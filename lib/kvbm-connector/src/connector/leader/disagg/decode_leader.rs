@@ -201,6 +201,30 @@ struct CdRequestState {
     remote_pipeline_complete: AtomicBool,
     completed: AtomicBool,
 
+    /// Holder-side session captured at gnmt time from
+    /// `coordinator.begin_remote_prefill`'s outcome. Carrying the
+    /// `Arc<dyn Session>` on the wrapper's per-request state closes
+    /// the CD USAA-1 race where a sibling `cleanup_failed_request`
+    /// from a previous run of the same request id could call
+    /// `coordinator.release` (Bug B's atomic-remove site) between
+    /// USAA installing wrapper state and `commit_usaa1` reaching the
+    /// remote-pipeline spawn — leaving `coordinator.session_for(rid)`
+    /// returning None and the wrapper bailing fatally to vLLM.
+    /// With the session held here, the spawn site uses the same
+    /// session that was opened for this request; if the coordinator
+    /// has finalized it externally, the remote pipeline observes
+    /// `CommitDelta::Closed` and routes to `cleanup_failed_request`
+    /// — the documented async-failure path.
+    ///
+    /// Mirrors the lazily-attached shape on the coordinator side
+    /// (`CdRequest.session: Mutex<Option<Arc<dyn Session>>>`,
+    /// coordinator.rs:284). Set to `Some` synchronously inside
+    /// `commit_gnmt_remote` after `begin_remote_prefill` returns
+    /// `Ok(outcome)`. By the time `commit_usaa1` reads it, the
+    /// invariant is "always Some" — the None branch is unreachable
+    /// unless `commit_gnmt_remote` is reordered.
+    session: Mutex<Option<Arc<dyn Session>>>,
+
     /// Pre-USAA failure stash. Set by `cleanup_failed_request` when
     /// the request fails before USAA had a chance to install G1
     /// destinations (no `local_match_g1_block_ids` and no
@@ -536,6 +560,11 @@ impl DecodeDisaggLeader {
             remote_slot_index: HashMap::new(),
             remote_pipeline_complete: AtomicBool::new(false),
             completed: AtomicBool::new(false),
+            // Attached after `begin_remote_prefill` returns Ok below
+            // (the session doesn't exist yet at this point). The
+            // Ok-arm assignment closes the CD USAA-1 race; see the
+            // doc-comment on `CdRequestState::session`.
+            session: Mutex::new(None),
             pending_failure: Mutex::new(None),
         });
         self.cd_request_state
@@ -584,6 +613,13 @@ impl DecodeDisaggLeader {
             install_payload,
         ) {
             Ok(outcome) => {
+                // Attach the session to the wrapper's per-request
+                // state so `commit_usaa1` can hand it to the remote
+                // pipeline spawn without re-querying the coordinator.
+                // Closes the CD USAA-1 race against
+                // `coordinator.release` from a sibling cleanup. See
+                // the doc-comment on `CdRequestState::session`.
+                *new_state.session.lock() = Some(Arc::clone(&outcome.session));
                 tracing::info!(
                     session_id = %outcome.session_id,
                     "commit_gnmt_remote: begin_remote_prefill ok"
@@ -754,11 +790,37 @@ impl DecodeDisaggLeader {
 
         // Drain stashed local-match pins + ids and rebuild per-
         // request state with the USAA-1 derived fields.
-        let existing = self
+        //
+        // CD USAA-1 race (read side): under
+        // `kv_load_failure_policy=recompute`, a sibling
+        // `cleanup_failed_request` on a previous run of this same
+        // request id can call `coordinator.release` (Bug B's atomic-
+        // remove site, coordinator.rs:1045) between the `is_active`
+        // check at the top of `decode_usaa` and the lookup here,
+        // dropping the wrapper-side state. The cleanup chain has
+        // already run — there's nothing for us to do, and bailing
+        // would propagate worker-fatal up to vLLM's EngineCore for
+        // a race vLLM already owns recovery for.
+        //
+        // Mirrors the soft-skip pattern at coordinator.rs:1045 and
+        // coordinator.rs:309-313. See `feedback-bail-vs-softskip-callbacks`
+        // for the Tier-2 ranking under Graham King's review skill.
+        let existing = match self
             .cd_request_state
             .get(request_id)
             .map(|e| Arc::clone(e.value()))
-            .ok_or_else(|| anyhow!("CD request state missing for {} at USAA-1", request_id))?;
+        {
+            Some(s) => s,
+            None => {
+                crate::audit!(
+                    "commit_usaa1_state_gone",
+                    role = "decode",
+                    request_id,
+                    reason = "cd_state_removed_between_is_active_and_commit_usaa1"
+                );
+                return Ok(());
+            }
+        };
         let local_match_g2_pins = existing.local_match_g2_pins.lock().take().ok_or_else(|| {
             anyhow!(
                 "CD USAA-1: local_match_g2_pins already drained for {} (USAA called twice?)",
@@ -800,6 +862,11 @@ impl DecodeDisaggLeader {
             remote_slot_index,
             remote_pipeline_complete: AtomicBool::new(false),
             completed: AtomicBool::new(false),
+            // Carry over the gnmt-time session so the remote-pipeline
+            // spawn below uses the held Arc instead of querying the
+            // coordinator. Closes the CD USAA-1 race; see the
+            // doc-comment on `CdRequestState::session`.
+            session: Mutex::new(existing.session.lock().clone()),
             // Carry over any pre-USAA stash from the gnmt-time state;
             // commit_usaa1 replaces the Arc entry so we must thread it.
             pending_failure: Mutex::new(existing.pending_failure.lock().clone()),
@@ -882,15 +949,47 @@ impl DecodeDisaggLeader {
                 reason = "remote_slots_empty"
             );
         } else {
-            let session = match self.coordinator.session_for(request_id) {
-                Some(s) => s,
-                None => {
-                    anyhow::bail!("CD USAA-1: coordinator has no session for {}", request_id);
-                }
-            };
+            // Read the session from the wrapper's per-request state
+            // (set synchronously in `commit_gnmt_remote`'s Ok arm).
+            // Closes the CD USAA-1 race against `coordinator.release`
+            // from a sibling cleanup, which Bug B's atomic-remove
+            // (coordinator.rs:1045) closed on the write side.
+            //
+            // Invariant: by the time `commit_usaa1` runs, the session
+            // was set under `commit_gnmt_remote`'s Ok arm. The None
+            // branch is unreachable on the documented orderings, but
+            // we route to `cleanup_failed_request` (the documented
+            // async-failure path) rather than `bail!` so a future
+            // unusual ordering surfaces as a graceful per-request
+            // failure to vLLM instead of a worker-fatal up the
+            // EngineCore stack. Matches Graham's Rule 13 ("graceful
+            // spawned-task error handling"). See
+            // `feedback-bail-vs-softskip-callbacks`.
             let wrapper = self
                 .arc_self()
                 .ok_or_else(|| anyhow!("wrapper Arc unavailable in commit_usaa1"))?;
+            let session = match updated.session.lock().clone() {
+                Some(s) => s,
+                None => {
+                    crate::audit!(
+                        "commit_usaa1_session_missing",
+                        role = "decode",
+                        request_id,
+                        reason = "wrapper_state_session_unset_post_gnmt"
+                    );
+                    let request_id_owned = request_id.to_string();
+                    let wrapper_clone = Arc::clone(&wrapper);
+                    self.tokio_handle.spawn(async move {
+                        wrapper_clone
+                            .cleanup_failed_request(
+                                &request_id_owned,
+                                "CD USAA-1: wrapper-side session missing post-gnmt".to_string(),
+                            )
+                            .await;
+                    });
+                    return Ok(());
+                }
+            };
             let request_id_owned = request_id.to_string();
             let state_clone = Arc::clone(&updated);
             self.tokio_handle.spawn(async move {
