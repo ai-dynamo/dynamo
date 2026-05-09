@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+// Planner types are exercised only by this module's tests until the
+// executor wires them in (PR-5+). Suppress dead-code warnings until
+// then; the call graph is intentional — see this module's tests.
+#![allow(dead_code)]
+
 //! Stride-aware, label-driven copy planner.
 //!
 //! Given two [`AnnotatedLayout`]s — each carrying a [`KvDimLayout`]
@@ -40,52 +45,9 @@
 
 use anyhow::{Result, bail};
 
-use kvbm_common::{KvDim, KvDimLayout, KvDimStrides};
+use kvbm_common::{AxisIntersection, CoordByLabel, KvDim, KvDimLayout, KvDimStrides};
 
-/// `KvDim` is a closed enum with seven variants; we use this constant
-/// to size [`CoordByLabel`]'s fixed array.
-const KV_DIM_COUNT: usize = 7;
-
-fn kv_dim_index(d: KvDim) -> usize {
-    match d {
-        KvDim::Block => 0,
-        KvDim::Layer => 1,
-        KvDim::Outer => 2,
-        KvDim::Page => 3,
-        KvDim::HeadCount => 4,
-        KvDim::HeadSize => 5,
-        KvDim::Payload => 6,
-    }
-}
-
-/// Per-axis coordinate keyed by label. `Some(v)` means the caller
-/// supplied a value for that axis; `None` means the axis isn't part of
-/// this layout (e.g. MLA has no `HeadCount`).
-///
-/// Backed by a fixed array because [`KvDim`] is a closed enum — adding
-/// a new variant is a load-bearing semantic change that demands
-/// recompiling every consumer of `CoordByLabel` anyway.
-#[derive(Debug, Clone, Default)]
-pub struct CoordByLabel([Option<usize>; KV_DIM_COUNT]);
-
-impl CoordByLabel {
-    pub fn new() -> Self {
-        Self([None; KV_DIM_COUNT])
-    }
-
-    pub fn set(mut self, d: KvDim, v: usize) -> Self {
-        self.0[kv_dim_index(d)] = Some(v);
-        self
-    }
-
-    pub fn set_in_place(&mut self, d: KvDim, v: usize) {
-        self.0[kv_dim_index(d)] = Some(v);
-    }
-
-    pub fn get(&self, d: KvDim) -> Option<usize> {
-        self.0[kv_dim_index(d)]
-    }
-}
+use crate::layout::LayoutView;
 
 /// A label-annotated, stride-described, addressable layout.
 ///
@@ -157,6 +119,60 @@ impl AnnotatedLayout {
             dim_layout,
             byte_strides,
         })
+    }
+
+    /// Project a [`LayoutView`] to an [`AnnotatedLayout`].
+    ///
+    /// Slices on `LayoutView` are baked into the projection:
+    /// - For each in-tensor (non-region-axis) sliced axis, the
+    ///   slice's `start * byte_strides[axis]` is added uniformly to
+    ///   every region base. The projected `AnnotatedLayout` therefore
+    ///   uses local (post-slice) coordinates with no further slice
+    ///   tracking.
+    /// - For region-axis slicing, [`LayoutView::slice`] already shrunk
+    ///   the regions vec to the slice's window — `from_view` simply
+    ///   copies it.
+    ///
+    /// The projected `AnnotatedLayout` retains the LayoutView's
+    /// post-slicing local layout (`local_layout`) and unchanged byte
+    /// strides. A [`TransferSelection`] passed to [`plan_copy`] can
+    /// further restrict iteration on top of the baked-in slicing.
+    pub fn from_view(view: &LayoutView) -> Result<Self> {
+        let region_axis = view.region_axis();
+        let strides = view.byte_strides().as_bytes();
+        let dims = view.local_layout().dims();
+
+        // Sum slice-start offsets across in-tensor sliced axes.
+        // Region-axis slicing was consumed by LayoutView::slice via
+        // regions-vec narrowing, so it must NOT be added here.
+        let mut in_tensor_offset = 0usize;
+        for slice in view.slices() {
+            if Some(slice.dim) == region_axis {
+                continue;
+            }
+            let pos = dims.iter().position(|d| *d == slice.dim).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "AnnotatedLayout::from_view: sliced axis {:?} not present in \
+                         layout {:?}",
+                    slice.dim,
+                    dims
+                )
+            })?;
+            in_tensor_offset += strides[pos] * slice.start;
+        }
+
+        let regions: Vec<usize> = view
+            .regions()
+            .iter()
+            .map(|r| r + in_tensor_offset)
+            .collect();
+
+        AnnotatedLayout::new(
+            regions,
+            region_axis,
+            view.local_layout().clone(),
+            view.byte_strides().clone(),
+        )
     }
 
     /// Byte address for a labelled coordinate.
@@ -273,19 +289,66 @@ impl Default for CopyPolicy {
     }
 }
 
-/// Plan a copy from `src` to `dst` over `block_pairs`, honouring
+/// What to transfer: per-block-pair copies, optionally restricted on
+/// per-axis coordinate ranges.
+///
+/// `block_pairs` carries the `(src_block_id, dst_block_id)` mappings —
+/// one entry per logical block to transfer.
+///
+/// `axis_slices` is the per-axis coordinate-range restriction the
+/// planner applies *on top of* whatever slicing is already baked into
+/// the projected `AnnotatedLayout`s. Each entry's `src_local` /
+/// `dst_local` ranges are interpreted in the corresponding side's local
+/// coordinate space and must have equal length (the intersection
+/// length). Axes absent from `axis_slices` are iterated full-extent.
+///
+/// Empty `axis_slices` means "no restriction beyond the layouts' own
+/// extent" — equivalent to PR-2's original signature, used by tests
+/// that aren't exercising sliced transfers.
+///
+/// Typical construction: call [`crate::layout::intersect_views`] on
+/// two `LayoutView`s, then drop the resulting `Vec<AxisIntersection>`
+/// in here verbatim.
+#[derive(Debug, Clone)]
+pub struct TransferSelection {
+    pub block_pairs: Vec<(usize, usize)>,
+    pub axis_slices: Vec<AxisIntersection>,
+}
+
+impl TransferSelection {
+    /// Build a selection that iterates the full extent of both layouts
+    /// (no axis restriction beyond what the layouts' own extents
+    /// already encode).
+    pub fn full(block_pairs: Vec<(usize, usize)>) -> Self {
+        Self {
+            block_pairs,
+            axis_slices: Vec::new(),
+        }
+    }
+
+    /// Look up the [`AxisIntersection`] for `dim`, if any.
+    pub fn axis_slice(&self, dim: KvDim) -> Option<&AxisIntersection> {
+        self.axis_slices.iter().find(|s| s.dim == dim)
+    }
+}
+
+/// Plan a copy from `src` to `dst` over the selection, honouring
 /// `policy`.
 ///
-/// Each pair is `(src_block_id, dst_block_id)` — the planner copies
-/// the same logical KV slab from src's row to dst's row.
+/// `selection.block_pairs` is the `(src_block_id, dst_block_id)`
+/// mapping. `selection.axis_slices` optionally restricts iteration
+/// on per-axis coordinate ranges (e.g. TP-resharding stripe pulls).
 pub fn plan_copy(
     src: &AnnotatedLayout,
     dst: &AnnotatedLayout,
-    block_pairs: &[(usize, usize)],
+    selection: &TransferSelection,
     policy: &CopyPolicy,
 ) -> Result<CopyPlan> {
-    // (a) Compatibility check: same multiset of (label, size) pairs.
-    check_label_compatibility(src, dst)?;
+    let block_pairs = selection.block_pairs.as_slice();
+    // (a0) Validate axis_slices against the layouts.
+    validate_axis_slices(src, dst, selection)?;
+    // (a) Compatibility check: same multiset of effective (label, size) pairs.
+    check_label_compatibility(src, dst, selection)?;
 
     // Element sizes must agree — the planner emits byte-level copies,
     // and a dtype-width disagreement would silently miscount.
@@ -319,8 +382,12 @@ pub fn plan_copy(
         }
     }
 
-    // (b) Three-way intersection.
-    let matching_axes = matching_inner_suffix(src, dst);
+    // (b) Three-way intersection. Sliced axes are force-outer (never
+    //     folded into the inner contiguous tail) so the planner doesn't
+    //     have to mix slice-start offsets into the inner copy.
+    //     Coalescing later fuses adjacent slice-coord ops when strides
+    //     permit, so the perf isn't penalised vs the unsliced case.
+    let matching_axes = matching_inner_suffix(src, dst, selection);
     let (inner_bytes, accepted) = compute_inner_bytes(src, dst, &matching_axes)?;
 
     if inner_bytes < policy.min_inner_bytes {
@@ -339,13 +406,32 @@ pub fn plan_copy(
     //     the matching label suffix — see compute_inner_bytes.
     let accepted_axes = &matching_axes[matching_axes.len() - accepted..];
     let inner_set: Vec<KvDim> = accepted_axes.iter().map(|(d, _)| *d).collect();
-    let outer_axes: Vec<(KvDim, usize)> = src
+    let outer_axes: Vec<(KvDim, OuterRange)> = src
         .dim_layout()
         .dims()
         .iter()
         .zip(src.dim_layout().sizes().iter())
         .filter(|(d, _)| !inner_set.contains(*d))
-        .map(|(&d, &s)| (d, s))
+        .map(|(&d, &src_size)| {
+            let range = match selection.axis_slice(d) {
+                Some(s) => OuterRange {
+                    src_start: s.src_local.start,
+                    dst_start: s.dst_local.start,
+                    len: s.len(),
+                },
+                None => {
+                    // Unsliced: src and dst sizes were verified equal by
+                    // check_label_compatibility (modulo Block, which uses
+                    // block_pairs and never reads `len`).
+                    OuterRange {
+                        src_start: 0,
+                        dst_start: 0,
+                        len: src_size,
+                    }
+                }
+            };
+            (d, range)
+        })
         .collect();
 
     // (d) Emit triples by iterating the outer domain in src order.
@@ -372,7 +458,11 @@ pub fn plan_copy(
     Ok(CopyPlan::Direct(ops))
 }
 
-fn check_label_compatibility(src: &AnnotatedLayout, dst: &AnnotatedLayout) -> Result<()> {
+fn check_label_compatibility(
+    src: &AnnotatedLayout,
+    dst: &AnnotatedLayout,
+    selection: &TransferSelection,
+) -> Result<()> {
     let src_dims = src.dim_layout().dims();
     let dst_dims = dst.dim_layout().dims();
     if src_dims.len() != dst_dims.len() {
@@ -382,15 +472,27 @@ fn check_label_compatibility(src: &AnnotatedLayout, dst: &AnnotatedLayout) -> Re
             dst_dims.len(),
         );
     }
-    // Every src label/size must appear in dst with the same size, and
-    // vice versa. KvDimLayout already forbids duplicate labels (modulo
-    // Outer), so a one-direction set check is sufficient.
+    // Every src label must appear in dst with the same effective size,
+    // and vice versa. Effective size = axis_slice.len() if the axis is
+    // sliced, else dim_layout.size_of(d). KvDimLayout already forbids
+    // duplicate labels (modulo Outer), so a one-direction set check is
+    // sufficient — but we still verify each side's effective size
+    // independently against the slice's per-side range.
     for (&d, &s) in src_dims.iter().zip(src.dim_layout().sizes().iter()) {
         let dst_size = dst.dim_layout().size_of(d).ok_or_else(|| {
             anyhow::anyhow!("plan_copy: src has label {d} but dst does not (dst dims {dst_dims:?})")
         })?;
-        if dst_size != s {
-            bail!("plan_copy: label {d} size disagrees — src={s}, dst={dst_size}",);
+        let (src_eff, dst_eff) = match selection.axis_slice(d) {
+            Some(slice) => (slice.src_local.len(), slice.dst_local.len()),
+            None => (s, dst_size),
+        };
+        if src_eff != dst_eff {
+            bail!(
+                "plan_copy: label {d} effective size disagrees — src_eff={src_eff} \
+                 (raw {s}, sliced={}), dst_eff={dst_eff} (raw {dst_size}, sliced={})",
+                selection.axis_slice(d).is_some(),
+                selection.axis_slice(d).is_some(),
+            );
         }
     }
     for &d in dst_dims.iter() {
@@ -401,12 +503,93 @@ fn check_label_compatibility(src: &AnnotatedLayout, dst: &AnnotatedLayout) -> Re
     Ok(())
 }
 
+/// Validate `selection.axis_slices` against both layouts. Each entry
+/// must (a) name an axis present in both layouts, (b) have matching
+/// `src_local` / `dst_local` lengths, (c) stay within each side's local
+/// extent, (d) NOT name the Block axis (which is driven by
+/// `block_pairs`), and (e) appear at most once per axis.
+fn validate_axis_slices(
+    src: &AnnotatedLayout,
+    dst: &AnnotatedLayout,
+    selection: &TransferSelection,
+) -> Result<()> {
+    let mut seen: Vec<KvDim> = Vec::with_capacity(selection.axis_slices.len());
+    for slice in &selection.axis_slices {
+        if seen.contains(&slice.dim) {
+            bail!(
+                "plan_copy: axis_slices has duplicate entry for axis {:?}",
+                slice.dim
+            );
+        }
+        seen.push(slice.dim);
+
+        if slice.dim == KvDim::Block {
+            bail!(
+                "plan_copy: axis_slices may not target the Block axis — Block iteration is \
+                 driven by block_pairs"
+            );
+        }
+        let src_size = src.dim_layout().size_of(slice.dim).ok_or_else(|| {
+            anyhow::anyhow!(
+                "plan_copy: axis_slices[{:?}] references axis not present in src layout",
+                slice.dim
+            )
+        })?;
+        let dst_size = dst.dim_layout().size_of(slice.dim).ok_or_else(|| {
+            anyhow::anyhow!(
+                "plan_copy: axis_slices[{:?}] references axis not present in dst layout",
+                slice.dim
+            )
+        })?;
+        if slice.src_local.end > src_size {
+            bail!(
+                "plan_copy: axis_slices[{:?}].src_local {:?} out of range (src size {})",
+                slice.dim,
+                slice.src_local,
+                src_size,
+            );
+        }
+        if slice.dst_local.end > dst_size {
+            bail!(
+                "plan_copy: axis_slices[{:?}].dst_local {:?} out of range (dst size {})",
+                slice.dim,
+                slice.dst_local,
+                dst_size,
+            );
+        }
+        if slice.src_local.len() != slice.dst_local.len() {
+            bail!(
+                "plan_copy: axis_slices[{:?}] src/dst lengths disagree ({} vs {})",
+                slice.dim,
+                slice.src_local.len(),
+                slice.dst_local.len(),
+            );
+        }
+        if slice.src_local.is_empty() {
+            bail!("plan_copy: axis_slices[{:?}] is empty", slice.dim);
+        }
+    }
+    Ok(())
+}
+
 /// Walk both layouts inside-out, recording the longest matching suffix
-/// of `(label, size)` pairs. Stops at the first mismatch, OR at any
-/// `KvDim::Block` axis (Block is always part of the outer iteration so
-/// the planner can honour the caller's `blocks` list), OR at the
-/// `region_axis` of either side (region partitioning ends contiguity).
-fn matching_inner_suffix(src: &AnnotatedLayout, dst: &AnnotatedLayout) -> Vec<(KvDim, usize)> {
+/// of `(label, size)` pairs that are eligible to fold into the inner
+/// contiguous copy. Stops at:
+/// - the first label or size mismatch,
+/// - any `KvDim::Block` axis (Block is always outer, driven by
+///   `block_pairs`),
+/// - the `region_axis` of either side (region partitioning ends
+///   contiguity),
+/// - any axis present in `selection.axis_slices` (sliced axes are
+///   forced outer so per-side `slice.start * stride` offsets land in
+///   `addr_of` via `emit_outer`'s `OuterRange`. Coalescing fuses the
+///   per-coord ops when strides are contiguous, recovering the same
+///   op-count as the unsliced case).
+fn matching_inner_suffix(
+    src: &AnnotatedLayout,
+    dst: &AnnotatedLayout,
+    selection: &TransferSelection,
+) -> Vec<(KvDim, usize)> {
     let src_dims = src.dim_layout().dims();
     let src_sizes = src.dim_layout().sizes();
     let dst_dims = dst.dim_layout().dims();
@@ -426,6 +609,9 @@ fn matching_inner_suffix(src: &AnnotatedLayout, dst: &AnnotatedLayout) -> Vec<(K
         if Some(sd) == src.region_axis() || Some(sd) == dst.region_axis() {
             break;
         }
+        if selection.axis_slice(sd).is_some() {
+            break;
+        }
         out.push((sd, ss));
     }
     // out is innermost-first; reverse so it reads outermost-to-innermost.
@@ -434,36 +620,60 @@ fn matching_inner_suffix(src: &AnnotatedLayout, dst: &AnnotatedLayout) -> Vec<(K
 }
 
 /// Compute `(inner_bytes, accepted_axis_count)` — the largest
-/// `inner_bytes` ≤ matching-suffix bytes AND ≤ each side's effective
-/// contiguous tail, plus the number of innermost matching axes that
-/// fit into that byte budget.
+/// `inner_bytes` accumulated by folding innermost matching axes into
+/// the inner contiguous copy.
 ///
-/// Walks inside-out across `matching_axes`, accumulating bytes until
-/// adding the next axis would exceed either side's tail. The caller
-/// uses `accepted_axis_count` (not `matching_axes.len()`) to decide
-/// which axes are folded into the inner copy versus iterated in the
-/// outer loop. Without that distinction, stride-truncated cases would
-/// silently skip iteration of axes that still need to vary.
+/// Walks `matching_axes` inside-out. At each axis, checks BOTH sides'
+/// strides for row-major-from-effective-sizes contiguity (i.e.
+/// `byte_strides[axis] == bytes_so_far`). When either side disagrees,
+/// or when including the axis would cross a region boundary, the walk
+/// stops. The accepted count is the prefix that passed; the caller
+/// uses that — not `matching_axes.len()` — to decide which axes go
+/// inner vs outer. (Without this distinction, stride-truncated cases
+/// would silently skip iteration of axes that still need to vary.)
+///
+/// Slice-aware: the per-axis size used is the matching effective size
+/// (= `axis_slice.len()` for sliced axes, raw size otherwise). The
+/// per-side stride check uses each side's actual `byte_strides[axis]`,
+/// which describe the underlying allocation and are pinned by slicing.
 fn compute_inner_bytes(
     src: &AnnotatedLayout,
     dst: &AnnotatedLayout,
     matching_axes: &[(KvDim, usize)],
 ) -> Result<(usize, usize)> {
     let elem = src.elem_size();
-    let src_tail = effective_inner_tail_bytes(src)?;
-    let dst_tail = effective_inner_tail_bytes(dst)?;
-    let cap = src_tail.min(dst_tail);
-    if elem > cap {
+    // Region-axis caps: cannot cross a region boundary on either side.
+    let src_region_cap = region_cap_bytes(src)?;
+    let dst_region_cap = region_cap_bytes(dst)?;
+    let region_cap = src_region_cap.min(dst_region_cap);
+    if elem > region_cap {
         return Ok((0, 0));
     }
     let mut bytes = elem;
     let mut accepted: usize = 0;
     for k in 0..matching_axes.len() {
-        let (_, size) = matching_axes[matching_axes.len() - 1 - k];
+        let (label, eff_size) = matching_axes[matching_axes.len() - 1 - k];
+        let src_pos = src
+            .dim_layout()
+            .position(label)
+            .expect("matching axis must be present in src");
+        let dst_pos = dst
+            .dim_layout()
+            .position(label)
+            .expect("matching axis must be present in dst");
+        // Both sides' strides at this axis must equal the bytes
+        // accumulated so far (row-major-from-effective-sizes).
+        if src.byte_strides().as_bytes()[src_pos] != bytes {
+            break;
+        }
+        if dst.byte_strides().as_bytes()[dst_pos] != bytes {
+            break;
+        }
         let next = bytes
-            .checked_mul(size)
+            .checked_mul(eff_size)
             .ok_or_else(|| anyhow::anyhow!("plan_copy: inner_bytes overflow"))?;
-        if next > cap {
+        // Cannot cross region boundary on either side.
+        if next > region_cap {
             break;
         }
         bytes = next;
@@ -476,18 +686,15 @@ fn compute_inner_bytes(
     }
 }
 
-/// Effective contiguous-tail bytes, capped at the region axis.
+/// Region-cap bytes: one full region's worth of bytes.
 ///
-/// Even if the recorded byte strides happen to agree with row-major
-/// past the region axis, the planner can't safely cross region
-/// boundaries — each region has its own base address. The cap is
-/// `elem_size * Π sizes of axes strictly inside the region axis`, i.e.
-/// one full region's worth of bytes.
-fn effective_inner_tail_bytes(layout: &AnnotatedLayout) -> Result<usize> {
-    let raw = layout
-        .byte_strides()
-        .contiguous_tail_bytes(layout.dim_layout())?;
-    let cap = match layout.region_axis() {
+/// `elem_size * Π raw sizes of axes strictly inside the region axis`.
+/// Sliced axes use raw sizes here on purpose — the cap is a structural
+/// upper bound on what `addr_of` can reach without changing the region
+/// coord, regardless of which subset of those bytes the current
+/// transfer actually visits.
+fn region_cap_bytes(layout: &AnnotatedLayout) -> Result<usize> {
+    match layout.region_axis() {
         Some(d) => {
             let pos = layout
                 .dim_layout()
@@ -495,16 +702,15 @@ fn effective_inner_tail_bytes(layout: &AnnotatedLayout) -> Result<usize> {
                 .expect("region_axis presence enforced by AnnotatedLayout::new");
             let sizes = layout.dim_layout().sizes();
             let mut bytes = layout.elem_size();
-            for k in pos + 1..sizes.len() {
+            for &s in &sizes[pos + 1..] {
                 bytes = bytes
-                    .checked_mul(sizes[k])
+                    .checked_mul(s)
                     .ok_or_else(|| anyhow::anyhow!("plan_copy: region cap overflow"))?;
             }
-            bytes
+            Ok(bytes)
         }
-        None => usize::MAX,
-    };
-    Ok(raw.min(cap))
+        None => Ok(usize::MAX),
+    }
 }
 
 /// Index map from dst's in-tensor axes to src's in-tensor axes.
@@ -542,19 +748,39 @@ fn in_tensor_permutation(src: &AnnotatedLayout, dst: &AnnotatedLayout) -> Vec<us
         .collect()
 }
 
+/// Per-axis outer-iteration descriptor.
+///
+/// `len` is the number of coords to walk on this axis. `src_start` /
+/// `dst_start` are added to the loop variable when setting each side's
+/// coord. For unsliced axes both starts are `0` and `len` equals the
+/// axis's local size; for sliced axes the per-side starts differ when
+/// the axis_slice's `src_local.start` and `dst_local.start` differ
+/// (e.g. the puller's stripe is offset within the dst allocation while
+/// the source uses local-frame coords from `0`).
+///
+/// The `Block` axis ignores `len` / `src_start` / `dst_start` — its
+/// iteration is driven by `block_pairs` instead.
+#[derive(Debug, Clone, Copy)]
+struct OuterRange {
+    src_start: usize,
+    dst_start: usize,
+    len: usize,
+}
+
 /// Recursively walk the outer axes, threading the src/dst block
 /// coordinates separately on the Block axis (since `block_pairs`
-/// carries different ids for src and dst), and emit one `CopyOp` per
-/// terminal cell.
+/// carries different ids for src and dst) and applying per-axis
+/// `(src_start, dst_start)` offsets on every other axis.
 ///
 /// Block-id range was validated up-front in `plan_copy`; `addr_of`
 /// also re-checks every coordinate against axis size and surfaces any
 /// remaining inconsistency as a `Result`, so this function bubbles
 /// errors instead of asserting.
+#[allow(clippy::too_many_arguments)]
 fn emit_outer(
     src: &AnnotatedLayout,
     dst: &AnnotatedLayout,
-    outer_axes: &[(KvDim, usize)],
+    outer_axes: &[(KvDim, OuterRange)],
     depth: usize,
     src_coord: &mut CoordByLabel,
     dst_coord: &mut CoordByLabel,
@@ -572,11 +798,11 @@ fn emit_outer(
         });
         return Ok(());
     }
-    let (label, size) = outer_axes[depth];
+    let (label, range) = outer_axes[depth];
     if label == KvDim::Block {
         for &(s, d) in block_pairs {
-            src_coord.set_in_place(KvDim::Block, s);
-            dst_coord.set_in_place(KvDim::Block, d);
+            src_coord.set(KvDim::Block, s);
+            dst_coord.set(KvDim::Block, d);
             emit_outer(
                 src,
                 dst,
@@ -590,9 +816,9 @@ fn emit_outer(
             )?;
         }
     } else {
-        for i in 0..size {
-            src_coord.set_in_place(label, i);
-            dst_coord.set_in_place(label, i);
+        for i in 0..range.len {
+            src_coord.set(label, range.src_start + i);
+            dst_coord.set(label, range.dst_start + i);
             emit_outer(
                 src,
                 dst,
@@ -634,6 +860,7 @@ fn coalesce(mut ops: Vec<CopyOp>) -> Vec<CopyOp> {
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 mod tests {
     use super::*;
 
@@ -810,7 +1037,13 @@ mod tests {
         block_ids.extend(32..48);
         let block_pairs: Vec<(usize, usize)> = block_ids.iter().map(|&b| (b, b)).collect();
 
-        let plan = plan_copy(&src, &dst, &block_pairs, &CopyPolicy::default()).unwrap();
+        let plan = plan_copy(
+            &src,
+            &dst,
+            &TransferSelection::full(block_pairs.clone()),
+            &CopyPolicy::default(),
+        )
+        .unwrap();
         match plan {
             CopyPlan::Direct(ops) => {
                 // inner_bytes == outer * page * nh * hd * elem
@@ -873,7 +1106,13 @@ mod tests {
         );
 
         let block_pairs: Vec<(usize, usize)> = (0..num_blocks).map(|b| (b, b)).collect();
-        let plan = plan_copy(&src, &dst, &block_pairs, &CopyPolicy::default()).unwrap();
+        let plan = plan_copy(
+            &src,
+            &dst,
+            &TransferSelection::full(block_pairs.clone()),
+            &CopyPolicy::default(),
+        )
+        .unwrap();
         match plan {
             CopyPlan::Transform { permutation, .. } => {
                 // src in-tensor axes: [Block, Outer, Page, HeadCount, HeadSize]
@@ -919,7 +1158,13 @@ mod tests {
         let dst = nhd_cross_layer(num_blocks, num_layers, outer, page, nh, hd, elem, dst_base);
 
         let block_pairs: Vec<(usize, usize)> = (0..num_blocks).map(|b| (b, b)).collect();
-        let plan = plan_copy(&src, &dst, &block_pairs, &CopyPolicy::default()).unwrap();
+        let plan = plan_copy(
+            &src,
+            &dst,
+            &TransferSelection::full(block_pairs.clone()),
+            &CopyPolicy::default(),
+        )
+        .unwrap();
         match plan {
             CopyPlan::Direct(ops) => {
                 // matching suffix walk inside-out: HeadSize, HeadCount,
@@ -947,8 +1192,8 @@ mod tests {
                 let layer = 2usize;
                 let block = 3usize;
                 let coord = CoordByLabel::new()
-                    .set(KvDim::Layer, layer)
-                    .set(KvDim::Block, block);
+                    .with(KvDim::Layer, layer)
+                    .with(KvDim::Block, block);
                 let expected_src = src.addr_of(&coord).unwrap();
                 let expected_dst = dst.addr_of(&coord).unwrap();
                 let found = ops
@@ -991,7 +1236,13 @@ mod tests {
         let dst = nhd_cross_layer(num_blocks, num_layers, outer, page, nh, hd, elem, dst_base);
 
         let block_pairs: Vec<(usize, usize)> = (0..num_blocks).map(|b| (b, b)).collect();
-        let plan = plan_copy(&src, &dst, &block_pairs, &CopyPolicy::default()).unwrap();
+        let plan = plan_copy(
+            &src,
+            &dst,
+            &TransferSelection::full(block_pairs.clone()),
+            &CopyPolicy::default(),
+        )
+        .unwrap();
         match plan {
             CopyPlan::Transform { permutation, .. } => {
                 // src in-tensor: [Block, Outer, HeadCount, Page, HeadSize]
@@ -1014,12 +1265,12 @@ mod tests {
     fn addr_of_handcomputed() {
         let layout = nhd_per_layer(4, 8, 2, 16, 8, 128, 2, vec![0x1000, 0x2000, 0x3000, 0x4000]);
         let coord = CoordByLabel::new()
-            .set(KvDim::Layer, 1)
-            .set(KvDim::Block, 3)
-            .set(KvDim::Outer, 1)
-            .set(KvDim::Page, 5)
-            .set(KvDim::HeadCount, 2)
-            .set(KvDim::HeadSize, 10);
+            .with(KvDim::Layer, 1)
+            .with(KvDim::Block, 3)
+            .with(KvDim::Outer, 1)
+            .with(KvDim::Page, 5)
+            .with(KvDim::HeadCount, 2)
+            .with(KvDim::HeadSize, 10);
         // base for layer=1 = 0x2000.
         // strides (bytes) for [Block, Outer, Page, HeadCount, HeadSize]:
         //   Block = outer*page*nh*hd*elem = 2*16*8*128*2 = 65536
@@ -1039,7 +1290,7 @@ mod tests {
     #[test]
     fn addr_of_errors_on_missing_region_coord() {
         let layout = nhd_per_layer(4, 8, 2, 16, 8, 128, 2, vec![0x1000, 0x2000, 0x3000, 0x4000]);
-        let coord = CoordByLabel::new().set(KvDim::Block, 0);
+        let coord = CoordByLabel::new().with(KvDim::Block, 0);
         assert!(layout.addr_of(&coord).is_err());
     }
 
@@ -1049,8 +1300,8 @@ mod tests {
     fn addr_of_errors_on_oob_coord() {
         let layout = nhd_per_layer(4, 8, 2, 16, 8, 128, 2, vec![0x1000, 0x2000, 0x3000, 0x4000]);
         let coord = CoordByLabel::new()
-            .set(KvDim::Layer, 1)
-            .set(KvDim::Block, 99); // 99 >= num_blocks (8)
+            .with(KvDim::Layer, 1)
+            .with(KvDim::Block, 99); // 99 >= num_blocks (8)
         assert!(layout.addr_of(&coord).is_err());
     }
 
@@ -1060,7 +1311,12 @@ mod tests {
     fn plan_copy_rejects_oob_block_id() {
         let layout = nhd_per_layer(2, 8, 2, 16, 8, 128, 2, vec![0x1000, 0x2000]);
         let block_pairs = vec![(0usize, 99usize)]; // dst id out of range.
-        let res = plan_copy(&layout, &layout, &block_pairs, &CopyPolicy::default());
+        let res = plan_copy(
+            &layout,
+            &layout,
+            &TransferSelection::full(block_pairs.clone()),
+            &CopyPolicy::default(),
+        );
         assert!(res.is_err());
     }
 
@@ -1102,7 +1358,13 @@ mod tests {
         );
 
         let block_pairs = vec![(0usize, 5usize), (2usize, 1usize)];
-        let plan = plan_copy(&src, &dst, &block_pairs, &CopyPolicy::default()).unwrap();
+        let plan = plan_copy(
+            &src,
+            &dst,
+            &TransferSelection::full(block_pairs.clone()),
+            &CopyPolicy::default(),
+        )
+        .unwrap();
         let CopyPlan::Direct(ops) = plan else {
             panic!("expected Direct");
         };
@@ -1116,11 +1378,11 @@ mod tests {
         for layer in 0..num_layers {
             for &(sb, db) in &block_pairs {
                 let src_coord = CoordByLabel::new()
-                    .set(KvDim::Layer, layer)
-                    .set(KvDim::Block, sb);
+                    .with(KvDim::Layer, layer)
+                    .with(KvDim::Block, sb);
                 let dst_coord = CoordByLabel::new()
-                    .set(KvDim::Layer, layer)
-                    .set(KvDim::Block, db);
+                    .with(KvDim::Layer, layer)
+                    .with(KvDim::Block, db);
                 let want_src = src.addr_of(&src_coord).unwrap();
                 let want_dst = dst.addr_of(&dst_coord).unwrap();
                 let found = ops
@@ -1217,7 +1479,13 @@ mod tests {
         };
 
         let block_pairs: Vec<(usize, usize)> = (0..num_blocks).map(|b| (b, b)).collect();
-        let plan = plan_copy(&src, &dst, &block_pairs, &policy).unwrap();
+        let plan = plan_copy(
+            &src,
+            &dst,
+            &TransferSelection::full(block_pairs.clone()),
+            &policy,
+        )
+        .unwrap();
         let CopyPlan::Direct(ops) = plan else {
             panic!("expected Direct (inner_bytes 64 ≥ min_inner_bytes 32)");
         };
@@ -1271,6 +1539,204 @@ mod tests {
             dim_layout,
             strides,
         );
+        assert!(res.is_err());
+    }
+
+    /// `AnnotatedLayout::from_view` projects a sliced LayoutView,
+    /// baking the in-tensor slice's `start * stride` offset into every
+    /// region base. Local (post-slice) coords on the projection should
+    /// hit the same byte addresses as the corresponding global coords
+    /// on the unsliced layout.
+    #[test]
+    fn from_view_bakes_in_tensor_slice_offset() {
+        use crate::layout::LayoutView;
+        let layout = KvDimLayout::new(
+            vec![
+                KvDim::Layer,
+                KvDim::Outer,
+                KvDim::Block,
+                KvDim::Page,
+                KvDim::HeadCount,
+                KvDim::HeadSize,
+            ],
+            vec![4, 2, 8, 16, 4, 64],
+        )
+        .unwrap();
+        let in_tensor = KvDimLayout::new(
+            vec![
+                KvDim::Outer,
+                KvDim::Block,
+                KvDim::Page,
+                KvDim::HeadCount,
+                KvDim::HeadSize,
+            ],
+            vec![2, 8, 16, 4, 64],
+        )
+        .unwrap();
+        let in_tensor_strides = KvDimStrides::contiguous_for(&in_tensor, 2);
+        let region_size = 2 * 8 * 16 * 4 * 64 * 2;
+        let mut byte_strides = vec![region_size];
+        byte_strides.extend_from_slice(in_tensor_strides.as_bytes());
+        let strides = KvDimStrides::from_byte_strides(byte_strides, 2).unwrap();
+        let regions: Vec<usize> = (0..4).map(|i| 0x1000_0000 + i * 0x10_0000).collect();
+
+        let view = LayoutView::full(layout, strides, regions, Some(KvDim::Layer))
+            .unwrap()
+            .slice(KvDim::HeadCount, 1, 2)
+            .unwrap();
+
+        let projected = AnnotatedLayout::from_view(&view).unwrap();
+        // Local coord HeadCount=0 on the projection ↔ global coord
+        // HeadCount=1 on a fresh unsliced layout. addr_of must match.
+        let local_coord = CoordByLabel::new()
+            .with(KvDim::Layer, 2)
+            .with(KvDim::Outer, 1)
+            .with(KvDim::Block, 3)
+            .with(KvDim::Page, 5)
+            .with(KvDim::HeadCount, 0)
+            .with(KvDim::HeadSize, 10);
+        let global_coord = local_coord.with(KvDim::HeadCount, 1);
+
+        let unsliced = LayoutView::full(
+            view.local_layout().clone(), // fine — full() shape is [2,8,16,4,64] with HC=2 here
+            view.byte_strides().clone(),
+            view.regions().to_vec(),
+            Some(KvDim::Layer),
+        );
+        // Use the original (pre-slice) view via a fresh build for the
+        // global-frame comparison.
+        let original_layout = KvDimLayout::new(
+            vec![
+                KvDim::Layer,
+                KvDim::Outer,
+                KvDim::Block,
+                KvDim::Page,
+                KvDim::HeadCount,
+                KvDim::HeadSize,
+            ],
+            vec![4, 2, 8, 16, 4, 64],
+        )
+        .unwrap();
+        let original = AnnotatedLayout::new(
+            (0..4).map(|i| 0x1000_0000 + i * 0x10_0000).collect(),
+            Some(KvDim::Layer),
+            original_layout,
+            view.byte_strides().clone(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            projected.addr_of(&local_coord).unwrap(),
+            original.addr_of(&global_coord).unwrap()
+        );
+        // Silence unused: the `unsliced` LayoutView is included only
+        // for symmetry; not all branches consume it directly.
+        let _ = unsliced;
+    }
+
+    /// Selection-driven plan: TP1 puller (HeadCount full = 4nh) pulling
+    /// from a TP4 source rank (HeadCount = nh). The selection encodes
+    /// HeadCount intersection: src_local=0..nh, dst_local=r*nh..(r+1)*nh.
+    /// The emitted ops must address the right HeadCount stripe on dst
+    /// while reading the source's full HeadCount range on src.
+    #[test]
+    fn plan_copy_honours_tp_stripe_axis_slice() {
+        use kvbm_common::AxisIntersection;
+
+        // Geometry: nh=4 on src (one TP4 rank); HeadCount=4*4=16 on dst.
+        let nh = 4usize;
+        let head_size = 64usize;
+        let page = 16usize;
+        let num_blocks = 8usize;
+        let num_layers = 2usize;
+        let elem = 2usize;
+
+        // Source side: one TP4 rank's local layout with HeadCount = nh.
+        let src = nhd_per_layer(num_layers, num_blocks, 2, page, nh, head_size, elem, {
+            (0..num_layers)
+                .map(|i| 0x1000_0000 + i * 0x10_0000)
+                .collect()
+        });
+        // Dest side: TP1 puller with full HeadCount = 4*nh = 16.
+        let dst = nhd_per_layer(num_layers, num_blocks, 2, page, 4 * nh, head_size, elem, {
+            (0..num_layers)
+                .map(|i| 0x2000_0000 + i * 0x10_0000)
+                .collect()
+        });
+
+        let block_pairs: Vec<(usize, usize)> = (0..num_blocks).map(|b| (b, b)).collect();
+
+        // Pulling from rank 1 of TP4: stripe HeadCount[nh, 2*nh) on dst.
+        let rank = 1usize;
+        let selection = TransferSelection {
+            block_pairs: block_pairs.clone(),
+            axis_slices: vec![AxisIntersection {
+                dim: KvDim::HeadCount,
+                src_local: 0..nh,
+                dst_local: rank * nh..(rank + 1) * nh,
+            }],
+        };
+
+        // Force-outer-on-sliced-axes means HeadCount becomes outer; the
+        // inner copy is just HeadSize (64 × elem = 128 B). Coalescing
+        // then fuses the 4 adjacent HeadCount ops back into one
+        // 512 B op per (Layer, Block, Outer, Page) cell. Drop the
+        // threshold so the 128 B inner clears the gate.
+        let policy = CopyPolicy {
+            min_inner_bytes: 128,
+            coalesce: true,
+        };
+        let plan = plan_copy(&src, &dst, &selection, &policy).unwrap();
+        let ops = match plan {
+            CopyPlan::Direct(ops) => ops,
+            other => panic!("expected Direct, got {other:?}"),
+        };
+        assert!(!ops.is_empty(), "plan must emit at least one CopyOp");
+
+        // Spot-check (layer=1, block=3, outer=0, page=2): src HeadCount
+        // origin = 0; dst HeadCount origin = nh. Each side's address
+        // must reflect the right per-side coord.
+        let src_coord = CoordByLabel::new()
+            .with(KvDim::Layer, 1)
+            .with(KvDim::Outer, 0)
+            .with(KvDim::Block, 3)
+            .with(KvDim::Page, 2)
+            .with(KvDim::HeadCount, 0)
+            .with(KvDim::HeadSize, 0);
+        let dst_coord = CoordByLabel::new()
+            .with(KvDim::Layer, 1)
+            .with(KvDim::Outer, 0)
+            .with(KvDim::Block, 3)
+            .with(KvDim::Page, 2)
+            .with(KvDim::HeadCount, rank * nh)
+            .with(KvDim::HeadSize, 0);
+        let want_src = src.addr_of(&src_coord).unwrap();
+        let want_dst = dst.addr_of(&dst_coord).unwrap();
+        let found = ops
+            .iter()
+            .find(|o| o.src_addr == want_src && o.dst_addr == want_dst);
+        assert!(
+            found.is_some(),
+            "expected an op at src=0x{want_src:x} dst=0x{want_dst:x}; \
+             ops: {ops:?}"
+        );
+    }
+
+    /// Block axis cannot be sliced via axis_slices — Block iteration is
+    /// driven by `block_pairs`. Validate the explicit error.
+    #[test]
+    fn plan_copy_rejects_axis_slice_on_block() {
+        use kvbm_common::AxisIntersection;
+        let layout = nhd_per_layer(2, 8, 2, 16, 4, 64, 2, vec![0x1000_0000, 0x1010_0000]);
+        let selection = TransferSelection {
+            block_pairs: vec![(0, 0)],
+            axis_slices: vec![AxisIntersection {
+                dim: KvDim::Block,
+                src_local: 0..1,
+                dst_local: 0..1,
+            }],
+        };
+        let res = plan_copy(&layout, &layout, &selection, &CopyPolicy::default());
         assert!(res.is_err());
     }
 }

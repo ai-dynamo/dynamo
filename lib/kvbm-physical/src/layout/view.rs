@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+// LayoutView is exercised only by this module's tests until the
+// executor / planner integration uses it as the canonical layout
+// carrier (PR-5+). Suppress dead-code warnings until then.
+#![allow(dead_code)]
+
 //! Sliced, stride-aware, label-driven layout views.
 //!
 //! [`LayoutView`] is the addressable carrier the planner reasons about.

@@ -35,6 +35,9 @@ pub use physical::NixlMetadata;
 pub use physical::PhysicalLayout;
 pub(crate) use serialize::LayoutDescriptor;
 pub use serialize::{BlockFormat, FullyContiguousDetails, LayerSeparateDetails, LayoutTypeDetails};
+// `intersect_views` is exposed for planner / executor wiring (PR-5+).
+// Today only view.rs's tests call it directly.
+#[allow(unused_imports)]
 pub(crate) use view::{LayoutView, intersect_views};
 
 // mod registration;
