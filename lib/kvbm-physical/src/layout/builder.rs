@@ -15,8 +15,8 @@
 use crate::layout::physical::PhysicalLayout;
 
 use super::{
-    BlockDimension, FullyContiguousLayout, LayerSeparateLayout, Layout, LayoutConfig,
-    MemoryDescriptor, physical::NixlMetadata,
+    BlockDimension, FullyContiguousLayout, InnerShape, KvBlockLayout, LayerSeparateLayout, Layout,
+    LayoutConfig, MemoryDescriptor, physical::NixlMetadata, serialize::BlockFormat,
 };
 
 use anyhow::{Result, anyhow, bail};
@@ -117,6 +117,13 @@ pub struct PhysicalLayoutBuilder<C, L, M> {
     config: Option<LayoutConfig>,
     layout_kind: Option<LayoutKind>,
     memory_plan: Option<MemoryPlan>,
+    /// Optional explicit KV block layout (NHD/HND/Universal*/...). When set,
+    /// it is plumbed into the constructed [`FullyContiguousLayout`] /
+    /// [`LayerSeparateLayout`] so transfer-time `requires_transform()` checks
+    /// have ground truth. When left at the default [`KvBlockLayout::Unknown`],
+    /// transfer comparisons fall into the `Unknown -> Unknown` soft-pass —
+    /// correct only when both endpoints happen to be identical.
+    kv_block_layout: KvBlockLayout,
     _config: PhantomData<C>,
     _layout: PhantomData<L>,
     _memory: PhantomData<M>,
@@ -130,6 +137,7 @@ impl PhysicalLayoutBuilder<NoConfig, NoLayout, NoMemory> {
             config: None,
             layout_kind: None,
             memory_plan: None,
+            kv_block_layout: KvBlockLayout::Unknown,
             _config: PhantomData,
             _layout: PhantomData,
             _memory: PhantomData,
@@ -145,8 +153,15 @@ impl<C, L, M> PhysicalLayoutBuilder<C, L, M> {
         Option<LayoutConfig>,
         Option<LayoutKind>,
         Option<MemoryPlan>,
+        KvBlockLayout,
     ) {
-        (self.agent, self.config, self.layout_kind, self.memory_plan)
+        (
+            self.agent,
+            self.config,
+            self.layout_kind,
+            self.memory_plan,
+            self.kv_block_layout,
+        )
     }
 
     fn from_parts<C2, L2, M2>(
@@ -154,12 +169,14 @@ impl<C, L, M> PhysicalLayoutBuilder<C, L, M> {
         config: Option<LayoutConfig>,
         layout_kind: Option<LayoutKind>,
         memory_plan: Option<MemoryPlan>,
+        kv_block_layout: KvBlockLayout,
     ) -> PhysicalLayoutBuilder<C2, L2, M2> {
         PhysicalLayoutBuilder {
             agent,
             config,
             layout_kind,
             memory_plan,
+            kv_block_layout,
             _config: PhantomData,
             _layout: PhantomData,
             _memory: PhantomData,
@@ -167,15 +184,41 @@ impl<C, L, M> PhysicalLayoutBuilder<C, L, M> {
     }
 }
 
+impl<C, L, M> PhysicalLayoutBuilder<C, L, M> {
+    /// Set the [`KvBlockLayout`] for the constructed layout.
+    ///
+    /// The default is [`KvBlockLayout::Unknown`], which is correct only when
+    /// both endpoints of any cross-pool transfer happen to be identical
+    /// (e.g., a single-host dev box). Production disagg paths should always
+    /// set this from the engine-reported layout via the connector layer's
+    /// [`From<CacheLayout>`](From) conversion:
+    ///
+    /// ```ignore
+    /// // In the connector worker:
+    /// let layout: KvBlockLayout = self.attention.cache_layout().into();
+    /// let physical = PhysicalLayoutBuilder::new(agent)
+    ///     .with_config(cfg)
+    ///     .layer_separate(block_dim)
+    ///     .with_kv_block_layout(layout)
+    ///     .with_external_device_regions(tensors)?
+    ///     .build()?;
+    /// ```
+    pub fn with_kv_block_layout(mut self, layout: KvBlockLayout) -> Self {
+        self.kv_block_layout = layout;
+        self
+    }
+}
+
 impl<L, M> PhysicalLayoutBuilder<NoConfig, L, M> {
     /// Attach the [`LayoutConfig`] required to size the layout and allocations.
     pub fn with_config(self, config: LayoutConfig) -> PhysicalLayoutBuilder<HasConfig, L, M> {
-        let (agent, _config, layout_kind, memory_plan) = self.into_parts();
+        let (agent, _config, layout_kind, memory_plan, kv_block_layout) = self.into_parts();
         PhysicalLayoutBuilder::<HasConfig, L, M>::from_parts(
             agent,
             Some(config),
             layout_kind,
             memory_plan,
+            kv_block_layout,
         )
     }
 }
@@ -183,12 +226,13 @@ impl<L, M> PhysicalLayoutBuilder<NoConfig, L, M> {
 impl<M> PhysicalLayoutBuilder<HasConfig, NoLayout, M> {
     /// Select the fully contiguous layout variant.
     pub fn fully_contiguous(self) -> PhysicalLayoutBuilder<HasConfig, HasLayout, M> {
-        let (agent, config, _layout, memory_plan) = self.into_parts();
+        let (agent, config, _layout, memory_plan, kv_block_layout) = self.into_parts();
         PhysicalLayoutBuilder::<HasConfig, HasLayout, M>::from_parts(
             agent,
             config,
             Some(LayoutKind::FullyContiguous),
             memory_plan,
+            kv_block_layout,
         )
     }
 
@@ -197,12 +241,13 @@ impl<M> PhysicalLayoutBuilder<HasConfig, NoLayout, M> {
         self,
         block_dim: BlockDimension,
     ) -> PhysicalLayoutBuilder<HasConfig, HasLayout, M> {
-        let (agent, config, _layout, memory_plan) = self.into_parts();
+        let (agent, config, _layout, memory_plan, kv_block_layout) = self.into_parts();
         PhysicalLayoutBuilder::<HasConfig, HasLayout, M>::from_parts(
             agent,
             config,
             Some(LayoutKind::LayerSeparate { block_dim }),
             memory_plan,
+            kv_block_layout,
         )
     }
 }
@@ -212,12 +257,13 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
         self,
         plan: MemoryPlan,
     ) -> PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
-        let (agent, config, layout_kind, _memory) = self.into_parts();
+        let (agent, config, layout_kind, _memory, kv_block_layout) = self.into_parts();
         PhysicalLayoutBuilder::<HasConfig, HasLayout, HasMemory>::from_parts(
             agent,
             config,
             layout_kind,
             Some(plan),
+            kv_block_layout,
         )
     }
 
@@ -261,7 +307,7 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
     where
         S: MemoryDescriptor + NixlCompatible + 'static,
     {
-        let (agent, config, layout_kind, _memory) = self.into_parts();
+        let (agent, config, layout_kind, _memory, kv_block_layout) = self.into_parts();
         let entries = register_existing_regions(&agent, regions)?;
         Ok(
             PhysicalLayoutBuilder::<HasConfig, HasLayout, HasMemory>::from_parts(
@@ -269,6 +315,7 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
                 config,
                 layout_kind,
                 Some(MemoryPlan::Provided(entries)),
+                kv_block_layout,
             ),
         )
     }
@@ -294,13 +341,14 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let (agent, config, layout_kind, _memory) = self.into_parts();
+        let (agent, config, layout_kind, _memory, kv_block_layout) = self.into_parts();
         Ok(
             PhysicalLayoutBuilder::<HasConfig, HasLayout, HasMemory>::from_parts(
                 agent,
                 config,
                 layout_kind,
                 Some(MemoryPlan::Provided(entries)),
+                kv_block_layout,
             ),
         )
     }
@@ -339,7 +387,7 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
             bail!("with_external_device_regions requires at least one tensor");
         }
 
-        let (agent, config, layout_kind, _memory) = self.into_parts();
+        let (agent, config, layout_kind, _memory, kv_block_layout) = self.into_parts();
 
         let mut entries = Vec::with_capacity(tensors.len());
 
@@ -370,6 +418,7 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
                 config,
                 layout_kind,
                 Some(MemoryPlan::Provided(entries)),
+                kv_block_layout,
             ),
         )
     }
@@ -378,7 +427,7 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, NoMemory> {
 impl PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
     /// Finalize the builder, constructing the [`PhysicalLayout`].
     pub fn build(self) -> Result<PhysicalLayout> {
-        let (agent, config, layout_kind, memory_plan) = self.into_parts();
+        let (agent, config, layout_kind, memory_plan, kv_block_layout) = self.into_parts();
 
         let config = config.ok_or_else(|| anyhow!("layout config missing despite type state"))?;
         let layout_kind =
@@ -398,13 +447,42 @@ impl PhysicalLayoutBuilder<HasConfig, HasLayout, HasMemory> {
                 let entry = entries.first().ok_or_else(|| {
                     anyhow!("fully contiguous layout requires a single memory region")
                 })?;
-                let layout = FullyContiguousLayout::new(config.clone(), entry.region.clone())?;
+                // Plumb the explicit kv_block_layout through to the layout
+                // so transfer-time `requires_transform()` checks have ground
+                // truth. When unset, this is `KvBlockLayout::Unknown` and
+                // matches the legacy `FullyContiguousLayout::new` shape.
+                let layout = FullyContiguousLayout::new_with_format(
+                    config.clone(),
+                    entry.region.clone(),
+                    BlockFormat::default(),
+                    kv_block_layout,
+                )?;
                 Arc::new(layout)
             }
             LayoutKind::LayerSeparate { block_dim } => {
                 let regions: Vec<Buffer> =
                     entries.iter().map(|entry| entry.region.clone()).collect();
-                let layout = LayerSeparateLayout::new(config.clone(), regions, block_dim)?;
+                // LayerSeparateLayout's builder accepts only operational
+                // (NHD/HND) or Unknown layouts via `inner_shape()`.
+                // Universal/Custom inputs are a configuration error — bail
+                // loudly so we surface the bug rather than silently
+                // downgrading to Unknown.
+                let inner_shape = match kv_block_layout {
+                    KvBlockLayout::OperationalNHD => InnerShape::NHD,
+                    KvBlockLayout::OperationalHND => InnerShape::HND,
+                    KvBlockLayout::Unknown => InnerShape::Unknown,
+                    other => bail!(
+                        "layer-separate layouts only support NHD/HND/Unknown \
+                         block layouts; got {:?}",
+                        other
+                    ),
+                };
+                let layout = LayerSeparateLayout::builder()
+                    .config(config.clone())
+                    .memory(regions)
+                    .block_dim(block_dim)
+                    .inner_shape(inner_shape)
+                    .build()?;
                 Arc::new(layout)
             }
         };
@@ -930,6 +1008,138 @@ mod tests {
         let metadata = physical.nixl_metadata();
         assert_eq!(metadata.agent_name(), agent.name());
         assert_eq!(metadata.mem_type(), MemType::Dram);
+    }
+
+    /// `with_kv_block_layout(NHD)` round-trips through the builder into the
+    /// constructed `LayerSeparateLayout`'s `block_layout()`. Default (no
+    /// setter call) yields `Unknown` — that's the latent-bug shape we keep
+    /// for v1 compat, but v2 callers can opt in to a real layout.
+    #[test]
+    fn layer_separate_kv_block_layout_round_trips_nhd() {
+        let agent = NixlAgent::new("builder-test-layer-nhd").expect("failed to create agent");
+        let cfg = make_layout_config();
+
+        let per_layer = per_layer_size(&cfg);
+        let regions: Vec<Buffer> = (0..cfg.num_layers)
+            .map(|_| {
+                create_buffer(TestRegisteredRegion::new(
+                    per_layer,
+                    StorageKind::System,
+                    MemType::Dram,
+                    0,
+                ))
+            })
+            .collect();
+
+        let physical = PhysicalLayoutBuilder::new(agent)
+            .with_config(cfg.clone())
+            .layer_separate(BlockDimension::BlockIsFirstDim)
+            .with_kv_block_layout(KvBlockLayout::OperationalNHD)
+            .with_registered_regions(regions)
+            .expect("registered layer regions accepted")
+            .build()
+            .expect("builder should succeed");
+
+        assert_eq!(
+            physical.layout().block_layout(),
+            KvBlockLayout::OperationalNHD,
+            "kv_block_layout setter should round-trip through the builder",
+        );
+    }
+
+    #[test]
+    fn fully_contiguous_kv_block_layout_round_trips_hnd() {
+        let agent = NixlAgent::new("builder-test-fc-hnd").expect("failed to create agent");
+        let cfg = make_layout_config();
+
+        let required = fully_contiguous_size(&cfg);
+        let region = create_buffer(TestRegisteredRegion::new(
+            required,
+            StorageKind::System,
+            MemType::Dram,
+            0,
+        ));
+
+        let physical = PhysicalLayoutBuilder::new(agent)
+            .with_config(cfg.clone())
+            .fully_contiguous()
+            .with_kv_block_layout(KvBlockLayout::OperationalHND)
+            .with_registered_regions(vec![region])
+            .expect("registered regions accepted")
+            .build()
+            .expect("builder should succeed");
+
+        assert_eq!(
+            physical.layout().block_layout(),
+            KvBlockLayout::OperationalHND,
+        );
+    }
+
+    /// Without `with_kv_block_layout`, the layout falls back to `Unknown` —
+    /// confirming we did not accidentally pick a default that masks bugs.
+    #[test]
+    fn layer_separate_defaults_to_unknown_kv_block_layout() {
+        let agent = NixlAgent::new("builder-test-default").expect("failed to create agent");
+        let cfg = make_layout_config();
+
+        let per_layer = per_layer_size(&cfg);
+        let regions: Vec<Buffer> = (0..cfg.num_layers)
+            .map(|_| {
+                create_buffer(TestRegisteredRegion::new(
+                    per_layer,
+                    StorageKind::System,
+                    MemType::Dram,
+                    0,
+                ))
+            })
+            .collect();
+
+        let physical = PhysicalLayoutBuilder::new(agent)
+            .with_config(cfg.clone())
+            .layer_separate(BlockDimension::BlockIsFirstDim)
+            .with_registered_regions(regions)
+            .expect("registered layer regions accepted")
+            .build()
+            .expect("builder should succeed");
+
+        assert_eq!(physical.layout().block_layout(), KvBlockLayout::Unknown);
+    }
+
+    /// Layer-separate layouts only support operational NHD/HND/Unknown.
+    /// A Universal/Custom override should be rejected at build time.
+    #[test]
+    fn layer_separate_rejects_universal_kv_block_layout() {
+        let agent = NixlAgent::new("builder-test-reject").expect("failed to create agent");
+        let cfg = make_layout_config();
+
+        let per_layer = per_layer_size(&cfg);
+        let regions: Vec<Buffer> = (0..cfg.num_layers)
+            .map(|_| {
+                create_buffer(TestRegisteredRegion::new(
+                    per_layer,
+                    StorageKind::System,
+                    MemType::Dram,
+                    0,
+                ))
+            })
+            .collect();
+
+        let err = PhysicalLayoutBuilder::new(agent)
+            .with_config(cfg.clone())
+            .layer_separate(BlockDimension::BlockIsFirstDim)
+            .with_kv_block_layout(KvBlockLayout::UniversalTP)
+            .with_registered_regions(regions)
+            .expect("registered layer regions accepted")
+            .build()
+            .expect_err("UniversalTP must be rejected for layer-separate layouts");
+
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("layer-separate")
+                && msg.to_lowercase().contains("nhd")
+                && msg.to_lowercase().contains("hnd"),
+            "error should explain the NHD/HND constraint, got: {msg}",
+        );
     }
 }
 

@@ -10,11 +10,13 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use kvbm_connector::TensorDescriptor;
+use kvbm_connector::config::AttentionConfig;
 use kvbm_connector::connector::leader::scheduler::KvConnectorMetadata;
 use kvbm_connector::connector::worker::{ConnectorWorker, ConnectorWorkerInterface};
 
 use crate::to_pyerr;
 use crate::v2::torch::Tensor;
+use crate::v2::vllm::PyKvbmVllmConfig;
 
 /// Python wrapper for the v2 ConnectorWorker.
 ///
@@ -29,17 +31,28 @@ pub struct PyConnectorWorker {
 
 #[pymethods]
 impl PyConnectorWorker {
-    /// Create a new ConnectorWorker from a KvbmRuntime.
+    /// Create a new ConnectorWorker from a KvbmRuntime and KvbmVllmConfig.
     ///
     /// Args:
     ///     runtime: The KvbmRuntime instance (provides Velo for communication)
+    ///     kvbm_config: The KvbmVllmConfig carrying parsed vLLM attention
+    ///         configuration. The Rust ConnectorWorker reads
+    ///         `attention.cache_layout()` and `attention.num_heads()` from
+    ///         this config inside `register_kv_caches`, so Python no longer
+    ///         needs to plumb those values as separate arguments.
     ///
     /// Returns:
     ///     ConnectorWorker: The worker instance ready for KV cache registration.
     #[new]
-    pub fn new(runtime: &crate::v2::runtime::PyKvbmRuntime) -> PyResult<Self> {
+    pub fn new(
+        runtime: &crate::v2::runtime::PyKvbmRuntime,
+        kvbm_config: &PyKvbmVllmConfig,
+    ) -> PyResult<Self> {
         let runtime = runtime.inner();
-        let inner = ConnectorWorker::new(runtime);
+        // Upcast the vLLM-specific Arc<dyn VllmAttentionConfig> to the
+        // generic Arc<dyn AttentionConfig> the connector layer expects.
+        let attention: Arc<dyn AttentionConfig> = kvbm_config.inner().attention.clone();
+        let inner = ConnectorWorker::new(runtime, attention);
         Ok(Self { inner })
     }
 

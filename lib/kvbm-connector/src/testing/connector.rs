@@ -1215,7 +1215,11 @@ impl TestConnectorInstanceBuilder {
                     .build()?,
             );
 
-            let connector_worker = ConnectorWorker::new(Arc::new(worker_runtime));
+            // Test harness uses the default Unknown layout. The existing
+            // tests register tensors on both endpoints with identical layouts
+            // so the `Unknown -> Unknown` soft-pass branch continues to apply
+            // — that's the pre-refactor behavior we are preserving.
+            let connector_worker = ConnectorWorker::new_for_test(Arc::new(worker_runtime));
 
             // Create mock tensors that hold references to the layout to keep memory alive
             let element_size = self.layout_config.dtype_width_bytes;

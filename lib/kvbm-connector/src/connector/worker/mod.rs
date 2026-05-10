@@ -54,6 +54,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use crate::config::AttentionConfig;
 use crate::connector::leader::scheduler::KvConnectorMetadata;
 use crate::vllm::layout::determine_kv_layout;
 use crate::{BlockId, KvbmRuntime};
@@ -67,6 +68,13 @@ pub trait ConnectorWorkerInterface: Send + Sync {
     /// `explicit_outer_dim` / `explicit_inner_dim` let the caller (Python, reading
     /// `vllm_config.model_config.use_mla`) bypass shape inference. Both must be
     /// `Some` or both `None`. See [`crate::vllm::layout::determine_kv_layout`].
+    ///
+    /// Per-block layout (`"NHD"` / `"HND"`) and `num_heads` are NOT taken as
+    /// parameters here. They are read from the [`AttentionConfig`] supplied
+    /// at construction time via [`ConnectorWorker::new`]. This keeps the
+    /// register call narrow (tensor + sizing only) and avoids re-encoding
+    /// values that the connector layer already exposes via
+    /// `cache_layout()` / `num_heads()`.
     fn register_kv_caches(
         &self,
         tensors: Vec<Arc<dyn TensorDescriptor>>,
@@ -179,6 +187,12 @@ pub struct ConnectorWorker {
 
     /// Start Forward Pass
     forward_pass_start: Mutex<Option<Instant>>,
+
+    /// Engine-reported attention configuration. Used inside
+    /// `register_kv_caches` to read the per-block KV layout
+    /// (`cache_layout()`) and head count (`num_heads()`) without inventing
+    /// a parallel parsing path. See [`AttentionConfig`] in `lib/kvbm-connector/src/config.rs`.
+    attention: Arc<dyn AttentionConfig>,
 }
 
 impl ConnectorWorker {
@@ -186,7 +200,12 @@ impl ConnectorWorker {
     ///
     /// Registers the `kvbm.connector.configure_layouts` handler immediately
     /// so the leader can trigger initialization via RPC.
-    pub fn new(runtime: Arc<KvbmRuntime>) -> Self {
+    ///
+    /// `attention` carries engine-reported configuration (KV cache layout,
+    /// head count, etc.) so `register_kv_caches` does not need to take
+    /// duplicate parameters from Python — it reads directly from the trait
+    /// object. See [`AttentionConfig`] in `lib/kvbm-connector/src/config.rs`.
+    pub fn new(runtime: Arc<KvbmRuntime>, attention: Arc<dyn AttentionConfig>) -> Self {
         let messenger = runtime.messenger().clone();
         let state = Arc::new(WorkerState::new(Arc::clone(&runtime)));
 
@@ -201,7 +220,22 @@ impl ConnectorWorker {
             forward_pass_completion_active: Arc::new(AtomicBool::new(false)),
             intra_pass_offload_active: Arc::new(Mutex::new(None)),
             forward_pass_start: Mutex::new(None),
+            attention,
         }
+    }
+
+    /// Construct a [`ConnectorWorker`] for tests with a default
+    /// [`AttentionConfig`] that reports `Unknown` cache layout.
+    ///
+    /// The existing test harness flows do not exercise cross-pool
+    /// `requires_transform()` checks (both endpoints are identical), so
+    /// `Unknown -> Unknown` continues to soft-pass exactly as before this
+    /// refactor. New tests that need to exercise mismatched layouts should
+    /// construct an explicit `AttentionConfig` impl and call
+    /// [`ConnectorWorker::new`] directly.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn new_for_test(runtime: Arc<KvbmRuntime>) -> Self {
+        Self::new(runtime, Arc::new(DefaultTestAttentionConfig::default()))
     }
 
     /// Get the DirectWorker if initialized.
@@ -400,7 +434,7 @@ impl ConnectorWorkerInterface for ConnectorWorker {
         }
 
         // Determine layout from tensor shapes (or from explicit dims, preferred path).
-        let (layout_config, block_dim) = determine_kv_layout(
+        let (mut layout_config, block_dim) = determine_kv_layout(
             num_device_blocks,
             page_size,
             dtype_width_bytes,
@@ -409,9 +443,30 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             explicit_inner_dim,
         )?;
 
+        // Read engine-reported attention configuration through the existing
+        // connector trait API (no string re-parsing here) and convert the
+        // typed CacheLayout into the physical-layer KvBlockLayout. This is
+        // the load-bearing fix: prefill workers reporting "HND" and decode
+        // workers reporting "NHD" now compare as `requires_transform == true`
+        // at transfer time instead of falling into the silent
+        // `Unknown -> Unknown` soft-pass.
+        let kv_block_layout: kvbm_physical::layout::KvBlockLayout =
+            self.attention.cache_layout().into();
+
+        // Wire num_heads through so KvBlockLayout-aware code can compute
+        // head_dim. Allocation is sized by inner_dim and is unaffected.
+        // We only set this when the engine reports a non-zero count
+        // (the test-default config returns 0, which would fail the
+        // builder's `validate_for_kv_block_layout` check downstream).
+        let num_heads = self.attention.num_heads();
+        if num_heads > 0 {
+            layout_config.num_heads = Some(num_heads);
+        }
+
         tracing::debug!(
             ?layout_config,
             ?block_dim,
+            ?kv_block_layout,
             "Determined KV layout configuration"
         );
 
@@ -423,6 +478,7 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             .dtype_width_bytes(dtype_width_bytes)
             .layout_config(layout_config)
             .block_dim(block_dim)
+            .kv_block_layout(kv_block_layout)
             .build()?;
 
         let details = WorkerDetails {
@@ -658,6 +714,47 @@ impl ConnectorWorkerInterface for ConnectorWorker {
 pub struct FinishedRequests {
     pub offloading: HashSet<String>,
     pub onboarding: HashSet<String>,
+}
+
+/// Default [`AttentionConfig`] used by `ConnectorWorker::new_for_test`
+/// and the `kvbm-connector` test harness. Reports `kv_cache_layout = ""`
+/// (which `CacheLayout::parse` maps to `Unknown`) so the resulting
+/// `KvBlockLayout::Unknown` matches the pre-refactor test behavior — the
+/// existing harness never exercised cross-pool `requires_transform()`
+/// checks against a real engine layout.
+#[cfg(any(test, feature = "testing"))]
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct DefaultTestAttentionConfig;
+
+#[cfg(any(test, feature = "testing"))]
+impl AttentionConfig for DefaultTestAttentionConfig {
+    fn block_size(&self) -> usize {
+        16
+    }
+
+    fn num_gpu_blocks(&self) -> usize {
+        0
+    }
+
+    fn num_cpu_blocks(&self) -> usize {
+        0
+    }
+
+    fn cache_dtype_bytes(&self) -> usize {
+        2
+    }
+
+    fn kv_cache_layout(&self) -> &str {
+        ""
+    }
+
+    fn head_size(&self) -> usize {
+        0
+    }
+
+    fn num_heads(&self) -> usize {
+        0
+    }
 }
 
 #[cfg(all(test, feature = "testing"))]

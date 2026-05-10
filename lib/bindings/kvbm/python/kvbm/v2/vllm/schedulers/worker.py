@@ -153,8 +153,14 @@ class SchedulerConnectorWorker:
         # Build KvbmRuntime (Velo messenger + tokio)
         self.runtime = KvbmRuntime.build_worker(self.kvbm_override_config)
 
-        # Create the Rust ConnectorWorker that handles NIXL registration
-        self.worker = ConnectorWorker(self.runtime)
+        # Create the Rust ConnectorWorker that handles NIXL registration.
+        #
+        # `kvbm_config` carries the parsed vLLM AttentionConfig (kv_cache_layout,
+        # num_heads, etc.) so the Rust side can read engine-reported layout
+        # from the existing `AttentionConfig::cache_layout()` API instead of
+        # re-parsing strings or accepting duplicate parameters on
+        # `register_kv_caches`.
+        self.worker = ConnectorWorker(self.runtime, self.kvbm_config)
 
         # Store peer info for handshake
         instance_id, worker_addr = self.runtime.peer_info()

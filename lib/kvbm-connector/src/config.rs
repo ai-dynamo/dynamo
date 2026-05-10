@@ -11,6 +11,8 @@
 
 use std::sync::Arc;
 
+use kvbm_physical::layout::KvBlockLayout;
+
 /// KV cache memory layout.
 ///
 /// Parsed from vLLM's `get_kv_cache_layout()` string.
@@ -28,6 +30,24 @@ impl CacheLayout {
             "NHD" => Self::NHD,
             "HND" => Self::HND,
             _ => Self::Unknown,
+        }
+    }
+}
+
+/// Map the framework-agnostic [`CacheLayout`] (parsed from vLLM's
+/// `get_kv_cache_layout()`) onto the physical-layer [`KvBlockLayout`] used by
+/// transfer-time `requires_transform()` checks.
+///
+/// `CacheLayout` only describes the per-block dimension ordering reported by
+/// the engine, so the conversion is total only into the operational variants
+/// (`OperationalNHD` / `OperationalHND`) plus `Unknown`. Universal/Custom
+/// layouts are constructed elsewhere and never enter through this path.
+impl From<CacheLayout> for KvBlockLayout {
+    fn from(layout: CacheLayout) -> Self {
+        match layout {
+            CacheLayout::NHD => KvBlockLayout::OperationalNHD,
+            CacheLayout::HND => KvBlockLayout::OperationalHND,
+            CacheLayout::Unknown => KvBlockLayout::Unknown,
         }
     }
 }
@@ -178,5 +198,56 @@ impl IntegrationsConfig {
     /// Get the world size from parallel configuration.
     pub fn world_size(&self) -> usize {
         self.parallel.world_size()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_layout_into_kv_block_layout() {
+        assert_eq!(
+            KvBlockLayout::from(CacheLayout::NHD),
+            KvBlockLayout::OperationalNHD,
+        );
+        assert_eq!(
+            KvBlockLayout::from(CacheLayout::HND),
+            KvBlockLayout::OperationalHND,
+        );
+        assert_eq!(
+            KvBlockLayout::from(CacheLayout::Unknown),
+            KvBlockLayout::Unknown,
+        );
+    }
+
+    /// The full production path: vLLM reports a layout string, we parse it
+    /// into [`CacheLayout`] and convert to [`KvBlockLayout`]. A prefill
+    /// worker reporting `"HND"` and a decode worker reporting `"NHD"` MUST
+    /// compare as `requires_transform == true` rather than falling into the
+    /// silent `Unknown -> Unknown` soft-pass branch.
+    #[test]
+    fn parse_then_convert_round_trip() {
+        let prefill: KvBlockLayout = CacheLayout::parse("HND").into();
+        let decode: KvBlockLayout = CacheLayout::parse("NHD").into();
+        assert_eq!(prefill, KvBlockLayout::OperationalHND);
+        assert_eq!(decode, KvBlockLayout::OperationalNHD);
+        assert!(
+            prefill.requires_transform(&decode),
+            "HND prefill -> NHD decode must require a transform kernel",
+        );
+
+        // Same layout (the GB10 dev box case) must not require a transform.
+        let prefill: KvBlockLayout = CacheLayout::parse("NHD").into();
+        let decode: KvBlockLayout = CacheLayout::parse("NHD").into();
+        assert!(!prefill.requires_transform(&decode));
+
+        // Empty / bogus / unrecognized strings fall back to Unknown — and
+        // the resulting KvBlockLayout::Unknown is the soft-pass default we
+        // are explicitly NOT pinning to a specific operational variant.
+        let parsed: KvBlockLayout = CacheLayout::parse("").into();
+        assert_eq!(parsed, KvBlockLayout::Unknown);
+        let parsed: KvBlockLayout = CacheLayout::parse("totally-bogus").into();
+        assert_eq!(parsed, KvBlockLayout::Unknown);
     }
 }

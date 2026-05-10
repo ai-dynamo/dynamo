@@ -32,7 +32,7 @@ use kvbm_engine::worker::{DirectWorker, LeaderLayoutConfig, WorkerLayoutResponse
 use crate::KvbmRuntime;
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_physical::TransferManager;
-use kvbm_physical::layout::{BlockDimension, LayoutConfig, PhysicalLayoutBuilder};
+use kvbm_physical::layout::{BlockDimension, KvBlockLayout, LayoutConfig, PhysicalLayoutBuilder};
 
 /// Cached state from `register_kv_caches` for deferred initialization.
 ///
@@ -63,6 +63,17 @@ pub struct PendingWorkerState {
 
     /// Block dimension (first or second dimension).
     pub block_dim: BlockDimension,
+
+    /// KV block layout describing the inner-dimension ordering ("NHD"/"HND")
+    /// reported by the engine via [`crate::config::AttentionConfig::cache_layout`].
+    /// Defaults to [`KvBlockLayout::Unknown`] for callers that have not yet
+    /// been migrated to plumb the engine layout through `AttentionConfig`.
+    /// Plumbed into [`PhysicalLayoutBuilder::with_kv_block_layout`] so
+    /// transfer-time `requires_transform()` checks have ground truth across
+    /// worker pools (prefill vs. decode) rather than relying on the
+    /// silent `Unknown -> Unknown` soft-pass.
+    #[builder(default = "KvBlockLayout::Unknown")]
+    pub kv_block_layout: KvBlockLayout,
 }
 
 impl PendingWorkerStateBuilder {
@@ -168,13 +179,21 @@ impl PendingWorkerState {
         tracing::debug!(
             ?self.layout_config,
             ?self.block_dim,
+            ?self.kv_block_layout,
             "Using pre-computed KV layout configuration"
         );
 
-        // 3. Build PhysicalLayout with NIXL registration
+        // 3. Build PhysicalLayout with NIXL registration.
+        //
+        // `with_kv_block_layout(self.kv_block_layout)` plumbs the
+        // engine-reported per-block layout (NHD/HND, from
+        // `AttentionConfig::cache_layout()` at register time) into the
+        // physical layer so transfer-time `requires_transform()` checks
+        // have ground truth.
         let physical_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
             .with_config(self.layout_config.clone())
             .layer_separate(self.block_dim)
+            .with_kv_block_layout(self.kv_block_layout)
             .with_external_device_regions(self.tensors)?
             .build()?;
 
@@ -241,9 +260,15 @@ impl PendingWorkerState {
                 "Allocating pinned host memory for G2 layout"
             );
 
+            // G2 (host pinned) MUST advertise the same kv_block_layout as
+            // G1 (device). Otherwise transfers between them compare
+            // `OperationalNHD -> Unknown` (or vice versa) and fall into
+            // the conservative `requires_transform == true` branch even
+            // when no transform is actually needed.
             let host_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
                 .with_config(host_layout)
                 .fully_contiguous()
+                .with_kv_block_layout(self.kv_block_layout)
                 .allocate_pinned(Some(self.cuda_device_id as u32))
                 .build()
                 .map_err(|e| {
@@ -283,9 +308,13 @@ impl PendingWorkerState {
                 // Clean shutdowns continue to be handled by `DiskStorage`'s Drop impl.
                 crate::connector::disk_cleanup::register(g3_path.clone());
 
+                // G3 (disk) — same rationale as G2: keep kv_block_layout
+                // aligned with G1 so eviction/onboard transfers don't
+                // trigger a spurious transform.
                 let disk_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
                     .with_config(disk_layout)
                     .fully_contiguous()
+                    .with_kv_block_layout(self.kv_block_layout)
                     .allocate_disk(Some(g3_path.clone()))
                     .build()
                     .map_err(|e| {
