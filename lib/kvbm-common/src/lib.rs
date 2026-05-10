@@ -3,6 +3,18 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod block;
+pub mod coord;
+pub mod slice;
+pub mod strides;
+pub mod tensor;
+
+pub use block::{BlockDim, InnerShape, KvBlockLayout};
+pub use coord::CoordByLabel;
+pub use slice::{AxisExtent, AxisIntersection, AxisSlice, LayoutSignature, intersect_axis};
+pub use strides::KvDimStrides;
+pub use tensor::{KvDim, KvDimLayout};
+
 pub type BlockId = usize;
 pub type SequenceHash = dynamo_tokens::PositionalLineageHash;
 

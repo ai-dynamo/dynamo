@@ -355,6 +355,129 @@ kvbm_kernels_launch_block_from_universal(
   }
 }
 
+namespace {
+
+// NHD ↔ HND transpose. Both sides are operational block stacks shaped as
+// `[nl, no][nt, nh, hd]` (NHD) or `[nl, no][nh, nt, hd]` (HND); the
+// transform swaps the inner (nt, nh) order while keeping `hd` contiguous.
+//
+// Each thread handles one `(nl_idx, no_idx, nt_idx, nh_idx, hd_idx)` element
+// across `num_blocks`, with `hd_idx` as the stride-1 axis on both src and
+// dst — adjacent threads access adjacent bytes (coalesced load + store).
+// `SrcLayout` is a template parameter so the inner-offset formulas resolve at
+// compile time; the host-side launcher dispatches to one of two specializations.
+template <typename T, BlockLayout SrcLayout>
+__global__ void
+kvbm_kernels_nhd_hnd_transpose_kernel(
+    const T* const* src_chunks, T* const* dst_chunks, size_t block_stride, size_t total_per_block, size_t num_blocks,
+    size_t nl, size_t no, size_t nt, size_t nh, size_t hd)
+{
+  size_t thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+  size_t stride = blockDim.x * gridDim.x;
+  size_t total = total_per_block * num_blocks;
+
+  while (thread_id < total) {
+    size_t block_idx = thread_id / total_per_block;
+    size_t residual = thread_id % total_per_block;
+
+    size_t tmp = residual;
+    size_t hd_idx = tmp % hd;
+    tmp /= hd;
+
+    size_t nt_idx = tmp % nt;
+    tmp /= nt;
+
+    size_t nh_idx = tmp % nh;
+    tmp /= nh;
+
+    size_t no_idx = tmp % no;
+    tmp /= no;
+
+    size_t nl_idx = tmp;
+
+    size_t chunk_idx = block_idx * block_stride + nl_idx * no + no_idx;
+    const T* src_chunk = src_chunks[chunk_idx];
+    T* dst_chunk = dst_chunks[chunk_idx];
+
+    size_t src_off;
+    size_t dst_off;
+    if constexpr (SrcLayout == BlockLayout::NHD) {
+      src_off = block_inner_offset<BlockLayout::NHD>(nt_idx, nh_idx, hd_idx, nt, nh, hd);
+      dst_off = block_inner_offset<BlockLayout::HND>(nt_idx, nh_idx, hd_idx, nt, nh, hd);
+    } else {
+      src_off = block_inner_offset<BlockLayout::HND>(nt_idx, nh_idx, hd_idx, nt, nh, hd);
+      dst_off = block_inner_offset<BlockLayout::NHD>(nt_idx, nh_idx, hd_idx, nt, nh, hd);
+    }
+    dst_chunk[dst_off] = src_chunk[src_off];
+    thread_id += stride;
+  }
+}
+
+template <typename T>
+cudaError_t
+kvbm_kernels_launch_nhd_hnd_transpose_impl(
+    const void* const* src_ptrs, void* const* dst_ptrs, size_t num_blocks, size_t nl, size_t no, size_t nt, size_t nh,
+    size_t hd, BlockLayout src_layout, cudaStream_t stream)
+{
+  size_t block_stride = nl * no;
+  size_t total_per_block = nl * no * nt * nh * hd;
+  size_t total = total_per_block * num_blocks;
+  if (total == 0) {
+    return cudaSuccess;
+  }
+
+  if (!src_ptrs || !dst_ptrs) {
+    return cudaErrorInvalidValue;
+  }
+
+  constexpr int kBlockDim = 256;
+  int grid_dim = kvbm_kernels_compute_grid_dim(total, kBlockDim);
+  if (grid_dim == 0) {
+    return cudaSuccess;
+  }
+
+  const T* const* src_chunks = reinterpret_cast<const T* const*>(src_ptrs);
+  T* const* dst_chunks = reinterpret_cast<T* const*>(const_cast<void* const*>(dst_ptrs));
+
+  if (src_layout == BlockLayout::NHD) {
+    kvbm_kernels_nhd_hnd_transpose_kernel<T, BlockLayout::NHD><<<grid_dim, kBlockDim, 0, stream>>>(
+        src_chunks, dst_chunks, block_stride, total_per_block, num_blocks, nl, no, nt, nh, hd);
+  } else {
+    kvbm_kernels_nhd_hnd_transpose_kernel<T, BlockLayout::HND><<<grid_dim, kBlockDim, 0, stream>>>(
+        src_chunks, dst_chunks, block_stride, total_per_block, num_blocks, nl, no, nt, nh, hd);
+  }
+
+  return cudaGetLastError();
+}
+
+}  // namespace
+
+extern "C" cudaError_t
+kvbm_kernels_launch_nhd_hnd_transpose(
+    const void* const* src_ptrs, void* const* dst_ptrs, size_t num_blocks, size_t nl, size_t no, size_t nt, size_t nh,
+    size_t hd, int dtype_value, int src_layout_value, cudaStream_t stream)
+{
+  auto dtype = static_cast<TensorDataType>(dtype_value);
+  auto src_layout = static_cast<BlockLayout>(src_layout_value);
+
+  switch (dtype) {
+    case TensorDataType::F16:
+      return kvbm_kernels_launch_nhd_hnd_transpose_impl<typename DTypeTraits<TensorDataType::F16>::type>(
+          src_ptrs, dst_ptrs, num_blocks, nl, no, nt, nh, hd, src_layout, stream);
+    case TensorDataType::BF16:
+      return kvbm_kernels_launch_nhd_hnd_transpose_impl<typename DTypeTraits<TensorDataType::BF16>::type>(
+          src_ptrs, dst_ptrs, num_blocks, nl, no, nt, nh, hd, src_layout, stream);
+    case TensorDataType::F32:
+      return kvbm_kernels_launch_nhd_hnd_transpose_impl<typename DTypeTraits<TensorDataType::F32>::type>(
+          src_ptrs, dst_ptrs, num_blocks, nl, no, nt, nh, hd, src_layout, stream);
+    case TensorDataType::F64:
+      return kvbm_kernels_launch_nhd_hnd_transpose_impl<typename DTypeTraits<TensorDataType::F64>::type>(
+          src_ptrs, dst_ptrs, num_blocks, nl, no, nt, nh, hd, src_layout, stream);
+    default:
+      return cudaErrorInvalidValue;
+  }
+}
+
 /// Check if cudaMemcpyBatchAsync is available at compile time.
 /// Returns true if CUDA 12.9+ was used to compile this library.
 extern "C" bool

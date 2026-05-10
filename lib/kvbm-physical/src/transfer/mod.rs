@@ -37,13 +37,19 @@
 //! future.await?;
 //! ```
 
+pub(crate) mod benchmark;
 pub(crate) mod capabilities;
 pub(crate) mod checksum;
 pub mod context;
 pub(crate) mod executor;
 pub(crate) mod fill;
+pub(crate) mod graph_cache;
+#[cfg(feature = "permute_kernels")]
+pub(crate) mod kernel_catalog;
+pub(crate) mod lower;
 pub(crate) mod notifications;
 pub(crate) mod options;
+pub(crate) mod plan;
 pub(crate) mod preferences;
 pub(crate) mod strategy;
 pub(crate) mod validation;
@@ -111,6 +117,16 @@ impl BounceBuffer {
 impl BounceBufferInternal {
     pub fn from_layout(layout: PhysicalLayout, block_ids: Vec<BlockId>) -> Self {
         Self { layout, block_ids }
+    }
+
+    #[cfg_attr(not(feature = "permute_kernels"), allow(dead_code))]
+    pub(crate) fn layout(&self) -> &PhysicalLayout {
+        &self.layout
+    }
+
+    #[cfg_attr(not(feature = "permute_kernels"), allow(dead_code))]
+    pub(crate) fn block_ids(&self) -> &[BlockId] {
+        &self.block_ids
     }
 }
 

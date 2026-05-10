@@ -6,6 +6,7 @@
 pub(super) mod cuda;
 mod memcpy;
 mod nixl;
+mod planner;
 
 use super::strategy::select_strategy;
 use super::strategy::{TransferPlan, TransferStrategy};
@@ -24,6 +25,10 @@ use tokio::sync::Mutex;
 
 // Re-export the NIXL transfer builder for public use
 pub use nixl::NixlTransferBuilder;
+
+// PR-7.5.1: expose the transform-kernel dispatcher for benchmark.rs timing.
+#[cfg(feature = "permute_kernels")]
+pub(crate) use planner::dispatch_transform_kernel;
 
 /// Transformation kernel types for converting between different block layouts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +140,11 @@ pub(crate) struct TransferOptionsInternal {
     pub(crate) dst_kv_layout: Option<KvBlockLayout>,
     /// Logical route used for transfer metrics.
     pub(crate) metric_route: Option<KvbmTransferRoute>,
+    /// Route through the stride-aware planner instead of legacy
+    /// `select_strategy` + `execute_direct_transfer`. PR-5 wires this
+    /// for the CudaAsync (H2D / D2H / D2D) strategies; other paths
+    /// ignore the flag.
+    pub(crate) use_planner: bool,
 }
 
 impl TransferOptionsInternal {
@@ -152,6 +162,7 @@ pub(crate) struct TransferOptionsInternalBuilder {
     src_kv_layout: Option<KvBlockLayout>,
     dst_kv_layout: Option<KvBlockLayout>,
     metric_route: Option<KvbmTransferRoute>,
+    use_planner: bool,
 }
 
 impl TransferOptionsInternalBuilder {
@@ -210,6 +221,11 @@ impl TransferOptionsInternalBuilder {
         self
     }
 
+    pub(crate) fn use_planner(mut self, on: bool) -> Self {
+        self.use_planner = on;
+        self
+    }
+
     pub(crate) fn build(self) -> Result<TransferOptionsInternal> {
         Ok(TransferOptionsInternal {
             layer_range: self.layer_range,
@@ -219,6 +235,7 @@ impl TransferOptionsInternalBuilder {
             src_kv_layout: self.src_kv_layout,
             dst_kv_layout: self.dst_kv_layout,
             metric_route: self.metric_route,
+            use_planner: self.use_planner,
         })
     }
 }
@@ -259,6 +276,8 @@ pub(crate) fn execute_transfer(
             options.layer_range,
             strategy,
             options.cuda_stream,
+            options.use_planner,
+            options.bounce_buffer.as_ref(),
             ctx,
         ),
         TransferPlan::TwoHop {
@@ -289,6 +308,8 @@ fn execute_direct_transfer(
     layer_range: Option<Range<usize>>,
     strategy: TransferStrategy,
     cuda_stream: Option<Arc<CudaStream>>,
+    use_planner: bool,
+    bounce_buffer: Option<&BounceBufferInternal>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     match strategy {
@@ -309,16 +330,39 @@ fn execute_direct_transfer(
         }
         TransferStrategy::CudaAsyncH2D
         | TransferStrategy::CudaAsyncD2H
-        | TransferStrategy::CudaAsyncD2D => Ok(cuda::execute_cuda_transfer(
-            src,
-            dst,
-            src_block_ids,
-            dst_block_ids,
-            layer_range,
-            strategy,
-            cuda_stream,
-            ctx,
-        )?),
+        | TransferStrategy::CudaAsyncD2D => {
+            if use_planner {
+                // PR-5: planner-driven path for CudaAsync H2D / D2H / D2D.
+                // Errors here are NOT silently fallen back to the
+                // legacy executor — the caller flipped the flag, so a
+                // failure is propagated as-is.
+                if layer_range.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "use_planner=true currently incompatible with layer_range; \
+                         layer-restricted transfers stay on the legacy executor"
+                    ));
+                }
+                return planner::execute_planner_cuda_transfer(
+                    src,
+                    dst,
+                    src_block_ids,
+                    dst_block_ids,
+                    strategy,
+                    cuda_stream,
+                    ctx,
+                );
+            }
+            Ok(cuda::execute_cuda_transfer(
+                src,
+                dst,
+                src_block_ids,
+                dst_block_ids,
+                layer_range,
+                strategy,
+                cuda_stream,
+                ctx,
+            )?)
+        }
         TransferStrategy::NixlRead
         | TransferStrategy::NixlWrite
         | TransferStrategy::NixlReadFlipped
@@ -328,6 +372,26 @@ fn execute_direct_transfer(
                     "cuda_stream option is not supported for NIXL strategies"
                 ));
             }
+            if use_planner {
+                // PR-5.6: planner-driven NIXL path. Errors propagate;
+                // no silent fallback to legacy (caller flipped the flag).
+                if layer_range.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "use_planner=true currently incompatible with layer_range; \
+                         layer-restricted NIXL transfers stay on the legacy executor"
+                    ));
+                }
+                return planner::execute_planner_nixl_transfer(
+                    src,
+                    dst,
+                    src_block_ids,
+                    dst_block_ids,
+                    strategy,
+                    bounce_buffer,
+                    ctx,
+                );
+            }
+            let _ = bounce_buffer;
             let mut builder = NixlTransferBuilder::new()
                 .src(src)
                 .dst(dst)
@@ -451,7 +515,9 @@ async fn execute_two_hop_transfer_chunk(
         bounce_ids_to_use,
         layer_range.clone(),
         first_strategy,
-        None, // Two-hop transfers don't support caller-provided streams
+        None,  // Two-hop transfers don't support caller-provided streams
+        false, // Two-hop chunks stay on the legacy path for now
+        None,  // bounce_buffer only used by use_planner=true NIXL transforms
         ctx,
     )?
     .await?;
@@ -463,7 +529,9 @@ async fn execute_two_hop_transfer_chunk(
         dst_block_ids,
         layer_range.clone(),
         second_strategy,
-        None, // Two-hop transfers don't support caller-provided streams
+        None,  // Two-hop transfers don't support caller-provided streams
+        false, // Two-hop chunks stay on the legacy path for now
+        None,
         ctx,
     )?
     .await?;

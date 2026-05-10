@@ -18,6 +18,8 @@ use kvbm_observability::SharedKvbmObservability;
 use velo::EventManager;
 
 use crate::manager::TransferManager;
+use crate::transfer::benchmark::{BenchmarkCache, BenchmarkCandidate, BenchmarkKey, BenchmarkOutcome};
+use crate::transfer::graph_cache::GraphCache;
 
 // Notifications module is declared in ../mod.rs
 // Re-export for convenience
@@ -222,6 +224,22 @@ pub struct TransferContext {
     #[allow(dead_code)]
     tx_nixl_events: mpsc::Sender<notifications::RegisterNixlNotification>,
     observability: Option<SharedKvbmObservability>,
+    /// PR-7.4.1: CUDA graph exec handle cache for replay-based transfers.
+    ///
+    /// Shared across clones of `TransferContext` so all executor calls on
+    /// the same context share the same cache. Drops with the last
+    /// `TransferContext` clone; each `ManagedExecHandle` entry calls
+    /// `cuGraphExecDestroy` on drop.
+    graph_cache: Arc<GraphCache>,
+
+    /// PR-7.5: Benchmark outcome cache for the scorer.
+    ///
+    /// Shared across clones of `TransferContext`. Populated by
+    /// `benchmark_pair` at startup when
+    /// `TransferCapabilities::startup_benchmark` is enabled; consulted by
+    /// `score_candidate` via `SelectionContext::benchmark_outcome`.
+    /// Drops with the last `TransferContext` clone.
+    benchmark_cache: Arc<BenchmarkCache>,
 }
 
 impl TransferContext {
@@ -315,6 +333,8 @@ impl TransferContext {
             tx_cuda_event,
             tx_nixl_events,
             observability,
+            graph_cache: Arc::new(GraphCache::new()),
+            benchmark_cache: Arc::new(BenchmarkCache::new()),
         })
     }
 
@@ -396,6 +416,69 @@ impl TransferContext {
     /// Get the CUDA memory pool for kernel allocations.
     pub(crate) fn cuda_pool(&self) -> &Arc<CudaMemPool> {
         &self.cuda_pool
+    }
+
+    /// PR-7.4.1: Get the CUDA graph exec handle cache.
+    ///
+    /// Shared across all clones of this context. Used by
+    /// `dispatch_cuda_graph_replay_planner` to look up or insert
+    /// instantiated exec handles keyed by transfer shape.
+    pub(crate) fn graph_cache(&self) -> &Arc<GraphCache> {
+        &self.graph_cache
+    }
+
+    /// PR-7.5: Get the benchmark outcome cache.
+    ///
+    /// Used by callers of `score_candidate` (in `executor::planner`) to
+    /// populate `SelectionContext::benchmark_outcome` before selection.
+    /// Shared across all clones of this context.
+    pub(crate) fn benchmark_cache(&self) -> &Arc<BenchmarkCache> {
+        &self.benchmark_cache
+    }
+
+    /// PR-7.5.1: Benchmark a set of candidates for a given layout-pair key
+    /// and record the winner in the cache.
+    ///
+    /// This is an explicit-API benchmark (Path B): the caller decides when
+    /// to benchmark (e.g. at startup with known layout pairs) and provides
+    /// the key, pre-decoded candidates, and a CUDA stream to dispatch on.
+    ///
+    /// Supported variants: `DirectDma`, `TransformKernel` (requires
+    /// `permute_kernels`), and `NixlDirectDma`. All routes measure
+    /// end-to-end transfer time including device/network completion.
+    ///
+    /// See [`BenchmarkCache::benchmark_pair`] for timing semantics and
+    /// error conditions.
+    #[allow(dead_code)]
+    pub(crate) fn benchmark_pair(
+        &self,
+        key: BenchmarkKey,
+        candidates: Vec<BenchmarkCandidate>,
+        stream: &Arc<CudaStream>,
+    ) -> anyhow::Result<BenchmarkOutcome> {
+        self.benchmark_cache.benchmark_pair(key, candidates, stream)
+    }
+
+    /// Clone the CUDA-event polling channel sender.
+    ///
+    /// Used by the planner-driven Staged executor (PR-6.2) to register
+    /// CUDA events from inside a `tokio::spawn`-ed chain task without
+    /// holding `&TransferContext` across an `.await`.
+    #[cfg(feature = "permute_kernels")]
+    pub(crate) fn tx_cuda_event_clone(
+        &self,
+    ) -> mpsc::Sender<RegisterPollingNotification<notifications::CudaEventChecker>> {
+        self.tx_cuda_event.clone()
+    }
+
+    /// Clone the NIXL status polling channel sender. Used for the same
+    /// reason as [`Self::tx_cuda_event_clone`] — Staged-task NIXL
+    /// completion registration without `&TransferContext`.
+    #[cfg(feature = "permute_kernels")]
+    pub(crate) fn tx_nixl_status_clone(
+        &self,
+    ) -> mpsc::Sender<RegisterPollingNotification<notifications::NixlStatusChecker>> {
+        self.tx_nixl_status.clone()
     }
 
     /// Register a NIXL transfer request for status polling completion.

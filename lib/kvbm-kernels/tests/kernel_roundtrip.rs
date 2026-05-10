@@ -23,7 +23,9 @@ use cudarc::driver::{
 };
 use cudarc::runtime::sys as cuda_runtime;
 use half::{bf16, f16};
-use kvbm_kernels::{BlockLayout, TensorDataType, block_from_universal, universal_from_block};
+use kvbm_kernels::{
+    BlockLayout, TensorDataType, block_from_universal, nhd_hnd_transpose, universal_from_block,
+};
 use ndarray::{Array5, s};
 use rand::Rng;
 
@@ -360,6 +362,120 @@ block_universal_test!(block_universal_roundtrip_hnd_f32, f32, BlockLayout::HND);
 block_universal_test!(block_universal_roundtrip_hnd_f64, f64, BlockLayout::HND);
 
 // ---------------------------------------------------------------------------
+// NHD ↔ HND transpose
+// ---------------------------------------------------------------------------
+//
+// Each test starts from independent ground truth (`make_blocks` of a random
+// universal tensor) and verifies the kernel output against the *opposite*
+// layout's ground truth — not against the kernel's own inverse pass. A pure
+// round-trip would silently pass a symmetric bug shared between forward and
+// inverse paths (the kernel is one FFI symbol with two template
+// specializations, so a wrong inner-offset formula applied consistently in
+// both directions would compose to identity).
+
+/// Run the transpose kernel from `src_layout` chunks to the opposite layout
+/// and verify the result equals the ground-truth chunks for that layout.
+fn nhd_hnd_transpose_inner<T: TestDtype>(src_layout: BlockLayout) -> Result<(), DriverError> {
+    let (stream, stream_raw) = match cuda_setup() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    let nh = 3usize;
+    let nl = 2usize;
+    let no = 2usize;
+    let nt = 4usize;
+    let hd = 5usize;
+    let nb = 3usize;
+    let chunk_volume = nh * nt * hd;
+
+    let mut rng = rand::rng();
+    let universals: Vec<Array5<T>> = (0..nb)
+        .map(|_| {
+            Array5::from_shape_fn((nh, nl, no, nt, hd), |_| {
+                T::from_f64(rng.random::<f64>() * 2.0 - 1.0)
+            })
+        })
+        .collect();
+
+    let dst_layout = match src_layout {
+        BlockLayout::NHD => BlockLayout::HND,
+        BlockLayout::HND => BlockLayout::NHD,
+    };
+    let src_blocks: Vec<Vec<Vec<T>>> = universals
+        .iter()
+        .map(|u| make_blocks(u, src_layout))
+        .collect();
+    let dst_blocks_expected: Vec<Vec<Vec<T>>> = universals
+        .iter()
+        .map(|u| make_blocks(u, dst_layout))
+        .collect();
+
+    let (_src_slices, src_ptrs) = upload_blocks(&stream, &src_blocks)?;
+    let (dst_slices, dst_ptrs) = alloc_buffers::<T>(&stream, nb * nl * no, chunk_volume)?;
+
+    {
+        let (sp, _g1) = src_ptrs.device_ptr(&stream);
+        let (dp, _g2) = dst_ptrs.device_ptr(&stream);
+        let status = unsafe {
+            nhd_hnd_transpose(
+                sp as usize as *const *const c_void,
+                dp as usize as *const *mut c_void,
+                nb,
+                nl,
+                no,
+                nt,
+                nh,
+                hd,
+                T::DTYPE,
+                src_layout,
+                stream_raw,
+            )
+        };
+        assert_eq!(status, cuda_runtime::cudaError::cudaSuccess);
+    }
+    stream.synchronize()?;
+
+    // `alloc_buffers` returns a flat `Vec<CudaSlice>` of length `nb * nl * no`,
+    // packed in `[block][nl_idx * no + no_idx]` order — matching the chunk
+    // layout produced by `make_blocks`.
+    for (block_idx, expected_block) in dst_blocks_expected.iter().enumerate() {
+        for (chunk_idx, expected_chunk) in expected_block.iter().enumerate() {
+            let slice = &dst_slices[block_idx * (nl * no) + chunk_idx];
+            let host = stream.clone_dtoh(slice)?;
+            assert_close::<T>(
+                &host,
+                expected_chunk,
+                &format!(
+                    "transpose {:?}->{:?} block {} chunk {}",
+                    src_layout, dst_layout, block_idx, chunk_idx
+                ),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+macro_rules! nhd_hnd_test {
+    ($name:ident, $ty:ty, $src_layout:expr) => {
+        #[test]
+        fn $name() -> Result<(), DriverError> {
+            nhd_hnd_transpose_inner::<$ty>($src_layout)
+        }
+    };
+}
+
+nhd_hnd_test!(nhd_hnd_transpose_nhd_to_hnd_f16, f16, BlockLayout::NHD);
+nhd_hnd_test!(nhd_hnd_transpose_nhd_to_hnd_bf16, bf16, BlockLayout::NHD);
+nhd_hnd_test!(nhd_hnd_transpose_nhd_to_hnd_f32, f32, BlockLayout::NHD);
+nhd_hnd_test!(nhd_hnd_transpose_nhd_to_hnd_f64, f64, BlockLayout::NHD);
+nhd_hnd_test!(nhd_hnd_transpose_hnd_to_nhd_f16, f16, BlockLayout::HND);
+nhd_hnd_test!(nhd_hnd_transpose_hnd_to_nhd_bf16, bf16, BlockLayout::HND);
+nhd_hnd_test!(nhd_hnd_transpose_hnd_to_nhd_f32, f32, BlockLayout::HND);
+nhd_hnd_test!(nhd_hnd_transpose_hnd_to_nhd_f64, f64, BlockLayout::HND);
+
+// ---------------------------------------------------------------------------
 // Edge cases
 // ---------------------------------------------------------------------------
 
@@ -395,6 +511,24 @@ fn empty_batch_noop() -> Result<(), DriverError> {
     // block_from_universal
     let status = unsafe {
         block_from_universal(
+            null_const,
+            null_mut,
+            0,
+            1,
+            1,
+            1,
+            1,
+            1,
+            TensorDataType::F32,
+            BlockLayout::NHD,
+            stream_raw,
+        )
+    };
+    assert_eq!(status, cuda_runtime::cudaError::cudaSuccess);
+
+    // nhd_hnd_transpose
+    let status = unsafe {
+        nhd_hnd_transpose(
             null_const,
             null_mut,
             0,

@@ -6,11 +6,15 @@
 //! This layout stores all blocks in a single contiguous memory allocation
 //! with the shape: [num_blocks, num_layers, outer_dim, page_size, inner_dim].
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
+use kvbm_common::{KvDim, KvDimLayout, KvDimStrides};
 use validator::Validate;
 
 use super::serialize::{BlockFormat, FullyContiguousDetails, LayoutTypeDetails};
-use super::{Buffer, KvBlockLayout, Layout, LayoutConfig, MemoryDescriptor, MemoryRegion};
+use super::view::LayoutView;
+use super::{
+    Buffer, KvBlockLayout, Layout, LayoutConfig, MemoryDescriptor, MemoryRegion, resolve_head_dims,
+};
 
 /// Fully contiguous layout where all blocks are in a single allocation.
 #[derive(Debug)]
@@ -65,14 +69,14 @@ impl FullyContiguousLayoutBuilder {
     }
 
     /// Set the layout configuration.
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     pub fn config(&mut self, config: LayoutConfig) -> &mut Self {
         self.config = Some(config);
         self
     }
 
     /// Set the memory buffer backing this layout.
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     pub fn memory(&mut self, memory: Buffer) -> &mut Self {
         self.memory = Some(memory);
         self
@@ -81,7 +85,7 @@ impl FullyContiguousLayoutBuilder {
     /// Set the KV block layout describing dimension ordering.
     ///
     /// Default: `KvBlockLayout::Unknown`
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     pub fn kv_block_layout(&mut self, layout: KvBlockLayout) -> &mut Self {
         self.kv_block_layout = layout;
         self
@@ -90,7 +94,7 @@ impl FullyContiguousLayoutBuilder {
     /// Set the block format.
     ///
     /// Default: `BlockFormat::default()` (Operational)
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     pub fn block_format(&mut self, format: BlockFormat) -> &mut Self {
         self.block_format = format;
         self
@@ -105,7 +109,7 @@ impl FullyContiguousLayoutBuilder {
     /// - `memory` is not set
     /// - The memory region is too small for the layout
     /// - The config validation fails
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     pub fn build(&self) -> Result<FullyContiguousLayout> {
         let config = self
             .config
@@ -122,19 +126,16 @@ impl FullyContiguousLayoutBuilder {
 
 impl FullyContiguousLayout {
     /// Create a builder for `FullyContiguousLayout`.
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     pub fn builder() -> FullyContiguousLayoutBuilder {
         FullyContiguousLayoutBuilder::new()
     }
 
-    /// Create a new fully contiguous layout with default KV block layout.
-    ///
-    /// # Arguments
-    /// * `config` - Layout configuration
-    /// * `memory` - Owned memory region that backs this layout
-    ///
-    /// # Returns
-    /// A new FullyContiguousLayout instance with `KvBlockLayout::Unknown`
+    /// Convenience constructor with `KvBlockLayout::Unknown` and the
+    /// default `BlockFormat`. Used by in-module tests; production callers
+    /// go through `PhysicalLayoutBuilder` (which threads `KvBlockLayout`
+    /// from the labelled probe).
+    #[cfg(all(test, feature = "testing-kvbm"))]
     pub(crate) fn new(config: LayoutConfig, memory: Buffer) -> Result<Self> {
         Self::new_internal(
             config,
@@ -204,19 +205,18 @@ impl FullyContiguousLayout {
     }
 
     /// Get the block format.
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     pub fn block_format(&self) -> BlockFormat {
         self.block_format
     }
 
     /// Get the KV block layout.
-    #[expect(dead_code)]
     pub fn kv_block_layout(&self) -> KvBlockLayout {
         self.kv_block_layout
     }
 
     /// Set the KV block layout.
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     pub fn set_kv_block_layout(&mut self, layout: KvBlockLayout) {
         self.kv_block_layout = layout;
     }
@@ -257,13 +257,172 @@ impl FullyContiguousLayout {
     }
 
     /// Get mutable reference to the memory Arc for NIXL registration.
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     pub fn memory_arc_mut(&mut self) -> &mut Buffer {
         &mut self.memory
     }
 }
 
 impl Layout for FullyContiguousLayout {
+    /// Projection: single allocation, no region axis.
+    ///
+    /// Axis order depends on [`KvBlockLayout`]:
+    /// - `OperationalNHD`: `[Block, Layer, Outer, Page, HeadCount, HeadSize]`
+    /// - `OperationalHND`: `[Block, Layer, Outer, HeadCount, Page, HeadSize]`
+    /// - `UniversalTP`:    `[Block, HeadCount, Layer, Outer, Page, HeadSize]`
+    /// - `UniversalPP`:    `[Block, Layer, HeadCount, Outer, Page, HeadSize]`
+    ///
+    /// The four orderings are what makes the kernel catalog's
+    /// signature-keyed dispatch work — NHD vs HND vs UniversalTP/PP differ
+    /// only in where `HeadCount` sits relative to the inner axes.
+    fn layout_view(&self) -> Result<LayoutView> {
+        let cfg = &self.config;
+        let block_layout = self.kv_block_layout();
+        if matches!(block_layout, KvBlockLayout::Unknown) {
+            bail!("FullyContiguousLayout::layout_view: Unknown block layout");
+        }
+        let (nh, hd) = resolve_head_dims(cfg, block_layout)?;
+        let elem = cfg.dtype_width_bytes;
+        let buffers = self.memory_regions();
+        if buffers.len() != 1 {
+            bail!(
+                "FullyContiguousLayout::layout_view: expected 1 Buffer, got {}",
+                buffers.len()
+            );
+        }
+        let regions = vec![buffers[0].addr()];
+
+        let (dims, sizes, byte_strides) = match block_layout {
+            KvBlockLayout::OperationalNHD => {
+                // [Block, Layer, Outer, Page, HeadCount, HeadSize]
+                let s_hs = elem;
+                let s_hc = s_hs * hd;
+                let s_pg = s_hc * nh;
+                let s_ot = s_pg * cfg.page_size;
+                let s_la = s_ot * cfg.outer_dim;
+                let s_bk = s_la * cfg.num_layers;
+                (
+                    vec![
+                        KvDim::Block,
+                        KvDim::Layer,
+                        KvDim::Outer,
+                        KvDim::Page,
+                        KvDim::HeadCount,
+                        KvDim::HeadSize,
+                    ],
+                    vec![
+                        cfg.num_blocks,
+                        cfg.num_layers,
+                        cfg.outer_dim,
+                        cfg.page_size,
+                        nh,
+                        hd,
+                    ],
+                    vec![s_bk, s_la, s_ot, s_pg, s_hc, s_hs],
+                )
+            }
+            KvBlockLayout::OperationalHND => {
+                // [Block, Layer, Outer, HeadCount, Page, HeadSize]
+                let s_hs = elem;
+                let s_pg = s_hs * hd;
+                let s_hc = s_pg * cfg.page_size;
+                let s_ot = s_hc * nh;
+                let s_la = s_ot * cfg.outer_dim;
+                let s_bk = s_la * cfg.num_layers;
+                (
+                    vec![
+                        KvDim::Block,
+                        KvDim::Layer,
+                        KvDim::Outer,
+                        KvDim::HeadCount,
+                        KvDim::Page,
+                        KvDim::HeadSize,
+                    ],
+                    vec![
+                        cfg.num_blocks,
+                        cfg.num_layers,
+                        cfg.outer_dim,
+                        nh,
+                        cfg.page_size,
+                        hd,
+                    ],
+                    vec![s_bk, s_la, s_ot, s_hc, s_pg, s_hs],
+                )
+            }
+            KvBlockLayout::UniversalTP => {
+                // [Block, HeadCount, Layer, Outer, Page, HeadSize] — per-block
+                // shape `[nh, nl, no, nt, hd]` (matches universal_from_block /
+                // block_from_universal kernel layout in kvbm-kernels).
+                let s_hs = elem;
+                let s_pg = s_hs * hd;
+                let s_ot = s_pg * cfg.page_size;
+                let s_la = s_ot * cfg.outer_dim;
+                let s_hc = s_la * cfg.num_layers;
+                let s_bk = s_hc * nh;
+                (
+                    vec![
+                        KvDim::Block,
+                        KvDim::HeadCount,
+                        KvDim::Layer,
+                        KvDim::Outer,
+                        KvDim::Page,
+                        KvDim::HeadSize,
+                    ],
+                    vec![
+                        cfg.num_blocks,
+                        nh,
+                        cfg.num_layers,
+                        cfg.outer_dim,
+                        cfg.page_size,
+                        hd,
+                    ],
+                    vec![s_bk, s_hc, s_la, s_ot, s_pg, s_hs],
+                )
+            }
+            KvBlockLayout::UniversalPP => {
+                // [Block, Layer, HeadCount, Outer, Page, HeadSize].
+                let s_hs = elem;
+                let s_pg = s_hs * hd;
+                let s_ot = s_pg * cfg.page_size;
+                let s_hc = s_ot * cfg.outer_dim;
+                let s_la = s_hc * nh;
+                let s_bk = s_la * cfg.num_layers;
+                (
+                    vec![
+                        KvDim::Block,
+                        KvDim::Layer,
+                        KvDim::HeadCount,
+                        KvDim::Outer,
+                        KvDim::Page,
+                        KvDim::HeadSize,
+                    ],
+                    vec![
+                        cfg.num_blocks,
+                        cfg.num_layers,
+                        nh,
+                        cfg.outer_dim,
+                        cfg.page_size,
+                        hd,
+                    ],
+                    vec![s_bk, s_la, s_hc, s_ot, s_pg, s_hs],
+                )
+            }
+            KvBlockLayout::Custom(_) => bail!(
+                "FullyContiguousLayout::layout_view: KvBlockLayout::Custom is not \
+                 supported by the planner-driven path"
+            ),
+            KvBlockLayout::Unknown => unreachable!("Unknown rejected above"),
+        };
+
+        let layout = KvDimLayout::new(dims, sizes)?;
+        let strides = KvDimStrides::from_byte_strides(byte_strides, elem)?;
+        // Homogeneous per-axis storage: the FC layout has a single allocation
+        // so every axis lives in the same StorageKind.
+        let sk = buffers[0].storage_kind();
+        let axis_storage_kinds = vec![sk; layout.dims().len()];
+        LayoutView::full(layout, strides, regions, None, axis_storage_kinds)
+    }
+
     fn config(&self) -> &LayoutConfig {
         &self.config
     }

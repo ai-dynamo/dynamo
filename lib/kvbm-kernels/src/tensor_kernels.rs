@@ -71,6 +71,20 @@ unsafe extern "C" {
         layout: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+
+    fn kvbm_kernels_launch_nhd_hnd_transpose(
+        src_ptrs: *const *const c_void,
+        dst_ptrs: *const *mut c_void,
+        num_blocks: usize,
+        nl: usize,
+        no: usize,
+        nt: usize,
+        nh: usize,
+        hd: usize,
+        dtype: i32,
+        src_layout: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
 }
 
 /// Controls how `memcpy_batch` dispatches copies.
@@ -205,6 +219,45 @@ pub unsafe fn universal_from_block(
             hd,
             dtype as i32,
             layout as i32,
+            stream,
+        )
+    }
+}
+
+/// Permute `num_blocks` operational block stacks between NHD and HND.
+///
+/// Both `src_ptrs` and `dst_ptrs` are device-accessible pointer tables
+/// shaped as `[num_blocks][nl * no]` (one chunk pointer per `(layer,
+/// outer)` slot). `src_layout` selects the source side's inner ordering
+/// (the destination is the opposite layout); `hd` is the contiguous
+/// innermost axis on both sides.
+#[cfg(feature = "permute_kernels")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn nhd_hnd_transpose(
+    src_ptrs: *const *const c_void,
+    dst_ptrs: *const *mut c_void,
+    num_blocks: usize,
+    nl: usize,
+    no: usize,
+    nt: usize,
+    nh: usize,
+    hd: usize,
+    dtype: TensorDataType,
+    src_layout: BlockLayout,
+    stream: cudaStream_t,
+) -> cudaError_t {
+    unsafe {
+        kvbm_kernels_launch_nhd_hnd_transpose(
+            src_ptrs,
+            dst_ptrs,
+            num_blocks,
+            nl,
+            no,
+            nt,
+            nh,
+            hd,
+            dtype as i32,
+            src_layout as i32,
             stream,
         )
     }

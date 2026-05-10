@@ -74,6 +74,49 @@ pub struct TransferCapabilities {
     ///
     /// Note: This only affects Device → Remote. Host → Remote is always direct.
     pub allow_gpu_rdma: bool,
+
+    /// PR-7.4: Enable CUDA graph capture/replay for repeated same-shape
+    /// transfers on the Cuda* route family.
+    ///
+    /// When enabled:
+    /// - Same-shape Cuda* transfers may be executed via a pre-captured
+    ///   `cudaGraphExec_t` with per-launch address rebinding, reducing
+    ///   kernel-launch overhead for frequently repeated shapes.
+    ///
+    /// When disabled (default):
+    /// - All Cuda* transfers use the standard launch path. This is the
+    ///   safe default because graph capture has CUDA-side preconditions
+    ///   (stream capture mode, no blocking ops, etc.) that callers must
+    ///   verify before enabling.
+    ///
+    /// **Status (PR-7.4):** Scaffolding only. No path emits
+    /// `Candidate::CudaGraphReplay` today, so this flag has no runtime
+    /// effect. The capture/replay executor wiring is deferred to PR-7.4.1.
+    #[serde(default)]
+    pub cuda_graph_replay: bool,
+
+    /// PR-7.5: Enable optional startup benchmarking.
+    ///
+    /// When enabled:
+    /// - Callers may invoke `TransferContext::benchmark_pair` to empirically
+    ///   measure candidate submit latencies for a given layout-pair key.
+    /// - The scorer consults `BenchmarkCache` and applies a +500 bonus to
+    ///   the empirically fastest candidate, overriding the static score
+    ///   constants when a cache entry is present.
+    ///
+    /// When disabled (default):
+    /// - `BenchmarkCache` is never populated or consulted; the scorer uses
+    ///   the existing static constants unchanged.  Production behaviour is
+    ///   identical to pre-PR-7.5.
+    ///
+    /// **Correctness invariant:** the benchmark result only influences
+    /// selection, not dispatch.  A wrong or stale benchmark entry can
+    /// cause a suboptimal candidate to be chosen but cannot corrupt data.
+    ///
+    /// **Status (PR-7.5):** DirectDma candidates only; NIXL + transform
+    /// benchmarking deferred to PR-7.5.1.
+    #[serde(default)]
+    pub startup_benchmark: bool,
 }
 
 impl TransferCapabilities {
@@ -87,6 +130,8 @@ impl TransferCapabilities {
         Self {
             allow_gds: true,
             allow_gpu_rdma: true,
+            cuda_graph_replay: false,    // remains opt-in; requires capturable stream
+            startup_benchmark: false,    // opt-in; caller decides when to benchmark
         }
     }
 
@@ -148,6 +193,37 @@ impl TransferCapabilities {
     /// Set the GPU RDMA capability.
     pub fn with_gpu_rdma(mut self, enabled: bool) -> Self {
         self.allow_gpu_rdma = enabled;
+        self
+    }
+
+    /// PR-7.4: Set the CUDA graph capture/replay capability.
+    ///
+    /// Defaulting to `false` is intentional — graph capture has
+    /// CUDA-side preconditions (stream capture mode, no blocking ops, etc.)
+    /// that the caller must verify. Enable only when the caller is certain
+    /// the transfer stream is graph-capturable and the shapes are stable
+    /// enough to amortise the capture cost.
+    ///
+    /// **Status (PR-7.4):** Flag scaffolding only; no executor path exists yet.
+    /// Enabling this flag currently has no runtime effect (no path emits
+    /// `Candidate::CudaGraphReplay`). Full wiring deferred to PR-7.4.1.
+    pub fn with_cuda_graph_replay(mut self, enabled: bool) -> Self {
+        self.cuda_graph_replay = enabled;
+        self
+    }
+
+    /// PR-7.5: Set the optional startup benchmarking capability.
+    ///
+    /// When enabled, the scorer will consult `BenchmarkCache` and apply a
+    /// +500 bonus to empirically measured winners.  Populate the cache by
+    /// calling `TransferContext::benchmark_pair` at startup.
+    ///
+    /// Correctness is not affected — the benchmark only influences
+    /// candidate selection, not dispatch.  Disable (default) in production
+    /// unless you have verified that startup benchmarking on your hardware
+    /// reliably identifies a performance winner.
+    pub fn with_startup_benchmark(mut self, enabled: bool) -> Self {
+        self.startup_benchmark = enabled;
         self
     }
 

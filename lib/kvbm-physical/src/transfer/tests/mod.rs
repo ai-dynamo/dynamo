@@ -2,8 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Comprehensive transfer tests for verifying data integrity across storage types and layout configurations.
+//!
+//! GPU- and NIXL-touching tests serialise via the macros in
+//! [`gate`]: `gpu_serial!()`, `nixl_serial!()`, `storage_serial!(...)`.
+//! Defaults: GPU permit count `2`, NIXL permit count `1`. Override
+//! via `KVBM_TEST_GPU_PARALLELISM` and `KVBM_TEST_NIXL_PARALLELISM`
+//! env vars.
 
+mod benchmark_path;
+pub(crate) mod gate;
 mod local_transfers;
+mod planner_graph_replay;
+mod planner_nixl;
+mod planner_path;
 
 /// Skip test if stub kernels are in use (no real CUDA available).
 ///
@@ -126,15 +137,32 @@ impl TransferMode {
 
 /// Standard layout configuration for all tests.
 pub fn standard_config(num_blocks: usize) -> LayoutConfig {
-    LayoutConfig::builder()
+    standard_config_with_page_size(num_blocks, 16)
+}
+
+/// Standard layout configuration with a caller-chosen `page_size` (tokens per block).
+///
+/// `num_heads = 8` and `inner_dim = 128` give `head_dim = 16` (Llama-ish proportions
+/// at toy scale). The kernel catalog requires `num_heads` to be set when projecting
+/// a known `KvBlockLayout`, so wiring it in here keeps `use_planner = true` paths
+/// happy without disturbing legacy tests (the field was already `Option<usize>`).
+/// When `permute_kernels` is on, `dtype = F16` matches the existing
+/// `dtype_width_bytes = 2`.
+pub fn standard_config_with_page_size(num_blocks: usize, page_size: usize) -> LayoutConfig {
+    let mut builder = LayoutConfig::builder();
+    builder
         .num_blocks(num_blocks)
         .num_layers(2)
         .outer_dim(2)
-        .page_size(16)
+        .page_size(page_size)
         .inner_dim(128)
         .dtype_width_bytes(2)
-        .build()
-        .unwrap()
+        .num_heads(Some(8));
+    #[cfg(feature = "permute_kernels")]
+    {
+        builder.dtype(Some(kvbm_kernels::TensorDataType::F16));
+    }
+    builder.build().unwrap()
 }
 
 /// Helper function for creating a PhysicalLayout builder with standard config.
@@ -197,14 +225,45 @@ pub fn create_lw_layout(
     }
 }
 
-/// Create a physical layout based on the specification.
-///
-/// This is a DRY helper that dispatches to create_fc_layout or create_lw_layout
-/// based on the layout kind in the spec.
+/// Create a physical layout based on the specification, using the default page_size (16).
 pub fn create_layout(agent: NixlAgent, spec: LayoutSpec, num_blocks: usize) -> PhysicalLayout {
+    create_layout_with_page_size(agent, spec, num_blocks, 16)
+}
+
+/// Create a physical layout with a caller-chosen `page_size` (tokens per block).
+///
+/// Used by page-size sweep tests to exercise FC/LW layout indexing across the range
+/// of production block sizes without disturbing the default helpers.
+pub fn create_layout_with_page_size(
+    agent: NixlAgent,
+    spec: LayoutSpec,
+    num_blocks: usize,
+    page_size: usize,
+) -> PhysicalLayout {
+    let config = standard_config_with_page_size(num_blocks, page_size);
     match spec.kind {
-        LayoutKind::FC => create_fc_layout(agent, spec.storage, num_blocks),
-        LayoutKind::LW => create_lw_layout(agent, spec.storage, num_blocks),
+        LayoutKind::FC => {
+            let b = PhysicalLayout::builder(agent)
+                .with_config(config)
+                .fully_contiguous();
+            match spec.storage {
+                StorageKind::System => b.allocate_system().build().unwrap(),
+                StorageKind::Pinned => b.allocate_pinned(None).build().unwrap(),
+                StorageKind::Device(id) => b.allocate_device(id).build().unwrap(),
+                StorageKind::Disk(_) => b.allocate_disk(None).build().unwrap(),
+            }
+        }
+        LayoutKind::LW => {
+            let b = PhysicalLayout::builder(agent)
+                .with_config(config)
+                .layer_separate(BlockDimension::BlockIsFirstDim);
+            match spec.storage {
+                StorageKind::System => b.allocate_system().build().unwrap(),
+                StorageKind::Pinned => b.allocate_pinned(None).build().unwrap(),
+                StorageKind::Device(id) => b.allocate_device(id).build().unwrap(),
+                StorageKind::Disk(_) => b.allocate_disk(None).build().unwrap(),
+            }
+        }
     }
 }
 
@@ -225,7 +284,9 @@ pub fn create_transfer_context(
 
 /// Fill blocks and compute checksums.
 ///
-/// This can only be called on System or Pinned layouts.
+/// Works on any storage kind: `fill_blocks` and `compute_block_checksums` both
+/// dispatch on layout location (host writes for System/Pinned, cudaMemcpy for
+/// Device, file I/O for Disk).
 pub fn fill_and_checksum(
     layout: &PhysicalLayout,
     block_ids: &[BlockId],
