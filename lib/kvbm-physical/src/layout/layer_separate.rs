@@ -8,13 +8,15 @@
 //! - Block-contiguous: [num_blocks, outer_dim, page_size, inner_dim]
 //! - Outer-contiguous: [outer_dim, num_blocks, page_size, inner_dim]
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
+use kvbm_common::{KvDim, KvDimLayout, KvDimStrides};
 use validator::Validate;
 
 use super::serialize::{LayerSeparateDetails, LayoutTypeDetails};
+use super::view::LayoutView;
 use super::{
     BlockDimension, Buffer, InnerShape, KvBlockLayout, Layout, LayoutConfig, MemoryDescriptor,
-    MemoryRegion,
+    MemoryRegion, resolve_head_dims,
 };
 
 /// Layer-separate layout where each layer has its own allocation.
@@ -292,8 +294,111 @@ impl LayerSeparateLayout {
 }
 
 impl Layout for LayerSeparateLayout {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
+    /// Projection: per-layer regions with `region_axis = Some(Layer)`.
+    /// Universal layouts cannot be LS — `LayerSeparateLayout::build`
+    /// rejects them — so only operational variants are projected here.
+    ///
+    /// In-region axis order depends on [`BlockDimension`] and
+    /// [`KvBlockLayout`]:
+    /// - `BlockIsFirstDim` + NHD: `[Layer, Block, Outer, Page, HeadCount, HeadSize]`
+    /// - `BlockIsFirstDim` + HND: `[Layer, Block, Outer, HeadCount, Page, HeadSize]`
+    /// - `BlockIsSecondDim` + NHD: `[Layer, Outer, Block, Page, HeadCount, HeadSize]`
+    /// - `BlockIsSecondDim` + HND: `[Layer, Outer, Block, HeadCount, Page, HeadSize]`
+    fn layout_view(&self) -> Result<LayoutView> {
+        let cfg = &self.config;
+        let block_layout = self.kv_block_layout();
+        if matches!(block_layout, KvBlockLayout::Unknown) {
+            bail!("LayerSeparateLayout::layout_view: Unknown block layout");
+        }
+        let (nh, hd) = resolve_head_dims(cfg, block_layout)?;
+        let elem = cfg.dtype_width_bytes;
+
+        // Per-region inner-axis strides (NHD vs HND).
+        let (s_hs, s_pre_outer, inner_axes_after_outer): (
+            usize,
+            usize,
+            (Vec<KvDim>, Vec<usize>, Vec<usize>),
+        ) = match block_layout {
+            KvBlockLayout::OperationalNHD => {
+                // Inside Outer: [Page, HeadCount, HeadSize]
+                let s_hs = elem;
+                let s_hc = s_hs * hd;
+                let s_pg = s_hc * nh;
+                let s_pre_outer = s_pg * cfg.page_size;
+                let inner = (
+                    vec![KvDim::Page, KvDim::HeadCount, KvDim::HeadSize],
+                    vec![cfg.page_size, nh, hd],
+                    vec![s_pg, s_hc, s_hs],
+                );
+                (s_hs, s_pre_outer, inner)
+            }
+            KvBlockLayout::OperationalHND => {
+                // Inside Outer: [HeadCount, Page, HeadSize]
+                let s_hs = elem;
+                let s_pg = s_hs * hd;
+                let s_hc = s_pg * cfg.page_size;
+                let s_pre_outer = s_hc * nh;
+                let inner = (
+                    vec![KvDim::HeadCount, KvDim::Page, KvDim::HeadSize],
+                    vec![nh, cfg.page_size, hd],
+                    vec![s_hc, s_pg, s_hs],
+                );
+                (s_hs, s_pre_outer, inner)
+            }
+            KvBlockLayout::UniversalTP | KvBlockLayout::UniversalPP => bail!(
+                "LayerSeparateLayout::layout_view: cannot represent universal \
+                 KvBlockLayout (LayerSeparateLayout::build rejects these)"
+            ),
+            KvBlockLayout::Custom(_) => bail!(
+                "LayerSeparateLayout::layout_view: KvBlockLayout::Custom is not \
+                 supported by the planner-driven path"
+            ),
+            KvBlockLayout::Unknown => unreachable!("Unknown rejected above"),
+        };
+        let _ = s_hs;
+
+        // Per-region prefix order depends on which axis is outermost in
+        // the region.
+        let region_size = s_pre_outer * cfg.outer_dim;
+        let (mut dims, mut sizes, mut byte_strides) = match self.block_dim() {
+            BlockDimension::BlockIsFirstDim => {
+                let s_ot = s_pre_outer;
+                let s_bk = s_ot * cfg.outer_dim;
+                let s_la = s_bk * cfg.num_blocks; // Layer-axis sentinel
+                let _ = region_size;
+                (
+                    vec![KvDim::Layer, KvDim::Block, KvDim::Outer],
+                    vec![cfg.num_layers, cfg.num_blocks, cfg.outer_dim],
+                    vec![s_la, s_bk, s_ot],
+                )
+            }
+            BlockDimension::BlockIsSecondDim => {
+                let s_bk = s_pre_outer;
+                let s_ot = s_bk * cfg.num_blocks;
+                let s_la = s_ot * cfg.outer_dim;
+                (
+                    vec![KvDim::Layer, KvDim::Outer, KvDim::Block],
+                    vec![cfg.num_layers, cfg.outer_dim, cfg.num_blocks],
+                    vec![s_la, s_ot, s_bk],
+                )
+            }
+        };
+        let (mut inner_dims, mut inner_sizes, mut inner_strides) = inner_axes_after_outer;
+        dims.append(&mut inner_dims);
+        sizes.append(&mut inner_sizes);
+        byte_strides.append(&mut inner_strides);
+
+        let layout = KvDimLayout::new(dims, sizes)?;
+        let strides = KvDimStrides::from_byte_strides(byte_strides, elem)?;
+        let regions: Vec<usize> = self.memory_regions().iter().map(|b| b.addr()).collect();
+        if regions.len() != cfg.num_layers {
+            bail!(
+                "LayerSeparateLayout::layout_view: {} regions but {} layers",
+                regions.len(),
+                cfg.num_layers
+            );
+        }
+        LayoutView::full(layout, strides, regions, Some(KvDim::Layer))
     }
 
     fn config(&self) -> &LayoutConfig {

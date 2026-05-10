@@ -35,339 +35,17 @@
 //!   picks one for execution.
 
 use anyhow::{Result, bail};
-use kvbm_common::{KvDim, KvDimLayout, KvDimStrides};
 
-use crate::layout::{
-    BlockDimension, FullyContiguousLayout, KvBlockLayout, LayerSeparateLayout, Layout, LayoutView,
-    PhysicalLayout,
-};
+use crate::layout::{LayoutView, PhysicalLayout};
 use crate::transfer::plan::{CopyOp, CopyPlan};
 
 /// Project a [`PhysicalLayout`] to a [`LayoutView`] for the planner.
 ///
-/// Thin wrapper around [`layout_to_view`] for callers that already have
-/// a `PhysicalLayout` in hand.
+/// Each concrete [`Layout`] impl owns its own projection via
+/// [`Layout::layout_view`]; this helper is the convenience wrapper
+/// for callers that already have a [`PhysicalLayout`] in hand.
 pub(crate) fn physical_to_layout_view(physical: &PhysicalLayout) -> Result<LayoutView> {
-    layout_to_view(physical.layout().as_ref())
-}
-
-/// Project a bare `&dyn Layout` to a [`LayoutView`].
-///
-/// Only [`FullyContiguousLayout`] and [`LayerSeparateLayout`] are
-/// supported; other layout kinds return an error. The projection is
-/// skeletal: the per-token NHD/HND substructure inside `inner_dim` is
-/// collapsed into a single opaque [`KvDim::Payload`] trailing axis.
-/// PR-6 will refine this when the kernel catalog needs to distinguish
-/// the substructure.
-///
-/// **Design note (deferred from PR-5 review).** `Layout::as_any()`
-/// downcasting is brittle: adding a new concrete `Layout` impl
-/// requires editing this dispatch and unsupported layouts fail late
-/// here rather than at the trait boundary. A follow-up PR can replace
-/// this with a `Layout::layout_view(&self) -> Result<LayoutView>`
-/// trait method (or a sibling projection trait) so each layout owns
-/// its projection.
-pub(crate) fn layout_to_view(layout: &dyn Layout) -> Result<LayoutView> {
-    let cfg = layout.config();
-    if let Some(fc) = layout.as_any().downcast_ref::<FullyContiguousLayout>() {
-        return fc_to_view(fc, cfg);
-    }
-    if let Some(ls) = layout.as_any().downcast_ref::<LayerSeparateLayout>() {
-        return ls_to_view(ls, cfg);
-    }
-    bail!(
-        "layout_to_view: unsupported concrete layout type \
-         (block_layout = {:?})",
-        layout.block_layout()
-    );
-}
-
-/// Resolve `(num_heads, head_dim)` from a config, requiring `num_heads`
-/// to be set when the projection has been asked to honour a known
-/// `KvBlockLayout` (the kernel catalog distinguishes NHD/HND/Universal
-/// by axis order, which can only be expressed once `inner_dim` is split).
-///
-/// Validation lives at the projection site, not at `LayoutConfig::build()`,
-/// so legacy callers that don't enable `use_planner = true` are not
-/// disturbed.
-fn resolve_head_dims(
-    cfg: &crate::layout::LayoutConfig,
-    block_layout: KvBlockLayout,
-) -> Result<(usize, usize)> {
-    let nh = cfg.num_heads.ok_or_else(|| {
-        anyhow::anyhow!(
-            "physical_to_layout_view: cfg.num_heads is required when KvBlockLayout = \
-             {block_layout:?} (set num_heads on LayoutConfig)"
-        )
-    })?;
-    if !cfg.inner_dim.is_multiple_of(nh) {
-        bail!(
-            "physical_to_layout_view: inner_dim ({}) is not divisible by num_heads ({}) \
-             — cannot split into HeadCount × HeadSize",
-            cfg.inner_dim,
-            nh,
-        );
-    }
-    Ok((nh, cfg.inner_dim / nh))
-}
-
-/// FC: single allocation, no region axis.
-///
-/// Axis order depends on `KvBlockLayout`:
-/// - `OperationalNHD`: `[Block, Layer, Outer, Page, HeadCount, HeadSize]`
-/// - `OperationalHND`: `[Block, Layer, Outer, HeadCount, Page, HeadSize]`
-/// - `UniversalTP`:    `[Block, HeadCount, Layer, Outer, Page, HeadSize]`
-/// - `UniversalPP`:    `[Block, Layer, HeadCount, Outer, Page, HeadSize]`
-///
-/// The four orderings are what makes the kernel catalog's
-/// signature-keyed dispatch work — NHD vs HND vs UniversalTP/PP differ
-/// only in where `HeadCount` sits relative to the inner axes.
-fn fc_to_view(fc: &FullyContiguousLayout, cfg: &crate::layout::LayoutConfig) -> Result<LayoutView> {
-    let block_layout = fc.kv_block_layout();
-    if matches!(block_layout, KvBlockLayout::Unknown) {
-        bail!("physical_to_layout_view: FullyContiguousLayout has Unknown block layout");
-    }
-    let (nh, hd) = resolve_head_dims(cfg, block_layout)?;
-    let elem = cfg.dtype_width_bytes;
-    let buffers = fc.memory_regions();
-    if buffers.len() != 1 {
-        bail!(
-            "physical_to_layout_view: FullyContiguousLayout expects 1 Buffer, got {}",
-            buffers.len()
-        );
-    }
-    let regions = vec![buffers[0].addr()];
-
-    let (dims, sizes, byte_strides) = match block_layout {
-        KvBlockLayout::OperationalNHD => {
-            // [Block, Layer, Outer, Page, HeadCount, HeadSize]
-            let s_hs = elem;
-            let s_hc = s_hs * hd;
-            let s_pg = s_hc * nh;
-            let s_ot = s_pg * cfg.page_size;
-            let s_la = s_ot * cfg.outer_dim;
-            let s_bk = s_la * cfg.num_layers;
-            (
-                vec![
-                    KvDim::Block,
-                    KvDim::Layer,
-                    KvDim::Outer,
-                    KvDim::Page,
-                    KvDim::HeadCount,
-                    KvDim::HeadSize,
-                ],
-                vec![
-                    cfg.num_blocks,
-                    cfg.num_layers,
-                    cfg.outer_dim,
-                    cfg.page_size,
-                    nh,
-                    hd,
-                ],
-                vec![s_bk, s_la, s_ot, s_pg, s_hc, s_hs],
-            )
-        }
-        KvBlockLayout::OperationalHND => {
-            // [Block, Layer, Outer, HeadCount, Page, HeadSize]
-            let s_hs = elem;
-            let s_pg = s_hs * hd;
-            let s_hc = s_pg * cfg.page_size;
-            let s_ot = s_hc * nh;
-            let s_la = s_ot * cfg.outer_dim;
-            let s_bk = s_la * cfg.num_layers;
-            (
-                vec![
-                    KvDim::Block,
-                    KvDim::Layer,
-                    KvDim::Outer,
-                    KvDim::HeadCount,
-                    KvDim::Page,
-                    KvDim::HeadSize,
-                ],
-                vec![
-                    cfg.num_blocks,
-                    cfg.num_layers,
-                    cfg.outer_dim,
-                    nh,
-                    cfg.page_size,
-                    hd,
-                ],
-                vec![s_bk, s_la, s_ot, s_hc, s_pg, s_hs],
-            )
-        }
-        KvBlockLayout::UniversalTP => {
-            // [Block, HeadCount, Layer, Outer, Page, HeadSize] — per-block
-            // shape `[nh, nl, no, nt, hd]` (matches universal_from_block /
-            // block_from_universal kernel layout in kvbm-kernels).
-            let s_hs = elem;
-            let s_pg = s_hs * hd;
-            let s_ot = s_pg * cfg.page_size;
-            let s_la = s_ot * cfg.outer_dim;
-            let s_hc = s_la * cfg.num_layers;
-            let s_bk = s_hc * nh;
-            (
-                vec![
-                    KvDim::Block,
-                    KvDim::HeadCount,
-                    KvDim::Layer,
-                    KvDim::Outer,
-                    KvDim::Page,
-                    KvDim::HeadSize,
-                ],
-                vec![
-                    cfg.num_blocks,
-                    nh,
-                    cfg.num_layers,
-                    cfg.outer_dim,
-                    cfg.page_size,
-                    hd,
-                ],
-                vec![s_bk, s_hc, s_la, s_ot, s_pg, s_hs],
-            )
-        }
-        KvBlockLayout::UniversalPP => {
-            // [Block, Layer, HeadCount, Outer, Page, HeadSize].
-            let s_hs = elem;
-            let s_pg = s_hs * hd;
-            let s_ot = s_pg * cfg.page_size;
-            let s_hc = s_ot * cfg.outer_dim;
-            let s_la = s_hc * nh;
-            let s_bk = s_la * cfg.num_layers;
-            (
-                vec![
-                    KvDim::Block,
-                    KvDim::Layer,
-                    KvDim::HeadCount,
-                    KvDim::Outer,
-                    KvDim::Page,
-                    KvDim::HeadSize,
-                ],
-                vec![
-                    cfg.num_blocks,
-                    cfg.num_layers,
-                    nh,
-                    cfg.outer_dim,
-                    cfg.page_size,
-                    hd,
-                ],
-                vec![s_bk, s_la, s_hc, s_ot, s_pg, s_hs],
-            )
-        }
-        KvBlockLayout::Custom(_) => bail!(
-            "physical_to_layout_view: KvBlockLayout::Custom is not supported by the \
-             planner-driven path"
-        ),
-        KvBlockLayout::Unknown => unreachable!("Unknown rejected above"),
-    };
-
-    let layout = KvDimLayout::new(dims, sizes)?;
-    let strides = KvDimStrides::from_byte_strides(byte_strides, elem)?;
-    LayoutView::full(layout, strides, regions, None)
-}
-
-/// LS: per-layer regions, `region_axis = Some(Layer)`. Universal
-/// layouts cannot be LS — `LayerSeparateLayout::build` rejects them
-/// — so only operational variants are projected here.
-///
-/// In-region axis order depends on `BlockDimension` and `KvBlockLayout`:
-/// - `BlockIsFirstDim` + NHD: `[Layer, Block, Outer, Page, HeadCount, HeadSize]`
-/// - `BlockIsFirstDim` + HND: `[Layer, Block, Outer, HeadCount, Page, HeadSize]`
-/// - `BlockIsSecondDim` + NHD: `[Layer, Outer, Block, Page, HeadCount, HeadSize]`
-/// - `BlockIsSecondDim` + HND: `[Layer, Outer, Block, HeadCount, Page, HeadSize]`
-fn ls_to_view(ls: &LayerSeparateLayout, cfg: &crate::layout::LayoutConfig) -> Result<LayoutView> {
-    let block_layout = ls.kv_block_layout();
-    if matches!(block_layout, KvBlockLayout::Unknown) {
-        bail!("physical_to_layout_view: LayerSeparateLayout has Unknown block layout");
-    }
-    let (nh, hd) = resolve_head_dims(cfg, block_layout)?;
-    let elem = cfg.dtype_width_bytes;
-
-    // Per-region inner-axis strides (NHD vs HND).
-    let (s_hs, s_pre_outer, inner_axes_after_outer): (
-        usize,
-        usize,
-        (Vec<KvDim>, Vec<usize>, Vec<usize>),
-    ) = match block_layout {
-        KvBlockLayout::OperationalNHD => {
-            // Inside Outer: [Page, HeadCount, HeadSize]
-            let s_hs = elem;
-            let s_hc = s_hs * hd;
-            let s_pg = s_hc * nh;
-            let s_pre_outer = s_pg * cfg.page_size;
-            let inner = (
-                vec![KvDim::Page, KvDim::HeadCount, KvDim::HeadSize],
-                vec![cfg.page_size, nh, hd],
-                vec![s_pg, s_hc, s_hs],
-            );
-            (s_hs, s_pre_outer, inner)
-        }
-        KvBlockLayout::OperationalHND => {
-            // Inside Outer: [HeadCount, Page, HeadSize]
-            let s_hs = elem;
-            let s_pg = s_hs * hd;
-            let s_hc = s_pg * cfg.page_size;
-            let s_pre_outer = s_hc * nh;
-            let inner = (
-                vec![KvDim::HeadCount, KvDim::Page, KvDim::HeadSize],
-                vec![nh, cfg.page_size, hd],
-                vec![s_hc, s_pg, s_hs],
-            );
-            (s_hs, s_pre_outer, inner)
-        }
-        KvBlockLayout::UniversalTP | KvBlockLayout::UniversalPP => bail!(
-            "physical_to_layout_view: LayerSeparateLayout cannot represent universal \
-             KvBlockLayout (LayerSeparateLayout::build rejects these)"
-        ),
-        KvBlockLayout::Custom(_) => bail!(
-            "physical_to_layout_view: KvBlockLayout::Custom is not supported by the \
-             planner-driven path"
-        ),
-        KvBlockLayout::Unknown => unreachable!("Unknown rejected above"),
-    };
-    let _ = s_hs;
-
-    // Per-region prefix order depends on which axis is outermost in
-    // the region.
-    let region_size = s_pre_outer * cfg.outer_dim;
-    let (mut dims, mut sizes, mut byte_strides) = match ls.block_dim() {
-        BlockDimension::BlockIsFirstDim => {
-            let s_ot = s_pre_outer;
-            let s_bk = s_ot * cfg.outer_dim;
-            let s_la = s_bk * cfg.num_blocks; // Layer-axis sentinel
-            let _ = region_size;
-            (
-                vec![KvDim::Layer, KvDim::Block, KvDim::Outer],
-                vec![cfg.num_layers, cfg.num_blocks, cfg.outer_dim],
-                vec![s_la, s_bk, s_ot],
-            )
-        }
-        BlockDimension::BlockIsSecondDim => {
-            let s_bk = s_pre_outer;
-            let s_ot = s_bk * cfg.num_blocks;
-            let s_la = s_ot * cfg.outer_dim;
-            (
-                vec![KvDim::Layer, KvDim::Outer, KvDim::Block],
-                vec![cfg.num_layers, cfg.outer_dim, cfg.num_blocks],
-                vec![s_la, s_ot, s_bk],
-            )
-        }
-    };
-    let (mut inner_dims, mut inner_sizes, mut inner_strides) = inner_axes_after_outer;
-    dims.append(&mut inner_dims);
-    sizes.append(&mut inner_sizes);
-    byte_strides.append(&mut inner_strides);
-
-    let layout = KvDimLayout::new(dims, sizes)?;
-    let strides = KvDimStrides::from_byte_strides(byte_strides, elem)?;
-    let regions: Vec<usize> = ls.memory_regions().iter().map(|b| b.addr()).collect();
-    if regions.len() != cfg.num_layers {
-        bail!(
-            "physical_to_layout_view: LayerSeparateLayout has {} regions but {} layers",
-            regions.len(),
-            cfg.num_layers
-        );
-    }
-    LayoutView::full(layout, strides, regions, Some(KvDim::Layer))
+    physical.layout().layout_view()
 }
 
 /// Executor candidate: one concrete way to perform the planned
@@ -446,6 +124,9 @@ pub(crate) fn select_candidate(candidates: &[Candidate]) -> Result<&Candidate> {
 #[cfg(all(test, feature = "testing-kvbm"))]
 mod tests {
     use super::*;
+    use kvbm_common::{KvDim, KvDimLayout, KvDimStrides};
+
+    use crate::layout::Layout;
     use crate::transfer::plan::AnnotatedLayout;
 
     #[test]
@@ -532,7 +213,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let view = layout_to_view(&fc as &dyn Layout).unwrap();
+        let view = (&fc as &dyn Layout).layout_view().unwrap();
         let al = AnnotatedLayout::from_view(&view).unwrap();
 
         let block_id = 2usize;
@@ -589,7 +270,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let view = layout_to_view(&ls as &dyn Layout).unwrap();
+        let view = (&ls as &dyn Layout).layout_view().unwrap();
         let al = AnnotatedLayout::from_view(&view).unwrap();
 
         let block_id = 1usize;
@@ -645,7 +326,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let view = layout_to_view(&ls as &dyn Layout).unwrap();
+        let view = (&ls as &dyn Layout).layout_view().unwrap();
         let al = AnnotatedLayout::from_view(&view).unwrap();
 
         let block_id = 2usize;
@@ -704,7 +385,7 @@ mod tests {
             .kv_block_layout(KvBlockLayout::Unknown)
             .build()
             .unwrap();
-        assert!(layout_to_view(&fc as &dyn Layout).is_err());
+        assert!((&fc as &dyn Layout).layout_view().is_err());
     }
 
     /// PR-6.1 projection requires `cfg.num_heads.is_some()` whenever
@@ -737,7 +418,8 @@ mod tests {
             .kv_block_layout(KvBlockLayout::OperationalNHD)
             .build()
             .unwrap();
-        let err = layout_to_view(&fc as &dyn Layout)
+        let err = (&fc as &dyn Layout)
+            .layout_view()
             .expect_err("projection should error when num_heads is unset");
         let msg = format!("{err:#}");
         assert!(

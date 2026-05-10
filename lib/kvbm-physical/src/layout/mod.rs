@@ -45,10 +45,39 @@ pub(crate) use view::{LayoutView, intersect_views};
 
 use std::any::Any;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 pub(crate) use dynamo_memory::MemoryDescriptor;
 pub use dynamo_memory::{Buffer, MemoryRegion};
+
+/// Resolve `(num_heads, head_dim)` from a config, requiring `num_heads`
+/// to be set when the projection has been asked to honour a known
+/// [`KvBlockLayout`] (the kernel catalog distinguishes NHD/HND/Universal
+/// by axis order, which can only be expressed once `inner_dim` is split).
+///
+/// Validation lives at the projection site, not at `LayoutConfig::build()`,
+/// so legacy callers that don't enable `use_planner = true` are not
+/// disturbed. Shared by [`Layout::layout_view`] impls.
+pub(crate) fn resolve_head_dims(
+    cfg: &LayoutConfig,
+    block_layout: KvBlockLayout,
+) -> Result<(usize, usize)> {
+    let nh = cfg.num_heads.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Layout::layout_view: cfg.num_heads is required when KvBlockLayout = \
+             {block_layout:?} (set num_heads on LayoutConfig)"
+        )
+    })?;
+    if !cfg.inner_dim.is_multiple_of(nh) {
+        bail!(
+            "Layout::layout_view: inner_dim ({}) is not divisible by num_heads ({}) \
+             — cannot split into HeadCount × HeadSize",
+            cfg.inner_dim,
+            nh,
+        );
+    }
+    Ok((nh, cfg.inner_dim / nh))
+}
 
 /// Core layout trait for mapping block IDs to memory regions.
 ///
@@ -58,13 +87,25 @@ pub use dynamo_memory::{Buffer, MemoryRegion};
 /// - Allocation requirements for external allocators
 /// - Metadata about block organization
 pub trait Layout: Any + Send + Sync + std::fmt::Debug {
-    /// Borrow as `&dyn Any` for runtime type identification.
+    /// Project this layout to a labelled [`LayoutView`] for the
+    /// stride-aware planner.
     ///
-    /// Used by the planner-path lowering to downcast to a concrete
-    /// layout type (FullyContiguousLayout / LayerSeparateLayout) and
-    /// project to a labelled `LayoutView`. Default impls in this crate
-    /// just return `self`.
-    fn as_any(&self) -> &dyn Any;
+    /// Each concrete impl owns the projection of its own per-axis stride
+    /// math: [`FullyContiguousLayout`] emits a single-region view with
+    /// the full `[Block, Layer, Outer, …]` axis order keyed off
+    /// [`KvBlockLayout`]; [`LayerSeparateLayout`] emits a per-layer
+    /// region view with `region_axis = Some(KvDim::Layer)`. Layouts
+    /// that cannot project (test mocks, future variants the planner
+    /// doesn't yet understand) bail with a precise error.
+    ///
+    /// `LayoutView` is `pub(crate)` — external callers consume layouts
+    /// through [`PhysicalLayout`] and never see this method's return
+    /// value. The `#[allow]` suppresses the `private_interfaces`
+    /// warning that would otherwise fire because [`Layout`] is `pub`.
+    /// A follow-up may demote [`Layout`] itself to `pub(crate)`
+    /// (external crates only use [`PhysicalLayout`]) and remove this.
+    #[allow(private_interfaces)]
+    fn layout_view(&self) -> Result<LayoutView>;
 
     /// Get the configuration for this layout.
     fn config(&self) -> &LayoutConfig;
