@@ -50,7 +50,7 @@ use crate::transfer::lower::{
     Candidate, SelectionContext, lower_to_candidates, physical_to_layout_view, select_candidate,
 };
 use crate::transfer::plan::{
-    AnnotatedLayout, CopyOp, CopyPlan, CopyPolicy, TransferSelection, plan_copy,
+    AnnotatedLayout, CopyOp, CopyPlan, CopyPolicy, TransferSelection, TransformReason, plan_copy,
 };
 
 /// Dispatch a CudaAsync transfer through the stride-aware planner.
@@ -82,7 +82,14 @@ pub(crate) fn execute_planner_cuda_transfer(
 ) -> Result<TransferCompleteNotification> {
     validate_cuda_planner_entry(strategy, src.layout().block_layout(), dst.layout().block_layout())?;
 
-    let outcome = plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy, ctx.capabilities())?;
+    // PR-7.3: restore the 4 KiB min_inner_bytes default. Same-layout
+    // copies with a small contiguous tail now route to SmallStridedCopy
+    // (via vectorized_copy) rather than failing with a no-kernel error.
+    // Previously kept at 0 (§Lesson 5, now RESOLVED by PR-7.3).
+    let outcome = plan_and_lower(
+        src, dst, src_block_ids, dst_block_ids, strategy, ctx.capabilities(),
+        CopyPolicy::default(),
+    )?;
 
     // Acquire a stream (caller-provided or pool-acquired). Direction
     // determines which stream pool we draw from.
@@ -115,6 +122,9 @@ pub(crate) fn execute_planner_cuda_transfer(
             block_pairs,
         } => {
             dispatch_transform_kernel(&invocation, src, dst, &block_pairs, &stream)?;
+        }
+        PlanOutcome::SmallStridedCopy(ops) => {
+            dispatch_small_strided_copy(&ops, &stream)?;
         }
     }
 
@@ -168,7 +178,12 @@ pub(crate) fn execute_planner_nixl_transfer(
         other => bail!("execute_planner_nixl_transfer: strategy {other:?} not a NIXL strategy"),
     };
 
-    let ops = match plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy, ctx.capabilities())? {
+    // NIXL path: keep min_inner_bytes = 0. NIXL descriptors are coalesced
+    // by plan_copy already, and the SmallStridedCopy (vectorized_copy)
+    // path is Cuda-only. Staged NIXL legs also call plan_and_lower with
+    // min_inner_bytes = 0 (same same-layout-always-Direct requirement).
+    let nixl_policy = CopyPolicy { min_inner_bytes: 0, coalesce: true };
+    let ops = match plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy, ctx.capabilities(), nixl_policy)? {
         PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
         PlanOutcome::Direct(ops) => ops,
         #[cfg(feature = "permute_kernels")]
@@ -186,6 +201,11 @@ pub(crate) fn execute_planner_nixl_transfer(
                 src, dst, invocation, block_pairs, bounce, strategy, xfer_op, ctx,
             );
         }
+        PlanOutcome::SmallStridedCopy(_) => bail!(
+            "execute_planner_nixl_transfer: unexpected SmallStridedCopy outcome — \
+             NIXL paths use min_inner_bytes = 0 and must always produce Direct. \
+             This is an internal routing bug."
+        ),
     };
 
     let nixl_agent = ctx.nixl_agent();
@@ -270,6 +290,11 @@ enum PlanOutcome {
         invocation: crate::transfer::kernel_catalog::KernelInvocation,
         block_pairs: Vec<(BlockId, BlockId)>,
     },
+    /// PR-7.3: threshold-fallback for same-layout copies whose inner
+    /// contiguous tail is below `min_inner_bytes`. Each op has the same
+    /// `size` (inner_bytes at the cut point). Dispatched via
+    /// `kvbm_kernels::vectorized_copy` on the Cuda path.
+    SmallStridedCopy(Vec<CopyOp>),
 }
 
 /// Shared "validate → project → plan → lower" pipeline used by both
@@ -280,6 +305,12 @@ enum PlanOutcome {
 /// [`validate_cuda_planner_entry`] / [`validate_nixl_planner_entry`]
 /// before calling this. This stage handles only the structural
 /// invariants of the (src, dst, block_ids) triple.
+///
+/// `policy` lets callers control the threshold-fallback threshold:
+/// - Cuda entry: `CopyPolicy::default()` (`min_inner_bytes = 4096`) so
+///   small-tail same-layout copies route to `SmallStridedCopy`.
+/// - NIXL entry and staged NIXL legs: `CopyPolicy { min_inner_bytes: 0,
+///   coalesce: true }` so same-layout legs always go `Direct`.
 fn plan_and_lower(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
@@ -287,6 +318,7 @@ fn plan_and_lower(
     dst_block_ids: &[BlockId],
     strategy: TransferStrategy,
     capabilities: &crate::transfer::TransferCapabilities,
+    policy: CopyPolicy,
 ) -> Result<PlanOutcome> {
     if validate_planner_block_ids(src_block_ids, dst_block_ids)?.is_noop() {
         return Ok(PlanOutcome::Empty);
@@ -332,19 +364,10 @@ fn plan_and_lower(
     // a `usize`-typed pair list.
     let plan_block_pairs: Vec<(usize, usize)> = block_pairs.iter().map(|&(s, d)| (s, d)).collect();
     let selection = TransferSelection::full(plan_block_pairs);
-    // PR-6.1 keeps `min_inner_bytes = 0`. Restoring the 4 KiB default
-    // would be unsafe — `plan_copy` emits `CopyPlan::Transform` when
-    // `inner_bytes < min_inner_bytes` regardless of whether the
-    // layouts are semantically identical, and the catalog returns
-    // `None` for same-layout pairs (no transform needed). Result:
-    // small same-layout copies would become planner errors. PR-7
-    // splits "semantic transform required" from "threshold fallback"
-    // inside `plan_copy` and registers a small-strided-copy candidate
-    // so the threshold can be reinstated.
-    let policy = CopyPolicy {
-        min_inner_bytes: 0,
-        coalesce: true,
-    };
+    // `policy` is caller-supplied:
+    // - Cuda entry uses CopyPolicy::default() (min_inner_bytes = 4096, PR-7.3).
+    // - NIXL entry and staged NIXL legs use min_inner_bytes = 0 so same-layout
+    //   legs always produce Direct ops; the SmallStridedCopy path is Cuda-only.
 
     let plan = plan_copy(&src_al, &dst_al, &selection, &policy)?;
     match plan {
@@ -372,15 +395,48 @@ fn plan_and_lower(
                 ),
             }
         }
-        // Same-KvBlockLayout pairs only reach `plan_copy`; if it
-        // somehow returns Transform anyway (e.g. future
-        // `min_inner_bytes` policy), surface it as an unhandled
-        // case until PR-7's threshold-fallback machinery lands.
-        CopyPlan::Transform { .. } => bail!(
-            "plan_and_lower: plan_copy emitted Transform for a same-KvBlockLayout \
-             pair — PR-6.1's catalog only dispatches when KvBlockLayout differs \
-             (handled before plan_copy). PR-7 will introduce threshold-fallback \
-             for small-tail same-layout copies."
+        // ThresholdFallback: inner_bytes < min_inner_bytes for a same-layout pair.
+        // Route through lower_to_candidates -> SmallStridedCopy.
+        CopyPlan::Transform {
+            reason: TransformReason::ThresholdFallback,
+            ref ops,
+            ..
+        } if ops.is_empty() => Ok(PlanOutcome::Empty),
+        CopyPlan::Transform {
+            reason: TransformReason::ThresholdFallback,
+            ..
+        } => {
+            let candidates = lower_to_candidates(plan)?;
+            let total_bytes: usize = match &candidates[..] {
+                [Candidate::SmallStridedCopy { ops }] => ops.iter().map(|o| o.size).sum(),
+                _ => 0,
+            };
+            let sel_ctx = SelectionContext {
+                strategy,
+                descriptor_count: candidates.len(),
+                total_bytes,
+                #[cfg(feature = "permute_kernels")]
+                dtype: src.layout().config().dtype,
+                capabilities,
+            };
+            let chosen = select_candidate(&candidates, &sel_ctx)?;
+            match chosen {
+                Candidate::SmallStridedCopy { ops } => Ok(PlanOutcome::SmallStridedCopy(ops.clone())),
+                other => bail!(
+                    "plan_and_lower: select_candidate returned unexpected variant for \
+                     ThresholdFallback: {other:?}"
+                ),
+            }
+        }
+        // Semantic Transform from plan_copy: plan_copy never emits this; this
+        // arm is a future-proofing safety net.
+        CopyPlan::Transform {
+            reason: TransformReason::Semantic,
+            ..
+        } => bail!(
+            "plan_and_lower: plan_copy emitted Transform(Semantic) — semantic transforms \
+             must be routed through the kernel catalog before plan_copy is called. \
+             This is an internal routing bug."
         ),
         CopyPlan::Staged { .. } => bail!(
             "plan_and_lower: CopyPlan::Staged is reserved (NIXL transforms in PR-6.2)"
@@ -939,13 +995,22 @@ impl OwnedStagedContext {
         strategy: TransferStrategy,
         xfer_op: XferOp,
     ) -> Result<TransferCompleteNotification> {
-        let outcome = plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy, &self.capabilities)?;
+        // Staged NIXL legs always use min_inner_bytes = 0: the staged
+        // executor relies on same-KvBlockLayout pairs going Direct so the
+        // per-leg plan_and_lower never triggers the SmallStridedCopy path.
+        let leg_policy = CopyPolicy { min_inner_bytes: 0, coalesce: true };
+        let outcome = plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy, &self.capabilities, leg_policy)?;
         let ops = match outcome {
             PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
             PlanOutcome::Direct(ops) => ops,
             PlanOutcome::Transform { .. } => bail!(
                 "OwnedStagedContext::build_and_post_nixl_leg: unexpected Transform outcome — \
                  staged NIXL leg expects same-KvBlockLayout pair to go Direct"
+            ),
+            PlanOutcome::SmallStridedCopy(_) => bail!(
+                "OwnedStagedContext::build_and_post_nixl_leg: unexpected SmallStridedCopy \
+                 outcome — staged NIXL leg uses min_inner_bytes = 0 and must go Direct. \
+                 This is an internal routing bug."
             ),
         };
 
@@ -1209,6 +1274,67 @@ fn dispatch_staged_nixl_transform(
     });
 
     Ok(TransferCompleteNotification::from_awaiter(outer_awaiter))
+}
+
+/// PR-7.3: dispatch threshold-fallback ops via `kvbm_kernels::vectorized_copy`.
+///
+/// All ops must share the same `size` — `plan_copy` guarantees this when it
+/// emits `CopyPlan::Transform { reason: ThresholdFallback }` because the
+/// outer-iteration loop uses a single `inner_bytes` for every descriptor
+/// (and does NOT coalesce, which could mix sizes).
+///
+/// The pointer arrays must be device-accessible. We stage host-side arrays
+/// then push them to device via `clone_htod`, mirroring `dispatch_transform_kernel`.
+fn dispatch_small_strided_copy(ops: &[CopyOp], stream: &Arc<CudaStream>) -> Result<()> {
+    use cudarc::driver::DevicePtr;
+
+    if ops.is_empty() {
+        return Ok(());
+    }
+
+    // All ops must have the same size — assert in debug builds.
+    let copy_size = ops[0].size;
+    debug_assert!(
+        ops.iter().all(|o| o.size == copy_size),
+        "dispatch_small_strided_copy: ops must all have the same size, \
+         but got mixed sizes (first={copy_size})"
+    );
+    if copy_size == 0 {
+        return Ok(());
+    }
+
+    let stream_raw = stream.cu_stream() as cudaStream_t;
+
+    // Build host-side pointer tables then push to device.
+    let mut src_ptrs: Vec<usize> = Vec::with_capacity(ops.len());
+    let mut dst_ptrs: Vec<usize> = Vec::with_capacity(ops.len());
+    for op in ops {
+        src_ptrs.push(op.src_addr);
+        dst_ptrs.push(op.dst_addr);
+    }
+
+    let src_dev = stream.clone_htod(&src_ptrs)?;
+    let dst_dev = stream.clone_htod(&dst_ptrs)?;
+    let (src_raw, _src_guard) = src_dev.device_ptr(stream.as_ref());
+    let (dst_raw, _dst_guard) = dst_dev.device_ptr(stream.as_ref());
+
+    let status = unsafe {
+        kvbm_kernels::vectorized_copy(
+            src_raw as usize as *mut *mut c_void,
+            dst_raw as usize as *mut *mut c_void,
+            copy_size,
+            ops.len() as i32,
+            stream_raw,
+        )
+    };
+    if status != cudarc::runtime::sys::cudaError::cudaSuccess {
+        bail!(
+            "dispatch_small_strided_copy: vectorized_copy failed with status={status:?}, \
+             copy_size={copy_size}, num_ops={}",
+            ops.len()
+        );
+    }
+    Ok(())
 }
 
 /// Group `ops` by `size` and dispatch each group via

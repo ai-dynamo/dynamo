@@ -58,8 +58,14 @@ pub(crate) fn physical_to_layout_view(physical: &PhysicalLayout) -> Result<Layou
 /// PR-6.1 emits [`Candidate::DirectDma`] from [`CopyPlan::Direct`] via
 /// `lower_to_candidates`; [`Candidate::TransformKernel`] is constructed
 /// directly by `executor::planner::plan_and_lower` once the catalog
-/// resolves a kernel for `CopyPlan::Transform`. Other variants are
-/// reserved for follow-up PRs:
+/// resolves a kernel for `CopyPlan::Transform`. Other variants:
+/// * [`Candidate::SmallStridedCopy`] — PR-7.3: threshold-fallback for
+///   same-layout copies whose inner contiguous tail is below the
+///   `min_inner_bytes` policy. Uses `kvbm_kernels::vectorized_copy`
+///   with a uniform `copy_size_bytes` (= inner_bytes at the cut point).
+///   Lower score than `DirectDma` so bulk DMA is preferred when both
+///   are viable, but `DirectDma` is only emitted on the Direct path;
+///   these two candidates never compete in practice.
 /// * [`Candidate::BatchedDma`] groups ops by region/stream for
 ///   coalesced launches; arrives when stream-aware grouping is wired.
 /// * [`Candidate::Staged`] handles two-hop transfers when direct
@@ -79,6 +85,13 @@ pub(crate) enum Candidate {
     #[cfg(feature = "permute_kernels")]
     TransformKernel {
         invocation: crate::transfer::kernel_catalog::KernelInvocation,
+    },
+    /// PR-7.3: threshold-fallback small-strided copy. Each op has the
+    /// same `size` (inner_bytes at the threshold cut); `vectorized_copy`
+    /// dispatches them as a uniform batch. Populated only on the Cuda
+    /// path — NIXL paths bail on this variant.
+    SmallStridedCopy {
+        ops: Vec<CopyOp>,
     },
     Staged {/* spec lands later */},
 }
@@ -160,23 +173,32 @@ impl TransferStrategy {
 /// Scoring constants.
 ///
 /// ```text
-/// TransformKernel  1100   — dedicated permute kernel; preferred over raw DMA
-///                             when the route is Cuda* (avoids per-coord
-///                             descriptor explosion).
-/// DirectDma        1000   — universal DMA fallback; available on all routes.
-/// BatchedDma       1000   — equivalent to DirectDma today; PR-7.3 may
-///                             differentiate via descriptor-count thresholds.
-/// Staged              -1  — placeholder variant; spec not yet finalised.
-///                             Negative score ensures it is *never* selected.
+/// TransformKernel     1100  — dedicated permute kernel; preferred over raw
+///                              DMA when the route is Cuda* (avoids per-coord
+///                              descriptor explosion).
+/// DirectDma           1000  — universal DMA fallback; available on all routes.
+/// BatchedDma          1000  — equivalent to DirectDma today.
+/// SmallStridedCopy     950  — PR-7.3 threshold-fallback via vectorized_copy.
+///                              Lower than DirectDma so bulk DMA is preferred
+///                              when both are viable. In practice these two
+///                              candidates are never emitted together: DirectDma
+///                              comes from CopyPlan::Direct, SmallStridedCopy
+///                              from CopyPlan::Transform{ThresholdFallback}.
+///                              The ranking documents the intended preference
+///                              order if the selection ever sees them together
+///                              (e.g. a future multi-path planner). Cuda-only;
+///                              NIXL paths bail on this variant.
+/// Staged                -1  — placeholder variant; spec not yet finalised.
+///                              Negative score ensures it is *never* selected.
 /// ```
 ///
-/// Adding a new `Candidate` variant for PR-7.3+ means:
-/// 1. Add its variant to `Candidate`.
-/// 2. Add a match arm here with the appropriate base score.
-/// 3. Adjust constants above if the new variant should outrank existing ones.
+/// Adding a new `Candidate` variant: add its variant to `Candidate`,
+/// add a match arm in `score_candidate` with the appropriate base score,
+/// and adjust constants above if the new variant should outrank existing ones.
 const SCORE_TRANSFORM_KERNEL: i64 = 1100;
 const SCORE_DIRECT_DMA: i64 = 1000;
 const SCORE_BATCHED_DMA: i64 = 1000;
+const SCORE_SMALL_STRIDED_COPY: i64 = 950;
 const SCORE_STAGED: i64 = -1;
 
 /// Score a single candidate given the selection context.
@@ -190,8 +212,18 @@ const SCORE_STAGED: i64 = -1;
 /// In production today `TransformKernel` is never passed through
 /// `select_candidate` — `plan_and_lower` routes it through
 /// `PlanOutcome::Transform` and dispatches it directly. The arm exists
-/// as scaffolding for PR-7.3/7.4 where future candidates may compete
+/// as scaffolding for PR-7.4 where future candidates may compete
 /// with `TransformKernel` under a Cuda route.
+///
+/// # Notes on `SmallStridedCopy`
+///
+/// `SmallStridedCopy` scores below `DirectDma` (950 vs 1000) so bulk DMA
+/// is preferred when both are emitted. In practice they are never emitted
+/// together — `DirectDma` comes from `CopyPlan::Direct`, `SmallStridedCopy`
+/// from `CopyPlan::Transform{ThresholdFallback}` — but the lower score
+/// documents the intended preference order for future multi-path planners.
+/// Only meaningful on Cuda-family routes; NIXL paths bail before reaching
+/// `select_candidate` for this variant.
 #[cfg_attr(not(feature = "permute_kernels"), allow(unused_variables))]
 pub(crate) fn score_candidate(candidate: &Candidate, ctx: &SelectionContext<'_>) -> i64 {
     match candidate {
@@ -211,26 +243,42 @@ pub(crate) fn score_candidate(candidate: &Candidate, ctx: &SelectionContext<'_>)
                 SCORE_DIRECT_DMA // treat as equivalent if somehow reached on NIXL
             }
         }
+        Candidate::SmallStridedCopy { .. } => SCORE_SMALL_STRIDED_COPY,
         Candidate::Staged { .. } => SCORE_STAGED,
     }
 }
 
 /// Lower a [`CopyPlan`] to a vector of executor candidates.
 ///
-/// PR-6.1 surface:
+/// PR-7.3 surface:
 /// * [`CopyPlan::Direct`] yields a single [`Candidate::DirectDma`].
-/// * [`CopyPlan::Transform`] errors here — Transform lowering happens
-///   in `executor::planner::plan_and_lower`, which has the original
-///   `PhysicalLayout`s needed for catalog lookup. (`AnnotatedLayout`
-///   is purely structural and doesn't carry `KvBlockLayout`.)
+/// * [`CopyPlan::Transform { reason: ThresholdFallback, ops, .. }`]
+///   yields a single [`Candidate::SmallStridedCopy`]. The ops are
+///   already generated by `plan_copy`'s outer-iteration loop at uniform
+///   `size` (inner_bytes). This path is taken only when `plan_and_lower`
+///   calls `lower_to_candidates` with a ThresholdFallback plan — for
+///   the Cuda path. NIXL paths never reach this because `plan_and_lower`
+///   is called with `min_inner_bytes = 0` on staged NIXL legs.
+/// * [`CopyPlan::Transform { reason: Semantic, .. }`] still errors here
+///   — Semantic transforms route through the kernel catalog upstream in
+///   `executor::planner::plan_and_lower` before `plan_copy` is called.
+///   `plan_copy` never emits `Semantic`; this arm is a safety net.
 /// * [`CopyPlan::Staged`] is reserved.
 pub(crate) fn lower_to_candidates(plan: CopyPlan) -> Result<Vec<Candidate>> {
     match plan {
         CopyPlan::Direct(ops) => Ok(vec![Candidate::DirectDma { ops }]),
-        CopyPlan::Transform { .. } => bail!(
-            "lower_to_candidates: CopyPlan::Transform is lowered by \
-             executor::planner::plan_and_lower (catalog lookup needs \
-             KvBlockLayout, which AnnotatedLayout does not carry)"
+        CopyPlan::Transform {
+            reason: crate::transfer::plan::TransformReason::ThresholdFallback,
+            ops,
+            ..
+        } => Ok(vec![Candidate::SmallStridedCopy { ops }]),
+        CopyPlan::Transform {
+            reason: crate::transfer::plan::TransformReason::Semantic,
+            ..
+        } => bail!(
+            "lower_to_candidates: CopyPlan::Transform(Semantic) must be routed through \
+             the kernel catalog in executor::planner::plan_and_lower before reaching \
+             lower_to_candidates. plan_copy does not emit Semantic — this is a caller bug."
         ),
         CopyPlan::Staged { .. } => bail!(
             "lower_to_candidates: CopyPlan::Staged is reserved and not \
@@ -312,20 +360,53 @@ mod tests {
         assert!(matches!(cands[0], Candidate::DirectDma { .. }));
     }
 
+    /// PR-7.3: ThresholdFallback Transform lowers to SmallStridedCopy.
     #[test]
-    fn lower_transform_errors() {
+    fn lower_threshold_fallback_to_small_strided_copy() {
+        use crate::transfer::plan::TransformReason;
+
         let layout = KvDimLayout::new(
             vec![KvDim::Block, KvDim::Page, KvDim::HeadSize],
             vec![4, 16, 128],
         )
         .unwrap();
-        let strides = KvDimStrides::from_byte_strides(vec![16 * 128 * 2, 128 * 2, 2], 2).unwrap();
+        let strides =
+            KvDimStrides::from_byte_strides(vec![16 * 128 * 2, 128 * 2, 2], 2).unwrap();
         let al = AnnotatedLayout::new(vec![0x1000], None, layout, strides).unwrap();
         let plan = CopyPlan::Transform {
             src: al.clone(),
             dst: al,
             block_pairs: vec![(0, 0)],
             permutation: vec![0, 1],
+            reason: TransformReason::ThresholdFallback,
+            ops: vec![CopyOp { src_addr: 0x1000, dst_addr: 0x2000, size: 256 }],
+        };
+        let cands = lower_to_candidates(plan).unwrap();
+        assert_eq!(cands.len(), 1);
+        assert!(matches!(cands[0], Candidate::SmallStridedCopy { .. }));
+    }
+
+    /// Semantic Transform still errors from lower_to_candidates — semantic
+    /// routing happens upstream in plan_and_lower via the kernel catalog.
+    #[test]
+    fn lower_semantic_transform_errors() {
+        use crate::transfer::plan::TransformReason;
+
+        let layout = KvDimLayout::new(
+            vec![KvDim::Block, KvDim::Page, KvDim::HeadSize],
+            vec![4, 16, 128],
+        )
+        .unwrap();
+        let strides =
+            KvDimStrides::from_byte_strides(vec![16 * 128 * 2, 128 * 2, 2], 2).unwrap();
+        let al = AnnotatedLayout::new(vec![0x1000], None, layout, strides).unwrap();
+        let plan = CopyPlan::Transform {
+            src: al.clone(),
+            dst: al,
+            block_pairs: vec![(0, 0)],
+            permutation: vec![0, 1],
+            reason: TransformReason::Semantic,
+            ops: vec![],
         };
         assert!(lower_to_candidates(plan).is_err());
     }
@@ -412,6 +493,53 @@ mod tests {
             msg.contains("no executable candidate"),
             "expected 'no executable candidate' in error, got: {msg}"
         );
+    }
+
+    // ── PR-7.3 SmallStridedCopy scorer tests ─────────────────────────────────
+
+    /// SmallStridedCopy scores 950 < DirectDma 1000: DirectDma wins when both
+    /// are present. (In practice they are never emitted together, but the
+    /// scorer must document the correct preference order.)
+    #[test]
+    fn small_strided_copy_scores_below_direct_dma() {
+        let ctx = cuda_ctx();
+        let cands = vec![
+            Candidate::SmallStridedCopy {
+                ops: vec![CopyOp { src_addr: 0x1000, dst_addr: 0x2000, size: 256 }],
+            },
+            Candidate::DirectDma {
+                ops: vec![CopyOp { src_addr: 0x3000, dst_addr: 0x4000, size: 4096 }],
+            },
+        ];
+        let picked = select_candidate(&cands, &ctx).unwrap();
+        assert!(
+            matches!(picked, Candidate::DirectDma { .. }),
+            "expected DirectDma (score {SCORE_DIRECT_DMA}) to beat SmallStridedCopy \
+             (score {SCORE_SMALL_STRIDED_COPY}), got {picked:?}"
+        );
+    }
+
+    /// SmallStridedCopy alone is chosen over Staged (negative score).
+    #[test]
+    fn small_strided_copy_wins_over_staged() {
+        let ctx = cuda_ctx();
+        let cands = vec![
+            Candidate::Staged {},
+            Candidate::SmallStridedCopy {
+                ops: vec![CopyOp { src_addr: 0x1000, dst_addr: 0x2000, size: 256 }],
+            },
+        ];
+        let picked = select_candidate(&cands, &ctx).unwrap();
+        assert!(matches!(picked, Candidate::SmallStridedCopy { .. }));
+    }
+
+    /// score_candidate constant check: SmallStridedCopy = 950.
+    #[test]
+    fn small_strided_copy_score_is_950() {
+        let ctx = cuda_ctx();
+        let c = Candidate::SmallStridedCopy { ops: vec![] };
+        assert_eq!(score_candidate(&c, &ctx), SCORE_SMALL_STRIDED_COPY);
+        assert_eq!(SCORE_SMALL_STRIDED_COPY, 950);
     }
 
     /// Two DirectDma candidates with equal scores — first one wins.

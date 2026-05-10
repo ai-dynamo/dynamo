@@ -27,7 +27,7 @@ use anyhow::Result;
 use super::gate::gpu_serial;
 use super::local_transfers::{LayoutType, build_agent_for_kinds};
 use super::*;
-use crate::layout::KvBlockLayout;
+use crate::layout::{KvBlockLayout, PhysicalLayout};
 use crate::transfer::executor::{TransferOptionsInternal, execute_transfer};
 
 /// Build a layout the planner path can project — sets
@@ -308,4 +308,67 @@ async fn use_planner_round_trip_hnd_to_nhd() -> Result<()> {
     skip_if_stubs_and_device!(StorageKind::Device(0));
     gpu_serial!();
     assert_nhd_hnd_round_trip(KvBlockLayout::OperationalHND).await
+}
+
+// ────────────────── PR-7.3: small-inner threshold-fallback ──────────────────
+
+/// Integration test: a same-layout D2D transfer whose inner contiguous tail
+/// is below 4 KiB routes through `SmallStridedCopy` (vectorized_copy) and
+/// produces byte-equivalent output to the legacy path.
+///
+/// Layout geometry chosen so inner_bytes < 4096:
+///   page_size=1, inner_dim=128 (nh=8, hd=16), outer_dim=2, dtype=2 bytes
+///   inner_bytes = outer×page×inner×dtype = 2×1×128×2 = 512 bytes < 4096
+///
+/// The planner path with `use_planner = true` should now succeed where
+/// previously (before PR-7.3) it would have returned a "plan_copy emitted
+/// Transform for same-KvBlockLayout pair" error.
+#[tokio::test]
+async fn use_planner_small_inner_threshold_fallback_d2d() -> Result<()> {
+    let src_kind = StorageKind::Device(0);
+    let dst_kind = StorageKind::Device(0);
+    skip_if_stubs_and_device!(src_kind, dst_kind);
+    gpu_serial!();
+
+    // page_size=1: inner_bytes = 2×1×128×2 = 512 < 4096 → ThresholdFallback path.
+    let agent = build_agent_for_kinds(&[src_kind, dst_kind])?;
+    let config = standard_config_with_page_size(4, /*page_size=*/ 1);
+    let build_layout = |bl: KvBlockLayout| {
+        PhysicalLayout::builder(agent.clone())
+            .with_config(config.clone())
+            .with_block_layout(bl)
+            .fully_contiguous()
+            .allocate_device(0)
+            .build()
+            .unwrap()
+    };
+    let src = build_layout(KvBlockLayout::OperationalNHD);
+    let dst_legacy = build_layout(KvBlockLayout::OperationalNHD);
+    let dst_planner = build_layout(KvBlockLayout::OperationalNHD);
+
+    let src_blocks = vec![0, 1];
+    let dst_blocks = vec![2, 3];
+    let src_checksums = fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
+    let ctx = create_transfer_context(agent, None).unwrap();
+
+    // Legacy path (use_planner = false).
+    let legacy_checksums = transfer_and_checksum(
+        &src, &dst_legacy, &src_blocks, &dst_blocks, false, ctx.context(),
+    )
+    .await?;
+
+    // Planner path (use_planner = true) — must not error, must match legacy.
+    let planner_checksums = transfer_and_checksum(
+        &src, &dst_planner, &src_blocks, &dst_blocks, true, ctx.context(),
+    )
+    .await?;
+
+    verify_checksums_by_position(&src_checksums, &src_blocks, &dst_legacy, &dst_blocks)?;
+    verify_checksums_by_position(&src_checksums, &src_blocks, &dst_planner, &dst_blocks)?;
+    for (&did, _) in dst_blocks.iter().zip(dst_blocks.iter()) {
+        let lc = legacy_checksums.get(&did).expect("legacy");
+        let pc = planner_checksums.get(&did).expect("planner");
+        assert_eq!(lc, pc, "planner/legacy checksum mismatch at block {did}");
+    }
+    Ok(())
 }
