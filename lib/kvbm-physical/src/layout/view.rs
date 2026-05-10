@@ -27,6 +27,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, bail};
+use dynamo_memory::StorageKind;
 use kvbm_common::{
     AxisExtent, AxisIntersection, AxisSlice, CoordByLabel, KvDim, KvDimLayout, KvDimStrides,
     LayoutSignature, intersect_axis,
@@ -77,6 +78,18 @@ pub(crate) struct LayoutView {
     /// time and can be relaxed without API breakage when the multi-slice
     /// intersection algebra is implemented.
     slices: Vec<AxisSlice>,
+
+    /// Per-axis [`StorageKind`], parallel to `local_layout.dims()`.
+    ///
+    /// Today every producer populates this homogeneously (all axes carry
+    /// the layout's single `StorageKind`) so production behaviour is
+    /// unchanged. Future PRs (PR-7.7.1+) will populate heterogeneous
+    /// vectors — e.g. disk axes mixed with device axes — when the planner
+    /// gains heterogeneous-storage dispatch.
+    ///
+    /// Slicing does **not** modify this vec: axis indices stay stable and
+    /// the storage kind for a sliced axis is unchanged.
+    axis_storage_kinds: Vec<StorageKind>,
 }
 
 impl LayoutView {
@@ -84,21 +97,36 @@ impl LayoutView {
     /// invariants:
     ///
     /// 1. `byte_strides` rank matches `layout` rank.
-    /// 2. If `region_axis` is `Some(d)`: `d` appears in `layout`,
+    /// 2. `axis_storage_kinds` length matches `layout` rank (one entry per
+    ///    axis, parallel to `layout.dims()`).
+    /// 3. If `region_axis` is `Some(d)`: `d` appears in `layout`,
     ///    `regions.len() == layout.size_of(d).unwrap()`, and
     ///    `regions.len() > 0`.
-    /// 3. If `region_axis` is `None`: `regions.len() == 1`.
+    /// 4. If `region_axis` is `None`: `regions.len() == 1`.
+    ///
+    /// Today's producers pass a homogeneous `axis_storage_kinds` (all
+    /// axes carry the same [`StorageKind`]). Future producers can pass a
+    /// mixed vec to express per-axis heterogeneous storage.
     pub(crate) fn full(
         layout: KvDimLayout,
         byte_strides: KvDimStrides,
         regions: Vec<usize>,
         region_axis: Option<KvDim>,
+        axis_storage_kinds: Vec<StorageKind>,
     ) -> Result<Self> {
-        if byte_strides.as_bytes().len() != layout.dims().len() {
+        let rank = layout.dims().len();
+        if byte_strides.as_bytes().len() != rank {
             bail!(
                 "LayoutView::full: stride rank ({}) != layout rank ({})",
                 byte_strides.as_bytes().len(),
-                layout.dims().len()
+                rank
+            );
+        }
+        if axis_storage_kinds.len() != rank {
+            bail!(
+                "LayoutView::full: axis_storage_kinds length ({}) != layout rank ({})",
+                axis_storage_kinds.len(),
+                rank
             );
         }
         match region_axis {
@@ -134,6 +162,7 @@ impl LayoutView {
             regions,
             region_axis,
             slices: Vec::new(),
+            axis_storage_kinds,
         })
     }
 
@@ -226,6 +255,29 @@ impl LayoutView {
     /// callers can rely on at most one entry per `dim` for now.**
     pub(crate) fn slices(&self) -> &[AxisSlice] {
         &self.slices
+    }
+
+    /// Per-axis [`StorageKind`], parallel to `local_layout().dims()`.
+    ///
+    /// Today's views are always homogeneous (all axes carry the same kind).
+    /// Future views from heterogeneous-storage layouts (e.g. disk head
+    /// axes mixed with device inner axes) will return a mixed slice.
+    pub(crate) fn axis_storage_kinds(&self) -> &[StorageKind] {
+        &self.axis_storage_kinds
+    }
+
+    /// Returns `true` when the view contains more than one distinct
+    /// [`StorageKind`] across its axes.
+    ///
+    /// An empty view, a single-axis view, or any view where all axes
+    /// carry the same kind returns `false`. A view with, say,
+    /// `[Device(0), Device(0), System, System]` returns `true`.
+    pub(crate) fn is_heterogeneous(&self) -> bool {
+        let mut iter = self.axis_storage_kinds.iter();
+        match iter.next() {
+            None => false,
+            Some(first) => iter.any(|k| k != first),
+        }
     }
 
     /// Element size (bytes) the strides were built against.
@@ -492,7 +544,9 @@ mod tests {
             .map(|i| 0x1000_0000 + i * 0x10_0000)
             .collect();
 
-        LayoutView::full(layout, strides, regions, Some(KvDim::Layer)).unwrap()
+        // Homogeneous System storage for all 6 axes (Layer + 5 in-tensor).
+        let axis_storage_kinds = vec![StorageKind::System; layout.dims().len()];
+        LayoutView::full(layout, strides, regions, Some(KvDim::Layer), axis_storage_kinds).unwrap()
     }
 
     #[test]
@@ -767,6 +821,77 @@ mod tests {
         nhd_per_layer_view(4, 16, 8, head_count, 64, 2)
     }
 
+    // ── PR-7.7: per-axis StorageKind tests ──────────────────────────────────
+
+    /// FC-like homogeneous view: all axes report `System`, `is_heterogeneous == false`.
+    #[test]
+    fn layout_view_axis_storage_homogeneous_single_storage_kind() {
+        let view = cross_layer_view(4, 16, 8, 4, 64, 2);
+        let kinds = view.axis_storage_kinds();
+        assert!(!kinds.is_empty(), "axis_storage_kinds must be non-empty");
+        assert!(
+            kinds.iter().all(|k| *k == StorageKind::System),
+            "all axes must report System"
+        );
+        assert!(!view.is_heterogeneous(), "homogeneous view must not be heterogeneous");
+    }
+
+    /// LS-like per-layer homogeneous view: all axes report `System`,
+    /// `is_heterogeneous == false`.
+    #[test]
+    fn layout_view_axis_storage_homogeneous_for_per_layer_view() {
+        let view = nhd_per_layer_view(4, 16, 8, 4, 64, 2);
+        let kinds = view.axis_storage_kinds();
+        assert_eq!(kinds.len(), view.local_layout().dims().len());
+        assert!(
+            kinds.iter().all(|k| *k == StorageKind::System),
+            "all axes must report System for a per-layer test view"
+        );
+        assert!(!view.is_heterogeneous());
+    }
+
+    /// Edge case: a single-axis view must not be heterogeneous.
+    #[test]
+    fn layout_view_homogeneous_with_single_axis() {
+        let layout = KvDimLayout::new(vec![KvDim::Block], vec![8]).unwrap();
+        let strides = KvDimStrides::from_byte_strides(vec![4096], 2).unwrap();
+        let view = LayoutView::full(
+            layout,
+            strides,
+            vec![0x1000],
+            None,
+            vec![StorageKind::Device(0)],
+        )
+        .unwrap();
+        assert_eq!(view.axis_storage_kinds(), &[StorageKind::Device(0)]);
+        assert!(!view.is_heterogeneous());
+    }
+
+    /// Synthetic heterogeneous fixture: mix Device(0) and System axes.
+    /// `is_heterogeneous` must return `true` and `axis_storage_kinds`
+    /// must faithfully report the input slice.
+    #[test]
+    fn layout_view_synthetic_heterogeneous_fixture() {
+        // 4-axis layout: [Block, Layer, Page, HeadSize].
+        // We label the first two axes Device(0), the last two System —
+        // a contrived but structurally valid heterogeneous example.
+        let layout = KvDimLayout::new(
+            vec![KvDim::Block, KvDim::Layer, KvDim::Page, KvDim::HeadSize],
+            vec![4, 2, 8, 64],
+        )
+        .unwrap();
+        let strides = KvDimStrides::contiguous_for(&layout, 2);
+        let mixed = vec![
+            StorageKind::Device(0),
+            StorageKind::Device(0),
+            StorageKind::System,
+            StorageKind::System,
+        ];
+        let view = LayoutView::full(layout, strides, vec![0x1000], None, mixed.clone()).unwrap();
+        assert_eq!(view.axis_storage_kinds(), mixed.as_slice());
+        assert!(view.is_heterogeneous(), "mixed storage kinds must be detected as heterogeneous");
+    }
+
     /// Build a fully-contiguous (cross-layer) NHD view with `Layer` as an
     /// in-tensor axis and `region_axis = None`. Single allocation.
     fn cross_layer_view(
@@ -790,6 +915,7 @@ mod tests {
         )
         .unwrap();
         let strides = KvDimStrides::contiguous_for(&layout, elem_size);
-        LayoutView::full(layout, strides, vec![0x2000_0000], None).unwrap()
+        let axis_storage_kinds = vec![StorageKind::System; layout.dims().len()];
+        LayoutView::full(layout, strides, vec![0x2000_0000], None, axis_storage_kinds).unwrap()
     }
 }

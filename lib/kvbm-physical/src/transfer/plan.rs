@@ -1668,7 +1668,8 @@ mod tests {
         let strides = KvDimStrides::from_byte_strides(byte_strides, 2).unwrap();
         let regions: Vec<usize> = (0..4).map(|i| 0x1000_0000 + i * 0x10_0000).collect();
 
-        let view = LayoutView::full(layout, strides, regions, Some(KvDim::Layer))
+        let axis_storage_kinds = vec![dynamo_memory::StorageKind::System; layout.dims().len()];
+        let view = LayoutView::full(layout, strides, regions, Some(KvDim::Layer), axis_storage_kinds)
             .unwrap()
             .slice(KvDim::HeadCount, 1, 2)
             .unwrap();
@@ -1685,11 +1686,13 @@ mod tests {
             .with(KvDim::HeadSize, 10);
         let global_coord = local_coord.with(KvDim::HeadCount, 1);
 
+        let unsliced_kinds = vec![dynamo_memory::StorageKind::System; view.local_layout().dims().len()];
         let unsliced = LayoutView::full(
             view.local_layout().clone(), // fine — full() shape is [2,8,16,4,64] with HC=2 here
             view.byte_strides().clone(),
             view.regions().to_vec(),
             Some(KvDim::Layer),
+            unsliced_kinds,
         );
         // Use the original (pre-slice) view via a fresh build for the
         // global-frame comparison.

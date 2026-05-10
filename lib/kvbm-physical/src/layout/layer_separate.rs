@@ -9,6 +9,7 @@
 //! - Outer-contiguous: [outer_dim, num_blocks, page_size, inner_dim]
 
 use anyhow::{Result, anyhow, bail};
+use dynamo_memory::StorageKind;
 use kvbm_common::{KvDim, KvDimLayout, KvDimStrides};
 use validator::Validate;
 
@@ -398,7 +399,12 @@ impl Layout for LayerSeparateLayout {
                 cfg.num_layers
             );
         }
-        LayoutView::full(layout, strides, regions, Some(KvDim::Layer))
+        // Homogeneous per-axis storage: all per-layer allocations share the
+        // same StorageKind (LS requires uniform allocation type). Use the
+        // first region's kind; build validated this uniformity at construction.
+        let sk = self.memory_regions().first().map(|b| b.storage_kind()).unwrap_or(StorageKind::System);
+        let axis_storage_kinds = vec![sk; layout.dims().len()];
+        LayoutView::full(layout, strides, regions, Some(KvDim::Layer), axis_storage_kinds)
     }
 
     fn config(&self) -> &LayoutConfig {

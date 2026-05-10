@@ -416,7 +416,11 @@ impl Layout for FullyContiguousLayout {
 
         let layout = KvDimLayout::new(dims, sizes)?;
         let strides = KvDimStrides::from_byte_strides(byte_strides, elem)?;
-        LayoutView::full(layout, strides, regions, None)
+        // Homogeneous per-axis storage: the FC layout has a single allocation
+        // so every axis lives in the same StorageKind.
+        let sk = buffers[0].storage_kind();
+        let axis_storage_kinds = vec![sk; layout.dims().len()];
+        LayoutView::full(layout, strides, regions, None, axis_storage_kinds)
     }
 
     fn config(&self) -> &LayoutConfig {
