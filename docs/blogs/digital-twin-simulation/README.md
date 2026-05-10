@@ -21,9 +21,10 @@ and hardware target. None of those choices is independent.
 At the bottom, kernels execute the attention and MLP work. Above them, engines
 such as vLLM, SGLang, and TensorRT-LLM schedule forward passes, batch requests,
 manage KV blocks, and decide how prefill and decode work share the device. Above
-that, Dynamo adds the system layer: a router decides which engine should receive
-each request based on prefix affinity and active load, autoscaling decisions
-adjust capacity to dynamic service goals, and the KV Block Manager controls how
+that, Dynamo adds the system layer: a [Router](../../components/router/router-guide.md)
+decides which engine should receive each request based on prefix affinity and
+active load, autoscaling decisions adjust capacity to dynamic service goals, and
+the [KV Block Manager (KVBM)](../../components/kvbm/kvbm-guide.md) controls how
 cached blocks are offloaded and distributed.
 
 That stack is powerful, but it is also hard to optimize. A routing policy can
@@ -66,10 +67,10 @@ how future GPUs or backends would change the best layout and policy.
 For engineering, the twin turns vague opportunity costs into measurable system
 effects. If specializing capacity from one decode worker to N prefill workers
 takes X seconds, replay can show whether that delay still meets a contractual
-SLA, what value of X becomes too high, and what target X would make the
-engineering work worth prioritizing. The same loop can scope whether a team
-should invest in faster worker startup, smarter scale-up thresholds, better
-prefill/decode rebalancing, or a more cache-aware router.
+service-level agreement (SLA), what value of X becomes too high, and what target
+X would make the engineering work worth prioritizing. The same loop can scope
+whether a team should invest in faster worker startup, smarter scale-up
+thresholds, better prefill/decode rebalancing, or a more cache-aware router.
 
 For customer-facing sizing, simulation can turn a workload and an SLA into a
 sizing conversation. A field team can compare GPU counts, worker layouts,
@@ -82,8 +83,9 @@ The key design choice is composition. Dynamo's simulation story is not one
 monolithic model. It is a set of components that mirror serving-system concepts
 and interact through a simulated timeline.
 
-One of those components is the Planner: Dynamo's autoscaling component. It
-computes scaling targets from live metrics, profiles, and SLA goals.
+One of those components is the [Planner](../../components/planner/planner-guide.md):
+Dynamo's autoscaling component. It computes scaling targets from live metrics,
+profiles, and SLA goals.
 
 [placeholder: architecture Mermaid diagram polish or replacement with production graphic]
 
@@ -139,9 +141,9 @@ lets components schedule more events.
 
 That gives us deterministic, replayable timelines. The simulator can run a long
 serving workload without sleeping for the actual time the workload would take.
-The trace collector then computes metrics from the simulated timeline: TTFT,
-TPOT, end-to-end latency, output throughput, cache reuse, and feasibility against
-the selected objective or SLA.
+The trace collector then computes metrics from the simulated timeline: time to
+first token (TTFT), time per output token (TPOT), end-to-end latency, output
+throughput, cache reuse, and feasibility against the selected objective or SLA.
 
 ### 1.2 A Request's Journey Through The Twin
 
@@ -153,8 +155,9 @@ One request makes the DES model concrete:
 2. The router decides where the request should go, or whether it should wait.
 3. The selected engine scheduler batches the request into a prefill or decode
    pass.
-4. Hardware-informed timing, such as AIC-backed timing, estimates the duration
-   of that pass.
+4. Hardware-informed timing, such as timing backed by
+   [AI Configurator (AIC)](../../kubernetes/model-deployment-guide.md#rapid-default),
+   estimates the duration of that pass.
 5. KV handoff, cache, or offload-related events may be scheduled on the same
    virtual timeline.
 6. Decode produces visible output tokens.
@@ -299,18 +302,19 @@ remote-cache availability, and eviction.
 There are two complementary parts to that plan.
 
 The first is simulation inside replay. The twin can model the timing and resource
-effects of local and lower-tier KV behavior: G1 pressure, G2 swap-in and
-offload, transfer bandwidth, tier capacity, and eventually G3 or remote tiers.
-This lets us test cache policies under a fixed workload without requiring every
-idea to start as a full cluster experiment.
+effects of local and lower-tier KV behavior: G1 (GPU memory) pressure, G2 (host
+memory) swap-in and offload, transfer bandwidth, tier capacity, and eventually
+G3 (disk) or remote tiers. This lets us test cache policies under a fixed
+workload without requiring every idea to start as a full cluster experiment.
 
 The second is a measurement loop for the real data plane. Replay can use the
-same synthetic or trace-derived request shapes to drive NIXL reads and writes
-against a distributed cache or CMX target. Those runs would give us concrete
-measurements for transfer cost, placement behavior, and contention, which can
-then calibrate the simulator instead of relying only on hand-tuned assumptions.
-Over time, those calibrated models become the basis for distributed cache
-simulation itself: CMX-style cross-machine movement, topology-aware routing,
+same synthetic or trace-derived request shapes to drive
+[NIXL (NVIDIA Inference tranXfer Library)](../../api/nixl-connect/README.md)
+reads and writes against a distributed cache target. Those runs would give us
+concrete measurements for transfer cost, placement behavior, and contention,
+which can then calibrate the simulator instead of relying only on hand-tuned
+assumptions. Over time, those calibrated models become the basis for distributed
+cache simulation itself: cross-machine movement, topology-aware routing,
 bandwidth-sensitive placement, and joint policies for when to reuse, move,
 offload, or recompute KV.
 
@@ -462,7 +466,7 @@ KV and cache discovery examples:
 - Tune offload thresholds.
 - Measure sensitivity to KV transfer bandwidth.
 - Evaluate future KVBM policies.
-- Study distributed cache and CMX movement strategies.
+- Study distributed cache and cross-machine movement strategies.
 - Compare move-vs-recompute decisions.
 - Couple cache-aware routing with cache-aware autoscaling.
 
