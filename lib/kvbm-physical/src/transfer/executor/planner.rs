@@ -85,6 +85,9 @@ pub(crate) fn execute_planner_cuda_transfer(
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     validate_cuda_planner_entry(strategy, src.layout().block_layout(), dst.layout().block_layout())?;
+    // PR-7.7.1: reject heterogeneous layouts before any planning work.
+    // Heterogeneous-composition planning (disk↔device mixed axes) lands in PR-7.7.2+.
+    reject_heterogeneous_views_at_entry(src, dst, "execute_planner_cuda_transfer")?;
 
     // PR-7.3: restore the 4 KiB min_inner_bytes default. Same-layout
     // copies with a small contiguous tail now route to SmallStridedCopy
@@ -229,6 +232,9 @@ pub(crate) fn execute_planner_nixl_transfer(
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     validate_nixl_planner_entry(strategy, src.layout().block_layout(), dst.layout().block_layout())?;
+    // PR-7.7.1: reject heterogeneous layouts before any planning work.
+    // Heterogeneous-composition planning (disk↔device mixed axes) lands in PR-7.7.2+.
+    reject_heterogeneous_views_at_entry(src, dst, "execute_planner_nixl_transfer")?;
     let xfer_op = match strategy {
         TransferStrategy::NixlRead | TransferStrategy::NixlReadFlipped => XferOp::Read,
         TransferStrategy::NixlWrite | TransferStrategy::NixlWriteFlipped => XferOp::Write,
@@ -751,6 +757,59 @@ fn build_transform_invocation(
         dtype,
         block_layout,
     })
+}
+
+/// PR-7.7.1: reject any pair where either layout has more than one
+/// distinct [`StorageKind`] across its axes.
+///
+/// Heterogeneous layouts (e.g. some axes on disk, some on device) require
+/// composition planning that doesn't exist yet. Failing loudly here converts
+/// a latent correctness bug (the planner would treat the heterogeneous view
+/// as homogeneous and produce wrong bytes) into a precise, catchable error.
+///
+/// Composition planning lands in PR-7.7.2+: `Candidate::HeterogeneousComposite`,
+/// axis-range sub-plan composition, executor dispatch over disk + device tiers.
+///
+/// Called after the per-entrypoint strategy guard and before `plan_and_lower`.
+/// The projection cost (one `layout_view()` per side) is paid only on this
+/// hot path; today's homogeneous-only callers see no regression because
+/// `is_heterogeneous()` returns `false` for every existing producer.
+fn reject_heterogeneous_views_at_entry(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    entry_label: &str,
+) -> Result<()> {
+    let src_view = physical_to_layout_view(src)?;
+    let dst_view = physical_to_layout_view(dst)?;
+    reject_heterogeneous_layout_views(&src_view, &dst_view, entry_label)
+}
+
+/// Core heterogeneous-layout guard operating on already-projected
+/// [`LayoutView`]s.
+///
+/// Extracted separately so unit tests can exercise the guard logic with
+/// synthetic `LayoutView` fixtures constructed via [`LayoutView::full`],
+/// without needing a full [`PhysicalLayout`] stack.
+pub(crate) fn reject_heterogeneous_layout_views(
+    src_view: &crate::layout::LayoutView,
+    dst_view: &crate::layout::LayoutView,
+    entry_label: &str,
+) -> Result<()> {
+    if src_view.is_heterogeneous() {
+        bail!(
+            "{entry_label}: src layout is heterogeneous (per-axis StorageKind contains \
+             more than one distinct kind). Heterogeneous-layout composition is not yet \
+             supported by the planner-driven path. Composition planning lands in PR-7.7.2+."
+        );
+    }
+    if dst_view.is_heterogeneous() {
+        bail!(
+            "{entry_label}: dst layout is heterogeneous (per-axis StorageKind contains \
+             more than one distinct kind). Heterogeneous-layout composition is not yet \
+             supported by the planner-driven path. Composition planning lands in PR-7.7.2+."
+        );
+    }
+    Ok(())
 }
 
 /// Outcome of [`validate_planner_inputs`].
@@ -2191,5 +2250,125 @@ mod tests {
             );
             assert!(r.is_err(), "strategy {s:?} expected to be rejected");
         }
+    }
+
+    // ──────────── PR-7.7.1: reject_heterogeneous_layout_views ────────────
+    //
+    // Tests operate on synthetic `LayoutView::full(...)` fixtures so no
+    // `PhysicalLayout` or real CUDA/NIXL infrastructure is needed.
+    // The guard logic lives in `reject_heterogeneous_layout_views`; the
+    // entrypoint wrappers (`execute_planner_{cuda,nixl}_transfer`) add the
+    // `physical_to_layout_view` projection and call it with the result.
+
+    use dynamo_memory::StorageKind;
+    use kvbm_common::{KvDim, KvDimLayout, KvDimStrides};
+
+    /// Build a minimal 2-axis homogeneous `LayoutView` with all axes = `kind`.
+    fn homogeneous_view(kind: StorageKind) -> crate::layout::LayoutView {
+        let layout =
+            KvDimLayout::new(vec![KvDim::Block, KvDim::Page], vec![4, 8]).unwrap();
+        let strides =
+            KvDimStrides::from_byte_strides(vec![8 * 64, 64], 2).unwrap();
+        let kinds = vec![kind; 2];
+        crate::layout::LayoutView::full(layout, strides, vec![0x1000], None, kinds).unwrap()
+    }
+
+    /// Build a 2-axis heterogeneous `LayoutView`: axis 0 = Device(0), axis 1 = System.
+    fn heterogeneous_view() -> crate::layout::LayoutView {
+        let layout =
+            KvDimLayout::new(vec![KvDim::Block, KvDim::Page], vec![4, 8]).unwrap();
+        let strides =
+            KvDimStrides::from_byte_strides(vec![8 * 64, 64], 2).unwrap();
+        let kinds = vec![StorageKind::Device(0), StorageKind::System];
+        crate::layout::LayoutView::full(layout, strides, vec![0x2000], None, kinds).unwrap()
+    }
+
+    /// Homogeneous src + homogeneous dst passes — this is the production path.
+    #[test]
+    fn heterogeneous_guard_accepts_both_homogeneous() {
+        let src = homogeneous_view(StorageKind::Device(0));
+        let dst = homogeneous_view(StorageKind::Device(0));
+        assert!(
+            reject_heterogeneous_layout_views(&src, &dst, "test_entry").is_ok(),
+            "homogeneous src + dst must pass the guard"
+        );
+    }
+
+    /// Heterogeneous src is rejected; error message must name the entry label,
+    /// "heterogeneous", and "PR-7.7.2" so callers know where the fix lands.
+    #[test]
+    fn heterogeneous_guard_rejects_heterogeneous_src() {
+        let src = heterogeneous_view();
+        let dst = homogeneous_view(StorageKind::Device(0));
+        let err = reject_heterogeneous_layout_views(&src, &dst, "test_cuda_entry")
+            .expect_err("heterogeneous src must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("heterogeneous"),
+            "error must mention 'heterogeneous': {msg}"
+        );
+        assert!(
+            msg.contains("PR-7.7.2"),
+            "error must mention 'PR-7.7.2' so callers know the future home: {msg}"
+        );
+        assert!(
+            msg.contains("src"),
+            "error must identify 'src' as the offending side: {msg}"
+        );
+    }
+
+    /// Heterogeneous dst is rejected with a matching error.
+    #[test]
+    fn heterogeneous_guard_rejects_heterogeneous_dst() {
+        let src = homogeneous_view(StorageKind::System);
+        let dst = heterogeneous_view();
+        let err = reject_heterogeneous_layout_views(&src, &dst, "test_nixl_entry")
+            .expect_err("heterogeneous dst must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("heterogeneous"),
+            "error must mention 'heterogeneous': {msg}"
+        );
+        assert!(
+            msg.contains("PR-7.7.2"),
+            "error must mention 'PR-7.7.2': {msg}"
+        );
+        assert!(
+            msg.contains("dst"),
+            "error must identify 'dst' as the offending side: {msg}"
+        );
+    }
+
+    /// Both src and dst heterogeneous: src is checked first, so the error
+    /// identifies the src side.
+    #[test]
+    fn heterogeneous_guard_rejects_both_heterogeneous_reports_src_first() {
+        let src = heterogeneous_view();
+        let dst = heterogeneous_view();
+        let err = reject_heterogeneous_layout_views(&src, &dst, "test_entry")
+            .expect_err("both-heterogeneous must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("src"),
+            "src-first checking: error must identify 'src': {msg}"
+        );
+    }
+
+    /// FC-like all-Device view is homogeneous — the common GPU-only production
+    /// layout must never trigger the guard.
+    #[test]
+    fn heterogeneous_guard_accepts_all_device_homogeneous_view() {
+        let src = homogeneous_view(StorageKind::Device(0));
+        let dst = homogeneous_view(StorageKind::Device(0));
+        assert!(reject_heterogeneous_layout_views(&src, &dst, "test_entry").is_ok());
+    }
+
+    /// LS-like all-System view is homogeneous — pinned-host layouts used in
+    /// system-memory transfers must also pass.
+    #[test]
+    fn heterogeneous_guard_accepts_all_system_homogeneous_view() {
+        let src = homogeneous_view(StorageKind::System);
+        let dst = homogeneous_view(StorageKind::System);
+        assert!(reject_heterogeneous_layout_views(&src, &dst, "test_entry").is_ok());
     }
 }
