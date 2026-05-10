@@ -389,6 +389,13 @@ fn plan_and_lower(
             let chosen = select_candidate(&candidates, &sel_ctx)?;
             match chosen {
                 Candidate::DirectDma { ops } => Ok(PlanOutcome::Direct(ops.clone())),
+                // PR-7.4: CudaGraphReplay is structurally unreachable here today
+                // (no path emits the variant → select_candidate never picks it),
+                // but the arm ensures a precise error if it ever is reached.
+                Candidate::CudaGraphReplay { .. } => bail!(
+                    "PR-7.4.1: cudaGraph replay capture+launch not yet wired \
+                     (Candidate emitted but no executor path)"
+                ),
                 other => bail!(
                     "plan_and_lower: select_candidate returned non-DirectDma for a \
                      CopyPlan::Direct: {other:?}"
@@ -422,6 +429,12 @@ fn plan_and_lower(
             let chosen = select_candidate(&candidates, &sel_ctx)?;
             match chosen {
                 Candidate::SmallStridedCopy { ops } => Ok(PlanOutcome::SmallStridedCopy(ops.clone())),
+                // PR-7.4: bail with the standard PR-7.4.1 message if somehow
+                // CudaGraphReplay is selected for a ThresholdFallback plan.
+                Candidate::CudaGraphReplay { .. } => bail!(
+                    "PR-7.4.1: cudaGraph replay capture+launch not yet wired \
+                     (Candidate emitted but no executor path)"
+                ),
                 other => bail!(
                     "plan_and_lower: select_candidate returned unexpected variant for \
                      ThresholdFallback: {other:?}"

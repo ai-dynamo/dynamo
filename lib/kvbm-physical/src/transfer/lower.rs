@@ -43,6 +43,58 @@ use crate::transfer::TransferCapabilities;
 use crate::transfer::plan::{CopyOp, CopyPlan};
 use crate::transfer::strategy::TransferStrategy;
 
+// ─────────────────────────── Graph cache key ─────────────────────────────────
+//
+// `GraphCacheKey` encodes the *shape* of a transfer — not the source/dst
+// addresses — so that many distinct block-ID pairs that share the same
+// descriptor count, byte volume, route and dtype can reuse the same captured
+// `cudaGraphExec_t`. Address rebinding (`cudaGraphExecMemcpyNodeSetParams` or
+// equivalent) is applied per launch in the executor; only the key is cached
+// here.
+//
+// `candidate_class` is a u8 discriminant for the `Candidate` variant that
+// produced the key. This lets the cache hold separate graphs for, e.g.,
+// a `DirectDma`-shaped graph vs a future `BatchedDma`-shaped one without the
+// key overloading `(shape, dtype, route)` alone.
+//
+// `dtype_width_bytes` is stored as `Option<u32>` so the key is usable whether
+// or not the `permute_kernels` feature is active (the feature gates
+// `TensorDataType`; the width in bytes is always a plain integer and remains
+// feature-agnostic without losing discrimination power for the graph cache).
+
+/// Cache key for CUDA graph capture/replay (PR-7.4 scaffolding).
+///
+/// Keyed on transfer *shape* — not addresses — so a single captured graph
+/// can be replayed with per-launch address rebinding for many distinct
+/// block-ID pairs that share the same shape.
+///
+/// **Status (PR-7.4):** Struct is wired; the cache and executor path that
+/// reads it are deferred to PR-7.4.1 (`cudaGraph_t` capture, instantiation,
+/// address rebinding, `HashMap<GraphCacheKey, cudaGraphExec_t>` storage).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct GraphCacheKey {
+    /// Number of copy descriptors in the planned op-set.
+    pub descriptor_count: usize,
+    /// Total bytes across all ops.
+    pub total_bytes: usize,
+    /// Element width in bytes, or `None` when `permute_kernels` is disabled
+    /// or the layout's dtype is unset. Used as a discriminant for the cache
+    /// so that same-shape transfers over different dtypes don't share a graph.
+    pub dtype_width_bytes: Option<u32>,
+    /// `TransferStrategy` discriminant encoded as its debug-string hash
+    /// substitute. Stored as a u8 index into the strategy family:
+    ///   0 = CudaAsyncH2D, 1 = CudaAsyncD2H, 2 = CudaAsyncD2D,
+    ///   3+ reserved for future families.
+    /// The scorer only emits `CudaGraphReplay` on Cuda-family routes; the
+    /// `route_family` field enforces the graph cache doesn't accidentally
+    /// unify CUDA and NIXL entries.
+    pub route_family: u8,
+    /// Discriminant for the `Candidate` variant that shaped this graph.
+    /// 0 = DirectDma-shaped, 1 = SmallStridedCopy-shaped. Prevents two
+    /// semantically-distinct graph shapes from aliasing in the cache.
+    pub candidate_class: u8,
+}
+
 /// Project a [`PhysicalLayout`] to a [`LayoutView`] for the planner.
 ///
 /// Each concrete [`Layout`] impl owns its own projection via
@@ -94,6 +146,36 @@ pub(crate) enum Candidate {
         ops: Vec<CopyOp>,
     },
     Staged {/* spec lands later */},
+    /// PR-7.4: CUDA graph capture/replay candidate.
+    ///
+    /// Preferred over [`Candidate::DirectDma`] on Cuda-family routes when
+    /// `TransferCapabilities::cuda_graph_replay` is enabled — score 1050 vs
+    /// 1000. A captured `cudaGraphExec_t` amortises per-kernel-launch overhead
+    /// for stable, frequently-repeated shapes.
+    ///
+    /// `cache_key` encodes the transfer *shape* (descriptor count, total bytes,
+    /// dtype width, route family, candidate class). Per-launch address rebinding
+    /// (src/dst pointers) is applied after cache lookup via CUDA graph node
+    /// param updates — the actual block addresses differ each call.
+    ///
+    /// **Status (PR-7.4):** Structural scaffolding. Score and `cache_key` are
+    /// wired. The executor dispatch arm returns an informative bail; no path
+    /// emits this variant today (no emitter exists), so the bail is structurally
+    /// unreachable in production. Full capture+rebind+cache wiring deferred to
+    /// PR-7.4.1:
+    ///   - `cudaStreamBeginCapture` / `cudaStreamEndCapture`
+    ///   - `cudaGraphInstantiate` → `cudaGraphExec_t`
+    ///   - `cudaGraphExecMemcpyNodeSetParams` per launch
+    ///   - `HashMap<GraphCacheKey, cudaGraphExec_t>` cache (thread-safe)
+    ///   - Cache invalidation policy (shape change, OOM eviction)
+    CudaGraphReplay {
+        /// Shape descriptor for cache lookup and rebind. Addresses are NOT
+        /// part of the key — they are rebound per launch.
+        cache_key: GraphCacheKey,
+        // exec_handle: cudaGraphExec_t  — arrives in PR-7.4.1 once the
+        //   capture/instantiate/rebind path is wired. Placeholder comment
+        //   kept here so the struct diff in PR-7.4.1 is obvious.
+    },
 }
 
 // ─────────────────────────── Selector scaffolding ────────────────────────────
@@ -176,6 +258,20 @@ impl TransferStrategy {
 /// TransformKernel     1100  — dedicated permute kernel; preferred over raw
 ///                              DMA when the route is Cuda* (avoids per-coord
 ///                              descriptor explosion).
+/// CudaGraphReplay     1050  — PR-7.4: replayed captured graph; preferred over
+///                              DirectDma on Cuda* routes when caps.cuda_graph_replay
+///                              is enabled, because it amortises per-kernel-launch
+///                              overhead for stable shapes. Scores below
+///                              TransformKernel because the permute kernel already
+///                              minimises data movement for layout-differing pairs;
+///                              graph replay adds a launch-side speedup but doesn't
+///                              change the data path for those pairs.
+///                              Gated: score returns SCORE_STAGED (< 0) when
+///                              caps.cuda_graph_replay is false, making it
+///                              unselectable without special enablement. Scorer-side
+///                              gating is the only structural enforcement available
+///                              in PR-7.4 because no path emits the variant today;
+///                              PR-7.4.1 may move the gate to the emitter instead.
 /// DirectDma           1000  — universal DMA fallback; available on all routes.
 /// BatchedDma          1000  — equivalent to DirectDma today.
 /// SmallStridedCopy     950  — PR-7.3 threshold-fallback via vectorized_copy.
@@ -196,6 +292,7 @@ impl TransferStrategy {
 /// add a match arm in `score_candidate` with the appropriate base score,
 /// and adjust constants above if the new variant should outrank existing ones.
 const SCORE_TRANSFORM_KERNEL: i64 = 1100;
+const SCORE_CUDA_GRAPH_REPLAY: i64 = 1050;
 const SCORE_DIRECT_DMA: i64 = 1000;
 const SCORE_BATCHED_DMA: i64 = 1000;
 const SCORE_SMALL_STRIDED_COPY: i64 = 950;
@@ -245,7 +342,47 @@ pub(crate) fn score_candidate(candidate: &Candidate, ctx: &SelectionContext<'_>)
         }
         Candidate::SmallStridedCopy { .. } => SCORE_SMALL_STRIDED_COPY,
         Candidate::Staged { .. } => SCORE_STAGED,
+        // PR-7.4: CudaGraphReplay — gated on caps.cuda_graph_replay.
+        //
+        // Scorer-side gating rationale: today no path emits this variant, so
+        // the gating here is the only structural enforcement available. When
+        // caps.cuda_graph_replay is false the score is negative (SCORE_STAGED),
+        // making the variant unselectable even if somehow constructed. When
+        // enabled the score is 1050 (above DirectDma's 1000), expressing the
+        // preference for graph-launch amortisation over raw per-kernel dispatch.
+        //
+        // PR-7.4.1 note: once a real emitter exists, gating may move to the
+        // emitter ("don't emit the variant unless caps.cuda_graph_replay") and
+        // the scorer can unconditionally return SCORE_CUDA_GRAPH_REPLAY. Both
+        // designs give the same result; scorer-side gating is chosen here for
+        // explicitness and to keep the test surface in one file.
+        Candidate::CudaGraphReplay { .. } => {
+            if ctx.capabilities.cuda_graph_replay {
+                SCORE_CUDA_GRAPH_REPLAY
+            } else {
+                SCORE_STAGED // negative → unselectable
+            }
+        }
     }
+}
+
+/// PR-7.4: Dispatch stub for [`Candidate::CudaGraphReplay`].
+///
+/// Always returns a bail with the PR-7.4.1 tracking message. Called from
+/// the executor's match arm when a `CudaGraphReplay` candidate is selected;
+/// today that arm is structurally unreachable (no path emits the variant),
+/// but the function is testable independently of the full executor pipeline.
+///
+/// **Deferred to PR-7.4.1:**
+/// - `cudaStreamBeginCapture` / `cudaStreamEndCapture`
+/// - `cudaGraphInstantiate` → `cudaGraphExec_t`
+/// - `cudaGraphExecMemcpyNodeSetParams` per launch (address rebinding)
+/// - `HashMap<GraphCacheKey, cudaGraphExec_t>` cache (thread-safe, FIFO eviction)
+pub(crate) fn dispatch_cuda_graph_replay(_key: &GraphCacheKey) -> Result<()> {
+    bail!(
+        "PR-7.4.1: cudaGraph replay capture+launch not yet wired \
+         (Candidate emitted but no executor path)"
+    )
 }
 
 /// Lower a [`CopyPlan`] to a vector of executor candidates.
@@ -337,6 +474,7 @@ mod tests {
         static CAPS: TransferCapabilities = TransferCapabilities {
             allow_gds: false,
             allow_gpu_rdma: false,
+            cuda_graph_replay: false,
         };
         SelectionContext {
             strategy: TransferStrategy::CudaAsyncD2D,
@@ -804,6 +942,105 @@ mod tests {
         assert!(
             msg.contains("num_heads"),
             "expected num_heads-related error, got: {msg}"
+        );
+    }
+
+    // ── PR-7.4 CudaGraphReplay scorer tests ──────────────────────────────────
+
+    fn make_graph_cache_key() -> GraphCacheKey {
+        GraphCacheKey {
+            descriptor_count: 8,
+            total_bytes: 32768,
+            dtype_width_bytes: Some(2),
+            route_family: 2, // CudaAsyncD2D
+            candidate_class: 0,
+        }
+    }
+
+    fn graph_replay_candidate() -> Candidate {
+        Candidate::CudaGraphReplay { cache_key: make_graph_cache_key() }
+    }
+
+    /// When `caps.cuda_graph_replay = true`, `CudaGraphReplay` scores 1050 and
+    /// outranks `DirectDma` (1000). `select_candidate` must pick the replay
+    /// candidate when both are present.
+    ///
+    /// Design note: scorer-side gating on `caps.cuda_graph_replay` is the only
+    /// structural enforcement available in PR-7.4 (no path emits the variant
+    /// today). A positive score when caps are enabled expresses the preference
+    /// for graph-launch amortisation; a negative score when disabled makes the
+    /// variant unselectable even if somehow constructed. PR-7.4.1 may move
+    /// the gate to the emitter — see scoring constants doc-block.
+    #[test]
+    fn score_cuda_graph_replay_outranks_direct_when_caps_enabled() {
+        static CAPS_ENABLED: TransferCapabilities = TransferCapabilities {
+            allow_gds: false,
+            allow_gpu_rdma: false,
+            cuda_graph_replay: true,
+        };
+        let ctx = SelectionContext {
+            strategy: TransferStrategy::CudaAsyncD2D,
+            descriptor_count: 8,
+            total_bytes: 32768,
+            #[cfg(feature = "permute_kernels")]
+            dtype: None,
+            capabilities: &CAPS_ENABLED,
+        };
+        let cands = vec![
+            Candidate::DirectDma { ops: vec![] },
+            graph_replay_candidate(),
+        ];
+        let picked = select_candidate(&cands, &ctx).unwrap();
+        assert!(
+            matches!(picked, Candidate::CudaGraphReplay { .. }),
+            "expected CudaGraphReplay (score {SCORE_CUDA_GRAPH_REPLAY}) to outrank \
+             DirectDma (score {SCORE_DIRECT_DMA}) when cuda_graph_replay=true, got {picked:?}"
+        );
+        // Confirm raw score
+        assert_eq!(score_candidate(&graph_replay_candidate(), &ctx), SCORE_CUDA_GRAPH_REPLAY);
+        assert_eq!(SCORE_CUDA_GRAPH_REPLAY, 1050);
+    }
+
+    /// When `caps.cuda_graph_replay = false`, `CudaGraphReplay` scores negative
+    /// (same as `Staged`) and is filtered out by `select_candidate`. `DirectDma`
+    /// must win even when `CudaGraphReplay` appears first.
+    ///
+    /// This test enforces the gating contract: enabling the cap is the only way
+    /// to make the variant selectable. Today no path emits the variant, so the
+    /// gate-on-caps is the sole structural enforcement in PR-7.4.
+    #[test]
+    fn score_cuda_graph_replay_filtered_when_caps_disabled() {
+        // Default ctx: cuda_graph_replay = false
+        let ctx = cuda_ctx();
+        assert!(!ctx.capabilities.cuda_graph_replay);
+        let cands = vec![
+            graph_replay_candidate(),
+            Candidate::DirectDma { ops: vec![] },
+        ];
+        let picked = select_candidate(&cands, &ctx).unwrap();
+        assert!(
+            matches!(picked, Candidate::DirectDma { .. }),
+            "expected DirectDma to win when CudaGraphReplay is cap-gated off, got {picked:?}"
+        );
+        // Score is negative (unselectable) when cap is disabled
+        assert!(
+            score_candidate(&graph_replay_candidate(), &ctx) < 0,
+            "CudaGraphReplay score must be negative when cuda_graph_replay=false"
+        );
+    }
+
+    /// The `dispatch_cuda_graph_replay` stub must return an error whose message
+    /// contains "PR-7.4.1" — enabling precise identification of the unimplemented
+    /// path in logs and test output.
+    #[test]
+    fn cuda_graph_replay_dispatch_bails_with_precise_error() {
+        let key = make_graph_cache_key();
+        let err = dispatch_cuda_graph_replay(&key)
+            .expect_err("dispatch_cuda_graph_replay must bail (PR-7.4.1 stub)");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("PR-7.4.1"),
+            "expected 'PR-7.4.1' in dispatch error message, got: {msg}"
         );
     }
 }

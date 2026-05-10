@@ -74,6 +74,26 @@ pub struct TransferCapabilities {
     ///
     /// Note: This only affects Device → Remote. Host → Remote is always direct.
     pub allow_gpu_rdma: bool,
+
+    /// PR-7.4: Enable CUDA graph capture/replay for repeated same-shape
+    /// transfers on the Cuda* route family.
+    ///
+    /// When enabled:
+    /// - Same-shape Cuda* transfers may be executed via a pre-captured
+    ///   `cudaGraphExec_t` with per-launch address rebinding, reducing
+    ///   kernel-launch overhead for frequently repeated shapes.
+    ///
+    /// When disabled (default):
+    /// - All Cuda* transfers use the standard launch path. This is the
+    ///   safe default because graph capture has CUDA-side preconditions
+    ///   (stream capture mode, no blocking ops, etc.) that callers must
+    ///   verify before enabling.
+    ///
+    /// **Status (PR-7.4):** Scaffolding only. No path emits
+    /// `Candidate::CudaGraphReplay` today, so this flag has no runtime
+    /// effect. The capture/replay executor wiring is deferred to PR-7.4.1.
+    #[serde(default)]
+    pub cuda_graph_replay: bool,
 }
 
 impl TransferCapabilities {
@@ -87,6 +107,7 @@ impl TransferCapabilities {
         Self {
             allow_gds: true,
             allow_gpu_rdma: true,
+            cuda_graph_replay: false, // remains false until PR-7.4.1 wires the executor
         }
     }
 
@@ -148,6 +169,22 @@ impl TransferCapabilities {
     /// Set the GPU RDMA capability.
     pub fn with_gpu_rdma(mut self, enabled: bool) -> Self {
         self.allow_gpu_rdma = enabled;
+        self
+    }
+
+    /// PR-7.4: Set the CUDA graph capture/replay capability.
+    ///
+    /// Defaulting to `false` is intentional — graph capture has
+    /// CUDA-side preconditions (stream capture mode, no blocking ops, etc.)
+    /// that the caller must verify. Enable only when the caller is certain
+    /// the transfer stream is graph-capturable and the shapes are stable
+    /// enough to amortise the capture cost.
+    ///
+    /// **Status (PR-7.4):** Flag scaffolding only; no executor path exists yet.
+    /// Enabling this flag currently has no runtime effect (no path emits
+    /// `Candidate::CudaGraphReplay`). Full wiring deferred to PR-7.4.1.
+    pub fn with_cuda_graph_replay(mut self, enabled: bool) -> Self {
+        self.cuda_graph_replay = enabled;
         self
     }
 
