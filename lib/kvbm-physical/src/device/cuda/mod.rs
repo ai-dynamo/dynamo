@@ -75,21 +75,22 @@ unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8> {
     }
 }
 
-/// CUDA device context wrapping cudarc::CudaContext.
+/// CUDA device context wrapping `cudarc::driver::CudaContext`.
 #[derive(Debug)]
-pub struct CudaContext {
+pub struct CudaDeviceContext {
     context: Arc<cudarc::driver::CudaContext>,
     device_id: u32,
 }
 
-impl CudaContext {
+impl CudaDeviceContext {
     pub fn new(device_id: u32) -> Result<Self> {
         let context = cudarc::driver::CudaContext::new(device_id as usize)
             .with_context(|| format!("Failed to create CUDA context for device {}", device_id))?;
         Ok(Self { context, device_id })
     }
 
-    /// Create from an existing CudaContext (for compatibility with existing code).
+    /// Create from an existing `cudarc::driver::CudaContext` (for
+    /// compatibility with existing code that already owns one).
     pub fn from_context(context: Arc<cudarc::driver::CudaContext>, device_id: u32) -> Self {
         Self { context, device_id }
     }
@@ -100,7 +101,7 @@ impl CudaContext {
     }
 }
 
-impl DeviceContextOps for CudaContext {
+impl DeviceContextOps for CudaDeviceContext {
     fn device_id(&self) -> u32 {
         self.device_id
     }
@@ -508,7 +509,7 @@ mod tests {
         if !is_available() {
             return;
         }
-        let ctx = CudaContext::new(0);
+        let ctx = CudaDeviceContext::new(0);
         assert!(ctx.is_ok());
     }
 }

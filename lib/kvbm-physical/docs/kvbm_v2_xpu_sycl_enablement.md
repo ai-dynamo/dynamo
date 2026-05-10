@@ -185,8 +185,8 @@ after XPU/SYCL enablement.
 
 | Area | Before (CUDA-only) | After (CUDA + XPU/SYCL) |
 |---|---|---|
-| **Backend selector** | Implicit — everything was CUDA. | `DeviceBackend::{Cuda, Sycl}` enum in `kvbm-physical`, with runtime `is_available()` probes guarded by `catch_unwind` so a missing `libcuda.so` / `libsycl.so` doesn't abort the process. `DeviceContext::new(backend, id)` dispatches to `CudaContext` or `SyclContext` behind `#[cfg(feature = "cuda")]` / `#[cfg(feature = "xpu-sycl")]`. |
-| **Device context / stream / event** | Direct use of `cudarc::driver::{CudaContext, CudaStream, CudaEvent}`. | New traits `DeviceContextOps`, `DeviceStreamOps`, `DeviceEventOps`, `DeviceMemPoolOps` in `lib/kvbm-physical/src/device/traits.rs`. `CudaContext` and `SyclContext` both implement them; the transfer executor, notification loop, and pool wrappers talk to trait objects only. |
+| **Backend selector** | Implicit — everything was CUDA. | `DeviceBackend::{Cuda, Sycl}` enum in `kvbm-physical`, with runtime `is_available()` probes guarded by `catch_unwind` so a missing `libcuda.so` / `libsycl.so` doesn't abort the process. `DeviceContext::new(backend, id)` dispatches to `CudaDeviceContext` or `SyclDeviceContext` behind `#[cfg(feature = "cuda")]` / `#[cfg(feature = "xpu-sycl")]`. |
+| **Device context / stream / event** | Direct use of `cudarc::driver::{CudaContext, CudaStream, CudaEvent}`. | New traits `DeviceContextOps`, `DeviceStreamOps`, `DeviceEventOps`, `DeviceMemPoolOps` in `lib/kvbm-physical/src/device/traits.rs`. `CudaDeviceContext` and `SyclDeviceContext` both implement them (named to avoid shadowing `cudarc::driver::CudaContext` and `oneapi_rs::safe::SyclContext`); the transfer executor, notification loop, and pool wrappers talk to trait objects only. |
 | **Copy API on streams** | Direction-named CUDA calls (`cudaMemcpyAsync` with explicit H2D/D2H kinds). | Pattern-based primitives on `DeviceStreamOps`: `batch_copy` (N DMAs, direction auto-detected), `memcpy_htod` / `memcpy_dtoh` (scalar uploads/downloads), `vectorized_copy` (kernel over pointer arrays). The executor picks between them based on op type, not direction. |
 | **`TransferStrategy` enum** | `CudaAsyncH2D`, `CudaAsyncD2H`, `CudaAsyncD2D`; `panic!` on `System ↔ Device`. | Two changes — (1) **rename** `CudaAsync*` → `Async*` since the backend-agnostic executor dispatches to either `CudaStreamWrapper` or `SyclStreamWrapper`; (2) **add** `BlockingH2D`, `BlockingD2H` that replace the upstream panic with an async copy + inline `device_stream.synchronize()`. Blocking variants apply on **both** backends because the motivating case (unpinned `System` memory degrading async copies to staged blocking behavior) affects CUDA and SYCL identically. See [`device_executor_flow.md`](./device_executor_flow.md#transferstrategy-vs-upstream--rename-and-additions) for the full before/after mapping. |
 | **Memory pool** | Native CUDA pool (`cuMemPoolCreate` / `cuMemAllocFromPoolAsync`). | Two pool implementations behind `DeviceMemPoolOps`: `CudaMemPool` (native API, stream-ordered) and `SyclMemPool` (software free-list over `sycl::malloc_device`, SYCL has no native pool API). `SyclMemPool`'s `PoolInner.active_allocs: HashMap<ptr, real_size>` keeps `cached_bytes` and `release_threshold` accurate when a best-fit returns a block larger than requested. |
@@ -258,8 +258,8 @@ graph TB
         DS["DeviceStream"]
         DE["DeviceEvent"]
         DP["DeviceMemPool"]
-        CudaCtx["CudaContext / Wrappers<br/>device/cuda/mod.rs"]
-        SyclCtx["SyclContext / Wrappers<br/>device/sycl/mod.rs"]
+        CudaCtx["CudaDeviceContext / Wrappers<br/>device/cuda/mod.rs"]
+        SyclCtx["SyclDeviceContext / Wrappers<br/>device/sycl/mod.rs"]
         CtxOps["trait DeviceContextOps"]
         StrOps["trait DeviceStreamOps"]
         EvOps["trait DeviceEventOps"]
@@ -471,7 +471,7 @@ classDiagram
         +device_id() u32
     }
 
-    class CudaContext {
+    class CudaDeviceContext {
         <<cuda backend>>
         +create_stream() CudaStreamWrapper
         +allocate_device()
@@ -503,7 +503,7 @@ classDiagram
         +free_async()
     }
 
-    class SyclContext {
+    class SyclDeviceContext {
         <<xpu backend>>
         -cache: SyclContextCache
         +create_stream() round-robin
@@ -557,12 +557,12 @@ classDiagram
     DeviceContextOps ..> DeviceMemPoolOps : creates
     DeviceStreamOps ..> DeviceEventOps : creates
 
-    CudaContext ..|> DeviceContextOps : implements
+    CudaDeviceContext ..|> DeviceContextOps : implements
     CudaStreamWrapper ..|> DeviceStreamOps : implements
     CudaEventWrapper ..|> DeviceEventOps : implements
     CudaMemPoolWrapper ..|> DeviceMemPoolOps : implements
 
-    SyclContext ..|> DeviceContextOps : implements
+    SyclDeviceContext ..|> DeviceContextOps : implements
     SyclStreamWrapper ..|> DeviceStreamOps : implements
     SyclEventWrapper ..|> DeviceEventOps : implements
     SyclMemPoolWrapper ..|> DeviceMemPoolOps : implements
@@ -686,7 +686,7 @@ classDiagram
 
     class CudaPinnedAllocator {
         <<kvbm-physical>>
-        -context: CudaContext
+        -context: cudarc::CudaContext
         +alloc_pinned() cuMemHostAlloc
     }
 
@@ -772,8 +772,8 @@ impl DeviceBackend {
 }
 ```
 
-`DeviceContext::new(backend, device_id)` dispatches to `CudaContext::new` or
-`SyclContext::new` behind `#[cfg(feature = "cuda")]` / `#[cfg(feature = "xpu-sycl")]`.
+`DeviceContext::new(backend, device_id)` dispatches to `CudaDeviceContext::new` or
+`SyclDeviceContext::new` behind `#[cfg(feature = "cuda")]` / `#[cfg(feature = "xpu-sycl")]`.
 
 ### Copy API — pattern-based, not direction-based
 

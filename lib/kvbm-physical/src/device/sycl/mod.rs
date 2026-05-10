@@ -119,23 +119,23 @@ fn untrack_alloc(map: &OnceLock<Mutex<HashMap<u64, u64>>>, ptr_u64: u64) -> bool
 }
 
 // =====================================================================
-// SyclContext — implements DeviceContextOps
+// SyclDeviceContext — implements DeviceContextOps
 // =====================================================================
 
 #[derive(Debug)]
-pub struct SyclContext {
+pub struct SyclDeviceContext {
     device_id: u32,
     cache: Arc<SyclContextCache>,
 }
 
-impl SyclContext {
+impl SyclDeviceContext {
     pub fn new(device_id: u32) -> Result<Self> {
         let cache = get_or_create_sycl_context(device_id)?;
         Ok(Self { device_id, cache })
     }
 }
 
-impl DeviceContextOps for SyclContext {
+impl DeviceContextOps for SyclDeviceContext {
     fn device_id(&self) -> u32 {
         self.device_id
     }
@@ -168,7 +168,7 @@ impl DeviceContextOps for SyclContext {
         } else {
             debug_assert!(
                 false,
-                "SyclContext::free_device: untracked ptr {:#x} (double-free or foreign ptr)",
+                "SyclDeviceContext::free_device: untracked ptr {:#x} (double-free or foreign ptr)",
                 ptr
             );
         }
@@ -222,7 +222,7 @@ impl DeviceContextOps for SyclContext {
         } else {
             debug_assert!(
                 false,
-                "SyclContext::free_pinned: untracked ptr {:#x} (double-free or foreign ptr)",
+                "SyclDeviceContext::free_pinned: untracked ptr {:#x} (double-free or foreign ptr)",
                 ptr
             );
         }

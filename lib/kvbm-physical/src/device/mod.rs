@@ -81,13 +81,13 @@ impl DeviceContext {
         let ops: Box<dyn DeviceContextOps> = match backend {
             DeviceBackend::Cuda => {
                 #[cfg(feature = "cuda")]
-                { Box::new(cuda::CudaContext::new(device_id)?) }
+                { Box::new(cuda::CudaDeviceContext::new(device_id)?) }
                 #[cfg(not(feature = "cuda"))]
                 { bail!("CUDA backend not compiled (enable 'cuda' feature)") }
             }
             DeviceBackend::Sycl => {
                 #[cfg(feature = "xpu-sycl")]
-                { Box::new(sycl::SyclContext::new(device_id)?) }
+                { Box::new(sycl::SyclDeviceContext::new(device_id)?) }
                 #[cfg(not(feature = "xpu-sycl"))]
                 { bail!("SYCL backend not compiled (enable 'xpu-sycl' feature)") }
             }
