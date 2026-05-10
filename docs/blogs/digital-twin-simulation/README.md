@@ -17,12 +17,13 @@ infrastructure, teams want a clear view of the value that infrastructure is
 likely to produce. That is especially hard for modern LLM serving, where a
 deployment has to choose the model backend, tensor-parallel shape,
 prefill/decode split, worker counts, scheduler settings, routing policy, KV
-reuse and offload behavior, autoscaling thresholds, and hardware target.
+reuse and offload behavior, autoscaling thresholds, and deployment topology.
 
-Those choices interact across layers. Engine schedulers turn kernel speed into
-queueing behavior. Dynamo's [Router](../../components/router/router-guide.md)
-decides where each request lands, autoscaling decisions adjust capacity only
-after startup or specialization delays, and the
+Those choices interact across layers. Engine schedulers turn backend pass timing
+into token-producing batches. Dynamo's
+[Router](../../components/router/router-guide.md) decides where each request
+lands, autoscaling decisions adjust capacity only after startup or
+specialization delays, and the
 [KV Block Manager (KVBM)](../../components/kvbm/kvbm-guide.md) determines when
 cached state is reused, moved, offloaded, or recomputed. A local improvement can
 shift the bottleneck somewhere else, and for larger models even one realistic
@@ -52,14 +53,17 @@ timing with simulated scheduler, Router, Planner, and KV/cache events; hardware
 runs expose the remaining error, and those deltas become calibration inputs for
 the next simulation pass.
 
+DynoSim optimizes how existing engine profiles and Dynamo components are
+assembled for a workload.
+
 ## Why Simulate LLM Serving?
 
 The real power of simulation is not just prediction. It is decision-making.
 
 The resulting loop is useful because it prices decisions before they hit the
-cluster. The twin can ask whether a faster kernel, lower transfer latency,
-different batching policy, or future GPU changes the best Router, Planner, or
-KVBM choice, then send only the strongest candidates to hardware validation.
+cluster. The twin can ask whether a different topology, transfer path, batching
+policy, or backend configuration changes the best Router, Planner, or KVBM
+choice, then send only the strongest candidates to live validation.
 
 [placeholder: add simulated-time vs wall-time table and speedup figure for
 representative simulated workloads]
@@ -68,13 +72,13 @@ That gives Dynamo a practical loop for research, engineering scoping, and
 customer-facing sizing.
 
 - **Research:** Test routing, autoscaling, prefill/decode, KV/cache, and
-  hardware-forward ideas before spending cluster time.
+  topology ideas before spending cluster time.
 - **Engineering:** Turn opportunity costs into thresholds. If specializing one
   decode worker into N prefill workers takes X seconds, the twin can show when X
   breaks the service-level agreement (SLA) and what target makes the work worth
   prioritizing.
 - **Customer-facing sizing:** Compare GPU counts, worker layouts, backends, and
-  future hardware assumptions against a workload and SLA before procurement.
+  deployment topologies against a workload and SLA before committing capacity.
 
 ## 1. Architecture And DES: Composing Dynamo As Events
 
@@ -333,7 +337,8 @@ Draft table shape:
 | Interpretation | This is a strong candidate for this workload, not a universal best layout. |
 
 The takeaway is not that one configuration is always best. It is that the twin
-can turn a large configuration space into a workload-specific hardware shortlist.
+can turn a large configuration space into a workload-specific deployment
+shortlist.
 
 ### 3.2 Discovery Examples Beyond The Current Optimizer
 
@@ -449,11 +454,11 @@ for human review.
 That would turn the digital twin into more than an optimizer over fixed knobs. It
 would become a testbed for algorithm discovery, where humans still own the
 system direction and validation bar, but agents can help explore the design space
-between hardware experiments.
+between live cluster experiments.
 
 ## 4. Simulation As The Inner Loop
 
-The goal is not to replace hardware validation. The goal is to make hardware
+The goal is not to replace live cluster validation. The goal is to make that
 validation more focused.
 
 Simulation becomes the inner loop for design exploration. Hardware remains the
@@ -464,7 +469,7 @@ movement, workload shape, and hardware-informed timing.
 The payoff is not just a faster benchmark. Simulation turns infrastructure
 planning from guesswork into an engineering discipline: use the twin to decide
 what to build, where to optimize, how to size customer deployments, and which
-hardware experiments are most likely to matter.
+live experiments are most likely to matter.
 
 Looking forward, we plan to close this loop in production as well. A smart
 sweeping algorithm built on top of the digital twin would run periodically
@@ -477,6 +482,6 @@ split, router policy, and Planner setting last week may no longer be optimal
 today. A continuous twin-driven sweep keeps the live deployment tracking the
 current optimum instead of relying on a one-shot launch decision.
 
-[placeholder: external review for claims about hardware validation vs simulation]
+[placeholder: external review for claims about live validation vs simulation]
 
 [placeholder: final links to relevant Dynamo docs, PRs, or prior posts]
