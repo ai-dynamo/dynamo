@@ -586,7 +586,6 @@ mod tests {
         );
     }
 
-    use crate::layout::Layout;
     use crate::transfer::plan::AnnotatedLayout;
 
     // ── helpers ──────────────────────────────────────────────────────────────

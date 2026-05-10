@@ -9,6 +9,7 @@
 //! via `KVBM_TEST_GPU_PARALLELISM` and `KVBM_TEST_NIXL_PARALLELISM`
 //! env vars.
 
+mod benchmark_path;
 pub(crate) mod gate;
 mod local_transfers;
 mod planner_graph_replay;

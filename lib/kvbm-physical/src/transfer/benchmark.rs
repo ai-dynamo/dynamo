@@ -750,7 +750,7 @@ mod tests {
     #[test]
     fn benchmark_nixl_locality_write_requires_local_src() {
         let cache = Arc::new(BenchmarkCache::new());
-        let key = make_key(TransferStrategy::NixlWrite);
+        let _key = make_key(TransferStrategy::NixlWrite);
 
         // Fake stream — DirectDma is not dispatched; NIXL route doesn't use it.
         // We can't create a real CudaStream without a GPU here, so we exploit
@@ -761,7 +761,7 @@ mod tests {
         let nixl_agent = dynamo_memory::nixl::NixlAgent::new("local-agent-write-check")
             .expect("NixlAgent::new must succeed");
 
-        let candidate = BenchmarkCandidate::NixlDirectDma {
+        let _candidate = BenchmarkCandidate::NixlDirectDma {
             ops: vec![],
             nixl_agent: nixl_agent.clone(),
             src_agent_name: "remote-agent".to_string(),
