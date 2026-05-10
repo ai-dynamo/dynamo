@@ -24,6 +24,7 @@
 
 use anyhow::Result;
 
+use super::gate::gpu_serial;
 use super::local_transfers::{LayoutType, build_agent_for_kinds};
 use super::*;
 use crate::layout::KvBlockLayout;
@@ -143,6 +144,7 @@ async fn use_planner_matches_legacy_fc_fc_d2d() -> Result<()> {
     let src_kind = StorageKind::Device(0);
     let dst_kind = StorageKind::Device(0);
     skip_if_stubs_and_device!(src_kind, dst_kind);
+    gpu_serial!();
     assert_planner_matches_legacy(LayoutType::FC, src_kind, LayoutType::FC, dst_kind).await
 }
 
@@ -151,6 +153,7 @@ async fn use_planner_matches_legacy_lw_lw_d2d() -> Result<()> {
     let src_kind = StorageKind::Device(0);
     let dst_kind = StorageKind::Device(0);
     skip_if_stubs_and_device!(src_kind, dst_kind);
+    gpu_serial!();
     assert_planner_matches_legacy(LayoutType::LW, src_kind, LayoutType::LW, dst_kind).await
 }
 
@@ -159,6 +162,7 @@ async fn use_planner_matches_legacy_fc_lw_d2d() -> Result<()> {
     let src_kind = StorageKind::Device(0);
     let dst_kind = StorageKind::Device(0);
     skip_if_stubs_and_device!(src_kind, dst_kind);
+    gpu_serial!();
     assert_planner_matches_legacy(LayoutType::FC, src_kind, LayoutType::LW, dst_kind).await
 }
 
@@ -167,6 +171,7 @@ async fn use_planner_matches_legacy_fc_fc_h2d() -> Result<()> {
     let src_kind = StorageKind::Pinned;
     let dst_kind = StorageKind::Device(0);
     skip_if_stubs_and_device!(src_kind, dst_kind);
+    gpu_serial!();
     assert_planner_matches_legacy(LayoutType::FC, src_kind, LayoutType::FC, dst_kind).await
 }
 
@@ -175,5 +180,6 @@ async fn use_planner_matches_legacy_fc_fc_d2h() -> Result<()> {
     let src_kind = StorageKind::Device(0);
     let dst_kind = StorageKind::Pinned;
     skip_if_stubs_and_device!(src_kind, dst_kind);
+    gpu_serial!();
     assert_planner_matches_legacy(LayoutType::FC, src_kind, LayoutType::FC, dst_kind).await
 }

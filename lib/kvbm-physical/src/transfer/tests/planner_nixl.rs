@@ -38,6 +38,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Result, bail};
 
+use super::gate::nixl_serial;
 use super::local_transfers::{LayoutType, is_nixl_backend_available};
 use super::*;
 use crate::layout::KvBlockLayout;
@@ -262,6 +263,7 @@ async fn use_planner_nixl_pull_matches_legacy_fc_fc() -> Result<()> {
         eprintln!("Skipping NIXL planner test — UCX backend unavailable");
         return Ok(());
     }
+    nixl_serial!();
     assert_planner_matches_legacy(Direction::Pull, LayoutType::FC, "fc_fc").await
 }
 
@@ -272,6 +274,7 @@ async fn use_planner_nixl_pull_matches_legacy_lw_lw() -> Result<()> {
         eprintln!("Skipping NIXL planner test — UCX backend unavailable");
         return Ok(());
     }
+    nixl_serial!();
     assert_planner_matches_legacy(Direction::Pull, LayoutType::LW, "lw_lw").await
 }
 
@@ -284,6 +287,7 @@ async fn use_planner_nixl_push_matches_legacy_fc_fc() -> Result<()> {
         eprintln!("Skipping NIXL planner test — UCX backend unavailable");
         return Ok(());
     }
+    nixl_serial!();
     assert_planner_matches_legacy(Direction::Push, LayoutType::FC, "fc_fc").await
 }
 
@@ -294,5 +298,6 @@ async fn use_planner_nixl_push_matches_legacy_lw_lw() -> Result<()> {
         eprintln!("Skipping NIXL planner test — UCX backend unavailable");
         return Ok(());
     }
+    nixl_serial!();
     assert_planner_matches_legacy(Direction::Push, LayoutType::LW, "lw_lw").await
 }

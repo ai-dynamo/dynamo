@@ -9,6 +9,9 @@
 //! - Different transfer strategies (Memcpy, CUDA H2D/D2H)
 
 use super::*;
+use super::gate::{gpu_serial, nixl_only_serial, storage_serial};
+#[cfg(feature = "testing-nixl-gds")]
+use super::gate::nixl_serial;
 use crate::transfer::executor::TransferOptionsInternal;
 use crate::transfer::executor::execute_transfer;
 use crate::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};
@@ -142,6 +145,8 @@ async fn test_p2p(
         return Ok(());
     }
 
+    storage_serial!(src_kind, dst_kind);
+
     use crate::transfer::{BounceBufferInternal, executor::TransferOptionsInternal};
 
     let agent = build_agent_for_kinds(&[src_kind, dst_kind])?;
@@ -197,6 +202,8 @@ async fn test_roundtrip(
         );
         return Ok(());
     }
+
+    storage_serial!(src_kind, inter_kind, dst_kind);
 
     use crate::transfer::executor::TransferOptionsInternal;
 
@@ -261,6 +268,8 @@ async fn test_gds(
         return Ok(());
     }
 
+    nixl_serial!();
+
     let agent = build_agent_for_kinds(&[src_kind, dst_kind])?;
 
     let src = build_layout(agent.clone(), src_layout, src_kind, 4);
@@ -296,6 +305,7 @@ async fn test_gds(
 #[tokio::test]
 async fn test_large_block_counts(#[case] block_count: usize) {
     skip_if_stubs!();
+    gpu_serial!();
 
     let agent = create_test_agent(&format!("test_large_block_counts_{}", block_count));
 
@@ -353,6 +363,7 @@ async fn test_page_size_sweep(
     #[values(16, 32, 64, 128, 256)] page_size: usize,
 ) -> Result<()> {
     skip_if_stubs_and_device!(src_kind, dst_kind);
+    storage_serial!(src_kind, dst_kind);
     assert!(
         page_size.is_power_of_two(),
         "page_size must be a power of 2"
@@ -430,6 +441,7 @@ async fn test_page_size_sweep_partial_layer(
     #[values(16, 32, 64, 128, 256)] page_size: usize,
 ) -> Result<()> {
     skip_if_stubs_and_device!(src_kind, dst_kind);
+    storage_serial!(src_kind, dst_kind);
     assert!(
         page_size.is_power_of_two(),
         "page_size must be a power of 2"
@@ -514,6 +526,10 @@ async fn test_page_size_sweep_disk_posix(
         eprintln!("Skipping disk POSIX sweep - POSIX backend unavailable");
         return Ok(());
     }
+
+    // Pinned ↔ Disk via NIXL POSIX — touches NIXL but not CUDA Device,
+    // so use the NIXL-only gate to avoid blocking unrelated GPU tests.
+    nixl_only_serial!();
 
     let k = (PAGE_SWEEP_TOKEN_BUDGET / page_size).max(2);
     let num_blocks = 2 * k;
@@ -707,6 +723,7 @@ async fn test_bounce_with_guards_impl(
     name_suffix: &str,
 ) -> Result<()> {
     skip_if_stubs_and_device!(host_storage, bounce_storage);
+    storage_serial!(host_storage, bounce_storage);
 
     let num_blocks = 6;
     let test_name = format!(
@@ -1299,6 +1316,7 @@ async fn test_cuda_fc_lw_roundtrip_uses_vectorized(
     #[case] device_kind: LayoutKind,
 ) -> Result<()> {
     skip_if_stubs_and_device!(StorageKind::Device(0));
+    gpu_serial!();
 
     let agent = build_agent_for_kinds(&[StorageKind::Pinned, StorageKind::Device(0)])?;
 

@@ -2,7 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Comprehensive transfer tests for verifying data integrity across storage types and layout configurations.
+//!
+//! GPU- and NIXL-touching tests serialise via the macros in
+//! [`gate`]: `gpu_serial!()`, `nixl_serial!()`, `storage_serial!(...)`.
+//! Defaults: GPU permit count `2`, NIXL permit count `1`. Override
+//! via `KVBM_TEST_GPU_PARALLELISM` and `KVBM_TEST_NIXL_PARALLELISM`
+//! env vars.
 
+pub(crate) mod gate;
 mod local_transfers;
 mod planner_nixl;
 mod planner_path;
