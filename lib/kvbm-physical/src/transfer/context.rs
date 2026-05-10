@@ -18,6 +18,7 @@ use kvbm_observability::SharedKvbmObservability;
 use velo::EventManager;
 
 use crate::manager::TransferManager;
+use crate::transfer::graph_cache::GraphCache;
 
 // Notifications module is declared in ../mod.rs
 // Re-export for convenience
@@ -222,6 +223,13 @@ pub struct TransferContext {
     #[allow(dead_code)]
     tx_nixl_events: mpsc::Sender<notifications::RegisterNixlNotification>,
     observability: Option<SharedKvbmObservability>,
+    /// PR-7.4.1: CUDA graph exec handle cache for replay-based transfers.
+    ///
+    /// Shared across clones of `TransferContext` so all executor calls on
+    /// the same context share the same cache. Drops with the last
+    /// `TransferContext` clone; each `ManagedExecHandle` entry calls
+    /// `cuGraphExecDestroy` on drop.
+    graph_cache: Arc<GraphCache>,
 }
 
 impl TransferContext {
@@ -315,6 +323,7 @@ impl TransferContext {
             tx_cuda_event,
             tx_nixl_events,
             observability,
+            graph_cache: Arc::new(GraphCache::new()),
         })
     }
 
@@ -396,6 +405,15 @@ impl TransferContext {
     /// Get the CUDA memory pool for kernel allocations.
     pub(crate) fn cuda_pool(&self) -> &Arc<CudaMemPool> {
         &self.cuda_pool
+    }
+
+    /// PR-7.4.1: Get the CUDA graph exec handle cache.
+    ///
+    /// Shared across all clones of this context. Used by
+    /// `dispatch_cuda_graph_replay_planner` to look up or insert
+    /// instantiated exec handles keyed by transfer shape.
+    pub(crate) fn graph_cache(&self) -> &Arc<GraphCache> {
+        &self.graph_cache
     }
 
     /// Clone the CUDA-event polling channel sender.

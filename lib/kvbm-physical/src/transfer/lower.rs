@@ -146,7 +146,7 @@ pub(crate) enum Candidate {
         ops: Vec<CopyOp>,
     },
     Staged {/* spec lands later */},
-    /// PR-7.4: CUDA graph capture/replay candidate.
+    /// PR-7.4 / PR-7.4.1: CUDA graph capture/replay candidate.
     ///
     /// Preferred over [`Candidate::DirectDma`] on Cuda-family routes when
     /// `TransferCapabilities::cuda_graph_replay` is enabled — score 1050 vs
@@ -158,23 +158,21 @@ pub(crate) enum Candidate {
     /// (src/dst pointers) is applied after cache lookup via CUDA graph node
     /// param updates — the actual block addresses differ each call.
     ///
-    /// **Status (PR-7.4):** Structural scaffolding. Score and `cache_key` are
-    /// wired. The executor dispatch arm returns an informative bail; no path
-    /// emits this variant today (no emitter exists), so the bail is structurally
-    /// unreachable in production. Full capture+rebind+cache wiring deferred to
-    /// PR-7.4.1:
-    ///   - `cudaStreamBeginCapture` / `cudaStreamEndCapture`
-    ///   - `cudaGraphInstantiate` → `cudaGraphExec_t`
-    ///   - `cudaGraphExecMemcpyNodeSetParams` per launch
-    ///   - `HashMap<GraphCacheKey, cudaGraphExec_t>` cache (thread-safe)
-    ///   - Cache invalidation policy (shape change, OOM eviction)
+    /// `ops` carries the copy descriptors (src/dst addresses + sizes). Each op
+    /// maps to one `cudaMemcpyAsync` node captured in the graph (Path B:
+    /// `MemcpyBatchMode::FallbackOnly` during capture). At replay time,
+    /// `cuGraphExecMemcpyNodeSetParams` rebinds each node's src/dst addresses
+    /// to the values in `ops`, which vary per call.
+    ///
+    /// **Status (PR-7.4.1):** Full capture + rebind + cache wiring.
     CudaGraphReplay {
         /// Shape descriptor for cache lookup and rebind. Addresses are NOT
         /// part of the key — they are rebound per launch.
         cache_key: GraphCacheKey,
-        // exec_handle: cudaGraphExec_t  — arrives in PR-7.4.1 once the
-        //   capture/instantiate/rebind path is wired. Placeholder comment
-        //   kept here so the struct diff in PR-7.4.1 is obvious.
+        /// Copy descriptors whose src/dst addresses are rebound on each
+        /// replay via `cuGraphExecMemcpyNodeSetParams`. Same ops as would
+        /// be used by the `DirectDma` path.
+        ops: Vec<CopyOp>,
     },
 }
 
@@ -387,23 +385,24 @@ pub(crate) fn score_candidate(candidate: &Candidate, ctx: &SelectionContext<'_>)
     }
 }
 
-/// PR-7.4: Dispatch stub for [`Candidate::CudaGraphReplay`].
+/// Validation helper for [`Candidate::CudaGraphReplay`] in unit tests.
 ///
-/// Always returns a bail with the PR-7.4.1 tracking message. Called from
-/// the executor's match arm when a `CudaGraphReplay` candidate is selected;
-/// today that arm is structurally unreachable (no path emits the variant),
-/// but the function is testable independently of the full executor pipeline.
+/// The real dispatch implementation lives in
+/// `transfer::executor::planner::dispatch_cuda_graph_replay_planner`
+/// (PR-7.4.1).  This function exists only so that lower.rs tests can
+/// verify the variant is formed correctly without needing a live
+/// `TransferContext` or CUDA stream.  It always returns `Ok(())`.
 ///
-/// **Deferred to PR-7.4.1:**
-/// - `cudaStreamBeginCapture` / `cudaStreamEndCapture`
-/// - `cudaGraphInstantiate` → `cudaGraphExec_t`
-/// - `cudaGraphExecMemcpyNodeSetParams` per launch (address rebinding)
-/// - `HashMap<GraphCacheKey, cudaGraphExec_t>` cache (thread-safe, FIFO eviction)
-pub(crate) fn dispatch_cuda_graph_replay(_key: &GraphCacheKey) -> Result<()> {
-    bail!(
-        "PR-7.4.1: cudaGraph replay capture+launch not yet wired \
-         (Candidate emitted but no executor path)"
-    )
+/// Unit tests that want to verify key-formation logic call this;
+/// integration tests exercise the real planner path.
+pub(crate) fn validate_cuda_graph_replay_key(key: &GraphCacheKey) -> Result<()> {
+    if key.descriptor_count == 0 {
+        bail!(
+            "validate_cuda_graph_replay_key: descriptor_count must be > 0 \
+             (zero-op graph has nothing to replay)"
+        );
+    }
+    Ok(())
 }
 
 /// Lower a [`CopyPlan`] to a vector of executor candidates.
@@ -512,7 +511,8 @@ mod tests {
                     dtype_width_bytes: None,
                     route_family: 0,
                     candidate_class: 0,
-                }
+                },
+                ops: vec![],
             }
             .class_name(),
             "CudaGraphReplay"
@@ -1037,7 +1037,10 @@ mod tests {
     }
 
     fn graph_replay_candidate() -> Candidate {
-        Candidate::CudaGraphReplay { cache_key: make_graph_cache_key() }
+        Candidate::CudaGraphReplay {
+            cache_key: make_graph_cache_key(),
+            ops: vec![CopyOp { src_addr: 0x1000, dst_addr: 0x2000, size: 4096 }],
+        }
     }
 
     /// When `caps.cuda_graph_replay = true`, `CudaGraphReplay` scores 1050 and
@@ -1108,18 +1111,20 @@ mod tests {
         );
     }
 
-    /// The `dispatch_cuda_graph_replay` stub must return an error whose message
-    /// contains "PR-7.4.1" — enabling precise identification of the unimplemented
-    /// path in logs and test output.
+    /// `validate_cuda_graph_replay_key` succeeds for a well-formed key (non-zero
+    /// descriptor count) and errors for a zero-descriptor key. PR-7.4.1 wires
+    /// the real dispatch in `planner::dispatch_cuda_graph_replay_planner`.
     #[test]
-    fn cuda_graph_replay_dispatch_bails_with_precise_error() {
+    fn cuda_graph_replay_key_validation() {
         let key = make_graph_cache_key();
-        let err = dispatch_cuda_graph_replay(&key)
-            .expect_err("dispatch_cuda_graph_replay must bail (PR-7.4.1 stub)");
-        let msg = format!("{err}");
         assert!(
-            msg.contains("PR-7.4.1"),
-            "expected 'PR-7.4.1' in dispatch error message, got: {msg}"
+            validate_cuda_graph_replay_key(&key).is_ok(),
+            "well-formed key must pass validation"
+        );
+        let zero_key = GraphCacheKey { descriptor_count: 0, ..key.clone() };
+        assert!(
+            validate_cuda_graph_replay_key(&zero_key).is_err(),
+            "zero descriptor_count must fail validation"
         );
     }
 }

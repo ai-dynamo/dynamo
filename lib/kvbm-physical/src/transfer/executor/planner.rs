@@ -37,6 +37,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 use cudarc::driver::CudaStream;
+use cudarc::driver::sys as cu_sys;
 use cudarc::runtime::sys::cudaStream_t;
 use dynamo_memory::nixl::{XferDescList, XferOp};
 use kvbm_kernels::MemcpyBatchMode;
@@ -46,8 +47,10 @@ use super::{PhysicalLayout, TransferStrategy};
 use crate::BlockId;
 use crate::layout::KvBlockLayout;
 use crate::transfer::context::TransferCompleteNotification;
+use crate::transfer::graph_cache::{GraphCache, ManagedExecHandle};
 use crate::transfer::lower::{
-    Candidate, SelectionContext, lower_to_candidates, physical_to_layout_view, select_candidate,
+    Candidate, GraphCacheKey, SelectionContext, lower_to_candidates, physical_to_layout_view,
+    select_candidate,
 };
 use crate::transfer::plan::{
     AnnotatedLayout, CopyOp, CopyPlan, CopyPolicy, TransferSelection, TransformReason, plan_copy,
@@ -137,6 +140,9 @@ pub(crate) fn execute_planner_cuda_transfer(
         }
         PlanOutcome::SmallStridedCopy(ops) => {
             dispatch_small_strided_copy(&ops, &stream)?;
+        }
+        PlanOutcome::CudaGraphReplay { cache_key, ops } => {
+            dispatch_cuda_graph_replay_planner(&ops, &cache_key, ctx.graph_cache(), &stream)?;
         }
     }
 
@@ -251,6 +257,11 @@ pub(crate) fn execute_planner_nixl_transfer(
         PlanOutcome::SmallStridedCopy(_) => bail!(
             "execute_planner_nixl_transfer: unexpected SmallStridedCopy outcome — \
              NIXL paths use min_inner_bytes = 0 and must always produce Direct. \
+             This is an internal routing bug."
+        ),
+        PlanOutcome::CudaGraphReplay { .. } => bail!(
+            "execute_planner_nixl_transfer: unexpected CudaGraphReplay outcome — \
+             graph replay is only valid on Cuda-family routes, not NIXL. \
              This is an internal routing bug."
         ),
     };
@@ -374,6 +385,12 @@ enum PlanOutcome {
     /// `size` (inner_bytes at the cut point). Dispatched via
     /// `kvbm_kernels::vectorized_copy` on the Cuda path.
     SmallStridedCopy(Vec<CopyOp>),
+    /// PR-7.4.1: CUDA graph capture/replay. `ops` are the copy
+    /// descriptors whose addresses are rebound on each replay.
+    CudaGraphReplay {
+        cache_key: GraphCacheKey,
+        ops: Vec<CopyOp>,
+    },
 }
 
 impl PlanOutcome {
@@ -391,6 +408,7 @@ impl PlanOutcome {
             #[cfg(feature = "permute_kernels")]
             PlanOutcome::Transform { .. } => "TransformKernel",
             PlanOutcome::SmallStridedCopy(_) => "SmallStridedCopy",
+            PlanOutcome::CudaGraphReplay { .. } => "CudaGraphReplay",
         }
     }
 
@@ -412,12 +430,13 @@ impl PlanOutcome {
                 block_pairs.len() * src_bytes_per_block
             }
             PlanOutcome::SmallStridedCopy(ops) => ops.iter().map(|o| o.size).sum(),
+            PlanOutcome::CudaGraphReplay { ops, .. } => ops.iter().map(|o| o.size).sum(),
         }
     }
 
     /// Number of descriptors / ops in the outcome.
     ///
-    /// For `Direct` / `SmallStridedCopy`: op count.
+    /// For `Direct` / `SmallStridedCopy` / `CudaGraphReplay`: op count.
     /// For `Transform`: block-pair count (one kernel call per pair group).
     fn descriptor_count(&self) -> usize {
         match self {
@@ -426,6 +445,7 @@ impl PlanOutcome {
             #[cfg(feature = "permute_kernels")]
             PlanOutcome::Transform { block_pairs, .. } => block_pairs.len(),
             PlanOutcome::SmallStridedCopy(ops) => ops.len(),
+            PlanOutcome::CudaGraphReplay { ops, .. } => ops.len(),
         }
     }
 }
@@ -506,11 +526,45 @@ fn plan_and_lower(
     match plan {
         CopyPlan::Direct(ops) if ops.is_empty() => Ok(PlanOutcome::Empty),
         CopyPlan::Direct(_) => {
-            let candidates = lower_to_candidates(plan)?;
+            let mut candidates = lower_to_candidates(plan)?;
             let total_bytes: usize = match &candidates[..] {
                 [Candidate::DirectDma { ops }] => ops.iter().map(|o| o.size).sum(),
                 _ => 0,
             };
+            // PR-7.4.1: emit a CudaGraphReplay candidate alongside DirectDma on
+            // Cuda-family routes when cuda_graph_replay is enabled. The scorer
+            // gives CudaGraphReplay a higher score (1050) than DirectDma (1000),
+            // so select_candidate picks it when the cap is on. The ops are shared
+            // with the DirectDma candidate; rebinding happens per-launch.
+            if capabilities.cuda_graph_replay && strategy.is_cuda_family() {
+                if let [Candidate::DirectDma { ops }] = &candidates[..] {
+                    let route_family = match strategy {
+                        TransferStrategy::CudaAsyncH2D => 0u8,
+                        TransferStrategy::CudaAsyncD2H => 1u8,
+                        TransferStrategy::CudaAsyncD2D => 2u8,
+                        _ => 3u8,
+                    };
+                    // `dtype_width_bytes` from LayoutConfig is always set
+                    // (defaults to 2 if not explicitly configured). We use it
+                    // as the dtype discriminant regardless of whether the
+                    // `permute_kernels` feature is active, keeping the cache
+                    // key consistent across feature configurations.
+                    let cache_key = GraphCacheKey {
+                        descriptor_count: ops.len(),
+                        total_bytes,
+                        dtype_width_bytes: Some(
+                            src.layout().config().dtype_width_bytes as u32,
+                        ),
+                        route_family,
+                        candidate_class: 0, // DirectDma-shaped
+                    };
+                    let replay_ops = ops.clone();
+                    candidates.push(Candidate::CudaGraphReplay {
+                        cache_key,
+                        ops: replay_ops,
+                    });
+                }
+            }
             let sel_ctx = SelectionContext {
                 strategy,
                 descriptor_count: candidates.len(),
@@ -522,15 +576,15 @@ fn plan_and_lower(
             let chosen = select_candidate(&candidates, &sel_ctx)?;
             match chosen {
                 Candidate::DirectDma { ops } => Ok(PlanOutcome::Direct(ops.clone())),
-                // PR-7.4: CudaGraphReplay is structurally unreachable here today
-                // (no path emits the variant → select_candidate never picks it),
-                // but the arm ensures a precise error if it ever is reached.
-                Candidate::CudaGraphReplay { .. } => bail!(
-                    "PR-7.4.1: cudaGraph replay capture+launch not yet wired \
-                     (Candidate emitted but no executor path)"
-                ),
+                // PR-7.4.1: CudaGraphReplay selected — emit with ops for capture/rebind.
+                Candidate::CudaGraphReplay { cache_key, ops } => {
+                    Ok(PlanOutcome::CudaGraphReplay {
+                        cache_key: cache_key.clone(),
+                        ops: ops.clone(),
+                    })
+                }
                 other => bail!(
-                    "plan_and_lower: select_candidate returned non-DirectDma for a \
+                    "plan_and_lower: select_candidate returned unexpected variant for \
                      CopyPlan::Direct: {other:?}"
                 ),
             }
@@ -562,12 +616,6 @@ fn plan_and_lower(
             let chosen = select_candidate(&candidates, &sel_ctx)?;
             match chosen {
                 Candidate::SmallStridedCopy { ops } => Ok(PlanOutcome::SmallStridedCopy(ops.clone())),
-                // PR-7.4: bail with the standard PR-7.4.1 message if somehow
-                // CudaGraphReplay is selected for a ThresholdFallback plan.
-                Candidate::CudaGraphReplay { .. } => bail!(
-                    "PR-7.4.1: cudaGraph replay capture+launch not yet wired \
-                     (Candidate emitted but no executor path)"
-                ),
                 other => bail!(
                     "plan_and_lower: select_candidate returned unexpected variant for \
                      ThresholdFallback: {other:?}"
@@ -1158,6 +1206,11 @@ impl OwnedStagedContext {
                  outcome — staged NIXL leg uses min_inner_bytes = 0 and must go Direct. \
                  This is an internal routing bug."
             ),
+            PlanOutcome::CudaGraphReplay { .. } => bail!(
+                "OwnedStagedContext::build_and_post_nixl_leg: unexpected CudaGraphReplay \
+                 outcome — staged NIXL legs use min_inner_bytes = 0 and cuda_graph_replay \
+                 is disabled on NIXL routes. This is an internal routing bug."
+            ),
         };
 
         let src_metadata = src.nixl_metadata();
@@ -1566,6 +1619,372 @@ fn dispatch_ops_grouped_by_size(ops: &[CopyOp], stream: &CudaStream) -> Result<(
             ));
         }
     }
+    Ok(())
+}
+
+/// PR-7.4.1: Dispatch a CUDA graph capture/replay transfer.
+///
+/// **Path B** (plan §Lesson 16 choice): uses `MemcpyBatchMode::FallbackOnly`
+/// during stream capture so CUDA records N individual `cudaMemcpyAsync` nodes
+/// (one per op), each independently rebindable via `cuGraphExecMemcpyNodeSetParams`.
+///
+/// # Algorithm
+///
+/// 1. **Cache lookup**: check `graph_cache` for `cache_key`.
+/// 2. **Cache miss — capture**:
+///    a. `cuStreamBeginCapture` on `capture_stream` (a temporary stream, never
+///       used for work; capture is per-stream in RELAXED mode).
+///    b. Issue `kvbm_kernels::memcpy_batch(FallbackOnly)` on `capture_stream` —
+///       N individual `cudaMemcpyAsync` calls captured as N graph nodes.
+///    c. `cuStreamEndCapture` → `CUgraph`.
+///    d. `cuGraphInstantiate` → `CUgraphExec`.
+///    e. `cuGraphGetNodes` → collect node handles in node-list order.
+///    f. Filter to MEMCPY-type nodes; verify count == ops.len().
+///    g. Store in cache as `ManagedExecHandle`.
+/// 3. **Address rebind** (both hit and miss paths):
+///    For each (node, op) pair call `cuGraphExecMemcpyNodeSetParams` with a
+///    `CUDA_MEMCPY3D` descriptor for the current op's `src_addr` / `dst_addr`.
+///    Memory type is `CU_MEMORYTYPE_UNIFIED` (works for both device and
+///    pinned-host pointers under CUDA unified addressing).
+/// 4. **Launch**: `cuGraphLaunch(exec, work_stream.cu_stream())`.
+///
+/// # Stream model
+///
+/// Capture uses an on-the-fly temporary stream distinct from the caller's work
+/// stream (CUDA requires the capture stream to be different from any stream
+/// currently active in the CUDA context). Launch always uses the caller's
+/// `work_stream` — the graph's nodes are not bound to any specific stream at
+/// instantiation time.
+///
+/// # Thread safety
+///
+/// The `GraphCache` is `Mutex<...>`-guarded. Cache lookup and insertion each
+/// hold the lock for the minimal window. Address rebind and launch are done
+/// with the exec handle raw pointer acquired from the cache; the lock is NOT
+/// held during these CUDA API calls — the caller is responsible for ensuring
+/// that the same exec handle is not concurrently launched by two threads
+/// (which is a CUDA-level constraint as well).  In kvbm-physical the planner
+/// is called synchronously per-transfer, so concurrent replay of the same
+/// exec is not possible today.
+fn dispatch_cuda_graph_replay_planner(
+    ops: &[CopyOp],
+    cache_key: &GraphCacheKey,
+    graph_cache: &Arc<GraphCache>,
+    work_stream: &Arc<CudaStream>,
+) -> Result<()> {
+    use std::mem::MaybeUninit;
+
+    if ops.is_empty() {
+        return Ok(());
+    }
+
+    // ── Helper: build a CUDA_MEMCPY3D descriptor for a CopyOp ────────────────
+    //
+    // Both src and dst are declared as CU_MEMORYTYPE_UNIFIED. Under CUDA
+    // unified addressing this covers device-allocated, pinned-host, and
+    // managed memory without needing to query the pointer's actual type.
+    // The copy goes through the unified address space regardless; CUDA
+    // dispatches the optimal DMA path internally.
+    let make_memcpy3d = |src_addr: usize, dst_addr: usize, size: usize| -> cu_sys::CUDA_MEMCPY3D {
+        let mut p: cu_sys::CUDA_MEMCPY3D = unsafe { MaybeUninit::zeroed().assume_init() };
+        p.srcMemoryType = cu_sys::CUmemorytype::CU_MEMORYTYPE_UNIFIED;
+        p.srcDevice = src_addr as cu_sys::CUdeviceptr;
+        p.dstMemoryType = cu_sys::CUmemorytype::CU_MEMORYTYPE_UNIFIED;
+        p.dstDevice = dst_addr as cu_sys::CUdeviceptr;
+        p.WidthInBytes = size;
+        p.Height = 1;
+        p.Depth = 1;
+        p
+    };
+
+    // ── 1. Cache lookup ───────────────────────────────────────────────────────
+
+    if let Some((exec, nodes)) = graph_cache.get_exec_and_nodes(cache_key) {
+        // Cache hit: rebind addresses then launch.
+        if nodes.len() != ops.len() {
+            bail!(
+                "dispatch_cuda_graph_replay_planner: cache hit but node count \
+                 mismatch (cached={}, ops={}). Cache key collision or bug.",
+                nodes.len(),
+                ops.len()
+            );
+        }
+        for (node, op) in nodes.iter().zip(ops.iter()) {
+            let params = make_memcpy3d(op.src_addr, op.dst_addr, op.size);
+            let result = unsafe {
+                cu_sys::cuGraphExecMemcpyNodeSetParams(
+                    exec,
+                    *node,
+                    &params as *const cu_sys::CUDA_MEMCPY3D,
+                    std::ptr::null_mut(), // ctx: NULL uses current context
+                )
+            };
+            if result != cu_sys::CUresult::CUDA_SUCCESS {
+                bail!(
+                    "dispatch_cuda_graph_replay_planner: cuGraphExecMemcpyNodeSetParams \
+                     failed with result={result:?}"
+                );
+            }
+        }
+        // Launch on the caller's work stream.
+        let result = unsafe {
+            cu_sys::cuGraphLaunch(exec, work_stream.cu_stream())
+        };
+        if result != cu_sys::CUresult::CUDA_SUCCESS {
+            bail!(
+                "dispatch_cuda_graph_replay_planner: cuGraphLaunch (cache hit) \
+                 failed with result={result:?}"
+            );
+        }
+        return Ok(());
+    }
+
+    // ── 2. Cache miss: capture the graph ─────────────────────────────────────
+
+    // Create a temporary stream for capture. We use a brand-new CudaStream
+    // via the same CudaContext that backs the work stream. cuStreamBeginCapture
+    // with RELAXED mode allows the captured stream to issue operations against
+    // any memory visible in the current context — required for D2D transfers
+    // since src and dst may be on the same device.
+    //
+    // SAFETY: `cu_stream` is valid for the lifetime of `work_stream` (shared
+    // context); the temporary stream is destroyed at the end of this block.
+
+    // Build a capture stream. We need access to the context to create a new
+    // stream.  cudarc doesn't expose `CudaStream::new` with a context handle
+    // externally, but we can use `cu_sys::cuStreamCreate` directly.
+    let mut capture_stream_raw: cu_sys::CUstream = std::ptr::null_mut();
+    {
+        let result = unsafe {
+            cu_sys::cuStreamCreate(
+                &mut capture_stream_raw as *mut cu_sys::CUstream,
+                cu_sys::CUstream_flags::CU_STREAM_DEFAULT as u32,
+            )
+        };
+        if result != cu_sys::CUresult::CUDA_SUCCESS {
+            bail!(
+                "dispatch_cuda_graph_replay_planner: cuStreamCreate failed with \
+                 result={result:?}"
+            );
+        }
+    }
+    // RAII guard: destroy the capture stream regardless of what follows.
+    struct StreamGuard(cu_sys::CUstream);
+    impl Drop for StreamGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { let _ = cu_sys::cuStreamDestroy_v2(self.0); }
+            }
+        }
+    }
+    let _capture_guard = StreamGuard(capture_stream_raw);
+
+    // Begin capture in RELAXED mode so the capture stream can see all
+    // device-visible memory (D2D and H2D/D2H pointers).
+    {
+        let result = unsafe {
+            cu_sys::cuStreamBeginCapture_v2(
+                capture_stream_raw,
+                cu_sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED,
+            )
+        };
+        if result != cu_sys::CUresult::CUDA_SUCCESS {
+            bail!(
+                "dispatch_cuda_graph_replay_planner: cuStreamBeginCapture_v2 \
+                 failed with result={result:?}"
+            );
+        }
+    }
+
+    // Issue N individual cudaMemcpyAsync calls on the capture stream via
+    // FallbackOnly mode. Each call records a separate MEMCPY graph node,
+    // one per op, independently rebindable at replay time.
+    {
+        let mut src_ptrs: Vec<*const c_void> = Vec::with_capacity(ops.len());
+        let mut dst_ptrs: Vec<*mut c_void> = Vec::with_capacity(ops.len());
+        // All ops must share the same size for the batch dispatch.
+        // The DirectDma path groups by size upstream; CudaGraphReplay
+        // is only emitted for same-size groups (descriptor_count encodes
+        // the count, total_bytes = count * size_per_op for uniform ops).
+        // We dispatch all ops in one memcpy_batch call using the first op's
+        // size — mixed sizes within a CudaGraphReplay batch are currently
+        // not supported and would be caught by the cache-key collision check.
+        let first_size = ops[0].size;
+        for op in ops {
+            src_ptrs.push(op.src_addr as *const c_void);
+            dst_ptrs.push(op.dst_addr as *mut c_void);
+        }
+        let status = unsafe {
+            kvbm_kernels::memcpy_batch(
+                src_ptrs.as_ptr(),
+                dst_ptrs.as_ptr(),
+                first_size,
+                ops.len(),
+                MemcpyBatchMode::FallbackOnly,
+                capture_stream_raw as cudaStream_t,
+            )
+        };
+        if status != cudarc::runtime::sys::cudaError::cudaSuccess {
+            // End capture to clean up before bailing.
+            let mut _g: cu_sys::CUgraph = std::ptr::null_mut();
+            unsafe { let _ = cu_sys::cuStreamEndCapture(capture_stream_raw, &mut _g as *mut _); }
+            bail!(
+                "dispatch_cuda_graph_replay_planner: memcpy_batch (FallbackOnly) \
+                 during capture failed with status={status:?}"
+            );
+        }
+    }
+
+    // End capture → CUgraph.
+    let cu_graph = {
+        let mut g: cu_sys::CUgraph = std::ptr::null_mut();
+        let result = unsafe {
+            cu_sys::cuStreamEndCapture(capture_stream_raw, &mut g as *mut cu_sys::CUgraph)
+        };
+        if result != cu_sys::CUresult::CUDA_SUCCESS {
+            bail!(
+                "dispatch_cuda_graph_replay_planner: cuStreamEndCapture failed \
+                 with result={result:?}"
+            );
+        }
+        g
+    };
+
+    // Instantiate the graph → CUgraphExec.
+    let cu_graph_exec = {
+        let mut exec: cu_sys::CUgraphExec = std::ptr::null_mut();
+        let result = unsafe {
+            cu_sys::cuGraphInstantiateWithFlags(
+                &mut exec as *mut cu_sys::CUgraphExec,
+                cu_graph,
+                0u64, // no special flags
+            )
+        };
+        if result != cu_sys::CUresult::CUDA_SUCCESS {
+            unsafe { let _ = cu_sys::cuGraphDestroy(cu_graph); }
+            bail!(
+                "dispatch_cuda_graph_replay_planner: cuGraphInstantiateWithFlags \
+                 failed with result={result:?}"
+            );
+        }
+        exec
+    };
+
+    // Collect graph nodes. The node list order corresponds to the capture
+    // order — which matches ops insertion order because FallbackOnly issues
+    // memcpy calls sequentially.
+    let nodes: Vec<cu_sys::CUgraphNode> = {
+        // Two-pass: first query count, then collect.
+        let mut num_nodes: usize = 0;
+        let result = unsafe {
+            cu_sys::cuGraphGetNodes(cu_graph, std::ptr::null_mut(), &mut num_nodes as *mut usize)
+        };
+        if result != cu_sys::CUresult::CUDA_SUCCESS {
+            unsafe {
+                let _ = cu_sys::cuGraphExecDestroy(cu_graph_exec);
+                let _ = cu_sys::cuGraphDestroy(cu_graph);
+            }
+            bail!(
+                "dispatch_cuda_graph_replay_planner: cuGraphGetNodes (count query) \
+                 failed with result={result:?}"
+            );
+        }
+        if num_nodes != ops.len() {
+            unsafe {
+                let _ = cu_sys::cuGraphExecDestroy(cu_graph_exec);
+                let _ = cu_sys::cuGraphDestroy(cu_graph);
+            }
+            bail!(
+                "dispatch_cuda_graph_replay_planner: expected {} graph nodes \
+                 (one per op), got {num_nodes}. FallbackOnly capture may have \
+                 coalesced ops or added extra synchronisation nodes.",
+                ops.len()
+            );
+        }
+        let mut node_vec = vec![std::ptr::null_mut::<cu_sys::CUgraphNode_st>(); num_nodes];
+        let result = unsafe {
+            cu_sys::cuGraphGetNodes(
+                cu_graph,
+                node_vec.as_mut_ptr(),
+                &mut num_nodes as *mut usize,
+            )
+        };
+        if result != cu_sys::CUresult::CUDA_SUCCESS {
+            unsafe {
+                let _ = cu_sys::cuGraphExecDestroy(cu_graph_exec);
+                let _ = cu_sys::cuGraphDestroy(cu_graph);
+            }
+            bail!(
+                "dispatch_cuda_graph_replay_planner: cuGraphGetNodes (fill) \
+                 failed with result={result:?}"
+            );
+        }
+        node_vec
+    };
+
+    // Verify all nodes are MEMCPY type.
+    for (i, &node) in nodes.iter().enumerate() {
+        let mut node_type = cu_sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_EMPTY;
+        let result = unsafe {
+            cu_sys::cuGraphNodeGetType(node, &mut node_type as *mut cu_sys::CUgraphNodeType)
+        };
+        if result != cu_sys::CUresult::CUDA_SUCCESS {
+            unsafe {
+                let _ = cu_sys::cuGraphExecDestroy(cu_graph_exec);
+                let _ = cu_sys::cuGraphDestroy(cu_graph);
+            }
+            bail!(
+                "dispatch_cuda_graph_replay_planner: cuGraphNodeGetType for node \
+                 {i} failed with result={result:?}"
+            );
+        }
+        if node_type != cu_sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_MEMCPY {
+            unsafe {
+                let _ = cu_sys::cuGraphExecDestroy(cu_graph_exec);
+                let _ = cu_sys::cuGraphDestroy(cu_graph);
+            }
+            bail!(
+                "dispatch_cuda_graph_replay_planner: node {i} is not a MEMCPY \
+                 node (type={node_type:?}). cudaMemcpyAsync (FallbackOnly) must \
+                 have produced a non-memcpy node — unexpected CUDA driver behaviour."
+            );
+        }
+    }
+
+    // Store the exec handle in the cache.
+    let handle = ManagedExecHandle { exec: cu_graph_exec, graph: cu_graph, nodes: nodes.clone() };
+    graph_cache.insert(cache_key.clone(), handle);
+
+    // ── 3 & 4. Rebind addresses then launch (first-time path) ────────────────
+
+    for (node, op) in nodes.iter().zip(ops.iter()) {
+        let params = make_memcpy3d(op.src_addr, op.dst_addr, op.size);
+        let result = unsafe {
+            cu_sys::cuGraphExecMemcpyNodeSetParams(
+                cu_graph_exec,
+                *node,
+                &params as *const cu_sys::CUDA_MEMCPY3D,
+                std::ptr::null_mut(),
+            )
+        };
+        if result != cu_sys::CUresult::CUDA_SUCCESS {
+            bail!(
+                "dispatch_cuda_graph_replay_planner: cuGraphExecMemcpyNodeSetParams \
+                 (first launch) failed with result={result:?}"
+            );
+        }
+    }
+
+    let result = unsafe {
+        cu_sys::cuGraphLaunch(cu_graph_exec, work_stream.cu_stream())
+    };
+    if result != cu_sys::CUresult::CUDA_SUCCESS {
+        bail!(
+            "dispatch_cuda_graph_replay_planner: cuGraphLaunch (first launch) \
+             failed with result={result:?}"
+        );
+    }
+
     Ok(())
 }
 

@@ -42,6 +42,7 @@ pub(crate) mod checksum;
 pub mod context;
 pub(crate) mod executor;
 pub(crate) mod fill;
+pub(crate) mod graph_cache;
 #[cfg(feature = "permute_kernels")]
 pub(crate) mod kernel_catalog;
 pub(crate) mod lower;

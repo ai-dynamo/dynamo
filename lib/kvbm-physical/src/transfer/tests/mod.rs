@@ -11,6 +11,7 @@
 
 pub(crate) mod gate;
 mod local_transfers;
+mod planner_graph_replay;
 mod planner_nixl;
 mod planner_path;
 
