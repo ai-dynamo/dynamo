@@ -42,6 +42,8 @@ pub(crate) mod checksum;
 pub mod context;
 pub(crate) mod executor;
 pub(crate) mod fill;
+#[cfg(feature = "permute_kernels")]
+pub(crate) mod kernel_catalog;
 pub(crate) mod lower;
 pub(crate) mod notifications;
 pub(crate) mod options;

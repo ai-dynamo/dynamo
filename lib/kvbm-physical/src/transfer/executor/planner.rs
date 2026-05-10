@@ -49,7 +49,9 @@ use crate::transfer::context::TransferCompleteNotification;
 use crate::transfer::lower::{
     Candidate, lower_to_candidates, physical_to_layout_view, select_candidate,
 };
-use crate::transfer::plan::{AnnotatedLayout, CopyOp, CopyPolicy, TransferSelection, plan_copy};
+use crate::transfer::plan::{
+    AnnotatedLayout, CopyOp, CopyPlan, CopyPolicy, TransferSelection, plan_copy,
+};
 
 /// Dispatch a CudaAsync transfer through the stride-aware planner.
 ///
@@ -80,29 +82,41 @@ pub(crate) fn execute_planner_cuda_transfer(
 ) -> Result<TransferCompleteNotification> {
     validate_cuda_planner_entry(strategy, src.layout().block_layout(), dst.layout().block_layout())?;
 
-    let ops = match plan_and_lower(src, dst, src_block_ids, dst_block_ids)? {
-        PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
-        PlanOutcome::Ops(ops) => ops,
-    };
+    let outcome = plan_and_lower(src, dst, src_block_ids, dst_block_ids)?;
 
     // Acquire a stream (caller-provided or pool-acquired). Direction
     // determines which stream pool we draw from.
     let caller_manages_sync = cuda_stream.is_some();
-    let stream = if let Some(s) = cuda_stream {
-        s
-    } else {
-        match strategy {
-            TransferStrategy::CudaAsyncD2H => ctx.next_d2h_streams(),
-            _ => ctx.next_h2d_streams(),
+    let stream = match &outcome {
+        PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
+        _ => {
+            if let Some(s) = cuda_stream {
+                s
+            } else {
+                match strategy {
+                    TransferStrategy::CudaAsyncD2H => ctx.next_d2h_streams(),
+                    _ => ctx.next_h2d_streams(),
+                }
+            }
         }
     };
 
-    // Dispatch ops to CUDA. Group by `size` so each `memcpy_batch`
-    // call has a uniform `size_per_copy`. The common case is one
-    // group (uniform op size after coalescing); if the planner emits
-    // heterogeneous sizes (e.g. partial coalescing across non-
-    // contiguous block runs), we issue one batch per size.
-    dispatch_ops_grouped_by_size(&ops, stream.as_ref())?;
+    match outcome {
+        PlanOutcome::Empty => unreachable!("handled above"),
+        PlanOutcome::Direct(ops) => {
+            // Group by `size` so each `memcpy_batch` call has a
+            // uniform `size_per_copy`. Common case is one group;
+            // heterogeneous sizes get one batch per size.
+            dispatch_ops_grouped_by_size(&ops, stream.as_ref())?;
+        }
+        #[cfg(feature = "permute_kernels")]
+        PlanOutcome::Transform {
+            invocation,
+            block_pairs,
+        } => {
+            dispatch_transform_kernel(&invocation, src, dst, &block_pairs, &stream)?;
+        }
+    }
 
     if caller_manages_sync {
         return Ok(TransferCompleteNotification::completed());
@@ -154,7 +168,14 @@ pub(crate) fn execute_planner_nixl_transfer(
 
     let ops = match plan_and_lower(src, dst, src_block_ids, dst_block_ids)? {
         PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
-        PlanOutcome::Ops(ops) => ops,
+        PlanOutcome::Direct(ops) => ops,
+        #[cfg(feature = "permute_kernels")]
+        PlanOutcome::Transform { .. } => bail!(
+            "execute_planner_nixl_transfer: cross-agent transforms are not yet \
+             wired (PR-6.2 lands the Staged executor that pulls raw bytes through \
+             a local intermediate, runs the kernel, then places). Drop \
+             use_planner=true for this transfer."
+        ),
     };
 
     let nixl_agent = ctx.nixl_agent();
@@ -228,8 +249,17 @@ enum PlanOutcome {
     /// The transfer has nothing to do (empty block list, or planner
     /// returned an empty op vec).
     Empty,
-    /// Lowered ops to dispatch.
-    Ops(Vec<CopyOp>),
+    /// Lowered ops to dispatch via `cudaMemcpyBatchAsync` / NIXL
+    /// `XferDescList`.
+    Direct(Vec<CopyOp>),
+    /// PR-6.1: a `KernelInvocation` resolved through the catalog —
+    /// dispatch via the matching `kvbm-kernels` FFI entrypoint with
+    /// pointer arrays built from the original `PhysicalLayout`s.
+    #[cfg(feature = "permute_kernels")]
+    Transform {
+        invocation: crate::transfer::kernel_catalog::KernelInvocation,
+        block_pairs: Vec<(BlockId, BlockId)>,
+    },
 }
 
 /// Shared "validate → project → plan → lower" pipeline used by both
@@ -250,38 +280,167 @@ fn plan_and_lower(
         return Ok(PlanOutcome::Empty);
     }
 
+    let block_pairs: Vec<(BlockId, BlockId)> = src_block_ids
+        .iter()
+        .zip(dst_block_ids.iter())
+        .map(|(&s, &d)| (s, d))
+        .collect();
+
+    // Catalog dispatch for layout pairs whose semantics differ
+    // (NHD↔HND, operational↔universal, etc.). `plan_copy` would
+    // technically still produce a Direct op-set for these via
+    // per-coord stride math — each op being a `head_size` byte
+    // chunk — but the resulting descriptor count is large
+    // (`num_blocks_to_transfer × num_layers × outer_dim × page_size
+    // × num_heads`) and the dedicated permute kernel is the
+    // intended path. Routing these to the catalog before
+    // `plan_copy` runs keeps `plan_copy` focused on same-shape
+    // copies and surfaces a no-matching-kernel error precisely
+    // when no kernel covers the pair (e.g. NHD↔HND in PR-6.1
+    // before PR-6.3 lands a transpose kernel).
+    #[cfg(feature = "permute_kernels")]
+    {
+        let src_kv = src.layout().block_layout();
+        let dst_kv = dst.layout().block_layout();
+        if src_kv.requires_transform(&dst_kv) {
+            let invocation = build_transform_invocation(src, dst)?;
+            return Ok(PlanOutcome::Transform {
+                invocation,
+                block_pairs,
+            });
+        }
+    }
+
     let src_view = physical_to_layout_view(src)?;
     let dst_view = physical_to_layout_view(dst)?;
     let src_al = AnnotatedLayout::from_view(&src_view)?;
     let dst_al = AnnotatedLayout::from_view(&dst_view)?;
 
-    let block_pairs: Vec<(usize, usize)> = src_block_ids
-        .iter()
-        .zip(dst_block_ids.iter())
-        .map(|(&s, &d)| (s, d))
-        .collect();
-    let selection = TransferSelection::full(block_pairs);
-    // PR-5 policy: `min_inner_bytes = 0` — see
-    // `execute_planner_cuda_transfer` for rationale.
+    // `block_pairs` was already built above; `plan_copy` consumes
+    // a `usize`-typed pair list.
+    let plan_block_pairs: Vec<(usize, usize)> = block_pairs.iter().map(|&(s, d)| (s, d)).collect();
+    let selection = TransferSelection::full(plan_block_pairs);
+    // PR-6.1 keeps `min_inner_bytes = 0`. Restoring the 4 KiB default
+    // would be unsafe — `plan_copy` emits `CopyPlan::Transform` when
+    // `inner_bytes < min_inner_bytes` regardless of whether the
+    // layouts are semantically identical, and the catalog returns
+    // `None` for same-layout pairs (no transform needed). Result:
+    // small same-layout copies would become planner errors. PR-7
+    // splits "semantic transform required" from "threshold fallback"
+    // inside `plan_copy` and registers a small-strided-copy candidate
+    // so the threshold can be reinstated.
     let policy = CopyPolicy {
         min_inner_bytes: 0,
         coalesce: true,
     };
 
     let plan = plan_copy(&src_al, &dst_al, &selection, &policy)?;
-    let candidates = lower_to_candidates(plan)?;
-    let chosen = select_candidate(&candidates)?;
-    let ops = match chosen {
-        Candidate::DirectDma { ops } => ops.clone(),
-        other => bail!(
-            "plan_and_lower: PR-5 only supports DirectDma, got {:?}",
-            other
+    match plan {
+        CopyPlan::Direct(ops) if ops.is_empty() => Ok(PlanOutcome::Empty),
+        CopyPlan::Direct(_) => {
+            let candidates = lower_to_candidates(plan)?;
+            let chosen = select_candidate(&candidates)?;
+            match chosen {
+                Candidate::DirectDma { ops } => Ok(PlanOutcome::Direct(ops.clone())),
+                other => bail!(
+                    "plan_and_lower: select_candidate returned non-DirectDma for a \
+                     CopyPlan::Direct: {other:?}"
+                ),
+            }
+        }
+        // Same-KvBlockLayout pairs only reach `plan_copy`; if it
+        // somehow returns Transform anyway (e.g. future
+        // `min_inner_bytes` policy), surface it as an unhandled
+        // case until PR-7's threshold-fallback machinery lands.
+        CopyPlan::Transform { .. } => bail!(
+            "plan_and_lower: plan_copy emitted Transform for a same-KvBlockLayout \
+             pair — PR-6.1's catalog only dispatches when KvBlockLayout differs \
+             (handled before plan_copy). PR-7 will introduce threshold-fallback \
+             for small-tail same-layout copies."
         ),
-    };
-    if ops.is_empty() {
-        return Ok(PlanOutcome::Empty);
+        CopyPlan::Staged { .. } => bail!(
+            "plan_and_lower: CopyPlan::Staged is reserved (NIXL transforms in PR-6.2)"
+        ),
     }
-    Ok(PlanOutcome::Ops(ops))
+}
+
+/// Resolve a kernel for a `CopyPlan::Transform` through the catalog
+/// and build the launch parameters. Errors precisely when no kernel
+/// covers the (src_kv, dst_kv, dtype) triple.
+#[cfg(feature = "permute_kernels")]
+fn build_transform_invocation(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+) -> Result<crate::transfer::kernel_catalog::KernelInvocation> {
+    use crate::transfer::kernel_catalog::{KernelInvocation, KernelKind, match_kernel, to_kernel_block_layout};
+
+    let src_kv = src.layout().block_layout();
+    let dst_kv = dst.layout().block_layout();
+    let cfg = src.layout().config();
+    if cfg != dst.layout().config() {
+        bail!(
+            "build_transform_invocation: src.config != dst.config — the catalog only \
+             dispatches transforms between same-shape layouts (got src.num_blocks={}, \
+             src.num_layers={}, src.outer_dim={}, src.page_size={}, src.inner_dim={}, \
+             dst.num_blocks={}, dst.num_layers={}, dst.outer_dim={}, dst.page_size={}, \
+             dst.inner_dim={})",
+            cfg.num_blocks, cfg.num_layers, cfg.outer_dim, cfg.page_size, cfg.inner_dim,
+            dst.layout().config().num_blocks, dst.layout().config().num_layers,
+            dst.layout().config().outer_dim, dst.layout().config().page_size,
+            dst.layout().config().inner_dim,
+        );
+    }
+    let dtype = cfg.dtype.ok_or_else(|| {
+        anyhow!(
+            "build_transform_invocation: cfg.dtype is required for transform dispatch \
+             (catalog dispatches on real TensorDataType, not byte width)"
+        )
+    })?;
+    let nh = cfg.num_heads.ok_or_else(|| {
+        anyhow!(
+            "build_transform_invocation: cfg.num_heads is required for transform dispatch"
+        )
+    })?;
+    if !cfg.inner_dim.is_multiple_of(nh) {
+        bail!(
+            "build_transform_invocation: inner_dim ({}) is not divisible by num_heads ({})",
+            cfg.inner_dim,
+            nh
+        );
+    }
+    let head_dim = cfg.inner_dim / nh;
+
+    let kind = match_kernel(src_kv, dst_kv, dtype).ok_or_else(|| {
+        anyhow!(
+            "build_transform_invocation: no kernel registered for (src={src_kv:?}, \
+             dst={dst_kv:?}, dtype={dtype:?}). NHD↔HND lands in PR-6.3; \
+             UniversalPP support is also pending."
+        )
+    })?;
+
+    // The kernel template selects NHD vs HND from the *operational*
+    // side of the pair.
+    let operational_kv = match kind {
+        KernelKind::UniversalFromBlock => src_kv, // operational → universal
+        KernelKind::BlockFromUniversal => dst_kv, // universal → operational
+    };
+    let block_layout = to_kernel_block_layout(operational_kv).ok_or_else(|| {
+        anyhow!(
+            "build_transform_invocation: operational side {operational_kv:?} \
+             has no kernel-side BlockLayout mapping"
+        )
+    })?;
+
+    Ok(KernelInvocation {
+        kind,
+        num_layers: cfg.num_layers,
+        outer_dim: cfg.outer_dim,
+        page_size: cfg.page_size,
+        num_heads: nh,
+        head_dim,
+        dtype,
+        block_layout,
+    })
 }
 
 /// Outcome of [`validate_planner_inputs`].
@@ -326,9 +485,13 @@ pub(crate) fn validate_planner_block_ids(
 
 /// Per-entrypoint guard for [`execute_planner_cuda_transfer`].
 ///
-/// Rejects strategies outside the `CudaAsync{H2D,D2H,D2D}` family and
-/// layout pairs that would require a kernel-side transform (PR-6.1
-/// drops the layout check once the kernel catalog handles transforms).
+/// Rejects strategies outside the `CudaAsync{H2D,D2H,D2D}` family.
+/// Layout-pair compatibility is enforced downstream by the kernel
+/// catalog (`build_transform_invocation`): identical layouts go
+/// through the Direct path, registered transform pairs through the
+/// Transform path, unregistered transform pairs surface a precise
+/// no-matching-kernel error.
+#[cfg_attr(feature = "permute_kernels", allow(unused_variables))]
 pub(crate) fn validate_cuda_planner_entry(
     strategy: TransferStrategy,
     src_block_layout: KvBlockLayout,
@@ -346,12 +509,16 @@ pub(crate) fn validate_cuda_planner_entry(
              entrypoint"
         );
     }
+    // Without the `permute_kernels` feature, the catalog isn't compiled
+    // in, so transforms can't be dispatched — keep the conservative
+    // guard active in that build.
+    #[cfg(not(feature = "permute_kernels"))]
     if src_block_layout.requires_transform(&dst_block_layout) {
         bail!(
             "validate_cuda_planner_entry: src ({src_block_layout:?}) and dst \
-             ({dst_block_layout:?}) require a kernel-side transform, which is not \
-             yet wired in the planner path (PR-6.1 lands the kernel catalog). \
-             Drop use_planner=true for this transfer."
+             ({dst_block_layout:?}) require a kernel-side transform, but the \
+             `permute_kernels` feature is not enabled in kvbm-physical. Drop \
+             use_planner=true or build with --features permute_kernels."
         );
     }
     Ok(())
@@ -387,6 +554,154 @@ pub(crate) fn validate_nixl_planner_entry(
              ({dst_block_layout:?}) require a kernel-side transform, which is \
              not yet wired in the NIXL planner path (PR-6.2 lands the Staged \
              executor). Drop use_planner=true for this transfer."
+        );
+    }
+    Ok(())
+}
+
+/// Dispatch a `KernelInvocation` resolved by the catalog: build the
+/// per-side pointer arrays from `(src, dst, block_pairs)`, push them
+/// to device memory, and launch the matching `kvbm-kernels` FFI
+/// entrypoint.
+///
+/// Pointer-array shape per kernel:
+/// - **operational side**: one pointer per (block, layer, outer)
+///   chunk; total length `num_blocks_to_transfer * num_layers * outer_dim`.
+///   Walked via `Layout::memory_region(block, layer, outer)`.
+/// - **universal side**: one pointer per block; total length
+///   `num_blocks_to_transfer`. Computed as
+///   `single_buffer_base + block_id * bytes_per_block` (universal
+///   layouts are FC-only, so a single allocation backs all blocks).
+#[cfg(feature = "permute_kernels")]
+fn dispatch_transform_kernel(
+    invocation: &crate::transfer::kernel_catalog::KernelInvocation,
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    block_pairs: &[(BlockId, BlockId)],
+    stream: &Arc<CudaStream>,
+) -> Result<()> {
+    use cudarc::driver::DevicePtr;
+
+    use crate::transfer::kernel_catalog::KernelKind;
+
+    let stream_raw = stream.cu_stream() as cudaStream_t;
+    let nl = invocation.num_layers;
+    let no = invocation.outer_dim;
+    let nt = invocation.page_size;
+    let nh = invocation.num_heads;
+    let hd = invocation.head_dim;
+
+    // Determine which side is operational vs universal.
+    let (op_layout, op_block_id_of, univ_layout, univ_block_id_of): (
+        &PhysicalLayout,
+        Box<dyn Fn(&(BlockId, BlockId)) -> BlockId>,
+        &PhysicalLayout,
+        Box<dyn Fn(&(BlockId, BlockId)) -> BlockId>,
+    ) = match invocation.kind {
+        KernelKind::UniversalFromBlock => (
+            src,
+            Box::new(|p: &(BlockId, BlockId)| p.0),
+            dst,
+            Box::new(|p: &(BlockId, BlockId)| p.1),
+        ),
+        KernelKind::BlockFromUniversal => (
+            dst,
+            Box::new(|p: &(BlockId, BlockId)| p.1),
+            src,
+            Box::new(|p: &(BlockId, BlockId)| p.0),
+        ),
+    };
+
+    // Operational pointer table: nb × nl × no entries, packed as
+    // [block_idx][layer*no + outer]. The kernel iterates this table
+    // in the same order.
+    let mut op_ptrs: Vec<usize> = Vec::with_capacity(block_pairs.len() * nl * no);
+    for pair in block_pairs {
+        let block_id = op_block_id_of(pair);
+        for layer in 0..nl {
+            for outer in 0..no {
+                let region = op_layout.layout().memory_region(block_id, layer, outer)
+                    .map_err(|e| anyhow!(
+                        "dispatch_transform_kernel: failed to read operational chunk \
+                         (block={block_id}, layer={layer}, outer={outer}): {e:?}"
+                    ))?;
+                op_ptrs.push(region.addr());
+            }
+        }
+    }
+
+    // Universal pointer table: one base per block. Universal layouts
+    // are FC-only (LayerSeparate rejects them at build), so all
+    // blocks live in a single allocation and per-block bases are
+    // `single_buffer_base + block_id * bytes_per_block`.
+    let univ_buffers = univ_layout.layout().memory_regions();
+    if univ_buffers.len() != 1 {
+        bail!(
+            "dispatch_transform_kernel: universal side expects 1 Buffer, got {}",
+            univ_buffers.len()
+        );
+    }
+    let univ_base = univ_buffers[0].addr();
+    let bytes_per_block = univ_layout.layout().config().bytes_per_block();
+    let mut univ_ptrs: Vec<usize> = Vec::with_capacity(block_pairs.len());
+    for pair in block_pairs {
+        let block_id = univ_block_id_of(pair);
+        univ_ptrs.push(univ_base + block_id * bytes_per_block);
+    }
+
+    // Push pointer tables to device memory. The kernels expect
+    // device-accessible pointer arrays.
+    let op_dev = stream.clone_htod(&op_ptrs)?;
+    let univ_dev = stream.clone_htod(&univ_ptrs)?;
+    let (op_ptr_dev_raw, _op_guard) = op_dev.device_ptr(stream.as_ref());
+    let (univ_ptr_dev_raw, _univ_guard) = univ_dev.device_ptr(stream.as_ref());
+
+    let status = match invocation.kind {
+        KernelKind::UniversalFromBlock => {
+            let universal_ptrs = univ_ptr_dev_raw as usize as *const *mut c_void;
+            let block_ptrs = op_ptr_dev_raw as usize as *const *const c_void;
+            unsafe {
+                kvbm_kernels::universal_from_block(
+                    universal_ptrs,
+                    block_ptrs,
+                    block_pairs.len(),
+                    nh,
+                    nl,
+                    no,
+                    nt,
+                    hd,
+                    invocation.dtype,
+                    invocation.block_layout,
+                    stream_raw,
+                )
+            }
+        }
+        KernelKind::BlockFromUniversal => {
+            let universal_ptrs = univ_ptr_dev_raw as usize as *const *const c_void;
+            let block_ptrs = op_ptr_dev_raw as usize as *const *mut c_void;
+            unsafe {
+                kvbm_kernels::block_from_universal(
+                    universal_ptrs,
+                    block_ptrs,
+                    block_pairs.len(),
+                    nh,
+                    nl,
+                    no,
+                    nt,
+                    hd,
+                    invocation.dtype,
+                    invocation.block_layout,
+                    stream_raw,
+                )
+            }
+        }
+    };
+    if status != cudarc::runtime::sys::cudaError::cudaSuccess {
+        bail!(
+            "dispatch_transform_kernel: kernel launch failed with status={status:?} \
+             for kind={:?}, num_blocks_to_transfer={}",
+            invocation.kind,
+            block_pairs.len(),
         );
     }
     Ok(())
@@ -487,27 +802,34 @@ mod tests {
         }
     }
 
-    /// NHD ↔ HND is a semantic transform — rejected until PR-6.1
-    /// wires the kernel catalog.
+    /// PR-6.1: layout-pair compatibility is no longer enforced at the
+    /// Cuda entry guard — the kernel catalog dispatches transforms for
+    /// pairs it knows about, and surfaces a precise no-matching-kernel
+    /// error from `build_transform_invocation` for pairs it doesn't
+    /// (e.g. NHD↔HND, which lands in PR-6.3). The entry guard now only
+    /// rejects on strategy mismatch.
     #[test]
-    fn cuda_entry_rejects_nhd_hnd() {
-        let r = validate_cuda_planner_entry(
-            TransferStrategy::CudaAsyncD2D,
-            KvBlockLayout::OperationalNHD,
-            KvBlockLayout::OperationalHND,
+    fn cuda_entry_accepts_transform_pairs_now_handled_by_catalog() {
+        // Operational ↔ Universal — PR-6.1 catalog has both directions.
+        assert!(
+            validate_cuda_planner_entry(
+                TransferStrategy::CudaAsyncD2D,
+                KvBlockLayout::OperationalNHD,
+                KvBlockLayout::UniversalTP,
+            )
+            .is_ok()
         );
-        assert!(r.is_err());
-    }
-
-    /// Operational ↔ Universal also requires a kernel transform.
-    #[test]
-    fn cuda_entry_rejects_operational_to_universal() {
-        let r = validate_cuda_planner_entry(
-            TransferStrategy::CudaAsyncD2D,
-            KvBlockLayout::OperationalNHD,
-            KvBlockLayout::UniversalTP,
+        // NHD ↔ HND — catalog miss (PR-6.3), but the entry guard still
+        // accepts; the precise error comes from the catalog at lower
+        // time.
+        assert!(
+            validate_cuda_planner_entry(
+                TransferStrategy::CudaAsyncD2D,
+                KvBlockLayout::OperationalNHD,
+                KvBlockLayout::OperationalHND,
+            )
+            .is_ok()
         );
-        assert!(r.is_err());
     }
 
     /// Non-CudaAsync strategies routed into the Cuda entrypoint

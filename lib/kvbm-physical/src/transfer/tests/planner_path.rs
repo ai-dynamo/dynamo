@@ -183,3 +183,109 @@ async fn use_planner_matches_legacy_fc_fc_d2h() -> Result<()> {
     gpu_serial!();
     assert_planner_matches_legacy(LayoutType::FC, src_kind, LayoutType::FC, dst_kind).await
 }
+
+// ────────────────── PR-6.1: operational ↔ universal ──────────────────
+
+/// Build an FC PhysicalLayout on Device(0) with an explicit
+/// `KvBlockLayout`. PR-6.1 catalog dispatch needs the layout enum
+/// set; the standard helper only configures NHD.
+fn build_fc_with_block_layout(
+    agent: NixlAgent,
+    block_layout: KvBlockLayout,
+    num_blocks: usize,
+) -> PhysicalLayout {
+    let config = standard_config(num_blocks);
+    PhysicalLayout::builder(agent)
+        .with_config(config)
+        .with_block_layout(block_layout)
+        .fully_contiguous()
+        .allocate_device(0)
+        .build()
+        .unwrap()
+}
+
+/// Operational ↔ universal round-trip on Device(0). Fill an NHD
+/// source with a deterministic pattern, transfer NHD → universal via
+/// the planner-driven kernel catalog (`universal_from_block`), then
+/// universal → fresh NHD via the inverse kernel
+/// (`block_from_universal`). Verify the final NHD matches the source
+/// byte-for-byte.
+///
+/// There's no legacy comparison path for transforms — the legacy
+/// CudaAsync executor doesn't dispatch `universal_from_block` /
+/// `block_from_universal`, so a side-by-side check is impossible.
+/// The round-trip pattern is the strongest correctness check
+/// available.
+async fn assert_operational_universal_round_trip(operational: KvBlockLayout) -> Result<()> {
+    let agent = build_agent_for_kinds(&[StorageKind::Device(0)])?;
+    let src = build_fc_with_block_layout(agent.clone(), operational, 4);
+    let mid = build_fc_with_block_layout(agent.clone(), KvBlockLayout::UniversalTP, 4);
+    let dst = build_fc_with_block_layout(agent.clone(), operational, 4);
+
+    let src_blocks = vec![0, 1];
+    let mid_blocks = vec![2, 3];
+    let dst_blocks = vec![0, 1];
+
+    let src_checksums = fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
+    let ctx = create_transfer_context(agent, None).unwrap();
+    let options = || -> Result<TransferOptionsInternal> {
+        TransferOptionsInternal::builder().use_planner(true).build()
+    };
+
+    // Forward: operational → universal.
+    let forward = execute_transfer(&src, &mid, &src_blocks, &mid_blocks, options()?, ctx.context())?;
+    forward.await?;
+
+    // Reverse: universal → fresh operational.
+    let reverse = execute_transfer(&mid, &dst, &mid_blocks, &dst_blocks, options()?, ctx.context())?;
+    reverse.await?;
+
+    // dst[0,1] should hold the original src[0,1] pattern.
+    verify_checksums_by_position(&src_checksums, &src_blocks, &dst, &dst_blocks)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn use_planner_round_trip_nhd_via_universal() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    gpu_serial!();
+    assert_operational_universal_round_trip(KvBlockLayout::OperationalNHD).await
+}
+
+#[tokio::test]
+async fn use_planner_round_trip_hnd_via_universal() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    gpu_serial!();
+    assert_operational_universal_round_trip(KvBlockLayout::OperationalHND).await
+}
+
+/// Catalog miss: NHD ↔ HND has no kernel registered until PR-6.3.
+/// The planner-driven Cuda* path must surface a precise error from
+/// `build_transform_invocation` — no silent fallback to a raw copy.
+#[tokio::test]
+async fn use_planner_nhd_hnd_errors_with_no_matching_kernel() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    gpu_serial!();
+    let agent = build_agent_for_kinds(&[StorageKind::Device(0)])?;
+    let src = build_fc_with_block_layout(agent.clone(), KvBlockLayout::OperationalNHD, 4);
+    let dst = build_fc_with_block_layout(agent.clone(), KvBlockLayout::OperationalHND, 4);
+
+    let src_blocks = vec![0, 1];
+    let dst_blocks = vec![2, 3];
+
+    let _ = fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
+    let ctx = create_transfer_context(agent, None).unwrap();
+    let options = TransferOptionsInternal::builder().use_planner(true).build()?;
+
+    let result = execute_transfer(&src, &dst, &src_blocks, &dst_blocks, options, ctx.context());
+    let err = match result {
+        Ok(_) => panic!("execute_transfer should bail with a no-matching-kernel error for NHD↔HND"),
+        Err(e) => e,
+    };
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("no kernel registered") || msg.contains("OperationalNHD"),
+        "expected no-matching-kernel error, got: {msg}"
+    );
+    Ok(())
+}

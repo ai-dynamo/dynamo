@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use derive_builder::Builder;
+#[cfg(feature = "permute_kernels")]
+use kvbm_kernels::TensorDataType;
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 
@@ -57,6 +59,23 @@ pub struct LayoutConfig {
     #[builder(default = "None")]
     #[serde(default)]
     pub num_heads: Option<usize>,
+
+    /// Tensor element dtype (`F16`, `BF16`, `F32`, `F64`).
+    ///
+    /// Required by the kernel catalog when projecting a layout with a
+    /// known [`KvBlockLayout`] for transform dispatch — the kernels
+    /// dispatch on dtype templates (F16 vs BF16 differ even at the
+    /// same byte width). Validated at the projection site
+    /// (`transfer::lower::layout_to_view`), not at `build()`, so legacy
+    /// callers that don't enable `use_planner = true` are unaffected.
+    ///
+    /// `#[serde(skip)]` because [`TensorDataType`] does not implement
+    /// serde traits in `kvbm-kernels`. Cross-process layout reconstruction
+    /// will need to plumb this separately when wire transport lands.
+    #[cfg(feature = "permute_kernels")]
+    #[builder(default = "None")]
+    #[serde(skip)]
+    pub dtype: Option<TensorDataType>,
 }
 
 impl LayoutConfig {

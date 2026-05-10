@@ -35,9 +35,14 @@ validator = { workspace = true }
 [features]
 default = []
 collectives = []
+# Forwards to kvbm-kernels/permute_kernels: enables the universal_from_block /
+# block_from_universal kernels that drive operational↔universal layout
+# transforms in the planner-driven CudaAsync executor (PR-6.1+).
+permute_kernels = ["kvbm-kernels/permute_kernels"]
 static-kernels = ["kvbm-kernels/static-kernels"]
 testing = []
-testing-kvbm = []
+# Activates permute_kernels so test builds always link the catalog.
+testing-kvbm = ["permute_kernels"]
 testing-nixl-gds = []
 
 [dev-dependencies]
