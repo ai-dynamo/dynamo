@@ -201,7 +201,13 @@ class PrometheusAPIClient:
                         and container.metric.model.lower() == model_name.lower()
                         and container.metric.dynamo_namespace == self.dynamo_namespace
                     ):
-                        values.append(container.value[1])
+                        # Drop NaN: increase(_sum)/increase(_count) is 0/0 on
+                        # quiet windows, which Prometheus reports as NaN. We
+                        # treat that as "no data" — symmetric with the router
+                        # path below — to keep Metrics.is_valid() honest.
+                        v = container.value[1]
+                        if not math.isnan(v):
+                            values.append(v)
                 if not values:
                     logger.warning(
                         f"No prometheus metric data available for {full_metric_name} with model {model_name} and dynamo namespace {self.dynamo_namespace}, use 0 instead"
@@ -409,6 +415,85 @@ class PrometheusAPIClient:
         except Exception as e:
             logger.warning(f"Could not check router scraping status: {e}")
 
+    # ------------------------------------------------------------------
+    # Power-aware planner DCGM queries (Phase 1 dashboard + Phase 3 EMA)
+    # ------------------------------------------------------------------
+
+    def get_total_dgd_power(
+        self,
+        k8s_namespace: str,
+        dgd_name: str,
+    ) -> Optional[float]:
+        """Sum of DCGM-reported per-GPU watts across this DGD (all components).
+
+        Used for the dynamo_planner_power_projected_watts dashboard gauge.
+        Returns None when DCGM is unavailable or the query returns no results.
+
+        DCGM workload-attribution labels (added by the DCGM exporter when
+        kubelet/CRI exposes pod info) are ``exported_namespace`` (the
+        Kubernetes namespace the workload runs in) and ``exported_pod``
+        (the workload pod name).  The bare ``namespace`` and ``pod`` labels
+        identify the DCGM exporter pod itself, not the workload.
+
+        The pod-name regex matches the operator's pod-name format
+        ``<dgd_name>-<replica-index>-<service-key-lowercase>-<hash>``
+        (e.g. ``qwen3-quickstart-0-vllmworker-86nvj``).
+        """
+        try:
+            result = self.prom.custom_query(
+                f"sum(DCGM_FI_DEV_POWER_USAGE{{"
+                f'exported_namespace="{k8s_namespace}",'
+                f'exported_pod=~"^{dgd_name}-[0-9]+-.*"}})'
+            )
+            if result:
+                return float(result[0]["value"][1])
+        except Exception as e:
+            logger.debug("get_total_dgd_power query failed: %s", e)
+        return None
+
+    def get_avg_per_gpu_power_by_component(
+        self,
+        interval: str,
+        k8s_namespace: str,
+        dgd_name: str,
+        component: str,
+        service_key: str,
+    ) -> Optional[float]:
+        """Per-GPU average draw over the last ``interval`` for one component.
+
+        Drives the per-component c_power EMA update in Phase 3+ correction
+        coefficients (§5.3).  ``component`` is ``"prefill"``, ``"decode"``,
+        or ``"agg"`` — used in log messages only.  ``service_key`` is the
+        DGD service-dict key (e.g. ``"VllmDecodeWorker"``); the operator
+        embeds its lowercase form in the pod name as
+        ``<dgd>-<replica-idx>-<service-key-lc>-<hash>``.
+
+        Filters DCGM samples by ``exported_namespace`` (K8s namespace, not
+        dynamo namespace) and ``exported_pod`` (workload pod name, not the
+        DCGM exporter's own pod).  Returns ``None`` when the query fails,
+        ``service_key`` is empty, or the result is empty.
+        """
+        if not service_key:
+            logger.debug(
+                "get_avg_per_gpu_power_by_component: empty service_key for "
+                "component=%s; cannot build pod regex.",
+                component,
+            )
+            return None
+        try:
+            result = self.prom.custom_query(
+                f"avg_over_time("
+                f"  avg(DCGM_FI_DEV_POWER_USAGE{{"
+                f'      exported_namespace="{k8s_namespace}",'
+                f'      exported_pod=~"^{dgd_name}-[0-9]+-{service_key.lower()}-.*"}})'
+                f"[{interval}:])"
+            )
+            if result:
+                return float(result[0]["value"][1])
+        except Exception as e:
+            logger.debug("get_avg_per_gpu_power_by_component query failed: %s", e)
+        return None
+
 
 def parse_frontend_metric_containers(
     result: list[dict],
@@ -434,11 +519,54 @@ _WORKER_METRIC_NAMES = {
 
 
 class DirectRouterMetricsClient:
-    """Query router's /metrics endpoint directly for real-time per-worker metrics.
+    """Query a KV-router's /metrics endpoint directly for real-time per-worker metrics.
 
     Runs a continuous background sampling loop that collects metrics at
     evenly-spaced intervals (interval / num_samples). At decision time,
     the load-based loop reads the buffer via get_recent_and_averaged_metrics().
+
+    Supported endpoints (by deployment topology — see ``_WORKER_METRIC_NAMES``
+    for the gauges this client expects):
+
+    - **KV-routed aggregated/disagg DGDs** (frontend launched with
+      ``--router-mode kv``): scrape ``http://<dgd>-frontend:8000/metrics``.
+      The per-worker ``dynamo_frontend_worker_*`` gauges are emitted by the
+      frontend's in-process KV router via ``register_worker_load_metrics``
+      and ``register_worker_timing_metrics`` (see
+      ``lib/llm/src/http/service/service_v2.rs``).
+
+    NOT supported:
+
+    - **Standalone ``python3 -m dynamo.router`` LocalRouter** (Global Planner
+      topology) — the LocalRouter pod's ``/metrics`` is served by the runtime
+      ``system_status_server`` whose Prometheus registry is *separate* from
+      the frontend HTTP service's registry.  ``register_worker_load_metrics``
+      is only invoked from ``service_v2.rs``, so the per-worker
+      ``dynamo_frontend_worker_*`` gauges never appear on the LocalRouter's
+      ``/metrics`` even when KV routing decisions update the global
+      ``WORKER_LOAD_METRICS`` static.  Pool planners using a Global Planner
+      topology must therefore drive their per-worker view from the
+      ``PrometheusAPIClient`` (router-source histograms aggregated over the
+      pool's ``dynamo_namespace``) rather than this direct scrape client.
+      See open-question #14 in ``powerplanner-design.md``.
+    - **RoundRobin / Random / PowerOfTwoChoices / LeastLoaded** routing modes
+      (the default for ``python3 -m dynamo.frontend`` with no flags) — the
+      ``WORKER_LOAD_METRICS`` `IntGaugeVec` and ``WORKER_LAST_*_GAUGE``
+      ``GaugeVec`` are registered but never written, so Prometheus omits the
+      families entirely from the exposition.  Pointing this client at such an
+      endpoint will yield an empty parse result; the planner's load-based
+      decision loop should detect this and fall back to its frontend-source
+      ``PrometheusAPIClient`` branch (see §5.3 of ``powerplanner-design.md``).
+    - **Worker /metrics endpoints** (``<dgd>-vllmworker:9090/metrics``) —
+      these expose ``dynamo_component_*`` (the worker's own work counters),
+      not the per-worker router gauges this client targets.
+
+    The class name (`DirectRouter…`) emphasizes that we bypass Prometheus
+    and scrape the router process directly to read the latest gauge value
+    rather than the rate over a long window.  This matters for the
+    load-based loop because the gauges have ``set()`` semantics — a single
+    instance per ``(worker_id, dp_rank, worker_type)`` tuple — which
+    Prometheus's scrape interval would otherwise blur out.
     """
 
     def __init__(self, router_metrics_url: str, dynamo_namespace: str):

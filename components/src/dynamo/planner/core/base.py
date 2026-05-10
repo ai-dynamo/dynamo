@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from typing import TYPE_CHECKING, Optional, Union
 
@@ -31,7 +32,7 @@ from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.connectors.virtual import VirtualConnector
-from dynamo.planner.core.budget import _initialize_gpu_counts
+from dynamo.planner.core.budget import POWER_ANNOTATION_KEY, _initialize_gpu_counts
 from dynamo.planner.core.state_machine import PlannerStateMachine
 from dynamo.planner.core.types import (
     EngineCapabilities,
@@ -55,6 +56,7 @@ from dynamo.planner.offline.trace_data import extract_metrics_from_mooncake
 if TYPE_CHECKING:
     from dynamo.common.forward_pass_metrics import ForwardPassMetrics
     from dynamo.llm import FpmEventSubscriber
+    from dynamo.planner.monitoring.aic_power_optimizer import AICPowerOptimizer, PowerAwareConfig
 
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -188,6 +190,9 @@ class NativePlannerBase:
         # Live dashboard runner (started in _async_init)
         self._dashboard_runner: Optional[aiohttp.web.AppRunner] = None
 
+        # AIC closed-loop optimizer (Phase 3; None when disabled or not configured).
+        self._aic_optimizer: Optional["AICPowerOptimizer"] = None
+
         # State machine (created after WorkerInfo is resolved)
         self._state_machine: Optional[PlannerStateMachine] = None
 
@@ -289,6 +294,25 @@ class NativePlannerBase:
             )
 
         await self._bootstrap_regression()
+
+        # AIC optimizer startup sweep (Phase 3).
+        if self.config.enable_aic_optimizer:
+            try:
+                from dynamo.planner.monitoring.aic_power_optimizer import AICPowerOptimizer
+
+                self._aic_optimizer = AICPowerOptimizer(
+                    self.config, self.prometheus_metrics
+                )
+                initial_config = await asyncio.to_thread(self._aic_optimizer.optimize)
+                if initial_config is not None:
+                    await self._apply_aic_config(initial_config)
+            except Exception as exc:
+                logger.error(
+                    "AIC optimizer startup failed — planner will continue with "
+                    "static power enforcement: %s",
+                    exc,
+                )
+                self._aic_optimizer = None
 
         # Log operating mode at startup
         if self.config.advisory:
@@ -597,12 +621,22 @@ class NativePlannerBase:
         if not m.is_valid():
             logger.info("Metrics contain None or NaN values, skipping")
             return None
+
+        # Aggregate token throughput for AIC drift detection (§5.6).
+        rps = m.num_req / max(1.0, self.config.throughput_adjustment_interval)
+        total_tokens_per_s = rps * (m.isl + m.osl) if m.isl > 0 and m.osl > 0 else None
+
         return TrafficObservation(
             duration_s=self.config.throughput_adjustment_interval_seconds,
             num_req=m.num_req,
             isl=m.isl,
             osl=m.osl,
             kv_hit_rate=m.kv_hit_rate,
+            # AIC optimizer signals (Phase 3) — latency in seconds to match
+            # PrometheusAPIClient conventions; m.ttft / m.itl are in ms.
+            ttft_avg=m.ttft / 1000.0 if m.ttft and m.ttft > 0 else None,
+            itl_avg=m.itl / 1000.0 if m.itl and m.itl > 0 else None,
+            total_tokens_per_s=total_tokens_per_s,
         )
 
     async def _collect_kv_hit_rate_observation(
@@ -729,6 +763,25 @@ class NativePlannerBase:
         if tick.need_worker_fpm:
             fpm_obs = self._collect_fpm()
 
+        # Populate FPM-sourced scheduled token counts on the traffic observation
+        # so AICPowerOptimizer.update_correction() can gate per-side EMA updates
+        # on actual scheduled work (prevents idle-side coefficient drag — §5.3).
+        if traffic is not None and fpm_obs is not None:
+            if fpm_obs.prefill:
+                traffic.scheduled_prefill_tokens = float(
+                    sum(
+                        fpm.scheduled_requests.sum_prefill_tokens
+                        for fpm in fpm_obs.prefill.values()
+                    )
+                )
+            if fpm_obs.decode:
+                traffic.scheduled_decode_kv_tokens = float(
+                    sum(
+                        fpm.scheduled_requests.sum_decode_kv_tokens
+                        for fpm in fpm_obs.decode.values()
+                    )
+                )
+
         return TickInput(
             now_s=now,
             traffic=traffic,
@@ -743,6 +796,231 @@ class NativePlannerBase:
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         """Override in subclasses to report metrics and apply scaling."""
         pass
+
+    async def _apply_power_annotations(self) -> None:
+        """Annotate worker pods with per-GPU power limits (Phase 1).
+
+        Reads the actual annotation from each Pod object returned by
+        get_component_pods(). Only PATCHes when annotation is missing or wrong.
+        K8s is the source of truth — no local cache.
+
+        Called after _apply_effects() on every tick so newly-created pods
+        pick up the cap within one tick, and AIC-driven cap changes (Phase 3+)
+        propagate to all running pods automatically.
+        """
+        if not self.config.enable_power_awareness:
+            return
+        if not isinstance(self.connector, KubernetesConnector):
+            return
+
+        pods_and_limits: list[tuple] = []
+        if self.require_prefill:
+            for pod in self.connector.get_component_pods(SubComponentType.PREFILL):
+                pods_and_limits.append(
+                    (pod, str(self.config.prefill_engine_gpu_power_limit))
+                )
+        if self.require_decode:
+            for pod in self.connector.get_component_pods(SubComponentType.DECODE):
+                pods_and_limits.append(
+                    (pod, str(self.config.decode_engine_gpu_power_limit))
+                )
+
+        for pod, limit_str in pods_and_limits:
+            current = (pod.metadata.annotations or {}).get(POWER_ANNOTATION_KEY)
+            if current == limit_str:
+                continue
+            try:
+                self.connector.kube_api.patch_pod_annotation(
+                    pod.metadata.name, POWER_ANNOTATION_KEY, limit_str
+                )
+                logger.info(
+                    "Annotated pod %s with %s=%s",
+                    pod.metadata.name,
+                    POWER_ANNOTATION_KEY,
+                    limit_str,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to patch power annotation on pod %s: %s",
+                    pod.metadata.name,
+                    e,
+                )
+
+    def _publish_power_budget_metrics(
+        self, num_p: int, num_d: int
+    ) -> None:
+        """Emit power budget gauges (Phase 1, dashboard observability only).
+
+        Uses static config values — not DCGM — so budget enforcement in
+        _apply_power_budget() is unaffected when DCGM goes down.
+        """
+        if self.prometheus_port == 0 or not self.config.enable_power_awareness:
+            return
+        if self.config.total_gpu_power_limit is None:
+            return
+
+        p_gpu = self.config.prefill_engine_num_gpu or 0
+        d_gpu = self.config.decode_engine_num_gpu or 0
+        projected = (
+            num_p * self.config.prefill_engine_gpu_power_limit * p_gpu
+            + num_d * self.config.decode_engine_gpu_power_limit * d_gpu
+        )
+        budget = self.config.total_gpu_power_limit
+        pm = self.prometheus_metrics
+        pm.power_budget_total_watts.set(budget)
+        pm.power_projected_watts.set(projected)
+        pm.power_budget_utilization.set(projected / budget if budget > 0 else 0.0)
+
+    def _min_prefill_max_num_batched_tokens(self) -> Optional[int]:
+        """Return the minimum ``max_num_batched_tokens`` reported by prefill workers.
+
+        Used to derive a defense-in-depth absolute prefill admission threshold
+        (§5.7 B6).  The minimum-across-workers is conservative: a single
+        under-reporting worker does not silently raise the effective floor.
+        Returns ``None`` when no prefill worker has synced this value via MDC.
+        """
+        val = self.prefill_worker_info.max_num_batched_tokens if self.require_prefill else None
+        return val if val and val > 0 else None
+
+    async def _apply_aic_config(self, new_config: "PowerAwareConfig") -> None:
+        """Apply an AIC-recommended config to the planner state (§6.4 + §6.7).
+
+        Order of operations:
+        1. Update per-GPU power caps in PlannerConfig (picked up by
+           _apply_power_annotations() on the next tick).
+        2. Request replica scaling via the connector.
+        3. Update drift-comparison reference in the optimizer.
+        4. Derive and emit implied admission thresholds (inherit + autoset).
+        5. Fan out /busy_threshold POSTs to all frontend pods (autoset only).
+        """
+        if new_config is None:
+            return
+
+        # 1. Update config caps — _apply_power_annotations() reads these.
+        self.config.prefill_engine_gpu_power_limit = new_config.cap_p
+        self.config.decode_engine_gpu_power_limit = new_config.cap_d
+        logger.info(
+            "_apply_aic_config: cap_p=%dW cap_d=%dW n_p=%d n_d=%d",
+            new_config.cap_p,
+            new_config.cap_d,
+            new_config.n_p,
+            new_config.n_d,
+        )
+
+        # 2. Request replica scaling.
+        targets: list[TargetReplica] = []
+        if self.require_prefill and new_config.n_p > 0:
+            targets.append(
+                TargetReplica(
+                    sub_component_type=SubComponentType.PREFILL,
+                    desired_replicas=new_config.n_p,
+                    component_name=self.prefill_worker_info.k8s_name,
+                )
+            )
+        if self.require_decode and new_config.n_d > 0:
+            targets.append(
+                TargetReplica(
+                    sub_component_type=SubComponentType.DECODE,
+                    desired_replicas=new_config.n_d,
+                    component_name=self.decode_worker_info.k8s_name,
+                )
+            )
+        if targets:
+            await self._apply_scaling_targets(targets, blocking=False)
+
+        # 3. Pin drift-comparison reference (§5.6).
+        if self._aic_optimizer is not None:
+            self._aic_optimizer._estimated_throughput = (
+                new_config.aic_seq_per_s_per_replica
+                * new_config.n_d
+                * (new_config.isl + new_config.osl)
+            )
+
+        # 4. Admission gauges (inherit + autoset both record implied θ).
+        if self.prometheus_port != 0 and self.config.admission_mode != "off":
+            pm = self.prometheus_metrics
+            pm.admission_implied_theta_decode.set(new_config.theta_decode_impl)
+            pm.admission_implied_theta_prefill_frac.set(new_config.theta_prefill_frac_impl)
+
+        # 5. Fan out POSTs to frontends (autoset only).
+        if self.config.admission_mode == "autoset" and isinstance(
+            self.connector, KubernetesConnector
+        ):
+            await self._fanout_busy_threshold(new_config)
+
+    async def _fanout_busy_threshold(self, new_config: "PowerAwareConfig") -> None:
+        """POST /busy_threshold to every frontend replica (§5.7 autoset path)."""
+        margin = self.config.admission_safety_margin
+        theta_d_set = min(1.0, margin * new_config.theta_decode_impl)
+        theta_pf_set = min(1.0, margin * new_config.theta_prefill_frac_impl)
+
+        # B6: absolute prefill threshold (defense-in-depth vs MDC DEFAULT_MAX_TOKENS).
+        min_M = self._min_prefill_max_num_batched_tokens()
+        theta_p_abs_set: Optional[int]
+        if min_M is not None:
+            theta_p_abs_set = math.ceil(theta_pf_set * min_M)
+            if self.prometheus_port != 0:
+                self.prometheus_metrics.admission_set_theta_prefill_abs.set(theta_p_abs_set)
+        else:
+            theta_p_abs_set = None
+            if self.prometheus_port != 0:
+                self.prometheus_metrics.admission_max_batched_tokens_unavailable_total.inc()
+            logger.critical(
+                "No prefill worker reports max_num_batched_tokens via MDC; "
+                "absolute prefill admission threshold cannot be derived. "
+                "Frontend's DEFAULT_MAX_TOKENS=10M fallback may silently disable "
+                "the fractional prefill check until MDC re-syncs. "
+                "Investigate worker MDC plumbing."
+            )
+
+        if self.prometheus_port != 0:
+            pm = self.prometheus_metrics
+            pm.admission_set_theta_decode.set(theta_d_set)
+            pm.admission_set_theta_prefill_frac.set(theta_pf_set)
+
+        assert isinstance(self.connector, KubernetesConnector)
+        pods = self.connector.list_frontend_pods()
+        if not pods:
+            logger.debug("No frontend pods found; skipping /busy_threshold fanout.")
+            return
+
+        model_name = self.model_name or self.config.model_name or ""
+        # Per-pod port resolution: operator emits a named ``http`` port on
+        # the frontend container, so we read each pod's actual port from its
+        # spec and only fall back to the (deprecated) ``frontend_http_port``
+        # config field for legacy manifests.  This honors per-DGD port
+        # overrides without a config mirror — closes design-doc OQ #13.
+        results = await asyncio.gather(
+            *(
+                self.connector.post_busy_threshold(
+                    pod,
+                    model_name,
+                    port=self.connector.resolve_frontend_http_port(
+                        pod, fallback=self.config.frontend_http_port
+                    ),
+                    active_decode_blocks_threshold=theta_d_set,
+                    active_prefill_tokens_threshold=theta_p_abs_set,
+                    active_prefill_tokens_threshold_frac=theta_pf_set,
+                )
+                for pod in pods
+            ),
+            return_exceptions=True,
+        )
+
+        failed = [
+            p.metadata.name
+            for p, r in zip(pods, results)
+            if isinstance(r, Exception)
+        ]
+        if failed:
+            if self.prometheus_port != 0:
+                self.prometheus_metrics.admission_partial_success_total.inc(len(failed))
+            logger.error(
+                "Failed to POST /busy_threshold to %d/%d frontend pods: %s",
+                len(failed),
+                len(pods),
+                failed,
+            )
 
     async def _apply_scaling_targets(
         self, targets: list[TargetReplica], blocking: bool = False
@@ -838,6 +1116,7 @@ class NativePlannerBase:
         self.prometheus_metrics.num_prefill_replicas.set(num_p)
         self.prometheus_metrics.num_decode_replicas.set(num_d)
         self.prometheus_metrics.gpu_hours.set(self._cumulative_gpu_hours)
+        self._publish_power_budget_metrics(num_p, num_d)
 
     def _report_diagnostics(self, tick: ScheduledTick, diag: TickDiagnostics) -> None:
         if self.prometheus_port == 0:
@@ -888,6 +1167,104 @@ class NativePlannerBase:
                 self._publish_inventory_and_gpu_hours(tick_input)
                 effects = self.state_machine.on_tick(next_tick, tick_input)
                 await self._apply_effects(effects)
+                await self._apply_power_annotations()  # Phase 1: annotate pods with GPU power limit
+
+                # Phase 3: AIC closed-loop optimizer update + conditional re-sweep.
+                if self._aic_optimizer is not None and tick_input.traffic is not None:
+                    interval_str = f"{self.config.throughput_adjustment_interval}s"
+                    # DGD name lives on the connector, not PlannerConfig.  When
+                    # running outside K8s (virtual / global-planner connector),
+                    # the DCGM selector is meaningless and the queries below
+                    # gracefully degrade to None.
+                    dgd_name = (
+                        self.connector.graph_deployment_name
+                        if isinstance(self.connector, KubernetesConnector)
+                        else ""
+                    )
+                    # DCGM attribution labels carry the K8s namespace
+                    # (exported_namespace), not the dynamo logical namespace.
+                    # Resolve via the connector when running in-cluster.
+                    k8s_ns = (
+                        self.connector.kube_api.current_namespace
+                        if isinstance(self.connector, KubernetesConnector)
+                        else ""
+                    )
+
+                    if self.config.mode == "disagg":
+                        obs_ttft = self.prometheus_traffic_client.get_avg_time_to_first_token(
+                            interval_str, self.model_name or ""
+                        )
+                        obs_itl = self.prometheus_traffic_client.get_avg_inter_token_latency(
+                            interval_str, self.model_name or ""
+                        )
+                        self._aic_optimizer.update_correction(
+                            traffic=tick_input.traffic,
+                            observed_ttft_avg=obs_ttft if obs_ttft else None,
+                            observed_itl_avg=obs_itl if obs_itl else None,
+                            observed_power_w_prefill=(
+                                self.prometheus_traffic_client.get_avg_per_gpu_power_by_component(
+                                    interval=interval_str,
+                                    k8s_namespace=k8s_ns,
+                                    dgd_name=dgd_name,
+                                    component="prefill",
+                                    service_key=self.prefill_worker_info.k8s_name or "",
+                                )
+                                if self.require_prefill
+                                else None
+                            ),
+                            observed_power_w_decode=(
+                                self.prometheus_traffic_client.get_avg_per_gpu_power_by_component(
+                                    interval=interval_str,
+                                    k8s_namespace=k8s_ns,
+                                    dgd_name=dgd_name,
+                                    component="decode",
+                                    service_key=self.decode_worker_info.k8s_name or "",
+                                )
+                                if self.require_decode
+                                else None
+                            ),
+                        )
+                    else:  # agg mode
+                        obs_ttft = self.prometheus_traffic_client.get_avg_time_to_first_token(
+                            interval_str, self.model_name or ""
+                        )
+                        obs_itl = self.prometheus_traffic_client.get_avg_inter_token_latency(
+                            interval_str, self.model_name or ""
+                        )
+                        self._aic_optimizer.update_correction(
+                            traffic=tick_input.traffic,
+                            observed_ttft_avg=obs_ttft if obs_ttft else None,
+                            observed_itl_avg=obs_itl if obs_itl else None,
+                            observed_power_w_agg=(
+                                self.prometheus_traffic_client.get_avg_per_gpu_power_by_component(
+                                    interval=interval_str,
+                                    k8s_namespace=k8s_ns,
+                                    dgd_name=dgd_name,
+                                    component="agg",
+                                    service_key=self.decode_worker_info.k8s_name or "",
+                                )
+                                if self.require_decode
+                                else None
+                            ),
+                        )
+
+                    if self._aic_optimizer.should_reoptimize(tick_input.traffic):
+                        logger.info(
+                            "AIC optimizer: drift detected — triggering re-sweep."
+                        )
+                        try:
+                            new_aic_config = await asyncio.to_thread(
+                                self._aic_optimizer.optimize
+                            )
+                            if new_aic_config is not None:
+                                await self._apply_aic_config(new_aic_config)
+                        except Exception as exc:
+                            logger.error(
+                                "AIC re-sweep exception (planner continues with "
+                                "current config): %s",
+                                exc,
+                            )
+
                 self._report_diagnostics(next_tick, effects.diagnostics)
                 self._log_decision_summary(effects)
 

@@ -246,6 +246,120 @@ class PlannerConfig(BaseModel):
     # Advisory mode: compute and log decisions without executing scaling
     advisory: bool = SLAPlannerDefaults.advisory
 
+    # --- Power-aware scaling (Phase 1 + 2) ---
+    enable_power_awareness: bool = Field(
+        default=False,
+        description=(
+            "Enable power-aware replica scaling and pod annotation. "
+            "Requires total_gpu_power_limit and power_agent_safe_default_watts."
+        ),
+    )
+    total_gpu_power_limit: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Total GPU power budget in watts for this DGD. Required when "
+            "enable_power_awareness=True. Recommended formula: "
+            "(rack_capacity_W × headroom_factor) − non_gpu_overhead with "
+            "headroom_factor ≈ 0.85–0.9."
+        ),
+    )
+    prefill_engine_gpu_power_limit: int = Field(
+        default=SLAPlannerDefaults.prefill_engine_gpu_power_limit,
+        description="Per-GPU power cap (watts) applied to prefill replicas via NVML.",
+    )
+    decode_engine_gpu_power_limit: int = Field(
+        default=SLAPlannerDefaults.decode_engine_gpu_power_limit,
+        description="Per-GPU power cap (watts) applied to decode replicas via NVML.",
+    )
+    power_agent_safe_default_watts: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Per-GPU fail-closed cap (watts) the Power Agent applies on cold-start "
+            "GPUs (no prior cap) when annotation parsing fails. Required when "
+            "enable_power_awareness=True. Recommended: ~70%% of SKU TDP "
+            "(e.g. 500W on H200 SXM, 490W on H100 SXM)."
+        ),
+    )
+
+    # --- AIC optimizer (Phase 3+) ---
+    enable_aic_optimizer: bool = Field(default=False)
+    aic_system: Optional[str] = Field(
+        default=None,
+        description="AIC system identifier (e.g. 'h200_sxm'). Falls back to aic_interpolation.system.",
+    )
+    aic_reoptimize_interval: int = Field(default=SLAPlannerDefaults.aic_reoptimize_interval)
+    aic_drift_relative_threshold: float = Field(
+        default=SLAPlannerDefaults.aic_drift_relative_threshold, ge=0.0
+    )
+    aic_drift_consecutive_ticks: int = Field(
+        default=SLAPlannerDefaults.aic_drift_consecutive_ticks, ge=1
+    )
+    aic_initial_c_power_prefill: float = Field(
+        default=SLAPlannerDefaults.aic_initial_c_power_prefill,
+        description="Cold-start c_power_p (disagg prefill side). H200 dense: ~1.05.",
+    )
+    aic_initial_c_power_decode: float = Field(
+        default=SLAPlannerDefaults.aic_initial_c_power_decode,
+        description="Cold-start c_power_d (disagg decode side). H200 dense: ~1.15.",
+    )
+    aic_initial_c_power_agg: float = Field(
+        default=SLAPlannerDefaults.aic_initial_c_power_agg,
+        description="Cold-start c_power_agg (aggregated mode only).",
+    )
+    aic_initial_c_ttft: float = Field(
+        default=SLAPlannerDefaults.aic_initial_c_ttft,
+        description="Cold-start c_ttft before live data arrives.",
+    )
+    aic_initial_c_itl: float = Field(
+        default=SLAPlannerDefaults.aic_initial_c_itl,
+        description="Cold-start c_itl before live data arrives.",
+    )
+    aic_max_consecutive_failures: int = Field(
+        default=SLAPlannerDefaults.aic_max_consecutive_failures, ge=1
+    )
+    aic_throughput_regression_warn_threshold: float = Field(
+        default=SLAPlannerDefaults.aic_throughput_regression_warn_threshold,
+        ge=0.0,
+        le=1.0,
+    )
+
+    # --- Frontend admission coupling (Phase 3+) ---
+    admission_mode: Literal["off", "inherit", "autoset"] = Field(
+        default="off",
+        description=(
+            "Frontend /busy_threshold coupling. 'off' never POSTs; 'inherit' "
+            "computes implied thresholds and emits Prometheus gauges only; "
+            "'autoset' POSTs implied thresholds after every config change."
+        ),
+    )
+    admission_safety_margin: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Multiplier applied to implied thresholds before POST in autoset mode. "
+            "Lower values shed earlier (more headroom for queueing variance)."
+        ),
+    )
+    frontend_http_port: int = Field(
+        default=8000,
+        ge=1,
+        le=65535,
+        description=(
+            "Legacy fallback port for /busy_threshold POST in autoset "
+            "admission mode. The planner now reads each frontend pod's "
+            "actual HTTP port from V1Pod.spec.containers[].ports[name=http] "
+            "(emitted by the operator since v1.x — see "
+            "deploy/operator/internal/consts/consts.go DynamoContainerPortName). "
+            "This config field is consulted only when the named port is "
+            "missing from the pod spec, which covers hand-rolled DGDs and "
+            "manifests authored before the operator's named-port standardization. "
+            "Default 8000 matches the operator's DynamoServicePort."
+        ),
+    )
+
     # Diagnostics report settings
     report_interval_hours: Optional[float] = Field(
         default=24.0,
@@ -302,6 +416,41 @@ class PlannerConfig(BaseModel):
                 f"fpm_sample_bucket_size must be a perfect square, "
                 f"got {self.fpm_sample_bucket_size}"
             )
+
+        # Power-awareness validation
+        if self.enable_power_awareness:
+            if self.total_gpu_power_limit is None:
+                raise ValueError(
+                    "total_gpu_power_limit is required when enable_power_awareness=True. "
+                    "Recommended: (rack_capacity_W × headroom_factor) − non_gpu_overhead "
+                    "with headroom_factor ≈ 0.85–0.9. Setting this incorrectly "
+                    "could silently cap your cluster — there is no safe default."
+                )
+            if self.power_agent_safe_default_watts is None:
+                raise ValueError(
+                    "power_agent_safe_default_watts is required when "
+                    "enable_power_awareness=True. This is the cold-start fail-closed cap "
+                    "the Power Agent applies on a fresh GPU (no prior cap) when "
+                    "annotation parsing fails. Recommended: ~70%% of SKU TDP "
+                    "(e.g. 500W on H200 SXM)."
+                )
+
+        # AIC optimizer validation (Phase 3)
+        if self.enable_aic_optimizer:
+            if self.aic_interpolation is None:
+                raise ValueError(
+                    "enable_aic_optimizer=True requires aic_interpolation to be set. "
+                    "AICInterpolationSpec carries the AIC model/system/backend and the "
+                    "picked TP configs that constrain the optimizer sweep. "
+                    "In rapid mode, the profiler writes this to the planner ConfigMap. "
+                    "See AICInterpolationSpec for required fields."
+                )
+            if not self.enable_power_awareness:
+                raise ValueError(
+                    "enable_aic_optimizer=True requires enable_power_awareness=True. "
+                    "The AIC optimizer derives and applies per-GPU power caps; those "
+                    "caps only take effect when power awareness is enabled."
+                )
 
         if self.environment == "global-planner" and not self.global_planner_namespace:
             raise ValueError(

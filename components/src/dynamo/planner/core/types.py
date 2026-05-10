@@ -50,6 +50,20 @@ class TrafficObservation:
     osl: float
     kv_hit_rate: Optional[float] = None
 
+    # AIC optimizer signals (Phase 3).
+    # ttft_avg / itl_avg: Prometheus-observed averages in *seconds* (not ms).
+    # Used by AICPowerOptimizer.should_reoptimize() for SLA-miss detection.
+    ttft_avg: Optional[float] = None
+    itl_avg: Optional[float] = None
+    # total_tokens_per_s: aggregate (isl+osl) token throughput across the DGD.
+    # Used for capacity-exceeded drift detection.
+    total_tokens_per_s: Optional[float] = None
+    # scheduled_*_tokens: per-side FPM-sourced work volumes.
+    # Used to gate EMA updates: skip the update when a side is idle so the
+    # coefficient doesn't drift toward idle-watt / aic-watt ≈ 0.
+    scheduled_prefill_tokens: Optional[float] = None
+    scheduled_decode_kv_tokens: Optional[float] = None
+
 
 @dataclass
 class WorkerCounts:

@@ -48,6 +48,20 @@ rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamoworkermetadatas"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Pod permissions are required for actuation knobs that operate on the
+# operator-emitted workload pods, not on the DGD CR:
+#   - patch: write the per-GPU TGP power-limit annotation
+#       (`dynamo.nvidia.com/gpu-power-limit`) onto worker pods so the
+#       Power Agent DaemonSet can read it and call NVML.
+#   - get/list: discover worker pods by label selector (for power
+#       annotation) and frontend pods (for HTTP busy_threshold POST
+#       in admission control).
+#   - watch: included for symmetry with other planner watch verbs and
+#       to support future informer-based pod discovery without a
+#       follow-up RBAC bump.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -86,4 +100,10 @@ rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamoworkermetadatas"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# See namespace-restricted Role above for rationale; same verbs apply
+# cluster-wide so the planner can patch annotations on workload pods
+# in the namespace its DGD is deployed to.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "patch"]
 {{- end }}

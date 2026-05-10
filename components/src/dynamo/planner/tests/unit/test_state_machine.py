@@ -1311,3 +1311,71 @@ class TestDiagnostics:
         assert diag.predicted_osl is not None
         assert diag.engine_rps_prefill is not None
         assert diag.engine_rps_prefill > 0
+
+
+# ---------------------------------------------------------------------------
+# _apply_global_budget — regression tests (Open Question #2 fix)
+# ---------------------------------------------------------------------------
+
+
+class TestApplyGlobalBudgetNoUpscale:
+    """_apply_global_budget must never return num_d > input num_d.
+
+    Previously, when prefill was the binding constraint and budget slack
+    remained after scaling it down, the remaining GPU count was given
+    unconditionally to decode — silently up-scaling decode beyond the
+    caller's demand.  The fix adds min(num_d, ...) at the decode assignment.
+    """
+
+    def _make_sm(self, max_gpu_budget: int, p_gpu: int = 1, d_gpu: int = 1):
+        caps = WorkerCapabilities(
+            prefill=EngineCapabilities(num_gpu=p_gpu),
+            decode=EngineCapabilities(num_gpu=d_gpu),
+        )
+        config = _make_config(max_gpu_budget=max_gpu_budget, min_endpoint=1)
+        return PlannerStateMachine(config, caps)
+
+    def test_decode_never_exceeds_input_when_prefill_binding(self):
+        """Regression: asymmetric (p_gpu=4, d_gpu=1) budget, decode was input 2.
+
+        Before the fix: after scaling down prefill, remaining GPUs were
+        unconditionally assigned to decode → num_d could exceed input 2.
+        """
+        # p_gpu=4, d_gpu=1; input (10, 2), budget=20
+        # total = 10*4 + 2*1 = 42 > 20 → triggers scaling
+        # After fix: num_d must stay ≤ 2 (the input demand)
+        sm = self._make_sm(max_gpu_budget=20, p_gpu=4, d_gpu=1)
+        num_p, num_d = sm._apply_global_budget(10, 2)
+        assert num_d <= 2, f"num_d={num_d} exceeded input demand of 2"
+        assert num_p >= 1
+
+    def test_decode_never_exceeds_input_symmetric(self):
+        """Symmetric GPUs, decode input=3, large budget → no up-scale."""
+        # p_gpu=2, d_gpu=2; input (5, 3), budget=10
+        # total = 5*2 + 3*2 = 16 > 10
+        sm = self._make_sm(max_gpu_budget=10, p_gpu=2, d_gpu=2)
+        num_p, num_d = sm._apply_global_budget(5, 3)
+        assert num_d <= 3, f"num_d={num_d} exceeded input demand of 3"
+
+    def test_no_scaling_when_within_budget(self):
+        """When total GPUs fit in budget, both counts pass through unchanged."""
+        sm = self._make_sm(max_gpu_budget=100, p_gpu=1, d_gpu=1)
+        num_p, num_d = sm._apply_global_budget(4, 4)
+        assert num_p == 4
+        assert num_d == 4
+
+    def test_both_clamped_to_min_endpoint_when_budget_tiny(self):
+        sm = self._make_sm(max_gpu_budget=1, p_gpu=4, d_gpu=4)
+        # min_req = 1*4 + 1*4 = 8 > budget=1 → (0, 0)
+        num_p, num_d = sm._apply_global_budget(5, 5)
+        assert (num_p, num_d) == (0, 0)
+
+    def test_result_fits_within_budget(self):
+        """After clamping, num_p*p_gpu + num_d*d_gpu must be ≤ budget."""
+        for budget in [10, 15, 20, 25]:
+            sm = self._make_sm(max_gpu_budget=budget, p_gpu=4, d_gpu=1)
+            num_p, num_d = sm._apply_global_budget(8, 3)
+            total = num_p * 4 + num_d * 1
+            assert total <= budget, (
+                f"budget={budget}: result ({num_p}P,{num_d}D) uses {total} GPUs"
+            )

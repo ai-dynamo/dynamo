@@ -309,6 +309,128 @@ class KubernetesConnector(PlannerConnector):
 
         return prefill_gpu_count, decode_gpu_count
 
+    def get_component_pods(self, sub_component_type: SubComponentType) -> list:
+        """Return the list of Pod objects for the given sub-component (prefill/decode).
+
+        Uses the operator's canonical pod labels (see
+        deploy/operator/internal/consts/consts.go):
+          - nvidia.com/dynamo-graph-deployment-name=<dgd>
+          - nvidia.com/dynamo-component=<service-key> (e.g. VllmPrefillWorker)
+        Returns an empty list when the service cannot be resolved (e.g. the DGD
+        has no matching component — handled gracefully by the caller).
+        """
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        try:
+            service = get_service_from_sub_component_type_or_name(
+                deployment, sub_component_type=sub_component_type
+            )
+        except Exception:
+            return []
+        label_selector = (
+            f"nvidia.com/dynamo-graph-deployment-name={self.graph_deployment_name},"
+            f"nvidia.com/dynamo-component={service.name}"
+        )
+        return self.kube_api.list_pods_by_label(label_selector)
+
+    def list_frontend_pods(self) -> list:
+        """Return all frontend pods for this DGD.
+
+        Frontends are identified by nvidia.com/dynamo-component-type=frontend
+        (semantic role, robust to service-key naming variation across DGDs).
+        Used by the planner's admission-control fanout (§6.7).
+        Returns an empty list when no frontend service is running.
+        """
+        label_selector = (
+            f"nvidia.com/dynamo-graph-deployment-name={self.graph_deployment_name},"
+            f"nvidia.com/dynamo-component-type=frontend"
+        )
+        return self.kube_api.list_pods_by_label(label_selector)
+
+    @staticmethod
+    def resolve_frontend_http_port(pod, fallback: int) -> int:
+        """Resolve the frontend HTTP port from the live pod spec.
+
+        The operator emits a named port ``http`` on the frontend container
+        (see ``deploy/operator/internal/dynamo/component_frontend.go``; the
+        constant ``DynamoContainerPortName = "http"`` lives in
+        ``deploy/operator/internal/consts/consts.go``).  Reading it from
+        ``V1Pod`` is the deterministic path: it follows DGD-spec port
+        overrides automatically and doesn't require the planner to keep a
+        config mirror in sync — closes open-question #13 in
+        ``docs/design-docs/powerplanner-design.md``.
+
+        Falls back to ``fallback`` (typically the deprecated
+        ``frontend_http_port`` config field) when the named port is absent —
+        covers legacy manifests authored before the operator started
+        emitting the named port, hand-rolled DGDs that omit ``ports``, and
+        unit-test fixtures that build minimal ``V1Pod`` mocks.
+
+        Args:
+            pod: A ``V1Pod`` (or a duck-typed mock).  The first container
+                with a ``ports[].name == "http"`` entry wins.
+            fallback: Port to return when no named port is found on any
+                container.  Must be a positive ``int``.
+
+        Returns:
+            The container port whose name is ``"http"``, or ``fallback``.
+        """
+        try:
+            containers = (pod.spec.containers if pod.spec else None) or []
+            for container in containers:
+                for port in container.ports or []:
+                    if getattr(port, "name", None) == "http":
+                        return int(port.container_port)
+        except (AttributeError, TypeError, ValueError):
+            # Defensive: malformed pod spec shouldn't take down the
+            # admission-control loop; we always have a fallback.
+            pass
+        return fallback
+
+    async def post_busy_threshold(
+        self,
+        pod,
+        model: str,
+        port: int,
+        active_decode_blocks_threshold: Optional[float],
+        active_prefill_tokens_threshold: Optional[int],
+        active_prefill_tokens_threshold_frac: Optional[float],
+    ) -> None:
+        """POST /busy_threshold to a single frontend pod (§6.7).
+
+        Raises on HTTP error or network failure — callers should gather with
+        ``return_exceptions=True`` and inspect the results.
+        Per-pod timeout is 5 s (frontend is in-cluster; long timeouts mask
+        saturation events).
+        """
+        try:
+            import httpx
+        except ImportError as exc:
+            raise RuntimeError(
+                "httpx is required for admission-control POST support. "
+                "Install it with: pip install httpx"
+            ) from exc
+
+        pod_ip = pod.status.pod_ip
+        if not pod_ip:
+            raise ValueError(
+                f"Pod {pod.metadata.name} has no pod IP; cannot POST /busy_threshold"
+            )
+
+        url = f"http://{pod_ip}:{port}/busy_threshold"
+        body: dict = {"model": model}
+        if active_decode_blocks_threshold is not None:
+            body["active_decode_blocks_threshold"] = active_decode_blocks_threshold
+        if active_prefill_tokens_threshold is not None:
+            body["active_prefill_tokens_threshold"] = active_prefill_tokens_threshold
+        if active_prefill_tokens_threshold_frac is not None:
+            body["active_prefill_tokens_threshold_frac"] = (
+                active_prefill_tokens_threshold_frac
+            )
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(url, json=body)
+            r.raise_for_status()
+
     def get_frontend_metrics_url(self, port: int = 8000) -> Optional[str]:
         """Auto-discover the Frontend service's metrics URL from the DGD.
 
