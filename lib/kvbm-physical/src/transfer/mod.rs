@@ -116,6 +116,16 @@ impl BounceBufferInternal {
     pub fn from_layout(layout: PhysicalLayout, block_ids: Vec<BlockId>) -> Self {
         Self { layout, block_ids }
     }
+
+    #[cfg_attr(not(feature = "permute_kernels"), allow(dead_code))]
+    pub(crate) fn layout(&self) -> &PhysicalLayout {
+        &self.layout
+    }
+
+    #[cfg_attr(not(feature = "permute_kernels"), allow(dead_code))]
+    pub(crate) fn block_ids(&self) -> &[BlockId] {
+        &self.block_ids
+    }
 }
 
 // ============================================================================

@@ -398,6 +398,28 @@ impl TransferContext {
         &self.cuda_pool
     }
 
+    /// Clone the CUDA-event polling channel sender.
+    ///
+    /// Used by the planner-driven Staged executor (PR-6.2) to register
+    /// CUDA events from inside a `tokio::spawn`-ed chain task without
+    /// holding `&TransferContext` across an `.await`.
+    #[cfg(feature = "permute_kernels")]
+    pub(crate) fn tx_cuda_event_clone(
+        &self,
+    ) -> mpsc::Sender<RegisterPollingNotification<notifications::CudaEventChecker>> {
+        self.tx_cuda_event.clone()
+    }
+
+    /// Clone the NIXL status polling channel sender. Used for the same
+    /// reason as [`Self::tx_cuda_event_clone`] — Staged-task NIXL
+    /// completion registration without `&TransferContext`.
+    #[cfg(feature = "permute_kernels")]
+    pub(crate) fn tx_nixl_status_clone(
+        &self,
+    ) -> mpsc::Sender<RegisterPollingNotification<notifications::NixlStatusChecker>> {
+        self.tx_nixl_status.clone()
+    }
+
     /// Register a NIXL transfer request for status polling completion.
     ///
     /// This method enqueues the transfer request to be polled for completion

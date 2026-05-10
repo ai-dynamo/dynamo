@@ -155,6 +155,8 @@ pub(crate) fn execute_planner_nixl_transfer(
     src_block_ids: &[BlockId],
     dst_block_ids: &[BlockId],
     strategy: TransferStrategy,
+    #[cfg_attr(not(feature = "permute_kernels"), allow(unused_variables))]
+    bounce_buffer: Option<&crate::transfer::BounceBufferInternal>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     validate_nixl_planner_entry(strategy, src.layout().block_layout(), dst.layout().block_layout())?;
@@ -170,12 +172,20 @@ pub(crate) fn execute_planner_nixl_transfer(
         PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
         PlanOutcome::Direct(ops) => ops,
         #[cfg(feature = "permute_kernels")]
-        PlanOutcome::Transform { .. } => bail!(
-            "execute_planner_nixl_transfer: cross-agent transforms are not yet \
-             wired (PR-6.2 lands the Staged executor that pulls raw bytes through \
-             a local intermediate, runs the kernel, then places). Drop \
-             use_planner=true for this transfer."
-        ),
+        PlanOutcome::Transform {
+            invocation,
+            block_pairs,
+        } => {
+            let bounce = bounce_buffer.ok_or_else(|| anyhow!(
+                "execute_planner_nixl_transfer: cross-agent transform requires \
+                 TransferOptions::bounce_buffer to be set (the Staged executor pulls \
+                 raw bytes through a local intermediate, runs the kernel, then places). \
+                 Pass a registered local-Device PhysicalLayout via TransferOptions::bounce_buffer."
+            ))?;
+            return dispatch_staged_nixl_transform(
+                src, dst, invocation, block_pairs, bounce, strategy, xfer_op, ctx,
+            );
+        }
     };
 
     let nixl_agent = ctx.nixl_agent();
@@ -527,9 +537,12 @@ pub(crate) fn validate_cuda_planner_entry(
 /// Per-entrypoint guard for [`execute_planner_nixl_transfer`].
 ///
 /// Rejects strategies outside the `Nixl{Read,Write,ReadFlipped,
-/// WriteFlipped}` family and layout pairs that would require a
-/// kernel-side transform (PR-6.2 drops the layout check once the
-/// Staged executor handles cross-agent transforms).
+/// WriteFlipped}` family. When the `permute_kernels` feature is
+/// disabled the layout-pair compatibility check stays active (no
+/// catalog → no Staged dispatch); with `permute_kernels` on, the
+/// Staged executor handles `requires_transform=true` pairs and the
+/// guard collapses to strategy-only.
+#[cfg_attr(feature = "permute_kernels", allow(unused_variables))]
 pub(crate) fn validate_nixl_planner_entry(
     strategy: TransferStrategy,
     src_block_layout: KvBlockLayout,
@@ -548,12 +561,13 @@ pub(crate) fn validate_nixl_planner_entry(
              entrypoint"
         );
     }
+    #[cfg(not(feature = "permute_kernels"))]
     if src_block_layout.requires_transform(&dst_block_layout) {
         bail!(
             "validate_nixl_planner_entry: src ({src_block_layout:?}) and dst \
-             ({dst_block_layout:?}) require a kernel-side transform, which is \
-             not yet wired in the NIXL planner path (PR-6.2 lands the Staged \
-             executor). Drop use_planner=true for this transfer."
+             ({dst_block_layout:?}) require a kernel-side transform, but the \
+             `permute_kernels` feature is not enabled in kvbm-physical. Drop \
+             use_planner=true or build with --features permute_kernels."
         );
     }
     Ok(())
@@ -705,6 +719,423 @@ fn dispatch_transform_kernel(
         );
     }
     Ok(())
+}
+
+/// PR-6.2: dispatch a NIXL transfer that requires a kernel-side
+/// transform via the Staged executor.
+///
+/// Cross-agent transforms cannot be done by NIXL alone — NIXL moves
+/// raw bytes between agents, but the operational↔universal permute
+/// is a CUDA kernel that runs only locally. The Staged executor
+/// stitches the two stages together:
+///
+/// - **NIXL Read (pull)**: NIXL-leg pulls `src → bounce` (raw, same
+///   `KvBlockLayout`); kernel-leg runs `bounce → dst` locally.
+/// - **NIXL Write (push)**: kernel-leg runs `src → bounce` locally;
+///   NIXL-leg pushes `bounce → dst` (raw, same `KvBlockLayout`).
+///
+/// The intermediate is the caller-supplied
+/// [`BounceBufferInternal`]: a registered local `PhysicalLayout`
+/// whose `KvBlockLayout` matches the *raw* side of the staged
+/// transfer (src for Read, dst for Write).
+///
+/// Stage 1 is built synchronously and its notification captured.
+/// The chain spawns a tokio task that awaits stage 1, then performs
+/// stage 2 using owned bits (cloned `NixlAgent`, polling-channel
+/// senders, event manager, CUDA stream). The returned
+/// [`TransferCompleteNotification`] resolves when stage 2 completes.
+///
+/// **Lifecycle.** The spawned chain is fire-and-forget at spawn
+/// time — the caller's only handle is the returned notification. If
+/// the tokio runtime is dropped before the chain finishes, the outer
+/// `velo::Event` is poisoned and the awaiter resolves with an
+/// error (not a hang).
+#[cfg(feature = "permute_kernels")]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_staged_nixl_transform(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    invocation: crate::transfer::kernel_catalog::KernelInvocation,
+    block_pairs: Vec<(BlockId, BlockId)>,
+    bounce: &crate::transfer::BounceBufferInternal,
+    strategy: TransferStrategy,
+    xfer_op: XferOp,
+    ctx: &TransferContext,
+) -> Result<TransferCompleteNotification> {
+    use crate::transfer::StorageKind;
+
+    let n = block_pairs.len();
+    if n == 0 {
+        return Ok(TransferCompleteNotification::completed());
+    }
+
+    // ──────── Validate bounce contract. ────────
+    let bounce_layout = bounce.layout();
+    let bounce_kv = bounce_layout.layout().block_layout();
+    let bounce_all = bounce.block_ids();
+    if bounce_all.len() < n {
+        bail!(
+            "dispatch_staged_nixl_transform: bounce has {} block ids, need at least {} \
+             for this transfer",
+            bounce_all.len(),
+            n
+        );
+    }
+    let bounce_block_ids: Vec<BlockId> = bounce_all[..n].to_vec();
+    if !matches!(bounce_layout.location(), StorageKind::Device(_)) {
+        bail!(
+            "dispatch_staged_nixl_transform: bounce storage must be Device(_); got {:?} \
+             (cross-agent transforms run a CUDA kernel locally)",
+            bounce_layout.location()
+        );
+    }
+    let nixl_agent_local = ctx.nixl_agent();
+    if bounce_layout.nixl_metadata().agent_name() != nixl_agent_local.name() {
+        bail!(
+            "dispatch_staged_nixl_transform: bounce agent {:?} != local agent {:?}",
+            bounce_layout.nixl_metadata().agent_name(),
+            nixl_agent_local.name()
+        );
+    }
+    let src_kv = src.layout().block_layout();
+    let dst_kv = dst.layout().block_layout();
+    match xfer_op {
+        XferOp::Read => {
+            if bounce_kv != src_kv {
+                bail!(
+                    "dispatch_staged_nixl_transform (Read): bounce KvBlockLayout {bounce_kv:?} \
+                     must equal src KvBlockLayout {src_kv:?} (the NIXL leg is a raw copy)"
+                );
+            }
+        }
+        XferOp::Write => {
+            if bounce_kv != dst_kv {
+                bail!(
+                    "dispatch_staged_nixl_transform (Write): bounce KvBlockLayout {bounce_kv:?} \
+                     must equal dst KvBlockLayout {dst_kv:?} (the NIXL leg is a raw copy)"
+                );
+            }
+        }
+    }
+
+    // ──────── Locality check (mirrors the Direct path). ────────
+    let src_metadata = src.nixl_metadata();
+    let dst_metadata = dst.nixl_metadata();
+    match xfer_op {
+        XferOp::Write => {
+            if nixl_agent_local.name() != src_metadata.agent_name() {
+                bail!(
+                    "dispatch_staged_nixl_transform: Write (push) requires local src; \
+                     src_agent={:?}, local_agent={:?}",
+                    src_metadata.agent_name(),
+                    nixl_agent_local.name()
+                );
+            }
+        }
+        XferOp::Read => {
+            if nixl_agent_local.name() != dst_metadata.agent_name() {
+                bail!(
+                    "dispatch_staged_nixl_transform: Read (pull) requires local dst; \
+                     dst_agent={:?}, local_agent={:?}",
+                    dst_metadata.agent_name(),
+                    nixl_agent_local.name()
+                );
+            }
+        }
+    }
+
+    // ──────── Block-id partitioning per stage. ────────
+    let src_block_ids: Vec<BlockId> = block_pairs.iter().map(|&(s, _)| s).collect();
+    let dst_block_ids: Vec<BlockId> = block_pairs.iter().map(|&(_, d)| d).collect();
+    let kernel_pairs: Vec<(BlockId, BlockId)> = match xfer_op {
+        XferOp::Read => bounce_block_ids
+            .iter()
+            .zip(dst_block_ids.iter())
+            .map(|(&b, &d)| (b, d))
+            .collect(),
+        XferOp::Write => src_block_ids
+            .iter()
+            .zip(bounce_block_ids.iter())
+            .map(|(&s, &b)| (s, b))
+            .collect(),
+    };
+
+    // ──────── Capture owned bits for the spawned task. ────────
+    let event_system = ctx.event_system().clone();
+    let runtime = ctx.tokio().clone();
+    let tx_cuda_event = ctx.tx_cuda_event_clone();
+    let tx_nixl_status = ctx.tx_nixl_status_clone();
+    let raw_agent = nixl_agent_local.raw_agent().clone();
+    let agent_clone = nixl_agent_local.clone();
+    let stream = ctx.next_h2d_streams();
+    let bounce_owned = bounce_layout.clone();
+    let src_owned = src.clone();
+    let dst_owned = dst.clone();
+    let invocation_owned = invocation.clone();
+
+    // ──────── Build stage 1 synchronously. ────────
+    let stage1_notification = match xfer_op {
+        XferOp::Read => build_and_post_nixl_leg(
+            src,
+            bounce_layout,
+            &src_block_ids,
+            &bounce_block_ids,
+            strategy,
+            xfer_op,
+            ctx,
+        )?,
+        XferOp::Write => {
+            dispatch_transform_kernel(
+                &invocation_owned,
+                &src_owned,
+                &bounce_owned,
+                &kernel_pairs,
+                &stream,
+            )?;
+            let cuda_event = stream.record_event(None)?;
+            ctx.register_cuda_event(cuda_event)
+        }
+    };
+
+    // ──────── Outer notification. ────────
+    let outer_event = event_system.new_event()?;
+    let outer_handle = outer_event.handle();
+    let outer_awaiter = event_system.awaiter(outer_handle)?;
+
+    // ──────── Spawn the chain. ────────
+    let event_system_task = event_system.clone();
+    let stream_task = stream.clone();
+
+    runtime.spawn(async move {
+        if let Err(e) = stage1_notification.await {
+            let _ = outer_event.poison(format!("staged stage 1: {e}"));
+            return;
+        }
+
+        let stage2_result: Result<()> = match xfer_op {
+            XferOp::Read => {
+                // Stage 2 = local kernel bounce → dst.
+                let prep: Result<TransferCompleteNotification> = (|| {
+                    dispatch_transform_kernel(
+                        &invocation_owned,
+                        &bounce_owned,
+                        &dst_owned,
+                        &kernel_pairs,
+                        &stream_task,
+                    )?;
+                    let cuda_event = stream_task.record_event(None)?;
+                    register_cuda_event_owned(
+                        &event_system_task,
+                        &tx_cuda_event,
+                        cuda_event,
+                    )
+                })();
+                match prep {
+                    Ok(notif) => notif.await,
+                    Err(e) => Err(e),
+                }
+            }
+            XferOp::Write => {
+                // Stage 2 = NIXL push bounce → dst.
+                let res: Result<TransferCompleteNotification> =
+                    build_and_post_nixl_leg_owned(
+                        &bounce_owned,
+                        &dst_owned,
+                        &bounce_block_ids,
+                        &dst_block_ids,
+                        strategy,
+                        xfer_op,
+                        &agent_clone,
+                        &raw_agent,
+                        &event_system_task,
+                        &tx_nixl_status,
+                    );
+                match res {
+                    Ok(notif) => notif.await,
+                    Err(e) => Err(e),
+                }
+            }
+        };
+
+        match stage2_result {
+            Ok(()) => {
+                let _ = outer_event.trigger();
+            }
+            Err(e) => {
+                let _ = outer_event.poison(format!("staged stage 2: {e}"));
+            }
+        }
+    });
+
+    Ok(TransferCompleteNotification::from_awaiter(outer_awaiter))
+}
+
+/// Synchronously build XferDescLists, create+post a NIXL xfer
+/// request, and register a polling notification — using only owned
+/// bits. Mirror of [`build_and_post_nixl_leg`] for callers that
+/// can't hold a `&TransferContext` across an `await`.
+#[cfg(feature = "permute_kernels")]
+#[allow(clippy::too_many_arguments)]
+fn build_and_post_nixl_leg_owned(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
+    strategy: TransferStrategy,
+    xfer_op: XferOp,
+    nixl_agent: &super::super::NixlAgent,
+    raw_agent: &dynamo_memory::nixl::Agent,
+    event_system: &Arc<velo::EventManager>,
+    tx_nixl_status: &tokio::sync::mpsc::Sender<
+        crate::transfer::notifications::RegisterPollingNotification<
+            crate::transfer::notifications::NixlStatusChecker,
+        >,
+    >,
+) -> Result<TransferCompleteNotification> {
+    // Same-KvBlockLayout pair → plan_copy emits Direct.
+    let outcome = plan_and_lower(src, dst, src_block_ids, dst_block_ids)?;
+    let ops = match outcome {
+        PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
+        PlanOutcome::Direct(ops) => ops,
+        PlanOutcome::Transform { .. } => bail!(
+            "build_and_post_nixl_leg_owned: unexpected Transform outcome — staged NIXL leg \
+             expects same-KvBlockLayout pair to go Direct"
+        ),
+    };
+
+    let src_metadata = src.nixl_metadata();
+    let dst_metadata = dst.nixl_metadata();
+    let mut src_dl = XferDescList::new(src_metadata.mem_type())?;
+    let mut dst_dl = XferDescList::new(dst_metadata.mem_type())?;
+    for op in &ops {
+        src_dl.add_desc(op.src_addr, op.size, src_metadata.device_id());
+        dst_dl.add_desc(op.dst_addr, op.size, dst_metadata.device_id());
+    }
+    if matches!(
+        strategy,
+        TransferStrategy::NixlReadFlipped | TransferStrategy::NixlWriteFlipped
+    ) {
+        std::mem::swap(&mut src_dl, &mut dst_dl);
+    }
+
+    let remote_agent = match xfer_op {
+        XferOp::Write => dst_metadata.agent_name(),
+        XferOp::Read => src_metadata.agent_name(),
+    };
+    let xfer_req = nixl_agent.create_xfer_req(xfer_op, &src_dl, &dst_dl, remote_agent, None)?;
+    let still_pending = nixl_agent.post_xfer_req(&xfer_req, None)?;
+    if !still_pending {
+        return Ok(TransferCompleteNotification::completed());
+    }
+
+    register_nixl_status_owned(event_system, tx_nixl_status, raw_agent.clone(), xfer_req)
+}
+
+/// Synchronous helper used by the Read direction of
+/// [`dispatch_staged_nixl_transform`]. Same as
+/// [`build_and_post_nixl_leg_owned`] but uses `&TransferContext`
+/// (synchronous call site, no spawn lifetime issue).
+#[cfg(feature = "permute_kernels")]
+#[allow(clippy::too_many_arguments)]
+fn build_and_post_nixl_leg(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    src_block_ids: &[BlockId],
+    dst_block_ids: &[BlockId],
+    strategy: TransferStrategy,
+    xfer_op: XferOp,
+    ctx: &TransferContext,
+) -> Result<TransferCompleteNotification> {
+    let outcome = plan_and_lower(src, dst, src_block_ids, dst_block_ids)?;
+    let ops = match outcome {
+        PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
+        PlanOutcome::Direct(ops) => ops,
+        PlanOutcome::Transform { .. } => bail!(
+            "build_and_post_nixl_leg: unexpected Transform outcome — staged NIXL leg \
+             expects same-KvBlockLayout pair to go Direct"
+        ),
+    };
+
+    let nixl_agent = ctx.nixl_agent();
+    let src_metadata = src.nixl_metadata();
+    let dst_metadata = dst.nixl_metadata();
+    let mut src_dl = XferDescList::new(src_metadata.mem_type())?;
+    let mut dst_dl = XferDescList::new(dst_metadata.mem_type())?;
+    for op in &ops {
+        src_dl.add_desc(op.src_addr, op.size, src_metadata.device_id());
+        dst_dl.add_desc(op.dst_addr, op.size, dst_metadata.device_id());
+    }
+    if matches!(
+        strategy,
+        TransferStrategy::NixlReadFlipped | TransferStrategy::NixlWriteFlipped
+    ) {
+        std::mem::swap(&mut src_dl, &mut dst_dl);
+    }
+
+    let remote_agent = match xfer_op {
+        XferOp::Write => dst_metadata.agent_name(),
+        XferOp::Read => src_metadata.agent_name(),
+    };
+    let xfer_req = nixl_agent.create_xfer_req(xfer_op, &src_dl, &dst_dl, remote_agent, None)?;
+    let still_pending = nixl_agent.post_xfer_req(&xfer_req, None)?;
+    if still_pending {
+        Ok(ctx.register_nixl_status(xfer_req))
+    } else {
+        Ok(TransferCompleteNotification::completed())
+    }
+}
+
+/// Register a CUDA event with the polling channel, returning a
+/// notification — using only owned bits so it can be called from
+/// inside a `tokio::spawn`-ed task.
+#[cfg(feature = "permute_kernels")]
+fn register_cuda_event_owned(
+    event_system: &Arc<velo::EventManager>,
+    tx_cuda_event: &tokio::sync::mpsc::Sender<
+        crate::transfer::notifications::RegisterPollingNotification<
+            crate::transfer::notifications::CudaEventChecker,
+        >,
+    >,
+    cuda_event: cudarc::driver::CudaEvent,
+) -> Result<TransferCompleteNotification> {
+    let new_event = event_system.new_event()?;
+    let handle = new_event.into_handle();
+    let awaiter = event_system.awaiter(handle)?;
+    let notification = crate::transfer::notifications::RegisterPollingNotification {
+        uuid: uuid::Uuid::new_v4(),
+        checker: crate::transfer::notifications::CudaEventChecker::new(cuda_event),
+        event_handle: handle,
+    };
+    tx_cuda_event
+        .try_send(notification)
+        .map_err(|e| anyhow!("staged: failed to enqueue CUDA event notification: {e}"))?;
+    Ok(TransferCompleteNotification::from_awaiter(awaiter))
+}
+
+/// Same as [`register_cuda_event_owned`] but for NIXL status.
+#[cfg(feature = "permute_kernels")]
+fn register_nixl_status_owned(
+    event_system: &Arc<velo::EventManager>,
+    tx_nixl_status: &tokio::sync::mpsc::Sender<
+        crate::transfer::notifications::RegisterPollingNotification<
+            crate::transfer::notifications::NixlStatusChecker,
+        >,
+    >,
+    raw_agent: dynamo_memory::nixl::Agent,
+    xfer_req: dynamo_memory::nixl::XferRequest,
+) -> Result<TransferCompleteNotification> {
+    let new_event = event_system.new_event()?;
+    let handle = new_event.into_handle();
+    let awaiter = event_system.awaiter(handle)?;
+    let notification = crate::transfer::notifications::RegisterPollingNotification {
+        uuid: uuid::Uuid::new_v4(),
+        checker: crate::transfer::notifications::NixlStatusChecker::new(raw_agent, xfer_req),
+        event_handle: handle,
+    };
+    tx_nixl_status
+        .try_send(notification)
+        .map_err(|e| anyhow!("staged: failed to enqueue NIXL status notification: {e}"))?;
+    Ok(TransferCompleteNotification::from_awaiter(awaiter))
 }
 
 /// Group `ops` by `size` and dispatch each group via
@@ -873,16 +1304,35 @@ mod tests {
         }
     }
 
-    /// NHD ↔ HND is a semantic transform — rejected until PR-6.2
-    /// wires the Staged executor.
+    /// PR-6.2: layout-pair compatibility is no longer enforced at the
+    /// NIXL entry guard when `permute_kernels` is on — the Staged
+    /// executor handles `requires_transform=true` pairs by stitching
+    /// a local kernel between the NIXL leg and the placement leg.
+    /// Pairs the catalog doesn't cover surface a precise error from
+    /// `build_transform_invocation` instead.
+    #[cfg(feature = "permute_kernels")]
     #[test]
-    fn nixl_entry_rejects_nhd_hnd() {
-        let r = validate_nixl_planner_entry(
-            TransferStrategy::NixlReadFlipped,
-            KvBlockLayout::OperationalNHD,
-            KvBlockLayout::OperationalHND,
+    fn nixl_entry_accepts_transform_pairs_with_permute_kernels() {
+        // Operational ↔ Universal — PR-6.1 catalog has both directions.
+        assert!(
+            validate_nixl_planner_entry(
+                TransferStrategy::NixlReadFlipped,
+                KvBlockLayout::OperationalNHD,
+                KvBlockLayout::UniversalTP,
+            )
+            .is_ok()
         );
-        assert!(r.is_err());
+        // NHD ↔ HND — catalog miss until PR-6.3, but the entry guard
+        // accepts; the precise error comes from the catalog at lower
+        // time.
+        assert!(
+            validate_nixl_planner_entry(
+                TransferStrategy::NixlReadFlipped,
+                KvBlockLayout::OperationalNHD,
+                KvBlockLayout::OperationalHND,
+            )
+            .is_ok()
+        );
     }
 
     /// Non-NIXL strategies routed into the NIXL entrypoint are an

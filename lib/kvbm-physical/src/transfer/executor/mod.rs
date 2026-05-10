@@ -273,6 +273,7 @@ pub(crate) fn execute_transfer(
             strategy,
             options.cuda_stream,
             options.use_planner,
+            options.bounce_buffer.as_ref(),
             ctx,
         ),
         TransferPlan::TwoHop {
@@ -304,6 +305,7 @@ fn execute_direct_transfer(
     strategy: TransferStrategy,
     cuda_stream: Option<Arc<CudaStream>>,
     use_planner: bool,
+    bounce_buffer: Option<&BounceBufferInternal>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     match strategy {
@@ -381,9 +383,11 @@ fn execute_direct_transfer(
                     src_block_ids,
                     dst_block_ids,
                     strategy,
+                    bounce_buffer,
                     ctx,
                 );
             }
+            let _ = bounce_buffer;
             let mut builder = NixlTransferBuilder::new()
                 .src(src)
                 .dst(dst)
@@ -509,6 +513,7 @@ async fn execute_two_hop_transfer_chunk(
         first_strategy,
         None,  // Two-hop transfers don't support caller-provided streams
         false, // Two-hop chunks stay on the legacy path for now
+        None,  // bounce_buffer only used by use_planner=true NIXL transforms
         ctx,
     )?
     .await?;
@@ -522,6 +527,7 @@ async fn execute_two_hop_transfer_chunk(
         second_strategy,
         None,  // Two-hop transfers don't support caller-provided streams
         false, // Two-hop chunks stay on the legacy path for now
+        None,
         ctx,
     )?
     .await?;
