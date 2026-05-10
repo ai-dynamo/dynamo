@@ -48,10 +48,12 @@ many design candidates before spending hardware time. Because the simulator is
 implemented in Rust, it is also practical to simulate thousands of workers on a
 developer laptop.
 
-That fidelity has to be earned. The twin combines hardware-informed engine
-timing with simulated scheduler, Router, Planner, and KV/cache events; hardware
-runs expose the remaining error, and those deltas become calibration inputs for
-the next simulation pass.
+That fidelity has to be earned. The twin combines measured engine timing with
+real Dynamo component cores, swapping live async and runtime bridges for
+deterministic replay bridges: Router simulation uses KV router primitives and
+configuration, Planner replay drives the Planner state machine, and worker
+passes reuse the mocker scheduler cores. Live runs expose the remaining deltas,
+which become calibration inputs for the next simulation pass.
 
 DynoSim optimizes how existing engine profiles and Dynamo components are
 assembled for a workload.
@@ -63,7 +65,7 @@ The real power of simulation is not just prediction. It is decision-making.
 The resulting loop is useful because it prices decisions before they hit the
 cluster. The twin can ask whether a different topology, transfer path, batching
 policy, or backend configuration changes the best Router, Planner, or KVBM
-choice, then send only the strongest candidates to live validation.
+choice, then send only the strongest candidates to real-cluster validation.
 
 [placeholder: add simulated-time vs wall-time table and speedup figure for
 representative simulated workloads]
@@ -72,7 +74,7 @@ That gives Dynamo a practical loop for research, engineering scoping, and
 customer-facing sizing.
 
 - **Research:** Test routing, autoscaling, prefill/decode, KV/cache, and
-  topology ideas before spending cluster time.
+  topology ideas, and generate KV cache traces before spending cluster time.
 - **Engineering:** Turn opportunity costs into thresholds. If specializing one
   decode worker into N prefill workers takes X seconds, the twin can show when X
   breaks the service-level agreement (SLA) and what target makes the work worth
@@ -80,7 +82,7 @@ customer-facing sizing.
 - **Customer-facing sizing:** Compare GPU counts, worker layouts, backends, and
   deployment topologies against a workload and SLA before committing capacity.
 
-## 1. Architecture And DES: Composing Dynamo As Events
+## 1. Architecture: Composing Dynamo As Events
 
 The key design choice is composition. Dynamo's simulation story is not one
 monolithic model. It is a set of components that mirror serving-system concepts
@@ -145,7 +147,8 @@ throughput, cache reuse, and feasibility against the selected objective or SLA.
 
 One request makes the DES model concrete:
 
-1. The load generator emits a request from a trace or synthetic workload.
+1. A load generator, such as Dynamo AIPerf, emits a request from a trace or
+   synthetic workload.
 2. The router decides where the request should go, or whether it should wait.
 3. The selected engine scheduler batches the request into a prefill or decode
    pass.
@@ -184,7 +187,8 @@ then back to metrics. The load side can be a recorded trace or a synthetic
 workload. At a high level, the same harness can represent open-loop and
 closed-loop styles of traffic, Mooncake-style trace inputs, and more advanced
 agentic or compute-heavy traffic patterns without making the blog post depend on
-one specific generator.
+one specific generator. It can also generate KV cache traces from the same run,
+so cache behavior can be inspected alongside request metrics.
 
 The collector is the other end of the loop. It turns the simulated lifecycle into
 observable serving metrics: throughput, TTFT, TPOT, end-to-end latency, prefix
@@ -200,10 +204,11 @@ behavior.
 ### 2.1 Single Engine Simulation: Scheduler Fidelity Matters
 
 A single engine is not just a tokens-per-second estimate. The scheduler decides
-which requests enter a pass, how prefill and decode work are batched, whether
-prefill is chunked, how many sequences are active, and how KV pressure affects
-progress. Those decisions are exactly what turn model timing into serving
-behavior.
+which requests enter each pass, how prefill and decode work are batched, and how
+KV pressure changes progress. DynoSim keeps that backend-specific: the vLLM path
+models a waiting/running scheduler with shared token budget and
+preemption/recompute, while the SGLang path models radix-cache-aware admission,
+chunked-prefill budgets, and prefix-preserving decode retraction.
 
 AIC fits into this picture as engine-side timing: given the model, backend,
 system, tensor-parallel shape, and pass shape, it estimates how long prefill or
@@ -252,7 +257,9 @@ Router framing:
 
 Because the Router shares the same event queue as engine completion and Planner
 actions, a route that improves prefix reuse may increase queueing somewhere
-else, while a route that balances load may give up a cache hit.
+else, while a route that balances load may give up a cache hit. The same event
+model can partially test fault-tolerance paths via random failure-mode
+injection: unavailable workers, replacement capacity, or request migration.
 
 #### Planner As A Feedback-Driven Component
 
@@ -439,7 +446,7 @@ KV and cache discovery examples:
 - Couple cache-aware routing with cache-aware autoscaling.
 
 These are natural twin questions: hold the workload fixed, change one component
-policy, and measure the system-level effect before going to hardware.
+policy, and measure the system-level effect before going to a real cluster.
 
 [placeholder: agentic algorithm discovery workflow and owner]
 
@@ -454,17 +461,17 @@ for human review.
 That would turn the digital twin into more than an optimizer over fixed knobs. It
 would become a testbed for algorithm discovery, where humans still own the
 system direction and validation bar, but agents can help explore the design space
-between live cluster experiments.
+between real-cluster experiments.
 
 ## 4. Simulation As The Inner Loop
 
-The goal is not to replace live cluster validation. The goal is to make that
+The goal is not to replace real-cluster validation. The goal is to make that
 validation more focused.
 
-Simulation becomes the inner loop for design exploration. Hardware remains the
-outer loop for validation. Between those loops, Dynamo can test serving algorithms
-as a system: scheduler behavior, routing policy, Planner control, KV/cache
-movement, workload shape, and hardware-informed timing.
+Simulation becomes the inner loop for design exploration. Real clusters remain
+the outer loop for validation. Between those loops, Dynamo can test serving
+algorithms as a system: scheduler behavior, routing policy, Planner control,
+KV/cache movement, workload shape, and measured engine timing.
 
 The payoff is not just a faster benchmark. Simulation turns infrastructure
 planning from guesswork into an engineering discipline: use the twin to decide
@@ -482,6 +489,6 @@ split, router policy, and Planner setting last week may no longer be optimal
 today. A continuous twin-driven sweep keeps the live deployment tracking the
 current optimum instead of relying on a one-shot launch decision.
 
-[placeholder: external review for claims about live validation vs simulation]
+[placeholder: external review for claims about real-cluster validation vs simulation]
 
 [placeholder: final links to relevant Dynamo docs, PRs, or prior posts]
