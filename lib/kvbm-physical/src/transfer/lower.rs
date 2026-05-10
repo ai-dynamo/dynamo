@@ -34,10 +34,14 @@
 //! * [`lower_to_candidates`] performs the lowering. [`select_candidate`]
 //!   picks one for execution.
 
+use std::cmp::Reverse;
+
 use anyhow::{Result, bail};
 
 use crate::layout::{LayoutView, PhysicalLayout};
+use crate::transfer::TransferCapabilities;
 use crate::transfer::plan::{CopyOp, CopyPlan};
+use crate::transfer::strategy::TransferStrategy;
 
 /// Project a [`PhysicalLayout`] to a [`LayoutView`] for the planner.
 ///
@@ -79,6 +83,138 @@ pub(crate) enum Candidate {
     Staged {/* spec lands later */},
 }
 
+// ─────────────────────────── Selector scaffolding ────────────────────────────
+//
+// `SelectionContext` + `score_candidate` + `select_candidate` land in PR-7.2
+// as scaffolding only. Today's candidate vectors always have ≤1 element, so
+// the scorer is invoked but never has a real choice. The benefit: PR-7.3
+// (small-strided-copy) and PR-7.4 (CudaGraphReplay) plug in new variants and
+// the existing scorer automatically selects the best one.
+//
+// Scoring design:
+//   - Higher score = preferred.
+//   - Negative score (< 0) = placeholder / not-yet-ready; filtered before
+//     selection so they can never be chosen even when no positive candidate
+//     exists (that surfaces a precise error instead of a silent wrong pick).
+//   - Tie-break: earlier element in the slice wins (stable ordering).
+
+/// Context passed to [`score_candidate`] to let it key on transfer shape
+/// rather than only the candidate variant.
+///
+/// # Route
+///
+/// `strategy: TransferStrategy` is used directly rather than a 2-variant
+/// `enum Route { Cuda, Nixl }` abstraction because:
+/// (a) `TransferStrategy` already encodes the Cuda*/Nixl* family, and
+/// (b) PR-7.3+ scoring may distinguish D2D from H2D even within the same
+///     Cuda family, so a 2-variant proxy would lose information.
+/// The scorer uses `is_cuda_family()` / `is_nixl_family()` helpers for
+/// the coarse routing check it needs today.
+pub(crate) struct SelectionContext<'a> {
+    /// Transfer strategy in use — determines the route family.
+    pub strategy: TransferStrategy,
+
+    /// Number of descriptors in the planned op-set.
+    pub descriptor_count: usize,
+
+    /// Total bytes to be moved across all ops.
+    pub total_bytes: usize,
+
+    /// Tensor element dtype when the kernel catalog is enabled.
+    ///
+    /// `None` when `cfg(not(feature = "permute_kernels"))` or when the
+    /// caller's `LayoutConfig::dtype` is unset (same gate as in
+    /// `LayoutConfig`).
+    #[cfg(feature = "permute_kernels")]
+    pub dtype: Option<kvbm_kernels::TensorDataType>,
+
+    /// Capability flags in effect for this transfer.
+    pub capabilities: &'a TransferCapabilities,
+}
+
+impl TransferStrategy {
+    /// Returns `true` for `CudaAsync{H2D, D2H, D2D}`.
+    ///
+    /// Used by the scorer to distinguish Cuda-family routes from NIXL.
+    pub(crate) fn is_cuda_family(self) -> bool {
+        matches!(
+            self,
+            TransferStrategy::CudaAsyncH2D
+                | TransferStrategy::CudaAsyncD2H
+                | TransferStrategy::CudaAsyncD2D
+        )
+    }
+
+    /// Returns `true` for `Nixl{Read, Write, ReadFlipped, WriteFlipped}`.
+    pub(crate) fn is_nixl_family(self) -> bool {
+        matches!(
+            self,
+            TransferStrategy::NixlRead
+                | TransferStrategy::NixlWrite
+                | TransferStrategy::NixlReadFlipped
+                | TransferStrategy::NixlWriteFlipped
+        )
+    }
+}
+
+/// Scoring constants.
+///
+/// ```text
+/// TransformKernel  1100   — dedicated permute kernel; preferred over raw DMA
+///                             when the route is Cuda* (avoids per-coord
+///                             descriptor explosion).
+/// DirectDma        1000   — universal DMA fallback; available on all routes.
+/// BatchedDma       1000   — equivalent to DirectDma today; PR-7.3 may
+///                             differentiate via descriptor-count thresholds.
+/// Staged              -1  — placeholder variant; spec not yet finalised.
+///                             Negative score ensures it is *never* selected.
+/// ```
+///
+/// Adding a new `Candidate` variant for PR-7.3+ means:
+/// 1. Add its variant to `Candidate`.
+/// 2. Add a match arm here with the appropriate base score.
+/// 3. Adjust constants above if the new variant should outrank existing ones.
+const SCORE_TRANSFORM_KERNEL: i64 = 1100;
+const SCORE_DIRECT_DMA: i64 = 1000;
+const SCORE_BATCHED_DMA: i64 = 1000;
+const SCORE_STAGED: i64 = -1;
+
+/// Score a single candidate given the selection context.
+///
+/// Returns a higher number for a more preferred candidate.
+/// Negative scores mark placeholder variants that must be filtered out
+/// before `select_candidate` makes a final choice.
+///
+/// # Notes on `TransformKernel`
+///
+/// In production today `TransformKernel` is never passed through
+/// `select_candidate` — `plan_and_lower` routes it through
+/// `PlanOutcome::Transform` and dispatches it directly. The arm exists
+/// as scaffolding for PR-7.3/7.4 where future candidates may compete
+/// with `TransformKernel` under a Cuda route.
+#[cfg_attr(not(feature = "permute_kernels"), allow(unused_variables))]
+pub(crate) fn score_candidate(candidate: &Candidate, ctx: &SelectionContext<'_>) -> i64 {
+    match candidate {
+        Candidate::DirectDma { .. } => SCORE_DIRECT_DMA,
+        Candidate::BatchedDma { .. } => SCORE_BATCHED_DMA,
+        #[cfg(feature = "permute_kernels")]
+        Candidate::TransformKernel { .. } => {
+            // TransformKernel is only meaningful on Cuda-family routes;
+            // it earns a higher base score than DirectDma because the
+            // dedicated permute kernel avoids the per-coord descriptor
+            // explosion that CopyPlan::Direct would generate.
+            // On NIXL routes, dispatch goes through dispatch_staged_nixl_transform,
+            // not through select_candidate, so this arm is unreachable there.
+            if ctx.strategy.is_cuda_family() {
+                SCORE_TRANSFORM_KERNEL
+            } else {
+                SCORE_DIRECT_DMA // treat as equivalent if somehow reached on NIXL
+            }
+        }
+        Candidate::Staged { .. } => SCORE_STAGED,
+    }
+}
+
 /// Lower a [`CopyPlan`] to a vector of executor candidates.
 ///
 /// PR-6.1 surface:
@@ -103,19 +239,35 @@ pub(crate) fn lower_to_candidates(plan: CopyPlan) -> Result<Vec<Candidate>> {
     }
 }
 
-/// Select a candidate to execute.
+/// Select the best candidate to execute.
 ///
-/// PR-5 picks the first [`Candidate::DirectDma`] in the list; future
-/// selection logic (PR-7) will key off route, dtype, descriptor count,
-/// and capability metadata. Errors when no executable candidate
-/// exists.
-pub(crate) fn select_candidate(candidates: &[Candidate]) -> Result<&Candidate> {
+/// Each candidate is scored via [`score_candidate`]; candidates with a
+/// negative score (placeholders such as [`Candidate::Staged`]) are filtered
+/// out before the max is taken. On score ties, the *earlier* element in
+/// the slice wins (stable ordering: `max_by_key` with `(score, Reverse(idx))`
+/// so a lower index beats a higher one at equal score).
+///
+/// Errors with a message containing `"no executable candidate"` when all
+/// candidates score below zero.
+pub(crate) fn select_candidate<'a>(
+    candidates: &'a [Candidate],
+    ctx: &SelectionContext<'_>,
+) -> Result<&'a Candidate> {
     candidates
         .iter()
-        .find(|c| matches!(c, Candidate::DirectDma { .. }))
+        .enumerate()
+        .filter_map(|(idx, c)| {
+            let s = score_candidate(c, ctx);
+            if s >= 0 { Some((idx, c, s)) } else { None }
+        })
+        // Higher score wins; on equal score, lower index wins (Reverse keeps
+        // the element with the smallest index when scores are equal).
+        .max_by_key(|&(idx, _, s)| (s, Reverse(idx)))
+        .map(|(_, c, _)| c)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "select_candidate: no executable Candidate::DirectDma in {} candidates",
+                "select_candidate: no executable candidate in {} candidates \
+                 (all scored < 0 or list is empty)",
                 candidates.len()
             )
         })
@@ -128,6 +280,25 @@ mod tests {
 
     use crate::layout::Layout;
     use crate::transfer::plan::AnnotatedLayout;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    fn cuda_ctx() -> SelectionContext<'static> {
+        // A minimal SelectionContext for unit tests that don't need real
+        // descriptor counts or bytes — just enough to drive the scorer.
+        static CAPS: TransferCapabilities = TransferCapabilities {
+            allow_gds: false,
+            allow_gpu_rdma: false,
+        };
+        SelectionContext {
+            strategy: TransferStrategy::CudaAsyncD2D,
+            descriptor_count: 1,
+            total_bytes: 4096,
+            #[cfg(feature = "permute_kernels")]
+            dtype: None,
+            capabilities: &CAPS,
+        }
+    }
 
     #[test]
     fn lower_direct_to_dma_candidate() {
@@ -161,9 +332,8 @@ mod tests {
 
     #[test]
     fn select_picks_direct_dma() {
-        // Use Staged as a non-DirectDma placeholder — this test pins
-        // `select_candidate`'s preference for DirectDma when present.
-        // (PR-7 will replace this with multi-candidate scoring.)
+        // Staged scores -1 (filtered); DirectDma scores 1000 — assert it wins.
+        let ctx = cuda_ctx();
         let cands = vec![
             Candidate::Staged {},
             Candidate::DirectDma {
@@ -174,14 +344,95 @@ mod tests {
                 }],
             },
         ];
-        let picked = select_candidate(&cands).unwrap();
+        let picked = select_candidate(&cands, &ctx).unwrap();
         assert!(matches!(picked, Candidate::DirectDma { .. }));
     }
 
     #[test]
     fn select_no_direct_errors() {
+        let ctx = cuda_ctx();
         let cands = vec![Candidate::Staged {}];
-        assert!(select_candidate(&cands).is_err());
+        assert!(select_candidate(&cands, &ctx).is_err());
+    }
+
+    // ── new PR-7.2 scorer tests ───────────────────────────────────────────────
+
+    /// On a Cuda route, TransformKernel scores 1100 vs DirectDma's 1000 vs
+    /// BatchedDma's 1000. TransformKernel should win.
+    #[cfg(feature = "permute_kernels")]
+    #[test]
+    fn select_picks_highest_scoring_candidate() {
+        use crate::transfer::kernel_catalog::{KernelInvocation, KernelKind};
+        use kvbm_kernels::{BlockLayout, TensorDataType};
+
+        let ctx = cuda_ctx();
+        let invoc = KernelInvocation {
+            kind: KernelKind::NhdHndTranspose,
+            num_layers: 1,
+            outer_dim: 1,
+            page_size: 16,
+            num_heads: 8,
+            head_dim: 64,
+            dtype: TensorDataType::F16,
+            block_layout: BlockLayout::NHD,
+        };
+        let cands = vec![
+            Candidate::BatchedDma { groups: vec![] },
+            Candidate::DirectDma { ops: vec![] },
+            Candidate::TransformKernel { invocation: invoc },
+        ];
+        let picked = select_candidate(&cands, &ctx).unwrap();
+        assert!(
+            matches!(picked, Candidate::TransformKernel { .. }),
+            "expected TransformKernel (score {SCORE_TRANSFORM_KERNEL}), got {picked:?}"
+        );
+    }
+
+    /// Staged scores -1 and must be filtered; DirectDma should win.
+    #[test]
+    fn select_filters_placeholder_candidates() {
+        let ctx = cuda_ctx();
+        let cands = vec![
+            Candidate::Staged {},
+            Candidate::DirectDma { ops: vec![] },
+        ];
+        let picked = select_candidate(&cands, &ctx).unwrap();
+        assert!(matches!(picked, Candidate::DirectDma { .. }));
+    }
+
+    /// When all candidates score < 0 the error message must contain
+    /// "no executable candidate".
+    #[test]
+    fn select_no_executable_candidates_errors() {
+        let ctx = cuda_ctx();
+        let cands = vec![Candidate::Staged {}];
+        let err = select_candidate(&cands, &ctx).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("no executable candidate"),
+            "expected 'no executable candidate' in error, got: {msg}"
+        );
+    }
+
+    /// Two DirectDma candidates with equal scores — first one wins.
+    #[test]
+    fn select_stable_ordering_on_tie() {
+        let ctx = cuda_ctx();
+        let first = Candidate::DirectDma {
+            ops: vec![CopyOp { src_addr: 0x1000, dst_addr: 0x2000, size: 64 }],
+        };
+        let second = Candidate::DirectDma {
+            ops: vec![CopyOp { src_addr: 0x3000, dst_addr: 0x4000, size: 128 }],
+        };
+        let cands = vec![first, second];
+        let picked = select_candidate(&cands, &ctx).unwrap();
+        // The first candidate has src_addr 0x1000; assert that's what we got.
+        match picked {
+            Candidate::DirectDma { ops } => {
+                assert_eq!(ops[0].src_addr, 0x1000, "expected first candidate to win tie");
+            }
+            other => panic!("expected DirectDma, got {other:?}"),
+        }
     }
 
     /// FullyContiguousLayout (NHD): verify `addr_of` on the projected

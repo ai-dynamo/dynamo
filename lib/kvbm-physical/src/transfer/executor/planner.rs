@@ -47,7 +47,7 @@ use crate::BlockId;
 use crate::layout::KvBlockLayout;
 use crate::transfer::context::TransferCompleteNotification;
 use crate::transfer::lower::{
-    Candidate, lower_to_candidates, physical_to_layout_view, select_candidate,
+    Candidate, SelectionContext, lower_to_candidates, physical_to_layout_view, select_candidate,
 };
 use crate::transfer::plan::{
     AnnotatedLayout, CopyOp, CopyPlan, CopyPolicy, TransferSelection, plan_copy,
@@ -82,7 +82,7 @@ pub(crate) fn execute_planner_cuda_transfer(
 ) -> Result<TransferCompleteNotification> {
     validate_cuda_planner_entry(strategy, src.layout().block_layout(), dst.layout().block_layout())?;
 
-    let outcome = plan_and_lower(src, dst, src_block_ids, dst_block_ids)?;
+    let outcome = plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy, ctx.capabilities())?;
 
     // Acquire a stream (caller-provided or pool-acquired). Direction
     // determines which stream pool we draw from.
@@ -168,7 +168,7 @@ pub(crate) fn execute_planner_nixl_transfer(
         other => bail!("execute_planner_nixl_transfer: strategy {other:?} not a NIXL strategy"),
     };
 
-    let ops = match plan_and_lower(src, dst, src_block_ids, dst_block_ids)? {
+    let ops = match plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy, ctx.capabilities())? {
         PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
         PlanOutcome::Direct(ops) => ops,
         #[cfg(feature = "permute_kernels")]
@@ -285,6 +285,8 @@ fn plan_and_lower(
     dst: &PhysicalLayout,
     src_block_ids: &[BlockId],
     dst_block_ids: &[BlockId],
+    strategy: TransferStrategy,
+    capabilities: &crate::transfer::TransferCapabilities,
 ) -> Result<PlanOutcome> {
     if validate_planner_block_ids(src_block_ids, dst_block_ids)?.is_noop() {
         return Ok(PlanOutcome::Empty);
@@ -349,7 +351,19 @@ fn plan_and_lower(
         CopyPlan::Direct(ops) if ops.is_empty() => Ok(PlanOutcome::Empty),
         CopyPlan::Direct(_) => {
             let candidates = lower_to_candidates(plan)?;
-            let chosen = select_candidate(&candidates)?;
+            let total_bytes: usize = match &candidates[..] {
+                [Candidate::DirectDma { ops }] => ops.iter().map(|o| o.size).sum(),
+                _ => 0,
+            };
+            let sel_ctx = SelectionContext {
+                strategy,
+                descriptor_count: candidates.len(),
+                total_bytes,
+                #[cfg(feature = "permute_kernels")]
+                dtype: src.layout().config().dtype,
+                capabilities,
+            };
+            let chosen = select_candidate(&candidates, &sel_ctx)?;
             match chosen {
                 Candidate::DirectDma { ops } => Ok(PlanOutcome::Direct(ops.clone())),
                 other => bail!(
@@ -844,6 +858,10 @@ struct OwnedStagedContext {
     raw_agent: dynamo_memory::nixl::Agent,
     nixl_agent: super::super::NixlAgent,
     stream: Arc<CudaStream>,
+    /// Copied from `TransferContext` so the staged task can build a
+    /// `SelectionContext` for the NIXL leg's `plan_and_lower` call.
+    /// `TransferCapabilities` is `Copy` so this is cheap.
+    capabilities: crate::transfer::TransferCapabilities,
 }
 
 #[cfg(feature = "permute_kernels")]
@@ -860,6 +878,7 @@ impl OwnedStagedContext {
             raw_agent: nixl_agent.raw_agent().clone(),
             nixl_agent,
             stream: ctx.next_h2d_streams(),
+            capabilities: *ctx.capabilities(),
         }
     }
 
@@ -920,7 +939,7 @@ impl OwnedStagedContext {
         strategy: TransferStrategy,
         xfer_op: XferOp,
     ) -> Result<TransferCompleteNotification> {
-        let outcome = plan_and_lower(src, dst, src_block_ids, dst_block_ids)?;
+        let outcome = plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy, &self.capabilities)?;
         let ops = match outcome {
             PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
             PlanOutcome::Direct(ops) => ops,
