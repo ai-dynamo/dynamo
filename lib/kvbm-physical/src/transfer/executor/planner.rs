@@ -887,7 +887,7 @@ pub(crate) fn validate_nixl_planner_entry(
 ///   `single_buffer_base + block_id * bytes_per_block` (universal
 ///   layouts are FC-only, so a single allocation backs all blocks).
 #[cfg(feature = "permute_kernels")]
-fn dispatch_transform_kernel(
+pub(crate) fn dispatch_transform_kernel(
     invocation: &crate::transfer::kernel_catalog::KernelInvocation,
     src: &PhysicalLayout,
     dst: &PhysicalLayout,

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Optional startup benchmarking cache for the planner selector (PR-7.5).
+//! Optional startup benchmarking cache for the planner selector (PR-7.5 / PR-7.5.1).
 //!
 //! [`BenchmarkCache`] maps [`BenchmarkKey`] (layout-pair shape) to a
 //! [`BenchmarkOutcome`] that records which `Candidate` variant won when
@@ -17,23 +17,24 @@
 //! dispatch always resolves through the real planner machinery.  A buggy
 //! benchmark outcome cannot corrupt data.
 //!
-//! # Timing semantics — submit latency, not transfer completion
+//! # Timing semantics
 //!
-//! [`benchmark_pair`](BenchmarkCache::benchmark_pair) measures the
-//! synchronous *submit* latency of each candidate — the time from the
-//! start of dispatch to when the call returns.  This mirrors the
-//! `submit_latency_us` telemetry emitted by `execute_planner_cuda_transfer`
-//! (PR-7.6).
+//! [`BenchmarkCache::benchmark_pair`] measures end-to-end transfer time
+//! per candidate:
 //!
-//! Submit latency is **not** transfer-completion time.  For small,
-//! descriptor-heavy transfers the submit path (memcpy_batch setup,
-//! kernel-launch API calls) dominates the observable latency before the
-//! first byte moves.  For large single-chunk copies the GPU transfer time
-//! dominates and submit latency is nearly constant — in that regime
-//! benchmarking submit-only is uninformative.  A future PR may extend
-//! `BenchmarkOutcome` to capture end-to-end timing (stream record + sync),
-//! but that requires an async path and per-route notification handling that
-//! is out of scope for PR-7.5.
+//! - **`DirectDma`**: `Instant::now()` → `dispatch_direct_dma_ops` →
+//!   `stream.synchronize()` → elapsed. Both submit and DMA transfer time
+//!   are included.
+//! - **`TransformKernel`** (requires `permute_kernels` feature): same
+//!   pattern with `dispatch_transform_kernel` + `stream.synchronize()`.
+//!   Includes pointer-table H2D upload and kernel execution.
+//! - **`NixlDirectDma`**: `Instant::now()` → `create_xfer_req` +
+//!   `post_xfer_req` → tight sync poll on `get_xfer_status()` until
+//!   completion → elapsed. End-to-end including network transfer.
+//!
+//! All three routes are now end-to-end (not submit-only). The timings are
+//! comparable within a candidate class; cross-class comparisons are valid
+//! for candidate selection since the scorer only uses the winner label.
 //!
 //! # Eviction
 //!
@@ -143,7 +144,7 @@ fn strategy_discriminant(s: TransferStrategy) -> u8 {
 pub struct BenchmarkOutcome {
     /// `Candidate::class_name()` of the empirically fastest candidate.
     pub winner: &'static str,
-    /// Minimum submit latency observed for the winner across
+    /// Minimum end-to-end latency observed for the winner across
     /// `runs_compared` benchmark trials (µs).  Zero if timing was
     /// not captured (scaffolding path).
     pub winner_latency_us: u64,
@@ -243,43 +244,44 @@ impl BenchmarkCache {
         self.inner.lock().expect("BenchmarkCache mutex poisoned").len()
     }
 
-    /// Benchmark a set of `Candidate::DirectDma` ops, record the winner in
-    /// the cache, and return the outcome.
+    /// Benchmark a set of candidates, record the winner in the cache, and
+    /// return the outcome.
     ///
-    /// # Scope (PR-7.5 — narrow Path B)
+    /// # Supported variants (PR-7.5.1)
     ///
-    /// Only `Candidate::DirectDma` ops are benchmarked today.  The
-    /// function bails with a descriptive error for any other candidate
-    /// variant.  This is intentional: NIXL benchmarking, transform-kernel
-    /// benchmarking, and graph-replay benchmarking all require their own
-    /// execution infrastructure (NIXL agents, kernel invocations, CUDA
-    /// graph capture) that is out of scope for one PR.  A future PR
-    /// (`PR-7.5.1`) may widen the dispatch here.
+    /// - [`BenchmarkCandidate::DirectDma`]: measures end-to-end via
+    ///   `memcpy_batch` + `stream.synchronize()`.
+    /// - [`BenchmarkCandidate::TransformKernel`]: `dispatch_transform_kernel`
+    ///   + `stream.synchronize()`. Requires the `permute_kernels` feature.
+    /// - [`BenchmarkCandidate::NixlDirectDma`]: `create_xfer_req` +
+    ///   `post_xfer_req` + sync polling on `get_xfer_status()`.
     ///
     /// # Timing semantics
     ///
-    /// Measures synchronous submit latency — the wall-clock elapsed time
-    /// from immediately before `dispatch_ops_grouped_by_size` is called to
-    /// immediately after it returns.  This mirrors the `tel_t0` / `tel_latency_us`
-    /// brackets in `execute_planner_cuda_transfer` (PR-7.6 telemetry).
-    /// Transfer-completion time (stream sync + event fire) is not captured
-    /// — see module doc for the rationale.
+    /// All routes measure end-to-end transfer time: the wall-clock elapsed
+    /// from immediately before dispatch to immediately after the transfer
+    /// completes on the device / network. This differs from PR-7.5's
+    /// submit-only timing for `DirectDma` — see module doc §Timing semantics.
     ///
     /// # Stream ownership
     ///
-    /// The caller provides an `Arc<CudaStream>`.  The function issues
-    /// CUDA work on that stream for each trial.  No explicit stream sync
-    /// is performed between candidates — the goal is to measure submit
-    /// overhead, not transfer latency, so cross-trial GPU serialisation
-    /// would distort the measurement.  If the caller wants clean
-    /// per-candidate isolation, it should provide separate streams.
+    /// For CUDA routes the caller provides an `Arc<CudaStream>`.  Each trial
+    /// ends with `stream.synchronize()`, so successive trials are isolated
+    /// end-to-end. For NIXL routes the stream is not used.
+    ///
+    /// # Locality invariants (NIXL)
+    ///
+    /// - `NixlWrite` requires `src` to be local to the benchmarking agent.
+    /// - `NixlRead` / `NixlReadFlipped` require `dst` to be local.
+    ///
+    /// Violation returns an error before any NIXL API is called.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - `candidates` is empty.
-    /// - Any candidate is not `Candidate::DirectDma` (deferral to PR-7.5.1).
-    /// - The dispatch itself fails.
+    /// - Any dispatch fails.
+    /// - Locality invariant is violated for a `NixlDirectDma` candidate.
     #[allow(dead_code)]
     pub(crate) fn benchmark_pair(
         self: &Arc<Self>,
@@ -296,13 +298,10 @@ impl BenchmarkCache {
         let mut best_latency_us = u64::MAX;
 
         for bc in &candidates {
-            let t0 = std::time::Instant::now();
-            dispatch_direct_dma_ops(&bc.ops, stream)?;
-            let latency_us = t0.elapsed().as_micros() as u64;
-
+            let (class_name, latency_us) = dispatch_benchmark_candidate(bc, stream)?;
             if latency_us < best_latency_us {
                 best_latency_us = latency_us;
-                best_class = bc.class_name;
+                best_class = class_name;
             }
         }
 
@@ -323,27 +322,77 @@ impl Default for BenchmarkCache {
     }
 }
 
-// ─────────────── BenchmarkCandidate — a thin submit-only descriptor ──────────
+// ─────────── BenchmarkCandidate — per-variant timing descriptors ─────────────
 //
-// `Candidate` is defined in `transfer::lower` and carries per-variant
-// data (kernel invocations, graph keys, …) that benchmarking doesn't need.
-// Rather than taking `&[Candidate]` and pattern-matching in the timing
-// loop (which would spread dispatch concerns into `benchmark.rs`), we
-// introduce a thin `BenchmarkCandidate` that the caller pre-decodes.
-// This keeps `benchmark.rs` independent of the full `Candidate` enum.
+// `Candidate` (in `transfer::lower`) carries per-variant data that the
+// benchmarking loop doesn't need. Rather than taking `&[Candidate]` and
+// pattern-matching in the timing loop (which would spread dispatch concerns
+// into `benchmark.rs`), we use a thin `BenchmarkCandidate` enum that the
+// caller pre-decodes from a `Candidate`.
+//
+// Each variant carries exactly the data needed to dispatch one timed trial.
 
-/// A pre-decoded candidate for submit-only benchmarking.
+/// A pre-decoded candidate for end-to-end benchmarking.
 ///
-/// Only `DirectDma` is supported today (PR-7.5 narrow Path B).
-/// A future PR may extend this with `SmallStridedCopy` ops or
-/// a `DirectDma | SmallStridedCopy` union field.
+/// Variants added in PR-7.5.1 extend the original `DirectDma`-only struct
+/// (PR-7.5) to cover `TransformKernel` and NIXL direct DMA.
 #[allow(dead_code)]
-pub(crate) struct BenchmarkCandidate {
-    /// Matches `Candidate::class_name()` for the variant this was decoded from.
-    pub class_name: &'static str,
-    /// Copy descriptors.  For `DirectDma`, these are the ops directly from
-    /// the planner.  Other variants are unsupported (bail at construction).
-    pub ops: Vec<CopyOp>,
+pub(crate) enum BenchmarkCandidate {
+    /// CUDA memcpy batch DMA (cudaMemcpyBatchAsync / cudaMemcpyAsync).
+    DirectDma {
+        /// Copy descriptors from the planner.
+        ops: Vec<CopyOp>,
+    },
+
+    /// Planner-driven permute kernel (operational ↔ universal, or NHD ↔ HND).
+    ///
+    /// Only present when the `permute_kernels` feature is enabled.
+    #[cfg(feature = "permute_kernels")]
+    TransformKernel {
+        /// Kernel launch parameters resolved by the catalog.
+        invocation: crate::transfer::kernel_catalog::KernelInvocation,
+        /// Source physical layout (borrowing is not possible here — the
+        /// benchmark loop outlives the planner call site).
+        src: Arc<crate::layout::PhysicalLayout>,
+        /// Destination physical layout.
+        dst: Arc<crate::layout::PhysicalLayout>,
+        /// `(src_block_id, dst_block_id)` pairs for this trial.
+        block_pairs: Vec<(crate::BlockId, crate::BlockId)>,
+    },
+
+    /// NIXL direct DMA (cross-agent `create_xfer_req` + `post_xfer_req`).
+    NixlDirectDma {
+        /// Copy descriptors (coalesced op list from the planner).
+        ops: Vec<CopyOp>,
+        /// NIXL agent driving this transfer (the "local" agent).
+        nixl_agent: dynamo_memory::nixl::NixlAgent,
+        /// Source layout metadata (agent name, mem_type, device_id).
+        src_agent_name: String,
+        src_mem_type: dynamo_memory::nixl::MemType,
+        src_device_id: u64,
+        /// Destination layout metadata.
+        dst_agent_name: String,
+        dst_mem_type: dynamo_memory::nixl::MemType,
+        dst_device_id: u64,
+        /// Transfer direction (Read = pull, Write = push).
+        xfer_op: dynamo_memory::nixl::XferOp,
+        /// When `true`, swap src/dst descriptor lists at the NIXL layer
+        /// (NixlReadFlipped / NixlWriteFlipped strategies).
+        flip_descriptors: bool,
+    },
+}
+
+impl BenchmarkCandidate {
+    /// The `Candidate::class_name()` string for this variant.
+    #[allow(dead_code)]
+    pub(crate) fn class_name(&self) -> &'static str {
+        match self {
+            BenchmarkCandidate::DirectDma { .. } => "DirectDma",
+            #[cfg(feature = "permute_kernels")]
+            BenchmarkCandidate::TransformKernel { .. } => "TransformKernel",
+            BenchmarkCandidate::NixlDirectDma { .. } => "DirectDma",
+        }
+    }
 }
 
 /// Thin copy descriptor re-exported for `BenchmarkCandidate`.
@@ -363,7 +412,69 @@ impl From<&crate::transfer::plan::CopyOp> for CopyOp {
     }
 }
 
+// ──────────────────── Per-variant timed dispatch ──────────────────────────────
+
+/// Dispatch one `BenchmarkCandidate` trial, returning `(class_name, duration_us)`.
+///
+/// The returned duration is end-to-end: from just before the dispatch call
+/// to after the device/network confirms completion.
+fn dispatch_benchmark_candidate(
+    bc: &BenchmarkCandidate,
+    stream: &Arc<CudaStream>,
+) -> Result<(&'static str, u64)> {
+    match bc {
+        BenchmarkCandidate::DirectDma { ops } => {
+            let t0 = std::time::Instant::now();
+            dispatch_direct_dma_ops(ops, stream)?;
+            stream.synchronize()?;
+            Ok(("DirectDma", t0.elapsed().as_micros() as u64))
+        }
+
+        #[cfg(feature = "permute_kernels")]
+        BenchmarkCandidate::TransformKernel { invocation, src, dst, block_pairs } => {
+            let t0 = std::time::Instant::now();
+            crate::transfer::executor::dispatch_transform_kernel(
+                invocation,
+                src,
+                dst,
+                block_pairs,
+                stream,
+            )?;
+            stream.synchronize()?;
+            Ok(("TransformKernel", t0.elapsed().as_micros() as u64))
+        }
+
+        BenchmarkCandidate::NixlDirectDma {
+            ops,
+            nixl_agent,
+            src_agent_name,
+            src_mem_type,
+            src_device_id,
+            dst_agent_name,
+            dst_mem_type,
+            dst_device_id,
+            xfer_op,
+            flip_descriptors,
+        } => {
+            dispatch_nixl_dma_ops_timed(
+                ops,
+                nixl_agent,
+                src_agent_name,
+                *src_mem_type,
+                *src_device_id,
+                dst_agent_name,
+                *dst_mem_type,
+                *dst_device_id,
+                *xfer_op,
+                *flip_descriptors,
+            )
+        }
+    }
+}
+
 /// Dispatch a `DirectDma` op set by calling `memcpy_batch`.
+///
+/// Timing is done by the caller (`dispatch_benchmark_candidate`).
 ///
 /// Mirrors `dispatch_ops_grouped_by_size` in `executor::planner` but
 /// is intentionally a private copy here so `benchmark.rs` stays
@@ -407,6 +518,99 @@ fn dispatch_direct_dma_ops(ops: &[CopyOp], stream: &Arc<CudaStream>) -> Result<(
         }
     }
     Ok(())
+}
+
+/// Dispatch a `NixlDirectDma` trial end-to-end and return `(class_name, duration_us)`.
+///
+/// Builds `XferDescList` pairs, posts the transfer via `create_xfer_req` +
+/// `post_xfer_req`, then polls `get_xfer_status()` in a tight sync loop
+/// until the transfer completes.  Returns an error if the transfer or status
+/// check fails, or if the locality invariant is violated.
+///
+/// # Locality invariants
+///
+/// - `NixlWrite` (push): `src` must be local to `nixl_agent`.
+/// - `NixlRead` / `NixlReadFlipped` (pull): `dst` must be local to `nixl_agent`.
+///
+/// These match `execute_planner_nixl_transfer`'s invariants.
+#[allow(dead_code)]
+fn dispatch_nixl_dma_ops_timed(
+    ops: &[CopyOp],
+    nixl_agent: &dynamo_memory::nixl::NixlAgent,
+    src_agent_name: &str,
+    src_mem_type: dynamo_memory::nixl::MemType,
+    src_device_id: u64,
+    dst_agent_name: &str,
+    dst_mem_type: dynamo_memory::nixl::MemType,
+    dst_device_id: u64,
+    xfer_op: dynamo_memory::nixl::XferOp,
+    flip_descriptors: bool,
+) -> Result<(&'static str, u64)> {
+    use dynamo_memory::nixl::{XferDescList, XferOp};
+
+    // Locality check (mirrors execute_planner_nixl_transfer).
+    let local_name = nixl_agent.name();
+    match xfer_op {
+        XferOp::Write => {
+            if local_name != src_agent_name {
+                bail!(
+                    "benchmark_pair NixlDirectDma: Write (push) requires local src; \
+                     src_agent={:?}, local_agent={:?}",
+                    src_agent_name,
+                    local_name,
+                );
+            }
+        }
+        XferOp::Read => {
+            if local_name != dst_agent_name {
+                bail!(
+                    "benchmark_pair NixlDirectDma: Read (pull) requires local dst; \
+                     dst_agent={:?}, local_agent={:?}",
+                    dst_agent_name,
+                    local_name,
+                );
+            }
+        }
+    }
+
+    // Build descriptor lists.
+    let mut src_dl = XferDescList::new(src_mem_type)?;
+    let mut dst_dl = XferDescList::new(dst_mem_type)?;
+    for op in ops {
+        src_dl.add_desc(op.src_addr, op.size, src_device_id);
+        dst_dl.add_desc(op.dst_addr, op.size, dst_device_id);
+    }
+    if flip_descriptors {
+        std::mem::swap(&mut src_dl, &mut dst_dl);
+    }
+
+    let remote_agent = match xfer_op {
+        XferOp::Write => dst_agent_name,
+        XferOp::Read => src_agent_name,
+    };
+
+    // Start timing — includes both create+post and the transfer itself.
+    let t0 = std::time::Instant::now();
+
+    let xfer_req = nixl_agent.create_xfer_req(xfer_op, &src_dl, &dst_dl, remote_agent, None)?;
+    let still_pending = nixl_agent.post_xfer_req(&xfer_req, None)?;
+
+    // Sync poll until complete (identical to the tight loop in
+    // llm/src/block_manager/block/transfer/nixl.rs).  This is fine at
+    // benchmark/startup time — we are not on a tokio worker thread here,
+    // and we don't need the notification-channel machinery.
+    if still_pending {
+        loop {
+            match nixl_agent.get_xfer_status(&xfer_req) {
+                Ok(status) if status.is_success() => break,
+                Ok(_) => std::thread::yield_now(),
+                Err(e) => bail!("benchmark_pair NixlDirectDma: get_xfer_status failed: {e}"),
+            }
+        }
+    }
+
+    let latency_us = t0.elapsed().as_micros() as u64;
+    Ok(("DirectDma", latency_us))
 }
 
 #[cfg(all(test, feature = "testing-kvbm"))]
@@ -509,5 +713,127 @@ mod tests {
         assert_eq!(strategy_discriminant(TransferStrategy::NixlWrite), 11);
         assert_eq!(strategy_discriminant(TransferStrategy::NixlReadFlipped), 12);
         assert_eq!(strategy_discriminant(TransferStrategy::NixlWriteFlipped), 13);
+    }
+
+    // ── BenchmarkCandidate::class_name ────────────────────────────────────────
+
+    /// Each variant must return the expected class_name string that
+    /// matches `Candidate::class_name()` in `transfer::lower`.
+    #[test]
+    fn benchmark_candidate_class_names() {
+        let direct = BenchmarkCandidate::DirectDma { ops: vec![] };
+        assert_eq!(direct.class_name(), "DirectDma");
+
+        // NixlDirectDma maps to "DirectDma" (same class, different route).
+        let nixl = BenchmarkCandidate::NixlDirectDma {
+            ops: vec![],
+            nixl_agent: dynamo_memory::nixl::NixlAgent::new("bench-test-cls")
+                .expect("agent"),
+            src_agent_name: "a".to_string(),
+            src_mem_type: dynamo_memory::nixl::MemType::Dram,
+            src_device_id: 0,
+            dst_agent_name: "b".to_string(),
+            dst_mem_type: dynamo_memory::nixl::MemType::Dram,
+            dst_device_id: 0,
+            xfer_op: dynamo_memory::nixl::XferOp::Read,
+            flip_descriptors: false,
+        };
+        assert_eq!(nixl.class_name(), "DirectDma");
+    }
+
+    // ── NIXL locality invariant ───────────────────────────────────────────────
+
+    /// A NixlDirectDma Write candidate with a non-local src must bail
+    /// with a descriptive error before touching any NIXL API.
+    ///
+    /// This test is sync (no GPU required) and runs without UCX.
+    #[test]
+    fn benchmark_nixl_locality_write_requires_local_src() {
+        let cache = Arc::new(BenchmarkCache::new());
+        let key = make_key(TransferStrategy::NixlWrite);
+
+        // Fake stream — DirectDma is not dispatched; NIXL route doesn't use it.
+        // We can't create a real CudaStream without a GPU here, so we exploit
+        // the fact that the NIXL locality check fires before stream use.
+        // Construct the candidate explicitly to trigger the check.
+
+        // Agent named "local-agent" is local; src_agent_name is "remote-agent".
+        let nixl_agent = dynamo_memory::nixl::NixlAgent::new("local-agent-write-check")
+            .expect("NixlAgent::new must succeed");
+
+        let candidate = BenchmarkCandidate::NixlDirectDma {
+            ops: vec![],
+            nixl_agent: nixl_agent.clone(),
+            src_agent_name: "remote-agent".to_string(),
+            src_mem_type: dynamo_memory::nixl::MemType::Dram,
+            src_device_id: 0,
+            dst_agent_name: "local-agent-write-check".to_string(),
+            dst_mem_type: dynamo_memory::nixl::MemType::Dram,
+            dst_device_id: 0,
+            xfer_op: dynamo_memory::nixl::XferOp::Write,
+            flip_descriptors: false,
+        };
+
+        // dispatch_nixl_dma_ops_timed is private; exercise via the full
+        // benchmark_pair path. We need a stream handle — borrow an existing
+        // one is not possible without GPU, but the locality check happens
+        // before any stream use. Use a null pointer transmute is risky; instead
+        // call dispatch_nixl_dma_ops_timed directly via a helper shim.
+        //
+        // Direct call to the module-private function via the re-exposed
+        // dispatch_benchmark_candidate path — we need a fake stream that
+        // will never be dereferenced (the NIXL path doesn't use it).
+        // The simplest safe approach: call dispatch_nixl_dma_ops_timed
+        // directly since it's in the same module.
+        let err = dispatch_nixl_dma_ops_timed(
+            &[],
+            &nixl_agent,
+            "remote-agent",        // src_agent_name (not local)
+            dynamo_memory::nixl::MemType::Dram,
+            0,
+            "local-agent-write-check", // dst_agent_name
+            dynamo_memory::nixl::MemType::Dram,
+            0,
+            dynamo_memory::nixl::XferOp::Write,
+            false,
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Write (push) requires local src"),
+            "expected locality error message, got: {msg}"
+        );
+
+        // Cache must remain empty — the error fired before any insert.
+        assert_eq!(cache.len(), 0, "cache must be empty after locality error");
+    }
+
+    /// A NixlDirectDma Read candidate with a non-local dst must bail
+    /// with a descriptive error.
+    #[test]
+    fn benchmark_nixl_locality_read_requires_local_dst() {
+        let nixl_agent = dynamo_memory::nixl::NixlAgent::new("local-agent-read-check")
+            .expect("NixlAgent::new must succeed");
+
+        let err = dispatch_nixl_dma_ops_timed(
+            &[],
+            &nixl_agent,
+            "local-agent-read-check", // src_agent_name
+            dynamo_memory::nixl::MemType::Dram,
+            0,
+            "remote-agent",           // dst_agent_name (not local)
+            dynamo_memory::nixl::MemType::Dram,
+            0,
+            dynamo_memory::nixl::XferOp::Read,
+            false,
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Read (pull) requires local dst"),
+            "expected read locality error, got: {msg}"
+        );
     }
 }

@@ -436,16 +436,16 @@ impl TransferContext {
         &self.benchmark_cache
     }
 
-    /// PR-7.5: Benchmark a set of candidates for a given layout-pair key
+    /// PR-7.5.1: Benchmark a set of candidates for a given layout-pair key
     /// and record the winner in the cache.
     ///
     /// This is an explicit-API benchmark (Path B): the caller decides when
     /// to benchmark (e.g. at startup with known layout pairs) and provides
     /// the key, pre-decoded candidates, and a CUDA stream to dispatch on.
     ///
-    /// Only `Candidate::DirectDma` candidates are supported today.
-    /// NIXL, transform-kernel, and graph-replay benchmarking are deferred
-    /// to PR-7.5.1.
+    /// Supported variants: `DirectDma`, `TransformKernel` (requires
+    /// `permute_kernels`), and `NixlDirectDma`. All routes measure
+    /// end-to-end transfer time including device/network completion.
     ///
     /// See [`BenchmarkCache::benchmark_pair`] for timing semantics and
     /// error conditions.
