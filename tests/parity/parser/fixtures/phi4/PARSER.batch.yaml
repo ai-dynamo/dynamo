@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: phi4
+mode: batch
+cases:
+  PARSER.batch.1:
+    description: Single tool call (happy path)
+    model_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
+  PARSER.batch.2:
+    description: Multiple tool calls (parallel)
+    model_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_time", "arguments": {"timezone":
+      "EST"}}]'
+    tools:
+    - *id001
+    - name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_time
+        arguments:
+          timezone: EST
+      normal_text: ''
+  PARSER.batch.3:
+    description: No tool call (plain text)
+    model_text: Hello, how can I help you today?
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: Hello, how can I help you today?
+  PARSER.batch.4:
+    description: Malformed JSON args (missing close brace)
+    model_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"]'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: ''
+  PARSER.batch.5:
+    description: No explicit end (truncation)
+    model_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: ''
+  PARSER.batch.6:
+    description: Empty args (no-arg call)
+    model_text: 'functools[{"name": "get_time", "arguments": {}}]'
+    tools:
+    - name: get_time
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      calls:
+      - name: get_time
+        arguments: {}
+      normal_text: ''
+  PARSER.batch.7:
+    description: Complex args (nested object + array)
+    model_text: 'functools[{"name": "process_data", "arguments": {"items": [1, 2, 3], "config": {"nested": true}}}]'
+    tools:
+    - name: process_data
+      parameters:
+        type: object
+        properties:
+          items:
+            type: array
+          config:
+            type: object
+    expected:
+      calls:
+      - name: process_data
+        arguments:
+          config:
+            nested: true
+          items:
+          - 1
+          - 2
+          - 3
+      normal_text: ''
+  PARSER.batch.8:
+    description: Interleaved normal text
+    model_text: 'I will check the weather. functools[{"name": "get_weather", "arguments": {"location": "NYC"}}] Done.'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: I will check the weather.
+  PARSER.batch.9:
+    description: Empty input
+    model_text: ''
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: ''
+  PARSER.batch.10:
+    description: Duplicate calls (same name twice)
+    model_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_weather", "arguments":
+      {"location": "LA"}}]'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_weather
+        arguments:
+          location: LA
+      normal_text: ''

@@ -603,6 +603,473 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{"location": "NYC"}\n```<｜tool▁call▁end｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{"location": "LA"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>',
         "tools": [_GET_WEATHER_LOC],
     },
+    # ----- deepseek_v4 (DSML) -----
+    # Format: <｜DSML｜tool_calls>
+    #          <｜DSML｜invoke name="NAME">
+    #          <｜DSML｜parameter name="K" string="true|false">V</｜DSML｜parameter>
+    #          ...
+    #          </｜DSML｜invoke>
+    #          </｜DSML｜tool_calls>
+    # `string="true"` means the parameter value is a literal string;
+    # `string="false"` means the value is a JSON literal (bool/int/array/etc).
+    ("deepseek_v4", "PARSER.batch.1"): {
+        "description": "Single tool call (happy path)",
+        "text": '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v4", "PARSER.batch.2"): {
+        "description": "Multiple tool calls (parallel)",
+        "text": '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n<｜DSML｜invoke name="get_time">\n<｜DSML｜parameter name="timezone" string="true">EST</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
+        "tools": [_GET_WEATHER_LOC, _GET_TIME_TZ],
+    },
+    ("deepseek_v4", "PARSER.batch.3"): {
+        "description": "No tool call (plain text)",
+        "text": "Hello, how can I help you today?",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v4", "PARSER.batch.4"): {
+        "description": "Malformed (missing </｜DSML｜parameter> end tag)",
+        "text": '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v4", "PARSER.batch.5"): {
+        "description": "Missing </｜DSML｜tool_calls> end marker",
+        "text": '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v4", "PARSER.batch.6"): {
+        "description": "Empty args (no-arg call)",
+        "text": '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_time">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
+        "tools": [_GET_TIME_NOARG],
+    },
+    ("deepseek_v4", "PARSER.batch.7"): {
+        "description": "Complex args (nested object + array, JSON-typed)",
+        "text": '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="process_data">\n<｜DSML｜parameter name="items" string="false">[1, 2, 3]</｜DSML｜parameter>\n<｜DSML｜parameter name="config" string="false">{"nested": true}</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
+        "tools": [_PROCESS_DATA_NESTED],
+    },
+    ("deepseek_v4", "PARSER.batch.8"): {
+        "description": "Interleaved normal text",
+        "text": 'I will check the weather. <｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v4", "PARSER.batch.9"): {
+        "description": "Empty input",
+        "text": "",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v4", "PARSER.batch.10"): {
+        "description": "Duplicate calls (same name twice)",
+        "text": '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">LA</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    # ----- hermes -----
+    ("hermes", "PARSER.batch.1"): {
+        "description": "Single tool call (happy path)",
+        "text": '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("hermes", "PARSER.batch.2"): {
+        "description": "Multiple tool calls (parallel)",
+        "text": '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "get_time", "arguments": {"timezone": "EST"}}</tool_call>',
+        "tools": [_GET_WEATHER_LOC, _GET_TIME_TZ],
+    },
+    ("hermes", "PARSER.batch.3"): {
+        "description": "No tool call (plain text)",
+        "text": "Hello, how can I help you today?",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("hermes", "PARSER.batch.4"): {
+        "description": "Malformed JSON args (missing close brace)",
+        "text": '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"</tool_call>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("hermes", "PARSER.batch.5"): {
+        "description": "Missing </tool_call> end marker",
+        "text": '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("hermes", "PARSER.batch.6"): {
+        "description": "Empty args (no-arg call)",
+        "text": '<tool_call>{"name": "get_time", "arguments": {}}</tool_call>',
+        "tools": [_GET_TIME_NOARG],
+    },
+    ("hermes", "PARSER.batch.7"): {
+        "description": "Complex args (nested object + array)",
+        "text": '<tool_call>{"name": "process_data", "arguments": {"items": [1, 2, 3], "config": {"nested": true}}}</tool_call>',
+        "tools": [_PROCESS_DATA_NESTED],
+    },
+    ("hermes", "PARSER.batch.8"): {
+        "description": "Interleaved normal text",
+        "text": 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call> Done.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("hermes", "PARSER.batch.9"): {
+        "description": "Empty input",
+        "text": "",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("hermes", "PARSER.batch.10"): {
+        "description": "Duplicate calls (same name twice)",
+        "text": '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location": "LA"}}</tool_call>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    # ----- qwen25 -----
+    ("qwen25", "PARSER.batch.1"): {
+        "description": "Single tool call (happy path)",
+        "text": '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("qwen25", "PARSER.batch.2"): {
+        "description": "Multiple tool calls (parallel)",
+        "text": '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "get_time", "arguments": {"timezone": "EST"}}</tool_call>',
+        "tools": [_GET_WEATHER_LOC, _GET_TIME_TZ],
+    },
+    ("qwen25", "PARSER.batch.3"): {
+        "description": "No tool call (plain text)",
+        "text": "Hello, how can I help you today?",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("qwen25", "PARSER.batch.4"): {
+        "description": "Malformed JSON args (missing close brace)",
+        "text": '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"</tool_call>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("qwen25", "PARSER.batch.5"): {
+        "description": "Missing </tool_call> end marker",
+        "text": '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("qwen25", "PARSER.batch.6"): {
+        "description": "Empty args (no-arg call)",
+        "text": '<tool_call>{"name": "get_time", "arguments": {}}</tool_call>',
+        "tools": [_GET_TIME_NOARG],
+    },
+    ("qwen25", "PARSER.batch.7"): {
+        "description": "Complex args (nested object + array)",
+        "text": '<tool_call>{"name": "process_data", "arguments": {"items": [1, 2, 3], "config": {"nested": true}}}</tool_call>',
+        "tools": [_PROCESS_DATA_NESTED],
+    },
+    ("qwen25", "PARSER.batch.8"): {
+        "description": "Interleaved normal text",
+        "text": 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call> Done.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("qwen25", "PARSER.batch.9"): {
+        "description": "Empty input",
+        "text": "",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("qwen25", "PARSER.batch.10"): {
+        "description": "Duplicate calls (same name twice)",
+        "text": '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location": "LA"}}</tool_call>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    # ----- mistral -----
+    ("mistral", "PARSER.batch.1"): {
+        "description": "Single tool call (happy path)",
+        "text": '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("mistral", "PARSER.batch.2"): {
+        "description": "Multiple tool calls (parallel)",
+        "text": '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_time", "arguments": {"timezone": "EST"}}][/TOOL_CALLS]',
+        "tools": [_GET_WEATHER_LOC, _GET_TIME_TZ],
+    },
+    ("mistral", "PARSER.batch.3"): {
+        "description": "No tool call (plain text)",
+        "text": "Hello, how can I help you today?",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("mistral", "PARSER.batch.4"): {
+        "description": "Malformed JSON args (missing close brace)",
+        "text": '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"][/TOOL_CALLS]',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("mistral", "PARSER.batch.5"): {
+        "description": "Missing [/TOOL_CALLS] end marker",
+        "text": '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}]',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("mistral", "PARSER.batch.6"): {
+        "description": "Empty args (no-arg call)",
+        "text": '[TOOL_CALLS][{"name": "get_time", "arguments": {}}][/TOOL_CALLS]',
+        "tools": [_GET_TIME_NOARG],
+    },
+    ("mistral", "PARSER.batch.7"): {
+        "description": "Complex args (nested object + array)",
+        "text": '[TOOL_CALLS][{"name": "process_data", "arguments": {"items": [1, 2, 3], "config": {"nested": true}}}][/TOOL_CALLS]',
+        "tools": [_PROCESS_DATA_NESTED],
+    },
+    ("mistral", "PARSER.batch.8"): {
+        "description": "Interleaved normal text",
+        "text": 'I will check the weather. [TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS] Done.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("mistral", "PARSER.batch.9"): {
+        "description": "Empty input",
+        "text": "",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("mistral", "PARSER.batch.10"): {
+        "description": "Duplicate calls (same name twice)",
+        "text": '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_weather", "arguments": {"location": "LA"}}][/TOOL_CALLS]',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    # ----- jamba -----
+    ("jamba", "PARSER.batch.1"): {
+        "description": "Single tool call (happy path)",
+        "text": '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("jamba", "PARSER.batch.2"): {
+        "description": "Multiple tool calls (parallel)",
+        "text": '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_time", "arguments": {"timezone": "EST"}}]</tool_calls>',
+        "tools": [_GET_WEATHER_LOC, _GET_TIME_TZ],
+    },
+    ("jamba", "PARSER.batch.3"): {
+        "description": "No tool call (plain text)",
+        "text": "Hello, how can I help you today?",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("jamba", "PARSER.batch.4"): {
+        "description": "Malformed JSON args (missing close brace)",
+        "text": '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"]</tool_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("jamba", "PARSER.batch.5"): {
+        "description": "Missing </tool_calls> end marker",
+        "text": '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("jamba", "PARSER.batch.6"): {
+        "description": "Empty args (no-arg call)",
+        "text": '<tool_calls>[{"name": "get_time", "arguments": {}}]</tool_calls>',
+        "tools": [_GET_TIME_NOARG],
+    },
+    ("jamba", "PARSER.batch.7"): {
+        "description": "Complex args (nested object + array)",
+        "text": '<tool_calls>[{"name": "process_data", "arguments": {"items": [1, 2, 3], "config": {"nested": true}}}]</tool_calls>',
+        "tools": [_PROCESS_DATA_NESTED],
+    },
+    ("jamba", "PARSER.batch.8"): {
+        "description": "Interleaved normal text",
+        "text": 'I will check the weather. <tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls> Done.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("jamba", "PARSER.batch.9"): {
+        "description": "Empty input",
+        "text": "",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("jamba", "PARSER.batch.10"): {
+        "description": "Duplicate calls (same name twice)",
+        "text": '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_weather", "arguments": {"location": "LA"}}]</tool_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    # ----- llama3_json -----
+    ("llama3_json", "PARSER.batch.1"): {
+        "description": "Single tool call (happy path)",
+        "text": '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}}',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("llama3_json", "PARSER.batch.2"): {
+        "description": "Multiple tool calls (parallel)",
+        "text": '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}};{"name": "get_time", "arguments": {"timezone": "EST"}}',
+        "tools": [_GET_WEATHER_LOC, _GET_TIME_TZ],
+    },
+    ("llama3_json", "PARSER.batch.3"): {
+        "description": "No tool call (plain text)",
+        "text": "Hello, how can I help you today?",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("llama3_json", "PARSER.batch.4"): {
+        "description": "Malformed JSON args (missing close brace)",
+        "text": '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("llama3_json", "PARSER.batch.5"): {
+        "description": "No explicit end (truncation)",
+        "text": '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("llama3_json", "PARSER.batch.6"): {
+        "description": "Empty args (no-arg call)",
+        "text": '<|python_tag|>{"name": "get_time", "arguments": {}}',
+        "tools": [_GET_TIME_NOARG],
+    },
+    ("llama3_json", "PARSER.batch.7"): {
+        "description": "Complex args (nested object + array)",
+        "text": '<|python_tag|>{"name": "process_data", "arguments": {"items": [1, 2, 3], "config": {"nested": true}}}',
+        "tools": [_PROCESS_DATA_NESTED],
+    },
+    ("llama3_json", "PARSER.batch.8"): {
+        "description": "Interleaved normal text (text after wrapper)",
+        "text": '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}} Done.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("llama3_json", "PARSER.batch.9"): {
+        "description": "Empty input",
+        "text": "",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("llama3_json", "PARSER.batch.10"): {
+        "description": "Duplicate calls (same name twice)",
+        "text": '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}};{"name": "get_weather", "arguments": {"location": "LA"}}',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    # ----- phi4 -----
+    ("phi4", "PARSER.batch.1"): {
+        "description": "Single tool call (happy path)",
+        "text": 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}]',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("phi4", "PARSER.batch.2"): {
+        "description": "Multiple tool calls (parallel)",
+        "text": 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_time", "arguments": {"timezone": "EST"}}]',
+        "tools": [_GET_WEATHER_LOC, _GET_TIME_TZ],
+    },
+    ("phi4", "PARSER.batch.3"): {
+        "description": "No tool call (plain text)",
+        "text": "Hello, how can I help you today?",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("phi4", "PARSER.batch.4"): {
+        "description": "Malformed JSON args (missing close brace)",
+        "text": 'functools[{"name": "get_weather", "arguments": {"location": "NYC"]',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("phi4", "PARSER.batch.5"): {
+        "description": "No explicit end (truncation)",
+        "text": 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("phi4", "PARSER.batch.6"): {
+        "description": "Empty args (no-arg call)",
+        "text": 'functools[{"name": "get_time", "arguments": {}}]',
+        "tools": [_GET_TIME_NOARG],
+    },
+    ("phi4", "PARSER.batch.7"): {
+        "description": "Complex args (nested object + array)",
+        "text": 'functools[{"name": "process_data", "arguments": {"items": [1, 2, 3], "config": {"nested": true}}}]',
+        "tools": [_PROCESS_DATA_NESTED],
+    },
+    ("phi4", "PARSER.batch.8"): {
+        "description": "Interleaved normal text",
+        "text": 'I will check the weather. functools[{"name": "get_weather", "arguments": {"location": "NYC"}}] Done.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("phi4", "PARSER.batch.9"): {
+        "description": "Empty input",
+        "text": "",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("phi4", "PARSER.batch.10"): {
+        "description": "Duplicate calls (same name twice)",
+        "text": 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_weather", "arguments": {"location": "LA"}}]',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    # ----- nemotron_nano -----
+    ("nemotron_nano", "PARSER.batch.1"): {
+        "description": "Single tool call (happy path)",
+        "text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call>",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("nemotron_nano", "PARSER.batch.2"): {
+        "description": "Multiple tool calls (parallel)",
+        "text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=get_time>\n<parameter=timezone>\nEST\n</parameter>\n</function>\n</tool_call>",
+        "tools": [_GET_WEATHER_LOC, _GET_TIME_TZ],
+    },
+    ("nemotron_nano", "PARSER.batch.3"): {
+        "description": "No tool call (plain text)",
+        "text": "Hello, how can I help you today?",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("nemotron_nano", "PARSER.batch.4"): {
+        "description": "Malformed (missing </parameter> closing tag)",
+        "text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</function>\n</tool_call>",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("nemotron_nano", "PARSER.batch.5"): {
+        "description": "Missing </tool_call> end marker",
+        "text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("nemotron_nano", "PARSER.batch.6"): {
+        "description": "Empty args (no-arg call)",
+        "text": "<tool_call>\n<function=get_time>\n</function>\n</tool_call>",
+        "tools": [_GET_TIME_NOARG],
+    },
+    ("nemotron_nano", "PARSER.batch.7"): {
+        "description": "Complex args (multi-parameter)",
+        "text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n<parameter=unit>\nfahrenheit\n</parameter>\n</function>\n</tool_call>",
+        "tools": [_GET_WEATHER_LOC_UNIT],
+    },
+    ("nemotron_nano", "PARSER.batch.8"): {
+        "description": "Interleaved normal text",
+        "text": "I'll help you check the weather. <tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call> Let me get that information for you.",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("nemotron_nano", "PARSER.batch.9"): {
+        "description": "Empty input",
+        "text": "",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("nemotron_nano", "PARSER.batch.10"): {
+        "description": "Duplicate calls (same name twice)",
+        "text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=get_weather>\n<parameter=location>\nLA\n</parameter>\n</function>\n</tool_call>",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    # ----- deepseek_v3_2 -----
+    ("deepseek_v3_2", "PARSER.batch.1"): {
+        "description": "Single tool call (happy path)",
+        "text": '<｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3_2", "PARSER.batch.2"): {
+        "description": "Multiple tool calls (parallel)",
+        "text": '<｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n<｜DSML｜invoke name="get_time">\n<｜DSML｜parameter name="timezone" string="true">EST</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>',
+        "tools": [_GET_WEATHER_LOC, _GET_TIME_TZ],
+    },
+    ("deepseek_v3_2", "PARSER.batch.3"): {
+        "description": "No tool call (plain text)",
+        "text": "Hello, how can I help you today?",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3_2", "PARSER.batch.4"): {
+        "description": "Malformed (missing </｜DSML｜parameter> end tag)",
+        "text": '<｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC\n</｜DSML｜invoke>\n</｜DSML｜function_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3_2", "PARSER.batch.5"): {
+        "description": "Missing </｜DSML｜function_calls> end marker",
+        "text": '<｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3_2", "PARSER.batch.6"): {
+        "description": "Empty args (no-arg call)",
+        "text": '<｜DSML｜function_calls>\n<｜DSML｜invoke name="get_time">\n</｜DSML｜invoke>\n</｜DSML｜function_calls>',
+        "tools": [_GET_TIME_NOARG],
+    },
+    ("deepseek_v3_2", "PARSER.batch.7"): {
+        "description": "Complex args (nested object + array, JSON-typed)",
+        "text": '<｜DSML｜function_calls>\n<｜DSML｜invoke name="process_data">\n<｜DSML｜parameter name="items" string="false">[1, 2, 3]</｜DSML｜parameter>\n<｜DSML｜parameter name="config" string="false">{"nested": true}</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>',
+        "tools": [_PROCESS_DATA_NESTED],
+    },
+    ("deepseek_v3_2", "PARSER.batch.8"): {
+        "description": "Interleaved normal text",
+        "text": 'I will check the weather. <｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3_2", "PARSER.batch.9"): {
+        "description": "Empty input",
+        "text": "",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3_2", "PARSER.batch.10"): {
+        "description": "Duplicate calls (same name twice)",
+        "text": '<｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">LA</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
 }
 
 

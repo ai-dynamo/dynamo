@@ -156,6 +156,16 @@ trtllm:
   - '!**/*.md'
   - '!**/*.rst'
 
+# sample -> sample-unified-test (framework-agnostic CPU-only backend
+# reference implementation). Piggybacks on the vllm image, so a sample-only
+# change triggers vllm-build + sample-unified-test. The common/backend ABC
+# already triggers `core`; this filter is for the launch scripts and tests
+# that are specific to the sample backend.
+sample:
+  - 'examples/backends/sample/**'
+  - '!**/*.md'
+  - '!**/*.rst'
+
 frontend:
   - *ci
   - '.cargo/config.toml'
