@@ -111,23 +111,14 @@ flowchart TD
     MES --> P
 ```
 
-The **Single Engine Core** models the behavior of one serving worker. It includes
-scheduler behavior and forward-pass timing. The scheduler decides what work goes
-into a pass; the timing model estimates how long that pass takes.
+The **Single Engine Core** models one worker: scheduler behavior plus
+forward-pass timing. The **Single Engine Simulation** wraps that core as one
+modeled execution stream. The **Multi Engine Simulation** composes many workers
+and adds the system behaviors that only exist across workers: admission,
+routing, KV movement, queueing, imbalance, and Planner decisions.
 
-The **Single Engine Simulation** wraps that core as one worker with one modeled
-execution stream.
-
-The **Multi Engine Simulation** composes many single engines. It can represent
-aggregated serving, where workers are broadly equivalent, or disaggregated
-serving, where prefill and decode capacity are separated. Once there are
-multiple engines, routing, KV movement, queueing, and imbalance become part of
-the system behavior.
-
-Around those engines, Dynamo can simulate serving components such as KV transfer,
-offloading hooks, the KV router, and the Planner. KVBM and distributed cache
-simulation are treated as near-future component work in this draft rather than
-as a fully hooked-up claim today.
+KVBM and distributed cache simulation are treated as near-future component work
+in this draft rather than as a fully hooked-up claim today.
 
 ### 1.1 DES Basics: LLM Inference As Events
 
@@ -162,10 +153,9 @@ One request makes the DES model concrete:
 6. Decode produces visible output tokens.
 7. The trace collector records request-level and system-level metrics.
 
-The important part is that every component decision changes the same global
-timeline. A router decision affects the worker's future queue. A Planner scaling
-decision has a delay before capacity appears. A KV movement decision can change
-when decode begins. DES gives those interactions a concrete place to happen.
+The important part is that every component decision changes future events: a
+router decision affects the worker's queue, a Planner scaling decision delays
+capacity, and a KV movement decision can change when decode begins.
 
 ### 1.3 Replay Harness: Driving The Twin
 
@@ -201,9 +191,7 @@ cache reuse, and feasibility.
 The architecture and DES overview above explain the mechanism. The
 Dynamo-specific value comes from which components are placed into that mechanism:
 engine schedulers, forward-pass timing, routers, Planner decisions, and KV/cache
-behavior. This is the meaty part of the twin. Each component observes simulated
-state, makes decisions, and changes the future event stream for the rest of the
-system.
+behavior.
 
 ### 2.1 Single Engine Simulation: Scheduler Fidelity Matters
 
@@ -213,46 +201,42 @@ prefill is chunked, how many sequences are active, and how KV pressure affects
 progress. Those decisions are exactly what turn model timing into serving
 behavior.
 
-AIC fits into this picture as engine-side timing. At a high level, AIC is a
-performance estimator for model execution on a target backend and hardware
-configuration. Given the model, backend, system, tensor-parallel shape, and pass
-shape, it estimates how long prefill or decode work should take.
-
-That estimate is not the whole serving simulation. The scheduler simulation
-decides what each pass contains: which requests are batched, how much prefill is
-chunked, how many decode sequences are active, and what KV state is in play. AIC
-then estimates the duration of that chosen pass. The combination is the point:
-AIC informs the speed of the pass, while the mocker/replay scheduler models the
+AIC fits into this picture as engine-side timing: given the model, backend,
+system, tensor-parallel shape, and pass shape, it estimates how long prefill or
+decode work should take. The scheduler simulation decides what each pass
+contains; AIC estimates the duration of that chosen pass. The combination is the
+point: AIC informs pass speed, while the mocker/replay scheduler models the
 serving behavior around the pass.
 
 The figure below shows why that scheduler layer matters. AIC gives strong
 fidelity to real silicon for engine-side performance, especially for throughput
 and token time. But TTFT is sensitive to how requests wait, batch, chunk, and
-enter prefill under high concurrency. That is expected: pass-level performance
-estimates tell us how fast a selected batch runs, while scheduler simulation
-models how that batch was formed and when each request first gets admitted.
+enter prefill under high concurrency.
 
 ![TPS/GPU, TPS/User, TPOT, and TTFT vs. concurrency for hardware, mocker, and AIC on B200 MiniMax-M2.5, TP=4, ISL/OSL 1K/1K.](./images/hw_mocker_aic_4panel.png)
 
-The model tested is MiniMax-M2.5 FP8 on B200, with TP=4, ISL=1K, OSL=1K, at concurrencies from 8 to 64. Mocker tracks the hardware trend across throughput and latency, with the high-concurrency TTFT behavior showing why scheduler modeling matters.
+The model tested is MiniMax-M2.5 FP8 on B200, with TP=4, ISL=1K, OSL=1K, at
+concurrencies from 8 to 64. Mocker tracks the hardware trend across throughput
+and latency, with high-concurrency TTFT showing why scheduler modeling matters.
 
 ### 2.2 Multi Engine Simulation: From Workers To Systems
 
-Once multiple engines exist, the central question becomes: where should this
-request go, and what future bottleneck does that choice create?
+For a purely feed-forward policy, multi-engine simulation is almost mechanical:
+pre-allocate each request to a worker queue, run the single-engine simulations in
+parallel, and collect the results. Round-robin routing without feedback is the
+simple version of this world.
 
-In aggregated serving, many workers can serve the same role. In disaggregated
-serving, prefill and decode capacity are separated. Requests move through stages,
-and the best system layout depends on interactions between prefill throughput,
-decode pressure, queueing, KV handoff cost, cache reuse, and worker availability.
+The power of Dynamo, and any serious inference framework, comes from components
+that make online decisions from active system feedback. A Router may need current
+cache state and decode load. The Planner may need traffic, worker state, and SLA
+signals. KVBM may need transfer pressure, tier capacity, and future cache
+availability. Multi-engine simulation has to model those feedback loops: each
+component consumes events from the shared heap, observes the current simulated
+state, and schedules future decisions or completions back into that same heap.
 
-That is where single-engine fidelity becomes system-level fidelity. Each worker
-still uses the single-engine core, but the multi-engine runtime adds admission,
-handoff, queueing, and routing decisions around those cores.
+#### Router As A Simulated Dynamo Component
 
-### 2.3 Router As A Simulated Dynamo Component
-
-The router is part of the simulated system, not a post-processing heuristic.
+The Router is part of the simulated system, not a post-processing heuristic.
 
 Router framing:
 
@@ -262,18 +246,14 @@ Router framing:
 | Decision | Choose a worker, queue the request, or apply an admission policy |
 | System effect | Cache reuse, load balance, TTFT, throughput, and downstream decode pressure |
 
-Because the router decision enters the same DES event queue as engine completion
-and Planner actions, it affects future state. A route that improves prefix reuse
-may increase queueing somewhere else. A route that balances load may give up a
-cache hit. A good simulation lets us study those tradeoffs without deploying a
-new router policy first.
+Because the Router shares the same event queue as engine completion and Planner
+actions, a route that improves prefix reuse may increase queueing somewhere
+else, while a route that balances load may give up a cache hit.
 
-### 2.4 Planner As A Feedback-Driven Component
+#### Planner As A Feedback-Driven Component
 
-Like the router, the Planner makes decisions from feedback produced by the rest
-of the system. Dynamo components are not isolated knobs: they observe engine
-metrics, traffic, cache state, and worker state, then make decisions that affect
-other components later in the same simulated timeline.
+Like the Router, the Planner makes decisions from feedback produced by the rest
+of the system: engine metrics, traffic, cache state, and worker state.
 
 Planner framing:
 
@@ -283,39 +263,27 @@ Planner framing:
 | Decision | Scale workers, change allocation, or hold steady |
 | System effect | Future capacity, responsiveness, stability, routing pressure, and prefill/decode balance |
 
-Planner decisions are especially natural in DES because they are delayed system
-events. A scale-up decision does not make capacity appear instantly. It schedules
-future state changes that interact with the requests already in the system, the
-router decisions still to come, and the engine queues already forming. That lets
-us test whether a policy is responsive enough without making it oscillate under
-changing load.
+Planner decisions are especially natural in DES because scale-up does not make
+capacity appear instantly. It schedules future state changes that interact with
+requests already in the system, router decisions still to come, and engine
+queues already forming.
 
-### 2.5 KV Block Manager Simulation
+#### KV Block Manager Simulation
 
 KVBM manages KV blocks across the serving memory hierarchy: local HBM, host
-memory, SSD, and distributed or remote cache. In the digital twin, the goal is
-to model those block movements as events that affect the same timeline as engine
-scheduling, routing, and autoscaling: offload completion, swap-in completion,
-remote-cache availability, and eviction.
+memory, SSD, and distributed or remote cache. Local lower-tier cache behavior can
+often be modeled as timing and resource pressure: G1 (GPU memory), G2 (host
+memory), transfer bandwidth, tier capacity, and eventually G3 (disk). Distributed
+cache is where the simulation becomes more interesting. Offload, onboard, remote
+read, and placement decisions affect routing, scheduling, queueing, and future
+cache state, so they need to be registered as events on the same timeline as the
+rest of the serving harness.
 
-There are two complementary parts to that plan.
-
-The first is simulation inside replay. The twin can model the timing and resource
-effects of local and lower-tier KV behavior: G1 (GPU memory) pressure, G2 (host
-memory) swap-in and offload, transfer bandwidth, tier capacity, and eventually
-G3 (disk) or remote tiers. This lets us test cache policies under a fixed
-workload without requiring every idea to start as a full cluster experiment.
-
-The second is a measurement loop for the real data plane. Replay can use the
-same synthetic or trace-derived request shapes to drive
+Replay can also drive
 [NIXL (NVIDIA Inference tranXfer Library)](../../api/nixl-connect/README.md)
-reads and writes against a distributed cache target. Those runs would give us
-concrete measurements for transfer cost, placement behavior, and contention,
-which can then calibrate the simulator instead of relying only on hand-tuned
-assumptions. Over time, those calibrated models become the basis for distributed
-cache simulation itself: cross-machine movement, topology-aware routing,
-bandwidth-sensitive placement, and joint policies for when to reuse, move,
-offload, or recompute KV.
+reads and writes against a real distributed cache target. Those measurements
+calibrate transfer cost, placement behavior, and contention, then feed back into
+the distributed cache model instead of relying only on hand-tuned assumptions.
 
 ## 3. Optimization And Discovery With The Twin
 
@@ -364,9 +332,8 @@ Draft table shape:
 | Key metrics | `output_throughput_tok_s=958.936306`, `prefix_cache_reused_ratio=0.4997`, `mean_ttft_ms=43442.98`, `mean_tpot_ms=35.16`, `mean_e2e_latency_ms=52409.77` |
 | Interpretation | This is a strong candidate for this workload, not a universal best layout. |
 
-The takeaway is not that one configuration is always best. The takeaway is that
-the digital twin can turn a large configuration space into a smaller set of
-hardware candidates, with each result tied to the workload that produced it.
+The takeaway is not that one configuration is always best. It is that the twin
+can turn a large configuration space into a workload-specific hardware shortlist.
 
 ### 3.2 Discovery Examples Beyond The Current Optimizer
 
@@ -387,13 +354,10 @@ Router discovery examples:
 
 #### Planner Discovery Examples
 Planner exposes a family of stateful decisions: when to scale, how aggressively,
-and which optimization
-target to chase. Their effects compound across minutes of trace, and a
-misconfigured planner can under-provision (SLA misses) or thrash (workers churn
-and waste GPU budget). These are painful questions to study on hardware. The
-digital twin lets us replay the same production-shaped trace against the
-planner-in-the-loop with simulated engines and measure the effect of one knob
-at a time.
+and which optimization target to chase. Their effects compound across minutes of
+traffic, and a misconfigured Planner can under-provision, miss SLA, or thrash
+workers. The twin lets us study those dynamics before paying for a full
+Kubernetes-scale experiment.
 
 The three experiments below use the Mooncake FAST25 `toolagent_trace`
 (~23,600 requests over 59 minutes, avg ISL 8.6k / OSL 182, ~6.7 rps) on
@@ -469,9 +433,8 @@ KV and cache discovery examples:
 - Compare move-vs-recompute decisions.
 - Couple cache-aware routing with cache-aware autoscaling.
 
-These are painful questions to answer on hardware first. They are natural
-questions for a replayable digital twin: hold the workload fixed, change one
-component policy, and measure the system-level effect.
+These are natural twin questions: hold the workload fixed, change one component
+policy, and measure the system-level effect before going to hardware.
 
 [placeholder: agentic algorithm discovery workflow and owner]
 
