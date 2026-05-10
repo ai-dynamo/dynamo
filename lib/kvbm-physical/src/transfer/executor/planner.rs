@@ -108,6 +108,18 @@ pub(crate) fn execute_planner_cuda_transfer(
         }
     };
 
+    // PR-7.6: capture telemetry fields from the outcome before dispatch
+    // so we can compute bytes/descriptors once without a second projection.
+    // `src.layout().config().bytes_per_block()` is a pure integer multiply
+    // (no allocation), so it's cheap even when no subscriber is active.
+    let tel_class = outcome.candidate_class();
+    let tel_descriptors = outcome.descriptor_count();
+    let tel_bytes = outcome.coalesced_bytes(src.layout().config().bytes_per_block());
+    // `submit_latency_us` brackets from here to after the synchronous
+    // dispatch returns. It does NOT include stream-record or event-register
+    // time — just the planner-dispatch submit path itself.
+    let tel_t0 = std::time::Instant::now();
+
     match outcome {
         PlanOutcome::Empty => unreachable!("handled above"),
         PlanOutcome::Direct(ops) => {
@@ -126,6 +138,41 @@ pub(crate) fn execute_planner_cuda_transfer(
         PlanOutcome::SmallStridedCopy(ops) => {
             dispatch_small_strided_copy(&ops, &stream)?;
         }
+    }
+
+    let tel_latency_us = tel_t0.elapsed().as_micros() as u64;
+
+    // PR-7.6: structured telemetry event — emitted at DEBUG level.
+    //
+    // `route` is "cuda" for fast log filtering; `strategy` carries the
+    // full `TransferStrategy` Debug repr for callers who need the exact
+    // direction (H2D / D2H / D2D).
+    //
+    // `src_layout_signature` / `dst_layout_signature` are only
+    // computed when a DEBUG subscriber has the "kvbm_physical::planner"
+    // target enabled — signatures each allocate a small Vec, so we
+    // guard with `tracing::enabled!` to avoid noise on the hot path.
+    if tracing::enabled!(target: "kvbm_physical::planner", tracing::Level::DEBUG) {
+        let src_sig = physical_to_layout_view(src)
+            .map(|v| v.signature())
+            .map(|s| format!("{s:?}"))
+            .unwrap_or_else(|e| format!("<err:{e}>"));
+        let dst_sig = physical_to_layout_view(dst)
+            .map(|v| v.signature())
+            .map(|s| format!("{s:?}"))
+            .unwrap_or_else(|e| format!("<err:{e}>"));
+        tracing::debug!(
+            target: "kvbm_physical::planner",
+            src_layout_signature = %src_sig,
+            dst_layout_signature = %dst_sig,
+            descriptor_count = tel_descriptors,
+            coalesced_bytes = tel_bytes,
+            route = "cuda",
+            strategy = ?strategy,
+            submit_latency_us = tel_latency_us,
+            candidate_class = tel_class,
+            "planner dispatch"
+        );
     }
 
     if caller_manages_sync {
@@ -265,8 +312,40 @@ pub(crate) fn execute_planner_nixl_transfer(
         XferOp::Write => dst_metadata.agent_name(),
         XferOp::Read => src_metadata.agent_name(),
     };
+    // PR-7.6: telemetry for the NIXL direct (non-staged) path.
+    // Descriptor count = ops.len() (coalesced); bytes = sum of sizes.
+    let tel_descriptors = ops.len();
+    let tel_bytes: usize = ops.iter().map(|o| o.size).sum();
+    let tel_t0 = std::time::Instant::now();
+
     let xfer_req = nixl_agent.create_xfer_req(xfer_op, &src_dl, &dst_dl, remote_agent, None)?;
     let still_pending = nixl_agent.post_xfer_req(&xfer_req, None)?;
+
+    let tel_latency_us = tel_t0.elapsed().as_micros() as u64;
+
+    if tracing::enabled!(target: "kvbm_physical::planner", tracing::Level::DEBUG) {
+        let src_sig = physical_to_layout_view(src)
+            .map(|v| v.signature())
+            .map(|s| format!("{s:?}"))
+            .unwrap_or_else(|e| format!("<err:{e}>"));
+        let dst_sig = physical_to_layout_view(dst)
+            .map(|v| v.signature())
+            .map(|s| format!("{s:?}"))
+            .unwrap_or_else(|e| format!("<err:{e}>"));
+        tracing::debug!(
+            target: "kvbm_physical::planner",
+            src_layout_signature = %src_sig,
+            dst_layout_signature = %dst_sig,
+            descriptor_count = tel_descriptors,
+            coalesced_bytes = tel_bytes,
+            route = "nixl",
+            strategy = ?strategy,
+            submit_latency_us = tel_latency_us,
+            candidate_class = "DirectDma",
+            "planner dispatch"
+        );
+    }
+
     if still_pending {
         Ok(ctx.register_nixl_status(xfer_req))
     } else {
@@ -295,6 +374,60 @@ enum PlanOutcome {
     /// `size` (inner_bytes at the cut point). Dispatched via
     /// `kvbm_kernels::vectorized_copy` on the Cuda path.
     SmallStridedCopy(Vec<CopyOp>),
+}
+
+impl PlanOutcome {
+    /// PR-7.6: short discriminator string used in telemetry events.
+    ///
+    /// The returned string is the same format as [`Candidate::class_name`].
+    /// `Empty` is never emitted (callers short-circuit before the telemetry
+    /// event); `StagedTransform` is emitted separately in
+    /// [`dispatch_staged_nixl_transform`] which does not produce a
+    /// `PlanOutcome`.
+    fn candidate_class(&self) -> &'static str {
+        match self {
+            PlanOutcome::Empty => "Empty",           // not emitted; here for completeness
+            PlanOutcome::Direct(_) => "DirectDma",
+            #[cfg(feature = "permute_kernels")]
+            PlanOutcome::Transform { .. } => "TransformKernel",
+            PlanOutcome::SmallStridedCopy(_) => "SmallStridedCopy",
+        }
+    }
+
+    /// Total bytes across all ops, or the kernel-side byte volume for
+    /// Transform outcomes.
+    ///
+    /// For `Direct` / `SmallStridedCopy`: sum of `op.size` over the op vec.
+    /// For `Transform`: `block_pairs.len() * bytes_per_block` — the kernel
+    ///   moves exactly one block worth of data per pair. `bytes_per_block`
+    ///   is taken from the `src` layout (caller passes it in to avoid
+    ///   needing another `PhysicalLayout` ref inside the enum).
+    #[cfg_attr(not(feature = "permute_kernels"), allow(unused_variables))]
+    fn coalesced_bytes(&self, src_bytes_per_block: usize) -> usize {
+        match self {
+            PlanOutcome::Empty => 0,
+            PlanOutcome::Direct(ops) => ops.iter().map(|o| o.size).sum(),
+            #[cfg(feature = "permute_kernels")]
+            PlanOutcome::Transform { block_pairs, .. } => {
+                block_pairs.len() * src_bytes_per_block
+            }
+            PlanOutcome::SmallStridedCopy(ops) => ops.iter().map(|o| o.size).sum(),
+        }
+    }
+
+    /// Number of descriptors / ops in the outcome.
+    ///
+    /// For `Direct` / `SmallStridedCopy`: op count.
+    /// For `Transform`: block-pair count (one kernel call per pair group).
+    fn descriptor_count(&self) -> usize {
+        match self {
+            PlanOutcome::Empty => 0,
+            PlanOutcome::Direct(ops) => ops.len(),
+            #[cfg(feature = "permute_kernels")]
+            PlanOutcome::Transform { block_pairs, .. } => block_pairs.len(),
+            PlanOutcome::SmallStridedCopy(ops) => ops.len(),
+        }
+    }
 }
 
 /// Shared "validate → project → plan → lower" pipeline used by both
@@ -1197,6 +1330,14 @@ fn dispatch_staged_nixl_transform(
             .collect(),
     };
 
+    // PR-7.6: telemetry timing starts here — brackets the synchronous
+    // portion of dispatch_staged_nixl_transform (validation, bounce checks,
+    // OwnedStagedContext construction, stage-1 setup, and tokio::spawn).
+    // Does NOT include the async stage-2 chain.
+    let tel_t0 = std::time::Instant::now();
+    // Byte volume = n block-pairs × bytes_per_block on the src side.
+    let tel_bytes = n * src.layout().config().bytes_per_block();
+
     // ──────── Build owned context. ────────
     let staged = OwnedStagedContext::from_ctx(ctx);
 
@@ -1285,6 +1426,38 @@ fn dispatch_staged_nixl_transform(
             }
         }
     });
+
+    let tel_latency_us = tel_t0.elapsed().as_micros() as u64;
+
+    // PR-7.6: telemetry for the staged NIXL transform path.
+    //
+    // candidate_class = "StagedTransform" — this path doesn't go through
+    // select_candidate; the class name documents the two-hop execution model.
+    // `coalesced_bytes` is n * bytes_per_block (src side) — the kernel moves
+    // exactly one block's worth of data per pair.
+    // `descriptor_count` = block-pair count (one kernel invocation per group).
+    if tracing::enabled!(target: "kvbm_physical::planner", tracing::Level::DEBUG) {
+        let src_sig = physical_to_layout_view(src)
+            .map(|v| v.signature())
+            .map(|s| format!("{s:?}"))
+            .unwrap_or_else(|e| format!("<err:{e}>"));
+        let dst_sig = physical_to_layout_view(dst)
+            .map(|v| v.signature())
+            .map(|s| format!("{s:?}"))
+            .unwrap_or_else(|e| format!("<err:{e}>"));
+        tracing::debug!(
+            target: "kvbm_physical::planner",
+            src_layout_signature = %src_sig,
+            dst_layout_signature = %dst_sig,
+            descriptor_count = n,
+            coalesced_bytes = tel_bytes,
+            route = "nixl",
+            strategy = ?strategy,
+            submit_latency_us = tel_latency_us,
+            candidate_class = "StagedTransform",
+            "planner dispatch"
+        );
+    }
 
     Ok(TransferCompleteNotification::from_awaiter(outer_awaiter))
 }

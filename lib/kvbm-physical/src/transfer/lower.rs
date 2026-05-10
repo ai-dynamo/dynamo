@@ -178,6 +178,27 @@ pub(crate) enum Candidate {
     },
 }
 
+impl Candidate {
+    /// Short discriminator string for telemetry / tracing.
+    ///
+    /// Each variant returns a fixed `&'static str` naming its class.
+    /// `StagedTransform` is emitted by `dispatch_staged_nixl_transform`
+    /// which does not go through `select_candidate`; it is not a real
+    /// `Candidate` variant but shares the naming convention for log
+    /// uniformity (emitted directly in the staged path).
+    pub(crate) fn class_name(&self) -> &'static str {
+        match self {
+            Candidate::DirectDma { .. } => "DirectDma",
+            Candidate::BatchedDma { .. } => "BatchedDma",
+            #[cfg(feature = "permute_kernels")]
+            Candidate::TransformKernel { .. } => "TransformKernel",
+            Candidate::SmallStridedCopy { .. } => "SmallStridedCopy",
+            Candidate::Staged { .. } => "Staged",
+            Candidate::CudaGraphReplay { .. } => "CudaGraphReplay",
+        }
+    }
+}
+
 // ─────────────────────────── Selector scaffolding ────────────────────────────
 //
 // `SelectionContext` + `score_candidate` + `select_candidate` land in PR-7.2
@@ -462,6 +483,64 @@ pub(crate) fn select_candidate<'a>(
 mod tests {
     use super::*;
     use kvbm_common::{KvDim, KvDimLayout, KvDimStrides};
+
+    // ── PR-7.6: class_name ───────────────────────────────────────────────────
+
+    /// Every `Candidate` variant must return its expected discriminator string.
+    /// This test is the authoritative check that `class_name` doesn't silently
+    /// drift when new variants are added.
+    #[test]
+    fn candidate_class_name_returns_expected_string() {
+        assert_eq!(
+            Candidate::DirectDma { ops: vec![] }.class_name(),
+            "DirectDma"
+        );
+        assert_eq!(
+            Candidate::BatchedDma { groups: vec![] }.class_name(),
+            "BatchedDma"
+        );
+        assert_eq!(Candidate::Staged {}.class_name(), "Staged");
+        assert_eq!(
+            Candidate::SmallStridedCopy { ops: vec![] }.class_name(),
+            "SmallStridedCopy"
+        );
+        assert_eq!(
+            Candidate::CudaGraphReplay {
+                cache_key: GraphCacheKey {
+                    descriptor_count: 1,
+                    total_bytes: 64,
+                    dtype_width_bytes: None,
+                    route_family: 0,
+                    candidate_class: 0,
+                }
+            }
+            .class_name(),
+            "CudaGraphReplay"
+        );
+        // TransformKernel is feature-gated; tested under `permute_kernels` below.
+    }
+
+    #[cfg(feature = "permute_kernels")]
+    #[test]
+    fn candidate_class_name_transform_kernel() {
+        use crate::transfer::kernel_catalog::{KernelInvocation, KernelKind};
+        use kvbm_kernels::{BlockLayout, TensorDataType};
+
+        let invoc = KernelInvocation {
+            kind: KernelKind::NhdHndTranspose,
+            num_layers: 1,
+            outer_dim: 1,
+            page_size: 16,
+            num_heads: 8,
+            head_dim: 64,
+            dtype: TensorDataType::F16,
+            block_layout: BlockLayout::NHD,
+        };
+        assert_eq!(
+            Candidate::TransformKernel { invocation: invoc }.class_name(),
+            "TransformKernel"
+        );
+    }
 
     use crate::layout::Layout;
     use crate::transfer::plan::AnnotatedLayout;
