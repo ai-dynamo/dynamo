@@ -18,6 +18,7 @@ use kvbm_observability::SharedKvbmObservability;
 use velo::EventManager;
 
 use crate::manager::TransferManager;
+use crate::transfer::benchmark::{BenchmarkCache, BenchmarkCandidate, BenchmarkKey, BenchmarkOutcome};
 use crate::transfer::graph_cache::GraphCache;
 
 // Notifications module is declared in ../mod.rs
@@ -230,6 +231,15 @@ pub struct TransferContext {
     /// `TransferContext` clone; each `ManagedExecHandle` entry calls
     /// `cuGraphExecDestroy` on drop.
     graph_cache: Arc<GraphCache>,
+
+    /// PR-7.5: Benchmark outcome cache for the scorer.
+    ///
+    /// Shared across clones of `TransferContext`. Populated by
+    /// `benchmark_pair` at startup when
+    /// `TransferCapabilities::startup_benchmark` is enabled; consulted by
+    /// `score_candidate` via `SelectionContext::benchmark_outcome`.
+    /// Drops with the last `TransferContext` clone.
+    benchmark_cache: Arc<BenchmarkCache>,
 }
 
 impl TransferContext {
@@ -324,6 +334,7 @@ impl TransferContext {
             tx_nixl_events,
             observability,
             graph_cache: Arc::new(GraphCache::new()),
+            benchmark_cache: Arc::new(BenchmarkCache::new()),
         })
     }
 
@@ -414,6 +425,38 @@ impl TransferContext {
     /// instantiated exec handles keyed by transfer shape.
     pub(crate) fn graph_cache(&self) -> &Arc<GraphCache> {
         &self.graph_cache
+    }
+
+    /// PR-7.5: Get the benchmark outcome cache.
+    ///
+    /// Used by callers of `score_candidate` (in `executor::planner`) to
+    /// populate `SelectionContext::benchmark_outcome` before selection.
+    /// Shared across all clones of this context.
+    pub(crate) fn benchmark_cache(&self) -> &Arc<BenchmarkCache> {
+        &self.benchmark_cache
+    }
+
+    /// PR-7.5: Benchmark a set of candidates for a given layout-pair key
+    /// and record the winner in the cache.
+    ///
+    /// This is an explicit-API benchmark (Path B): the caller decides when
+    /// to benchmark (e.g. at startup with known layout pairs) and provides
+    /// the key, pre-decoded candidates, and a CUDA stream to dispatch on.
+    ///
+    /// Only `Candidate::DirectDma` candidates are supported today.
+    /// NIXL, transform-kernel, and graph-replay benchmarking are deferred
+    /// to PR-7.5.1.
+    ///
+    /// See [`BenchmarkCache::benchmark_pair`] for timing semantics and
+    /// error conditions.
+    #[allow(dead_code)]
+    pub(crate) fn benchmark_pair(
+        &self,
+        key: BenchmarkKey,
+        candidates: Vec<BenchmarkCandidate>,
+        stream: &Arc<CudaStream>,
+    ) -> anyhow::Result<BenchmarkOutcome> {
+        self.benchmark_cache.benchmark_pair(key, candidates, stream)
     }
 
     /// Clone the CUDA-event polling channel sender.

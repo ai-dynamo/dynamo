@@ -40,6 +40,7 @@ use anyhow::{Result, bail};
 
 use crate::layout::{LayoutView, PhysicalLayout};
 use crate::transfer::TransferCapabilities;
+use crate::transfer::benchmark::{BENCHMARK_WINNER_BONUS, BenchmarkOutcome};
 use crate::transfer::plan::{CopyOp, CopyPlan};
 use crate::transfer::strategy::TransferStrategy;
 
@@ -244,6 +245,17 @@ pub(crate) struct SelectionContext<'a> {
 
     /// Capability flags in effect for this transfer.
     pub capabilities: &'a TransferCapabilities,
+
+    /// PR-7.5: Empirically measured winner for this layout-pair / route.
+    ///
+    /// `Some(outcome)` when `caps.startup_benchmark` is enabled AND the
+    /// `BenchmarkCache` has an entry for the current `BenchmarkKey`.
+    /// `None` (default) otherwise — the scorer falls back to the baseline
+    /// static constants, preserving pre-PR-7.5 behaviour unchanged.
+    ///
+    /// The outcome is owned (not a ref from inside the Mutex) so
+    /// `SelectionContext` can be used without holding any lock.
+    pub benchmark_outcome: Option<BenchmarkOutcome>,
 }
 
 impl TransferStrategy {
@@ -323,6 +335,18 @@ const SCORE_STAGED: i64 = -1;
 /// Negative scores mark placeholder variants that must be filtered out
 /// before `select_candidate` makes a final choice.
 ///
+/// # PR-7.5: Benchmark cache bonus
+///
+/// When `ctx.benchmark_outcome` is `Some(outcome)` and
+/// `outcome.winner == candidate.class_name()`, [`BENCHMARK_WINNER_BONUS`]
+/// (+500) is added to the candidate's base score.  This pushes the
+/// empirically measured winner above all other candidates in the same
+/// score band (base scores are 950–1100) and above candidates from
+/// higher-score families if the base score + bonus exceeds them.
+///
+/// Correctness is unaffected: the bonus only affects which variant is
+/// *selected*; the dispatch machinery is identical regardless.
+///
 /// # Notes on `TransformKernel`
 ///
 /// In production today `TransformKernel` is never passed through
@@ -342,6 +366,26 @@ const SCORE_STAGED: i64 = -1;
 /// `select_candidate` for this variant.
 #[cfg_attr(not(feature = "permute_kernels"), allow(unused_variables))]
 pub(crate) fn score_candidate(candidate: &Candidate, ctx: &SelectionContext<'_>) -> i64 {
+    let base = score_candidate_base(candidate, ctx);
+    // PR-7.5: apply benchmark winner bonus when the cache has an entry.
+    // Negative base scores (Staged placeholder) are left negative even with
+    // the bonus — we still guard on base < 0 in the caller's filter.
+    if base >= 0 {
+        if let Some(ref outcome) = ctx.benchmark_outcome {
+            if outcome.winner == candidate.class_name() {
+                return base + BENCHMARK_WINNER_BONUS;
+            }
+        }
+    }
+    base
+}
+
+/// Base scoring without the benchmark bonus.
+///
+/// Split out so tests can verify base scores independently of the
+/// benchmark-outcome pathway.
+#[cfg_attr(not(feature = "permute_kernels"), allow(unused_variables))]
+fn score_candidate_base(candidate: &Candidate, ctx: &SelectionContext<'_>) -> i64 {
     match candidate {
         Candidate::DirectDma { .. } => SCORE_DIRECT_DMA,
         Candidate::BatchedDma { .. } => SCORE_BATCHED_DMA,
@@ -554,6 +598,7 @@ mod tests {
             allow_gds: false,
             allow_gpu_rdma: false,
             cuda_graph_replay: false,
+            startup_benchmark: false,
         };
         SelectionContext {
             strategy: TransferStrategy::CudaAsyncD2D,
@@ -562,6 +607,7 @@ mod tests {
             #[cfg(feature = "permute_kernels")]
             dtype: None,
             capabilities: &CAPS,
+            benchmark_outcome: None,
         }
     }
 
@@ -1059,6 +1105,7 @@ mod tests {
             allow_gds: false,
             allow_gpu_rdma: false,
             cuda_graph_replay: true,
+            startup_benchmark: false,
         };
         let ctx = SelectionContext {
             strategy: TransferStrategy::CudaAsyncD2D,
@@ -1067,6 +1114,7 @@ mod tests {
             #[cfg(feature = "permute_kernels")]
             dtype: None,
             capabilities: &CAPS_ENABLED,
+            benchmark_outcome: None,
         };
         let cands = vec![
             Candidate::DirectDma { ops: vec![] },
@@ -1125,6 +1173,157 @@ mod tests {
         assert!(
             validate_cuda_graph_replay_key(&zero_key).is_err(),
             "zero descriptor_count must fail validation"
+        );
+    }
+
+    // ── PR-7.5 benchmark outcome scorer tests ────────────────────────────────
+
+    /// Helper: a `SelectionContext` with a `BenchmarkOutcome` marking
+    /// `winner_class` as the winner.
+    fn ctx_with_benchmark_winner(winner_class: &'static str) -> SelectionContext<'static> {
+        use crate::transfer::benchmark::BenchmarkOutcome;
+        use std::time::SystemTime;
+        static CAPS_BENCH: TransferCapabilities = TransferCapabilities {
+            allow_gds: false,
+            allow_gpu_rdma: false,
+            cuda_graph_replay: false,
+            startup_benchmark: true,
+        };
+        SelectionContext {
+            strategy: TransferStrategy::CudaAsyncD2D,
+            descriptor_count: 4,
+            total_bytes: 16384,
+            #[cfg(feature = "permute_kernels")]
+            dtype: None,
+            capabilities: &CAPS_BENCH,
+            benchmark_outcome: Some(BenchmarkOutcome {
+                winner: winner_class,
+                winner_latency_us: 42,
+                runs_compared: 2,
+                recorded_at: SystemTime::UNIX_EPOCH,
+            }),
+        }
+    }
+
+    /// A `BenchmarkOutcome` marking `"DirectDma"` as the winner bumps its
+    /// score by `BENCHMARK_WINNER_BONUS` (+500) to 1500, making it beat
+    /// `SmallStridedCopy` (950) regardless of their base-score order.
+    /// Verifies `score_candidate` consults `ctx.benchmark_outcome`.
+    #[test]
+    fn benchmark_outcome_bumps_winning_candidate_score() {
+        use crate::transfer::benchmark::BENCHMARK_WINNER_BONUS;
+        let ctx = ctx_with_benchmark_winner("DirectDma");
+        let direct = Candidate::DirectDma { ops: vec![] };
+        let small = Candidate::SmallStridedCopy { ops: vec![] };
+
+        let direct_score = score_candidate(&direct, &ctx);
+        let small_score = score_candidate(&small, &ctx);
+
+        // DirectDma base = 1000; winner bonus = +500 → 1500.
+        assert_eq!(
+            direct_score,
+            SCORE_DIRECT_DMA + BENCHMARK_WINNER_BONUS,
+            "DirectDma score must be base + BENCHMARK_WINNER_BONUS when it's the winner"
+        );
+        // SmallStridedCopy is not the winner → baseline only.
+        assert_eq!(small_score, SCORE_SMALL_STRIDED_COPY);
+        assert!(
+            direct_score > small_score,
+            "benchmark winner (DirectDma, {direct_score}) must outscore non-winner \
+             (SmallStridedCopy, {small_score})"
+        );
+    }
+
+    /// When `ctx.benchmark_outcome` is `None` (cache miss / disabled),
+    /// all scores are identical to pre-PR-7.5 baseline.
+    #[test]
+    fn benchmark_cache_miss_gives_baseline_score() {
+        let ctx = cuda_ctx(); // benchmark_outcome = None
+        assert!(ctx.benchmark_outcome.is_none());
+
+        let direct = Candidate::DirectDma { ops: vec![] };
+        let small = Candidate::SmallStridedCopy { ops: vec![] };
+
+        assert_eq!(
+            score_candidate(&direct, &ctx),
+            SCORE_DIRECT_DMA,
+            "cache miss must leave DirectDma at baseline score"
+        );
+        assert_eq!(
+            score_candidate(&small, &ctx),
+            SCORE_SMALL_STRIDED_COPY,
+            "cache miss must leave SmallStridedCopy at baseline score"
+        );
+    }
+
+    /// When the benchmark winner is `"DirectDma"`, `select_candidate` must
+    /// pick it over `SmallStridedCopy`.  Tests end-to-end path through the
+    /// scorer when a cache entry is present.
+    #[test]
+    fn select_candidate_uses_benchmark_outcome() {
+        let ctx = ctx_with_benchmark_winner("DirectDma");
+        let cands = vec![
+            Candidate::SmallStridedCopy {
+                ops: vec![CopyOp { src_addr: 0x1000, dst_addr: 0x2000, size: 256 }],
+            },
+            Candidate::DirectDma {
+                ops: vec![CopyOp { src_addr: 0x3000, dst_addr: 0x4000, size: 4096 }],
+            },
+        ];
+        let picked = select_candidate(&cands, &ctx).unwrap();
+        assert!(
+            matches!(picked, Candidate::DirectDma { .. }),
+            "select_candidate must pick the benchmark winner (DirectDma), got {picked:?}"
+        );
+    }
+
+    /// Benchmark winner bonus does NOT apply to negative-score variants
+    /// (i.e. `Staged`).  Even if somehow named as the winner, `Staged`
+    /// stays negative and is filtered out.
+    #[test]
+    fn benchmark_winner_bonus_not_applied_to_negative_base() {
+        let ctx = ctx_with_benchmark_winner("Staged");
+        let staged = Candidate::Staged {};
+        let score = score_candidate(&staged, &ctx);
+        // Staged base = -1; bonus must NOT push it positive.
+        assert!(
+            score < 0,
+            "Staged must remain negative even when named as benchmark winner; got {score}"
+        );
+    }
+
+    /// Class names used in `BenchmarkOutcome::winner` must match
+    /// `Candidate::class_name()` exactly — otherwise the bonus is never
+    /// applied and the cache entry is silently ignored.
+    ///
+    /// This test asserts that `class_name()` returns the string the scorer
+    /// compares against, so future variant renames break this test first.
+    #[test]
+    fn class_name_matches_benchmark_winner_field_semantics() {
+        // The scorer compares outcome.winner == candidate.class_name().
+        // Verify for the most common candidate variants.
+        assert_eq!(
+            Candidate::DirectDma { ops: vec![] }.class_name(),
+            "DirectDma",
+            "class_name must match the string stored in BenchmarkOutcome::winner"
+        );
+        assert_eq!(
+            Candidate::SmallStridedCopy { ops: vec![] }.class_name(),
+            "SmallStridedCopy"
+        );
+        assert_eq!(
+            Candidate::CudaGraphReplay {
+                cache_key: GraphCacheKey {
+                    descriptor_count: 1,
+                    total_bytes: 64,
+                    dtype_width_bytes: None,
+                    route_family: 0,
+                    candidate_class: 0,
+                },
+                ops: vec![],
+            }
+            .class_name(),
+            "CudaGraphReplay"
         );
     }
 }

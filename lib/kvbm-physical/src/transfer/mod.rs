@@ -37,6 +37,7 @@
 //! future.await?;
 //! ```
 
+pub(crate) mod benchmark;
 pub(crate) mod capabilities;
 pub(crate) mod checksum;
 pub mod context;

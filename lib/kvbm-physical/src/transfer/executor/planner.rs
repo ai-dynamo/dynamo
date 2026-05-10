@@ -46,6 +46,7 @@ use super::TransferContext;
 use super::{PhysicalLayout, TransferStrategy};
 use crate::BlockId;
 use crate::layout::KvBlockLayout;
+use crate::transfer::benchmark::{BenchmarkKey, BenchmarkOutcome};
 use crate::transfer::context::TransferCompleteNotification;
 use crate::transfer::graph_cache::{GraphCache, ManagedExecHandle};
 use crate::transfer::lower::{
@@ -89,9 +90,14 @@ pub(crate) fn execute_planner_cuda_transfer(
     // copies with a small contiguous tail now route to SmallStridedCopy
     // (via vectorized_copy) rather than failing with a no-kernel error.
     // Previously kept at 0 (§Lesson 5, now RESOLVED by PR-7.3).
+    //
+    // PR-7.5: look up the benchmark cache before calling plan_and_lower so
+    // the SelectionContext inside can consult the outcome.  Returns None when
+    // startup_benchmark is disabled (the default) — zero cost on the hot path.
+    let benchmark_outcome = lookup_benchmark_outcome(src, dst, strategy, ctx);
     let outcome = plan_and_lower(
         src, dst, src_block_ids, dst_block_ids, strategy, ctx.capabilities(),
-        CopyPolicy::default(),
+        CopyPolicy::default(), benchmark_outcome,
     )?;
 
     // Acquire a stream (caller-provided or pool-acquired). Direction
@@ -235,8 +241,11 @@ pub(crate) fn execute_planner_nixl_transfer(
     // by plan_copy already, and the SmallStridedCopy (vectorized_copy)
     // path is Cuda-only. Staged NIXL legs also call plan_and_lower with
     // min_inner_bytes = 0 (same same-layout-always-Direct requirement).
+    //
+    // PR-7.5: benchmark lookup for NIXL; see Cuda entrypoint comment.
+    let nixl_benchmark_outcome = lookup_benchmark_outcome(src, dst, strategy, ctx);
     let nixl_policy = CopyPolicy { min_inner_bytes: 0, coalesce: true };
-    let ops = match plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy, ctx.capabilities(), nixl_policy)? {
+    let ops = match plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy, ctx.capabilities(), nixl_policy, nixl_benchmark_outcome)? {
         PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
         PlanOutcome::Direct(ops) => ops,
         #[cfg(feature = "permute_kernels")]
@@ -464,6 +473,26 @@ impl PlanOutcome {
 ///   small-tail same-layout copies route to `SmallStridedCopy`.
 /// - NIXL entry and staged NIXL legs: `CopyPolicy { min_inner_bytes: 0,
 ///   coalesce: true }` so same-layout legs always go `Direct`.
+/// PR-7.5: Look up the benchmark cache and build a `BenchmarkKey` from
+/// two physical layouts.  Returns `None` if `startup_benchmark` is
+/// disabled or if the views can't be projected (safe fallback: scorer
+/// uses baseline scores).
+fn lookup_benchmark_outcome(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    strategy: TransferStrategy,
+    ctx: &TransferContext,
+) -> Option<BenchmarkOutcome> {
+    if !ctx.capabilities().startup_benchmark {
+        return None;
+    }
+    let src_view = physical_to_layout_view(src).ok()?;
+    let dst_view = physical_to_layout_view(dst).ok()?;
+    let dtype_w = Some(src.layout().config().dtype_width_bytes as u32);
+    let key = BenchmarkKey::new(src_view.signature(), dst_view.signature(), dtype_w, strategy);
+    ctx.benchmark_cache().lookup(&key)
+}
+
 fn plan_and_lower(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
@@ -472,6 +501,7 @@ fn plan_and_lower(
     strategy: TransferStrategy,
     capabilities: &crate::transfer::TransferCapabilities,
     policy: CopyPolicy,
+    benchmark_outcome: Option<BenchmarkOutcome>,
 ) -> Result<PlanOutcome> {
     if validate_planner_block_ids(src_block_ids, dst_block_ids)?.is_noop() {
         return Ok(PlanOutcome::Empty);
@@ -572,6 +602,7 @@ fn plan_and_lower(
                 #[cfg(feature = "permute_kernels")]
                 dtype: src.layout().config().dtype,
                 capabilities,
+                benchmark_outcome,
             };
             let chosen = select_candidate(&candidates, &sel_ctx)?;
             match chosen {
@@ -612,6 +643,7 @@ fn plan_and_lower(
                 #[cfg(feature = "permute_kernels")]
                 dtype: src.layout().config().dtype,
                 capabilities,
+                benchmark_outcome,
             };
             let chosen = select_candidate(&candidates, &sel_ctx)?;
             match chosen {
@@ -1192,8 +1224,10 @@ impl OwnedStagedContext {
         // Staged NIXL legs always use min_inner_bytes = 0: the staged
         // executor relies on same-KvBlockLayout pairs going Direct so the
         // per-leg plan_and_lower never triggers the SmallStridedCopy path.
+        // PR-7.5: no benchmark lookup for staged legs — they always produce
+        // DirectDma ops (no competing candidates), so the bonus has no effect.
         let leg_policy = CopyPolicy { min_inner_bytes: 0, coalesce: true };
-        let outcome = plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy, &self.capabilities, leg_policy)?;
+        let outcome = plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy, &self.capabilities, leg_policy, None)?;
         let ops = match outcome {
             PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
             PlanOutcome::Direct(ops) => ops,
