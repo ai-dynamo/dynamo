@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Working title: A Dynamo Digital Twin
+# Working title: DynoSim: A Dynamo Digital Twin
 
 [placeholder: final author list and publication date]
 
@@ -12,36 +12,29 @@ SPDX-License-Identifier: Apache-2.0
 > Draft status: unpublished working draft. Keep this file out of `docs/index.yml`
 > and `docs/blogs/index.mdx` until the post is ready to publish.
 
-Modern LLM serving at scale is a complex distributed system problem with an
-enormous number of tunable configurations. A deployment has to choose the model
-backend, tensor-parallel shape, prefill/decode split, worker counts, scheduler
-settings, routing policy, KV reuse and offload behavior, autoscaling thresholds,
-and hardware target. None of those choices is independent.
+Before investing millions, or even billions, of dollars in data center
+infrastructure, teams want a clear view of the value that infrastructure is
+likely to produce. That is especially hard for modern LLM serving, where a
+deployment has to choose the model backend, tensor-parallel shape,
+prefill/decode split, worker counts, scheduler settings, routing policy, KV
+reuse and offload behavior, autoscaling thresholds, and hardware target.
 
-At the bottom, kernels execute the attention and MLP work. Above them, engines
-such as vLLM, SGLang, and TensorRT-LLM schedule forward passes, batch requests,
-manage KV blocks, and decide how prefill and decode work share the device. Above
-that, Dynamo adds the system layer: a [Router](../../components/router/router-guide.md)
-decides which engine should receive each request based on prefix affinity and
-active load, autoscaling decisions adjust capacity to dynamic service goals, and
-the [KV Block Manager (KVBM)](../../components/kvbm/kvbm-guide.md) controls how
-cached blocks are offloaded and distributed.
-
-That stack is powerful, but it is also hard to optimize. A routing policy can
-improve cache reuse while increasing downstream queueing. An autoscaling decision
-can change future capacity only after a startup or specialization delay. A block
-movement policy can change whether a request pays recompute, transfer, or
-offload cost. Future hardware can change the engine speeds and feeds enough that
-the right system layout changes with it. For larger models, even running a
-single realistic experiment can require many GPUs or nodes before we learn
-whether the idea was worth testing.
+Those choices interact across layers. Engine schedulers turn kernel speed into
+queueing behavior. Dynamo's [Router](../../components/router/router-guide.md)
+decides where each request lands, autoscaling decisions adjust capacity only
+after startup or specialization delays, and the
+[KV Block Manager (KVBM)](../../components/kvbm/kvbm-guide.md) determines when
+cached state is reused, moved, offloaded, or recomputed. A local improvement can
+shift the bottleneck somewhere else, and for larger models even one realistic
+experiment can require many GPUs or nodes before we learn whether the idea was
+worth testing.
 
 That is the motivation for a Dynamo digital twin.
 
 [placeholder: confirm exact public wording for "digital twin"]
 
-In this post, a digital twin means a replayable discrete-event simulation of the
-Dynamo serving stack: engine schedulers, forward-pass timing, KV and cache
+In this post, a digital twin means a workload-driven discrete-event simulation
+of the Dynamo serving stack: engine schedulers, forward-pass timing, KV and cache
 behavior, routers, autoscaling, and workload traces. The goal is not a purely
 analytical estimate and not a bit-exact hardware emulator. The goal is a faithful
 serving simulation at the atomic level of forward passes, with the Dynamo
@@ -49,33 +42,39 @@ components above the engine included in the same event timeline.
 
 That puts Dynamo's simulation in the middle ground between spreadsheet estimates
 and full cluster experiments. It preserves component boundaries while studying
-their interactions on one replayed timeline, and it is cheap enough to screen
+their interactions on one simulated timeline, and it is cheap enough to screen
 many design candidates before spending hardware time. Because the simulator is
 implemented in Rust, it is also practical to simulate thousands of workers on a
 developer laptop.
 
+That fidelity has to be earned. The twin combines hardware-informed engine
+timing with simulated scheduler, Router, Planner, and KV/cache events; hardware
+runs expose the remaining error, and those deltas become calibration inputs for
+the next simulation pass.
+
 ## Why Simulate LLM Serving?
 
-Simulation gives Dynamo a practical loop for research, engineering scoping, and
+The real power of simulation is not just prediction. It is decision-making.
+
+The resulting loop is useful because it prices decisions before they hit the
+cluster. The twin can ask whether a faster kernel, lower transfer latency,
+different batching policy, or future GPU changes the best Router, Planner, or
+KVBM choice, then send only the strongest candidates to hardware validation.
+
+[placeholder: add simulated-time vs wall-time table and speedup figure for
+representative simulated workloads]
+
+That gives Dynamo a practical loop for research, engineering scoping, and
 customer-facing sizing.
 
-For research, replay makes it cheaper to test new serving algorithms before
-spending cluster time. Fixed traces can compare routing, autoscaling,
-prefill/decode allocation, and KV/cache ideas; hardware-forward inputs can ask
-how future GPUs or backends would change the best layout and policy.
-
-For engineering, the twin turns vague opportunity costs into measurable system
-effects. If specializing capacity from one decode worker to N prefill workers
-takes X seconds, replay can show whether that delay still meets a contractual
-service-level agreement (SLA), what value of X becomes too high, and what target
-X would make the engineering work worth prioritizing. The same loop can scope
-whether a team should invest in faster worker startup, smarter scale-up
-thresholds, better prefill/decode rebalancing, or a more cache-aware router.
-
-For customer-facing sizing, simulation can turn a workload and an SLA into a
-sizing conversation. A field team can compare GPU counts, worker layouts,
-backend choices, and future hardware assumptions before procurement, then take a
-workload-specific shortlist to hardware validation.
+- **Research:** Test routing, autoscaling, prefill/decode, KV/cache, and
+  hardware-forward ideas before spending cluster time.
+- **Engineering:** Turn opportunity costs into thresholds. If specializing one
+  decode worker into N prefill workers takes X seconds, the twin can show when X
+  breaks the service-level agreement (SLA) and what target makes the work worth
+  prioritizing.
+- **Customer-facing sizing:** Compare GPU counts, worker layouts, backends, and
+  future hardware assumptions against a workload and SLA before procurement.
 
 ## 1. Architecture And DES: Composing Dynamo As Events
 
@@ -499,10 +498,10 @@ outer loop for validation. Between those loops, Dynamo can test serving algorith
 as a system: scheduler behavior, routing policy, Planner control, KV/cache
 movement, workload shape, and hardware-informed timing.
 
-The payoff is not just a faster benchmark. It is a shared loop for algorithm
-research, engineering prioritization, and deployment sizing: use simulation to
-narrow the space, then spend hardware time on the candidates most likely to
-matter.
+The payoff is not just a faster benchmark. Simulation turns infrastructure
+planning from guesswork into an engineering discipline: use the twin to decide
+what to build, where to optimize, how to size customer deployments, and which
+hardware experiments are most likely to matter.
 
 Looking forward, we plan to close this loop in production as well. A smart
 sweeping algorithm built on top of the digital twin would run periodically
@@ -511,7 +510,7 @@ under the current workload distribution, and recommend (or directly apply) a
 reconfiguration when a materially better deployment is found. Because traffic
 shape drifts over hours and days — different prompt mixes, ISL/OSL
 distributions, or burst patterns — what was the right TP shape, prefill/decode
-split, router policy, and planner setting last week may no longer be optimal
+split, router policy, and Planner setting last week may no longer be optimal
 today. A continuous twin-driven sweep keeps the live deployment tracking the
 current optimum instead of relying on a one-shot launch decision.
 
