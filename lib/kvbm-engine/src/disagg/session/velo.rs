@@ -625,6 +625,17 @@ impl VeloSession {
     pub fn test_available_pin_count(&self) -> usize {
         self.inner.available_pins.lock().len()
     }
+
+    /// Test-only: count of authorized-but-unacked pull entries
+    /// in `inbound_pulls` (populated by `Frame::Pull`, drained by
+    /// `Frame::PullAck`).  Symmetric with `test_available_pin_count`
+    /// — the two maps must both be empty after `close()` so that the
+    /// strong refs they hold drop and the underlying G2 blocks are
+    /// returned to the pool.  See `close()` for the drain rationale.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn test_inbound_pulls_count(&self) -> usize {
+        self.inner.inbound_pulls.len()
+    }
 }
 
 fn spawn_monitor(

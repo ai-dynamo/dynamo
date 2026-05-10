@@ -612,3 +612,147 @@ async fn close_drains_unacked_holder_pins() -> Result<()> {
 
     Ok(())
 }
+
+// ============================================================================
+// Case: close() drains BOTH available_pins AND inbound_pulls, releasing the
+//       underlying G2 blocks so the prefill pool reset succeeds
+// ============================================================================
+//
+// Targeted regression for the `VeloSession::close()` drain fix
+// (3a7b775fa4) — distinct from `close_drains_unacked_holder_pins`,
+// which only asserts `test_available_pin_count() == 0` after
+// `close()`.  This test pins the invariant on three independent
+// observable axes so a future refactor that deletes either drain
+// line is caught:
+//
+//   1. `available_pins` is empty after `close()`.  This is the map
+//      that holds `ImmutableBlock<G2>` strong refs; deleting
+//      `available_pins.lock().clear();` re-introduces the original
+//      "Reset pool count mismatch" failure.
+//
+//   2. `inbound_pulls` is empty after `close()`.  This map holds
+//      `Vec<SequenceHash>` (just `u128` hash values — not strong
+//      refs), so deleting `inbound_pulls.clear();` does NOT directly
+//      leak G2 blocks.  But the `Frame::Pull`/`Frame::PullAck`
+//      protocol contract requires the two maps to drain in lockstep
+//      (PullAck removes the inbound_pulls entry AND the matched
+//      available_pins entries — see `dispatch_frame` Frame::PullAck
+//      arm).  An asymmetric drain at `close()` leaves the session
+//      with stale authorize-but-unacked tracking that any future
+//      change to add a strong-ref-bearing field to `inbound_pulls`
+//      (e.g. for backpressure) would silently leak.  The new
+//      `test_inbound_pulls_count` accessor mirrors
+//      `test_available_pin_count` so this axis is checkable today.
+//
+//   3. The G2 `BlockManager`'s `available_blocks()` returns to
+//      `total_blocks()` after `close()` and the locally-held
+//      `ImmutableBlock` handles drop, and `reset_inactive_pool()`
+//      succeeds.  This is the production-side end-state — same
+//      shape as `ManagedBlockPool::reset`'s `ResetError("total
+//      blocks: N, available blocks: N - leaked")`.  This is the
+//      assertion that would have caught the original bug at
+//      integration scope.  It fires when `available_pins.clear()`
+//      is missing (the strong-ref-bearing drain).
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn close_drains_inbound_pulls_and_releases_pool_blocks() -> Result<()> {
+    let h = build_side().await;
+    let session_id = uuid::Uuid::new_v4();
+    let h_session = h.factory.open_concrete(session_id)?;
+
+    let total_blocks = h.g2_manager.total_blocks();
+    let available_before = h.g2_manager.available_blocks();
+    assert_eq!(
+        available_before, total_blocks,
+        "build_side must hand back a fully-reset G2 manager"
+    );
+
+    // Holder commits + makes-available 3 hashes, matching the smoke's
+    // observed leak shape ("3 missing blocks unaccounted for").
+    let blocks = make_blocks(&h.g2_manager, 3, 1100);
+    let hashes: Vec<_> = blocks.iter().map(|b| b.sequence_hash()).collect();
+    h_session.commit(hashes.clone())?;
+    h_session.make_available(blocks)?;
+
+    // Sanity: pins are actually loaded AND the G2 pool sees the
+    // 3 blocks as checked out.  If this doesn't hold, the
+    // pool-parity assertion below isn't measuring what we think it is.
+    assert_eq!(
+        h_session.test_available_pin_count(),
+        3,
+        "make_available should pin all 3 blocks"
+    );
+    assert_eq!(
+        h.g2_manager.available_blocks(),
+        total_blocks - 3,
+        "available_pins must hold strong refs that reduce the \
+         G2 manager's available count by 3"
+    );
+
+    // Forge two distinct inbound `Frame::Pull`s — each authorizes a
+    // different subset of hashes, populating `inbound_pulls` with two
+    // entries.  No `Frame::PullAck` ever arrives (this is the
+    // simulated peer-pull-fails-before-PullAck case from the recompute
+    // smoke).
+    h_session.test_inject_inbound_frame(Frame::Pull {
+        pull_id: 11,
+        hashes: vec![hashes[0]],
+    });
+    h_session.test_inject_inbound_frame(Frame::Pull {
+        pull_id: 12,
+        hashes: vec![hashes[1], hashes[2]],
+    });
+    assert_eq!(
+        h_session.test_inbound_pulls_count(),
+        2,
+        "two Frame::Pull frames should record two inbound_pulls entries"
+    );
+    assert_eq!(
+        h_session.test_available_pin_count(),
+        3,
+        "Frame::Pull alone must not drop available_pins"
+    );
+
+    // Abort path.  After close():
+    //   - the wire is being torn down (close enqueues Finalize)
+    //   - no PullAck can ever arrive on either pull_id
+    //   - both maps are dead weight — must be drained so the strong
+    //     refs they hold release back to the pool.
+    h_session.close(Some("simulated peer abort".to_string()));
+
+    assert_eq!(
+        h_session.test_available_pin_count(),
+        0,
+        "close() must drain `available_pins`"
+    );
+    assert_eq!(
+        h_session.test_inbound_pulls_count(),
+        0,
+        "close() must drain `inbound_pulls`; otherwise authorized- \
+         but-unacked pull entries keep `Vec<SequenceHash>` mirrors \
+         alive and the corresponding G2 blocks leak past pool reset"
+    );
+
+    // Drop the local `hashes` vec — the only remaining strong refs
+    // should now be inside the (just-drained) session inner, which
+    // means the G2 pool sees all 3 blocks return to inactive.
+    drop(hashes);
+
+    // Production-shape end-state: the G2 `BlockManager`'s
+    // `available_blocks()` returns to `total_blocks()`, and
+    // `reset_inactive_pool()` succeeds (same shape as the
+    // `ManagedBlockPool::reset` failure that surfaced this bug
+    // — `total blocks: N, available blocks: N - leaked`).
+    assert_eq!(
+        h.g2_manager.available_blocks(),
+        total_blocks,
+        "after close() all 3 G2 blocks must return to the pool; \
+         a non-zero leak here is the exact symptom of the original \
+         `Reset pool count mismatch` failure"
+    );
+    h.g2_manager
+        .reset_inactive_pool()
+        .map_err(|e| anyhow::anyhow!("reset_inactive_pool must succeed after close(): {e}"))?;
+
+    Ok(())
+}
