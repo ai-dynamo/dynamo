@@ -58,15 +58,17 @@ use crate::transfer::plan::{AnnotatedLayout, CopyOp, CopyPolicy, TransferSelecti
 /// transfer cannot be safely handled by the PR-5 planner path.
 ///
 /// Bails (no fallback) when:
-/// - the strategy is not one of `CudaAsync{H2D, D2H, D2D}`;
-/// - the src/dst block-id lists have unequal length;
+/// - the strategy is not one of `CudaAsync{H2D, D2H, D2D}` —
+///   enforced by [`validate_cuda_planner_entry`];
+/// - the src/dst block-id lists have unequal length —
+///   enforced by [`validate_planner_block_ids`];
 /// - `src.block_layout()` and `dst.block_layout()` would require a
 ///   semantic transformation (NHD↔HND, ↔Universal, etc.). The
 ///   planner-side projection collapses the per-token NHD/HND
 ///   substructure into a single trailing `Payload` axis, so a
 ///   raw-copy without going through the kernel catalog would silently
-///   transpose-corrupt the data. PR-6 wires the kernel candidates and
-///   removes this gate.
+///   transpose-corrupt the data. PR-6.1 wires the kernel catalog
+///   and removes this gate from the Cuda* entrypoint.
 pub(crate) fn execute_planner_cuda_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
@@ -76,7 +78,9 @@ pub(crate) fn execute_planner_cuda_transfer(
     cuda_stream: Option<Arc<CudaStream>>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
-    let ops = match plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy)? {
+    validate_cuda_planner_entry(strategy, src.layout().block_layout(), dst.layout().block_layout())?;
+
+    let ops = match plan_and_lower(src, dst, src_block_ids, dst_block_ids)? {
         PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
         PlanOutcome::Ops(ops) => ops,
     };
@@ -121,12 +125,16 @@ pub(crate) fn execute_planner_cuda_transfer(
 /// in `LayoutView` once heterogeneous-storage planning lands.
 ///
 /// Bails (no fallback) when:
-/// - the strategy is not one of `Nixl{Read, Write, ReadFlipped, WriteFlipped}`;
+/// - the strategy is not one of `Nixl{Read, Write, ReadFlipped, WriteFlipped}` —
+///   enforced by [`validate_nixl_planner_entry`];
+/// - the src/dst block-id lists have unequal length —
+///   enforced by [`validate_planner_block_ids`];
+/// - `src.block_layout()` and `dst.block_layout()` would require a
+///   kernel-side transform — PR-6.2 wires the Staged executor and
+///   removes this gate from the NIXL entrypoint;
 /// - locality is wrong for the chosen op (Write requires src local;
 ///   Read requires dst local — same invariants the legacy executor
-///   asserts);
-/// - any condition rejected by [`validate_planner_inputs`] or
-///   [`plan_and_lower`].
+///   asserts).
 pub(crate) fn execute_planner_nixl_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
@@ -135,13 +143,16 @@ pub(crate) fn execute_planner_nixl_transfer(
     strategy: TransferStrategy,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
+    validate_nixl_planner_entry(strategy, src.layout().block_layout(), dst.layout().block_layout())?;
     let xfer_op = match strategy {
         TransferStrategy::NixlRead | TransferStrategy::NixlReadFlipped => XferOp::Read,
         TransferStrategy::NixlWrite | TransferStrategy::NixlWriteFlipped => XferOp::Write,
+        // unreachable: validate_nixl_planner_entry already rejected
+        // non-NIXL strategies above. Kept as a defence-in-depth bail.
         other => bail!("execute_planner_nixl_transfer: strategy {other:?} not a NIXL strategy"),
     };
 
-    let ops = match plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy)? {
+    let ops = match plan_and_lower(src, dst, src_block_ids, dst_block_ids)? {
         PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
         PlanOutcome::Ops(ops) => ops,
     };
@@ -223,24 +234,19 @@ enum PlanOutcome {
 
 /// Shared "validate → project → plan → lower" pipeline used by both
 /// the CUDA and NIXL planner-path entrypoints.
+///
+/// Strategy and layout-compatibility checks are NOT done here — each
+/// entrypoint enforces its own per-family contract via
+/// [`validate_cuda_planner_entry`] / [`validate_nixl_planner_entry`]
+/// before calling this. This stage handles only the structural
+/// invariants of the (src, dst, block_ids) triple.
 fn plan_and_lower(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
     src_block_ids: &[BlockId],
     dst_block_ids: &[BlockId],
-    strategy: TransferStrategy,
 ) -> Result<PlanOutcome> {
-    let src_block_layout = src.layout().block_layout();
-    let dst_block_layout = dst.layout().block_layout();
-    if validate_planner_inputs(
-        src_block_layout,
-        dst_block_layout,
-        src_block_ids,
-        dst_block_ids,
-        strategy,
-    )?
-    .is_noop()
-    {
+    if validate_planner_block_ids(src_block_ids, dst_block_ids)?.is_noop() {
         return Ok(PlanOutcome::Empty);
     }
 
@@ -294,40 +300,20 @@ impl PlannerInputs {
     }
 }
 
-/// Pure validation gate for `execute_planner_cuda_transfer`. Extracted
-/// so the rejection paths can be tested without a `TransferContext`
-/// (which needs a real CUDA stream pool, NIXL agent, and tokio
-/// runtime).
+/// Pure structural validation: block-id list lengths must match, and
+/// an empty list short-circuits to a no-op completion. No knowledge
+/// of strategy or layouts.
 ///
-/// Returns `Err` for every condition that bails inside the executor:
-/// unsupported strategy, mismatched block-id list lengths, and
-/// `requires_transform` layout pairs. Returns `Ok(Noop)` when the
-/// transfer has no work to do, `Ok(Proceed)` otherwise.
-pub(crate) fn validate_planner_inputs(
-    src_block_layout: KvBlockLayout,
-    dst_block_layout: KvBlockLayout,
+/// Extracted so the rejection paths can be tested without a
+/// `TransferContext` (which needs a real CUDA stream pool, NIXL agent,
+/// and tokio runtime).
+pub(crate) fn validate_planner_block_ids(
     src_block_ids: &[BlockId],
     dst_block_ids: &[BlockId],
-    strategy: TransferStrategy,
 ) -> Result<PlannerInputs> {
-    if !matches!(
-        strategy,
-        TransferStrategy::CudaAsyncH2D
-            | TransferStrategy::CudaAsyncD2H
-            | TransferStrategy::CudaAsyncD2D
-            | TransferStrategy::NixlRead
-            | TransferStrategy::NixlWrite
-            | TransferStrategy::NixlReadFlipped
-            | TransferStrategy::NixlWriteFlipped
-    ) {
-        bail!(
-            "validate_planner_inputs: strategy {strategy:?} not supported in PR-5 \
-             (only CudaAsync H2D / D2H / D2D and Nixl Read/Write)"
-        );
-    }
     if src_block_ids.len() != dst_block_ids.len() {
         bail!(
-            "execute_planner_cuda_transfer: src_block_ids ({}) != dst_block_ids ({})",
+            "validate_planner_block_ids: src_block_ids ({}) != dst_block_ids ({})",
             src_block_ids.len(),
             dst_block_ids.len()
         );
@@ -335,15 +321,75 @@ pub(crate) fn validate_planner_inputs(
     if src_block_ids.is_empty() {
         return Ok(PlannerInputs::Noop);
     }
-    if src_block_layout.requires_transform(&dst_block_layout) {
+    Ok(PlannerInputs::Proceed)
+}
+
+/// Per-entrypoint guard for [`execute_planner_cuda_transfer`].
+///
+/// Rejects strategies outside the `CudaAsync{H2D,D2H,D2D}` family and
+/// layout pairs that would require a kernel-side transform (PR-6.1
+/// drops the layout check once the kernel catalog handles transforms).
+pub(crate) fn validate_cuda_planner_entry(
+    strategy: TransferStrategy,
+    src_block_layout: KvBlockLayout,
+    dst_block_layout: KvBlockLayout,
+) -> Result<()> {
+    if !matches!(
+        strategy,
+        TransferStrategy::CudaAsyncH2D
+            | TransferStrategy::CudaAsyncD2H
+            | TransferStrategy::CudaAsyncD2D
+    ) {
         bail!(
-            "execute_planner_cuda_transfer: src ({src_block_layout:?}) and dst \
-             ({dst_block_layout:?}) require a kernel-side transform, which is not \
-             yet wired in the planner path (PR-6 lands the kernel catalog). Drop \
-             use_planner=true for this transfer."
+            "validate_cuda_planner_entry: strategy {strategy:?} is not a CudaAsync \
+             variant — caller routed a non-Cuda strategy into the Cuda planner \
+             entrypoint"
         );
     }
-    Ok(PlannerInputs::Proceed)
+    if src_block_layout.requires_transform(&dst_block_layout) {
+        bail!(
+            "validate_cuda_planner_entry: src ({src_block_layout:?}) and dst \
+             ({dst_block_layout:?}) require a kernel-side transform, which is not \
+             yet wired in the planner path (PR-6.1 lands the kernel catalog). \
+             Drop use_planner=true for this transfer."
+        );
+    }
+    Ok(())
+}
+
+/// Per-entrypoint guard for [`execute_planner_nixl_transfer`].
+///
+/// Rejects strategies outside the `Nixl{Read,Write,ReadFlipped,
+/// WriteFlipped}` family and layout pairs that would require a
+/// kernel-side transform (PR-6.2 drops the layout check once the
+/// Staged executor handles cross-agent transforms).
+pub(crate) fn validate_nixl_planner_entry(
+    strategy: TransferStrategy,
+    src_block_layout: KvBlockLayout,
+    dst_block_layout: KvBlockLayout,
+) -> Result<()> {
+    if !matches!(
+        strategy,
+        TransferStrategy::NixlRead
+            | TransferStrategy::NixlWrite
+            | TransferStrategy::NixlReadFlipped
+            | TransferStrategy::NixlWriteFlipped
+    ) {
+        bail!(
+            "validate_nixl_planner_entry: strategy {strategy:?} is not a NIXL \
+             variant — caller routed a non-NIXL strategy into the NIXL planner \
+             entrypoint"
+        );
+    }
+    if src_block_layout.requires_transform(&dst_block_layout) {
+        bail!(
+            "validate_nixl_planner_entry: src ({src_block_layout:?}) and dst \
+             ({dst_block_layout:?}) require a kernel-side transform, which is \
+             not yet wired in the NIXL planner path (PR-6.2 lands the Staged \
+             executor). Drop use_planner=true for this transfer."
+        );
+    }
+    Ok(())
 }
 
 /// Group `ops` by `size` and dispatch each group via
@@ -396,123 +442,144 @@ fn dispatch_ops_grouped_by_size(ops: &[CopyOp], stream: &CudaStream) -> Result<(
 mod tests {
     use super::*;
 
-    /// Same operational layout: validator passes.
+    // ──────────── validate_planner_block_ids ────────────
+
+    /// Equal-length non-empty block-id lists are a valid Proceed
+    /// case — the structural validator says nothing about strategy
+    /// or layouts.
     #[test]
-    fn validator_passes_same_operational_layout() {
-        let r = validate_planner_inputs(
-            KvBlockLayout::OperationalNHD,
-            KvBlockLayout::OperationalNHD,
-            &[0, 1, 2],
-            &[0, 1, 2],
-            TransferStrategy::CudaAsyncD2D,
-        );
+    fn block_ids_validator_passes_equal_length() {
+        let r = validate_planner_block_ids(&[0, 1, 2], &[0, 1, 2]);
         assert!(matches!(r, Ok(PlannerInputs::Proceed)));
     }
 
-    /// NHD ↔ HND is a semantic transform that PR-5 cannot raw-copy
-    /// without corrupting data.
+    /// Empty block lists short-circuit to Noop so the caller can
+    /// resolve a "completed" notification without dispatching.
     #[test]
-    fn validator_rejects_nhd_hnd() {
-        let r = validate_planner_inputs(
+    fn block_ids_validator_returns_noop_on_empty_list() {
+        let r = validate_planner_block_ids(&[], &[]);
+        assert!(matches!(r, Ok(PlannerInputs::Noop)));
+    }
+
+    /// Mismatched block-id list lengths are a structural error.
+    #[test]
+    fn block_ids_validator_rejects_length_mismatch() {
+        let r = validate_planner_block_ids(&[0, 1], &[0]);
+        assert!(r.is_err());
+    }
+
+    // ──────────── validate_cuda_planner_entry ────────────
+
+    /// Same operational layout + CudaAsync strategy passes.
+    #[test]
+    fn cuda_entry_passes_same_operational_layout() {
+        for s in [
+            TransferStrategy::CudaAsyncH2D,
+            TransferStrategy::CudaAsyncD2H,
+            TransferStrategy::CudaAsyncD2D,
+        ] {
+            let r = validate_cuda_planner_entry(
+                s,
+                KvBlockLayout::OperationalNHD,
+                KvBlockLayout::OperationalNHD,
+            );
+            assert!(r.is_ok(), "strategy {s:?} expected to pass");
+        }
+    }
+
+    /// NHD ↔ HND is a semantic transform — rejected until PR-6.1
+    /// wires the kernel catalog.
+    #[test]
+    fn cuda_entry_rejects_nhd_hnd() {
+        let r = validate_cuda_planner_entry(
+            TransferStrategy::CudaAsyncD2D,
             KvBlockLayout::OperationalNHD,
             KvBlockLayout::OperationalHND,
-            &[0],
-            &[0],
-            TransferStrategy::CudaAsyncD2D,
         );
         assert!(r.is_err());
     }
 
     /// Operational ↔ Universal also requires a kernel transform.
     #[test]
-    fn validator_rejects_operational_to_universal() {
-        let r = validate_planner_inputs(
+    fn cuda_entry_rejects_operational_to_universal() {
+        let r = validate_cuda_planner_entry(
+            TransferStrategy::CudaAsyncD2D,
             KvBlockLayout::OperationalNHD,
             KvBlockLayout::UniversalTP,
-            &[0],
-            &[0],
-            TransferStrategy::CudaAsyncD2D,
         );
         assert!(r.is_err());
     }
 
-    /// Empty block lists are a valid no-op (caller short-circuits).
+    /// Non-CudaAsync strategies routed into the Cuda entrypoint
+    /// are an internal-routing bug; reject explicitly.
     #[test]
-    fn validator_returns_noop_on_empty_block_list() {
-        let r = validate_planner_inputs(
-            KvBlockLayout::OperationalNHD,
-            KvBlockLayout::OperationalNHD,
-            &[],
-            &[],
-            TransferStrategy::CudaAsyncD2D,
-        );
-        assert!(matches!(r, Ok(PlannerInputs::Noop)));
-    }
-
-    /// Mismatched block-id list lengths are rejected.
-    #[test]
-    fn validator_rejects_block_id_length_mismatch() {
-        let r = validate_planner_inputs(
-            KvBlockLayout::OperationalNHD,
-            KvBlockLayout::OperationalNHD,
-            &[0, 1],
-            &[0],
-            TransferStrategy::CudaAsyncD2D,
-        );
-        assert!(r.is_err());
-    }
-
-    /// CudaAsync and Nixl strategies are accepted; Memcpy / Invalid
-    /// are not (PR-5/5.6 wires only those two strategy families).
-    #[test]
-    fn validator_strategy_acceptance() {
-        // Accepted: every CudaAsync direction.
+    fn cuda_entry_rejects_non_cuda_strategies() {
         for s in [
-            TransferStrategy::CudaAsyncH2D,
-            TransferStrategy::CudaAsyncD2H,
-            TransferStrategy::CudaAsyncD2D,
+            TransferStrategy::NixlRead,
+            TransferStrategy::NixlWrite,
+            TransferStrategy::NixlReadFlipped,
+            TransferStrategy::NixlWriteFlipped,
+            TransferStrategy::Memcpy,
+            TransferStrategy::Invalid,
         ] {
-            assert!(matches!(
-                validate_planner_inputs(
-                    KvBlockLayout::OperationalNHD,
-                    KvBlockLayout::OperationalNHD,
-                    &[0],
-                    &[0],
-                    s,
-                ),
-                Ok(PlannerInputs::Proceed)
-            ));
+            let r = validate_cuda_planner_entry(
+                s,
+                KvBlockLayout::OperationalNHD,
+                KvBlockLayout::OperationalNHD,
+            );
+            assert!(r.is_err(), "strategy {s:?} expected to be rejected");
         }
-        // Accepted: every Nixl variant.
+    }
+
+    // ──────────── validate_nixl_planner_entry ────────────
+
+    /// Same operational layout + every Nixl variant passes.
+    #[test]
+    fn nixl_entry_passes_same_operational_layout() {
         for s in [
             TransferStrategy::NixlRead,
             TransferStrategy::NixlWrite,
             TransferStrategy::NixlReadFlipped,
             TransferStrategy::NixlWriteFlipped,
         ] {
-            assert!(matches!(
-                validate_planner_inputs(
-                    KvBlockLayout::OperationalNHD,
-                    KvBlockLayout::OperationalNHD,
-                    &[0],
-                    &[0],
-                    s,
-                ),
-                Ok(PlannerInputs::Proceed)
-            ));
-        }
-        // Rejected: Memcpy (CPU host-only path) and Invalid sentinel.
-        for s in [TransferStrategy::Memcpy, TransferStrategy::Invalid] {
-            assert!(
-                validate_planner_inputs(
-                    KvBlockLayout::OperationalNHD,
-                    KvBlockLayout::OperationalNHD,
-                    &[0],
-                    &[0],
-                    s,
-                )
-                .is_err()
+            let r = validate_nixl_planner_entry(
+                s,
+                KvBlockLayout::OperationalNHD,
+                KvBlockLayout::OperationalNHD,
             );
+            assert!(r.is_ok(), "strategy {s:?} expected to pass");
+        }
+    }
+
+    /// NHD ↔ HND is a semantic transform — rejected until PR-6.2
+    /// wires the Staged executor.
+    #[test]
+    fn nixl_entry_rejects_nhd_hnd() {
+        let r = validate_nixl_planner_entry(
+            TransferStrategy::NixlReadFlipped,
+            KvBlockLayout::OperationalNHD,
+            KvBlockLayout::OperationalHND,
+        );
+        assert!(r.is_err());
+    }
+
+    /// Non-NIXL strategies routed into the NIXL entrypoint are an
+    /// internal-routing bug; reject explicitly.
+    #[test]
+    fn nixl_entry_rejects_non_nixl_strategies() {
+        for s in [
+            TransferStrategy::CudaAsyncH2D,
+            TransferStrategy::CudaAsyncD2H,
+            TransferStrategy::CudaAsyncD2D,
+            TransferStrategy::Memcpy,
+            TransferStrategy::Invalid,
+        ] {
+            let r = validate_nixl_planner_entry(
+                s,
+                KvBlockLayout::OperationalNHD,
+                KvBlockLayout::OperationalNHD,
+            );
+            assert!(r.is_err(), "strategy {s:?} expected to be rejected");
         }
     }
 }
