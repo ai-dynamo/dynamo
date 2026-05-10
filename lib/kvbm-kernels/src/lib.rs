@@ -10,4 +10,6 @@ pub use tensor_kernels::{
 
 // Permute kernels - data layout transformation (requires permute_kernels feature)
 #[cfg(feature = "permute_kernels")]
-pub use tensor_kernels::{BlockLayout, TensorDataType, block_from_universal, universal_from_block};
+pub use tensor_kernels::{
+    BlockLayout, TensorDataType, block_from_universal, nhd_hnd_transpose, universal_from_block,
+};

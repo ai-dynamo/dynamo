@@ -423,16 +423,20 @@ fn build_transform_invocation(
     let kind = match_kernel(src_kv, dst_kv, dtype).ok_or_else(|| {
         anyhow!(
             "build_transform_invocation: no kernel registered for (src={src_kv:?}, \
-             dst={dst_kv:?}, dtype={dtype:?}). NHD↔HND lands in PR-6.3; \
-             UniversalPP support is also pending."
+             dst={dst_kv:?}, dtype={dtype:?}). UniversalPP support is pending."
         )
     })?;
 
-    // The kernel template selects NHD vs HND from the *operational*
-    // side of the pair.
+    // `block_layout` carries the kernel's NHD/HND template parameter:
+    // - U↔O: the (single) operational side selects the inner-token
+    //   ordering of the block stack.
+    // - O↔O (NhdHndTranspose): both sides are operational; the kernel's
+    //   `src_layout` flag drives the inner-offset formulas, so the SRC
+    //   side wins.
     let operational_kv = match kind {
-        KernelKind::UniversalFromBlock => src_kv, // operational → universal
-        KernelKind::BlockFromUniversal => dst_kv, // universal → operational
+        KernelKind::UniversalFromBlock => src_kv,
+        KernelKind::BlockFromUniversal => dst_kv,
+        KernelKind::NhdHndTranspose => src_kv,
     };
     let block_layout = to_kernel_block_layout(operational_kv).ok_or_else(|| {
         anyhow!(
@@ -605,6 +609,13 @@ fn dispatch_transform_kernel(
     let nh = invocation.num_heads;
     let hd = invocation.head_dim;
 
+    // Operational↔operational transpose: both sides are operational
+    // block stacks, so the universal-side scaffolding below doesn't
+    // apply. Build per-side chunk pointer tables and launch directly.
+    if matches!(invocation.kind, KernelKind::NhdHndTranspose) {
+        return dispatch_nhd_hnd_transpose_kernel(invocation, src, dst, block_pairs, stream);
+    }
+
     // Determine which side is operational vs universal.
     let (op_layout, op_block_id_of, univ_layout, univ_block_id_of): (
         &PhysicalLayout,
@@ -624,6 +635,7 @@ fn dispatch_transform_kernel(
             src,
             Box::new(|p: &(BlockId, BlockId)| p.0),
         ),
+        KernelKind::NhdHndTranspose => unreachable!("handled above"),
     };
 
     // Operational pointer table: nb × nl × no entries, packed as
@@ -709,6 +721,7 @@ fn dispatch_transform_kernel(
                 )
             }
         }
+        KernelKind::NhdHndTranspose => unreachable!("handled above"),
     };
     if status != cudarc::runtime::sys::cudaError::cudaSuccess {
         bail!(
@@ -716,6 +729,84 @@ fn dispatch_transform_kernel(
              for kind={:?}, num_blocks_to_transfer={}",
             invocation.kind,
             block_pairs.len(),
+        );
+    }
+    Ok(())
+}
+
+/// PR-6.3: dispatch the operational↔operational (NHD↔HND) transpose
+/// kernel.
+///
+/// Both sides are operational block stacks, so unlike
+/// [`dispatch_transform_kernel`]'s universal-side scaffolding, both
+/// pointer tables are built via `Layout::memory_region(b, l, o)` —
+/// shaped `[num_blocks_to_transfer × num_layers × outer_dim]` each.
+/// The direction is carried on `KernelInvocation::block_layout`
+/// (kernel's `src_layout` template parameter).
+#[cfg(feature = "permute_kernels")]
+fn dispatch_nhd_hnd_transpose_kernel(
+    invocation: &crate::transfer::kernel_catalog::KernelInvocation,
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    block_pairs: &[(BlockId, BlockId)],
+    stream: &Arc<CudaStream>,
+) -> Result<()> {
+    use cudarc::driver::DevicePtr;
+
+    let stream_raw = stream.cu_stream() as cudaStream_t;
+    let nl = invocation.num_layers;
+    let no = invocation.outer_dim;
+    let nt = invocation.page_size;
+    let nh = invocation.num_heads;
+    let hd = invocation.head_dim;
+
+    let build_table = |layout: &PhysicalLayout, block_id_of: fn(&(BlockId, BlockId)) -> BlockId|
+        -> Result<Vec<usize>> {
+        let mut table: Vec<usize> = Vec::with_capacity(block_pairs.len() * nl * no);
+        for pair in block_pairs {
+            let block_id = block_id_of(pair);
+            for layer in 0..nl {
+                for outer in 0..no {
+                    let region = layout.layout().memory_region(block_id, layer, outer)
+                        .map_err(|e| anyhow!(
+                            "dispatch_nhd_hnd_transpose_kernel: failed to read chunk \
+                             (block={block_id}, layer={layer}, outer={outer}): {e:?}"
+                        ))?;
+                    table.push(region.addr());
+                }
+            }
+        }
+        Ok(table)
+    };
+    let src_ptrs = build_table(src, |p| p.0)?;
+    let dst_ptrs = build_table(dst, |p| p.1)?;
+
+    let src_dev = stream.clone_htod(&src_ptrs)?;
+    let dst_dev = stream.clone_htod(&dst_ptrs)?;
+    let (src_ptr_dev_raw, _src_guard) = src_dev.device_ptr(stream.as_ref());
+    let (dst_ptr_dev_raw, _dst_guard) = dst_dev.device_ptr(stream.as_ref());
+
+    let status = unsafe {
+        kvbm_kernels::nhd_hnd_transpose(
+            src_ptr_dev_raw as usize as *const *const c_void,
+            dst_ptr_dev_raw as usize as *const *mut c_void,
+            block_pairs.len(),
+            nl,
+            no,
+            nt,
+            nh,
+            hd,
+            invocation.dtype,
+            invocation.block_layout,
+            stream_raw,
+        )
+    };
+    if status != cudarc::runtime::sys::cudaError::cudaSuccess {
+        bail!(
+            "dispatch_nhd_hnd_transpose_kernel: kernel launch failed with status={status:?}, \
+             num_blocks_to_transfer={}, src_layout={:?}",
+            block_pairs.len(),
+            invocation.block_layout,
         );
     }
     Ok(())

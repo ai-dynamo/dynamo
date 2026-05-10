@@ -42,6 +42,10 @@ pub(crate) enum KernelKind {
     UniversalFromBlock,
     /// `block_from_universal`: universal → operational (NHD/HND).
     BlockFromUniversal,
+    /// `nhd_hnd_transpose`: operational ↔ operational (NHD ↔ HND).
+    /// One FFI symbol with a `src_layout` flag; the dispatcher reads
+    /// `KernelInvocation::block_layout` for the direction.
+    NhdHndTranspose,
 }
 
 /// Launch parameters for a registered kernel.
@@ -92,6 +96,12 @@ pub(crate) fn match_kernel(
         (OperationalNHD | OperationalHND, UniversalTP) => Some(KernelKind::UniversalFromBlock),
         // Universal → Operational: block_from_universal.
         (UniversalTP, OperationalNHD | OperationalHND) => Some(KernelKind::BlockFromUniversal),
+        // Operational ↔ Operational (PR-6.3): nhd_hnd_transpose.
+        // Direction is carried on `KernelInvocation::block_layout`
+        // (the kernel's `src_layout` template parameter).
+        (OperationalNHD, OperationalHND) | (OperationalHND, OperationalNHD) => {
+            Some(KernelKind::NhdHndTranspose)
+        }
         // Same layout: no transform needed (defensive — `requires_transform`
         // also reports false here, so plan_copy would emit Direct).
         (a, b) if a == b => None,
@@ -152,19 +162,19 @@ mod tests {
         }
     }
 
-    /// Operational ↔ Operational (NHD ↔ HND) is not covered until
-    /// PR-6.3 wires a dedicated transpose kernel; today the catalog
-    /// reports a miss and the planner-path entrypoint surfaces a
-    /// precise error.
+    /// Operational ↔ Operational (NHD ↔ HND): PR-6.3 added a dedicated
+    /// transpose kernel. Both directions resolve to `NhdHndTranspose`;
+    /// the dispatcher reads the direction off
+    /// `KernelInvocation::block_layout`.
     #[test]
-    fn nhd_hnd_returns_none_until_pr_6_3() {
+    fn matches_nhd_hnd_transpose() {
         assert_eq!(
             match_kernel(OperationalNHD, OperationalHND, TensorDataType::F16),
-            None,
+            Some(KernelKind::NhdHndTranspose),
         );
         assert_eq!(
             match_kernel(OperationalHND, OperationalNHD, TensorDataType::F16),
-            None,
+            Some(KernelKind::NhdHndTranspose),
         );
     }
 

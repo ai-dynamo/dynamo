@@ -259,33 +259,53 @@ async fn use_planner_round_trip_hnd_via_universal() -> Result<()> {
     assert_operational_universal_round_trip(KvBlockLayout::OperationalHND).await
 }
 
-/// Catalog miss: NHD ↔ HND has no kernel registered until PR-6.3.
-/// The planner-driven Cuda* path must surface a precise error from
-/// `build_transform_invocation` — no silent fallback to a raw copy.
-#[tokio::test]
-async fn use_planner_nhd_hnd_errors_with_no_matching_kernel() -> Result<()> {
-    skip_if_stubs_and_device!(StorageKind::Device(0));
-    gpu_serial!();
+// ────────────────── PR-6.3: NHD ↔ HND ──────────────────
+
+/// Round-trip NHD → HND → NHD on Device(0) via the planner-driven
+/// `nhd_hnd_transpose` kernel. Wiring test only — kernel correctness
+/// is verified independently in `kvbm-kernels`'s `kernel_roundtrip`
+/// suite, which compares each direction's output against ground-truth
+/// chunks (not against the kernel's own inverse).
+async fn assert_nhd_hnd_round_trip(src_layout: KvBlockLayout) -> Result<()> {
+    let other = match src_layout {
+        KvBlockLayout::OperationalNHD => KvBlockLayout::OperationalHND,
+        KvBlockLayout::OperationalHND => KvBlockLayout::OperationalNHD,
+        _ => panic!("assert_nhd_hnd_round_trip: src must be NHD or HND, got {src_layout:?}"),
+    };
     let agent = build_agent_for_kinds(&[StorageKind::Device(0)])?;
-    let src = build_fc_with_block_layout(agent.clone(), KvBlockLayout::OperationalNHD, 4);
-    let dst = build_fc_with_block_layout(agent.clone(), KvBlockLayout::OperationalHND, 4);
+    let src = build_fc_with_block_layout(agent.clone(), src_layout, 4);
+    let mid = build_fc_with_block_layout(agent.clone(), other, 4);
+    let dst = build_fc_with_block_layout(agent.clone(), src_layout, 4);
 
     let src_blocks = vec![0, 1];
-    let dst_blocks = vec![2, 3];
+    let mid_blocks = vec![2, 3];
+    let dst_blocks = vec![0, 1];
 
-    let _ = fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
+    let src_checksums = fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
     let ctx = create_transfer_context(agent, None).unwrap();
-    let options = TransferOptionsInternal::builder().use_planner(true).build()?;
-
-    let result = execute_transfer(&src, &dst, &src_blocks, &dst_blocks, options, ctx.context());
-    let err = match result {
-        Ok(_) => panic!("execute_transfer should bail with a no-matching-kernel error for NHD↔HND"),
-        Err(e) => e,
+    let options = || -> Result<TransferOptionsInternal> {
+        TransferOptionsInternal::builder().use_planner(true).build()
     };
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("no kernel registered") || msg.contains("OperationalNHD"),
-        "expected no-matching-kernel error, got: {msg}"
-    );
+
+    let forward = execute_transfer(&src, &mid, &src_blocks, &mid_blocks, options()?, ctx.context())?;
+    forward.await?;
+    let reverse = execute_transfer(&mid, &dst, &mid_blocks, &dst_blocks, options()?, ctx.context())?;
+    reverse.await?;
+
+    verify_checksums_by_position(&src_checksums, &src_blocks, &dst, &dst_blocks)?;
     Ok(())
+}
+
+#[tokio::test]
+async fn use_planner_round_trip_nhd_to_hnd() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    gpu_serial!();
+    assert_nhd_hnd_round_trip(KvBlockLayout::OperationalNHD).await
+}
+
+#[tokio::test]
+async fn use_planner_round_trip_hnd_to_nhd() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    gpu_serial!();
+    assert_nhd_hnd_round_trip(KvBlockLayout::OperationalHND).await
 }

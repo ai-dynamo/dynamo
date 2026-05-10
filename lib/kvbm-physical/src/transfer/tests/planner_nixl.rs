@@ -529,6 +529,244 @@ async fn use_planner_nixl_push_transform_universal_to_hnd() -> Result<()> {
     assert_staged_push_round_trip(KvBlockLayout::OperationalHND).await
 }
 
+// ──────────── PR-6.3: staged NHD ↔ HND transforms ────────────
+//
+// Wiring tests for the staged NIXL path through the new transpose
+// kernel. Verification uses the same `nhd_hnd_transpose` symbol in
+// the inverse direction — kernel correctness against ground truth
+// is exercised by `kvbm-kernels`'s `kernel_roundtrip` suite.
+
+/// Round-trip via staged Pull `src(layout, owner) → mid(other, remote)`,
+/// then local Cuda* `mid(other, remote) → final(layout, remote)`.
+/// `final`'s checksums on remote must match `src`'s by position.
+async fn assert_staged_pull_nhd_hnd_round_trip(src_layout: KvBlockLayout) -> Result<()> {
+    use crate::transfer::BounceBufferInternal;
+
+    let other = match src_layout {
+        KvBlockLayout::OperationalNHD => KvBlockLayout::OperationalHND,
+        KvBlockLayout::OperationalHND => KvBlockLayout::OperationalNHD,
+        _ => panic!(
+            "assert_staged_pull_nhd_hnd_round_trip: src must be NHD or HND, got {src_layout:?}"
+        ),
+    };
+
+    let role = format!("pull-staged-nhd-hnd-{:?}", src_layout);
+    let (owner_name, remote_name) = agent_pair_names(&role);
+    let owner = build_ucx_agent(&owner_name)?
+        .expect("UCX backend missing — caller should have skipped");
+    let remote = build_ucx_agent(&remote_name)?
+        .expect("UCX backend missing — caller should have skipped");
+
+    // src on owner (src_layout); mid on remote (other) — the staged
+    // pull's destination; final on remote (src_layout) — the local
+    // inverse target; bounce on remote (src_layout) — matches src kv
+    // for the NIXL leg of the staged pull.
+    let src = build_fc_with_block_layout_on_agent(owner.clone(), src_layout, 4)?;
+    let mid = build_fc_with_block_layout_on_agent(remote.clone(), other, 4)?;
+    let final_dst = build_fc_with_block_layout_on_agent(remote.clone(), src_layout, 4)?;
+    let bounce_layout = build_fc_with_block_layout_on_agent(remote.clone(), src_layout, 4)?;
+
+    let owner_md = owner
+        .get_local_md()
+        .map_err(|e| anyhow::anyhow!("owner.get_local_md: {:?}", e))?;
+    let remote_md = remote
+        .get_local_md()
+        .map_err(|e| anyhow::anyhow!("remote.get_local_md: {:?}", e))?;
+    owner
+        .load_remote_md(&remote_md)
+        .map_err(|e| anyhow::anyhow!("owner.load_remote_md: {:?}", e))?;
+    remote
+        .load_remote_md(&owner_md)
+        .map_err(|e| anyhow::anyhow!("remote.load_remote_md: {:?}", e))?;
+
+    let src_blocks = vec![0, 1];
+    let mid_blocks = vec![2, 3];
+    let final_blocks = vec![0, 1];
+    let bounce_blocks = vec![2, 3];
+
+    let src_checksums = fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
+
+    let caps = crate::transfer::TransferCapabilities::default().with_gpu_rdma(true);
+    let ctx = create_transfer_context(remote, Some(caps))?;
+
+    // Stage 1 (under test): staged Pull src → mid through bounce + kernel.
+    let bounce = BounceBufferInternal::from_layout(bounce_layout, bounce_blocks);
+    let staged_options = TransferOptionsInternal::builder()
+        .use_planner(true)
+        .bounce_buffer(bounce)
+        .build()?;
+    let staged = execute_transfer(
+        &src,
+        &mid,
+        &src_blocks,
+        &mid_blocks,
+        staged_options,
+        ctx.context(),
+    )?;
+    staged.await?;
+
+    // Stage 2 (verification): local Cuda* mid → final via the same
+    // kernel symbol in the inverse direction.
+    let local_options = TransferOptionsInternal::builder().use_planner(true).build()?;
+    let local = execute_transfer(
+        &mid,
+        &final_dst,
+        &mid_blocks,
+        &final_blocks,
+        local_options,
+        ctx.context(),
+    )?;
+    local.await?;
+
+    verify_checksums_by_position(&src_checksums, &src_blocks, &final_dst, &final_blocks)?;
+    Ok(())
+}
+
+/// Round-trip via staged Push `src(layout, owner) →
+/// final_dst(other, remote)`, then local Cuda* `final_dst(other, remote)
+/// → final2(layout, remote)`. `final2`'s checksums on remote must match
+/// `src`'s by position.
+///
+/// **Key invariant**: src and final_dst differ in `KvBlockLayout`, so
+/// `requires_transform` is true and the executor routes through
+/// `dispatch_staged_nixl_transform`. With only two operational layouts
+/// in the system (NHD, HND), introducing an `other`-layout intermediate
+/// on the *same* agent before the cross-agent hop would collapse the
+/// staged hop into a same-layout Direct push and silently bypass the
+/// path under test — so the staged push runs straight from
+/// src(layout, owner) to final_dst(other, remote).
+async fn assert_staged_push_nhd_hnd_round_trip(src_layout: KvBlockLayout) -> Result<()> {
+    use crate::transfer::BounceBufferInternal;
+
+    let other = match src_layout {
+        KvBlockLayout::OperationalNHD => KvBlockLayout::OperationalHND,
+        KvBlockLayout::OperationalHND => KvBlockLayout::OperationalNHD,
+        _ => panic!(
+            "assert_staged_push_nhd_hnd_round_trip: src must be NHD or HND, got {src_layout:?}"
+        ),
+    };
+
+    let role = format!("push-staged-nhd-hnd-{:?}", src_layout);
+    let (owner_name, remote_name) = agent_pair_names(&role);
+    let owner = build_ucx_agent(&owner_name)?
+        .expect("UCX backend missing — caller should have skipped");
+    let remote = build_ucx_agent(&remote_name)?
+        .expect("UCX backend missing — caller should have skipped");
+
+    // src on owner (src_layout); final_dst on remote (other) — the
+    // staged push's destination, kv-mismatched from src so the
+    // executor routes through dispatch_staged_nixl_transform; bounce
+    // on owner (other) — matches dst kv for the NIXL leg of the
+    // staged push; final2 on remote (src_layout) — local inverse
+    // target for verification.
+    let src = build_fc_with_block_layout_on_agent(owner.clone(), src_layout, 4)?;
+    let final_dst = build_fc_with_block_layout_on_agent(remote.clone(), other, 4)?;
+    let bounce_layout = build_fc_with_block_layout_on_agent(owner.clone(), other, 4)?;
+    let final2 = build_fc_with_block_layout_on_agent(remote.clone(), src_layout, 4)?;
+
+    let owner_md = owner
+        .get_local_md()
+        .map_err(|e| anyhow::anyhow!("owner.get_local_md: {:?}", e))?;
+    let remote_md = remote
+        .get_local_md()
+        .map_err(|e| anyhow::anyhow!("remote.get_local_md: {:?}", e))?;
+    owner
+        .load_remote_md(&remote_md)
+        .map_err(|e| anyhow::anyhow!("owner.load_remote_md: {:?}", e))?;
+    remote
+        .load_remote_md(&owner_md)
+        .map_err(|e| anyhow::anyhow!("remote.load_remote_md: {:?}", e))?;
+
+    let src_blocks = vec![0, 1];
+    let final_blocks = vec![0, 1];
+    let bounce_blocks = vec![2, 3];
+    let final2_blocks = vec![2, 3];
+
+    let src_checksums = fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
+
+    let caps = crate::transfer::TransferCapabilities::default().with_gpu_rdma(true);
+    let ctx_owner = create_transfer_context(owner, Some(caps.clone()))?;
+    let ctx_remote = create_transfer_context(remote, Some(caps))?;
+
+    // Stage 1 (under test): staged Push src → final_dst through
+    // kernel (src→bounce locally on owner) + NIXL push (bounce →
+    // final_dst on remote).
+    let bounce = BounceBufferInternal::from_layout(bounce_layout, bounce_blocks);
+    let staged_options = TransferOptionsInternal::builder()
+        .use_planner(true)
+        .bounce_buffer(bounce)
+        .build()?;
+    let staged = execute_transfer(
+        &src,
+        &final_dst,
+        &src_blocks,
+        &final_blocks,
+        staged_options,
+        ctx_owner.context(),
+    )?;
+    staged.await?;
+
+    // Stage 2 (verification): local Cuda* final_dst → final2 on
+    // remote via the inverse direction of the same kernel symbol.
+    let local_options = TransferOptionsInternal::builder().use_planner(true).build()?;
+    let local = execute_transfer(
+        &final_dst,
+        &final2,
+        &final_blocks,
+        &final2_blocks,
+        local_options,
+        ctx_remote.context(),
+    )?;
+    local.await?;
+
+    verify_checksums_by_position(&src_checksums, &src_blocks, &final2, &final2_blocks)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn use_planner_nixl_pull_transform_nhd_to_hnd() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    if !is_nixl_backend_available("UCX") {
+        eprintln!("Skipping NIXL planner test — UCX backend unavailable");
+        return Ok(());
+    }
+    nixl_serial!();
+    assert_staged_pull_nhd_hnd_round_trip(KvBlockLayout::OperationalNHD).await
+}
+
+#[tokio::test]
+async fn use_planner_nixl_pull_transform_hnd_to_nhd() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    if !is_nixl_backend_available("UCX") {
+        eprintln!("Skipping NIXL planner test — UCX backend unavailable");
+        return Ok(());
+    }
+    nixl_serial!();
+    assert_staged_pull_nhd_hnd_round_trip(KvBlockLayout::OperationalHND).await
+}
+
+#[tokio::test]
+async fn use_planner_nixl_push_transform_nhd_to_hnd() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    if !is_nixl_backend_available("UCX") {
+        eprintln!("Skipping NIXL planner test — UCX backend unavailable");
+        return Ok(());
+    }
+    nixl_serial!();
+    assert_staged_push_nhd_hnd_round_trip(KvBlockLayout::OperationalNHD).await
+}
+
+#[tokio::test]
+async fn use_planner_nixl_push_transform_hnd_to_nhd() -> Result<()> {
+    skip_if_stubs_and_device!(StorageKind::Device(0));
+    if !is_nixl_backend_available("UCX") {
+        eprintln!("Skipping NIXL planner test — UCX backend unavailable");
+        return Ok(());
+    }
+    nixl_serial!();
+    assert_staged_push_nhd_hnd_round_trip(KvBlockLayout::OperationalHND).await
+}
+
 /// Negative test: NIXL transform without a bounce buffer must error
 /// at the entrypoint with a precise message naming `bounce_buffer`.
 #[tokio::test]

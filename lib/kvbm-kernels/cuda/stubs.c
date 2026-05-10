@@ -70,6 +70,26 @@ kvbm_kernels_launch_block_from_universal(
 }
 
 cudaError_t
+kvbm_kernels_launch_nhd_hnd_transpose(
+    const void* const* src_ptrs, void* const* dst_ptrs, size_t num_blocks, size_t nl, size_t no, size_t nt, size_t nh,
+    size_t hd, int dtype_value, int src_layout_value, cudaStream_t stream)
+{
+  (void)src_ptrs;
+  (void)dst_ptrs;
+  (void)num_blocks;
+  (void)nl;
+  (void)no;
+  (void)nt;
+  (void)nh;
+  (void)hd;
+  (void)dtype_value;
+  (void)src_layout_value;
+  (void)stream;
+  STUB_ABORT("kvbm_kernels_launch_nhd_hnd_transpose");
+  return 1;  // Unreachable
+}
+
+cudaError_t
 kvbm_kernels_launch_vectorized_copy(
     void** src_ptrs, void** dst_ptrs, size_t copy_size_bytes, int num_pairs, cudaStream_t stream)
 {
