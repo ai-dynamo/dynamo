@@ -50,6 +50,7 @@ from dynamo.llm import (
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
+    WorkerType,
     register_model,
 )
 from dynamo.runtime import DistributedRuntime
@@ -616,9 +617,28 @@ async def init_llm_worker(
             media_fetcher.allow_direct_port(allow_internal)
 
         # Register the model with runtime config
-        # Encode workers do NOT register - they're internal workers only
-        # Prefill and decode workers register - frontend detects their role via ModelType
+        # Encode workers do NOT register - they're internal workers only.
+        # Their registration is deferred until the worker_set_key migration
+        # adds a worker_type slot (the current key collides encode with decode
+        # in the same namespace).
         if config.disaggregation_mode != DisaggregationMode.ENCODE:
+            # Topology readiness role + DNF needs, derived literally per branch.
+            # `--encode-endpoint` is non-empty when this worker talks to a
+            # separate encode worker; that adds Encode to its needs.
+            if config.disaggregation_mode == DisaggregationMode.PREFILL:
+                worker_type = WorkerType.Prefill
+                needs_set: list[WorkerType] = [WorkerType.Decode]
+            elif config.disaggregation_mode == DisaggregationMode.DECODE:
+                worker_type = WorkerType.Decode
+                needs_set = [WorkerType.Prefill]
+            else:
+                # AGGREGATED ("prefill_and_decode")
+                worker_type = WorkerType.Aggregated
+                needs_set = []
+            if config.encode_endpoint:
+                needs_set.append(WorkerType.Encode)
+            needs: list[list[WorkerType]] = [needs_set] if needs_set else []
+
             await register_model(
                 model_input,
                 model_type,
@@ -631,6 +651,8 @@ async def init_llm_worker(
                 custom_template_path=config.custom_jinja_template,
                 media_decoder=media_decoder,
                 media_fetcher=media_fetcher,
+                worker_type=worker_type,
+                needs=needs,
             )
 
         health_check_payload = TrtllmHealthCheckPayload(
