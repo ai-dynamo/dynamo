@@ -75,6 +75,18 @@ COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linu
 # Copy NIXL Python wheels
 COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+
+# Install RDMA libraries required for UCX to find RDMA devices
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libibverbs1 \
+        rdma-core \
+        ibverbs-utils \
+        libibumad3 \
+        libnuma1 \
+        librdmacm1 \
+        ibverbs-providers && \
+    rm -rf /var/lib/apt/lists/*
 {% endif %}
 
 # Copy attribution files and wheels
