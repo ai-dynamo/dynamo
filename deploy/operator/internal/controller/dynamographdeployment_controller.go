@@ -620,21 +620,28 @@ func (r *DynamoGraphDeploymentReconciler) scaleGroveResource(ctx context.Context
 	return err
 }
 
-func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (*commoncontroller.Resource, error) {
+func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(
+	ctx context.Context,
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	existingPodCliqueSet *grovev1alpha1.PodCliqueSet,
+	restartState *dynamo.RestartState,
+	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+) (*commoncontroller.Resource, error) {
 	logger := log.FromContext(ctx)
-
-	existingRestartAnnotations, err := r.getExistingRestartAnnotationsPCS(ctx, dynamoDeployment)
-	if err != nil {
-		logger.Error(err, "failed to get existing restart annotations")
-		return nil, fmt.Errorf("failed to get existing restart annotations: %w", err)
+	if renderDeployment == nil {
+		renderDeployment = dynamoDeployment
 	}
 
+	existingRestartAnnotations := restartAnnotationsFromPodCliqueSet(existingPodCliqueSet)
+
 	// generate the dynamoComponentsDeployments from the config
-	grovePodCliqueSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.RuntimeConfig, r.Client, r.DockerSecretRetriever, restartState, existingRestartAnnotations, checkpointInfos)
+	grovePodCliqueSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, renderDeployment, r.Config, r.RuntimeConfig, r.Client, r.DockerSecretRetriever, restartState, existingRestartAnnotations, checkpointInfos)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return nil, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
+	preserveGrovePodCliqueSetOrder(grovePodCliqueSet, existingPodCliqueSet)
 	_, syncedGrovePodCliqueSet, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*grovev1alpha1.PodCliqueSet, bool, error) {
 		return grovePodCliqueSet, false, nil
 	})
@@ -660,15 +667,22 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context
 	return syncedGrovePodCliqueSetAsResource, nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsPCS(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) (map[string]string, error) {
-	restartAnnotations := make(map[string]string)
+func (r *DynamoGraphDeploymentReconciler) getExistingGrovePodCliqueSet(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) (*grovev1alpha1.PodCliqueSet, error) {
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	err := r.Client.Get(ctx, types.NamespacedName{Name: dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components), Namespace: dgd.Namespace}, pcs)
 	if err != nil && !errors.IsNotFound(err) {
 		return nil, fmt.Errorf("failed to get PodCliqueSet: %w", err)
 	}
 	if errors.IsNotFound(err) {
-		return restartAnnotations, nil
+		return nil, nil
+	}
+	return pcs, nil
+}
+
+func restartAnnotationsFromPodCliqueSet(pcs *grovev1alpha1.PodCliqueSet) map[string]string {
+	restartAnnotations := make(map[string]string)
+	if pcs == nil {
+		return restartAnnotations
 	}
 	for _, clique := range pcs.Spec.Template.Cliques {
 		if clique.Annotations != nil {
@@ -679,7 +693,115 @@ func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsPCS(ctx c
 			}
 		}
 	}
-	return restartAnnotations, nil
+	return restartAnnotations
+}
+
+func preserveGrovePodCliqueSetOrder(desired *grovev1alpha1.PodCliqueSet, existing *grovev1alpha1.PodCliqueSet) {
+	if desired == nil || existing == nil {
+		return
+	}
+	desired.Spec.Template.Cliques = orderLikeExisting(existing.Spec.Template.Cliques, desired.Spec.Template.Cliques, podCliqueTemplateName)
+	desired.Spec.Template.PodCliqueScalingGroupConfigs = orderLikeExisting(existing.Spec.Template.PodCliqueScalingGroupConfigs, desired.Spec.Template.PodCliqueScalingGroupConfigs, podCliqueScalingGroupConfigName)
+	desired.Spec.Template.ResourceClaimTemplates = orderLikeExisting(existing.Spec.Template.ResourceClaimTemplates, desired.Spec.Template.ResourceClaimTemplates, resourceClaimTemplateConfigName)
+}
+
+func orderLikeExisting[T any](existing []T, desired []T, nameOf func(T) string) []T {
+	if len(existing) == 0 || len(desired) < 2 {
+		return desired
+	}
+	desiredByName := make(map[string]T, len(desired))
+	for _, item := range desired {
+		if name := nameOf(item); name != "" {
+			desiredByName[name] = item
+		}
+	}
+	ordered := make([]T, 0, len(desired))
+	used := make(map[string]struct{}, len(desired))
+	for _, existingItem := range existing {
+		name := nameOf(existingItem)
+		if desiredItem, ok := desiredByName[name]; ok {
+			ordered = append(ordered, desiredItem)
+			used[name] = struct{}{}
+		}
+	}
+	for _, item := range desired {
+		name := nameOf(item)
+		if name == "" {
+			ordered = append(ordered, item)
+			continue
+		}
+		if _, ok := used[name]; !ok {
+			ordered = append(ordered, item)
+		}
+	}
+	return ordered
+}
+
+func podCliqueTemplateName(clique *grovev1alpha1.PodCliqueTemplateSpec) string {
+	if clique == nil {
+		return ""
+	}
+	return clique.Name
+}
+
+func podCliqueScalingGroupConfigName(config grovev1alpha1.PodCliqueScalingGroupConfig) string {
+	return config.Name
+}
+
+func resourceClaimTemplateConfigName(config grovev1alpha1.ResourceClaimTemplateConfig) string {
+	return config.Name
+}
+
+func (r *DynamoGraphDeploymentReconciler) prepareGroveRenderDeployment(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) (*nvidiacomv1beta1.DynamoGraphDeployment, *grovev1alpha1.PodCliqueSet, error) {
+	existingPodCliqueSet, err := r.getExistingGrovePodCliqueSet(ctx, dgd)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	renderDeployment := dgd.DeepCopy()
+	for i := range renderDeployment.Spec.Components {
+		component := &renderDeployment.Spec.Components[i]
+		componentType := string(component.ComponentType)
+		if !groveComponentTypeCanUseLegacyWorkerSelector(componentType) {
+			continue
+		}
+		if podCliqueSetHasLegacyWorkerSelector(existingPodCliqueSet, component.ComponentName, componentType) {
+			applyLegacyGroveWorkerComponentType(component, componentType)
+		}
+	}
+	return renderDeployment, existingPodCliqueSet, nil
+}
+
+func groveComponentTypeCanUseLegacyWorkerSelector(componentType string) bool {
+	return componentType == consts.ComponentTypePrefill || componentType == consts.ComponentTypeDecode
+}
+
+func podCliqueSetHasLegacyWorkerSelector(pcs *grovev1alpha1.PodCliqueSet, componentName string, componentType string) bool {
+	if pcs == nil {
+		return false
+	}
+	for _, clique := range pcs.Spec.Template.Cliques {
+		if clique == nil || clique.Labels[consts.KubeLabelDynamoComponent] != componentName {
+			continue
+		}
+		if hasLegacyWorkerSelector(clique.Labels, componentType) {
+			return true
+		}
+	}
+	return false
+}
+
+func applyLegacyGroveWorkerComponentType(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, subComponentType string) {
+	component.ComponentType = nvidiacomv1beta1.ComponentTypeWorker
+	if component.PodTemplate == nil {
+		component.PodTemplate = &corev1.PodTemplateSpec{}
+	}
+	if component.PodTemplate.Labels == nil {
+		component.PodTemplate.Labels = map[string]string{}
+	}
+	if _, ok := component.PodTemplate.Labels[consts.KubeLabelDynamoSubComponentType]; !ok {
+		component.PodTemplate.Labels[consts.KubeLabelDynamoSubComponentType] = subComponentType
+	}
 }
 
 // reconcileGroveScaling handles scaling operations for Grove resources based on component replica changes.
@@ -776,7 +898,12 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 		return ReconcileResult{}, err
 	}
 
-	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, restartState, checkpointInfos)
+	renderDeployment, existingPodCliqueSet, err := r.prepareGroveRenderDeployment(ctx, dynamoDeployment)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
+
+	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, renderDeployment, existingPodCliqueSet, restartState, checkpointInfos)
 	if err != nil {
 		logger.Error(err, "failed to reconcile the Grove PodClique Set")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodClique Set: %w", err)
@@ -801,22 +928,22 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 	}
 
 	resources := []Resource{grovePodCliqueSetAsResource}
-	for i := range dynamoDeployment.Spec.Components {
-		component := &dynamoDeployment.Spec.Components[i]
+	for i := range renderDeployment.Spec.Components {
+		component := &renderDeployment.Spec.Components[i]
 		componentName := component.ComponentName
 
 		// if k8s discovery is enabled, create a service for each component
 		// else, only create for the frontend component
 		isK8sDiscoveryEnabled := commoncontroller.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, dynamoDeployment.Annotations)
 		if isK8sDiscoveryEnabled || string(component.ComponentType) == consts.ComponentTypeFrontend {
-			dynamoNamespace := dynamoDeployment.GetDynamoNamespaceForComponent(component)
+			dynamoNamespace := renderDeployment.GetDynamoNamespaceForComponent(component)
 			mainComponentService, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 				ServiceName:     dynamo.GetDCDResourceName(dynamoDeployment, componentName, ""),
 				Namespace:       dynamoDeployment.Namespace,
 				ComponentType:   string(component.ComponentType),
 				DynamoNamespace: dynamoNamespace,
 				ComponentName:   componentName,
-				Labels:          dynamo.GetDGDComponentResourceLabels(dynamoDeployment, componentName, component),
+				Labels:          dynamo.GetDGDComponentResourceLabels(renderDeployment, componentName, component),
 				IsK8sDiscovery:  isK8sDiscoveryEnabled,
 			})
 			if err != nil {
