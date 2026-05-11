@@ -18,7 +18,7 @@
 //! - **Prefill** worker (`--disaggregation-mode prefill`): registers with
 //!   `endpoint_types = "prefill"`. On `start()` it pulls
 //!   `disaggregation_bootstrap_port` and `dist_init_addr` from SGLang's
-//!   `GetServerInfo.server_args`. On each `generate()` it generates a 31-bit
+//!   `GetServerInfo.server_args`. On each `generate()` it generates a 63-bit
 //!   random `bootstrap_room`, yields one `LLMEngineOutput` chunk with
 //!   `disaggregated_params` populated (the frontend captures this and forwards
 //!   to the decode worker), then issues the gRPC `Generate` with
@@ -29,9 +29,11 @@
 //!   also): pulls `request.bootstrap_info` if present and forwards it via the
 //!   proto's `DisaggregatedParams`. Streams generated tokens normally.
 //!
-//! Rooms are 31-bit so they round-trip safely through the proto's `int32`
-//! field. The frontend stores `bootstrap_room` as `u64` but the same low bits
-//! reach both prefill and decode legs, so the rendezvous matches.
+//! Rooms are 63-bit. The proto field is `int64` (patched smg-grpc-proto;
+//! see lib/backend/sglang_bridge/proto/sglang_scheduler.proto). The frontend
+//! stores `bootstrap_room` as `u64` and dynamo's PrefillRouter encodes
+//! `dp_rank` into the upper bits via `compute_bootstrap_room`, so the full
+//! width must survive the wire for dp-aware NIXL rendezvous.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -427,16 +429,14 @@ impl SglangBridge {
         let sampling = build_sampling_params(&request);
 
         // Decode side: pull bootstrap_info forwarded from the prefill leg.
-        // Mask to a positive i32 (drop the sign bit) so the proto wire value
-        // matches what SGLang stores in its uint64 metadata buffer. SGLang's
-        // `decode.py::Context corruption detected` compares decode-side
-        // `expected_room` (proto signed int32) against the buffer's uint64;
-        // a negative i32 sign-extends to a huge u64 and the equality fails
-        // even though the room is the same. Forcing positive avoids this.
+        // Forward the full 63-bit room — dynamo's PrefillRouter encodes
+        // dp_rank into the upper bits via `compute_bootstrap_room`, so
+        // truncating would clobber dp-aware rendezvous on the decode side.
+        // Proto wire is int64 (patched smg-grpc-proto), reinterpret as i64.
         let disagg = request.bootstrap_info.as_ref().map(|bi| DisaggregatedParams {
             bootstrap_host: bi.bootstrap_host.clone(),
             bootstrap_port: bi.bootstrap_port as i32,
-            bootstrap_room: (bi.bootstrap_room & 0x7FFF_FFFF) as i32,
+            bootstrap_room: bi.bootstrap_room as i64,
         });
 
         let grpc_req = GenerateRequest {
@@ -538,7 +538,7 @@ impl SglangBridge {
         }))
     }
 
-    /// Prefill path. Generates a 31-bit `bootstrap_room`, yields one chunk
+    /// Prefill path. Generates a 63-bit `bootstrap_room`, yields one chunk
     /// carrying `disaggregated_params: {host, port, room}` for the frontend's
     /// prefill router to capture and forward to the decode worker. Then
     /// issues `Generate` to SGLang (which writes KV to the rendezvous) and
@@ -570,16 +570,15 @@ impl SglangBridge {
             .ok_or_else(|| backend_error("prefill: bootstrap_port not initialised"))?;
 
         // Honor a router-provided room if the frontend already chose one;
-        // otherwise generate a fresh 31-bit room (positive i32 for proto wire,
-        // round-trips via u64 in PreprocessedRequest.bootstrap_info). Mask to
-        // 31 bits so both prefill and decode bridges emit the same positive
-        // value — SGLang's decode-side corruption check otherwise mis-fires
-        // when the i32 sign-extends into the uint64 metadata buffer slot.
-        let bootstrap_room: i32 = request
+        // otherwise generate a fresh 63-bit room. The frontend's
+        // PrefillRouter::compute_bootstrap_room encodes dp_rank into the
+        // upper bits, so we keep the full width on the wire (proto field is
+        // int64; see lib/backend/sglang_bridge/proto/sglang_scheduler.proto).
+        let bootstrap_room: i64 = request
             .bootstrap_info
             .as_ref()
-            .map(|bi| (bi.bootstrap_room & 0x7FFF_FFFF) as i32)
-            .unwrap_or_else(|| rand::thread_rng().gen_range(1..i32::MAX));
+            .map(|bi| bi.bootstrap_room as i64)
+            .unwrap_or_else(|| rand::thread_rng().gen_range(1..i64::MAX));
 
         let prompt_len = request.token_ids.len() as u32;
         let input_ids: Vec<u32> = request.token_ids.clone();
@@ -619,7 +618,7 @@ impl SglangBridge {
         bootstrap_chunk.disaggregated_params = Some(serde_json::json!({
             "bootstrap_host": bootstrap_host,
             "bootstrap_port": bootstrap_port,
-            "bootstrap_room": bootstrap_room as u64,
+            "bootstrap_room": bootstrap_room,
         }));
         tracing::debug!(
             request_id = ctx.id(),

@@ -90,7 +90,13 @@ message SamplingParams {
 message DisaggregatedParams {
   string bootstrap_host = 1;
   int32 bootstrap_port = 2;
-  int32 bootstrap_room = 3;
+  // int64 (was int32) so the 63-bit room space from dynamo's
+  // PrefillRouter::compute_bootstrap_room survives the wire intact —
+  // a negative i32 sign-extends to a huge u64 in SGLang's decode-side
+  // metadata buffer and trips the `actual_room != expected_room` check.
+  // Mirror this change in smg-grpc-proto's vendored sglang_scheduler.proto
+  // until upstream lightseekorg/smg adopts it.
+  int64 bootstrap_room = 3;
 }
 
 // =====================

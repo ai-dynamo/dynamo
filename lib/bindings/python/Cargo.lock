@@ -2245,6 +2245,7 @@ dependencies = [
  "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-runtime",
+ "dynamo-sglang-bridge",
  "futures",
  "once_cell",
  "parking_lot",
@@ -2330,6 +2331,28 @@ dependencies = [
  "uuid",
  "validator",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-sglang-bridge"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "clap",
+ "dynamo-backend-common",
+ "futures",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "rand 0.9.4",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
