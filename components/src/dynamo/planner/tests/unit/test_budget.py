@@ -63,13 +63,18 @@ def test_bounds_below_floor_strict():
     assert "below floor" in reason
 
 
-def test_bounds_with_tolerance_accepts_edges():
-    # tol=2 widens the band to [2, 10].
+def test_bounds_tolerance_relaxes_only_lower_edge():
+    # tol=2 widens the band to [2, 8] — max is a hard cap, never relaxed.
     assert bounds_for_total(2, 4, 8, 2) == (True, "")
-    assert bounds_for_total(10, 4, 8, 2) == (True, "")
-    in_band, reason = bounds_for_total(11, 4, 8, 2)
+    assert bounds_for_total(8, 4, 8, 2) == (True, "")
+    in_band, reason = bounds_for_total(9, 4, 8, 2)
     assert in_band is False
-    assert "+ tol 2" in reason
+    assert "exceeds ceiling" in reason
+    # No "+ tol N" on the ceiling reason — tolerance is lower-only.
+    assert "tol" not in reason
+    in_band, reason = bounds_for_total(1, 4, 8, 2)
+    assert in_band is False
+    assert "- tol 2" in reason
 
 
 def test_bounds_disabled_floor():
@@ -122,26 +127,30 @@ def test_clamp_pair_disabled_caps_returns_inputs():
 # ---------------------------------------------------------------------------- #
 
 
-def test_clamp_pair_asymmetric_within_tolerance_no_op():
-    # prefill 1 GPU/worker, decode 2 GPU/worker. min=max=4. tol=2 → [2, 6].
-    # desired (1, 2) = 1 + 4 = 5 → in band, returned unchanged.
-    assert proportional_clamp_pair(1, 2, 1, 2, 4, 4, 1) == (1, 2)
+def test_clamp_pair_asymmetric_overshoot_shrinks_to_strict_ceiling():
+    # prefill 1 GPU/worker, decode 2 GPU/worker. min=max=4. tol=2 lowers
+    # only the floor → band [2, 4]. Desired (1, 2) = 5 overshoots the hard
+    # cap and must be shrunk back to <= 4.
+    new_p, new_d = proportional_clamp_pair(1, 2, 1, 2, 4, 4, 1)
+    assert new_p * 1 + new_d * 2 <= 4
+    assert new_p >= 1 and new_d >= 1  # min_endpoint preserved when feasible
 
 
 def test_clamp_pair_asymmetric_floor_grows():
-    # prefill=1, decode=2. min=max=5. desired (1,1)=3 < min=5. tol=2 → [3, 7].
-    # 3 is the lower edge — floor logic still pushes up to land in band.
+    # prefill=1, decode=2. min=max=5. desired (1,1)=3 < min=5. tol=2 → [3, 5].
+    # Floor logic pushes up; result must stay at or below the strict ceiling.
     new_p, new_d = proportional_clamp_pair(1, 1, 1, 2, 5, 5, 1)
     total = new_p * 1 + new_d * 2
-    assert 3 <= total <= 7
+    assert 3 <= total <= 5
 
 
 def test_clamp_pair_asymmetric_unreachable_target_converges():
     # Both pools = 2 GPU/worker. min=max=5 unreachable (totals are even).
-    # tol=2 → band [3, 7]. Should land at 4 or 6 in one pass.
+    # tol=2 only on lower → band [3, 5]. Should land at 4 (largest feasible
+    # multiple of 2 that doesn't exceed the hard cap of 5).
     new_p, new_d = proportional_clamp_pair(1, 1, 2, 2, 5, 5, 1)
     total = new_p * 2 + new_d * 2
-    assert total in (4, 6)
+    assert total == 4
 
 
 def test_clamp_pair_no_oscillation_after_one_pass():
@@ -153,7 +162,7 @@ def test_clamp_pair_no_oscillation_after_one_pass():
 
 def test_clamp_pair_asymmetric_min_max_open_band():
     # min=4, max=10, prefill=1, decode=2. desired (1, 1) = 3 < min.
-    # Tolerance applies (both bounds set), tol=2, band [2, 12].
+    # Tolerance applies only to lower edge → band [2, 10].
     # 3 is in band → no-op.
     assert proportional_clamp_pair(1, 1, 1, 2, 4, 10, 1) == (1, 1)
 
@@ -174,20 +183,15 @@ def test_clamp_pair_ceiling_below_min_endpoint_returns_zero():
     assert proportional_clamp_pair(5, 5, 1, 1, -1, 1, 1) == (0, 0)
 
 
-def test_clamp_pair_ceiling_below_min_endpoint_within_tolerance_keeps_alive():
-    # Reviewer's repro: p_gpu=2, d_gpu=2, min=max=3, min_endpoint=1.
-    # Tolerance=2 so band is [1, 5]. Strict ceiling (3) is below
-    # min_endpoint*p + min_endpoint*d = 4, but max + tolerance = 5 >= 4,
-    # so (1,1)=4 GPUs is feasible inside the band — must NOT zero out.
-    new_p, new_d = proportional_clamp_pair(1, 2, 2, 2, 3, 3, 1)
-    assert (new_p, new_d) != (0, 0)
-    total = new_p * 2 + new_d * 2
-    assert 1 <= total <= 5
+def test_clamp_pair_ceiling_below_min_endpoint_zeros():
+    # p_gpu=2, d_gpu=2, min=max=3, min_endpoint=1. min_endpoint of each pool
+    # would need 4 GPUs but the hard cap is 3. Configuration is infeasible
+    # — must zero the deployment rather than overshoot the hard cap.
+    assert proportional_clamp_pair(1, 2, 2, 2, 3, 3, 1) == (0, 0)
 
 
-def test_clamp_pair_ceiling_below_min_endpoint_outside_tolerance_zeros():
-    # Same shape but band is too narrow to hold (1,1): max=1, tol=2,
-    # band [-1, 3]; min_req=4 > 3, so we still zero correctly.
+def test_clamp_pair_ceiling_below_min_endpoint_far_outside_zeros():
+    # Same shape with an even tighter ceiling — also zeroes.
     assert proportional_clamp_pair(1, 2, 2, 2, 1, 1, 1) == (0, 0)
 
 
@@ -200,7 +204,8 @@ def test_clamp_pair_zero_inputs_with_floor_distributes():
 def test_clamp_pair_infeasible_band_falls_back_to_inputs():
     # Floor 100, ceiling 4 — infeasible. Should not crash; returns inputs.
     new_p, new_d = proportional_clamp_pair(2, 2, 1, 1, 100, 4, 1)
-    # Floor push would land at >> 4 + tol=1 = 5, so we keep inputs.
+    # Floor push would land far above the strict ceiling (4), so we keep
+    # inputs and let the caller surface the config error.
     assert (new_p, new_d) == (2, 2)
 
 
@@ -214,7 +219,7 @@ def test_clamp_single_no_op_when_both_disabled():
 
 
 def test_clamp_single_in_band():
-    # 3 replicas * 1 GPU = 3, in [2, 5]. With tol=1, [1, 6].
+    # 3 replicas * 1 GPU = 3, in [2, 5]. With tol=1 (lower-only), [1, 5].
     assert proportional_clamp_single(3, 1, 2, 5, 1) == 3
 
 
@@ -224,8 +229,8 @@ def test_clamp_single_above_ceiling_strict():
 
 
 def test_clamp_single_below_floor_grows():
-    # 1 replica * 1 GPU = 1 < min=4. Both bounds active → tol=1, band [3, 5].
-    # Ceiling allows 5 max replicas. Should grow to >=3.
+    # 1 replica * 1 GPU = 1 < min=4. Both bounds active → tol=1 (lower-only),
+    # band [3, 5]. Should grow to >=3 and stay <= 5.
     out = proportional_clamp_single(1, 1, 4, 5, 1)
     assert 3 <= out * 1 <= 5
 
@@ -239,10 +244,8 @@ def test_clamp_single_ceiling_below_min_endpoint():
     assert proportional_clamp_single(5, 1, -1, 2, 3) == 0
 
 
-def test_clamp_single_ceiling_below_min_endpoint_within_tolerance_keeps_alive():
-    # Reviewer's repro: engine_gpu=4, min_endpoint=1, min=max=3.
-    # Tolerance=4, band [-1, 7]. Strict ceiling=3 is below min_endpoint*4=4
-    # but max + tolerance = 7 >= 4, so 1 replica (=4 GPUs) is feasible.
-    out = proportional_clamp_single(2, 4, 3, 3, 1)
-    assert out != 0
-    assert out * 4 <= 7  # within max + tolerance
+def test_clamp_single_ceiling_below_min_endpoint_zeros():
+    # engine_gpu=4, min_endpoint=1, min=max=3. Strict ceiling=3 is below
+    # min_endpoint*4=4 — even one replica overshoots the hard cap, so the
+    # deployment is infeasible and must be zeroed.
+    assert proportional_clamp_single(2, 4, 3, 3, 1) == 0

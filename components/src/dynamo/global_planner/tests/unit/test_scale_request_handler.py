@@ -557,8 +557,11 @@ async def test_pair_packs_both_partners_when_both_fit(mock_runtime):
         runtime=mock_runtime,
         managed_namespaces=["default-dgd-a", "default-dgd-b"],
         k8s_namespace="default",
-        min_total_gpus=12,
-        max_total_gpus=12,
+        # Band [11, 13] so both +1-GPU partners fit strictly below the
+        # ceiling. (Under a fixed min==max==12 cap, strict ceiling would
+        # admit only one of the two scale-up partners.)
+        min_total_gpus=11,
+        max_total_gpus=13,
     )
     connector_a = _install_connector(
         handler,
@@ -574,7 +577,7 @@ async def test_pair_packs_both_partners_when_both_fit(mock_runtime):
     )
     # Both DGD-A's decode and DGD-B's decode have pending scale-up intents
     # (each +1 GPU). Cluster baseline = 12; standalone request lands at 11
-    # (below floor strictly). Pack both partners → 11+1+1 = 13 = max+tol.
+    # (at floor). Pack both partners → 11+1+1 = 13 (at ceiling, strict).
     handler._intent_cache["default/dgd-a/decode"] = PoolIntent(
         last_desired=4, last_seen_at=time.time()
     )
@@ -695,9 +698,10 @@ async def test_cross_dgd_pair_first_patch_failure_yields_error(mock_runtime):
 
 
 @pytest.mark.asyncio
-async def test_cross_dgd_asymmetric_gpu_tolerance(mock_runtime):
-    """Cross-DGD pair with different per-replica GPU counts: tolerance is
-    computed from the two paired pools only."""
+async def test_cross_dgd_asymmetric_pair_rejected_above_ceiling(mock_runtime):
+    """Cross-DGD pair whose post-transfer total would exceed ``max`` is
+    rejected: tolerance does **not** relax the upper bound (max is a hard
+    cluster-capacity cap)."""
     handler = ScaleRequestHandler(
         runtime=mock_runtime,
         managed_namespaces=["default-dgd-a", "default-dgd-b"],
@@ -720,17 +724,17 @@ async def test_cross_dgd_asymmetric_gpu_tolerance(mock_runtime):
         _dgd_spec(prefill_replicas=0, decode_replicas=3, prefill_gpu=1, decode_gpu=2),
         parent_dgd_name="dgd-b",
     )
-    # DGD-B's decode wants to scale up by 1 (+2 GPUs); DGD-A's prefill request
-    # scales down by 1 (-1 GPU). Paired total = 3+8 = 11. tol = max(1, 2) = 2,
-    # max+tol = 12. 11 <= 12 → within bounds.
+    # DGD-B decode wants +1 (+2 GPUs); DGD-A prefill request wants -1 (-1 GPU).
+    # Paired total = 10 - 1 + 2 = 11 > max=10. Decode's 2 GPU/worker step can't
+    # be partially applied to land at exactly 10, so the pair is denied.
     handler._intent_cache["default/dgd-b/decode"] = PoolIntent(
         last_desired=4, last_seen_at=time.time()
     )
     req = _scale_req(dgd="dgd-a", caller_ns="default-dgd-a", prefill=3)
     results = await _run(handler, req)
-    assert results[0]["status"] == "success"
-    assert handler.connectors["default/dgd-a"].set_component_replicas.called
-    assert handler.connectors["default/dgd-b"].set_component_replicas.called
+    assert results[0]["status"] == "rejected"
+    handler.connectors["default/dgd-a"].set_component_replicas.assert_not_called()
+    handler.connectors["default/dgd-b"].set_component_replicas.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -789,9 +793,11 @@ async def test_scale_up_paired_with_pending_scale_down_when_ceiling_breached(
 
 
 @pytest.mark.asyncio
-async def test_asymmetric_per_worker_gpu_pair_within_tolerance(mock_runtime):
-    """Prefill=1 GPU/worker, Decode=2 GPU/worker. Paired transfer lands at
-    total=max+tol and is accepted under tolerance."""
+async def test_asymmetric_per_worker_gpu_pair_rejected_above_ceiling(mock_runtime):
+    """Prefill=1 GPU/worker, Decode=2 GPU/worker. Paired transfer would land
+    at total=11 > max=10. ``max`` is a strict cluster-capacity bound (no
+    tolerance on the upper side), so the pair is denied — even though the
+    overshoot is only one decode-worker's worth of GPUs."""
     handler = ScaleRequestHandler(
         runtime=mock_runtime,
         managed_namespaces=["default-my-dgd"],
@@ -805,23 +811,23 @@ async def test_asymmetric_per_worker_gpu_pair_within_tolerance(mock_runtime):
         "default/my-dgd",
         _dgd_spec(prefill_replicas=4, decode_replicas=3, prefill_gpu=1, decode_gpu=2),
     )
-    # Decode wants +1 (=+2 GPUs), prefill has cached intent -1 (=-1 GPU).
-    # Paired total = 10 + 2 - 1 = 11. max+tol = 10+2 = 12, so within bounds.
+    # Decode wants +1 (=+2 GPUs); prefill cached intent -1 (=-1 GPU).
+    # Paired total = 10 + 2 - 1 = 11 > max=10. No partial works (decode step
+    # is 2 GPUs — partial-K can only be 3=current or 4=full, neither lands at
+    # 10 with the -1 prefill applied).
     handler._intent_cache["default/my-dgd/prefill"] = PoolIntent(
         last_desired=3, last_seen_at=time.time()
     )
     req = _scale_req(caller_ns="default-my-dgd", decode=4)
     results = await _run(handler, req)
-    assert results[0]["status"] == "success"
-    connector.set_component_replicas.assert_called_once()
-    call_targets = connector.set_component_replicas.call_args[0][0]
-    sub_types = {t.sub_component_type.value: t.desired_replicas for t in call_targets}
-    assert sub_types == {"decode": 4, "prefill": 3}
+    assert results[0]["status"] == "rejected"
+    connector.set_component_replicas.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_asymmetric_pair_denied_if_outside_tolerance(mock_runtime):
-    """Paired total that exceeds max+tolerance is rejected."""
+async def test_asymmetric_pair_denied_if_above_ceiling(mock_runtime):
+    """Paired total that exceeds ``max`` is rejected. ``max`` is a strict
+    upper bound — no tolerance applied."""
     handler = ScaleRequestHandler(
         runtime=mock_runtime,
         managed_namespaces=["default-my-dgd"],
@@ -836,7 +842,7 @@ async def test_asymmetric_pair_denied_if_outside_tolerance(mock_runtime):
         _dgd_spec(prefill_replicas=4, decode_replicas=3, prefill_gpu=1, decode_gpu=2),
     )
     # Decode wants +2 (=+4 GPUs), prefill cached intent -1 (=-1 GPU).
-    # Paired total = 10 + 4 - 1 = 13. max+tol = 12. Deny.
+    # Paired total = 10 + 4 - 1 = 13 > max=10. Deny.
     handler._intent_cache["default/my-dgd/prefill"] = PoolIntent(
         last_desired=3, last_seen_at=time.time()
     )
@@ -1064,8 +1070,10 @@ async def test_pair_packing_continues_past_too_small_candidate(mock_runtime):
     #  1. prefill +1 → +1 GPU.
     #  2. decode  +4 → +4 GPU.
     # Request: DGD-A prefill 5 → 1 (-4 GPU). Standalone total = 8 (below floor 12).
-    # Packing ascending: prefill (+1) accepted (still below band, total=9),
-    # then decode (+4) accepted (total=13 = max+tol). Both applied.
+    # Packing ascending: prefill (+1) accepted (still below band, total=9);
+    # decode +4 full would push to 13 — over the strict ceiling (max=12, no
+    # upper tolerance). So decode is partially consumed to land at exactly 12.
+    # Both partners are applied; decode's cached intent (7) is NOT mutated.
     handler._intent_cache["default/dgd-b/prefill"] = PoolIntent(
         last_desired=2, last_seen_at=time.time()
     )
@@ -1087,8 +1095,12 @@ async def test_pair_packing_continues_past_too_small_candidate(mock_runtime):
         for t in connector_b.set_component_replicas.call_args[0][0]
     }
     assert a_targets == {"prefill": 1}
-    # Both DGD-B partners packed into the same per-DGD patch.
-    assert b_targets == {"prefill": 2, "decode": 7}
+    # Prefill fully consumed (small partner), decode partially consumed so
+    # the combined total lands at the strict ceiling.
+    assert b_targets["prefill"] == 2
+    assert 3 < b_targets["decode"] < 7  # partial: between current(3) and last_desired(7)
+    # Cached intent for decode NOT mutated — planner still wants 7.
+    assert handler._intent_cache["default/dgd-b/decode"].last_desired == 7
 
 
 def test_read_all_pools_tolerates_concurrent_connector_insert(mock_runtime):

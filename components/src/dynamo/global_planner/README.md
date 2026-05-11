@@ -146,7 +146,7 @@ When `--min-total-gpus` is set the Global Planner enforces a floor on total GPUs
 
 **Arbitration across all pools.** Every scale request that would breach the budget band triggers a search for opposite-direction pending intents on any other pool the Global Planner knows about — prefill ↔ decode within the same DGD, or across two different DGDs entirely (e.g., multiple agg DGDs sharing a cluster-wide budget).
 
-**Multi-partner packing**: the search packs as many qualifying partners as fit. Candidates are tried in ascending `abs(delta_gpu)` order, fully admitted while the running total stays inside `[min - tolerance, max + tolerance]`. When the next candidate's full inclusion would push past the band's far edge, the algorithm tries **partial consumption** — applying an intermediate replica count between the partner's current and its cached `last_desired` — that lands at the band edge. The cached intent's `last_desired` is **not** mutated by a partial application; the residual stays pending and can pair with future requests.
+**Multi-partner packing**: the search packs as many qualifying partners as fit. Candidates are tried in ascending `abs(delta_gpu)` order, fully admitted while the running total stays inside `[min - tolerance, max]`. When the next candidate's full inclusion would push past the band's far edge, the algorithm tries **partial consumption** — applying an intermediate replica count between the partner's current and its cached `last_desired` — that lands at the band edge. The cached intent's `last_desired` is **not** mutated by a partial application; the residual stays pending and can pair with future requests.
 
 If no packing brings totals into the band, the request is rejected (`REJECTED`) and nothing is applied.
 
@@ -158,7 +158,7 @@ When the selected partners span multiple DGDs:
 
 This scope is needed for "multiple agg pools sharing a budget" deployments such as [`examples/global_planner/global-planner-gpu-budget.yaml`](../../../../examples/global_planner/global-planner-gpu-budget.yaml).
 
-**Tolerance for asymmetric pools.** When two paired pools have different `resources.limits.gpu` per replica, a single-worker step cannot always exactly cancel. Paired transfers are allowed to land up to `max(gpu_per_replica across the two paired pools)` outside `[min, max]` so the pair can still rebalance in whole-worker steps. Standalone (non-paired) requests must stay strictly within `[min, max]`.
+**Tolerance for asymmetric pools.** When two paired pools have different `resources.limits.gpu` per replica, a single-worker step cannot always exactly cancel. Paired transfers may land up to `max(gpu_per_replica across the paired pools)` **below** `min` so the pair can still rebalance in whole-worker steps. `max` is a hard cluster-capacity bound and is never relaxed — pairs whose post-transfer total would exceed `max` are denied. Standalone (non-paired) requests must stay strictly within `[min, max]`.
 
 **Intent cache.** Each scale request updates a per-pool cache with the pool's most recent desired replica count and a timestamp. Entries are eligible as pair partners when they are within `--intent-cache-ttl-seconds` of the current time and the pool's cached `desired` still differs from its current Kubernetes replica count (i.e., the intent is *pending*, not yet satisfied). An entry whose desired equals current is considered satisfied and is skipped when looking for partners.
 

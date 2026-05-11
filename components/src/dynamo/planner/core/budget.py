@@ -69,21 +69,21 @@ def bounds_for_total(
     max_gpus: int,
     tolerance: int,
 ) -> tuple[bool, str]:
-    """Pure check: does ``total`` fit ``[min_gpus - tolerance, max_gpus + tolerance]``?
+    """Pure check: does ``total`` fit ``[min_gpus - tolerance, max_gpus]``?
 
     A negative ``min_gpus`` disables the floor. A negative ``max_gpus``
-    disables the ceiling. ``tolerance == 0`` enforces strict bounds.
+    disables the ceiling. ``tolerance == 0`` enforces a strict floor.
+
+    ``max_gpus`` is a hard hardware/capacity bound and is **never** relaxed —
+    overshooting it would risk pending pods or over-admission. Tolerance
+    relaxes only the lower bound, to handle integer-step granularity where
+    pool changes can't always exactly cancel.
 
     Returns ``(in_bounds, reason_if_out)``. ``reason`` is empty when in bounds.
     """
     if max_gpus >= 0:
-        hi = max_gpus + tolerance
-        if total > hi:
-            return (
-                False,
-                f"total {total} exceeds ceiling "
-                f"({max_gpus}{f' + tol {tolerance}' if tolerance else ''})",
-            )
+        if total > max_gpus:
+            return (False, f"total {total} exceeds ceiling ({max_gpus})")
     if min_gpus >= 0:
         lo = min_gpus - tolerance
         if total < lo:
@@ -106,12 +106,11 @@ def proportional_clamp_pair(
 ) -> tuple[int, int]:
     """Clamp ``(num_p, num_d)`` so total GPUs lands in the budget band.
 
-    The band is ``[min_gpus - tolerance, max_gpus + tolerance]`` when both
-    bounds are active, and strictly ``[0, max_gpus]`` or ``[min_gpus, +inf)``
-    when only one bound is active. ``tolerance`` is computed internally as
-    ``max(p_gpu, d_gpu)`` and only applied when both bounds are active —
-    callers with only a ceiling get the historical strict behavior of
-    ``_apply_global_budget`` preserved exactly.
+    The band is ``[min_gpus - tolerance, max_gpus]`` when both bounds are
+    active, and strictly ``[0, max_gpus]`` or ``[min_gpus, +inf)`` when only
+    one bound is active. ``tolerance`` is computed internally as
+    ``max(p_gpu, d_gpu)`` and only relaxes the lower bound — ``max_gpus`` is
+    a hard hardware/capacity bound and is never relaxed.
 
     Distribution policy is proportional in both directions (mirror of the
     historical proportional shrink). SLA-pressure-aware split is a future
@@ -120,7 +119,8 @@ def proportional_clamp_pair(
     Negative ``min_gpus`` or ``max_gpus`` disables the corresponding bound.
     Returns ``(num_p, num_d)`` unchanged if both are disabled or if either
     per-replica GPU count is non-positive (caller hasn't initialized
-    capabilities yet).
+    capabilities yet). Returns ``(0, 0)`` when even ``min_endpoint`` of each
+    pool would overshoot the hard ceiling (configuration is infeasible).
     """
     if min_gpus < 0 and max_gpus < 0:
         return num_p, num_d
@@ -136,21 +136,15 @@ def proportional_clamp_pair(
     if in_band:
         return num_p, num_d
 
-    # Ceiling path — proportional shrink. Mirrors the historical
-    # _apply_global_budget logic for backward compatibility.
-    if max_gpus >= 0 and total > max_gpus + tolerance:
+    # Ceiling path — strict shrink. ``max_gpus`` is a hard cap; if even
+    # min_endpoint of each pool overshoots it, the deployment is infeasible
+    # and we zero out (the caller is responsible for surfacing the config
+    # error). Otherwise proportionally shrink to fit under ``max_gpus``.
+    if max_gpus >= 0 and total > max_gpus:
         min_req = min_endpoint * p_gpu + min_endpoint * d_gpu
-        # Compare against the *band* upper edge (max + tolerance), not the
-        # strict ceiling: in fixed-budget configs the band is the contract,
-        # and (1, 1) at min_endpoint each can land above max but inside
-        # max + tolerance. Zeroing the deployment in that case is wrong.
-        # When tolerance is 0 (ceiling-only mode) this collapses to the
-        # historical strict check.
-        if max_gpus + tolerance < min_req:
+        if max_gpus < min_req:
             return 0, 0
-        # Shrink target is the band upper edge so min_endpoint*per_pool can
-        # actually fit when max_gpus alone is a hair too small.
-        target = max(max_gpus, min_req)
+        target = max_gpus
         scale = target / total
         max_p = math.floor((target - min_endpoint * d_gpu) / p_gpu)
         new_p = max(min_endpoint, min(max_p, math.floor(num_p * scale)))
@@ -172,11 +166,11 @@ def proportional_clamp_pair(
         remaining = max(0, floor - new_p * p_gpu)
         new_d = max(min_endpoint, math.ceil(remaining / d_gpu))
 
-    # If the floor push would blow past the ceiling band, the configuration
+    # If the floor push would blow past the strict ceiling, the configuration
     # is infeasible (tight bounds incompatible with the step sizes). Best
     # effort: keep the inputs unchanged and let the caller log; this
     # function stays pure.
-    if max_gpus >= 0 and (new_p * p_gpu + new_d * d_gpu) > max_gpus + tolerance:
+    if max_gpus >= 0 and (new_p * p_gpu + new_d * d_gpu) > max_gpus:
         return num_p, num_d
 
     return new_p, new_d
@@ -192,10 +186,11 @@ def proportional_clamp_single(
     """Single-pool variant for agg mode.
 
     Tolerance equals ``engine_gpu`` automatically when both bounds are
-    active. When only one bound is set, falls back to strict enforcement
-    matching historical ``_budget_clamp``.
+    active, and relaxes only the lower bound. ``max_gpus`` is a hard cap.
 
     Negative ``min_gpus`` or ``max_gpus`` disables the corresponding bound.
+    Returns ``0`` when even ``min_endpoint`` replicas would overshoot the
+    hard ceiling (configuration is infeasible).
     """
     if min_gpus < 0 and max_gpus < 0:
         return desired
@@ -209,18 +204,11 @@ def proportional_clamp_single(
     if in_band:
         return desired
 
-    if max_gpus >= 0 and total > max_gpus + tolerance:
+    if max_gpus >= 0 and total > max_gpus:
         min_req = min_endpoint * engine_gpu
-        # Compare against band upper edge (max + tolerance), not strict
-        # ceiling — in fixed-budget configs the band is the contract.
-        # E.g. engine_gpu=4, min_endpoint=1, min=max=3 should let
-        # 1 replica (=4 GPUs) survive inside the [-1, 7] band rather than
-        # being torn down. tolerance=0 in ceiling-only mode preserves
-        # historical strict behavior.
-        if max_gpus + tolerance < min_req:
+        if max_gpus < min_req:
             return 0
-        target = max(max_gpus, min_req)
-        return max(min_endpoint, math.floor(target / engine_gpu))
+        return max(min_endpoint, math.floor(max_gpus / engine_gpu))
 
     # total < min_gpus - tolerance
     return max(min_endpoint, math.ceil(min_gpus / engine_gpu))
@@ -236,11 +224,11 @@ def _apply_global_gpu_budget(
 ) -> tuple[int, int]:
     """Apply GPU budget band to disagg ``(num_p, num_d)``.
 
-    Honors ``config.max_gpu_budget`` (ceiling) and ``config.min_gpu_budget``
+    Honors ``config.max_gpu_budget`` (hard ceiling) and ``config.min_gpu_budget``
     (floor; ``-1`` disables). When both are active, allows the result to
-    land in ``[min - tolerance, max + tolerance]`` where ``tolerance =
+    land in ``[min - tolerance, max]`` where ``tolerance =
     max(prefill_engine_num_gpu, decode_engine_num_gpu)`` — see
-    ``proportional_clamp_pair``.
+    ``proportional_clamp_pair``. ``max_gpu_budget`` is never relaxed.
 
     Returns ``(0, 0)`` if the ceiling is below the per-pool minima
     (configuration error).

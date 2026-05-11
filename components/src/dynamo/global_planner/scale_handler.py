@@ -61,10 +61,13 @@ class ScaleRequestHandler:
     - ``min_total_gpus`` is a floor; scale-downs that would drop below it
       are denied unless a cached opposite-direction intent from another pool
       can be paired with them (intra-DGD or cross-DGD).
-    - Paired transfers may land up to ``tolerance`` GPUs outside
-      [min, max] where tolerance = max per-replica GPU across the two pools
-      actually being paired. This exists to handle asymmetric per-replica
-      GPU counts where a single-worker step cannot exactly cancel across pools.
+    - Paired transfers may land up to ``tolerance`` GPUs **below** ``min``,
+      where tolerance = max per-replica GPU across the pools actually being
+      paired. This exists to handle asymmetric per-replica GPU counts where
+      a single-worker step cannot exactly cancel across pools. ``max`` is
+      a hard cluster-capacity bound and is never relaxed — overshooting it
+      would risk pending pods / over-admission. Asymmetric pairs whose total
+      would land above ``max`` are denied.
 
     Intent cache semantics:
     - Every scale request seeds the per-pool intent cache *before* the
@@ -450,8 +453,10 @@ class ScaleRequestHandler:
         Returns an integer ``K`` strictly between ``current_replicas`` and
         ``last_desired`` (direction-consistent) such that applying ``K``
         instead of ``last_desired`` lands the combined transfer at the
-        appropriate band edge. ``None`` if no feasible partial exists
-        (e.g., even one worker's contribution overshoots).
+        appropriate band edge — the strict ceiling on the upper side
+        (``max``, no tolerance) or ``min - tolerance`` on the lower side.
+        ``None`` if no feasible partial exists (e.g., even one worker's
+        contribution overshoots).
         """
         _, _, last_desired, spec = candidate
         current = spec.current_replicas
@@ -466,12 +471,12 @@ class ScaleRequestHandler:
 
         if last_desired > current:
             # Scale-up candidate: pick K in [current+1, last_desired] that
-            # keeps total <= max + tolerance.
+            # keeps total <= max (strict ceiling — max is a hard hardware
+            # bound, see budget.bounds_for_total).
             if self.max_total_gpus < 0:
                 return last_desired
-            upper = self.max_total_gpus + tolerance
-            # K <= current + (upper - baseline_total) // gpu
-            headroom = upper - baseline_total
+            # K <= current + (max - baseline_total) // gpu
+            headroom = self.max_total_gpus - baseline_total
             if headroom <= 0:
                 return None
             max_k = current + headroom // gpu
@@ -506,9 +511,9 @@ class ScaleRequestHandler:
 
         Algorithm: greedy admission, ascending ``abs(delta_gpu)`` order. For
         each candidate, fully admit if it keeps the combined transfer in
-        ``[min - tolerance, max + tolerance]``; if full admission would
-        overshoot, try partial consumption that lands at the band edge and
-        stop (the band is now tight, larger candidates won't fit either).
+        ``[min - tolerance, max]``; if full admission would overshoot the
+        strict ceiling, try partial consumption that lands at the band edge
+        and stop (the band is now tight, larger candidates won't fit either).
 
         Tolerance is computed **once** over the request's changing pools
         plus all candidates considered for inclusion, not iteratively
@@ -582,8 +587,7 @@ class ScaleRequestHandler:
             #   request_net_delta < 0 → request alone undershoots floor
             #     (approaching from below; candidates push up).
             above_ceiling = (
-                self.max_total_gpus >= 0
-                and full_total > self.max_total_gpus + tolerance
+                self.max_total_gpus >= 0 and full_total > self.max_total_gpus
             )
             below_floor = (
                 self.min_total_gpus >= 0
@@ -709,8 +713,9 @@ class ScaleRequestHandler:
         Returns ``(is_in_bounds, reason_if_out_of_bounds)``.
 
         Standalone (non-paired) requests use strict bounds; paired transfers
-        get the tolerance band. Delegates the in-band math to
-        ``budget.bounds_for_total``.
+        get the tolerance band on the **lower** edge only — ``max_total_gpus``
+        is a hard cluster-capacity bound (enforced by
+        ``budget.bounds_for_total``).
         """
         return budget.bounds_for_total(
             total,
@@ -881,7 +886,7 @@ class ScaleRequestHandler:
                             f"[{partners_desc}]; total {total_paired} GPUs "
                             f"(bounds "
                             f"[{self.min_total_gpus if self.min_total_gpus >= 0 else '-inf'} - {paired_tolerance}, "
-                            f"{self.max_total_gpus if self.max_total_gpus >= 0 else '+inf'} + {paired_tolerance}])"
+                            f"{self.max_total_gpus if self.max_total_gpus >= 0 else '+inf'}])"
                         )
                     elif standalone_ok:
                         logger.info(
