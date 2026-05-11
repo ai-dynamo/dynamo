@@ -14,6 +14,7 @@ Each backend's ``unified_main.py`` calls :func:`run` with its
 """
 
 import os
+import sys
 import threading
 import time
 
@@ -29,21 +30,25 @@ async def _start(engine_cls: type[LLMEngine], argv: list[str] | None = None):
     await w.run()
 
 
-def _shutdown_watchdog() -> None:
+def _force_exit_after_delay() -> None:
     time.sleep(2)
-    # 911 mirrors the Rust orchestrator's deadline backstop in
-    # lib/backend-common/src/worker.rs so monitoring sees a forced
-    # termination rather than a clean exit.
+    # 911 matches the Rust force-exit code (lib/backend-common/src/worker.rs).
+    try:
+        sys.stderr.write("force-exit 911: leaked engine threads\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
     os._exit(911)
 
 
 def run(engine_cls: type[LLMEngine], argv: list[str] | None = None):
     """Entry point for per-backend unified_main.py files."""
-    uvloop.run(_start(engine_cls, argv))
-    # Engines leak non-daemon threads that block exit after Worker.run
-    # cleaned up; force-exit backstop. Issue #9343.
-    threading.Thread(
-        target=_shutdown_watchdog,
-        daemon=True,
-        name="dynamo-backend-shutdown-watchdog",
-    ).start()
+    try:
+        uvloop.run(_start(engine_cls, argv))
+    finally:
+        # Backstop for engines that leak non-daemon threads.
+        threading.Thread(
+            target=_force_exit_after_delay,
+            daemon=True,
+            name="dynamo-backend-shutdown-watchdog",
+        ).start()
