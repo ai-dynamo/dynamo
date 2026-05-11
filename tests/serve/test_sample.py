@@ -30,6 +30,7 @@ sample_configs = {
             pytest.mark.gpu_0,
             pytest.mark.timeout(300),
             pytest.mark.pre_merge,
+            pytest.mark.unified,
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,

@@ -77,8 +77,9 @@ The tag describes the *grammar*, not the parser stage.
 
 - **`PARSER.fmt.1`** Function-name conventions — allowed identifier chars (hyphens, underscores, dots), prefix variants (`functions.NAME` vs bare `NAME`), and rejection of malformed function IDs.
 - **`PARSER.fmt.2`** Whitespace / formatting tolerance — whitespace inside or between grammar tokens.
-- **`PARSER.fmt.3`** Token format variants — multiple acceptable spellings for the same semantic (e.g., Kimi K2's singular `<|tool_call_section_*|>` vs plural `<|tool_calls_section_*|>` section tokens).
+- **`PARSER.fmt.3`** Token / wire-format variants — multiple acceptable spellings for the same semantic. Examples: Kimi K2's singular `<|tool_call_section_*|>` vs plural `<|tool_calls_section_*|>` section tokens; Mistral pre-v11 (`[TOOL_CALLS][{"name":...,"arguments":...}]` JSON-array body) vs v11+ (`[TOOL_CALLS]name{...args}` name-then-object); Llama 3 with vs without `<|python_tag|>` start fence; Hermes `qwen25` registry alias. Parser must accept all configured variants and reject ones not registered for the active config.
 - **`PARSER.fmt.4`** Empty section / no-content wrappers — start+end fences with nothing between them.
+- **`PARSER.fmt.5`** Argument-shape conventions — JSON envelope shape inside the call body, distinct from `PARSER.fmt.1`'s function-name surface. Three sub-axes: native call-ID preservation (Kimi K2 `functions.NAME:N` surfaced verbatim on `ToolCall.id`); JSON field-order tolerance (`{name, arguments}` vs `{arguments, name}`, including the case where `arguments` itself contains a key called `"name"`); argument-key aliasing (`arguments` vs `parameters` interchangeably).
 
 #### `PARSER.xml.*` — XML-family only
 
@@ -102,6 +103,11 @@ The tag describes the *grammar*, not the parser stage.
 - Extremely long output (≥10 KB tool-call JSON in a single call).
 - Mid-stream error injection / interruption (worker kill, network drop mid-parse).
 - Schema arg-count mismatch (model emits extra or missing args vs declared schema).
+- Regex timeout / catastrophic-pattern guard, parser-exception containment, long ordinary-content fast-path. vLLM has explicit `test_regex_timeout_handling` for `llama3_json` / `llama4_pythonic` / `pythonic` and `test_extract_tool_calls_streaming_exception_returns_none` for Mistral; Dynamo relies on the Rust `regex` crate's linear-time guarantee but does not pin failure-containment paths.
+
+### Known production gaps (parser missing entirely)
+
+- **Mistral v11+ wire format** (`[TOOL_CALLS]name{...args}` name-then-object). Dynamo's `ToolCallConfig::mistral()` and the underlying `base_json_parser.rs` only handle pre-v11 (`[TOOL_CALLS][{name, arguments}]` JSON-array body). v11 is the current production path for Mistral-Small / Mistral-Large; vLLM tests it extensively under the `mistral_tool_parser` fixture. See `PARSER.fmt.3` for the variant taxonomy.
 
 ---
 
@@ -112,6 +118,11 @@ One complete, well-formed call in the response.
 - Applies to every tool-call parser.
 - Baseline correctness check. If `PARSER.batch.1` fails, nothing else
   below matters.
+- For parsers whose grammar carries a model-emitted call ID (e.g. Kimi
+  K2's `functions.NAME:N`), the happy-path test must additionally
+  assert that the native ID is preserved verbatim on `ToolCall.id` —
+  see `PARSER.fmt.5` for the broader argument-shape contract.
+  Reference: vLLM Kimi K2 PR #32768.
 
 ## `PARSER.batch.2` — Multiple tool calls (sequential or parallel)
 
@@ -259,6 +270,9 @@ which prefix variants it recognizes (`functions.NAME` vs bare `NAME`).
 - Models differ on what they emit. The parser must take a position
   and pin it with a test so a future tokenizer change doesn't
   silently start dropping valid calls.
+- Argument-envelope shape concerns (native ID preservation, JSON
+  field-order, argument-key alias) live under `PARSER.fmt.5`, not
+  here. `PARSER.fmt.1` is strictly the function-name surface.
 
 ## `PARSER.fmt.2` — Whitespace / formatting tolerance
 
@@ -272,15 +286,27 @@ arg JSON, etc.).
 - Rejecting whitespace strictly is also a valid choice — pin the
   behavior either way.
 
-## `PARSER.fmt.3` — Token format variants
+## `PARSER.fmt.3` — Token / wire-format variants
 
-Multiple acceptable spellings for the same semantic — e.g., Kimi K2's
-singular `<|tool_call_section_*|>` vs plural
-`<|tool_calls_section_*|>` section tokens. Parser must accept all
-configured variants.
+Multiple acceptable spellings for the same semantic. Examples:
 
-- Grammar-conditional. Applies only when the parser's config
-  explicitly enumerates more than one token-form alias.
+- **Kimi K2**: singular `<|tool_call_section_*|>` vs plural
+  `<|tool_calls_section_*|>` section tokens.
+- **Mistral**: pre-v11 (`[TOOL_CALLS][{"name":...,"arguments":...}]`
+  JSON-array body) vs v11+ (`[TOOL_CALLS]name{...args}`
+  name-then-object). The two forms come from different tokenizer
+  versions; production traffic mixes both.
+- **Llama 3**: with vs without `<|python_tag|>` start fence — same
+  inner JSON, different outer envelope.
+- **Hermes**: `qwen25` parser-name alias resolves to the same
+  `ToolCallConfig::hermes()` config; both names must dispatch
+  identically.
+
+Parser must accept all configured variants and reject ones not
+registered for the active config.
+
+- Grammar-conditional. Applies whenever the parser's config or
+  registry enumerates more than one token-form spelling.
 
 ## `PARSER.fmt.4` — Empty section / no-content wrappers
 
@@ -291,6 +317,37 @@ must produce zero calls and preserve any surrounding text as
 
 - Grammar-conditional. Applies to parsers with paired start/end
   fences.
+
+## `PARSER.fmt.5` — Argument-shape conventions
+
+JSON-envelope shape inside the call body. Distinct from
+`PARSER.fmt.1` (function-name surface) — these axes describe how the
+arguments object is laid out, not the function identifier.
+
+Three sub-axes:
+
+1. **Native call-ID preservation** — when the model emits its own
+   call ID (e.g. Kimi K2's `functions.NAME:N`), the parser must
+   surface it verbatim on `ToolCall.id` rather than synthesizing one
+   from a parser-internal counter. Reference: vLLM Kimi K2 PR #32768.
+2. **JSON field-order tolerance** — `{name, arguments}` vs
+   `{arguments, name}` must both parse, including the case where
+   `arguments` itself contains a key called `"name"`. Reference:
+   vLLM Mistral `argument_before_name` and
+   `argument_before_name_and_name_in_argument` parametrize IDs
+   appearing in 3 test functions: `test_extract_tool_calls_pre_v11_tokenizer`,
+   `test_extract_tool_calls_streaming_pre_v11_tokenizer`,
+   `test_extract_tool_calls_streaming_one_chunk`.
+3. **Argument-key aliasing** — `arguments` vs `parameters`
+   interchangeably. Reference: vLLM Llama 3 JSON
+   `test_extract_tool_calls_with_arguments_key`.
+
+- Grammar-conditional. Applies to JSON-family parsers (Mistral,
+  Llama 3 JSON, Hermes) where the wire format embeds a JSON object
+  with named keys; sub-axis 1 also applies to XML-family parsers
+  that surface a model-emitted ID (Kimi K2 specifically).
+- Each sub-axis can be N/A independently — e.g. Hermes has no
+  native call-ID surface, so sub-axis 1 is N/A there.
 
 ---
 
@@ -386,7 +443,7 @@ parenthetical names the originating incident. No separate
 | -- | -- | -- |
 | `PARSER.batch.{1..10}` | All | Universal behavior contract |
 | `PARSER.stream.{1..4}` | All | Streaming surface; same logical cases via different harness |
-| `PARSER.fmt.{1..4}` | Grammar-conditional | Each variant required only where the grammar permits it |
+| `PARSER.fmt.{1..5}` | Grammar-conditional | Each variant required only where the grammar permits it; `.5` (argument-shape) is JSON-family-leaning |
 | `PARSER.xml.{1,2}` | XML-family only | Entity decoding + schema-aware coercion |
 | `PARSER.harmony.{1,2}` | Harmony only | Channel routing + envelope variants |
 
@@ -405,9 +462,11 @@ Minimum viable set:
    frontend.
 6. `PARSER.batch.8` — interleaved text.
 7. `PARSER.batch.{9, 10}` — empty/null and duplicate calls.
-8. Format variants where applicable (`PARSER.fmt.{1..4}`): cover
+8. Format variants where applicable (`PARSER.fmt.{1..5}`): cover
    any that the parser's grammar permits. Mark `N/A` for those that
-   don't apply.
+   don't apply. JSON-family parsers (Mistral, Llama 3 JSON, Hermes)
+   should specifically pin `PARSER.fmt.5` (argument-shape: native
+   ID / field-order / arguments-vs-parameters alias).
 9. Family-specific categories where applicable: `PARSER.xml.{1, 2}`
    for XML grammars, `PARSER.harmony.{1, 2}` for Harmony.
 
