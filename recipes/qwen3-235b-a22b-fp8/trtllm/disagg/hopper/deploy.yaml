@@ -82,7 +82,7 @@ spec:
           command:
             - /bin/sh
             - -c
-    TRTLLMPrefillWorker:
+    prefill:
       componentType: worker
       subComponentType: prefill
       envFromSecret: hf-token-secret
@@ -138,7 +138,7 @@ spec:
           - name: model-cache
             persistentVolumeClaim:
               claimName: model-cache
-    TRTLLMDecodeWorker:
+    decode:
       componentType: worker
       subComponentType: decode
       envFromSecret: hf-token-secret

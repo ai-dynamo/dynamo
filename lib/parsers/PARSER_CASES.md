@@ -202,6 +202,31 @@ Parser must split content correctly: text → `normal_text`, calls →
   handoff. Cross-tag with `REASONING.batch.2` if the reasoning parser
   also runs over the input.
 
+### Sub-cases
+
+The `b8` column of the cross-impl parity matrix shows broad divergence
+(vLLM and SGLang drop trailing text after the wrapper across XML-style
+families; Dynamo preserves it). The sub-cases pin which positional
+shape is being exercised so divergences land on a precise row.
+
+- **`PARSER.batch.8.a`** Narration **before** the tool call only —
+  model emits text, then a single tool call, then nothing else. Most
+  parsers handle this; it's the historical happy path.
+- **`PARSER.batch.8.b`** Narration **after** the tool call only —
+  model emits the tool call, then trailing text. Common divergence
+  point: vLLM and SGLang typically truncate at the wrapper close.
+- **`PARSER.batch.8.c`** Narration **both before and after** the tool
+  call (the sandwich). Combines `.a` and `.b` shapes; useful as a
+  superset assertion.
+- **`PARSER.batch.8.d`** Narration **between** multiple tool calls —
+  text → call → text → call → text. Tests that inter-call text is
+  preserved (not just leading/trailing).
+
+All four sub-cases share the same parser contract — `tool_calls` extracted,
+`normal_text` preserved by position. `.a`/`.b`/`.c` are single-call shapes
+that vary only in where the narration sits; `.d` is the multi-call
+interleaving shape. The assertion across all four is on `normal_text`.
+
 ## `PARSER.batch.9` — Empty content / empty `tool_calls` array / null response
 
 Engine emits a chunk with `delta.content = ""`, or a final response
