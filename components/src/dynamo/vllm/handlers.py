@@ -2336,6 +2336,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
+        logger.info(f"token model got local_dp_rank: {dp_rank}")
         priority = -int(routing.get("priority", 0))
 
         trace_headers = build_trace_headers(context)
@@ -2399,6 +2400,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
+        logger.info(f"text mode got local_dp_rank: {dp_rank}")
         priority = -int(routing.get("priority", 0))
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text_per_choice: dict[int, str] = {}
