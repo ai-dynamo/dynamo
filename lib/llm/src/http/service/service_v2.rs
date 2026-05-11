@@ -635,43 +635,49 @@ impl HttpServiceConfigBuilder {
         // Echo x-request-id from request to response headers for client correlation
         let router = router.layer(axum::middleware::from_fn(echo_request_id_header));
 
-        // RL admin router: served on a dedicated listener at `rl_port`.
-        // Enabled when `enable_rl || DYN_ENABLE_RL_ENDPOINTS=true` and
-        // `runtime` is provided (required for discovery and fan-out).
-        let rl_router = if config.enable_rl || env_is_truthy("DYN_ENABLE_RL_ENDPOINTS") {
+        // RL admin router: served on a dedicated listener at `rl_port` AND merged
+        // onto the main port so that admin clients can use the same base URL as the
+        // OpenAI-compat endpoint (no separate port required in single-node setups).
+        // Enabled when `enable_rl || DYN_ENABLE_RL_ENDPOINTS=true` and `runtime` is set.
+        let (router, rl_router) = if config.enable_rl || env_is_truthy("DYN_ENABLE_RL_ENDPOINTS") {
             match config.runtime.as_ref() {
                 Some(drt) => {
-                    tracing::info!(
-                        rl_port = config.rl_port,
-                        "RL admin routes enabled at /v1/rl/engine on dedicated listener"
-                    );
+                    // Build the plain RL router (shared routes, no extra layers).
                     match super::openai::rl_router(drt.clone()) {
-                        Ok(router) => {
-                            let router = router
+                        Ok(plain) => {
+                            tracing::info!(
+                                rl_port = config.rl_port,
+                                "RL admin routes enabled at /v1/rl/engine \
+                                     (main port + dedicated listener)"
+                            );
+                            // Merge plain routes onto main router.
+                            let router = router.merge(plain.clone());
+                            // Dedicated-port copy gets full tracing.
+                            let dedicated = plain
                                 .layer(
                                     TraceLayer::new_for_http()
                                         .make_span_with(make_system_request_span)
                                         .on_response(on_response),
                                 )
                                 .layer(axum::middleware::from_fn(echo_request_id_header));
-                            Some(router)
+                            (router, Some(dedicated))
                         }
                         Err(e) => {
                             tracing::error!("Failed to build RL router: {e}");
-                            None
+                            (router, None)
                         }
                     }
                 }
                 None => {
                     tracing::warn!(
                         "RL admin routes requested (DYN_ENABLE_RL_ENDPOINTS=true) but \
-                         HttpServiceConfigBuilder.runtime is None — skipping mount."
+                             HttpServiceConfigBuilder.runtime is None — skipping mount."
                     );
-                    None
+                    (router, None)
                 }
             }
         } else {
-            None
+            (router, None)
         };
 
         Ok(HttpService {
