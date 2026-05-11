@@ -108,17 +108,16 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
             // Handle array format (like phi4: functools[{...}])
             if let Some(pos) = s.rfind(']') {
                 let candidate = &s[..=pos].trim();
-                // Keep only valid JSON arrays
-                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
-                    // For arrays, we need to extract the individual objects
-                    if let Ok(serde_json::Value::Array(arr)) =
-                        serde_json::from_str::<serde_json::Value>(candidate)
-                    {
-                        for item in arr {
-                            if let Ok(item_str) = serde_json::to_string(&item) {
-                                items.push(item_str);
-                            }
-                        }
+                // Parse as `Vec<Box<RawValue>>` so each element retains its
+                // original byte span. Going through `serde_json::Value` +
+                // `to_string` here would strip whitespace and reorder keys
+                // inside each tool call's `arguments`, breaking byte-level
+                // append-only across multi-step tool use for parsers that
+                // route through this single-token path (functools, [TOOL_CALLS],
+                // <|python_tag|>).
+                if let Ok(arr) = serde_json::from_str::<Vec<Box<RawValue>>>(candidate) {
+                    for item in arr {
+                        items.push(item.get().to_string());
                     }
                 }
             }

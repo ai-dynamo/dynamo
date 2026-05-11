@@ -235,9 +235,11 @@ fn flatten_mixed_content(parts: &[serde_json::Value], placeholder_tpl: &str) -> 
     out
 }
 
-fn normalize_tool_arguments_in_messages(messages: &mut serde_json::Value) {
-    // Deserialize tool call arguments from JSON strings to objects/arrays before template rendering
-    // avoids double encoding and enables iteration
+fn normalize_tool_calls_arguments_in_messages(messages: &mut serde_json::Value) {
+    // Deserialize `tool_calls[].function.arguments` from JSON strings to
+    // objects/arrays before template rendering — avoids double encoding
+    // and enables iteration. Skipped for templates whose own `is string`
+    // branch wants the raw string verbatim (see render()).
     let Some(msgs) = messages.as_array_mut() else {
         return;
     };
@@ -254,7 +256,19 @@ fn normalize_tool_arguments_in_messages(messages: &mut serde_json::Value) {
                 }
             }
         }
+    }
+}
 
+fn normalize_function_call_arguments_in_messages(messages: &mut serde_json::Value) {
+    // Legacy (deprecated) OpenAI `function_call.arguments` path. Kept separate
+    // from `tool_calls` normalization so the per-template `arguments is string`
+    // opt-out — which only refers to `tool_call.arguments` inside the
+    // tool_calls loop — does not accidentally suppress this path.
+    let Some(msgs) = messages.as_array_mut() else {
+        return;
+    };
+
+    for msg in msgs.iter_mut() {
         if let Some(function_call) = msg.get_mut("function_call").and_then(|v| v.as_object_mut())
             && let Some(args) = function_call.get_mut("arguments")
             && let Some(s) = args.as_str()
@@ -521,15 +535,37 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         ))
         .unwrap();
 
+        // Pick the concrete template first so the normalization opt-out can be
+        // template- and field-specific: only the chosen template's
+        // `tool_call.arguments is string` flag should suppress normalization,
+        // and only for the `tool_calls[].function.arguments` field. Legacy
+        // `function_call.arguments` lives outside that branch and is always
+        // normalized.
+        let (template_name, template_handles_tool_calls_args_string) = if has_tools {
+            (
+                "tool_use",
+                self.tool_use_template_handles_tool_calls_arguments_string,
+            )
+        } else {
+            (
+                "default",
+                self.default_template_handles_tool_calls_arguments_string,
+            )
+        };
+
         // Pre-parse JSON-string `arguments` into objects — but only for templates
         // that unconditionally `| tojson` them. Templates that branch on
         // `tool_call.arguments is string` (Qwen3, Hermes) want the raw string
         // verbatim so the rendered bytes match what the model emitted on the
         // prior turn. Re-serializing through minijinja's compact `tojson` here
         // breaks append-only prefix matching across multi-step tool use.
-        if !self.template_handles_arguments_string {
-            normalize_tool_arguments_in_messages(&mut messages_for_template);
+        if !template_handles_tool_calls_args_string {
+            normalize_tool_calls_arguments_in_messages(&mut messages_for_template);
         }
+        // Legacy `function_call.arguments` is always normalized — the
+        // `arguments is string` opt-out only covers the modern `tool_calls`
+        // branch.
+        normalize_function_call_arguments_in_messages(&mut messages_for_template);
 
         // Inject reasoning_content as <think> blocks into content — but only if
         // the template doesn't handle it natively. Templates like Nemotron and
@@ -557,11 +593,7 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
             ctx
         };
 
-        let tmpl: minijinja::Template<'_, '_> = if has_tools {
-            self.env.get_template("tool_use")?
-        } else {
-            self.env.get_template("default")?
-        };
+        let tmpl: minijinja::Template<'_, '_> = self.env.get_template(template_name)?;
         Ok(tmpl.render(&ctx)?)
     }
 }
@@ -1279,7 +1311,7 @@ NORMAL MODE
             }]
         })]);
 
-        normalize_tool_arguments_in_messages(&mut messages);
+        normalize_tool_calls_arguments_in_messages(&mut messages);
 
         let mut env = Environment::new();
         env.add_filter("tojson", super::super::tokcfg::tojson);
@@ -1312,7 +1344,7 @@ NORMAL MODE
             }]
         })]);
 
-        normalize_tool_arguments_in_messages(&mut messages);
+        normalize_tool_calls_arguments_in_messages(&mut messages);
 
         let mut env = Environment::new();
         env.add_template("t", tmpl).unwrap();
@@ -1336,7 +1368,7 @@ NORMAL MODE
             }
         })]);
 
-        normalize_tool_arguments_in_messages(&mut messages);
+        normalize_function_call_arguments_in_messages(&mut messages);
 
         assert_eq!(
             messages[0]["function_call"]["arguments"],
@@ -1358,7 +1390,7 @@ NORMAL MODE
             }]
         })]);
 
-        normalize_tool_arguments_in_messages(&mut messages);
+        normalize_tool_calls_arguments_in_messages(&mut messages);
 
         assert_eq!(
             messages[0]["tool_calls"][0]["function"]["arguments"],
@@ -1400,7 +1432,7 @@ NORMAL MODE
         let mut messages =
             serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
-        normalize_tool_arguments_in_messages(&mut messages);
+        normalize_tool_calls_arguments_in_messages(&mut messages);
 
         // Multimodal content preserved as array (mixed types not flattened)
         assert!(messages[0]["content"].is_array());
@@ -2021,9 +2053,15 @@ NORMAL_MODE
             formatter.template_handles_reasoning,
             "template references reasoning_content directly"
         );
+        // The Qwen3-Thinking template is registered as both `default` and
+        // `tool_use` (single-string HF chat template), so both flags must fire.
         assert!(
-            formatter.template_handles_arguments_string,
-            "template branches on `arguments is string` and must opt out of arg pre-parsing"
+            formatter.default_template_handles_tool_calls_arguments_string,
+            "default template branches on `arguments is string`"
+        );
+        assert!(
+            formatter.tool_use_template_handles_tool_calls_arguments_string,
+            "tool_use template branches on `arguments is string`"
         );
     }
 
