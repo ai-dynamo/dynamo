@@ -56,8 +56,11 @@ fn detect_image_placeholder_template(env: &Environment) -> Option<&'static str> 
         .ok()
         .map(|t| t.source().to_string())
         .unwrap_or_default();
-    // Phi-3-vision: `<|user|>`/`<|end|>` envelope with `+ message['content'] +`.
-    if src.contains("<|user|>") && src.contains("<|end|>") {
+    // Phi-3-vision template constructs `<|user|>` at runtime via
+    // `'<|' + message['role'] + '|>'`, so the literal `<|user|>` never
+    // appears in the source. The literals that ARE in the source are
+    // `<|end|>` (end-of-turn) and `<|assistant|>` (generation prompt).
+    if src.contains("<|end|>") && src.contains("<|assistant|>") {
         return Some("<|image_{n}|>");
     }
     // LLaVA-1.5: USER:/ASSISTANT: convention with `+ message['content']`.

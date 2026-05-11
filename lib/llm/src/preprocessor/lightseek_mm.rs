@@ -153,20 +153,21 @@ pub fn resolve_image_token_id(model_id: &str, model_dir: &Path) -> Option<TokenI
     // token id from `config.json` (Kimi) still resolve; specs that need
     // vocab access just return `None` here.
     let tokenizer_path = model_dir.join("tokenizer.json");
-    let hf_tokenizer = tokenizer_path
-        .to_str()
-        .and_then(|p| match HuggingFaceTokenizer::from_file(p) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                tracing::debug!(
-                    target: "mm_routing",
-                    model_dir = %model_dir.display(),
-                    err = %e,
-                    "lightseek: tokenizer.json not loaded; falling back to NullTokenizer"
-                );
-                None
-            }
-        });
+    let hf_tokenizer =
+        tokenizer_path
+            .to_str()
+            .and_then(|p| match HuggingFaceTokenizer::from_file(p) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    tracing::debug!(
+                        target: "mm_routing",
+                        model_dir = %model_dir.display(),
+                        err = %e,
+                        "lightseek: tokenizer.json not loaded; falling back to NullTokenizer"
+                    );
+                    None
+                }
+            });
     let null_tokenizer = NullTokenizer;
     let tokenizer: &dyn Tokenizer = match hf_tokenizer.as_ref() {
         Some(t) => t,

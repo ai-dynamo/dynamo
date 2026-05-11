@@ -170,6 +170,50 @@ fn mdc_model_dir(mdc: &ModelDeploymentCard) -> Option<std::path::PathBuf> {
     cf.path()?.parent().map(std::path::PathBuf::from)
 }
 
+/// Find the first occurrence of `needle` in `haystack`. Linear scan; the
+/// needles here are tokenized chat-template placeholders (≤ 10 tokens for
+/// Phi-3-style `<|image_N|>`), so the naive O(n·m) cost is fine.
+#[cfg(feature = "lightseek-mm")]
+fn find_subseq<T: PartialEq>(haystack: &[T], needle: &[T]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// HTTP/HTTPS query-parameter keys that identify cache-busters or signed-URL
+/// metadata rather than image content. Stripped before hashing so the same
+/// image reached through different signed URLs collides on the same routing
+/// `mm_hash`. Match is case-insensitive.
+///
+/// Conservative list — only adds keys that are widely documented as
+/// cache-bust or presign metadata. Content-shaping params (`width`,
+/// `quality`, `format`, …) are deliberately *not* in this set: a 256-wide
+/// thumbnail must not collide on the same hash as the 1024-wide render.
+#[cfg(feature = "lightseek-mm")]
+fn is_cache_buster_query_key(key: &str) -> bool {
+    let lc = key.to_ascii_lowercase();
+    matches!(
+        lc.as_str(),
+        // Generic cache-busters / version selectors.
+        "v" | "version" | "cb" | "cache_bust" | "_" | "t" | "ts" | "timestamp"
+        // Generic signed-URL pieces.
+        | "sig" | "signature" | "token" | "expires" | "expiry" | "exp"
+        // AWS S3 / CloudFront presigned (case-folded form of `X-Amz-…`).
+        | "x-amz-signature" | "x-amz-date" | "x-amz-expires"
+        | "x-amz-algorithm" | "x-amz-credential" | "x-amz-signedheaders"
+        | "x-amz-security-token" | "x-amz-user-agent"
+        // GCS signed URLs.
+        | "x-goog-signature" | "x-goog-date" | "x-goog-expires"
+        | "x-goog-algorithm" | "x-goog-credential" | "x-goog-signedheaders"
+        // Azure SAS tokens (`se`, `sp`, etc. are short by spec).
+        | "se" | "sp" | "sr" | "sv" | "st" | "tn" | "srt" | "ss" | "skoid"
+        | "sktid" | "skt" | "ske" | "sks" | "skv" | "spr"
+    )
+}
+
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
@@ -194,6 +238,13 @@ pub struct OpenAIPreprocessor {
     /// back to text-prefix routing.
     #[cfg(feature = "lightseek-mm")]
     image_token_id: Option<crate::protocols::TokenIdType>,
+    /// Per-family flatten-time image placeholder template (e.g.
+    /// `"<|image_{n}|>"` for Phi-3, `"<image>"` for LLaVA-1.5). Threaded
+    /// through from the formatter so the routing path can reverse the
+    /// BPE-encoded numbered form (Phi-3) back into single placeholder
+    /// tokens when the chat template uses numbered markers.
+    #[cfg(feature = "lightseek-mm")]
+    image_placeholder_template: Option<&'static str>,
 }
 
 impl OpenAIPreprocessor {
@@ -313,6 +364,9 @@ impl OpenAIPreprocessor {
             }
         };
 
+        #[cfg(feature = "lightseek-mm")]
+        let image_placeholder_template = formatter.image_placeholder_template();
+
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
@@ -328,6 +382,8 @@ impl OpenAIPreprocessor {
             image_token_counter,
             #[cfg(feature = "lightseek-mm")]
             image_token_id,
+            #[cfg(feature = "lightseek-mm")]
+            image_placeholder_template,
         }))
     }
     /// Encode a string to it's tokens
@@ -882,18 +938,52 @@ impl OpenAIPreprocessor {
         // match the number of images in the request. If they disagree, the
         // expansion would misplace ranges; better to skip MM routing entirely
         // and fall back to text-prefix routing for this request.
+        //
+        // Families like Phi-3-vision use numbered placeholder text
+        // (`<|image_1|>`) that BPE-decomposes into multiple sub-tokens —
+        // `image_token_id` (the single `<|image|>` special token) never
+        // appears post-tokenization. For those we run a substring-match
+        // pass first that rewrites each numbered placeholder's BPE
+        // sub-sequence back to a single `image_token_id`, then proceed
+        // with the standard expansion below.
         let placeholder_count = token_ids.iter().filter(|&&t| t == image_token_id).count();
-        if placeholder_count != mm_image_entries.len() {
-            tracing::warn!(
-                target: "mm_routing",
-                placeholder_count,
-                image_count = mm_image_entries.len(),
-                image_token_id = image_token_id,
-                "placeholder token count in tokenized prompt does not match image count; \
-                 skipping MM routing info (text-prefix routing only)"
-            );
-            return Ok(());
-        }
+        let normalized_token_ids: std::borrow::Cow<'_, [crate::protocols::TokenIdType]> =
+            if placeholder_count == mm_image_entries.len() {
+                std::borrow::Cow::Borrowed(token_ids)
+            } else if let Some(tpl) = self.image_placeholder_template
+                && tpl.contains("{n}")
+            {
+                match self.normalize_numbered_placeholders(
+                    token_ids,
+                    image_token_id,
+                    tpl,
+                    mm_image_entries.len(),
+                ) {
+                    Some(v) => std::borrow::Cow::Owned(v),
+                    None => {
+                        tracing::warn!(
+                            target: "mm_routing",
+                            placeholder_count,
+                            image_count = mm_image_entries.len(),
+                            image_token_id = image_token_id,
+                            placeholder_template = tpl,
+                            "numbered placeholder BPE rewrite failed; \
+                             skipping MM routing info (text-prefix routing only)"
+                        );
+                        return Ok(());
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    target: "mm_routing",
+                    placeholder_count,
+                    image_count = mm_image_entries.len(),
+                    image_token_id = image_token_id,
+                    "placeholder token count in tokenized prompt does not match image count; \
+                     skipping MM routing info (text-prefix routing only)"
+                );
+                return Ok(());
+            };
 
         // Compute per-image N via lightseek + run the expansion.
         let n_tokens: Vec<usize> = mm_image_entries
@@ -903,10 +993,10 @@ impl OpenAIPreprocessor {
         let n_total: usize = n_tokens.iter().sum();
 
         let mut expanded: Vec<crate::protocols::TokenIdType> =
-            Vec::with_capacity(token_ids.len() + n_total);
+            Vec::with_capacity(normalized_token_ids.len() + n_total);
         let mut img_ranges: Vec<(usize, usize)> = Vec::with_capacity(mm_image_entries.len());
         let mut i = 0usize;
-        for &t in token_ids {
+        for &t in normalized_token_ids.iter() {
             if t == image_token_id && i < mm_image_entries.len() {
                 let start = expanded.len();
                 expanded.extend(std::iter::repeat_n(image_token_id, n_tokens[i]));
@@ -956,17 +1046,99 @@ impl OpenAIPreprocessor {
         Ok(())
     }
 
-    /// xxh3-64 of the full URL string. Used as the routing `mm_hash` in the
-    /// URL-passthrough path. Two callers will collide on the same image only
-    /// when they send byte-identical URLs — including any query string. Any
-    /// query parameter that differs between requests (signed-URL `?sig=…`,
-    /// cache-buster `?v=…`, content selector `?width=…`) breaks the collision
-    /// and routes to a fresh worker. Frontend-decoding mode replaces this
-    /// with content-addressed hashing over decoded RGB bytes, which does
-    /// give cross-URL cache reuse.
+    /// Rewrites BPE-decomposed numbered image placeholders back into single
+    /// `image_token_id` tokens so the standard expansion can proceed.
+    ///
+    /// Used for Phi-3-vision-style templates whose flatten-time placeholder
+    /// is `<|image_{n}|>` (not a tokenizer special token, BPE-encodes into
+    /// ~7 sub-tokens) while the model's actual image token is `<|image|>`
+    /// (single special token = `image_token_id`). The backend's HF
+    /// processor recognises `<|image_{n}|>` in the prompt and replaces
+    /// each with N copies of `image_token_id` post-tokenization — we
+    /// replicate the routing-side equivalent here.
+    ///
+    /// For each image index `i` in `1..=expected_count`, encodes the
+    /// substituted placeholder string and scans `token_ids` for the
+    /// resulting BPE sub-sequence. Each match collapses to a single
+    /// `image_token_id` in the returned vector, preserving every
+    /// surrounding token. Returns `None` if any expected placeholder is
+    /// missing or if scans go out of order — the caller falls back to
+    /// text-prefix routing in that case.
+    #[cfg(feature = "lightseek-mm")]
+    fn normalize_numbered_placeholders(
+        &self,
+        token_ids: &[crate::protocols::TokenIdType],
+        image_token_id: crate::protocols::TokenIdType,
+        placeholder_tpl: &str,
+        expected_count: usize,
+    ) -> Option<Vec<crate::protocols::TokenIdType>> {
+        let mut out: Vec<crate::protocols::TokenIdType> = Vec::with_capacity(token_ids.len());
+        let mut cursor = 0usize;
+        for idx in 1..=expected_count {
+            let placeholder_text = placeholder_tpl.replace("{n}", &idx.to_string());
+            let encoding = self.tokenizer.encode(&placeholder_text).ok()?;
+            let sub_ids = encoding.token_ids();
+            if sub_ids.is_empty() {
+                return None;
+            }
+            let pos = find_subseq(&token_ids[cursor..], sub_ids)? + cursor;
+            out.extend_from_slice(&token_ids[cursor..pos]);
+            out.push(image_token_id);
+            cursor = pos + sub_ids.len();
+        }
+        out.extend_from_slice(&token_ids[cursor..]);
+        Some(out)
+    }
+
+    /// xxh3-64 of the URL after normalizing cache-buster / signed-URL query
+    /// parameters for HTTP/HTTPS. Used as the routing `mm_hash` in the
+    /// URL-passthrough path. Goal: the same image reached through different
+    /// signed URLs (rotating `?sig=…`, `?v=…`, AWS/GCS/Azure presign params)
+    /// collides on the same routing key, so the warm request lands on the
+    /// worker that already cached the image's KV blocks.
+    ///
+    /// Stripping is HTTP-only: `s3://`, `gs://`, `file://` and `data:` URIs
+    /// hash as-is because their query parameters carry object identity (or
+    /// the URI itself is content-addressed). Content-shaping HTTP params
+    /// (e.g. `?width=`, `?quality=`) are preserved — they identify a
+    /// different rendered image.
+    ///
+    /// Frontend-decoding mode replaces this with content-addressed hashing
+    /// over decoded RGB bytes, which gives cross-URL cache reuse even for
+    /// query parameters this list doesn't know about.
     #[cfg(feature = "lightseek-mm")]
     fn hash_image_url(url: &str) -> u64 {
-        xxhash_rust::xxh3::xxh3_64(url.as_bytes())
+        let canonical = Self::normalize_image_url(url);
+        xxhash_rust::xxh3::xxh3_64(canonical.as_bytes())
+    }
+
+    /// Returns the URL with HTTP/HTTPS cache-buster + signed-URL query
+    /// parameters removed. Other schemes pass through unchanged.
+    ///
+    /// Parse failure is treated as "pass through" — the routing path stays
+    /// correct (just byte-identical match) and downstream paths that
+    /// actually fetch the URL will surface the parse error.
+    #[cfg(feature = "lightseek-mm")]
+    fn normalize_image_url(url: &str) -> String {
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return url.to_string();
+        }
+        let Ok(mut parsed) = url::Url::parse(url) else {
+            return url.to_string();
+        };
+        let preserved: Vec<(String, String)> = parsed
+            .query_pairs()
+            .filter(|(k, _)| !is_cache_buster_query_key(k))
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        parsed.set_query(None);
+        if !preserved.is_empty() {
+            let mut qmut = parsed.query_pairs_mut();
+            for (k, v) in &preserved {
+                qmut.append_pair(k, v);
+            }
+        }
+        parsed.into()
     }
 
     /// Header-only image dim fetch. For HTTP/HTTPS we issue a Range request
@@ -2950,15 +3122,54 @@ mod tests {
     /// like a cache-buster (`?v=1` vs `?v=2`) may also be a content selector
     /// (e.g. version → different image). Hash the full URL and let the URL
     /// be the identity.
+    /// Cache-buster query parameters (`?v=`, `?sig=`, AWS/GCS/Azure presign
+    /// fields) must be stripped before hashing so the same image reached
+    /// through different signed URLs lands on the same routing key.
     #[cfg(feature = "lightseek-mm")]
     #[test]
-    fn hash_image_url_distinguishes_query_strings() {
+    fn hash_image_url_strips_cache_busters_for_http() {
         let base = "https://cdn.example.com/img.jpg";
         let v1 = OpenAIPreprocessor::hash_image_url(&format!("{base}?v=1"));
-        let v2 = OpenAIPreprocessor::hash_image_url(&format!("{base}?v=2"));
+        let v2 = OpenAIPreprocessor::hash_image_url(&format!("{base}?v=2&sig=abc"));
         let no_q = OpenAIPreprocessor::hash_image_url(base);
-        assert_ne!(v1, v2, "?v=1 and ?v=2 may identify different images");
-        assert_ne!(v1, no_q, "presence of any query string changes the URL");
+        assert_eq!(v1, v2, "cache-busters must be stripped before hashing");
+        assert_eq!(
+            v1, no_q,
+            "stripping cache-busters yields the same hash as the bare URL"
+        );
+    }
+
+    /// AWS S3 / GCS presigned URLs rotate every few minutes; without
+    /// stripping, the same object hashes differently each request.
+    #[cfg(feature = "lightseek-mm")]
+    #[test]
+    fn hash_image_url_strips_presigned_params() {
+        let base = "https://bucket.s3.amazonaws.com/img.jpg";
+        let a = OpenAIPreprocessor::hash_image_url(&format!(
+            "{base}?X-Amz-Signature=AAA&X-Amz-Date=20260101T000000Z&X-Amz-Expires=600"
+        ));
+        let b = OpenAIPreprocessor::hash_image_url(&format!(
+            "{base}?X-Amz-Signature=BBB&X-Amz-Date=20260101T010000Z&X-Amz-Expires=900"
+        ));
+        assert_eq!(
+            a, b,
+            "rotating S3 presign params must collide on the same hash"
+        );
+    }
+
+    /// Content-shaping query params (image dimensions, format, quality) are
+    /// NOT cache-busters — `?width=256` and `?width=1024` produce different
+    /// rendered images and must hash differently.
+    #[cfg(feature = "lightseek-mm")]
+    #[test]
+    fn hash_image_url_preserves_content_params() {
+        let base = "https://cdn.example.com/img.jpg";
+        let small = OpenAIPreprocessor::hash_image_url(&format!("{base}?width=256"));
+        let large = OpenAIPreprocessor::hash_image_url(&format!("{base}?width=1024"));
+        assert_ne!(
+            small, large,
+            "content-shaping params identify a different rendered image"
+        );
     }
 
     /// data: URIs are content-addressed; hashing the entire URI gives content equality.

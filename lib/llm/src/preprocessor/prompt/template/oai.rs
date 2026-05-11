@@ -170,8 +170,7 @@ fn may_be_fix_msg_content(
                             // Mixed text+image array for a string-content
                             // template — flatten with model-family image
                             // placeholders inlined where the image parts were.
-                            let flattened =
-                                flatten_mixed_content(&content_array, placeholder_tpl);
+                            let flattened = flatten_mixed_content(&content_array, placeholder_tpl);
                             msg_object.insert(
                                 "content".to_string(),
                                 serde_json::Value::String(flattened),
@@ -466,6 +465,10 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
 impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
     fn supports_add_generation_prompt(&self) -> bool {
         self.supports_add_generation_prompt
+    }
+
+    fn image_placeholder_template(&self) -> Option<&'static str> {
+        self.image_placeholder_template
     }
 
     fn render(&self, req: &dyn OAIChatLikeRequest) -> Result<String> {
@@ -818,7 +821,8 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Test array → string normalization (preserve_arrays=false for standard templates)
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: text-only array is concatenated into a single string
         assert_eq!(
@@ -864,7 +868,8 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Test array → string normalization (preserve_arrays=false for standard templates)
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: System message with string content remains unchanged
         assert_eq!(
@@ -908,7 +913,8 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Empty arrays should be preserved regardless of preserve_arrays setting
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: Empty arrays are preserved as-is
         assert!(messages[0]["content"].is_array());
@@ -932,7 +938,8 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Test with preserve_arrays=false (standard templates)
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: String content is not modified
         assert_eq!(
@@ -963,7 +970,8 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Mixed content should be preserved regardless of preserve_arrays setting
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: Mixed content types are preserved as array for template handling
         // image_url should be converted to image placeholder
@@ -1030,12 +1038,9 @@ mod tests {
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
-        let messages = serde_json::to_value(may_be_fix_msg_content(
-            messages_raw,
-            false,
-            Some("<image>"),
-        ))
-        .unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, Some("<image>")))
+                .unwrap();
 
         let content = messages[0]["content"].as_str().expect("content flattened");
         assert_eq!(content, "Describe: <image>");
@@ -1062,7 +1067,8 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Non-text arrays should be preserved regardless of preserve_arrays setting
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: Non-text content arrays are preserved, with image_url converted to image
         assert!(messages[0]["content"].is_array());
@@ -1159,7 +1165,8 @@ NORMAL MODE
 
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Mixed types should preserve array structure, with image_url converted to image
         assert!(messages[0]["content"].is_array());
@@ -1188,7 +1195,8 @@ NORMAL MODE
 
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Unknown types mixed with text should preserve array
         assert!(messages[0]["content"].is_array());
@@ -1363,7 +1371,8 @@ NORMAL MODE
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Test with preserve_arrays=true (multimodal templates)
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, true, None)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, true, None)).unwrap();
 
         // Verify: String is converted to array format
         assert!(messages[0]["content"].is_array());
@@ -1393,7 +1402,8 @@ NORMAL MODE
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Test with preserve_arrays=true (multimodal templates)
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, true, None)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, true, None)).unwrap();
 
         // Verify: Array is preserved as-is
         assert!(messages[0]["content"].is_array());
