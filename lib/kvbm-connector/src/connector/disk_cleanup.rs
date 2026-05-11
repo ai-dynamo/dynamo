@@ -61,7 +61,10 @@ async fn signal_task() {
     let Some((sig_name, sig_num)) = await_shutdown_signal().await else {
         return;
     };
-    tracing::info!(signal = sig_name, "received shutdown signal, removing G3 cache files");
+    tracing::info!(
+        signal = sig_name,
+        "received shutdown signal, removing G3 cache files"
+    );
     cleanup_all();
 
     // 128 + signal number is the conventional exit code for signal-terminated
@@ -222,7 +225,10 @@ mod tests {
         assert_eq!(signal_info, Some(("SIGHUP", 1)));
 
         cleanup_all();
-        assert!(!path.exists(), "file should have been removed by cleanup_all");
+        assert!(
+            !path.exists(),
+            "file should have been removed by cleanup_all"
+        );
 
         deregister(&path);
     }
