@@ -1162,12 +1162,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         Body:
           weight_version str   version tag to record (default "unknown")
           engine_rpc     str   collective_rpc target (default "update_weights_from_path")
+          <any other key>      forwarded to the rpc as kwargs (e.g. weight_dir for
+                               NCCLWeightUpdateWorker.update_weights_from_path)
         """
         body = body or {}
         version = body.get("weight_version", "unknown")
         rpc = body.get("engine_rpc", "update_weights_from_path")
+        rpc_kwargs = {k: v for k, v in body.items() if k not in ("engine_rpc", "weight_version")}
         try:
-            await self.engine_client.collective_rpc(rpc, kwargs={})
+            await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
             self._weight_version = version
             logger.info(f"[RL] Weights received via distributed (version={version}, rpc={rpc})")
             return {"status": "ok", "version": version}
