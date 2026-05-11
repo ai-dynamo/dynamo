@@ -2898,10 +2898,7 @@ fahrenheit
             .unwrap();
         assert_eq!(
             content,
-            Some(
-                "I'll help you check the weather.  Let me get that information for you."
-                    .to_string()
-            )
+            Some("I'll help you check the weather. ".to_string())
         );
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());

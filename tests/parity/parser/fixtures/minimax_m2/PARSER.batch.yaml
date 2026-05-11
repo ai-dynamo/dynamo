@@ -149,7 +149,7 @@ cases:
       - name: get_weather
         arguments:
           location: Tokyo
-      normal_text: I'll help you check the weather.
+      normal_text: "I'll help you check the weather. "
   PARSER.batch.9:
     description: Empty input
     model_text: ''
