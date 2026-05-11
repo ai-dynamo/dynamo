@@ -31,7 +31,7 @@ func TestComputeDGDWorkersSpecHashNil(t *testing.T) {
 }
 
 func TestComputeDGDWorkersSpecHashDeterministic(t *testing.T) {
-	const goldenDGDWorkerHash = "2bc34b39"
+	const goldenDGDWorkerHash = "702a3324"
 
 	dgd := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test"},
@@ -108,5 +108,106 @@ func TestComputeDGDWorkersSpecHashTracksDGDSpecMetadata(t *testing.T) {
 	}
 	if labelHash == baseHash {
 		t.Fatalf("DGD spec labels did not affect worker hash: %q", labelHash)
+	}
+}
+
+func TestComputeDGDWorkersSpecHashIgnoresOverriddenDGDSpecMetadata(t *testing.T) {
+	dgd := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test"},
+		Spec: DynamoGraphDeploymentSpec{
+			Annotations: map[string]string{"rollout": "dgd-annotation"},
+			Labels:      map[string]string{"rollout": "dgd-label"},
+			Components: []DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "worker",
+					ComponentType: ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Annotations: map[string]string{"rollout": "component-annotation"},
+							Labels:      map[string]string{"rollout": "component-label"},
+						},
+					},
+				},
+			},
+		},
+	}
+	baseHash, err := ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		t.Fatalf("ComputeDGDWorkersSpecHash(base): %v", err)
+	}
+
+	changed := dgd.DeepCopy()
+	changed.Spec.Annotations["rollout"] = "changed-dgd-annotation"
+	changed.Spec.Labels["rollout"] = "changed-dgd-label"
+	changedHash, err := ComputeDGDWorkersSpecHash(changed)
+	if err != nil {
+		t.Fatalf("ComputeDGDWorkersSpecHash(changed): %v", err)
+	}
+	if changedHash != baseHash {
+		t.Fatalf("overridden DGD metadata changed worker hash: %q != %q", changedHash, baseHash)
+	}
+}
+
+func TestComputeDGDWorkersSpecHashIgnoresOverriddenDGDEnv(t *testing.T) {
+	dgd := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test"},
+		Spec: DynamoGraphDeploymentSpec{
+			Env: []corev1.EnvVar{{Name: "FOO", Value: "dgd"}},
+			Components: []DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "worker",
+					ComponentType: ComponentTypeWorker,
+					PodTemplate: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:  "main",
+								Env:   []corev1.EnvVar{{Name: "FOO", Value: "component"}},
+								Image: "worker:latest",
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+	baseHash, err := ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		t.Fatalf("ComputeDGDWorkersSpecHash(base): %v", err)
+	}
+
+	changed := dgd.DeepCopy()
+	changed.Spec.Env[0].Value = "changed-dgd"
+	changedHash, err := ComputeDGDWorkersSpecHash(changed)
+	if err != nil {
+		t.Fatalf("ComputeDGDWorkersSpecHash(changed): %v", err)
+	}
+	if changedHash != baseHash {
+		t.Fatalf("overridden DGD env changed worker hash: %q != %q", changedHash, baseHash)
+	}
+}
+
+func TestComputeDGDWorkersSpecHashTracksWorkerComponentType(t *testing.T) {
+	worker := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test"},
+		Spec: DynamoGraphDeploymentSpec{
+			Components: []DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: ComponentTypeWorker,
+			}},
+		},
+	}
+	workerHash, err := ComputeDGDWorkersSpecHash(worker)
+	if err != nil {
+		t.Fatalf("ComputeDGDWorkersSpecHash(worker): %v", err)
+	}
+
+	prefill := worker.DeepCopy()
+	prefill.Spec.Components[0].ComponentType = ComponentTypePrefill
+	prefillHash, err := ComputeDGDWorkersSpecHash(prefill)
+	if err != nil {
+		t.Fatalf("ComputeDGDWorkersSpecHash(prefill): %v", err)
+	}
+	if prefillHash == workerHash {
+		t.Fatalf("component type did not affect worker hash: %q", prefillHash)
 	}
 }

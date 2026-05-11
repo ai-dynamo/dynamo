@@ -846,6 +846,7 @@ func (r *DynamoComponentDeploymentReconciler) getKubeLabels(dynamoComponentDeplo
 			commonconsts.KubeLabelDynamoNamespace,
 			commonconsts.KubeLabelDynamoGraphDeploymentName,
 			commonconsts.KubeLabelDynamoWorkerHash,
+			commonconsts.KubeLabelDynamoComponentClass,
 		} {
 			if value := objectLabels[key]; value != "" {
 				labels[key] = value

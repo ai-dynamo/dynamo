@@ -7881,6 +7881,26 @@ func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {
 	assert.Equal(t, int32(1), *frontendDCD.Spec.Replicas)
 }
 
+func TestGenerateDynamoComponentsDeploymentsAddsWorkerClassForEPP(t *testing.T) {
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "epp", ComponentType: v1beta1.ComponentTypeEPP},
+				{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill},
+			},
+		},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, &RestartState{}, nil, RollingUpdateContext{NewWorkerHash: "aabb1122"})
+	require.NoError(t, err)
+
+	prefillDCD := dcds["prefill"]
+	require.NotNil(t, prefillDCD)
+	assert.Equal(t, commonconsts.ComponentClassWorker, prefillDCD.Labels[commonconsts.KubeLabelDynamoComponentClass])
+	assert.Equal(t, commonconsts.ComponentClassWorker, GetPodTemplateLabels(&prefillDCD.Spec.DynamoComponentDeploymentSharedSpec)[commonconsts.KubeLabelDynamoComponentClass])
+}
+
 func TestGenerateDynamoComponentsDeployments_InferBackendFrameworkForGeneratedDCDs(t *testing.T) {
 	dgd := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},

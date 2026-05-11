@@ -454,6 +454,47 @@ func TestLegacyAlphaHashCompatibility_V2OnlyChangeUsesNewV2Generation(t *testing
 	require.Equal(t, newV2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 }
 
+func TestUnsupportedPathwayV2OnlyChangeKeepsV2OnlyGeneration(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Envs:          []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
+		},
+	})
+	dgd.Spec.BackendFramework = "vllm"
+	legacyHash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	v2Hash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{
+		consts.AnnotationCurrentWorkerHash:   legacyHash,
+		consts.AnnotationCurrentWorkerHashV2: v2Hash,
+	}
+
+	r := createTestReconcilerWithStatus(dgd)
+	dgd.Spec.BackendFramework = "sglang"
+
+	newLegacyHash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	newV2Hash := betaDGDWorkersSpecHash(t, dgd)
+	require.Equal(t, legacyHash, newLegacyHash)
+	require.NotEqual(t, v2Hash, newV2Hash)
+
+	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
+	require.Empty(t, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
+	require.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
+
+	desired, err := r.desiredWorkerHashes(dgd)
+	require.NoError(t, err)
+	completed := r.workerHashesForUnsupportedPathway(dgd, desired)
+	require.Empty(t, completed.v1)
+	require.Equal(t, newV2Hash, completed.v2)
+
+	r.setCurrentWorkerHashes(dgd, completed)
+	rollingCtx, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	require.NoError(t, err)
+	require.Equal(t, newV2Hash, rollingCtx.NewWorkerHash)
+}
+
 func TestSupportsManagedRollingUpdate(t *testing.T) {
 	tests := []struct {
 		name     string
