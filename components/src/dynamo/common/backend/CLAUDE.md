@@ -6,10 +6,10 @@ Two-class abstraction: `Worker` (runtime integration) and
 ## Engine Lifecycle
 
 ```
-from_args(argv)  ->  start()  ->  generate() / abort()  ->  cleanup()
-     |                  |              |                        |
-  parse args,      start engine,    serve requests         shutdown,
-  return config    return metadata  (concurrent)           release resources
+from_args(argv) -> start() -> generate()/abort() -> drain() -> cleanup()
+     |                |              |                  |          |
+  parse args,    start engine,   serve requests    drain in-flight, shutdown,
+  return config  return metadata (concurrent)      then cleanup    release resources
 ```
 
 1. `from_args(argv)` -- classmethod factory. Parses CLI args, returns
@@ -18,7 +18,10 @@ from_args(argv)  ->  start()  ->  generate() / abort()  ->  cleanup()
    `generate()` MUST be ready to accept calls.
 3. `generate(request, context)` -- streaming inference, called concurrently.
 4. `abort(context)` -- cancel an in-flight request (optional, default no-op).
-5. `cleanup()` -- called once on shutdown.
+5. `drain()` -- backend-side drain before cleanup (optional, default no-op).
+   Called after the discovery unregister + grace period; use it for in-flight
+   NIXL transfers (issue #7319) that must complete while the runtime is alive.
+6. `cleanup()` -- called once on shutdown.
 
 ## Design Constraints
 
@@ -39,11 +42,11 @@ from_args(argv)  ->  start()  ->  generate() / abort()  ->  cleanup()
   build a `WorkerConfig` is a type error, not a runtime `AttributeError`.
 
 - **`generate()` delegates to engine with cancellation monitoring.**
-  `Worker.generate()` runs a background task that watches
-  `context.async_killed_or_stopped()` and calls `engine.abort(context)` on
-  cancellation. It also checks `context.is_stopped()` after each yielded
-  chunk. Sampling params, prompt building, and output formatting stay inside
-  each engine -- they are deeply engine-specific.
+  Cancellation monitoring lives in Rust (`dynamo_backend_common::EngineAdapter`):
+  it spawns a per-request task that watches `ctx.stopped()` / `ctx.killed()`
+  and calls `engine.abort(context)` on cancellation. The Python ABC's
+  `generate()` just yields chunks — the cross-stream cancel logic and
+  exception → `BackendError` mapping are handled by the bridge.
 
 - **`start()` returns `EngineConfig`.** The model class needs registration
   metadata (`context_length`, `block_size`, `total_kv_blocks`) but must not
@@ -111,6 +114,15 @@ Standardize on:
 | File | What it does |
 |------|-------------|
 | `engine.py` | `LLMEngine` ABC -- the only interface engines must implement |
-| `worker.py` | `Worker` -- runtime lifecycle: create runtime, register model, serve endpoint, cleanup |
+| `worker.py` | `Worker` -- thin shim over `dynamo._core.backend.Worker`; lifecycle state machine and signal handling live in Rust (`lib/backend-common`) |
 | `run.py` | Common entry point -- `run(engine_cls)` used by all `unified_main.py` files |
 | `sample_engine.py` | Reference engine -- use as template and for testing |
+
+The Rust `Worker` (in `lib/backend-common/src/worker.rs`) owns:
+  - Lifecycle state machine (Init → Running → Stopped)
+  - SIGTERM/SIGINT handling and graceful shutdown orchestration
+    (discovery unregister → grace period → drain → cleanup)
+  - 3-phase distributed runtime shutdown after engine.cleanup() returns
+
+State-machine and orchestrator invariants are pinned by Rust unit tests
+in the same crate. Don't reimplement them on the Python side.

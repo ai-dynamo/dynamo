@@ -7,6 +7,7 @@ import copy
 import inspect
 import json
 import logging
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, TypeAlias
@@ -43,6 +44,108 @@ class SglangPreprocessResult:
     reasoning_parser: ReasoningParser | None
     guided_decoding: dict[str, Any] | None
     request: dict[str, Any]
+    force_reasoning: bool = False
+
+
+# --- force_reasoning detection (mirrors sglang's template_manager) -------
+#
+# sglang's template_manager sets ``_force_reasoning`` once at startup by
+# scanning the chat template for ``<|im_start|>assistant\n<think>\n``
+# (the qwen3 pattern). We broaden that to also catch GLM-4.5/5 templates
+# which open a thinking block right before the generation prompt.
+#
+# A static, per-server boolean is plenty: per-request decoding of prompt
+# tails adds latency on the hot path with nothing to show for it. The
+# per-request knobs live downstream (``separate_reasoning``,
+# ``chat_template_kwargs.enable_thinking``), matching sglang's API.
+_FORCE_REASONING_PATTERNS = (
+    # qwen3-family: <|im_start|>assistant\n<think>\n
+    re.compile(r"<\|im_start\|>assistant\\n<think>\\n"),
+    # GLM-4.5/5 and similar: <|assistant|> followed by an opening <think>
+    # within the generation-prompt block. The template often has Jinja
+    # expressions (including a '</think>' literal) between the two, so we
+    # match the opening tag literally -- '<think>' never matches
+    # '</think>' because the '/' breaks the literal prefix.
+    re.compile(r"<\|assistant\|>[\s\S]{0,400}?<think>"),
+    # generic fallback for non-delimiter-style templates
+    re.compile(r"\bassistant\b[\s\S]{0,200}?<think>"),
+)
+
+
+def detect_force_reasoning_from_template(chat_template: str | None) -> bool:
+    """Return True if the chat template auto-opens a reasoning block.
+
+    Intended to be called once at processor startup with
+    ``tokenizer.chat_template`` and cached on the processor.
+    """
+    if not chat_template or not isinstance(chat_template, str):
+        return False
+    for pat in _FORCE_REASONING_PATTERNS:
+        if pat.search(chat_template):
+            return True
+    return False
+
+
+# Reasoning parsers that default to "thinking on" unless the client
+# explicitly opts out via chat_template_kwargs. Mirrors sglang's
+# serving_chat._get_reasoning_from_request table.
+_THINKING_BY_DEFAULT = {"qwen3", "glm45", "nemotron_3", "interns1", "kimi_k2"}
+_THINKING_OPT_IN = {"deepseek-v3", "gemma4"}
+
+
+def resolve_request_force_reasoning(
+    request: dict[str, Any],
+    reasoning_parser_name: str | None,
+    template_default: bool,
+) -> bool:
+    """Resolve the effective force_reasoning flag for a single request.
+
+    Mirrors sglang.srt.entrypoints.openai.serving_chat._get_reasoning_from_request
+    combined with template_manager.force_reasoning:
+
+      * opt-out families (``glm45``/``qwen3``/``kimi_k2``/...): on by
+        default, ``chat_template_kwargs.enable_thinking=False`` (or
+        ``thinking=False`` for ``kimi_k2``) disables it.
+      * opt-in families (``deepseek-v3``/``gemma4``): off by default,
+        enabled by ``chat_template_kwargs.{thinking,enable_thinking}=True``.
+      * anything else: follow the statically-detected template default.
+    """
+    if not reasoning_parser_name:
+        return False
+
+    kwargs = (
+        request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
+    )
+
+    if reasoning_parser_name in _THINKING_BY_DEFAULT:
+        flag_key = (
+            "thinking" if reasoning_parser_name == "kimi_k2" else "enable_thinking"
+        )
+        return kwargs.get(flag_key) is not False
+
+    if reasoning_parser_name in _THINKING_OPT_IN:
+        flag_key = (
+            "thinking" if reasoning_parser_name == "deepseek-v3" else "enable_thinking"
+        )
+        return kwargs.get(flag_key) is True
+
+    return template_default
+
+
+def _client_wants_separate_reasoning(request: dict[str, Any]) -> bool:
+    """Honor the client's ``separate_reasoning`` flag (default True).
+
+    Matches sglang's ChatCompletionRequest.separate_reasoning: a client
+    sending ``separate_reasoning=False`` asks for thinking text to land in
+    ``delta.content`` instead of ``delta.reasoning_content``. We implement
+    that by skipping reasoning-parser creation entirely for the request.
+    """
+    value = request.get("separate_reasoning", True)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() not in ("0", "false", "no", "off")
+    return bool(value)
 
 
 def convert_tools(tools: list[dict[str, Any]] | None) -> list[SglangTool] | None:
@@ -89,11 +192,11 @@ def _materialize_messages(messages: list[Any]) -> list[dict[str, Any]]:
 def _normalize_assistant_tool_call_arguments(messages: list[dict[str, Any]]) -> None:
     """Parse assistant tool_call ``arguments`` from JSON string to dict in place.
 
-    Some chat templates (notably qwen3-coder) call ``arguments | items`` on
-    assistant tool_calls, which requires ``arguments`` to be a mapping rather
-    than the JSON string carried by the OpenAI wire format.  Mirror SGLang
-    native's behaviour (``serving_chat.py``) so multi-turn conversations
-    containing prior tool calls render correctly.
+    Some chat templates call ``arguments | items`` on assistant tool_calls,
+    which requires ``arguments`` to be a mapping rather than the JSON string
+    carried by the OpenAI wire format.  Mirror SGLang native's behaviour
+    (``serving_chat.py``) so multi-turn conversations containing prior tool
+    calls render correctly.
 
     Malformed JSON is left untouched so the chat-template error remains
     visible to the caller instead of being silently corrupted.
@@ -111,11 +214,12 @@ def _normalize_assistant_tool_call_arguments(messages: list[dict[str, Any]]) -> 
             if not isinstance(fn, dict):
                 continue
             args = fn.get("arguments")
-            if isinstance(args, str) and args:
-                try:
-                    fn["arguments"] = json.loads(args)
-                except (json.JSONDecodeError, ValueError):
-                    pass
+            if not isinstance(args, str) or not args:
+                continue
+            try:
+                fn["arguments"] = json.loads(args)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                continue
 
 
 def create_parsers(
@@ -124,6 +228,7 @@ def create_parsers(
     tool_call_parser_name: str | None,
     reasoning_parser_name: str | None,
     sglang_tools: list[SglangTool] | None = None,
+    force_reasoning: bool = False,
 ) -> tuple[ToolCallParserType | None, ReasoningParser | None]:
     """Create tool call and reasoning parsers for a request.
 
@@ -153,10 +258,14 @@ def create_parsers(
             )
 
     reasoning_parser = None
-    if reasoning_parser_name:
+    guided_decoding_active = tool_choice == "required" or _is_named_tool_choice(
+        tool_choice
+    )
+    if reasoning_parser_name and not guided_decoding_active:
         reasoning_parser = ReasoningParser(
             model_type=reasoning_parser_name,
             stream_reasoning=True,
+            force_reasoning=force_reasoning,
         )
 
     return tool_call_parser, reasoning_parser
@@ -245,7 +354,9 @@ def _render_deepseek_v4_prompt_token_ids(
             encoding_messages.insert(0, {"role": "system", "content": ""})
         encoding_messages[0]["tools"] = template_tools
 
-    chat_template_kwargs = request.get("chat_template_kwargs") or {}
+    chat_template_kwargs = (
+        request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
+    )
     thinking_mode = "thinking" if chat_template_kwargs.get("thinking") else "chat"
     reasoning_effort = (
         request.get("reasoning_effort")
@@ -358,19 +469,16 @@ def build_tool_call_guided_decoding(
 
 
 def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:
-    if isinstance(prompt_token_ids, list):
-        return prompt_token_ids
+    """Flatten ``apply_chat_template`` output to ``list[int]``.
 
-    input_ids = getattr(prompt_token_ids, "input_ids", None)
-    if input_ids is not None and not isinstance(input_ids, str):
-        return list(input_ids)
-
-    if isinstance(prompt_token_ids, dict):
-        dict_input_ids = prompt_token_ids.get("input_ids")
-        if dict_input_ids is not None and not isinstance(dict_input_ids, str):
-            return list(dict_input_ids)
-
-    return list(prompt_token_ids)
+    On transformers v5 the default ``TokenizersBackend`` returns a
+    ``BatchEncoding`` from ``apply_chat_template(..., tokenize=True)``;
+    unwrap to ``.input_ids`` (a flat list for a single conversation).
+    """
+    ids = getattr(prompt_token_ids, "input_ids", prompt_token_ids)
+    if isinstance(ids, dict):
+        ids = ids.get("input_ids", prompt_token_ids)
+    return list(ids)
 
 
 def preprocess_chat_request(
@@ -380,12 +488,30 @@ def preprocess_chat_request(
     tool_call_parser_name: str | None,
     reasoning_parser_name: str | None,
     exclude_tools_when_tool_choice_none: bool = True,
+    template_force_reasoning: bool = False,
 ) -> SglangPreprocessResult:
     """Preprocess a chat request using SGLang tokenizer and parser APIs.
+
+    ``template_force_reasoning`` is the static per-server flag derived from
+    the chat template (see :func:`detect_force_reasoning_from_template`);
+    the effective per-request value combines it with client knobs
+    (``separate_reasoning``, ``chat_template_kwargs.enable_thinking``).
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
     messages = _materialize_messages(request.get("messages", []))
+
+    # Per-request client escape hatch: skip reasoning parsing entirely when
+    # the client sends ``separate_reasoning=False`` -- thinking text then
+    # lands in ``delta.content`` instead of ``delta.reasoning_content``.
+    effective_reasoning_parser_name = (
+        reasoning_parser_name if _client_wants_separate_reasoning(request) else None
+    )
+    force_reasoning = resolve_request_force_reasoning(
+        request,
+        effective_reasoning_parser_name,
+        template_force_reasoning,
+    )
 
     # Convert tools to SGLang format (done once, shared with parser creation)
     sglang_tools = convert_tools(request.get("tools"))
@@ -430,6 +556,14 @@ def preprocess_chat_request(
         if template_tools:
             template_kwargs["tools"] = template_tools
 
+        chat_template_kwargs = (
+            request.get("chat_template_kwargs")
+            or request.get("chat_template_args")
+            or {}
+        )
+        if chat_template_kwargs:
+            template_kwargs.update(chat_template_kwargs)
+
         prompt_token_ids = _normalize_prompt_token_ids(
             tokenizer.apply_chat_template(messages, **template_kwargs)
         )
@@ -439,8 +573,9 @@ def preprocess_chat_request(
     tool_call_parser, reasoning_parser = create_parsers(
         request,
         tool_call_parser_name=tool_call_parser_name,
-        reasoning_parser_name=reasoning_parser_name,
+        reasoning_parser_name=effective_reasoning_parser_name,
         sglang_tools=sglang_tools,
+        force_reasoning=force_reasoning,
     )
     guided_decoding = build_tool_call_guided_decoding(
         request,
@@ -454,6 +589,7 @@ def preprocess_chat_request(
         reasoning_parser=reasoning_parser,
         guided_decoding=guided_decoding,
         request=request,
+        force_reasoning=force_reasoning,
     )
 
 

@@ -384,6 +384,64 @@ func TestDGD_IntermediateHubStatusComponentNamesWinOverPreservedSpoke(t *testing
 	}
 }
 
+func TestDGD_FromV1alpha1_StatusComponentNameWithoutComponentNames(t *testing.T) {
+	src := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "status-alpha", Namespace: "ns"},
+		Status: DynamoGraphDeploymentStatus{
+			Services: map[string]ServiceReplicaStatus{
+				"worker": {
+					ComponentName:   "worker-current",
+					Replicas:        1,
+					UpdatedReplicas: 1,
+				},
+			},
+		},
+	}
+	got := roundTripFromV1alpha1(t, src)
+	status := got.Status.Services["worker"]
+	if status.ComponentName != "worker-current" {
+		t.Fatalf("componentName = %q, want worker-current", status.ComponentName)
+	}
+	if len(status.ComponentNames) != 0 {
+		t.Fatalf("componentNames = %#v, want empty", status.ComponentNames)
+	}
+}
+
+func TestDGD_FromExistingHubStatusPreservationRestoresComponentName(t *testing.T) {
+	hub := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "status-existing-hub", Namespace: "ns"},
+		Status: v1beta1.DynamoGraphDeploymentStatus{
+			Components: map[string]v1beta1.ComponentReplicaStatus{
+				"worker": {
+					Replicas:        1,
+					UpdatedReplicas: 1,
+				},
+			},
+		},
+	}
+	if err := setJSONAnnOnObj(&hub.ObjectMeta, annDGDStatus, &DynamoGraphDeploymentStatus{
+		Services: map[string]ServiceReplicaStatus{
+			"worker": {
+				ComponentName: "worker-current",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("set status annotation: %v", err)
+	}
+
+	got := &DynamoGraphDeployment{}
+	if err := got.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	status := got.Status.Services["worker"]
+	if status.ComponentName != "worker-current" {
+		t.Fatalf("componentName = %q, want worker-current", status.ComponentName)
+	}
+	if len(status.ComponentNames) != 0 {
+		t.Fatalf("componentNames = %#v, want empty", status.ComponentNames)
+	}
+}
+
 func TestDGD_RoundTrip_SpecLevelFields(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "spec", Namespace: "ns"},
@@ -1527,7 +1585,7 @@ func TestDGD_FromV1alpha1_CheckpointEnabledFalseEmptyPayload(t *testing.T) {
 // an aggregated frontend+worker service pair where the frontend has no
 // explicit container resources (so `containers[*].resources` projects as an
 // empty object) and `sharedMemorySize="0"` (which exercises the Disabled=true
-// path in convertSharedMemoryFrom). It is shared by the idempotence tests
+// path in ConvertToSharedMemorySpec). It is shared by the idempotence tests
 // below so the linter does not flag the identical fixture builders as dupl.
 func newIdempotenceDGDFixture() *v1beta1.DynamoGraphDeployment {
 	replicas := int32(1)
@@ -1588,7 +1646,7 @@ func newIdempotenceDGDFixture() *v1beta1.DynamoGraphDeployment {
 // round-trip, so kubectl apply is idempotent for any v1beta1 input.
 func TestDGD_ApplyIdempotence_GenerationBump(t *testing.T) {
 	// sharedMemorySize=\"0\" is the critical trigger: it exercises the
-	// Disabled=true path in convertSharedMemoryFrom, which previously left
+	// Disabled=true path in ConvertToSharedMemorySpec, which previously left
 	// SharedMemorySpec.Size as a bare Quantity{}.
 	newSrc := newIdempotenceDGDFixture
 
@@ -1633,13 +1691,13 @@ func TestDGD_ApplyIdempotence_GenerationBump(t *testing.T) {
 // a non-pointer struct, so encoding/json's omitempty does not drop it); after
 // the etcd JSON round-trip the Size becomes a canonical zero Quantity that is
 // not reflect.DeepEqual to the Go zero value. Without the fix in
-// convertSharedMemoryFrom, every reapply of a v1beta1 object carrying the
+// ConvertToSharedMemorySpec, every reapply of a v1beta1 object carrying the
 // sparse save would bump .metadata.generation.
 func TestDGD_ApplyIdempotence_EmptySharedMemoryOrigin(t *testing.T) {
 	// Seed a v1alpha1 object whose only non-default bit is SharedMemory =
 	// &SharedMemorySpec{}, then run it through ConvertTo once so the
 	// produced v1beta1 carries the sparse save we need to exercise the empty
-	// branch of convertSharedMemoryFrom.
+	// branch of shared-memory restoration.
 	a1 := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "shm-empty", Namespace: "ns"},
 		Spec: DynamoGraphDeploymentSpec{

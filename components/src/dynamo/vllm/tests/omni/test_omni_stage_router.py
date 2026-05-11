@@ -53,7 +53,11 @@ def _make_stage_cfg(stage_id: int):
 
 def _make_router(stage_configs, stage_clients, formatter=None, output_modalities=None):
     router = stage_router.OmniStageRouter.__new__(stage_router.OmniStageRouter)
-    router.config = SimpleNamespace(output_modalities=output_modalities)
+    router.config = SimpleNamespace(
+        output_modalities=output_modalities,
+        model="test-model",
+        served_model_name=None,
+    )
     router.stage_configs = stage_configs
     router.stage_clients = stage_clients
     router._formatter = formatter or AsyncMock()
@@ -68,6 +72,34 @@ def _patched_generate(router, request, request_id="req-1", request_type="chat"):
         ),
         patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value=request_id),
     )
+
+
+def test_router_loads_stage_configs_from_model_deploy_config():
+    config = SimpleNamespace(
+        model="zai-org/GLM-Image",
+        served_model_name=None,
+        media_output_fs_url=None,
+        media_output_http_url=None,
+        default_video_fps=16,
+    )
+    stage_configs = [_make_stage_cfg(0)]
+
+    with (
+        patch(
+            "dynamo.vllm.omni.stage_router.load_and_resolve_stage_configs",
+            return_value=("/deploy/glm_image.yaml", stage_configs),
+        ) as load_and_resolve_stage_configs,
+        patch("dynamo.vllm.omni.stage_router.OutputFormatter") as output_formatter,
+    ):
+        router = stage_router.OmniStageRouter(config, "/deploy/glm_image.yaml")
+
+    load_and_resolve_stage_configs.assert_called_once_with(
+        config.model,
+        "/deploy/glm_image.yaml",
+        kwargs={},
+    )
+    output_formatter.assert_called_once()
+    assert router.stage_configs == stage_configs
 
 
 # ── issue-004: opaque router ──────────────────────────────
