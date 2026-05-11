@@ -85,6 +85,7 @@ HF_HUB_OFFLINE=1 \
     --enforce-eager \
     --max-model-len 2048 \
     --max-num-seqs 2 \
+    --enable-rl \
     --worker-extension-cls prime_rl.inference.vllm.worker.filesystem.FileSystemWeightUpdateWorker \
     > "$LOG_DIR/worker.log" 2>&1 &
 WORKER_PID=$!

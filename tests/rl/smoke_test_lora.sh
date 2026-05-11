@@ -99,6 +99,7 @@ HF_HUB_OFFLINE=1 \
     --enforce-eager \
     --max-model-len 2048 \
     --max-num-seqs 2 \
+    --enable-rl \
     --enable-lora \
     --max-lora-rank 32 \
     --max-loras 4 \
