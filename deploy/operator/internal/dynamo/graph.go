@@ -285,13 +285,17 @@ func GenerateDynamoComponentsDeployments(
 	rollingUpdateCtx RollingUpdateContext,
 ) (map[string]*v1beta1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1beta1.DynamoComponentDeployment)
+	backendFramework, err := backendFrameworkForGeneratedDCDs(parentDGD)
+	if err != nil {
+		return nil, err
+	}
 
 	// Generate DCDs for each component.
 	for i := range parentDGD.Spec.Components {
 		component := &parentDGD.Spec.Components[i]
 		componentName := component.ComponentName
 		dynamoNamespace := parentDGD.GetDynamoNamespaceForComponent(component)
-		dcd, err := generateSingleDCD(ctx, parentDGD, componentName, component, dynamoNamespace, restartState, existingRestartAnnotations, rollingUpdateCtx)
+		dcd, err := generateSingleDCD(ctx, parentDGD, componentName, component, dynamoNamespace, backendFramework, restartState, existingRestartAnnotations, rollingUpdateCtx)
 		if err != nil {
 			return nil, err
 		}
@@ -299,6 +303,34 @@ func GenerateDynamoComponentsDeployments(
 	}
 
 	return deployments, nil
+}
+
+func backendFrameworkForGeneratedDCDs(parentDGD *v1beta1.DynamoGraphDeployment) (string, error) {
+	if parentDGD.Spec.BackendFramework != "" {
+		return parentDGD.Spec.BackendFramework, nil
+	}
+
+	var detected BackendFramework
+	for i := range parentDGD.Spec.Components {
+		component := &parentDGD.Spec.Components[i]
+		if !IsWorkerComponent(string(component.ComponentType)) {
+			continue
+		}
+
+		backendFramework, err := getBackendFrameworkFromComponent(component, parentDGD)
+		if err != nil {
+			return "", fmt.Errorf("failed to determine backend framework for component %s: %w", component.ComponentName, err)
+		}
+		if backendFramework == "" || backendFramework == BackendFrameworkNoop {
+			continue
+		}
+		if detected != "" && detected != backendFramework {
+			return "", fmt.Errorf("multiple backend frameworks detected for generated DynamoComponentDeployments: %s and %s", detected, backendFramework)
+		}
+		detected = backendFramework
+	}
+
+	return string(detected), nil
 }
 
 func GetDynamoNamespace(object metav1.Object, service *v1beta1.DynamoComponentDeploymentSharedSpec) string {
@@ -312,6 +344,7 @@ func generateSingleDCD(
 	componentName string,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	dynamoNamespace string,
+	backendFramework string,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
 	rollingUpdateCtx RollingUpdateContext,
@@ -319,7 +352,7 @@ func generateSingleDCD(
 	deployment := &v1beta1.DynamoComponentDeployment{}
 	deployment.Spec.DynamoComponentDeploymentSharedSpec = *component
 	deployment.Name = GetDCDResourceName(parentDGD, componentName, rollingUpdateCtx.NewWorkerHash)
-	deployment.Spec.BackendFramework = parentDGD.Spec.BackendFramework
+	deployment.Spec.BackendFramework = backendFramework
 	deployment.Namespace = parentDGD.Namespace
 
 	if err := applyDGDComponentAlphaCompatibilityToDCD(parentDGD, componentName, deployment); err != nil {
