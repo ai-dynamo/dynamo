@@ -1098,7 +1098,9 @@ async def test_pair_packing_continues_past_too_small_candidate(mock_runtime):
     # Prefill fully consumed (small partner), decode partially consumed so
     # the combined total lands at the strict ceiling.
     assert b_targets["prefill"] == 2
-    assert 3 < b_targets["decode"] < 7  # partial: between current(3) and last_desired(7)
+    assert (
+        3 < b_targets["decode"] < 7
+    )  # partial: between current(3) and last_desired(7)
     # Cached intent for decode NOT mutated — planner still wants 7.
     assert handler._intent_cache["default/dgd-b/decode"].last_desired == 7
 
