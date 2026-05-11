@@ -1790,7 +1790,7 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
             serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
         assert_eq!(args["timezone"], "Asia/Shanghai");
     }
-    /// Alias registration: verifies `deepseek-v4` and `deepseekv4` route to the same parser as `deepseek_v4`. Not a CASE.*; covers registry plumbing.
+    /// Alias registration: verifies `deepseek-v4` and `deepseekv4` route to the same parser as `deepseek_v4`. Not a PARSER.*; covers registry plumbing.
     #[tokio::test]
     async fn test_deepseek_v4_compatibility_aliases() {
         let input = r#"<｜DSML｜tool_calls>
@@ -2898,10 +2898,7 @@ fahrenheit
             .unwrap();
         assert_eq!(
             content,
-            Some(
-                "I'll help you check the weather.  Let me get that information for you."
-                    .to_string()
-            )
+            Some("I'll help you check the weather. ".to_string())
         );
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());

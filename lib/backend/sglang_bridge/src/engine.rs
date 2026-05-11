@@ -375,7 +375,7 @@ impl LLMEngine for SglangBridge {
         &self,
         request: PreprocessedRequest,
         ctx: Arc<dyn AsyncEngineContext>,
-    ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError> {
+    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         match self.disaggregation_mode {
             DisaggMode::Prefill => self.generate_prefill(request, ctx).await,
             DisaggMode::Decode | DisaggMode::None => self.generate_decode(request, ctx).await,
@@ -409,7 +409,7 @@ impl SglangBridge {
         &self,
         request: PreprocessedRequest,
         ctx: Arc<dyn AsyncEngineContext>,
-    ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError> {
+    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         tracing::info!(
             request_id = ctx.id(),
             disagg_mode = ?self.disaggregation_mode,
@@ -476,23 +476,23 @@ impl SglangBridge {
                 tokio::select! {
                     biased;
                     _ = ctx.stopped() => {
-                        yield LLMEngineOutput::cancelled()
-                            .with_usage(usage(prompt_len, completion_tokens));
+                        yield Ok(LLMEngineOutput::cancelled()
+                            .with_usage(usage(prompt_len, completion_tokens)));
                         break;
                     }
                     maybe_chunk = stream.next() => {
                         let Some(chunk_res) = maybe_chunk else {
-                            yield LLMEngineOutput::error(
+                            yield Ok(LLMEngineOutput::error(
                                 "sglang_bridge: stream ended without terminal".to_string()
-                            );
+                            ));
                             break;
                         };
                         let resp = match chunk_res {
                             Ok(r) => r,
                             Err(status) => {
-                                yield LLMEngineOutput::error(
+                                yield Ok(LLMEngineOutput::error(
                                     format!("sglang_bridge: gRPC stream error: {status}")
-                                );
+                                ));
                                 break;
                             }
                         };
@@ -501,7 +501,7 @@ impl SglangBridge {
                             Some(GenResponse::Chunk(stream_chunk)) => {
                                 completion_tokens = stream_chunk.completion_tokens;
                                 for tid in stream_chunk.token_ids {
-                                    yield chunk::token(tid);
+                                    yield Ok(chunk::token(tid));
                                 }
                             }
                             Some(GenResponse::Complete(complete)) => {
@@ -515,20 +515,20 @@ impl SglangBridge {
                                 terminal.token_ids = vec![];
                                 let total = complete.completion_tokens.max(completion_tokens);
                                 terminal = terminal.with_usage(usage(prompt_len, total));
-                                yield terminal;
+                                yield Ok(terminal);
                                 break;
                             }
                             Some(GenResponse::Error(err)) => {
-                                yield LLMEngineOutput::error(format!(
+                                yield Ok(LLMEngineOutput::error(format!(
                                     "sglang_bridge: {} ({})",
                                     err.message, err.http_status_code
-                                ));
+                                )));
                                 break;
                             }
                             None => {
-                                yield LLMEngineOutput::error(
+                                yield Ok(LLMEngineOutput::error(
                                     "sglang_bridge: empty oneof response".to_string()
-                                );
+                                ));
                                 break;
                             }
                         }
@@ -548,7 +548,7 @@ impl SglangBridge {
         &self,
         request: PreprocessedRequest,
         ctx: Arc<dyn AsyncEngineContext>,
-    ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError> {
+    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         tracing::info!(
             request_id = ctx.id(),
             "sglang_bridge prefill: generate_prefill ENTRY"
@@ -719,7 +719,7 @@ impl SglangBridge {
             // The actual prefill compute + KV transfer continues in the
             // spawned background task; the decode worker fetches KV via
             // NIXL using the bootstrap_room we just delivered.
-            yield bootstrap_chunk;
+            yield Ok(bootstrap_chunk);
         }))
     }
 }

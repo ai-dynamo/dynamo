@@ -23,7 +23,7 @@ title: Snapshot
 
 - x86_64 (`amd64`) GPU nodes
 - NVIDIA driver 580.xx or newer on the target GPU nodes (590.xx or newer if testing multi-GPU snapshots)
-- vLLM or SGLang backend today
+- vLLM backend today, with limited preview support
 - `ReadWriteMany` storage for cross-node restore
 - **CRI-O / OpenShift:** set `runtime.type=crio` on the snapshot chart (and `openshift.enabled=true` on OpenShift). Defaults are for containerd; see the chart README for sockets and Helm flags.
 
@@ -145,15 +145,7 @@ spec:
             ...
 ```
 
-If this checkpoint should capture and restore GPU Memory Service helpers, set:
-
-```yaml
-spec:
-  gpuMemoryService:
-    enabled: true
-```
-
-`spec.gpuMemoryService` is outside `spec.identity`, so it does not change the checkpoint identity hash.
+Leave `spec.gpuMemoryService.enabled` unset or `false`. Snapshot plus GPU Memory Service is not yet available, and admission rejects `DynamoCheckpoint` objects with `spec.gpuMemoryService.enabled: true`. See [Shadow Engine Failover](shadow-engine-failover.md) for the current GMS support status.
 
 For a full working example, see [deploy/operator/config/samples/nvidia.com_v1alpha1_dynamocheckpoint.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/config/samples/nvidia.com_v1alpha1_dynamocheckpoint.yaml).
 
@@ -275,7 +267,7 @@ spec:
         ...
 ```
 
-Auto mode only hashes `checkpoint.identity`. If you need GMS-specific checkpoint behavior, configure it on the `DynamoCheckpoint` object with `spec.gpuMemoryService.enabled`.
+Auto mode only hashes `checkpoint.identity`. GMS-specific checkpoint behavior is not yet available.
 
 Useful inspection commands:
 
@@ -295,9 +287,7 @@ kubectl patch dgd vllm-auto-demo -n ${NAMESPACE} --type=merge \
 
 ## Failover Restore
 
-Dynamo supports both intra-pod and inter-pod failover restore topologies. In
-operator-managed deployments, the operator prepares the restore workload
-automatically. Users enable failover in the `DynamoGraphDeployment` spec.
+Failover restore is not yet available. The current Snapshot flow does not support Snapshot plus GMS, so do not use failover restore as a supported checkpoint/restore path. For current GMS and active/passive failover guidance, see [Shadow Engine Failover](shadow-engine-failover.md).
 
 ## Lower-Level Testing With `snapshotctl`
 
@@ -358,7 +348,7 @@ Checkpoints are uniquely identified by a **16-character SHA256 hash** (64 bits) 
 | Field | Required | Affects Hash | Example |
 |-------|----------|-------------|---------|
 | `model` | ✓ | ✓ | `meta-llama/Llama-3-8B` |
-| `backendFramework` | ✓ | ✓ | `sglang`, `vllm` |
+| `backendFramework` | ✓ | ✓ | `vllm` |
 | `dynamoVersion` | | ✓ | `0.9.0`, `1.0.0` |
 | `tensorParallelSize` | | ✓ | `1`, `2`, `4`, `8` |
 | `pipelineParallelSize` | | ✓ | `1`, `2` |
@@ -411,8 +401,10 @@ status:
 
 ## Limitations
 
-- **LLM workers only**: checkpoint/restore supports LLM decode and prefill workers. Specialized workers such as multimodal, embedding, and diffusion are not supported.
-- **Multi-GPU remains preview**: tensor-parallel configurations are exercised in internal testing, but they are not yet a broadly supported production path across clusters.
+- **Backend support is limited**: checkpoint/restore currently supports vLLM workers only, and that support is still a limited preview.
+- **Worker coverage is narrow**: specialized workers such as multimodal, embedding, and diffusion are not supported.
+- **Multi-GPU remains preview**: vLLM tensor-parallel configurations have limited validation and are not yet a broadly supported path across clusters.
+- **GMS restore is not yet available**: Snapshot plus GPU Memory Service is blocked by admission.
 - **Network state is sensitive**: restore is sensitive to live TCP socket state. Loopback bootstrap/control sockets are the most reliable path today.
 - **Privileged DaemonSet required**: `snapshot-agent` must run privileged to execute CRIU and `cuda-checkpoint`. Workload pods do not need to be privileged.
 
@@ -462,10 +454,11 @@ If the manifest already carries snapshot target metadata, it must agree with the
 ## Planned Features
 
 - Stabilize multi-GPU support
-- TensorRT-LLM support
+- Additional backend support
 - Alternative storage backends
 
 ## Related Documentation
 
 - [Installation Guide](installation-guide.md)
+- [Shadow Engine Failover](shadow-engine-failover.md)
 - [API Reference](api-reference.md)

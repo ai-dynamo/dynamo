@@ -176,7 +176,7 @@ _Appears in:_
 | `namespace` _string_ | Namespace is the desired namespace for the created DynamoGraphDeployment.<br />If not specified, defaults to the DGDR namespace. |  | Optional: \{\} <br /> |
 | `labels` _object (keys:string, values:string)_ | Labels are additional labels to add to the DynamoGraphDeployment metadata.<br />These are merged with auto-generated labels from the profiling process. |  | Optional: \{\} <br /> |
 | `annotations` _object (keys:string, values:string)_ | Annotations are additional annotations to add to the DynamoGraphDeployment metadata. |  | Optional: \{\} <br /> |
-| `workersImage` _string_ | WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.<br />This image is used for both temporary DGDs created during online profiling and the final DGD.<br />If omitted, the image from the base config file (e.g., disagg.yaml) is used.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0" |  | Optional: \{\} <br /> |
+| `workersImage` _string_ | WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.<br />This image is used for both temporary DGDs created during online profiling and the final DGD.<br />If omitted, the image from the base config file (e.g., disagg.yaml) is used.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1" |  | Optional: \{\} <br /> |
 
 
 #### DeploymentStatus
@@ -382,7 +382,6 @@ _Appears in:_
 | `serviceName` _string_ | The name of the component |  |  |
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
-| `dynamoNamespace` _string_ | DynamoNamespace is deprecated and will be removed in a future version.<br />The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component |  | Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
@@ -426,7 +425,6 @@ _Appears in:_
 | `serviceName` _string_ | The name of the component |  |  |
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
-| `dynamoNamespace` _string_ | DynamoNamespace is deprecated and will be removed in a future version.<br />The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component |  | Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
@@ -1022,7 +1020,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `config` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.<br />The profiler will validate the configuration and report any errors. |  | Optional: \{\} <br />Type: object <br /> |
 | `configMapRef` _[ConfigMapKeySelector](#configmapkeyselector)_ | ConfigMapRef is an optional reference to a ConfigMap containing the DynamoGraphDeployment<br />base config file (disagg.yaml). This is separate from the profiling config above.<br />The path to this config will be set as engine.config in the profiling config. |  | Optional: \{\} <br /> |
-| `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0" |  | Required: \{\} <br /> |
+| `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1" |  | Required: \{\} <br /> |
 | `outputPVC` _string_ | OutputPVC is an optional PersistentVolumeClaim name for storing profiling output.<br />If specified, all profiling artifacts (logs, plots, configs, raw data) will be written<br />to this PVC instead of an ephemeral emptyDir volume. This allows users to access<br />complete profiling results after the job completes by mounting the PVC.<br />The PVC must exist in the same namespace as the DGDR.<br />If not specified, profiling uses emptyDir and only essential data is saved to ConfigMaps.<br />Note: ConfigMaps are still created regardless of this setting for planner integration. |  | Optional: \{\} <br /> |
 | `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core)_ | Resources specifies the compute resource requirements for the profiling job container.<br />If not specified, no resource requests or limits are set. |  | Optional: \{\} <br /> |
 | `tolerations` _[Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core) array_ | Tolerations allows the profiling job to be scheduled on nodes with matching taints.<br />For example, to schedule on GPU nodes, add a toleration for the nvidia.com/gpu taint. |  | Optional: \{\} <br /> |
@@ -1638,10 +1636,10 @@ _Appears in:_
 
 DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 
-v1beta1 is currently an UNSERVED version: it is defined so that conversion
-scaffolding and type generation can land ahead of the full multi-version
-wiring. Callers must continue to use v1alpha1 until v1beta1 is promoted to
-served in a subsequent MR.
+v1beta1 is a served version: the API server accepts reads and writes
+against it, and transparently converts to/from v1alpha1 (still the
+storage version until a later MR flips it). Conversion goes through the
+operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 
 
 
@@ -1679,7 +1677,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Required: \{\} <br /> |
+| `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
 | `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly. |  | Enum: [frontend worker prefill decode planner epp] <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate is the pod template used to create the component's pods.<br />The operator injects its defaults (image, command, env, ports, probes,<br />resources, volume mounts) into the container named `"main"` inside<br />`podTemplate.spec.containers`, merging user overrides by name. If no<br />container named `"main"` is present, the operator auto-generates it<br />with standard defaults. All other containers in `podTemplate.spec.containers`<br />are treated as user-managed sidecars: the operator does not inject<br />defaults into them, so sidecars must specify required fields (e.g. `image`)<br />themselves. The validation webhook rejects pod templates where a<br />non-`"main"` container is missing a required field such as `image`. |  | Optional: \{\} <br /> |
@@ -1709,7 +1707,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `backendFramework` _string_ | backendFramework specifies the backend framework. |  | Enum: [sglang vllm trtllm] <br />Required: \{\} <br /> |
-| `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Required: \{\} <br /> |
+| `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
 | `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly. |  | Enum: [frontend worker prefill decode planner epp] <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate is the pod template used to create the component's pods.<br />The operator injects its defaults (image, command, env, ports, probes,<br />resources, volume mounts) into the container named `"main"` inside<br />`podTemplate.spec.containers`, merging user overrides by name. If no<br />container named `"main"` is present, the operator auto-generates it<br />with standard defaults. All other containers in `podTemplate.spec.containers`<br />are treated as user-managed sidecars: the operator does not inject<br />defaults into them, so sidecars must specify required fields (e.g. `image`)<br />themselves. The validation webhook rejects pod templates where a<br />non-`"main"` container is missing a required field such as `image`. |  | Optional: \{\} <br /> |
@@ -1731,10 +1729,10 @@ _Appears in:_
 
 DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 
-v1beta1 is currently an UNSERVED version: it is defined so that conversion
-scaffolding and type generation can land ahead of the full multi-version
-wiring. Callers must continue to use v1alpha1 until v1beta1 is promoted to
-served in a subsequent MR.
+v1beta1 is a served version: the API server accepts reads and writes
+against it, and transparently converts to/from v1alpha1 (still the
+storage version until a later MR flips it). Conversion goes through the
+operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 
 
 
@@ -1815,7 +1813,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />Can be a HuggingFace ID or a private model name. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `backend` _[BackendType](#backendtype)_ | Backend specifies the inference backend to use for profiling and deployment. | auto | Enum: [auto sglang trtllm vllm] <br />Optional: \{\} <br /> |
-| `image` _string_ | Image is the container image reference for the profiling job (frontend image).<br />Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0". |  | Optional: \{\} <br /> |
+| `image` _string_ | Image is the container image reference for the profiling job (frontend image).<br />Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1". |  | Optional: \{\} <br /> |
 | `modelCache` _[ModelCacheSpec](#modelcachespec)_ | ModelCache provides optional PVC configuration for pre-downloaded model weights.<br />When provided, weights are loaded from the PVC instead of downloading from HuggingFace. |  | Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#hardwarespec)_ | Hardware describes the hardware resources available for profiling and deployment.<br />Typically auto-filled by the operator from cluster discovery. |  | Optional: \{\} <br /> |
 | `workload` _[WorkloadSpec](#workloadspec)_ | Workload defines the expected workload characteristics for SLA-based profiling. |  | Optional: \{\} <br /> |
@@ -1861,10 +1859,9 @@ The adapter acts as an intermediary between autoscalers and the DGD,
 ensuring that only the adapter controller modifies the DGD's component replicas.
 This prevents conflicts when multiple autoscaling mechanisms are in play.
 
-v1beta1 is currently an UNSERVED version: it is defined so that conversion
-scaffolding and type generation can land ahead of the full multi-version
-wiring. Callers must continue to use v1alpha1 until v1beta1 is promoted to
-served in a subsequent MR.
+v1alpha1 remains the storage version; conversion between served versions is
+handled by the operator's conversion webhook
+(see api/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
 
 
 

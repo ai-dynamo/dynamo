@@ -11,7 +11,9 @@ use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, ThreadPoolIndexer,
 };
-use dynamo_kv_router::protocols::{BlockHashOptions, OverlapScores, RouterEvent, WorkerId};
+use dynamo_kv_router::protocols::{
+    BlockHashOptions, OverlapScores, RouterEvent, StorageTier, WorkerId,
+};
 use dynamo_kv_router::scheduling::TierOverlapBlocks;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -34,6 +36,10 @@ enum ReplayIndexer {
 
 impl ReplayIndexer {
     async fn apply_event(&self, event: RouterEvent) {
+        // TODO: support lower tier events in replay indexer
+        if !event.storage_tier.is_gpu() {
+            return;
+        }
         match self {
             Self::Single(indexer) => indexer.apply_event(event).await,
             Self::Concurrent(indexer) => indexer.apply_event(event).await,
@@ -93,6 +99,20 @@ impl KvCacheEventSink for ReplayKvEventSink {
     fn publish(&self, event: dynamo_kv_router::protocols::KvCacheEvent) -> anyhow::Result<()> {
         self.event_tx
             .send(RouterEvent::new(self.worker_id, event))
+            .map_err(|_| anyhow!("replay router event channel closed"))
+    }
+
+    fn publish_with_storage_tier(
+        &self,
+        event: dynamo_kv_router::protocols::KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> anyhow::Result<()> {
+        self.event_tx
+            .send(RouterEvent::with_storage_tier(
+                self.worker_id,
+                event,
+                storage_tier,
+            ))
             .map_err(|_| anyhow!("replay router event channel closed"))
     }
 }
@@ -363,5 +383,69 @@ impl ReplayRouter {
             Self::RoundRobin(_) => Vec::new(),
             Self::Kv(router) => router.debug_potential_loads(isl_tokens, track_prefill_tokens),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dynamo_kv_router::protocols::{
+        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+        KvCacheStoredBlockData, LocalBlockHash, StorageTier, WorkerWithDpRank,
+        compute_block_hash_for_seq,
+    };
+
+    use super::*;
+
+    fn store_event(
+        worker_id: WorkerId,
+        event_id: u64,
+        tokens_hash: LocalBlockHash,
+        storage_tier: StorageTier,
+    ) -> RouterEvent {
+        RouterEvent::with_storage_tier(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(event_id),
+                        tokens_hash,
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            },
+            storage_tier,
+        )
+    }
+
+    #[tokio::test]
+    async fn replay_indexer_ignores_lower_tier_events_for_primary_overlap() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let tokens = vec![1, 2, 3, 4];
+        let tokens_hash = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())[0];
+        let indexer = create_replay_indexer(4, 1);
+
+        indexer
+            .apply_event(store_event(7, 1, tokens_hash, StorageTier::HostPinned))
+            .await;
+        indexer.flush().await;
+        let matches = indexer
+            .find_matches_for_request(&tokens, None)
+            .await
+            .unwrap();
+        assert_eq!(matches.scores.get(&worker), None);
+
+        indexer
+            .apply_event(store_event(7, 2, tokens_hash, StorageTier::Device))
+            .await;
+        indexer.flush().await;
+        let matches = indexer
+            .find_matches_for_request(&tokens, None)
+            .await
+            .unwrap();
+        assert_eq!(matches.scores.get(&worker), Some(&1));
     }
 }

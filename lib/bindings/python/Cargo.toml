@@ -37,6 +37,7 @@ dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sglang-bridge = { path = "../../backend/sglang_bridge" }
 
 anyhow = { version = "1" }
+async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 dashmap = { version = "6.1" }
 futures = { version = "0.3" }

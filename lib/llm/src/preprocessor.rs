@@ -19,8 +19,9 @@ use anyhow::Context;
 use anyhow::{Result, bail};
 
 use dynamo_protocols::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
-    ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, EncodingFormat,
+    ChatCompletionMessageContent, ChatCompletionRequestMessage,
+    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+    ChatCompletionToolChoiceOption, EncodingFormat,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use futures::Stream;
@@ -153,6 +154,8 @@ pub struct OpenAIPreprocessor {
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
+    /// KV cache block size published in the model deployment card.
+    kv_cache_block_size: usize,
     tool_call_parser: Option<String>,
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
@@ -190,6 +193,7 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
+        let kv_cache_block_size = mdc.kv_cache_block_size as usize;
 
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
@@ -205,6 +209,7 @@ impl OpenAIPreprocessor {
             mdcsum,
             lora_name,
             runtime_config,
+            kv_cache_block_size,
             tool_call_parser,
             media_loader,
             context_length,
@@ -802,12 +807,18 @@ impl OpenAIPreprocessor {
                 | Some(ChatCompletionToolChoiceOption::Named(_))
         );
 
+        let reasoning_disabled_by_request = Self::is_reasoning_disabled_by_request(
+            self.runtime_config.reasoning_parser.as_deref(),
+            request.chat_template_args.as_ref(),
+        );
+
         // Try to parse reasoning content only if parser is configured.
         let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
-            && !Self::is_reasoning_disabled_by_request(
-                self.runtime_config.reasoning_parser.as_deref(),
-                request.chat_template_args.as_ref(),
-            )
+            && !reasoning_disabled_by_request
+            && !suppress_reasoning_after_tool
+            && !tool_choice_forces_guided_json;
+        let should_strip_disabled_reasoning_start = reasoning_disabled_by_request
+            && Self::is_nemotron_force_reasoning(self.runtime_config.reasoning_parser.as_deref())
             && !suppress_reasoning_after_tool
             && !tool_choice_forces_guided_json;
 
@@ -823,6 +834,10 @@ impl OpenAIPreprocessor {
                 stream,
                 self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
                 prompt_injected_reasoning,
+            ))
+        } else if should_strip_disabled_reasoning_start {
+            Box::pin(Self::strip_leading_reasoning_start_from_stream(
+                stream, "<think>",
             ))
         } else {
             Box::pin(stream)
@@ -1276,14 +1291,36 @@ impl OpenAIPreprocessor {
         tool_call_parser: Option<&str>,
         reasoning_parser: Option<&str>,
     ) -> bool {
-        matches!(tool_call_parser, Some("gemma4") | Some("gemma-4"))
-            || matches!(reasoning_parser, Some("gemma4") | Some("gemma-4"))
+        // Parsers in this allow-list match against special tokens that the
+        // tokenizer would otherwise strip when `skip_special_tokens=true`
+        // (the OpenAI-API default). Without the tokens preserved through
+        // decode the parsers silently produce empty reasoning_content /
+        // tool_calls.
+        //
+        // - gemma4: `<|think|>` markers (reasoning + tool-call).
+        // - harmony / gpt_oss: `<|channel|>analysis<|message|>...<|end|>`.
+        // - kimi_k2: `<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>`.
+        // - kimi_k25: `</think>` (special token id 163607).
+        matches!(
+            tool_call_parser,
+            Some("gemma4") | Some("gemma-4") | Some("harmony") | Some("kimi_k2")
+        ) || matches!(
+            reasoning_parser,
+            Some("gemma4") | Some("gemma-4") | Some("gpt_oss") | Some("kimi_k25")
+        )
+    }
+
+    fn is_nemotron_force_reasoning(reasoning_parser: Option<&str>) -> bool {
+        matches!(
+            reasoning_parser,
+            Some("nemotron_nano" | "nemotron3" | "nemotron_v3")
+        )
     }
 
     /// Check if reasoning parsing should be disabled based on per-request parameters.
     /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
-    /// For nemotron_nano: disabled when chat_template_args contains "enable_thinking": false
-    ///   or "force_nonempty_content": true.
+    /// For Nemotron force-reasoning aliases: disabled when chat_template_args
+    ///   contains "enable_thinking": false or "force_nonempty_content": true.
     /// For deepseek_r1 / deepseek_v4: disabled when chat_template_args contains
     ///   "thinking": false or "thinking_mode": "chat" — matches the V4 formatter's
     ///   `resolve_thinking_mode` convention, so the parser and the prompt stay in sync.
@@ -1305,7 +1342,7 @@ impl OpenAIPreprocessor {
                 }
                 false
             }
-            Some("nemotron_nano") | Some("nemotron3") => {
+            parser if Self::is_nemotron_force_reasoning(parser) => {
                 if let Some(args) = chat_template_args {
                     if let Some(enable_thinking) = args.get("enable_thinking")
                         && enable_thinking == &serde_json::Value::Bool(false)
@@ -1415,6 +1452,150 @@ impl OpenAIPreprocessor {
         })
         .fuse()
     }
+
+    // Motivation: when Nemotron reasoning is disabled by request flags, the
+    // backend may still emit a leading <think>. Buffer the initial stream
+    // bytes so split chunks like "<thi" + "nk>answer" are stripped cleanly.
+    fn strip_leading_reasoning_start_from_stream<S>(
+        stream: S,
+        think_start_token: &'static str,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        struct StripReasoningStartState {
+            stream:
+                Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
+            think_start_token: &'static str,
+            choices: HashMap<u32, StripChoiceState>,
+            last_response: Option<Annotated<NvCreateChatCompletionStreamResponse>>,
+            eof_flushed: bool,
+        }
+
+        #[derive(Default)]
+        struct StripChoiceState {
+            buffer: String,
+            decided: bool,
+        }
+
+        fn take_undecided_buffer(choice_state: &mut StripChoiceState) -> Option<String> {
+            if choice_state.decided || choice_state.buffer.is_empty() {
+                return None;
+            }
+
+            choice_state.decided = true;
+            Some(std::mem::take(&mut choice_state.buffer))
+        }
+
+        fn drain_undecided_buffers(
+            choices: &mut HashMap<u32, StripChoiceState>,
+        ) -> HashMap<u32, String> {
+            choices
+                .iter_mut()
+                .filter_map(|(index, choice_state)| {
+                    take_undecided_buffer(choice_state).map(|buffer| (*index, buffer))
+                })
+                .collect()
+        }
+
+        let state = StripReasoningStartState {
+            stream: Box::pin(stream),
+            think_start_token,
+            choices: HashMap::new(),
+            last_response: None,
+            eof_flushed: false,
+        };
+
+        stream::unfold(state, |mut state| async move {
+            if let Some(mut response) = state.stream.next().await {
+                let Some(mut data) = response.data.take() else {
+                    return Some((response, state));
+                };
+
+                for choice in data.inner.choices.iter_mut() {
+                    let choice_state = state.choices.entry(choice.index).or_default();
+                    let text = match choice.delta.content.take() {
+                        Some(ChatCompletionMessageContent::Text(text)) => text,
+                        other => {
+                            if let Some(buffer) = take_undecided_buffer(choice_state) {
+                                choice.delta.content =
+                                    Some(ChatCompletionMessageContent::Text(buffer));
+                            } else {
+                                choice.delta.content = other;
+                            }
+                            continue;
+                        }
+                    };
+
+                    let output = if choice_state.decided {
+                        text
+                    } else {
+                        choice_state.buffer.push_str(&text);
+                        if state.think_start_token.starts_with(&choice_state.buffer)
+                            && choice_state.buffer.len() < state.think_start_token.len()
+                        {
+                            choice.delta.content = None;
+                            continue;
+                        }
+
+                        choice_state.decided = true;
+                        if choice_state.buffer.starts_with(state.think_start_token) {
+                            choice_state.buffer[state.think_start_token.len()..].to_string()
+                        } else {
+                            choice_state.buffer.clone()
+                        }
+                    };
+
+                    choice_state.buffer.clear();
+                    choice.delta.content = if output.is_empty() {
+                        None
+                    } else {
+                        Some(ChatCompletionMessageContent::Text(output))
+                    };
+                }
+
+                response.data = Some(data);
+                state.last_response = Some(response.clone());
+
+                Some((response, state))
+            } else if state.eof_flushed {
+                None
+            } else {
+                state.eof_flushed = true;
+                let mut flushed = drain_undecided_buffers(&mut state.choices);
+                if flushed.is_empty() {
+                    None
+                } else {
+                    let mut response = state.last_response.clone()?;
+                    let data = response.data.as_mut()?;
+                    data.inner.usage = None;
+                    data.inner.choices.retain_mut(|choice| {
+                        if let Some(buffer) = flushed.remove(&choice.index) {
+                            choice.delta.role = None;
+                            choice.delta.content = Some(ChatCompletionMessageContent::Text(buffer));
+                            choice.delta.tool_calls = None;
+                            choice.delta.function_call = None;
+                            choice.delta.refusal = None;
+                            choice.delta.reasoning_content = None;
+                            choice.finish_reason = None;
+                            choice.stop_reason = None;
+                            choice.logprobs = None;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+
+                    if data.inner.choices.is_empty() {
+                        None
+                    } else {
+                        Some((response, state))
+                    }
+                }
+            }
+        })
+        .fuse()
+    }
 }
 
 // for pals, we do not want to add the generation prompt to the formatted prompt
@@ -1473,6 +1654,10 @@ impl
             common_request.agent_context.clone().map(|agent_context| {
                 let request_model = common_request.model.clone();
                 let request_tracker = tracker.clone();
+                let replay_metrics = crate::agents::trace::request_replay_metrics(
+                    &common_request.token_ids,
+                    self.kv_cache_block_size,
+                );
                 let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
                     .and_then(|context| context.x_request_id)
                     .or_else(|| {
@@ -1481,7 +1666,13 @@ impl
                             .ok()
                             .map(|value| value.as_ref().clone())
                     });
-                (agent_context, request_model, request_tracker, x_request_id)
+                (
+                    agent_context,
+                    request_model,
+                    request_tracker,
+                    x_request_id,
+                    replay_metrics,
+                )
             })
         } else {
             None
@@ -1563,6 +1754,7 @@ impl
             request_model,
             request_tracker,
             x_request_id,
+            replay_metrics,
         )) = trace_state
         {
             let (stream, done_fut) = crate::telemetry::stream::notify_on_completion(final_stream);
@@ -1574,12 +1766,13 @@ impl
                         "agent_context present but request tracker is missing; emitting partial trace"
                     );
                 }
-                let metrics = crate::agents::trace::request_metrics(
+                let mut metrics = crate::agents::trace::request_metrics(
                     request_id,
                     x_request_id,
                     request_model,
                     request_tracker.as_deref(),
                 );
+                metrics.replay = replay_metrics;
                 crate::agents::trace::emit_request_end(agent_context, metrics);
             });
             stream
@@ -1809,6 +2002,7 @@ mod strip_tests {
 mod tests {
     use super::*;
 
+    /// PRE.1 — `skip_special_tokens` default. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]
     fn test_parser_requires_special_tokens() {
         let cases: &[(Option<&str>, Option<&str>, bool, &str)] = &[
@@ -1844,10 +2038,44 @@ mod tests {
             ),
             (Some("hermes"), None, false, "hermes → not required"),
             (
+                Some("harmony"),
+                None,
+                true,
+                "harmony tool-call only → required",
+            ),
+            (
+                None,
+                Some("gpt_oss"),
+                true,
+                "gpt_oss reasoning only → required",
+            ),
+            (
+                Some("harmony"),
+                Some("gpt_oss"),
+                true,
+                "harmony + gpt_oss paired → required",
+            ),
+            (
                 Some("kimi_k2"),
                 Some("kimi_k25"),
-                false,
-                "kimi_k2 paired → not required",
+                true,
+                "kimi_k2 + kimi_k25 paired → required \
+                 (tool-call markers `<|tool_calls_section_*|>` and reasoning \
+                  marker `</think>` are special tokens that get stripped under \
+                  the default skip_special_tokens=true)",
+            ),
+            (
+                None,
+                Some("kimi_k25"),
+                true,
+                "kimi_k25 reasoning only → required (`</think>` is special token id 163607)",
+            ),
+            (
+                Some("kimi_k2"),
+                None,
+                true,
+                "kimi_k2 tool-call only → required \
+                 (`<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>` are special)",
             ),
             (None, None, false, "no parsers → not required"),
         ];
@@ -1860,6 +2088,7 @@ mod tests {
         }
     }
 
+    /// PRE.2 — Per-request reasoning gate. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]
     fn test_is_reasoning_disabled_by_request() {
         let thinking_true = {
@@ -1882,6 +2111,14 @@ mod tests {
             m.insert(
                 "enable_thinking".to_string(),
                 serde_json::Value::Bool(false),
+            );
+            m
+        };
+        let force_nonempty_content_true = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "force_nonempty_content".to_string(),
+                serde_json::Value::Bool(true),
             );
             m
         };
@@ -2002,6 +2239,24 @@ mod tests {
                 Some(&empty_args),
                 false,
                 "nemotron_nano + empty args → enabled",
+            ),
+            (
+                Some("nemotron3"),
+                Some(&force_nonempty_content_true),
+                true,
+                "nemotron3 + force_nonempty_content=true → disabled",
+            ),
+            (
+                Some("nemotron_v3"),
+                Some(&enable_thinking_false),
+                true,
+                "nemotron_v3 + enable_thinking=false → disabled",
+            ),
+            (
+                Some("nemotron_v3"),
+                Some(&force_nonempty_content_true),
+                true,
+                "nemotron_v3 + force_nonempty_content=true → disabled",
             ),
             // deepseek_v4 — same convention as deepseek_r1; verify all three aliases
             // (deepseek_v4 / deepseek-v4 / deepseekv4) plus both signal keys.

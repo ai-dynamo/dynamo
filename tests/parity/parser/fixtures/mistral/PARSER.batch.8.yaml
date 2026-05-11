@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: mistral
+mode: batch
+cases:
+  PARSER.batch.8.a:
+    description: Narration before tool call only
+    ref: dynamo
+    model_text: 'I will check the weather. [TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: I will check the weather.
+    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
+    # vllm produces:
+    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
+    #   normal_text: 'I will check the weather. '
+  PARSER.batch.8.b:
+    description: Narration after tool call only
+    ref: dynamo
+    model_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS] Let me know if you need
+      more.'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
+  PARSER.batch.8.c:
+    description: Narration both before and after (sandwich)
+    ref: inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_mistral_tool_parser.py#L1858
+    model_text: 'I will check the weather. [TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]
+      Let me know if you need more.'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: I will check the weather.
+    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
+    # vllm produces:
+    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
+    #   normal_text: 'I will check the weather. '
+  PARSER.batch.8.d:
+    description: Narration between multiple tool calls
+    ref: dynamo
+    model_text: 'I will check the weather. [TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]
+      Then check LA weather. [TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "LA"}}][/TOOL_CALLS]'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: I will check the weather.
+    # TODO(research): vllm diverges — EXPECTS_ERROR(Only one BOT token): vLLM mistral_tool_parser raises ValueError on two consecutive [TOOL_CALLS] envelopes
+    # vllm produces:
+    #   error: ValueError: Only one BOT token should have been outputted, but got I will check the weather. [TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS] Then check LA weather.

@@ -250,8 +250,8 @@ pub struct ModelDeploymentCard {
     /// Max context (in number of tokens) this model can handle
     pub context_length: u32,
 
-    /// Size of a KV cache block - vllm only currently
-    /// Passed to the engine and the KV router.
+    /// Size of a KV cache block.
+    /// Passed to the engine, KV router, and trace replay hash path.
     pub kv_cache_block_size: u32,
 
     /// How many times a request can be migrated to another worker if the HTTP server lost
