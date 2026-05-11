@@ -1,0 +1,19 @@
+extends: _base/h200_disagg.yaml
+name: D20_mdc_missing_max_batched_tokens
+description: >
+  MDC unavailable for 20 ticks. admission_max_batched_tokens_unavailable_total
+  increments; fractional threshold still applied; absolute threshold skipped.
+
+planner:
+  admission_mode: autoset
+
+events:
+  - type: mdc_unavailable
+    at_tick: 10
+    duration_ticks: 20
+
+assertions:
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

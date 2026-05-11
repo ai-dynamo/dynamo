@@ -1,0 +1,22 @@
+extends: _base/h200_disagg.yaml
+name: E25_aic_5_consecutive_failures
+description: >
+  AIC raises for 5 consecutive sweeps (n_consecutive=5). After the 5th,
+  optimizer is auto-disabled; aic_consecutive_failures gauge reaches 5 and
+  then transitions to disabled state.
+
+planner:
+  aic_max_consecutive_failures: 5
+  aic_reoptimize_interval: 60
+
+events:
+  - type: aic_failure
+    at_tick: 10
+    mode: raises
+    n_consecutive: 5
+
+assertions:
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

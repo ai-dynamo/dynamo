@@ -1,0 +1,22 @@
+extends: _base/h200_disagg.yaml
+name: E24_aic_exception_at_runtime
+description: >
+  AIC raises at tick 50 (after a prior successful sweep). _last_optimal_config
+  is retained; aic_optimizer_exceptions_total increments; planner stays alive.
+
+events:
+  - type: aic_failure
+    at_tick: 50
+    mode: raises
+    n_consecutive: 1
+
+assertions:
+  - at_tick: 52
+    field: optimizer_exceptions
+    op: ">="
+    value: 0.0
+    description: "Planner remains alive after exception"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

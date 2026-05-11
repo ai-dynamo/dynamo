@@ -1,0 +1,28 @@
+extends: _base/h200_disagg.yaml
+name: A4_step_drift_midstream
+description: >
+  Decode power bias steps from 1.0 to 1.35 at tick 100. EMA half-life ≈ 5
+  ticks (α=0.3). Verifies hysteresis prevents immediate re-sweep flap.
+
+events:
+  - type: bias_step
+    at_tick: 100
+    signal: power_bias_decode
+    value: 1.35
+
+assertions:
+  - at_tick: 80
+    field: c_power_d
+    op: "within"
+    value: 1.0
+    tolerance: 0.12
+    description: "Pre-step c_power_d near 1.0"
+  - at_tick: 150
+    field: c_power_d
+    op: ">"
+    value: 1.1
+    description: "Post-step c_power_d has risen tracking the bias"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

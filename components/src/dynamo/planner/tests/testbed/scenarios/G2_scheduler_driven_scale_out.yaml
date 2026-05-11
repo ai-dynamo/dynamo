@@ -1,0 +1,27 @@
+extends: _base/mocker_h200_disagg.yaml
+name: G2_scheduler_driven_scale_out
+description: >
+  Mocker replay with synthetic load ramp (tokens_per_sec: 100→800 over 60 s).
+  Validates that AIC optimizer and scheduler jointly expand decode pool within
+  budget and without oscillation. Tests the interface between scheduler
+  dynamics and the power budget: n_d should increase, projected_w should stay
+  under budget.
+
+overlay:
+  bias: {}
+
+assertions:
+  - at_tick: 30
+    field: n_d
+    op: ">="
+    value: 1.0
+    description: "Scheduler has added at least one decode replica by tick 30"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"
+  - always: true
+    field: n_oscillations
+    op: "<="
+    value: 3.0
+    description: "At most 3 replica flip-flops over the entire run"

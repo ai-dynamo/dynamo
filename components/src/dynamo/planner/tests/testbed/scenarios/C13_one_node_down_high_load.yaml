@@ -1,0 +1,30 @@
+extends: _base/h200_disagg.yaml
+name: C13_one_node_down_high_load
+description: >
+  One decode replica lost at high load. SLA-miss path fires after
+  aic_drift_consecutive_ticks; re-sweep to higher-replica config.
+
+load:
+  profile: constant
+  # Synthetic fleet capacity at post-clamp (1P, 4D) is ≈ 660k tok/s. 3500 was
+  # the original design value but produced ~0.5% utilization — no queue
+  # saturation, no TTFT inflation, no drift trigger after the node_down.
+  # 700k saturates the (1P, 3D) post-node-down configuration enough for
+  # queue_factor to push observed TTFT past the 500ms SLA.
+  tokens_per_sec: 700000.0
+
+events:
+  - type: node_down
+    at_tick: 30
+    n_decode_lost: 1
+
+assertions:
+  - eventually_by_tick: 80
+    field: sweep_fired
+    op: "=="
+    value: 1.0
+    description: "Re-sweep fires after SLA miss on high load"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

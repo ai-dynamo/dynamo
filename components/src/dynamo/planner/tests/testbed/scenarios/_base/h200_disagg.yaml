@@ -1,0 +1,50 @@
+class: alpha
+seed: 42
+ticks: 200
+interval_s: 60
+
+planner:
+  mode: disagg
+  ttft: 500.0
+  itl: 50.0
+  enable_power_awareness: true
+  enable_aic_optimizer: true
+  total_gpu_power_limit: 4000
+  power_agent_safe_default_watts: 500
+  prefill_engine_gpu_power_limit: 500
+  decode_engine_gpu_power_limit: 425
+  aic_initial_c_power_prefill: 1.0
+  aic_initial_c_power_decode: 1.0
+  aic_initial_c_power_agg: 1.0
+  aic_initial_c_ttft: 1.0
+  aic_initial_c_itl: 1.0
+  aic_reoptimize_interval: 300
+  aic_drift_relative_threshold: 0.15
+  aic_drift_consecutive_ticks: 3
+  aic_max_consecutive_failures: 5
+  min_endpoint: 1
+  max_gpu_budget: 64
+  admission_mode: "off"   # MUST be quoted — YAML 1.1 coerces bare `off` to False.
+
+fleet:
+  system: h200_sxm
+  gpus_per_prefill_engine: 1
+  gpus_per_decode_engine: 2
+  bias:
+    power_bias_prefill: 1.0
+    power_bias_decode: 1.0
+    ttft_bias: 1.0
+    itl_bias: 1.0
+    capacity_bias: 1.0
+  noise:
+    power_per_gpu:  { model: gaussian, sigma: 0.07 }
+    ttft:           { model: gaussian, sigma: 0.05 }
+    itl:            { model: gaussian, sigma: 0.04 }
+    capacity:       { model: gaussian, sigma: 0.03 }
+
+load:
+  profile: constant
+  tokens_per_sec: 2000.0
+
+events: []
+assertions: []

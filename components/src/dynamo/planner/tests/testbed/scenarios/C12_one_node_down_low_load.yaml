@@ -1,0 +1,26 @@
+extends: _base/h200_disagg.yaml
+name: C12_one_node_down_low_load
+description: >
+  One decode replica lost; offered load < remaining capacity.
+  No sweep fires (capacity_exceeded=false, no SLA miss) — validates
+  "Direction matters" from §5.6.
+
+load:
+  profile: constant
+  tokens_per_sec: 500.0
+
+events:
+  - type: node_down
+    at_tick: 50
+    n_decode_lost: 1
+
+assertions:
+  - at_tick: 80
+    field: sweep_fired
+    op: "=="
+    value: 0.0
+    description: "No re-sweep when under-loaded after node loss"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

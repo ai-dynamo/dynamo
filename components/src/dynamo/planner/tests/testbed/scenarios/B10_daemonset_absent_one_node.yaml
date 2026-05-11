@@ -1,0 +1,26 @@
+extends: _base/h200_disagg.yaml
+name: B10_daemonset_absent_one_node
+description: >
+  DaemonSet absent fault: annotation is recorded but not reflected to truth
+  model. Truth-side draw = TDP × n; c_power_d climbs; re-sweep fires or pegs.
+
+events:
+  - type: actuation_fault
+    at_tick: 0
+    duration_ticks: 200
+    mode: daemonset_absent
+
+fleet:
+  bias:
+    power_bias_decode: 1.5
+
+assertions:
+  - eventually_by_tick: 100
+    field: c_power_d
+    op: ">"
+    value: 1.2
+    description: "c_power_d drifts up when cap not applied to truth model"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

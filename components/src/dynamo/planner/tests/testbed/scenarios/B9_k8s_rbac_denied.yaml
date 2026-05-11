@@ -1,0 +1,17 @@
+extends: _base/h200_disagg.yaml
+name: B9_k8s_rbac_denied
+description: >
+  RBAC denied fault for 5 ticks. WARNING should be logged; scaling decisions
+  not blocked. Power annotations still in config even though apply fails.
+
+events:
+  - type: actuation_fault
+    at_tick: 10
+    duration_ticks: 5
+    mode: rbac_denied
+
+assertions:
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

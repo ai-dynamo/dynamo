@@ -1,0 +1,23 @@
+extends: _base/h200_disagg.yaml
+name: D19_dcgm_attribution_loss
+description: >
+  Prometheus outage on power_p and power_d only (DCGM attribution loss).
+  Power EMA gates fail; latency coefficients still update.
+
+events:
+  - type: prom_outage
+    at_tick: 20
+    duration_ticks: 30
+    signals: ["power_p", "power_d"]
+
+assertions:
+  - at_tick: 35
+    field: c_power_d
+    op: "within"
+    value: 1.0
+    tolerance: 0.10
+    description: "Power EMA held during outage"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

@@ -1,0 +1,26 @@
+extends: _base/h200_disagg.yaml
+name: B7_nvml_clamp_low
+description: >
+  Actuation fault nvml_low: optimizer requests 180W decode cap (below H200
+  minimum of 200W). FakeActuator clamps to 200W. Power agent cap_clamped_min
+  counter increments; truth-side draw = 200W, c_power_d drifts up.
+
+planner:
+  decode_engine_gpu_power_limit: 180
+
+events:
+  - type: actuation_fault
+    at_tick: 0
+    duration_ticks: 200
+    mode: nvml_low
+
+assertions:
+  - at_tick: 10
+    field: cap_clamped_min
+    op: ">"
+    value: 0
+    description: "SKU min clamp counter increments"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

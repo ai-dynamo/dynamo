@@ -1,0 +1,22 @@
+extends: _base/h200_disagg.yaml
+name: A1_power_under_estimate_decode
+description: >
+  Truth-side decode power is 1.35× AIC's prediction from t=0. Validates that
+  c_power_d EMA converges to ~1.35 and cap_d is re-inflated on next sweep.
+
+fleet:
+  bias:
+    power_bias_decode: 1.35
+
+assertions:
+  - at_tick: 50
+    field: c_power_d
+    op: "within"
+    value: 1.35
+    tolerance: 0.15
+    description: "c_power_d converges toward 1.35 by tick 50"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"
+    description: "Budget never exceeded"

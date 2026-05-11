@@ -1,0 +1,31 @@
+extends: _base/h200_disagg.yaml
+name: C15_node_recovery
+description: >
+  Node down at tick 50, node up at tick 100. No permanent state corruption;
+  coefficients re-converge; final config matches pre-fault steady state.
+
+events:
+  - type: node_down
+    at_tick: 50
+    n_decode_lost: 2
+  - type: node_up
+    at_tick: 100
+    n_decode_restored: 2
+
+assertions:
+  - at_tick: 45
+    field: c_power_d
+    op: "within"
+    value: 1.0
+    tolerance: 0.20
+    description: "Pre-fault c_power_d near 1.0"
+  - at_tick: 180
+    field: c_power_d
+    op: "within"
+    value: 1.0
+    tolerance: 0.30
+    description: "Post-recovery c_power_d re-converges"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

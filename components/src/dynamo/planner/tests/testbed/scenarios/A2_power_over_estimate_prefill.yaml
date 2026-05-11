@@ -1,0 +1,25 @@
+extends: _base/h200_disagg.yaml
+name: A2_power_over_estimate_prefill
+description: >
+  Truth-side prefill power is 0.7× AIC's prediction. Validates that c_power_p
+  EMA shrinks but max(1.0, c) asymmetric clamp holds — cap_p unchanged.
+
+fleet:
+  bias:
+    power_bias_prefill: 0.70
+
+assertions:
+  - at_tick: 100
+    field: c_power_p
+    op: "<"
+    value: 1.0
+    description: "c_power_p shrinks below 1.0 (raw EMA tracks actual draw)"
+  - always: true
+    field: cap_p
+    op: ">="
+    value: 450
+    description: "cap_p not reduced below AIC prediction (asymmetric clamp)"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

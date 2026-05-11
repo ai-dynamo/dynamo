@@ -1,0 +1,16 @@
+extends: _base/h200_disagg.yaml
+name: E22_budget_below_min_endpoint
+description: >
+  Budget is too small to cover even min_endpoint replicas from tick 0.
+  _apply_power_budget returns (0, 0) with WARNING; static static enforcement
+  still functions.
+
+planner:
+  total_gpu_power_limit: 100
+
+assertions:
+  - at_tick: 5
+    field: n_d
+    op: "=="
+    value: 0.0
+    description: "Budget too small → zero decode replicas"

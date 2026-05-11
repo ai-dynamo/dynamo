@@ -1,0 +1,23 @@
+extends: _base/h200_disagg.yaml
+name: D17_prometheus_outage
+description: >
+  Prometheus outage for 10 ticks (all signals). EMA gates skip (None returns);
+  coefficients held at prior values. Budget enforcement unaffected.
+
+events:
+  - type: prom_outage
+    at_tick: 30
+    duration_ticks: 10
+    signals: ["ttft", "itl", "power_p", "power_d", "capacity"]
+
+assertions:
+  - at_tick: 35
+    field: c_power_d
+    op: "within"
+    value: 1.0
+    tolerance: 0.20
+    description: "EMA held at prior value during outage (no update)"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

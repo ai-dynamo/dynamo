@@ -1,0 +1,21 @@
+extends: _base/h200_disagg.yaml
+name: E21_budget_shrunk_live
+description: >
+  Budget shrinks 4000→2000W at tick 50. _apply_power_budget clamps replicas
+  immediately. AIC re-sweeps. No oscillation after initial clamp.
+
+events:
+  - type: budget_change
+    at_tick: 50
+    new_total_w: 2000
+
+assertions:
+  - at_tick: 55
+    field: projected_w
+    op: "<="
+    value: 2000
+    description: "Projected power clamps to new budget within a few ticks"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

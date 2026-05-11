@@ -1,0 +1,32 @@
+extends: _base/h200_disagg.yaml
+name: C14_all_decode_workers_fail
+description: >
+  All decode replicas fail. total_tokens_per_sec ≈ 0 does NOT trigger drift
+  (correct, by design); SLA-miss (TTFT timeout) triggers re-sweep attempt.
+
+events:
+  - type: node_down
+    at_tick: 20
+    n_decode_lost: 4
+
+assertions:
+  # After ``node_down`` at tick 20, ``n_d_truth`` immediately drops to 0.
+  # The drift detector then sees zero capacity → SLA miss → re-sweep at
+  # roughly tick 25, which recreates decode replicas. So "all decode gone"
+  # is observable in the one-tick window between the failure and the next
+  # re-sweep — at_tick: 21 captures that window exactly.
+  - at_tick: 21
+    field: n_d
+    op: "=="
+    value: 0.0
+    description: "All decode replicas gone immediately after node failure"
+  # The planner SHOULD react with a re-sweep — fire by tick 35.
+  - eventually_by_tick: 35
+    field: sweep_fired
+    op: "=="
+    value: 1.0
+    description: "Re-sweep fires after capacity drops to zero"
+  - always: true
+    field: projected_w
+    op: "<="
+    ref: "planner.total_gpu_power_limit"

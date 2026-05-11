@@ -129,6 +129,12 @@ class AICPowerOptimizer:
         # Emit initial coefficient gauges so dashboards show cold-start values.
         self._emit_coefficient_metrics()
 
+        # Optional testbed injection: when set, replaces the real
+        # AIConfiguratorPerfEstimator instantiation inside optimize().
+        # Type: Optional[Callable[[str, str, str], Any]]  (hf_id, system, backend) → estimator
+        # Set only by the synthetic testbed; never touched in production.
+        self._aic_estimator_factory = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -146,14 +152,18 @@ class AICPowerOptimizer:
         system = self._config.aic_system or spec.system
 
         try:
-            from dynamo.planner.monitoring.aic_estimator import AIConfiguratorPerfEstimator
+            if self._aic_estimator_factory is not None:
+                estimator = self._aic_estimator_factory(
+                    hf_id=spec.hf_id, system=system, backend=spec.backend
+                )
+            else:
+                from dynamo.planner.monitoring.aic_estimator import AIConfiguratorPerfEstimator
+                estimator = AIConfiguratorPerfEstimator(
+                    hf_id=spec.hf_id,
+                    system=system,
+                    backend=spec.backend,
+                )
             from dynamo.planner.config.parallelization import picked_to_aic_model_config_kwargs
-
-            estimator = AIConfiguratorPerfEstimator(
-                hf_id=spec.hf_id,
-                system=system,
-                backend=spec.backend,
-            )
         except ImportError as exc:
             self._handle_sweep_failure(
                 f"aiconfigurator not installed: {exc}",
