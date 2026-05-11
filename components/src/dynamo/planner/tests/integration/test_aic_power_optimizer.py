@@ -315,6 +315,151 @@ class TestOptimizeHappyPath:
 
 
 # ---------------------------------------------------------------------------
+# optimize() — defensive clamp for non-physical AIC power_w
+# ---------------------------------------------------------------------------
+
+
+class TestAICPowerWClamp:
+    """Defensive clamp guarding against non-physical AIC power_w outputs.
+
+    Context: AIC's per-kernel 3D-cubic interpolator extrapolates non-physical
+    power values at sparse-grid query points (observed on h200_sxm + vLLM
+    0.19.1 + generation_attention at batch >= 256; aggregate power_w returned
+    by estimate_perf was 1275 W vs a 700 W TDP and a 721 W measured peak).
+
+    The optimizer must:
+      - cap cap_*_per_gpu at ceil(TDP × max(1, c_power_*)) when AIC's raw
+        power_w exceeds TDP × 1.1;
+      - preserve the unclamped raw value on PowerAwareConfig.aic_power_w_*
+        so update_correction() has a true denominator and c_power_*
+        coefficients converge below 1.0 instead of being silently masked;
+      - increment aic_power_w_clamped_total{side="..."} for each clamped side.
+    """
+
+    def test_nonphysical_decode_power_clamps_cap_to_tdp(self):
+        """1275 W decode → cap_d clamped at ceil(700 W × c_power_d=1.0) = 700."""
+        estimator = _make_estimator_mock(
+            power_w_prefill=400.0,
+            power_w_decode=1275.0,
+            tdp_w=700.0,
+        )
+        config = _make_config(c_power_p=1.0, c_power_d=1.0)
+        opt, metrics = _make_optimizer_with_mock(estimator, config)
+
+        with patch(
+            "dynamo.planner.monitoring.aic_estimator.AIConfiguratorPerfEstimator",
+            return_value=estimator,
+        ):
+            result = opt.optimize()
+
+        assert result is not None
+        assert result.cap_d == 700, (
+            f"cap_d={result.cap_d} W must be clamped to TDP=700 W, "
+            "not derived from the bogus 1275 W AIC value"
+        )
+        assert result.cap_p == 400  # prefill in range → unchanged
+
+    def test_clamped_side_preserves_raw_value_on_config(self):
+        """PowerAwareConfig.aic_power_w_decode keeps the raw 1275 W so EMA
+        sees the true mismatch and c_power_decode converges below 1.0."""
+        estimator = _make_estimator_mock(
+            power_w_prefill=400.0,
+            power_w_decode=1275.0,
+            tdp_w=700.0,
+        )
+        opt, _ = _make_optimizer_with_mock(estimator)
+
+        with patch(
+            "dynamo.planner.monitoring.aic_estimator.AIConfiguratorPerfEstimator",
+            return_value=estimator,
+        ):
+            result = opt.optimize()
+
+        assert result is not None
+        assert result.aic_power_w_decode == pytest.approx(1275.0), (
+            "raw AIC value must be preserved on the config so update_correction() "
+            "can normalise observed power against AIC's actual (over-)prediction"
+        )
+        assert result.aic_power_w_prefill == pytest.approx(400.0)
+
+    def test_clamp_metric_increments_only_for_offending_side(self):
+        estimator = _make_estimator_mock(
+            power_w_prefill=400.0,    # in range — should NOT clamp
+            power_w_decode=1500.0,    # > 1.1 × 700 — MUST clamp
+            tdp_w=700.0,
+        )
+        opt, metrics = _make_optimizer_with_mock(estimator)
+
+        with patch(
+            "dynamo.planner.monitoring.aic_estimator.AIConfiguratorPerfEstimator",
+            return_value=estimator,
+        ):
+            opt.optimize()
+
+        sides = [
+            c.kwargs.get("side")
+            for c in metrics.aic_power_w_clamped_total.labels.call_args_list
+        ]
+        assert "decode" in sides
+        assert "prefill" not in sides
+
+    def test_at_threshold_does_not_clamp(self):
+        """Boundary: power_w exactly == 1.1 × TDP must NOT clamp (<= rule)."""
+        threshold = 700.0 * 1.1
+        estimator = _make_estimator_mock(
+            power_w_prefill=threshold,
+            power_w_decode=threshold,
+            tdp_w=700.0,
+        )
+        config = _make_config(c_power_p=1.0, c_power_d=1.0)
+        opt, metrics = _make_optimizer_with_mock(estimator, config)
+
+        with patch(
+            "dynamo.planner.monitoring.aic_estimator.AIConfiguratorPerfEstimator",
+            return_value=estimator,
+        ):
+            result = opt.optimize()
+
+        import math
+        assert result is not None
+        assert result.cap_p == math.ceil(threshold)   # 770
+        assert result.cap_d == math.ceil(threshold)   # 770
+        sides = [
+            c.kwargs.get("side")
+            for c in metrics.aic_power_w_clamped_total.labels.call_args_list
+        ]
+        assert sides == []
+
+    def test_agg_mode_clamps_via_averaged_path(self):
+        """In agg mode the (prefill_raw + decode_raw)/2 path uses the CLAMPED
+        per-side values, so a single bad side cannot inflate cap_p == cap_d."""
+        estimator = _make_estimator_mock(
+            power_w_prefill=400.0,
+            power_w_decode=1275.0,    # bogus
+            tdp_w=700.0,
+        )
+        config = _make_config(mode="agg", c_power_agg=1.0)
+        opt, metrics = _make_optimizer_with_mock(estimator, config)
+
+        with patch(
+            "dynamo.planner.monitoring.aic_estimator.AIConfiguratorPerfEstimator",
+            return_value=estimator,
+        ):
+            result = opt.optimize()
+
+        import math
+        assert result is not None
+        # Averaged clamped path: (400 + 700) / 2 = 550
+        assert result.cap_p == math.ceil((400.0 + 700.0) / 2.0)
+        assert result.cap_p == result.cap_d
+        sides = [
+            c.kwargs.get("side")
+            for c in metrics.aic_power_w_clamped_total.labels.call_args_list
+        ]
+        assert "decode" in sides
+
+
+# ---------------------------------------------------------------------------
 # optimize() — budget constraint
 # ---------------------------------------------------------------------------
 

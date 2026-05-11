@@ -44,6 +44,12 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "gamma: γ-class scenarios (need mocker / dynamo.llm with native binding)",
     )
+    config.addinivalue_line(
+        "markers",
+        "real_aic: exercises AICPowerOptimizer against a real AIC perf database "
+        "(opt-in; set AIC_SANDBOX_DIR env var to a populated systems/ directory "
+        "and install the aiconfigurator package)",
+    )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

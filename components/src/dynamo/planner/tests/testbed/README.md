@@ -81,12 +81,48 @@ testbed/
     └── test_self_consistency.py
 ```
 
-### Two test classes
+### Test classes
 
 | Class | Driver | Observability | Scheduler | Speed |
 |-------|--------|---------------|-----------|-------|
 | **α** | `SyntheticFleet` (in-memory truth model) | `FakePrometheusClient` | Deterministic (no Kubernetes) | < 1 s / scenario |
 | **γ** | `dynamo-mocker` replay + `SyntheticPowerOverlay` | Same FakePrometheusClient (power from overlay) | Real mocker scheduler | 2–4 s / scenario |
+| **real-AIC** | Real `aiconfigurator` perf database from a mounted sandbox | `MagicMock` metrics; in-process EMA loop | None (drives `update_correction()` directly) | < 20 s / suite |
+
+#### real-AIC class
+
+Opt-in only. Exercises `AICPowerOptimizer.optimize()` and the EMA drift loop
+against a real AIC perf database with measured `power_w` data — the closest
+thing to a production loop we can run without a real GPU. See §8 row 14 of
+`powerplanner-design.md` for the defensive clamp this class regression-tests.
+
+```bash
+# Mount or symlink your AIC power-data tree at .aic_sandbox/systems/ first
+# (h200_sxm.yaml + data/h200_sxm/...; same layout as aiconfigurator/systems/).
+AIC_SANDBOX_DIR="$PWD/.aic_sandbox/systems" \
+    pytest components/src/dynamo/planner/tests/testbed/tests/test_aic_real_data.py -v
+```
+
+What it verifies (parametrized across every SKU present in the sandbox):
+
+* `AIConfiguratorPerfEstimator.estimate_perf` returns non-zero `power_w`
+  for both prefill and decode (i.e. the sandbox actually has power data,
+  not a TDP-fallback fixture).
+* `AICPowerOptimizer.optimize()` produces a `PowerAwareConfig` whose
+  per-GPU caps never exceed `TDP × _COEFF_MAX = 2 × TDP`.
+* `aic_power_w_clamped_total{side=...}` fires iff AIC's raw `power_w`
+  exceeded `TDP × 1.1` for that side. On the H200 vLLM 0.19.1 data this
+  is exercised; on B200 TRT-LLM 1.3.0rc6 the data is dense enough that
+  the clamp stays cold.
+* The EMA loop converges in three regimes — well-calibrated → 1.0,
+  over-predict → pegs at 0.5, under-predict → 1.5 — against H200's
+  *real* AIC denominators.
+* `should_reoptimize()` respects the hysteresis count under sustained
+  SLA breach and stays silent under healthy load.
+
+CI runs this class by setting `AIC_SANDBOX_DIR` in the job environment;
+local invocations without the env var are silently skipped at module
+import time with a one-line reason. The marker is `@pytest.mark.real_aic`.
 
 γ-class skips automatically in two situations:
 

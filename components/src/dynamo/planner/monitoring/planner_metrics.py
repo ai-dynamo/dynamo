@@ -211,6 +211,19 @@ class PlannerPrometheusMetrics:
             "Times re-optimization produced a lower predicted throughput than the "
             "previous config (informational — config is still applied).",
         )
+        # AIC's per-op power interpolator can extrapolate non-physical values at
+        # high batch sizes / sparse data-grid corners (observed on H200 vLLM
+        # generation_attention at batch>=256). The optimizer clamps the raw
+        # power_w to nameplate TDP before deriving per-GPU caps; this counter
+        # tracks how often that defensive clamp engaged, labelled by side.
+        # A sustained increment means AIC offline data needs a backfill at the
+        # batch sizes the planner is exercising.
+        self.aic_power_w_clamped_total = Counter(
+            "dynamo_aic_power_w_clamped_total",
+            "Times AIC's reported power_w exceeded nameplate TDP and was "
+            "clamped before being used to derive per-GPU power caps.",
+            labelnames=("side",),
+        )
 
         # -- Admission control / busy_threshold coupling (Phase 3) --------
         # Implied thresholds derived from the AIC operating point (always

@@ -46,6 +46,19 @@ _EMA_ALPHA = 0.3
 _COEFF_MIN = 0.5
 _COEFF_MAX = 2.0
 
+# Defensive clamp for AIC's reported per-GPU power_w.  Empirically (see
+# .agents/research/aic_power_extrapolation_2026-05-11.md), AIC's per-kernel
+# 3D-cubic interpolator can return non-physical power values when the query
+# falls into a sparse corner of the offline data lattice — observed on
+# h200_sxm + vLLM 0.19.1 + generation_attention at batch >= 256 (returned
+# ~1563 W per op vs a 721 W measured peak).  Any aic_power_w above
+# TDP × _AIC_POWER_W_NONPHYSICAL_MULTIPLE is treated as bogus and clamped to
+# TDP before being used to derive per-GPU caps.  The cap that ultimately
+# reaches NVML can never legitimately exceed TDP anyway (the daemon would
+# clamp it down silently), so this clamp only loses fidelity in the
+# "AIC was wrong" regime — never in the physical regime.
+_AIC_POWER_W_NONPHYSICAL_MULTIPLE = 1.1
+
 
 @dataclass
 class PowerAwareConfig:
@@ -142,7 +155,20 @@ class AICPowerOptimizer:
     def optimize(self) -> Optional[PowerAwareConfig]:
         """Run a full AIC sweep and return the recommended config.
 
-        Blocking (~6 s); call via ``asyncio.to_thread``.
+        Always call via ``asyncio.to_thread`` — the first call per process
+        takes 3-6 s (perf-database load from disk, dominated by parsing
+        ~10-100 K rows of TXT data and building cubic interpolators).
+        Subsequent calls reuse ``aiconfigurator.sdk.perf_database.databases_cache``
+        and complete in ~10-15 ms.  Measured 2026-05-11 against the
+        in-repo H200 vLLM 0.19.1 and B200 TRT-LLM 1.3.0rc6 sandboxes
+        (see .aic_bench.py).
+
+        Closed-loop budget at the default ``aic_reoptimize_interval=300s``
+        is therefore well under 0.01 % planner-CPU duty cycle at steady
+        state — the rate-limit + hysteresis guards exist for downstream
+        impact (annotation PATCH rate, frontend ``/busy_threshold`` POST
+        fanout, config flapping), not for AIC sweep CPU cost.
+
         Returns ``None`` when the optimizer is auto-disabled (§8 rows 1, 4).
         """
         if self._disabled:
@@ -262,14 +288,29 @@ class AICPowerOptimizer:
             raw_power_w_prefill = tdp_w
             raw_power_w_decode = tdp_w
 
+        # Defensive clamp: AIC's per-kernel power interpolator can extrapolate
+        # to non-physical values at sparse-grid query points (observed on H200
+        # vLLM generation_attention at batch >= 256).  The clamped values feed
+        # cap derivation; the *raw* values are stored on PowerAwareConfig as
+        # EMA denominators so c_power_* coefficients visibly converge below 1.0
+        # whenever AIC over-predicts, giving operators an independent signal
+        # alongside the aic_power_w_clamped_total counter.
+        cap_power_w_prefill = self._clamp_aic_power_w(
+            raw_power_w_prefill, tdp_w, side="prefill"
+        )
+        cap_power_w_decode = self._clamp_aic_power_w(
+            raw_power_w_decode, tdp_w, side="decode"
+        )
+
         if mode == "agg":
             raw_power_w_agg = (raw_power_w_prefill + raw_power_w_decode) / 2.0
-            cap_p_per_gpu = math.ceil(raw_power_w_agg * max(1.0, self._c_power_agg))
+            cap_power_w_agg = (cap_power_w_prefill + cap_power_w_decode) / 2.0
+            cap_p_per_gpu = math.ceil(cap_power_w_agg * max(1.0, self._c_power_agg))
             cap_d_per_gpu = cap_p_per_gpu
         else:
             raw_power_w_agg = 0.0
-            cap_p_per_gpu = math.ceil(raw_power_w_prefill * max(1.0, self._c_power_p))
-            cap_d_per_gpu = math.ceil(raw_power_w_decode * max(1.0, self._c_power_d))
+            cap_p_per_gpu = math.ceil(cap_power_w_prefill * max(1.0, self._c_power_p))
+            cap_d_per_gpu = math.ceil(cap_power_w_decode * max(1.0, self._c_power_d))
 
         # ---------- SLA feasibility (single-engine check) ----------
         corrected_ttft_ms = aic_ttft_ms * max(1.0, self._c_ttft)
@@ -525,6 +566,35 @@ class AICPowerOptimizer:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _clamp_aic_power_w(self, raw_power_w: float, tdp_w: float, *, side: str) -> float:
+        """Defensive clamp for AIC's reported per-GPU power_w (§6.4, §8 row 7).
+
+        Returns ``raw_power_w`` unchanged when it is at or below
+        ``tdp_w × _AIC_POWER_W_NONPHYSICAL_MULTIPLE``.  Otherwise logs a
+        WARNING with both the raw and clamped values, increments the
+        ``aic_power_w_clamped_total{side=...}`` counter, and returns
+        ``tdp_w``.  Callers must always use the returned value when sizing
+        per-GPU caps so a single bad AIC interpolation cannot produce a
+        nominal cap larger than the GPU can physically draw.
+        """
+        threshold = tdp_w * _AIC_POWER_W_NONPHYSICAL_MULTIPLE
+        if raw_power_w <= threshold:
+            return raw_power_w
+        logger.warning(
+            "AIC optimizer: %s power_w=%.1f W exceeds TDP×%.2f (%.1f W) — "
+            "treating as non-physical interpolation artefact; clamping to TDP %.0f W "
+            "for cap computation. EMA denominator preserves the raw value so "
+            "c_power_%s converges to live/raw (typically <1) and gives an "
+            "independent signal alongside aic_power_w_clamped_total.",
+            side, raw_power_w, _AIC_POWER_W_NONPHYSICAL_MULTIPLE, threshold,
+            tdp_w, side,
+        )
+        try:
+            self._metrics.aic_power_w_clamped_total.labels(side=side).inc()
+        except Exception:
+            pass
+        return tdp_w
 
     def _sweep_replicas(
         self,
