@@ -69,8 +69,10 @@ RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRO
     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
     add-apt-repository -y ppa:kobuk-team/intel-graphics
 
-# Fetch UCX patch
+{% if "nixl_ref" in context[framework] %}
+# UCX patch for the nixl-driven UCX build below.
 RUN wget --tries=3 --waitretry=5 https://raw.githubusercontent.com/intel/llm-scaler/35a14cbc08d714f460a29b7a7328df5620c8530f/vllm/patches/ai-dynamo-xpu/patches/ucx-v1.12.0.patch -O /tmp/ucx.patch
+{% endif %}
 
 # Install Intel GPU runtime packages
 RUN apt update -y && apt upgrade -y && \
@@ -217,8 +219,8 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
     uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
 
+{% if "nixl_ref" in context[framework] %}
 ARG NIXL_UCX_REF
-
 {% if device == "cuda" %}
 ARG NIXL_GDRCOPY_REF
 
@@ -230,6 +232,7 @@ RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64")
     rpm -Uvh gdrcopy-kmod-*.el8.noarch.rpm && \
     rpm -Uvh gdrcopy-*.el8.${ARCH_ALT}.rpm && \
     rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
+{% endif %}
 {% endif %}
 
 # sccache binary is pre-installed in dynamo_base; stage it off-PATH so
@@ -295,6 +298,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     find /tmp/ffmpeg-${FFMPEG_VERSION} \( -name config.log -o -name config.status \) -delete && \
     mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/
 
+{% if "nixl_ref" in context[framework] %}
 # Build and install UCX
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
@@ -392,8 +396,9 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && \
     ldconfig
 {% endif %}
+{% endif %}
 
-{% if framework == "vllm" and device == "cuda" %}
+{% if "nixl_ref" in context[framework] and framework == "vllm" and device == "cuda" %}
 # Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
 ARG AWS_SDK_CPP_VERSION=1.11.760
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
@@ -425,7 +430,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 ##################################
 ##### runtime_wheel_builder ######
 ##################################
-# Builds ai-dynamo, ai-dynamo-runtime, and gpu_memory_service wheels, sans nixl.
+# Builds ai-dynamo, ai-dynamo-runtime, kvbm, and gpu_memory_service wheels.
+# kvbm links via nixl-sys's stub-api (no libnixl present here).
 
 FROM wheel_builder_base AS runtime_wheel_builder
 
@@ -462,6 +468,41 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
+# Build kvbm wheel. nixl-sys auto-falls back to stub-api when libnixl is absent.
+ARG ENABLE_KVBM
+RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
+    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        eval $(/tmp/use-sccache.sh setup-env cmake); \
+    fi && \
+    source ${VIRTUAL_ENV}/bin/activate && \
+    if [ "$ENABLE_KVBM" = "true" ]; then \
+        cd /opt/dynamo/lib/bindings/kvbm && \
+        KVBM_FEATURES=""; \
+        if [ "$DEVICE" = "cuda" ]; then KVBM_FEATURES="--features nccl"; fi && \
+        maturin build --release ${KVBM_FEATURES} --out target/wheels && \
+        if [ "$DEVICE" = "cuda" ]; then \
+            auditwheel repair \
+                --exclude libnixl.so \
+                --exclude libnixl_build.so \
+                --exclude libnixl_common.so \
+                --exclude 'lib*.so*' \
+                --plat manylinux_2_28_${ARCH_ALT} \
+                --wheel-dir /opt/dynamo/dist \
+                target/wheels/*.whl; \
+        else \
+            cp target/wheels/*.whl /opt/dynamo/dist/; \
+        fi; \
+    fi && \
+    /tmp/use-sccache.sh show-stats "Dynamo KVBM"
+
 {% else %}
 # Dev/local-dev targets do not have pre-built wheels or /workspace source code.
 # After you start the local-dev/dev container, you will need to build from source:
@@ -495,20 +536,22 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
 ##### wheel_builder ##############
 ##################################
 {% if "nixl_ref" in context[framework] %}
-# Builds nixl (native + Python wheel) and kvbm wheel, then consolidates all wheels.
-# Runtime templates COPY from this stage.
+# Builds the nixl C++ stack + nixl python wheel, then consolidates dynamo wheels
+# from runtime_wheel_builder. Runtime templates COPY from this stage.
 
 FROM wheel_builder_base AS wheel_builder
 
-# Build and install nixl
 ARG TARGETARCH
 ARG DEVICE
 ARG NIXL_REF
 ARG USE_SCCACHE
+ARG PYTHON_VERSION
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
 {% endif %}
 
+# Clone nixl, configure, build, and install C++ libs.
+# cuda: contrib/build-wheel.sh renames the wheel; xpu/cpu rename here.
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
@@ -520,12 +563,9 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     git clone "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
     git checkout ${NIXL_REF} && \
-    if [ "$DEVICE" = "cuda" ]; then \
-        PKG_NAME="nixl-cu${CUDA_MAJOR}"; \
-    else \
-        PKG_NAME="nixl-${DEVICE}"; \
+    if [ "$DEVICE" != "cuda" ]; then \
+        ./contrib/tomlutil.py --wheel-name "nixl-${DEVICE}" pyproject.toml; \
     fi && \
-    ./contrib/tomlutil.py --wheel-name $PKG_NAME pyproject.toml && \
     mkdir build && \
     if [ "$DEVICE" = "cuda" ]; then \
         meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
@@ -566,8 +606,31 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
     echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
     ldconfig
 
-# Build NIXL wheel → /opt/dynamo/dist/nixl/nixl*.whl (C++ transport library, all targets)
-ARG PYTHON_VERSION
+# Build the nixl python wheel.
+{% if device == "cuda" %}
+# Self-contained wheel (libs + plugins bundled under nixl.libs/).
+RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
+    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
+    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        eval $(/tmp/use-sccache.sh setup-env); \
+    fi && \
+    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+    mkdir -p /opt/dynamo/dist/nixl && \
+    cd /workspace/nixl && \
+    ./contrib/build-wheel.sh \
+        --python-version "$PYTHON_VERSION" \
+        --platform "manylinux_2_28_${ARCH_ALT}" \
+        --output-dir /opt/dynamo/dist/nixl \
+        --ucx-plugins-dir /usr/local/ucx/lib/ucx \
+        --nixl-plugins-dir "$NIXL_PLUGIN_DIR"
+{% else %}
+# Wheel depends on $NIXL_PREFIX and /usr/local/ucx at runtime.
+# TODO: switch xpu/cpu to self-contained wheels once contrib/build-wheel.sh
+#   supports a non-nvcc PKG_NAME path.
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     --mount=type=cache,target=/root/.cache/uv,sharing=shared \
@@ -579,58 +642,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     fi && \
     cd /workspace/nixl && \
     uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
-
-{% if target not in ("dev", "local-dev") %}
-# Copy source code (order matters for layer caching)
-COPY .cargo/ /opt/dynamo/.cargo/
-COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
-COPY lib/ /opt/dynamo/lib/
-COPY components/ /opt/dynamo/components/
-
-# Build kvbm wheel (with nixl linkage via auditwheel repair)
-ARG ENABLE_KVBM
-RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
-    --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
-    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
-    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
-    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
-    export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
-    export UV_CACHE_DIR=/root/.cache/uv && \
-    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
-    ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
-    if [ "$USE_SCCACHE" = "true" ]; then \
-        eval $(/tmp/use-sccache.sh setup-env cmake); \
-    fi && \
-    mkdir -p ${CARGO_TARGET_DIR} && \
-    source ${VIRTUAL_ENV}/bin/activate && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
-        cd /opt/dynamo/lib/bindings/kvbm && \
-        KVBM_FEATURES=""; \
-        if [ "$DEVICE" = "cuda" ]; then KVBM_FEATURES="--features nccl"; fi && \
-        maturin build --release ${KVBM_FEATURES} --out target/wheels && \
-        if [ "$DEVICE" = "cuda" ]; then \
-            auditwheel repair \
-                --exclude libnixl.so \
-                --exclude libnixl_build.so \
-                --exclude libnixl_common.so \
-                --exclude 'lib*.so*' \
-                --plat manylinux_2_28_${ARCH_ALT} \
-                --wheel-dir /opt/dynamo/dist \
-                target/wheels/*.whl; \
-        elif [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then \
-            cp target/wheels/*.whl /opt/dynamo/dist/; \
-        fi; \
-    fi && \
-    /tmp/use-sccache.sh show-stats "Dynamo KVBM"
 {% endif %}
 
-# Consolidate all wheels from the runtime wheel builder stage
+# Consolidate dynamo + kvbm + gpu_memory_service wheels alongside nixl wheels.
 COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
 {% else %}
-# SGLang uses NIXL from the upstream lmsysorg/sglang runtime image and does not
-# build Dynamo KVBM. Keep this alias so downstream stages can still COPY Dynamo
-# wheels and build tools from a common wheel_builder stage name.
-# SGLang dev/source builds may link nixl-sys against stubs when native NIXL is
-# absent; block-manager/KVBM runtime work should use vllm/trtllm/none images.
+# No nixl_ref: alias to runtime_wheel_builder so downstream COPYs resolve.
 FROM runtime_wheel_builder AS wheel_builder
 {% endif %}

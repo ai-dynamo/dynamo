@@ -187,16 +187,10 @@ RUN if [ ! -e /usr/bin/python3 ]; then \
         fi; \
     fi
 
-{% if device == "xpu" %}
+{% if "nixl_ref" in context[framework] and device == "xpu" %}
 ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
     NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
     NIXL_PREFIX=/opt/intel/intel_nixl
-{% elif framework != "sglang" %}
-# Non-SGLang runtimes use the Dynamo-built NIXL install from wheel_builder.
-# Reset the same values already set in runtime (no harm).
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
-    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
 {% endif %}
 
 {% if device != "xpu" %}
@@ -215,8 +209,7 @@ ENV CUDA_HOME=/usr/local/cuda \
     NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 {% endif %}
 
-{% if framework != "sglang" %}
-# Base LD_LIBRARY_PATH with universal paths (all frameworks have these)
+{% if "nixl_ref" in context[framework] and device != "cuda" %}
 # Framework-specific paths are conditionally added in /etc/profile.d/50-framework-paths.sh
 ENV LD_LIBRARY_PATH=\
 ${NIXL_LIB_DIR}:\
@@ -224,8 +217,6 @@ ${NIXL_PLUGIN_DIR}:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 ${LD_LIBRARY_PATH}
-{% else %}
-# SGLang dev/local-dev inherit the upstream SGLang/NIXL runtime stack.
 {% endif %}
 
 # Copy shell profile script for framework-specific environment variables

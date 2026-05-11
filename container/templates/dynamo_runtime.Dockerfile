@@ -23,24 +23,12 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
-# NIXL environment variables
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
-    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins \
-    CARGO_TARGET_DIR=/opt/dynamo/target
+ENV CARGO_TARGET_DIR=/opt/dynamo/target
 
-ENV LD_LIBRARY_PATH=\
-${NIXL_LIB_DIR}:\
-${NIXL_PLUGIN_DIR}:\
-/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
-${LD_LIBRARY_PATH}
-
-# Copy ucx and nixl libs
-COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
-COPY --chown=dynamo: --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
+{% if "nixl_ref" in context[framework] %}
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+{% endif %}
 
 # Always copy FFmpeg so libs are available for Rust checks in CI
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
@@ -52,7 +40,7 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 
 {% if target not in ("dev", "local-dev") %}
 # Copy built artifacts (not needed for dev/local-dev; users build from source)
-COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
+COPY --chown=dynamo: --from=runtime_wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 {% endif %}
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
@@ -103,7 +91,10 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    {% if "nixl_ref" in context[framework] -%}
+    /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+    {% endif -%}
+    && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \
@@ -114,10 +105,27 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
     fi
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
+{% if "nixl_ref" in context[framework] %}
 # Install NIXL wheel only (pre-built C++ binary, not buildable from source).
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl
+{% endif %}
+{% endif %}
+
+{% if context[framework]["enable_kvbm"] == "true" %}
+# kvbm's nixl-sys stub-api dlopens "libnixl_capi.so" by basename, but the nixl
+# wheel bundles libs under .nixl_cu*.mesonpy.libs/ — not on the loader path.
+# Register that dir with ldconfig so the C-API and its sibling libnixl* deps
+# all resolve from the wheel.
+# TODO: drop once upstream nixl preloads the C-API on `import nixl`.
+USER root
+RUN set -e; \
+    NIXL_CAPI=$(find ${VIRTUAL_ENV} -name 'libnixl_capi.so*' -print -quit 2>/dev/null); \
+    if [ -z "$NIXL_CAPI" ]; then echo "ERROR: libnixl_capi.so not found under ${VIRTUAL_ENV}" >&2; exit 1; fi; \
+    dirname "$NIXL_CAPI" > /etc/ld.so.conf.d/nixl-wheel.conf; \
+    ldconfig
+USER dynamo
 {% endif %}
 
 # Install gpu_memory_service wheel if enabled (all targets)

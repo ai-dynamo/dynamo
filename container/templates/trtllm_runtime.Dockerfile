@@ -184,29 +184,19 @@ ENV HOME=/home/dynamo
 SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 
 ENV DYNAMO_HOME=/workspace
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib64
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
 # Copy pre-built venv with PyTorch and TensorRT-LLM from framework stage
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
-# Copy UCX from framework image as plugin for NIXL
-# Copy NIXL source from framework image
-# Copy dynamo wheels for gitlab artifacts (read-only, no group-write needed)
-COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
+{% if "nixl_ref" in context[framework] %}
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+{% endif %}
 
-ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
+ENV PATH="${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
 # Both arch paths are listed; the non-existent one is silently ignored by the linker.
 ENV LD_LIBRARY_PATH=\
-$NIXL_LIB_DIR:\
-$NIXL_PLUGIN_DIR:\
-/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
 /opt/hpcx/ompi/lib:\
 /usr/local/tensorrt/targets/x86_64-linux-gnu/lib:\
 /usr/local/tensorrt/targets/aarch64-linux-gnu/lib:\
@@ -241,7 +231,10 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
       pip \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-      /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+      {% if "nixl_ref" in context[framework] -%}
+      /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+      {% endif -%}
+      && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \
@@ -255,13 +248,27 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
     chmod -R g+w /workspace/benchmarks
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
-# Install NIXL wheel only (pre-built C++ binary, not buildable from source).
 # `pip` is installed into the venv so TRT-LLM's NVRTC JIT can locate this
 # install via `pip show tensorrt_llm` at runtime (required for FMHA kernel
 # JIT compilation on sm_100a, where cubins are not pre-compiled).
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-    uv pip install pip /opt/dynamo/wheelhouse/nixl/nixl*.whl
+    uv pip install pip{% if "nixl_ref" in context[framework] %} /opt/dynamo/wheelhouse/nixl/nixl*.whl{% endif %}
+{% endif %}
+
+{% if context[framework]["enable_kvbm"] == "true" %}
+# kvbm's nixl-sys stub-api dlopens "libnixl_capi.so" by basename, but the nixl
+# wheel bundles libs under .nixl_cu*.mesonpy.libs/ — not on the loader path.
+# Register that dir with ldconfig so the C-API and its sibling libnixl* deps
+# all resolve from the wheel.
+# TODO: drop once upstream nixl preloads the C-API on `import nixl`.
+USER root
+RUN set -e; \
+    NIXL_CAPI=$(find ${VIRTUAL_ENV} -name 'libnixl_capi.so*' -print -quit 2>/dev/null); \
+    if [ -z "$NIXL_CAPI" ]; then echo "ERROR: libnixl_capi.so not found under ${VIRTUAL_ENV}" >&2; exit 1; fi; \
+    dirname "$NIXL_CAPI" > /etc/ld.so.conf.d/nixl-wheel.conf; \
+    ldconfig
+USER dynamo
 {% endif %}
 
 # Install gpu_memory_service wheel if enabled (all targets)

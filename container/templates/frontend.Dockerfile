@@ -63,8 +63,6 @@ ENV PATH="/opt/dynamo/venv/bin:$PATH"
 # Copy uv from base stage and wheels from wheel_builder (no runtime stage dependency)
 COPY --chown=dynamo: --from=dynamo_base /bin/uv /bin/uvx /bin/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 # Create virtual environment
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
@@ -83,15 +81,13 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.frontend.txt
 
-ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
-# In an ideal world, we'd use a mirror of PyPI for much more reliable downloads.
+# Frontend routes requests to backend workers; it does not import nixl or kvbm.
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -z "$GMS_WHEEL" ]; then \
@@ -99,14 +95,6 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
             exit 1; \
         fi; \
         uv pip install "$GMS_WHEEL"; \
-    fi && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
-        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -z "$KVBM_WHEEL" ]; then \
-            echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        uv pip install "$KVBM_WHEEL"; \
     fi && \
     cd /workspace/benchmarks && \
     export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \

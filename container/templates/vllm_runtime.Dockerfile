@@ -194,18 +194,16 @@ ENV HOME=/home/dynamo
 # This picks up the umask 002 from the /etc/profile.d/00-umask.sh file for subsequent RUN commands
 SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 
+{% if "nixl_ref" in context[framework] and device != "cuda" %}
 {% if device == "xpu" %}
 ENV NIXL_PREFIX=/opt/intel/intel_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/x86_64-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-{% elif device == "cpu" %}
+{% else %}
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/x86_64-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-{% else %}
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib64
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+{% endif %}
 {% endif %}
 
 # Site-packages path derived from PYTHON_VERSION ARG
@@ -247,18 +245,21 @@ COPY --chmod=775 --chown=dynamo:0 --from=framework \
 # Copy vllm with correct ownership (read-only, no group-write needed)
 COPY --chown=dynamo:0 --from=framework /opt/vllm /opt/vllm
 
-# Copy UCX and NIXL to system directories (read-only, no group-write needed)
+{% if "nixl_ref" in context[framework] %}
+{% if device != "cuda" %}
+# xpu/cpu wheel is not self-contained; supply libs via LD_LIBRARY_PATH.
 COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
 COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 {% if device == "xpu" %}
 {# XPU NIXL uses lib/x86_64-linux-gnu; copy to NIXL_LIB_DIR to ensure lib dir is populated #}
 COPY --chown=dynamo: --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
 {% endif %}
-{# For cpu/cuda: NIXL libs are already included in the $NIXL_PREFIX COPY above #}
+{% endif %}
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 
+{% if device != "cuda" %}
 ENV PATH=/usr/local/ucx/bin:$PATH
 
 ENV LD_LIBRARY_PATH=\
@@ -267,6 +268,8 @@ $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 ${LD_LIBRARY_PATH:-}
+{% endif %}
+{% endif %}
 
 {% if device == "cuda" %}
 ENV LD_LIBRARY_PATH=\
@@ -297,10 +300,15 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
     uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-      /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+      {% if "nixl_ref" in context[framework] -%}
+      /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+      {% endif -%}
+      && \
+    {% if "nixl_ref" in context[framework] -%}
     if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
         uv pip uninstall -y nixl-cu12 || true; \
     fi && \
+    {% endif -%}
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \
@@ -315,6 +323,7 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
     chmod -R g+w /workspace/benchmarks
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
+{% if "nixl_ref" in context[framework] %}
 # Install NIXL wheel only (pre-built C++ binary, not buildable from source).
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
@@ -322,6 +331,22 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
     if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
         uv pip uninstall -y nixl-cu12 || true; \
     fi
+{% endif %}
+{% endif %}
+
+{% if device == "cuda" and context[framework]["enable_kvbm"] == "true" %}
+# kvbm's nixl-sys stub-api dlopens "libnixl_capi.so" by basename, but the nixl
+# wheel bundles libs under .nixl_cu*.mesonpy.libs/ — not on the loader path.
+# Register that dir with ldconfig so the C-API and its sibling libnixl* deps
+# all resolve from the wheel.
+# TODO: drop once upstream nixl preloads the C-API on `import nixl`.
+USER root
+RUN set -e; \
+    NIXL_CAPI=$(find ${VIRTUAL_ENV} -name 'libnixl_capi.so*' -print -quit 2>/dev/null); \
+    if [ -z "$NIXL_CAPI" ]; then echo "ERROR: libnixl_capi.so not found under ${VIRTUAL_ENV}" >&2; exit 1; fi; \
+    dirname "$NIXL_CAPI" > /etc/ld.so.conf.d/nixl-wheel.conf; \
+    ldconfig
+USER dynamo
 {% endif %}
 
 {% if device == "cuda" %}

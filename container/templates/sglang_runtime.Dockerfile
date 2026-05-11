@@ -45,12 +45,30 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 # pip from replacing that stack. Dev/local-dev build from source later in the
 # shared dev stage after the workspace is bind-mounted.
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+{% if "nixl_ref" in context[framework] %}
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+{% endif %}
 
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-        /opt/dynamo/wheelhouse/ai_dynamo*any.whl
+        /opt/dynamo/wheelhouse/ai_dynamo*any.whl{% if "nixl_ref" in context[framework] %} \
+        /opt/dynamo/wheelhouse/nixl/nixl*.whl{% endif %}
+
+{% if context[framework]["enable_kvbm"] == "true" %}
+# kvbm's nixl-sys stub-api dlopens "libnixl_capi.so" by basename, but the nixl
+# wheel bundles libs under .nixl_cu*.mesonpy.libs/ — not on the loader path.
+# Register that dir with ldconfig so the C-API and its sibling libnixl* deps
+# all resolve from the wheel.
+# TODO: drop once upstream nixl preloads the C-API on `import nixl`.
+RUN set -e; \
+    NIXL_CAPI=$(find / -name 'libnixl_capi.so*' -print -quit 2>/dev/null); \
+    if [ -z "$NIXL_CAPI" ]; then echo "ERROR: libnixl_capi.so not found in image" >&2; exit 1; fi; \
+    dirname "$NIXL_CAPI" > /etc/ld.so.conf.d/nixl-wheel.conf; \
+    ldconfig
+{% endif %}
 
 # Install accelerate for diffusion/video worker pipelines (diffusers requires it
 # for enable_model_cpu_offload but the upstream SGLang runtime image omits it)
