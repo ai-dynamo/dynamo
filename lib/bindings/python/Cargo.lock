@@ -2112,6 +2112,7 @@ dependencies = [
  "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-protocols",
+ "dynamo-rl",
  "dynamo-runtime",
  "dynamo-tokenizers",
  "dynamo-tokens",
@@ -2285,6 +2286,20 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "dynamo-rl"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "dynamo-runtime",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
