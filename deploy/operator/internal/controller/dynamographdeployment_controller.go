@@ -1389,6 +1389,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	// Sync all generated DCDs
 	for key, dcd := range dynamoComponentsDeployments {
 		logger.Info("Reconciling DynamoComponentDeployment", "key", key, "name", dcd.Name)
+		if err := r.preserveExistingDCDBackendFramework(ctx, dcd); err != nil {
+			logger.Error(err, "failed to preserve existing DynamoComponentDeployment backendFramework", "name", dcd.Name)
+			return ReconcileResult{}, fmt.Errorf("failed to preserve existing DynamoComponentDeployment backendFramework: %w", err)
+		}
 		_, syncedDCD, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1beta1.DynamoComponentDeployment, bool, error) {
 			return dcd, false, nil
 		})
@@ -1425,6 +1429,23 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	}
 
 	return result, nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) preserveExistingDCDBackendFramework(ctx context.Context, desired *nvidiacomv1beta1.DynamoComponentDeployment) error {
+	existing := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	err := r.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, existing)
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to get existing DynamoComponentDeployment %s/%s: %w", desired.Namespace, desired.Name, err)
+	}
+
+	// backendFramework is immutable on DCDs. Older generated children may have
+	// an empty value, so preserve the stored value on update while allowing new
+	// children to be created with the inferred backend.
+	desired.Spec.BackendFramework = existing.Spec.BackendFramework
+	return nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDCD(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) (map[string]string, error) {

@@ -65,6 +65,56 @@ func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme 
 	return s
 }
 
+func TestDynamoGraphDeploymentReconciler_preserveExistingDCDBackendFramework(t *testing.T) {
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+
+	existing := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "vllm-disagg-planner-frontend",
+			Namespace: "jsm",
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "",
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "Frontend",
+				ComponentType: v1beta1.ComponentTypeFrontend,
+			},
+		},
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(existing).
+			Build(),
+	}
+
+	desiredExisting := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      existing.Name,
+			Namespace: existing.Namespace,
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+		},
+	}
+	gomega.NewWithT(t).Expect(reconciler.preserveExistingDCDBackendFramework(ctx, desiredExisting)).To(gomega.Succeed())
+	gomega.NewWithT(t).Expect(desiredExisting.Spec.BackendFramework).To(gomega.Equal(""))
+
+	desiredNew := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "vllm-disagg-planner-vllmdecodeworker-2dad72b9",
+			Namespace: "jsm",
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+		},
+	}
+	gomega.NewWithT(t).Expect(reconciler.preserveExistingDCDBackendFramework(ctx, desiredNew)).To(gomega.Succeed())
+	gomega.NewWithT(t).Expect(desiredNew.Spec.BackendFramework).To(gomega.Equal("vllm"))
+}
+
 func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) {
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 
