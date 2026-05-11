@@ -1,17 +1,29 @@
 {
-  "schema_version": 2,
   "description": "Maps (from_image:tag, baseline_image:tag) pairs to slim CycloneDX SBOMs of the baseline. Each entry records the engineer-specified compliance boundary: NGC (or other upstream) owns everything in the baseline; we own everything from_image adds on top. The captured SBOM is the BASELINE -- runtime licenses stages subtract its components from final-image NOTICES to filter out NGC-owned content. CI runs container/compliance/base_sboms/check_drift.py on every PR/post-merge; if either digest moved or the from_image's layer prefix no longer matches the recorded baseline, CI fails and a refresh PR is required.",
-  "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 4 MB per file.",
+  "entries": [
+    {
+      "baseline_digest": "sha256:043085f9298b5da0d79bfd91e162b04c0661f3cb2f03202c5b912037cf6c1ba6",
+      "baseline_image": "nvcr.io/nvidia/distroless/python",
+      "baseline_sbom": "python@043085f9.cdx.json",
+      "baseline_tag": "3.12-v4.0.3",
+      "from_digest": "sha256:043085f9298b5da0d79bfd91e162b04c0661f3cb2f03202c5b912037cf6c1ba6",
+      "from_image": "nvcr.io/nvidia/distroless/python",
+      "from_tag": "3.12-v4.0.3",
+      "platform": "linux/amd64"
+    }
+  ],
   "entry_schema": {
+    "baseline_digest": "manifest-list digest of baseline_image at capture time",
+    "baseline_image": "engineer-specified compliance floor (upstream owns below; we own above)",
+    "baseline_sbom": "filename of the slim CycloneDX SBOM of the baseline in this directory",
+    "baseline_tag": "registry tag of baseline_image",
+    "from_digest": "manifest-list digest of from_image at capture time",
     "from_image": "registry-qualified image used in our Dockerfile's FROM line",
     "from_tag": "registry tag of from_image",
-    "from_digest": "manifest-list digest of from_image at capture time",
-    "baseline_image": "engineer-specified compliance floor (upstream owns below; we own above)",
-    "baseline_tag": "registry tag of baseline_image",
-    "baseline_digest": "manifest-list digest of baseline_image at capture time",
-    "baseline_sbom": "filename of the slim CycloneDX SBOM of the baseline in this directory",
-    "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64",
-    "layer_prefix_check_skipped": "(optional) true if the engineer opted out at capture time"
+    "layer_prefix_check_skipped": "(optional) true if the engineer opted out at capture time",
+    "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
-  "entries": []
+  "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 4 MB per file.",
+  "generated_at": "2026-05-11T18:55:39+00:00",
+  "schema_version": 2
 }
