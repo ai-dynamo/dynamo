@@ -45,8 +45,8 @@ _PACKAGE: dict[str, str] = {
 # than fix. Promote to a tracked bug before removing.
 #
 # Pattern: vLLM and SGLang both truncate normal_text at the *end* of the
-# tool-call wrapper across all XML-style parsers (kimi_k2, qwen3_coder, glm47).
-# Only Dynamo preserves text that appears after the closing wrapper token.
+# tool-call wrapper for some parser families. Dynamo preserves text that
+# appears after the closing wrapper token for the families still listed below.
 _TRAILING_NORMAL_TEXT_DROP = "drops trailing normal_text after tool-call wrapper end"
 _HARMONY_REQUIRES_ASSISTANT_PREFIX = (
     "SGLang's GptOssDetector bot_token requires '<|start|>assistant<|channel|>commentary' "
@@ -61,13 +61,11 @@ _RECOVERY_CONTRACT = "impl-defined recovery contract (see PARSER_CASES.md)"
 
 KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     # vLLM and SGLang both truncate normal_text at the *end* of the tool-call
-    # wrapper across all XML-style parsers. Only Dynamo preserves text after
+    # wrapper for these parser families. Only Dynamo preserves text after
     # the closing wrapper token.
     ("vllm", "kimi_k2", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "qwen3_coder", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
     ("vllm", "glm47", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
     ("sglang", "kimi_k2", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "qwen3_coder", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
     # SGLang's GptOssDetector requires a strict '<|start|>assistant<|channel|>commentary'
     # bot_token; bare '<|channel|>commentary' variants (PARSER.batch.1, .6, .13)
     # are not detected at all.
@@ -97,9 +95,7 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "PARSER.batch.10",
     ): "Dynamo drops back-to-back commentary blocks; SGLang extracts them",
     # Whitespace handling on text immediately preceding the bot_token:
-    # - SGLang on deepseek_v3_1: trims one trailing space; Dynamo keeps it
-    # - vLLM on minimax_m2: keeps trailing space; Dynamo trims it (opposite
-    #   direction from deepseek)
+    # - SGLang on DeepSeek variants trims one trailing space; Dynamo keeps it.
     (
         "sglang",
         "deepseek_v3_1",
@@ -155,16 +151,6 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "deepseek_v4",
         "PARSER.batch.7",
     ): "vLLM emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types",
-    (
-        "vllm",
-        "minimax_m2",
-        "PARSER.batch.8",
-    ): "preserves trailing space; Dynamo trims it",
-    (
-        "sglang",
-        "minimax_m2",
-        "PARSER.batch.8",
-    ): "preserves trailing space; Dynamo trims it",
     # PARSER.batch.4 (malformed) — impl-defined recovery contract.
     ("vllm", "deepseek_v3_1", "PARSER.batch.4"): _RECOVERY_CONTRACT,
     ("vllm", "minimax_m2", "PARSER.batch.4"): _RECOVERY_CONTRACT,
