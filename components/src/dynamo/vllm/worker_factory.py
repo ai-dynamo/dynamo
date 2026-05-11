@@ -670,15 +670,48 @@ class WorkerFactory:
     ) -> None:
         """Register all engine routes for this handler.
 
+        Includes both the existing system routes (sleep, wake_up, etc.) and the
+        RL admin routes reachable via POST /v1/rl/engine {"method": "<name>"}.
+
         Args:
             runtime: The DistributedRuntime instance to register routes on.
         """
+        # System / operational routes
         runtime.register_engine_route("start_profile", handler.start_profile)
         runtime.register_engine_route("stop_profile", handler.stop_profile)
         runtime.register_engine_route("sleep", handler.sleep)
         runtime.register_engine_route("wake_up", handler.wake_up)
         runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
 
+        # RL admin routes (control plane)
+        runtime.register_engine_route("liveness_probe", handler.liveness_probe)
+        runtime.register_engine_route("pause_generation", handler.pause_generation)
+        runtime.register_engine_route("resume_generation", handler.resume_generation)
+        runtime.register_engine_route("flush_cache", handler.flush_cache)
+        runtime.register_engine_route("abort_request", handler.abort_request)
+
+        # RL admin routes (weight management)
+        runtime.register_engine_route("update_weights_from_disk", handler.update_weights_from_disk)
+        runtime.register_engine_route("update_weights_from_distributed", handler.update_weights_from_distributed)
+        runtime.register_engine_route("update_weights_from_tensor", handler.update_weights_from_tensor)
+        runtime.register_engine_route("init_weights_update_group", handler.init_weights_update_group)
+        runtime.register_engine_route("destroy_weights_update_group", handler.destroy_weights_update_group)
+        runtime.register_engine_route("get_weight_version", handler.get_weight_version)
+
+        # RL admin routes (LoRA)
+        runtime.register_engine_route("load_lora_adapter", handler.load_lora_adapter)
+        runtime.register_engine_route("unload_lora_adapter", handler.unload_lora_adapter)
+
+        rl_routes = [
+            "liveness_probe", "pause_generation", "resume_generation",
+            "flush_cache", "abort_request",
+            "update_weights_from_disk", "update_weights_from_distributed",
+            "update_weights_from_tensor", "init_weights_update_group",
+            "destroy_weights_update_group", "get_weight_version",
+            "load_lora_adapter", "unload_lora_adapter",
+        ]
         logger.info(
-            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep, /engine/start_profile, /engine/stop_profile"
+            "Registered engine routes: sleep, wake_up, scale_elastic_ep, "
+            "start_profile, stop_profile, and RL admin routes: %s",
+            ", ".join(rl_routes),
         )
