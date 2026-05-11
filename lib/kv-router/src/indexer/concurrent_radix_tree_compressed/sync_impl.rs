@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use crate::indexer::AnchorCapableSyncIndexer;
 
 // ============================================================================
 // SyncIndexer implementation for ConcurrentRadixTreeCompressed
@@ -186,3 +187,5 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
         Some(self.dump_tree_as_events())
     }
 }
+
+impl AnchorCapableSyncIndexer for ConcurrentRadixTreeCompressed {}

@@ -26,8 +26,8 @@ use rustc_hash::{FxBuildHasher, FxHashSet};
 #[cfg(feature = "bench")]
 use super::ShardedIndexerMetrics;
 use super::{
-    AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError, ShardSizeSnapshot, SyncIndexer,
-    ThreadPoolIndexer,
+    AnchorCapableSyncIndexer, AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError,
+    ShardSizeSnapshot, ThreadPoolIndexer,
 };
 use crate::protocols::*;
 
@@ -96,7 +96,7 @@ struct StoreRouteDecision {
 }
 
 /// Anchor-aware branch-sharded wrapper over N [`ThreadPoolIndexer<T>`] instances.
-pub struct AnchorAwareBranchShardedIndexer<T: SyncIndexer> {
+pub struct AnchorAwareBranchShardedIndexer<T: AnchorCapableSyncIndexer> {
     shards: Vec<Arc<ThreadPoolIndexer<T>>>,
     num_shards: usize,
     max_routing_depth: usize,
@@ -108,7 +108,7 @@ pub struct AnchorAwareBranchShardedIndexer<T: SyncIndexer> {
     metrics: ShardedIndexerMetrics,
 }
 
-impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
+impl<T: AnchorCapableSyncIndexer> AnchorAwareBranchShardedIndexer<T> {
     /// Create an anchor-aware branch-sharded indexer from pre-built shards.
     pub fn new(shards: Vec<ThreadPoolIndexer<T>>, prefix_depth: usize, kv_block_size: u32) -> Self {
         assert!(!shards.is_empty(), "Must provide at least one shard");
@@ -639,7 +639,7 @@ impl<T: SyncIndexer> AnchorAwareBranchShardedIndexer<T> {
 }
 
 #[async_trait]
-impl<T: SyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
+impl<T: AnchorCapableSyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
     async fn find_matches(
         &self,
         sequence: Vec<LocalBlockHash>,
@@ -895,6 +895,7 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     use super::*;
+    use crate::indexer::SyncIndexer;
     use crate::indexer::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
     use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
     use tokio::sync::Barrier as AsyncBarrier;
