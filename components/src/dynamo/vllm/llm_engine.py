@@ -154,39 +154,26 @@ class VllmLLMEngine(LLMEngine):
         )
         self._vllm_config = vllm_config
 
-        # Wrap AsyncLLM creation + post-init in try/except. Worker won't
-        # call cleanup() on a failed start(); without this any failure
-        # after AsyncLLM allocates leaves an orphan vLLM EngineCore.
         self.engine_client = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
             usage_context=UsageContext.OPENAI_API_SERVER,
         )
-        try:
-            self._model_max_len = getattr(
-                getattr(vllm_config, "model_config", None), "max_model_len", None
-            )
+        self._model_max_len = getattr(
+            getattr(vllm_config, "model_config", None), "max_model_len", None
+        )
 
-            num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks or 0
-            block_size = vllm_config.cache_config.block_size
+        num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks or 0
+        block_size = vllm_config.cache_config.block_size
 
-            return EngineConfig(
-                model=self.engine_args.model,
-                served_model_name=self.engine_args.served_model_name,
-                context_length=self._model_max_len,
-                kv_cache_block_size=block_size,
-                total_kv_blocks=num_gpu_blocks,
-                max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
-                max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
-            )
-        except Exception:
-            try:
-                self.engine_client.shutdown()
-            except Exception:
-                logger.warning(
-                    "engine shutdown after start failure raised", exc_info=True
-                )
-            self.engine_client = None
-            raise
+        return EngineConfig(
+            model=self.engine_args.model,
+            served_model_name=self.engine_args.served_model_name,
+            context_length=self._model_max_len,
+            kv_cache_block_size=block_size,
+            total_kv_blocks=num_gpu_blocks,
+            max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
+            max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+        )
 
     async def generate(
         self, request: GenerateRequest, context: Context
