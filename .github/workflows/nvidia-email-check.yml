@@ -1,0 +1,61 @@
+name: NVIDIA Email Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  nvidia-email-check:
+    runs-on: ubuntu-latest
+    # Skip bots (dependabot etc.) and PRs flagged as external contributions
+    # by .github/workflows/pr_full_ci_reminder.yaml. Everything else is
+    # treated as an internal contributor and must use an @nvidia.com email.
+    if: >-
+      github.event.pull_request.user.type != 'Bot' &&
+      !contains(github.event.pull_request.labels.*.name, 'external-contribution')
+    steps:
+      - name: Verify all commit author emails are @nvidia.com
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+
+            const bad = commits.filter(c => {
+              const email = (c.commit.author && c.commit.author.email) || '';
+              return !email.toLowerCase().endsWith('@nvidia.com');
+            });
+
+            if (bad.length === 0) {
+              core.info(`All ${commits.length} commit(s) use an @nvidia.com author email.`);
+              return;
+            }
+
+            const author = context.payload.pull_request.user.login;
+            const lines = bad.map(c => {
+              const sha = c.sha.substring(0, 12);
+              const email = (c.commit.author && c.commit.author.email) || '(missing)';
+              const subject = c.commit.message.split('\n')[0];
+              return `  ${sha}  ${email}  ${subject}`;
+            });
+
+            const msg =
+              `PR author @${author} is treated as an internal contributor, but the following ` +
+              `commit(s) do not use an @nvidia.com author email:\n` +
+              lines.join('\n') +
+              `\n\nFix:\n` +
+              `  git config user.email 'you@nvidia.com'\n` +
+              `  # rewrite the affected commits, then force-push the branch\n` +
+              `\nIf this PR is from an external contributor, a maintainer can apply the ` +
+              `'external-contribution' label to bypass this check.`;
+
+            core.setFailed(msg);
