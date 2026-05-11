@@ -265,11 +265,13 @@ impl CoordinatedWorker {
         // Unpack metadata to get logical type info
         let unpacked = metadata.unpack()?;
 
-        // Import into the underlying worker so NIXL knows about the remote
+        // Import into the underlying worker so NIXL knows about the remote.
+        // Preserve the inbound parallelism descriptor across the repack.
         let repacked = SerializedLayout::pack(
             unpacked.worker_address.clone(),
             unpacked.nixl_metadata.clone(),
             unpacked.layouts.clone(),
+            unpacked.parallelism.clone(),
         )?;
         let response = self.inner.import_metadata(repacked)?;
         let _handles = response.await?;

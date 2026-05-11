@@ -9,7 +9,9 @@ mod metadata;
 mod remote;
 
 pub use handle::LayoutHandle;
-pub use metadata::{LogicalLayoutDescriptor, SerializedLayout, WorkerAddress};
+pub use metadata::{
+    LogicalLayoutDescriptor, ParallelismDescriptor, SerializedLayout, WorkerAddress,
+};
 
 pub(crate) use local::LocalLayout;
 pub(crate) use metadata::LocalLayoutDescriptor;
@@ -641,8 +643,10 @@ impl LayoutRegistry {
             }
         }
 
-        // Pack into managed metadata
-        SerializedLayout::pack(worker_address, nixl_metadata, serialized_layouts)
+        // Pack into managed metadata. AB-1a: ParallelismDescriptor not
+        // available at this layer; populated by the leader-side caller
+        // when assembling cross-leader exports.
+        SerializedLayout::pack(worker_address, nixl_metadata, serialized_layouts, None)
     }
 
     /// Import remote layout metadata.

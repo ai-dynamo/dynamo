@@ -321,11 +321,14 @@ impl PhysicalWorker {
             );
         }
 
-        // Pack with worker address and NIXL metadata
+        // Pack with worker address and NIXL metadata.
+        // AB-1a: ParallelismDescriptor populated by the leader at the
+        // export RPC site (where tp_size is known). Worker-local export
+        // leaves it `None`.
         let worker_address = self.manager.worker_address();
         let nixl_metadata = self.manager.get_nixl_metadata()?;
 
-        SerializedLayout::pack(worker_address, nixl_metadata, descriptors)
+        SerializedLayout::pack(worker_address, nixl_metadata, descriptors, None)
     }
 
     /// Import serialized layout metadata into the transfer manager.
@@ -674,11 +677,13 @@ impl WorkerTransfers for PhysicalWorker {
             }
         }
 
-        // Import so NIXL knows about the remote (repack to pass ownership)
+        // Import so NIXL knows about the remote (repack to pass ownership).
+        // Preserve the inbound parallelism descriptor across the repack.
         let repacked = SerializedLayout::pack(
             unpacked.worker_address,
             unpacked.nixl_metadata,
             unpacked.layouts,
+            unpacked.parallelism,
         )?;
         self.manager.import_metadata(repacked)?;
 

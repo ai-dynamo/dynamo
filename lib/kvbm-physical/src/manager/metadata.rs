@@ -8,8 +8,9 @@ use crate::layout::LayoutDescriptor;
 use anyhow::Result;
 use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
+use std::ops::Range;
 
-use kvbm_common::LogicalLayoutHandle;
+use kvbm_common::{KvDim, LogicalLayoutHandle};
 
 /// Worker identification combining worker_id and NIXL agent name.
 #[derive(Debug, Clone, Encode, Decode, PartialEq, Eq)]
@@ -80,10 +81,64 @@ impl LogicalLayoutDescriptor {
 /// Type alias for backwards compatibility.
 pub type LocalLayoutDescriptor = LogicalLayoutDescriptor;
 
+/// Per-worker parallelism descriptor exchanged alongside layout metadata.
+///
+/// Carries the information a peer leader needs to plan cross-parallelism
+/// transfers (cross-TP, future cross-PP) without inferring it from
+/// `Vec<SerializedLayout>.len()` or per-worker `LayoutConfig` alone.
+///
+/// PP fields are reserved — `pp_size` must be 1 for now;
+/// `layer_ownership` must be `0..num_layers` accordingly.
+#[derive(Debug, Clone, Encode, Decode, PartialEq, Eq)]
+pub struct ParallelismDescriptor {
+    /// Total tensor-parallel size on this worker's leader.
+    pub tp_size: usize,
+    /// Reserved for future pipeline-parallel support. Must be 1 today.
+    pub pp_size: usize,
+    /// This worker's rank within the leader's worker set: `0..tp_size * pp_size`.
+    pub rank: usize,
+    /// Axis along which this worker holds a shard. Typically [`KvDim::HeadCount`].
+    #[bincode(with_serde)]
+    pub shard_axis: KvDim,
+    /// Global extents (full, un-sharded sizes) per labelled axis.
+    /// Vec-of-tuples rather than a map so the wire format is deterministic
+    /// and avoids requiring `Ord` on [`KvDim`].
+    #[bincode(with_serde)]
+    pub global_extents: Vec<(KvDim, usize)>,
+    /// Layer range this worker owns. For `pp_size == 1` this is `0..num_layers`.
+    #[bincode(with_serde)]
+    pub layer_ownership: Range<usize>,
+}
+
+impl ParallelismDescriptor {
+    /// Construct a descriptor for the single-worker, single-leader case.
+    ///
+    /// Used as a stub at call sites that don't yet have leader-level
+    /// parallelism state plumbed through. Real descriptors come from the
+    /// leader when assembling its export.
+    pub fn single_worker(num_layers: usize) -> Self {
+        Self {
+            tp_size: 1,
+            pp_size: 1,
+            rank: 0,
+            shard_axis: KvDim::HeadCount,
+            global_extents: Vec::new(),
+            layer_ownership: 0..num_layers,
+        }
+    }
+}
+
 /// The set of [`LogicalLayoutDescriptor`] that are RDMA enabled. This object packages the detail
 /// about the layouts and the NIXL RDMA metadata required to reconstruct the layouts and access
 /// the memory via NIXL RDMA.
-#[derive(Debug, Encode, Decode)]
+///
+/// `Decode` is implemented manually (not derived) so that the trailing
+/// `parallelism` field is forward-compatible: legacy bytes encoded
+/// before AB-1a (without the `parallelism` field) decode to
+/// `parallelism = None` rather than failing with an EOF error. This
+/// supports rolling upgrades where one side is still emitting the
+/// pre-AB-1a wire shape.
+#[derive(Debug, Encode)]
 pub struct RdmaLayoutDescriptors {
     /// Worker identification
     pub worker_address: WorkerAddress,
@@ -91,6 +146,13 @@ pub struct RdmaLayoutDescriptors {
     pub nixl_metadata: Vec<u8>,
     /// Serialized layouts (handle + logical type + layout data)
     pub layouts: Vec<LogicalLayoutDescriptor>,
+    /// Per-worker parallelism descriptor for cross-parallelism planning.
+    ///
+    /// `None` covers two cases: (1) callers that don't yet have
+    /// leader-level parallelism state plumbed through emit `None`; and
+    /// (2) bytes encoded before AB-1a never carried this field, and
+    /// the manual `unpack` synthesises `None` for them.
+    pub parallelism: Option<ParallelismDescriptor>,
 }
 
 /// Managed memory metadata package for export/import.
@@ -109,6 +171,9 @@ impl SerializedLayout {
     /// * `worker_address` - Worker identification
     /// * `nixl_metadata` - NIXL metadata blob from get_local_md()
     /// * `layouts` - Vector of layouts with handles and logical types to export
+    /// * `parallelism` - Optional [`ParallelismDescriptor`] for cross-parallelism
+    ///   planning. `None` is the transitional default until leader-level
+    ///   parallelism state is plumbed through (AB-1a follow-up).
     ///
     /// # Returns
     /// Packed metadata ready for transmission
@@ -116,11 +181,13 @@ impl SerializedLayout {
         worker_address: WorkerAddress,
         nixl_metadata: Vec<u8>,
         layouts: Vec<LogicalLayoutDescriptor>,
+        parallelism: Option<ParallelismDescriptor>,
     ) -> Result<Self> {
         let inner = RdmaLayoutDescriptors {
             worker_address,
             nixl_metadata,
             layouts,
+            parallelism,
         };
         let bytes = bincode::encode_to_vec(&inner, bincode::config::standard())
             .map_err(|e| anyhow::anyhow!("failed to encode managed memory metadata: {}", e))?;
@@ -129,12 +196,52 @@ impl SerializedLayout {
 
     /// Unpack metadata from serialized form.
     ///
+    /// Decodes field-by-field rather than via a derived `Decode` impl so
+    /// that the trailing `parallelism` field is forward-compatible:
+    /// legacy bytes encoded before AB-1a stop after `layouts`, and we
+    /// synthesise `parallelism = None` for them. New bytes always carry
+    /// at least the `Option` discriminant.
+    ///
     /// # Returns
     /// Unpacked metadata structure
     pub fn unpack(&self) -> Result<RdmaLayoutDescriptors> {
-        let (inner, _) = bincode::decode_from_slice(&self.0, bincode::config::standard())
-            .map_err(|e| anyhow::anyhow!("failed to decode managed memory metadata: {}", e))?;
-        Ok(inner)
+        let cfg = bincode::config::standard();
+        let bytes = &self.0[..];
+
+        let (worker_address, c1): (WorkerAddress, usize) =
+            bincode::decode_from_slice(bytes, cfg).map_err(|e| {
+                anyhow::anyhow!("failed to decode worker_address: {}", e)
+            })?;
+        let rest = &bytes[c1..];
+
+        let (nixl_metadata, c2): (Vec<u8>, usize) =
+            bincode::decode_from_slice(rest, cfg).map_err(|e| {
+                anyhow::anyhow!("failed to decode nixl_metadata: {}", e)
+            })?;
+        let rest = &rest[c2..];
+
+        let (layouts, c3): (Vec<LogicalLayoutDescriptor>, usize) =
+            bincode::decode_from_slice(rest, cfg)
+                .map_err(|e| anyhow::anyhow!("failed to decode layouts: {}", e))?;
+        let rest = &rest[c3..];
+
+        let parallelism = if rest.is_empty() {
+            // Pre-AB-1a wire shape — trailing field absent.
+            None
+        } else {
+            let (p, _): (Option<ParallelismDescriptor>, usize) =
+                bincode::decode_from_slice(rest, cfg).map_err(|e| {
+                    anyhow::anyhow!("failed to decode parallelism descriptor: {}", e)
+                })?;
+            p
+        };
+
+        Ok(RdmaLayoutDescriptors {
+            worker_address,
+            nixl_metadata,
+            layouts,
+            parallelism,
+        })
     }
 
     /// Get the raw bytes.
@@ -231,7 +338,8 @@ mod tests {
         )];
 
         let packed =
-            SerializedLayout::pack(worker_address.clone(), nixl_metadata.clone(), layouts).unwrap();
+            SerializedLayout::pack(worker_address.clone(), nixl_metadata.clone(), layouts, None)
+                .unwrap();
 
         assert!(!packed.is_empty());
 
@@ -268,7 +376,7 @@ mod tests {
         ];
 
         let packed =
-            SerializedLayout::pack(worker_address, nixl_metadata, layouts.clone()).unwrap();
+            SerializedLayout::pack(worker_address, nixl_metadata, layouts.clone(), None).unwrap();
         let unpacked = packed.unpack().unwrap();
 
         assert_eq!(unpacked.layouts.len(), 3);
@@ -285,12 +393,92 @@ mod tests {
     }
 
     #[test]
+    fn test_parallelism_descriptor_roundtrip() {
+        let worker_address = WorkerAddress::new(7, "tp-worker".to_string());
+        let nixl_metadata = vec![9; 16];
+        let layouts = vec![LogicalLayoutDescriptor::new(
+            LayoutHandle::new(7, 1),
+            LogicalLayoutHandle::G2,
+            make_test_serialized_layout(),
+        )];
+        let parallelism = ParallelismDescriptor {
+            tp_size: 4,
+            pp_size: 1,
+            rank: 2,
+            shard_axis: KvDim::HeadCount,
+            global_extents: vec![(KvDim::HeadCount, 32), (KvDim::Layer, 24)],
+            layer_ownership: 0..24,
+        };
+
+        let packed = SerializedLayout::pack(
+            worker_address,
+            nixl_metadata,
+            layouts,
+            Some(parallelism.clone()),
+        )
+        .unwrap();
+        let unpacked = packed.unpack().unwrap();
+
+        assert_eq!(unpacked.parallelism.as_ref(), Some(&parallelism));
+    }
+
+    /// Legacy wire shape — pre-AB-1a bytes had only three fields and no
+    /// trailing parallelism. A new decoder must read these and synthesise
+    /// `parallelism = None`, not fail with an EOF error.
+    #[derive(bincode::Encode)]
+    struct LegacyRdmaLayoutDescriptors {
+        worker_address: WorkerAddress,
+        nixl_metadata: Vec<u8>,
+        layouts: Vec<LogicalLayoutDescriptor>,
+    }
+
+    #[test]
+    fn test_legacy_bytes_decode_to_none() {
+        let worker_address = WorkerAddress::new(11, "legacy".to_string());
+        let nixl_metadata = vec![0xab; 12];
+        let layouts = vec![LogicalLayoutDescriptor::new(
+            LayoutHandle::new(11, 1),
+            LogicalLayoutHandle::G2,
+            make_test_serialized_layout(),
+        )];
+        let legacy = LegacyRdmaLayoutDescriptors {
+            worker_address: worker_address.clone(),
+            nixl_metadata: nixl_metadata.clone(),
+            layouts: layouts.clone(),
+        };
+
+        // Encode in the pre-AB-1a wire shape (three fields only).
+        let legacy_bytes =
+            bincode::encode_to_vec(&legacy, bincode::config::standard()).unwrap();
+
+        // Wrap the legacy bytes in the new SerializedLayout container.
+        let packed = SerializedLayout::from_bytes(legacy_bytes);
+        let unpacked = packed
+            .unpack()
+            .expect("new decoder must read legacy bytes without error");
+
+        assert_eq!(unpacked.worker_address, worker_address);
+        assert_eq!(unpacked.nixl_metadata, nixl_metadata);
+        assert_eq!(unpacked.layouts.len(), 1);
+        assert!(unpacked.parallelism.is_none());
+    }
+
+    #[test]
+    fn test_parallelism_descriptor_absent() {
+        let worker_address = WorkerAddress::new(8, "no-parallelism".to_string());
+        let packed =
+            SerializedLayout::pack(worker_address, Vec::new(), Vec::new(), None).unwrap();
+        let unpacked = packed.unpack().unwrap();
+        assert!(unpacked.parallelism.is_none());
+    }
+
+    #[test]
     fn test_metadata_from_bytes() {
         let worker_address = WorkerAddress::new(42, "test".to_string());
         let nixl_metadata = vec![1, 2, 3];
         let layouts = vec![];
 
-        let packed = SerializedLayout::pack(worker_address, nixl_metadata, layouts).unwrap();
+        let packed = SerializedLayout::pack(worker_address, nixl_metadata, layouts, None).unwrap();
         let bytes = packed.as_bytes().to_vec();
 
         let restored = SerializedLayout::from_bytes(bytes);

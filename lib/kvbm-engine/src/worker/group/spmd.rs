@@ -163,11 +163,13 @@ impl WorkerTransfers for SpmdParallelWorkers {
                 ));
             }
 
-            // Repack for the underlying worker's import_metadata
+            // Repack for the underlying worker's import_metadata.
+            // Preserve the inbound parallelism descriptor across the repack.
             let repacked = SerializedLayout::pack(
                 unpacked.worker_address,
                 unpacked.nixl_metadata,
                 unpacked.layouts,
+                unpacked.parallelism,
             )?;
 
             // Call underlying worker's import_metadata
