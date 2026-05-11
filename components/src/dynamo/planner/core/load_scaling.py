@@ -503,13 +503,31 @@ class LoadScalingMixin:
 
         estimates: list[float] = []
         # Consolidation-aware scale-down. Two safety checks per worker:
-        #  1. Hard cache-feasibility: post-consolidation KV must fit within
-        #     ``max_kv_tokens``. Exceeding the cache forces request queueing
-        #     / block eviction, a non-linear regime the regression cannot
-        #     model, so refuse outright when crossed.
-        #  2. SLA check: predicted ITL at the survivor's post-consolidation KV
-        #     must stay within ``SLA * sensitivity``. Decouples from cache
-        #     size -- engines often saturate latency well before cache.
+        #
+        #  1. **Hard cache feasibility**: post-consolidation KV must fit
+        #     within ``max_kv_tokens``. Exceeding the cache forces block
+        #     eviction / request queueing, a non-linear regime the
+        #     regression cannot model, so we refuse outright when crossed.
+        #
+        #  2. **Rate-bound SLA check**: predict the survivor's *steady-state*
+        #     ITL after losing a worker via a closed-form Little's-Law fixed
+        #     point, then compare to ``SLA * sensitivity``.
+        #
+        #     The closed form (derived in
+        #     ``DecodeRegressionModel.estimate_post_consolidation_itl``) is::
+        #
+        #         itl_post = (N-1) * intercept * itl_curr
+        #                    / (N * intercept - itl_curr)
+        #
+        #     and tends to +inf as ``itl_curr -> N * intercept`` -- the
+        #     rate-bound capacity limit beyond which one fewer worker
+        #     physically cannot sustain the offered load. This captures
+        #     catastrophic saturation that a "scale KV by N/(N-1)" linear
+        #     extrapolation would miss.
+        #
+        #     If the regression's intercept is non-positive (noisy fit), we
+        #     fall back to the linear projection ``estimate_next_itl`` at
+        #     ``post_kv = (sched + queued) * N/(N-1)``.
         can_scale_down = num_workers > 1
         consolidation_refused = False
         for (wid, dp), fpm in fpm_stats.items():
@@ -534,11 +552,22 @@ class LoadScalingMixin:
                     can_scale_down = False
                     consolidation_refused = True
                     continue
-                # (2) SLA check via regression at post-consolidation kv
-                post_itl = self._decode_regression.estimate_next_itl(
-                    scheduled_decode_kv=post_sched_kv,
-                    queued_decode_kv=0,
-                )
+                # (2) rate-bound SLA check at the survivor's steady-state ITL
+                post_itl: Optional[float] = None
+                if est is not None:
+                    post_itl = self._decode_regression.estimate_post_consolidation_itl(
+                        itl_curr=est,
+                        num_workers=num_workers,
+                    )
+                if post_itl is None:
+                    # Closed-form unavailable (regression cold or unstable
+                    # intercept) -- fall back to linear extrapolation at
+                    # the scaled kv. Less accurate near saturation but
+                    # safe.
+                    post_itl = self._decode_regression.estimate_next_itl(
+                        scheduled_decode_kv=post_sched_kv,
+                        queued_decode_kv=0,
+                    )
                 if post_itl is None:
                     can_scale_down = False
                 elif post_itl * 1000 >= self._config.itl * sensitivity:

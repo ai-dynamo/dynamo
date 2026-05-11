@@ -64,6 +64,25 @@ class DecodeRegressionModel(_BaseRegressionModel):
     def avg_decode_length(self) -> float:
         return self._avg_decode_len.value
 
+    @property
+    def intercept_seconds(self) -> Optional[float]:
+        """Regression intercept (no-load wall_time per iteration, in seconds).
+
+        Returns ``None`` if the model has not been fitted yet. The intercept
+        represents fixed per-iter overhead (kernel launches, framework
+        bookkeeping) that does not scale with batch composition. It is the
+        physical lower bound on ITL -- the wall_time prediction approaches
+        this value as ``num_req -> 0`` and ``kv -> 0``.
+
+        Used by the rate-bound consolidation predictor: at steady state the
+        post-survival ITL diverges as the system approaches the rate-bound
+        capacity ``ITL = N * intercept``, beyond which one fewer worker
+        cannot sustain the offered request rate.
+        """
+        if not self._is_fitted:
+            return None
+        return float(self._model.intercept_)
+
     def _predict_2d(self, num_requests: float, kv_tokens: float) -> float:
         return max(
             1e-6, float(self._model.predict(np.array([[num_requests, kv_tokens]]))[0])
@@ -80,6 +99,85 @@ class DecodeRegressionModel(_BaseRegressionModel):
         total_kv = scheduled_decode_kv + queued_decode_kv + self._avg_decode_len.value
         num_req = self._avg_num_decode.value + 1
         return self._predict_2d(num_req, total_kv)
+
+    def estimate_post_consolidation_itl(
+        self,
+        itl_curr: float,
+        num_workers: int,
+    ) -> Optional[float]:
+        """Estimate steady-state ITL on the survivor after scaling N -> N-1.
+
+        Closed-form Little's-Law solution for the post-consolidation ITL.
+        Derivation:
+
+        The regression decomposes ITL into a fixed cost (intercept) plus a
+        load-dependent variable cost::
+
+            itl_curr = intercept + V_curr
+
+        where ``V_curr = c_req * num_req_curr + c_kv * kv_curr`` is the
+        variable portion (load * regression slopes).
+
+        At steady state, Little's Law ties per-worker concurrency to the
+        product of arrival rate and time-in-system. Time-in-system for a
+        decode token is ~ITL, so the variable load scales with both:
+
+          1. ``N/(N-1)``: arrival rate per worker after losing a worker
+             (cluster offered load is invariant; per-worker share grows).
+          2. ``itl_post / itl_curr``: longer ITL means each request lingers
+             longer in the batch, further inflating concurrency / kv.
+
+        Hence the variable cost on the survivor at the new steady state is::
+
+            V_post = (itl_post / itl_curr) * (N / (N-1)) * V_curr
+                   = (itl_post / itl_curr) * (N / (N-1)) * (itl_curr - intercept)
+
+        and ``itl_post = intercept + V_post``. Substituting and solving the
+        linear fixed point in ``itl_post``::
+
+            itl_post = (N-1) * intercept * itl_curr / (N * intercept - itl_curr)
+
+        Equivalently::
+
+            itl_post = itl_curr * (1 + (itl_curr - intercept) /
+                                   (N * intercept - itl_curr))
+
+        **Saturation**: the denominator ``N * intercept - itl_curr`` goes to
+        zero as ``itl_curr -> N * intercept``. Past this point one fewer
+        worker physically cannot sustain the offered request rate (the
+        survivor would need to process tokens faster than its intercept
+        permits). Returns ``+inf`` in that regime so callers refuse
+        scale-down.
+
+        Args:
+            itl_curr: Current per-worker ITL in seconds.
+            num_workers: Current worker count (must be >= 2 to consolidate).
+
+        Returns:
+            Predicted post-consolidation ITL in seconds; ``+inf`` if the
+            system is rate-bound (infeasible to lose a worker);
+            ``None`` if the regression is not fitted or the intercept is
+            non-positive (a noisy fit we can't trust for this projection).
+        """
+        if not self._ensure_fitted() or num_workers < 2:
+            return None
+        intercept = self.intercept_seconds
+        if intercept is None or intercept <= 0:
+            # A non-positive intercept means the fit was dominated by noise
+            # or extrapolation past training data -- the rate-bound formula
+            # would divide by something meaningless. Caller should fall back
+            # to a direct ``estimate_next_itl`` at scaled inputs instead.
+            return None
+        if itl_curr <= intercept:
+            # Below the fixed cost floor (regression noise) -- treat survivor
+            # as also at the floor; nothing to amplify.
+            return intercept
+        denom = num_workers * intercept - itl_curr
+        if denom <= 0:
+            # Rate-bound: even with infinite cache, one fewer worker cannot
+            # keep up with the offered request rate.
+            return float("inf")
+        return (num_workers - 1) * intercept * itl_curr / denom
 
     def find_best_engine_decode_rps(
         self,

@@ -347,27 +347,54 @@ def _decode_caps_with_max_kv(max_kv_tokens: int) -> WorkerCapabilities:
     )
 
 
+def _train_decode_regression_with_intercept(core: PlannerStateMachine) -> None:
+    """Trains the decode regression with a sizable fixed-cost intercept (~30ms).
+
+    The rate-bound consolidation formula (Little's Law fixed point) only
+    behaves non-trivially when the regression's intercept is large relative
+    to the variable load -- the "interesting" regime is
+    ``intercept < itl_curr < N * intercept``. With the default training
+    helper's ~1 ms intercept the formula always reports saturation, so
+    rate-bound tests use this larger fixed cost.
+    """
+    fpms = [
+        _make_fpm(
+            sum_decode_kv_tokens=kv,
+            num_decode_requests=n,
+            wall_time=1e-5 * kv + 0.03,  # intercept = 30 ms
+        )
+        for n, kv in [(5, 5000), (10, 10000), (20, 20000), (30, 30000), (40, 40000)]
+    ]
+    core.load_benchmark_fpms(decode_fpms=fpms)
+
+
 class TestDecodeConsolidationAwareScaleDown:
-    """Decode scale-down uses two checks at the survivor's post-consolidation
-    KV (current sched+queued scaled by N/(N-1)):
+    """Decode scale-down uses two checks per worker:
 
-    1. **Cache feasibility** -- post_kv must fit within ``max_kv_tokens``;
-       crossing it forces block eviction / queueing, a non-linear regime
-       outside the regression's domain.
-    2. **SLA check** -- regression-predicted ITL at post_kv must stay
-       within ``SLA * sensitivity``.
+    1. **Hard cache feasibility** -- post_kv must fit within
+       ``max_kv_tokens``; crossing it forces block eviction / queueing,
+       a non-linear regime outside the regression's domain.
+    2. **Rate-bound SLA check** -- closed-form Little's-Law projection of
+       the survivor's steady-state ITL after losing a worker, compared to
+       ``SLA * sensitivity``.
 
-    Either failure refuses the scale-down.
+    The closed form is
+
+        itl_post = (N-1) * intercept * itl_curr / (N * intercept - itl_curr)
+
+    and diverges as ``itl_curr -> N * intercept`` (rate-bound capacity).
+    See ``DecodeRegressionModel.estimate_post_consolidation_itl`` for the
+    full derivation.
     """
 
-    def _setup(self, *, itl_sla: float = 100.0, max_kv_tokens: int = 100_000):
+    def _setup(self, *, itl_sla: float = 300.0, max_kv_tokens: int = 100_000):
         core = _make_core(
             mode="decode",
             itl=itl_sla,
             load_scaling_down_sensitivity=80,
         )
         core._capabilities = _decode_caps_with_max_kv(max_kv_tokens)
-        _train_decode_regression(core)
+        _train_decode_regression_with_intercept(core)
         return core
 
     def _tick(self, *, num_workers: int, sched_kv_per_worker: int) -> TickInput:
@@ -377,10 +404,9 @@ class TestDecodeConsolidationAwareScaleDown:
                 worker_id=f"w{i}",
                 sum_decode_kv_tokens=sched_kv_per_worker,
                 num_decode_requests=max(1, sched_kv_per_worker // 1000),
-                # Match _train_decode_regression's wall_time formula so the
-                # post-bootstrap refit on each tick stays monotone in kv;
-                # otherwise the regression rejects the fit and decisions skip.
-                wall_time=0.00001 * sched_kv_per_worker + 0.001,
+                # Match the training regression's slope+intercept so per-tick
+                # refits stay monotone (otherwise the fit can reject).
+                wall_time=1e-5 * sched_kv_per_worker + 0.03,
             )
         return TickInput(
             now_s=5.0,
@@ -388,27 +414,44 @@ class TestDecodeConsolidationAwareScaleDown:
             worker_counts=WorkerCounts(ready_num_decode=num_workers),
         )
 
-    def test_post_consolidation_within_sla_permits(self):
-        """Light load: post_kv well under cache and SLA -> ALLOW.
+    def test_rate_bound_below_saturation_permits(self):
+        """Light load: ``itl_curr`` well below ``N * intercept`` -> ALLOW.
 
-        N=2, sched_kv=1500. post_kv = 3000. Predicted ITL ~= 0.001 +
-        0.00001 * 4000 ~= 41 ms (with internal avg_decode_len), under
-        the 80 ms threshold. No scale-up either (under 100 ms SLA).
+        intercept ~= 30 ms. With sched_kv=1000, predicted itl_curr ~= 50 ms
+        (intercept + 0.01ms*kv*kv + avg_decode_len adjustment). Rate-bound
+        post-consolidation itl_post = 1 * 30 * 50 / (60 - 50) = 150 ms,
+        below SLA * sensitivity = 240 ms.
         """
-        core = self._setup(itl_sla=100.0)
-        tick = self._tick(num_workers=2, sched_kv_per_worker=1_500)
+        core = self._setup(itl_sla=300.0)
+        tick = self._tick(num_workers=2, sched_kv_per_worker=1_000)
         effects = core.on_tick(_tick_for(tick), tick)
         assert effects.scale_to is not None
         assert effects.scale_to.num_decode == 1
 
-    def test_post_consolidation_breaches_sla_refuses(self):
-        """Cache fine but predicted ITL > SLA*sensitivity -> SLA check refuses.
+    def test_rate_bound_breaches_sla_refuses(self):
+        """Sub-saturation but predicted post-itl > SLA*sensitivity -> REFUSE.
 
-        N=2, sched_kv=8000. post_kv=16000 (well below 100K cache). Predicted
-        ITL ~= 0.001 + 0.00001 * 17000 ~= 171 ms, above the 80 ms threshold.
+        Same load (itl_post ~= 150 ms by rate-bound formula) but a tighter
+        SLA of 150 ms (threshold 120 ms). 150 > 120 -> SLA check refuses.
         """
-        core = self._setup(itl_sla=100.0)
-        tick = self._tick(num_workers=2, sched_kv_per_worker=8_000)
+        core = self._setup(itl_sla=150.0)
+        tick = self._tick(num_workers=2, sched_kv_per_worker=1_000)
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is None or effects.scale_to.num_decode == 2
+        assert (
+            effects.diagnostics.load_decision_reason
+            == "scale_down_refused_consolidation"
+        )
+
+    def test_rate_bound_saturation_refuses(self):
+        """At the rate-bound capacity: ``itl_curr >= N * intercept`` -> REFUSE.
+
+        sched_kv=4000 gives itl_curr ~= 70 ms > 60 ms = 2 * intercept. The
+        closed form's denominator goes non-positive -> post_itl = +inf ->
+        scale-down is infeasible at any sensitivity.
+        """
+        core = self._setup(itl_sla=10_000.0)  # SLA effectively off
+        tick = self._tick(num_workers=2, sched_kv_per_worker=4_000)
         effects = core.on_tick(_tick_for(tick), tick)
         assert effects.scale_to is None or effects.scale_to.num_decode == 2
         assert (
@@ -417,10 +460,10 @@ class TestDecodeConsolidationAwareScaleDown:
         )
 
     def test_post_consolidation_exceeds_max_kv_refuses(self):
-        """Hard cache fail-safe: post_kv >= max_kv -> refuse outright.
+        """Hard cache fail-safe still applies independently of rate-bound.
 
-        N=2, sched_kv=60_000. post_kv=120_000 >= max_kv 100_000. SLA is
-        effectively off (10s) so only the cache check can refuse.
+        sched_kv=60_000 -> post_kv = 120_000 >= max_kv = 100_000. Refused
+        without consulting the rate-bound model (SLA is effectively off).
         """
         core = self._setup(itl_sla=10_000.0, max_kv_tokens=100_000)
         tick = self._tick(num_workers=2, sched_kv_per_worker=60_000)
@@ -431,21 +474,105 @@ class TestDecodeConsolidationAwareScaleDown:
             == "scale_down_refused_consolidation"
         )
 
-    def test_no_max_kv_falls_through_to_sla_check(self):
-        """Without max_kv_tokens, only the SLA check governs.
-
-        Cache check is skipped (no denominator); the regression still gates
-        scale-down by predicted ITL. Light load passes -> ALLOW.
-        """
-        core = self._setup(itl_sla=100.0)
-        # Erase max_kv: cache check becomes a no-op.
+    def test_no_max_kv_falls_through_to_rate_bound_check(self):
+        """Without max_kv_tokens, only the rate-bound SLA check governs."""
+        core = self._setup(itl_sla=300.0)
         core._capabilities = WorkerCapabilities(
             decode=EngineCapabilities(num_gpu=1, max_num_batched_tokens=2048),
         )
-        tick = self._tick(num_workers=2, sched_kv_per_worker=1_500)
+        tick = self._tick(num_workers=2, sched_kv_per_worker=1_000)
         effects = core.on_tick(_tick_for(tick), tick)
         assert effects.scale_to is not None
         assert effects.scale_to.num_decode == 1
+
+
+class TestEstimatePostConsolidationItl:
+    """Unit tests for the closed-form rate-bound projection.
+
+    Math:  itl_post = (N-1) * intercept * itl_curr / (N * intercept - itl_curr)
+    """
+
+    def _fitted_regression(self):
+        core = _make_core(mode="decode")
+        _train_decode_regression_with_intercept(core)
+        # Force a fit (regression lazy-fits on first prediction).
+        core.decode_regression.estimate_next_itl(
+            scheduled_decode_kv=0, queued_decode_kv=0
+        )
+        return core.decode_regression
+
+    def test_returns_none_when_unfitted(self):
+        core = _make_core(mode="decode")
+        assert (
+            core.decode_regression.estimate_post_consolidation_itl(
+                itl_curr=0.05, num_workers=2
+            )
+            is None
+        )
+
+    def test_returns_none_for_n_below_2(self):
+        reg = self._fitted_regression()
+        assert reg.estimate_post_consolidation_itl(itl_curr=0.05, num_workers=1) is None
+
+    def test_below_intercept_returns_intercept(self):
+        reg = self._fitted_regression()
+        intercept = reg.intercept_seconds
+        assert intercept is not None and intercept > 0
+        # itl_curr below the fixed cost floor: survivor also pegged at floor.
+        result = reg.estimate_post_consolidation_itl(
+            itl_curr=intercept * 0.5, num_workers=2
+        )
+        assert result == intercept
+
+    def test_at_saturation_returns_infinity(self):
+        reg = self._fitted_regression()
+        intercept = reg.intercept_seconds
+        assert intercept is not None
+        # itl_curr at exactly N * intercept -> denominator 0 -> infeasible.
+        result = reg.estimate_post_consolidation_itl(
+            itl_curr=2 * intercept, num_workers=2
+        )
+        assert result == float("inf")
+
+    def test_past_saturation_returns_infinity(self):
+        reg = self._fitted_regression()
+        intercept = reg.intercept_seconds
+        assert intercept is not None
+        result = reg.estimate_post_consolidation_itl(
+            itl_curr=3 * intercept, num_workers=2
+        )
+        assert result == float("inf")
+
+    def test_closed_form_matches_formula(self):
+        """Direct verification of (N-1)*c*itl / (N*c - itl) at a finite point."""
+        reg = self._fitted_regression()
+        intercept = reg.intercept_seconds
+        assert intercept is not None
+        N = 2
+        # Pick itl_curr midway between intercept and N*intercept.
+        itl_curr = 1.5 * intercept
+        expected = (N - 1) * intercept * itl_curr / (N * intercept - itl_curr)
+        actual = reg.estimate_post_consolidation_itl(itl_curr=itl_curr, num_workers=N)
+        assert actual is not None
+        assert abs(actual - expected) < 1e-9
+
+    def test_higher_n_more_permissive(self):
+        """At N=10 the saturation point is 10*intercept (vs 2*intercept at N=2),
+        so the same itl_curr is sub-saturation at high N but saturated at low N.
+        """
+        reg = self._fitted_regression()
+        intercept = reg.intercept_seconds
+        assert intercept is not None
+        itl_curr = 1.8 * intercept
+
+        at_n2 = reg.estimate_post_consolidation_itl(itl_curr, num_workers=2)
+        at_n10 = reg.estimate_post_consolidation_itl(itl_curr, num_workers=10)
+
+        # N=2: itl_curr 1.8*c is approaching saturation -> very large
+        # N=10: same itl_curr is well below saturation -> finite, modest
+        assert at_n2 is not None and at_n10 is not None
+        assert at_n2 > at_n10
+        assert at_n10 < 5 * intercept  # comfortably finite
 
 
 def _train_slow_prefill_regression(core: PlannerStateMachine) -> None:
