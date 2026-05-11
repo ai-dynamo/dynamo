@@ -58,7 +58,7 @@ vllm:
     runtime_image_tag: 132765e3560659ff63ebd236203672e991b70e08-xpu
   cpu:
     base_image: ubuntu
-    runtime_image: ubuntu
+    runtime_image: vllm/vllm-openai-cpu
     base_image_tag: 24.04
     runtime_image_tag: 24.04
   flashinf_ref: v0.6.8.post1
