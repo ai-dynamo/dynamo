@@ -283,24 +283,46 @@ fn unique_tmp_path(dest: &Path) -> PathBuf {
     p
 }
 
+/// RAII guard that unlinks a tmp path on drop. `dismiss()` cancels the
+/// cleanup once the tmp has been consumed by a successful rename. Drop
+/// ignores ENOENT — safe under double-cleanup races.
+struct TmpGuard {
+    path: Option<PathBuf>,
+}
+
+impl TmpGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+    fn dismiss(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TmpGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.path.take() {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
 /// Atomic publish: stage via `f(&tmp)`, then `rename(tmp -> dest)`.
 /// Concurrent-safe because tmps are per-call (see [`unique_tmp_path`])
 /// and `rename(2)` is atomic + overwrites. Tmp is unlinked on any
-/// failure.
+/// failure path including async cancellation — see [`TmpGuard`].
 async fn stage_and_rename<F, Fut>(dest: &Path, f: F) -> anyhow::Result<()>
 where
     F: FnOnce(PathBuf) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<()>>,
 {
     let tmp = unique_tmp_path(dest);
-    if let Err(err) = f(tmp.clone()).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(err);
-    }
-    if let Err(err) = tokio::fs::rename(&tmp, dest).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        anyhow::bail!("renaming {} -> {}: {err}", tmp.display(), dest.display());
-    }
+    let mut guard = TmpGuard::new(tmp.clone());
+    f(tmp.clone()).await?;
+    tokio::fs::rename(&tmp, dest)
+        .await
+        .with_context(|| format!("renaming {} -> {}", tmp.display(), dest.display()))?;
+    guard.dismiss();
     Ok(())
 }
 
@@ -311,14 +333,11 @@ where
     F: FnOnce(&Path) -> anyhow::Result<()>,
 {
     let tmp = unique_tmp_path(dest);
-    if let Err(err) = f(&tmp) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(err);
-    }
-    if let Err(err) = std::fs::rename(&tmp, dest) {
-        let _ = std::fs::remove_file(&tmp);
-        anyhow::bail!("renaming {} -> {}: {err}", tmp.display(), dest.display());
-    }
+    let mut guard = TmpGuard::new(tmp.clone());
+    f(&tmp)?;
+    std::fs::rename(&tmp, dest)
+        .with_context(|| format!("renaming {} -> {}", tmp.display(), dest.display()))?;
+    guard.dismiss();
     Ok(())
 }
 
@@ -1900,5 +1919,43 @@ mod tests {
             msg.contains("--model-path") || msg.contains("shared mount"),
             "wrong error: {msg}"
         );
+    }
+
+    /// Dropping `stage_and_rename`'s future mid-await (caller cancellation)
+    /// must still unlink the tmp file via the [`TmpGuard`] drop path.
+    #[tokio::test]
+    async fn stage_and_rename_unlinks_tmp_on_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        let leaked_before: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(leaked_before.is_empty(), "tempdir starts empty");
+
+        let fut = super::stage_and_rename(&dest, |tmp| async move {
+            std::fs::write(&tmp, b"partial").unwrap();
+            // Mimic a worker abort mid-fetch: yield, then never resume.
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        // Drop the future before it can complete (cancellation).
+        {
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(50), fut).await;
+        }
+
+        // Give Drop a moment to run.
+        tokio::task::yield_now().await;
+
+        let leaked_after: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .collect();
+        assert!(
+            leaked_after.is_empty(),
+            "TmpGuard should have unlinked the tmp on cancel; leaked: {leaked_after:?}"
+        );
+        assert!(!dest.exists(), "dest must not exist after cancel");
     }
 }
