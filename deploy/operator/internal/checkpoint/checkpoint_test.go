@@ -113,10 +113,9 @@ func TestStorageFromConfig(t *testing.T) {
 		assert.False(t, ok)
 	})
 
-	t.Run("legacy s3 config is ignored", func(t *testing.T) {
+	t.Run("legacy s3 type is ignored", func(t *testing.T) {
 		_, ok, err := StorageFromConfig(configv1alpha1.CheckpointStorageConfiguration{
 			Type: configv1alpha1.CheckpointStorageTypeS3,
-			S3:   configv1alpha1.CheckpointS3Config{URI: "s3://bucket/prefix"},
 		})
 		require.NoError(t, err)
 		assert.False(t, ok)
