@@ -71,6 +71,10 @@ impl From<SerializableTransferOptions> for TransferOptions {
             src_kv_layout: None,
             dst_kv_layout: None,
             metric_route: opts.metric_route,
+            // use_planner is a per-side optimization toggle; the wire form
+            // intentionally does not propagate it. Each receiver picks its
+            // own planner policy.
+            use_planner: false,
         }
     }
 }
