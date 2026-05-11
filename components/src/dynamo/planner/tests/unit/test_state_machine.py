@@ -363,7 +363,7 @@ class TestDecodeConsolidationAwareScaleDown:
     def _setup(self, *, itl_sla: float = 100.0, max_kv_tokens: int = 100_000):
         core = _make_core(
             mode="decode",
-            itl=itl_sla,
+            itl_ms=itl_sla,
             load_scaling_down_sensitivity=80,
         )
         core._capabilities = _decode_caps_with_max_kv(max_kv_tokens)
@@ -477,7 +477,7 @@ class TestPrefillConsolidationAwareScaleDown:
     def _setup(self, ttft: float = 100.0):
         core = _make_core(
             mode="prefill",
-            ttft=ttft,
+            ttft_ms=ttft,
             load_scaling_down_sensitivity=80,
         )
         _train_slow_prefill_regression(core)
@@ -569,7 +569,7 @@ class TestPrefillQueueBudgetRefinement:
     def _setup(self, ttft: float = 50.0):
         core = _make_core(
             mode="prefill",
-            ttft=ttft,
+            ttft_ms=ttft,
             load_scaling_down_sensitivity=80,
         )
         _train_prefill_regression_high_own_compute(core)
@@ -1084,8 +1084,8 @@ class TestAggConsolidationAwareScaleDown:
         scaled down 2 -> 1 anyway. Post-fix we stay at 2.
         """
         core = _make_agg_core(
-            ttft=500.0,
-            itl=1000.0,
+            ttft_ms=500.0,
+            itl_ms=1000.0,
             load_scaling_down_sensitivity=80,
         )
         core._capabilities = _agg_caps_with_max_kv(100_000)
@@ -1124,8 +1124,8 @@ class TestAggConsolidationAwareScaleDown:
             500ms -> queue_budget <= 0 -> REFUSES.
         """
         core = _make_agg_core(
-            ttft=500.0,
-            itl=1000.0,
+            ttft_ms=500.0,
+            itl_ms=1000.0,
             load_scaling_down_sensitivity=80,
         )
         core._capabilities = _agg_caps_with_max_kv(100_000)
@@ -1153,8 +1153,8 @@ class TestAggConsolidationAwareScaleDown:
     def test_both_sides_safe_permits_scale_down(self):
         """Sanity: when neither side refuses, agg DOES scale down."""
         core = _make_agg_core(
-            ttft=2000.0,  # generous TTFT so prefill never refuses
-            itl=1000.0,
+            ttft_ms=2000.0,  # generous TTFT so prefill never refuses
+            itl_ms=1000.0,
             load_scaling_down_sensitivity=80,
         )
         core._capabilities = _agg_caps_with_max_kv(100_000)
