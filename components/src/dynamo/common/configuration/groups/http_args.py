@@ -20,8 +20,9 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-from typing import Optional, Self
+from typing import Optional
 
+from dynamo.common.compat import Self
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument

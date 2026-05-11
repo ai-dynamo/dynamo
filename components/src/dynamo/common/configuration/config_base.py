@@ -2,10 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import argparse
 
-try:
-    from typing import Self
-except ImportError:  # Python < 3.11
-    from typing_extensions import Self
+from dynamo.common.compat import Self
 
 
 class ConfigBase:
