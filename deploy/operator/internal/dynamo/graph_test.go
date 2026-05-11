@@ -9005,3 +9005,145 @@ func TestPCSNameForDGD(t *testing.T) {
 		})
 	}
 }
+
+func TestGeneratePodSpecForComponent_KvCacheTransferTopologyEnvVars(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
+
+	t.Run("frontend gets topology env vars when kvCacheTransferTopology is set", func(t *testing.T) {
+		dgd := &v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {ComponentType: commonconsts.ComponentTypeFrontend},
+				},
+				KvCacheTransferTopology: &v1alpha1.KvCacheTransferTopology{
+					Label:          "topology.kubernetes.io/zone",
+					Level:          "zone",
+					MismatchPolicy: v1alpha1.MismatchPolicyFail,
+				},
+			},
+		}
+		component := dgd.Spec.Services["frontend"].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkSGLang, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, podSpec.Containers, 1)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.Equal(t, "zone", envMap[commonconsts.EnvRouterKvTransferTopologyLevel],
+			"frontend should have DYN_ROUTER_KV_TRANSFER_TOPOLOGY_LEVEL")
+		assert.Equal(t, "fail", envMap[commonconsts.EnvRouterKvTransferMismatchPolicy],
+			"frontend should have DYN_ROUTER_KV_TRANSFER_MISMATCH_POLICY")
+	})
+
+	t.Run("frontend gets fallback mismatch policy", func(t *testing.T) {
+		dgd := &v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {ComponentType: commonconsts.ComponentTypeFrontend},
+				},
+				KvCacheTransferTopology: &v1alpha1.KvCacheTransferTopology{
+					Label:          "nvidia.com/rack",
+					Level:          "rack",
+					MismatchPolicy: v1alpha1.MismatchPolicyFallback,
+				},
+			},
+		}
+		component := dgd.Spec.Services["frontend"].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkSGLang, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, nil,
+		)
+		require.NoError(t, err)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.Equal(t, "rack", envMap[commonconsts.EnvRouterKvTransferTopologyLevel])
+		assert.Equal(t, "fallback", envMap[commonconsts.EnvRouterKvTransferMismatchPolicy])
+	})
+
+	t.Run("worker does not get topology env vars", func(t *testing.T) {
+		dgd := &v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+				},
+				KvCacheTransferTopology: &v1alpha1.KvCacheTransferTopology{
+					Label:          "topology.kubernetes.io/zone",
+					Level:          "zone",
+					MismatchPolicy: v1alpha1.MismatchPolicyFail,
+				},
+			},
+		}
+		component := dgd.Spec.Services["worker"].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkSGLang, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil,
+		)
+		require.NoError(t, err)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.NotContains(t, envMap, commonconsts.EnvRouterKvTransferTopologyLevel,
+			"worker should not have topology env vars")
+		assert.NotContains(t, envMap, commonconsts.EnvRouterKvTransferMismatchPolicy,
+			"worker should not have topology env vars")
+	})
+
+	t.Run("frontend without topology has no topology env vars", func(t *testing.T) {
+		dgd := &v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {ComponentType: commonconsts.ComponentTypeFrontend},
+				},
+			},
+		}
+		component := dgd.Spec.Services["frontend"].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkSGLang, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, nil,
+		)
+		require.NoError(t, err)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.NotContains(t, envMap, commonconsts.EnvRouterKvTransferTopologyLevel,
+			"frontend without topology should not have topology env vars")
+		assert.NotContains(t, envMap, commonconsts.EnvRouterKvTransferMismatchPolicy,
+			"frontend without topology should not have topology env vars")
+	})
+
+	t.Run("frontend defaults mismatchPolicy to fail when omitted", func(t *testing.T) {
+		dgd := &v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {ComponentType: commonconsts.ComponentTypeFrontend},
+				},
+				KvCacheTransferTopology: &v1alpha1.KvCacheTransferTopology{
+					Label: "topology.kubernetes.io/zone",
+					Level: "zone",
+					// MismatchPolicy omitted (zero value)
+				},
+			},
+		}
+		component := dgd.Spec.Services["frontend"].DeepCopy()
+		podSpec, err := GeneratePodSpecForComponent(
+			component, BackendFrameworkSGLang, secretsRetriever, dgd, RoleMain, 1,
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, nil,
+		)
+		require.NoError(t, err)
+
+		envMap := envVarsToMap(podSpec.Containers[0].Env)
+		assert.Equal(t, "fail", envMap[commonconsts.EnvRouterKvTransferMismatchPolicy],
+			"omitted mismatchPolicy should default to fail")
+	})
+}

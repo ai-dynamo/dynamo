@@ -346,6 +346,44 @@ type TopologyConstraint struct {
 // +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
 type TopologyDomain string
 
+// MismatchPolicy controls behavior when no decode workers exist in the same
+// topology domain as the prefill worker during KV-cache transfer routing.
+// +kubebuilder:validation:Enum=fail;fallback
+type MismatchPolicy string
+
+const (
+	// MismatchPolicyFail returns an error to the client when no same-domain
+	// decode workers are available.
+	MismatchPolicyFail MismatchPolicy = "fail"
+	// MismatchPolicyFallback allows cross-domain KV transfer if no decode
+	// workers exist in the prefill worker's topology domain.
+	MismatchPolicyFallback MismatchPolicy = "fallback"
+)
+
+// KvCacheTransferTopology constrains KV-cache transfers between prefill and
+// decode workers to the same topology domain. This is a graph-wide concern
+// placed at the DGD spec level because it affects both the frontend (router
+// config) and all workers (topology metadata injection).
+type KvCacheTransferTopology struct {
+	// label is a raw pod label key (e.g. "topology.kubernetes.io/zone") used
+	// to identify the topology domain of each worker pod. When set, the
+	// operator copies the specified node label onto worker pods and projects
+	// it as a DYN_TOPOLOGY_* env var. This path does not require Grove.
+	// +kubebuilder:validation:MinLength=1
+	Label string `json:"label"`
+
+	// level is the topology domain to enforce for KV-cache transfers
+	// (e.g. "zone", "rack"). Must be a valid topology domain name.
+	Level TopologyDomain `json:"level"`
+
+	// mismatchPolicy controls behavior when no same-domain decode workers
+	// exist. Defaults to "fail".
+	// +optional
+	// +kubebuilder:default=fail
+	// +kubebuilder:validation:Enum=fail;fallback
+	MismatchPolicy MismatchPolicy `json:"mismatchPolicy,omitempty"`
+}
+
 // ComponentKind represents the type of underlying Kubernetes resource backing a DGD component.
 // +kubebuilder:validation:Enum=PodClique;PodCliqueScalingGroup;Deployment;LeaderWorkerSet
 type ComponentKind string

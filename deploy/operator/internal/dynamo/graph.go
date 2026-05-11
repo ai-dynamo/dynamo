@@ -1734,6 +1734,25 @@ func GeneratePodSpecForComponent(
 		operatorConfig = &configv1alpha1.OperatorConfiguration{}
 	}
 
+	// Inject KV-cache transfer topology env vars for frontend components.
+	// The router reads these to enforce topology-aware decode worker selection.
+	if dynamoDeployment.Spec.KvCacheTransferTopology != nil &&
+		component.ComponentType == commonconsts.ComponentTypeFrontend {
+		kvt := dynamoDeployment.Spec.KvCacheTransferTopology
+		mismatchPolicy := string(kvt.MismatchPolicy)
+		if mismatchPolicy == "" {
+			mismatchPolicy = string(v1alpha1.MismatchPolicyFail)
+		}
+		topologyEnvs := []corev1.EnvVar{
+			{Name: commonconsts.EnvRouterKvTransferTopologyLevel, Value: string(kvt.Level)},
+			{Name: commonconsts.EnvRouterKvTransferMismatchPolicy, Value: mismatchPolicy},
+		}
+		component.Envs = MergeEnvs(topologyEnvs, component.Envs)
+	}
+
+	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
+	propagateDGDSpecMetadata(dynamoDeployment.Spec.Annotations, dynamoDeployment.Spec.Labels, component)
+
 	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo, deployerOverride)
 	if err != nil {
 		return nil, err

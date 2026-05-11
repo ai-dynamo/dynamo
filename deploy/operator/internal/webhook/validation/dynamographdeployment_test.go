@@ -1544,6 +1544,173 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			errMsg:      "annotation nvidia.com/dynamo-operator-origin-version has invalid value \"bad\": must be valid semver\nannotation nvidia.com/vllm-distributed-executor-backend has invalid value \"invalid\": must be \"mp\" or \"ray\"",
 			errContains: true,
 		},
+		// --- KvCacheTransferTopology validation ---
+		{
+			name: "valid kvCacheTransferTopology with label",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"frontend": {ComponentType: consts.ComponentTypeFrontend},
+					},
+					KvCacheTransferTopology: &nvidiacomv1alpha1.KvCacheTransferTopology{
+						Label:          "topology.kubernetes.io/zone",
+						Level:          "zone",
+						MismatchPolicy: nvidiacomv1alpha1.MismatchPolicyFail,
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "kvCacheTransferTopology missing label",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"frontend": {ComponentType: consts.ComponentTypeFrontend},
+					},
+					KvCacheTransferTopology: &nvidiacomv1alpha1.KvCacheTransferTopology{
+						Label: "",
+						Level: "zone",
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.kvCacheTransferTopology.label is required",
+		},
+		{
+			name: "kvCacheTransferTopology missing level",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"frontend": {ComponentType: consts.ComponentTypeFrontend},
+					},
+					KvCacheTransferTopology: &nvidiacomv1alpha1.KvCacheTransferTopology{
+						Label: "topology.kubernetes.io/zone",
+						Level: "",
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.kvCacheTransferTopology.level is required",
+		},
+		{
+			name: "kvCacheTransferTopology invalid level format",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"frontend": {ComponentType: consts.ComponentTypeFrontend},
+					},
+					KvCacheTransferTopology: &nvidiacomv1alpha1.KvCacheTransferTopology{
+						Label: "topology.kubernetes.io/zone",
+						Level: "INVALID_LEVEL",
+					},
+				},
+			},
+			wantErr:     true,
+			errMsg:      "spec.kvCacheTransferTopology.level \"INVALID_LEVEL\" is not a valid topology domain",
+			errContains: true,
+		},
+		{
+			name: "kvCacheTransferTopology invalid mismatchPolicy",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"frontend": {ComponentType: consts.ComponentTypeFrontend},
+					},
+					KvCacheTransferTopology: &nvidiacomv1alpha1.KvCacheTransferTopology{
+						Label:          "topology.kubernetes.io/zone",
+						Level:          "zone",
+						MismatchPolicy: "invalid-policy",
+					},
+				},
+			},
+			wantErr:     true,
+			errMsg:      "spec.kvCacheTransferTopology.mismatchPolicy \"invalid-policy\" is invalid",
+			errContains: true,
+		},
+		{
+			name: "kvCacheTransferTopology omitted mismatchPolicy defaults to fail",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"frontend": {ComponentType: consts.ComponentTypeFrontend},
+					},
+					KvCacheTransferTopology: &nvidiacomv1alpha1.KvCacheTransferTopology{
+						Label: "topology.kubernetes.io/zone",
+						Level: "zone",
+						// mismatchPolicy omitted
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "kvCacheTransferTopology with fallback mismatchPolicy",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"frontend": {ComponentType: consts.ComponentTypeFrontend},
+					},
+					KvCacheTransferTopology: &nvidiacomv1alpha1.KvCacheTransferTopology{
+						Label:          "topology.kubernetes.io/zone",
+						Level:          "zone",
+						MismatchPolicy: nvidiacomv1alpha1.MismatchPolicyFallback,
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "no kvCacheTransferTopology is valid",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"frontend": {ComponentType: consts.ComponentTypeFrontend},
+					},
+				},
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
