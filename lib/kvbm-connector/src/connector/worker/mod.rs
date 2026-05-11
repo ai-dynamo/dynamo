@@ -39,7 +39,7 @@ mod velo;
 use cudarc::driver::CudaStream;
 pub use velo::client::ConnectorWorkerClient;
 
-use init::PendingWorkerState;
+use init::{PendingLayoutMode, PendingWorkerState};
 use state::{WorkerDetails, WorkerState};
 
 use anyhow::{Result, bail};
@@ -60,6 +60,7 @@ use crate::{BlockId, KvbmRuntime};
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_engine::worker::{DirectWorker, WorkerTransfers};
 use kvbm_physical::TransferOptions;
+use kvbm_physical::layout::LayoutConfig;
 
 pub trait ConnectorWorkerInterface: Send + Sync {
     /// Register KV cache tensors (deferred mode - caches state for later).
@@ -79,6 +80,28 @@ pub trait ConnectorWorkerInterface: Send + Sync {
         dtype_width_bytes: usize,
         dim_layout: kvbm_common::KvDimLayout,
         block_layout: kvbm_common::KvBlockLayout,
+    ) -> Result<()>;
+
+    /// Register a single cross-layer KV cache tensor (deferred mode).
+    ///
+    /// The tensor's physical byte layout must be
+    /// `[num_blocks, num_layers, outer_dim, page_size, inner_dim]`, which is
+    /// what vLLM's `allocate_uniform_kv_caches` produces for FlashAttention NHD
+    /// after the stride-order permutation. The caller (Python) is responsible
+    /// for asserting the layout matches before invoking this method.
+    ///
+    /// All dims are passed explicitly because they cannot be unambiguously
+    /// inferred from the raw tensor shape (the last dim is the product of
+    /// num_kv_heads and head_size, which we don't need to split).
+    fn register_cross_layers_kv_cache(
+        &self,
+        tensor: Arc<dyn TensorDescriptor>,
+        num_device_blocks: usize,
+        num_layers: usize,
+        outer_dim: usize,
+        page_size: usize,
+        inner_dim: usize,
+        dtype_width_bytes: usize,
     ) -> Result<()>;
 
     /// Bind connector metadata from the leader.
@@ -421,19 +444,19 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             "Determined KV layout configuration"
         );
 
+        let num_layers = tensors.len();
+
         // Create pending state (validates tensors internally)
         let pending = PendingWorkerState::builder()
             .tensors(tensors)
             .num_device_blocks(num_device_blocks)
             .dtype_width_bytes(dtype_width_bytes)
             .layout_config(layout_config)
-            .block_dim(block_dim)
+            .mode(PendingLayoutMode::LayerSeparate { block_dim })
             .block_layout(block_layout)
             .build()?;
 
-        let details = WorkerDetails {
-            num_layers: pending.tensors.len(),
-        };
+        let details = WorkerDetails { num_layers };
 
         tracing::info!(
             cuda_device = pending.cuda_device_id,
@@ -445,8 +468,83 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             page_size = pending.layout_config.page_size,
             inner_dim = pending.layout_config.inner_dim,
             num_heads = ?pending.layout_config.num_heads,
-            block_dim = ?pending.block_dim,
+            mode = ?pending.mode,
             "KV caches registered (deferred mode - waiting for leader RPC)"
+        );
+
+        self.state.set_pending_state(pending)?;
+
+        self.state
+            .details
+            .set(details)
+            .map_err(|_| anyhow::anyhow!("details already set"))?;
+
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip_all, fields(instance_id = ?self.runtime.messenger().instance_id()))]
+    fn register_cross_layers_kv_cache(
+        &self,
+        tensor: Arc<dyn TensorDescriptor>,
+        num_device_blocks: usize,
+        num_layers: usize,
+        outer_dim: usize,
+        page_size: usize,
+        inner_dim: usize,
+        dtype_width_bytes: usize,
+    ) -> Result<()> {
+        // Prevent double registration (mirror register_kv_caches checks).
+        if self.state.service.get().is_some() {
+            bail!("KV caches already registered");
+        }
+        if self.state.has_pending_state() {
+            bail!("KV caches already pending registration");
+        }
+        if self.state.details.get().is_some() {
+            bail!("Worker details already set");
+        }
+
+        // Build LayoutConfig from explicit dims — Python already validated the
+        // physical layout matches `[num_blocks, num_layers, outer, page, inner]`.
+        let layout_config = LayoutConfig::builder()
+            .num_blocks(num_device_blocks)
+            .num_layers(num_layers)
+            .outer_dim(outer_dim)
+            .page_size(page_size)
+            .inner_dim(inner_dim)
+            .dtype_width_bytes(dtype_width_bytes)
+            .build()?;
+
+        tracing::info!(
+            num_device_blocks,
+            num_layers,
+            outer_dim,
+            page_size,
+            inner_dim,
+            dtype_width_bytes,
+            "Registering cross-layer KV cache (fully-contiguous, deferred mode)"
+        );
+
+        let pending = PendingWorkerState::builder()
+            .tensors(vec![tensor])
+            .num_device_blocks(num_device_blocks)
+            .dtype_width_bytes(dtype_width_bytes)
+            .layout_config(layout_config)
+            .mode(PendingLayoutMode::FullyContiguous)
+            // FlashAttention NHD is enforced upstream by Python (see
+            // register_cross_layers_kv_cache validation: stride_order +
+            // get_kv_cache_stride_order checks). Hardcoding NHD here keeps
+            // the hub-side block-layout compat gate consistent with the LS
+            // path; if other layouts are ever accepted, plumb this through
+            // as a parameter on the trait method.
+            .block_layout(kvbm_common::KvBlockLayout::OperationalNHD)
+            .build()?;
+
+        let details = WorkerDetails { num_layers };
+
+        tracing::info!(
+            cuda_device = pending.cuda_device_id,
+            "Cross-layer KV cache registered (deferred mode - waiting for leader RPC)"
         );
 
         self.state.set_pending_state(pending)?;
