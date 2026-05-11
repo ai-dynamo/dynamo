@@ -37,21 +37,24 @@ def gh_releases(repo: str) -> list[dict]:
 
 
 def parse_version(v: str) -> tuple:
-    """Parse '1.3.0rc12' / '1.2.1' / '1.3.0' into a sortable tuple.
+    """Parse '1.3.0rc12' / '1.3.0rc5.post1' / '1.2.1' into a sortable tuple.
 
     Sort order within the same X.Y.Z is dev < rc < final < post.
     """
-    m = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:(rc|post|dev)\.?(\d+))?$", v.lstrip("v"))
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)((?:\.?(?:rc|post|dev)\.?\d+)*)$", v.lstrip("v"))
     if not m:
-        return (0, 0, 0, -1, -1)
-    major, minor, patch, suf, sufnum = m.groups()
+        return (0, 0, 0, ((-1, -1),))
+    major, minor, patch, suffix_text = m.groups()
     suffix_rank = {"dev": 0, "rc": 1, None: 2, "post": 3}
+    suffix_key = tuple(
+        (suffix_rank[suf], int(sufnum))
+        for suf, sufnum in re.findall(r"\.?(rc|post|dev)\.?(\d+)", suffix_text)
+    ) or ((suffix_rank[None], 0),)
     return (
         int(major),
         int(minor),
         int(patch),
-        suffix_rank[suf],
-        int(sufnum or 0),
+        suffix_key,
     )
 
 
