@@ -245,6 +245,11 @@ impl KvbmConfig {
     ///
     /// - Host cache (G2) enabled → UCX (used for inter-worker / remote transfers)
     /// - Disk cache (G3) enabled → POSIX, or GDS_MT when `disk.use_gds = true`
+    /// - Host-bypass mode (`bypass_host_cache() == true`) → force GDS_MT for
+    ///   direct G1↔G3 transfers, and UCX for the cross-process metadata
+    ///   exchange path (`getLocalMD`) that registers G1 (VRAM) segments. POSIX
+    ///   alone cannot register VRAM, so without these the worker fails at
+    ///   `registerMem` for `VRAM_SEG`.
     ///
     /// Idempotent and additive: only fills gaps, never removes a backend the
     /// user explicitly enabled. If no tier is enabled, leaves `nixl` untouched
@@ -253,7 +258,8 @@ impl KvbmConfig {
         let host_enabled = self.cache.host.is_enabled();
         let disk_cfg = self.cache.disk.as_ref();
         let disk_enabled = disk_cfg.is_some_and(|d| d.is_enabled());
-        let prefer_gds = disk_cfg.is_some_and(|d| d.use_gds);
+        let bypass_host = self.cache.bypass_host_cache();
+        let prefer_gds = disk_cfg.is_some_and(|d| d.use_gds) || bypass_host;
 
         if !host_enabled && !disk_enabled {
             return;
@@ -261,16 +267,26 @@ impl KvbmConfig {
 
         let nixl = self.nixl.get_or_insert_with(NixlConfig::empty);
 
-        if host_enabled && !nixl.has_backend("UCX") {
-            tracing::info!(
-                "Auto-enabling NIXL backend UCX (host cache requires it for inter-worker transfers)"
-            );
+        // UCX is needed both when G2 is real (inter-worker transfers) and in
+        // host-bypass mode (the worker still needs UCX for the metadata
+        // exchange that exposes its VRAM segments to the leader).
+        if (host_enabled || bypass_host) && !nixl.has_backend("UCX") {
+            let reason = if bypass_host {
+                "host-bypass mode requires UCX for cross-process metadata exchange"
+            } else {
+                "host cache requires UCX for inter-worker transfers"
+            };
+            tracing::info!(reason, "Auto-enabling NIXL backend UCX");
             *nixl = nixl.clone().with_backend("UCX");
         }
 
         if disk_enabled && !nixl.has_backend("POSIX") && !nixl.has_backend("GDS_MT") {
             let backend = if prefer_gds { "GDS_MT" } else { "POSIX" };
-            tracing::info!(backend, "Auto-enabling NIXL backend for disk cache");
+            tracing::info!(
+                backend,
+                bypass_host,
+                "Auto-enabling NIXL backend for disk cache"
+            );
             *nixl = nixl.clone().with_backend(backend);
         }
     }
