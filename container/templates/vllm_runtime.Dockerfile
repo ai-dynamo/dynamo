@@ -102,7 +102,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
-{%if device == "xpu" %} \
+{%if device != "cuda" %} \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
 {% endif %} \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
@@ -113,6 +113,20 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
     fi
+
+{% if device != "cuda" %}
+# CPU/XPU: Use virtual environment (not system Python)
+# Upgrade NIXL meta package and all device variants to match our built version.
+# The nixl meta package imports device-specific packages, so all must be at the same version.
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    set -eu; \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv; \
+    NIXL_VERSION="${NIXL_REF#v}"; \
+    uv pip install --force-reinstall --no-deps \
+        "nixl==${NIXL_VERSION}" \
+        "nixl-cu12==${NIXL_VERSION}" \
+        "nixl-cu13==${NIXL_VERSION}"
+{% endif %}
 
 {% if device == "cuda" %}
 # vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
@@ -133,8 +147,6 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     bash /tmp/install_vllm_omni.sh
-{% endif %}
-
 {% endif %}
 {% endif %}
 
