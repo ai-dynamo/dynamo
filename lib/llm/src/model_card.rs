@@ -336,7 +336,11 @@ async fn resolve_uri(
     let parsed = url::Url::parse(uri).with_context(|| format!("parsing artifact uri: {uri}"))?;
 
     if dest.exists() {
-        return Ok(());
+        if CheckedFile::from_disk(dest).is_ok_and(|cf| cf.checksum() == expected.checksum()) {
+            return Ok(());
+        }
+        tracing::warn!(dest = %dest.display(), "MDC cache blob failed re-verification; refetching");
+        let _ = std::fs::remove_file(dest);
     }
 
     stage_and_rename(dest, |tmp| async move {
@@ -1736,6 +1740,41 @@ mod tests {
     #[tokio::test]
     async fn resolve_uri_http_rejects_oversize_body() {
         assert_resolve_uri_rejects(b"x".repeat(35).as_slice(), 8, "exceeds cap").await;
+    }
+
+    /// Cache hit re-verifies the on-disk blob; mismatch → unlink + refetch.
+    #[tokio::test]
+    async fn resolve_uri_refetches_on_cache_hit_mismatch() {
+        let body: &[u8] = b"valid-bytes-for-blob";
+        let dir = tempfile::tempdir().unwrap();
+        let valid = dir.path().join("valid");
+        std::fs::write(&valid, body).unwrap();
+        let cf = super::CheckedFile::from_disk(&valid).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/f")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+        let url = format!("{}/f", server.url());
+
+        let dest = dir.path().join("blob");
+        std::fs::write(&dest, b"corrupt-bytes").unwrap();
+
+        super::resolve_uri(
+            &reqwest::Client::new(),
+            &url,
+            &cf,
+            &dest,
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .expect("resolve_uri should refetch and succeed");
+
+        let after = std::fs::read(&dest).unwrap();
+        assert_eq!(after, body, "blob should have been replaced");
     }
 
     /// `parse_hf_uri` round-trip — `hf://repo/filename` parses into
