@@ -74,26 +74,40 @@ impl Default for KvbmOffloadConfig {
 impl KvbmOffloadConfig {
     /// Derive an offload config from scheduler-level [`MockEngineArgs`].
     ///
-    /// Returns `None` unless both `num_g2_blocks` and `kv_bytes_per_token`
+    /// Returns `Ok(None)` unless both `num_g2_blocks` and `kv_bytes_per_token`
     /// are set. Positive `num_g2_blocks` is the explicit opt-in for the G2
     /// tier; `kv_bytes_per_token` is required to compute `block_size_bytes`.
-    /// Caller should interpret `None` as "don't attach an offload engine
+    /// Caller should interpret `Ok(None)` as "don't attach an offload engine
     /// for this run".
-    pub fn from_args(args: &MockEngineArgs) -> Option<Self> {
-        let num_g2_blocks = args.num_g2_blocks?;
+    pub fn from_args(args: &MockEngineArgs) -> anyhow::Result<Option<Self>> {
+        let num_g3_blocks = args
+            .num_g3_blocks
+            .and_then(|block_count| (block_count > 0).then_some(block_count));
+        let Some(num_g2_blocks) = args.num_g2_blocks else {
+            if num_g3_blocks.is_some() {
+                anyhow::bail!(
+                    "num_g3_blocks requires num_g2_blocks because mocker stages G3 through G2"
+                );
+            }
+            return Ok(None);
+        };
         if num_g2_blocks == 0 {
-            return None;
+            return Ok(None);
         }
-        let bpt = args.kv_bytes_per_token?;
+        let Some(bpt) = args.kv_bytes_per_token else {
+            if num_g3_blocks.is_some() {
+                anyhow::bail!(
+                    "num_g3_blocks requires kv_bytes_per_token so mocker can size G2/G3 transfers"
+                );
+            }
+            return Ok(None);
+        };
         let defaults = Self::default();
         let offload_batch_size = args
             .offload_batch_size
             .filter(|batch_size| *batch_size > 0)
             .unwrap_or(defaults.offload_batch_size);
-        let num_g3_blocks = args
-            .num_g3_blocks
-            .and_then(|block_count| (block_count > 0).then_some(block_count));
-        Some(Self {
+        Ok(Some(Self {
             num_g2_blocks,
             block_size_tokens: args.block_size,
             offload_batch_size,
@@ -111,7 +125,7 @@ impl KvbmOffloadConfig {
             bandwidth_g3_to_g2_gbps: args
                 .bandwidth_g3_to_g2_gbps
                 .unwrap_or(defaults.bandwidth_g3_to_g2_gbps),
-        })
+        }))
     }
 }
 
@@ -128,7 +142,23 @@ mod tests {
             .normalized()
             .unwrap();
         assert!(args.kv_bytes_per_token.is_none());
-        assert!(KvbmOffloadConfig::from_args(&args).is_none());
+        assert!(KvbmOffloadConfig::from_args(&args).unwrap().is_none());
+    }
+
+    #[test]
+    fn from_args_errors_when_g3_kv_bytes_per_token_missing() {
+        let args = MockEngineArgs::builder()
+            .num_g2_blocks(Some(10_000))
+            .num_g3_blocks(Some(20_000))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+        let error = KvbmOffloadConfig::from_args(&args).unwrap_err();
+        assert!(
+            error.to_string().contains("requires kv_bytes_per_token"),
+            "unexpected error: {error}",
+        );
     }
 
     #[test]
@@ -141,7 +171,7 @@ mod tests {
             .normalized()
             .unwrap();
         assert!(args.num_g2_blocks.is_none());
-        assert!(KvbmOffloadConfig::from_args(&args).is_none());
+        assert!(KvbmOffloadConfig::from_args(&args).unwrap().is_none());
     }
 
     #[test]
@@ -153,7 +183,7 @@ mod tests {
             .build()
             .unwrap();
 
-        assert!(KvbmOffloadConfig::from_args(&args).is_none());
+        assert!(KvbmOffloadConfig::from_args(&args).unwrap().is_none());
     }
 
     #[test]
@@ -166,7 +196,9 @@ mod tests {
             .unwrap()
             .normalized()
             .unwrap();
-        let cfg = KvbmOffloadConfig::from_args(&args).expect("bpt set");
+        let cfg = KvbmOffloadConfig::from_args(&args)
+            .unwrap()
+            .expect("bpt set");
         assert_eq!(cfg.block_size_bytes, Some(64 * 131_072));
         // Defaults preserved.
         assert_eq!(cfg.num_g2_blocks, 10_000);
@@ -195,7 +227,9 @@ mod tests {
             .unwrap()
             .normalized()
             .unwrap();
-        let cfg = KvbmOffloadConfig::from_args(&args).expect("bpt set");
+        let cfg = KvbmOffloadConfig::from_args(&args)
+            .unwrap()
+            .expect("bpt set");
         assert_eq!(cfg.num_g2_blocks, 10_000);
         assert_eq!(cfg.block_size_tokens, 64);
         assert_eq!(cfg.offload_batch_size, 16);
@@ -217,7 +251,9 @@ mod tests {
             .build()
             .unwrap();
 
-        let cfg = KvbmOffloadConfig::from_args(&args).expect("G2 remains enabled");
+        let cfg = KvbmOffloadConfig::from_args(&args)
+            .unwrap()
+            .expect("G2 remains enabled");
         assert_eq!(cfg.num_g2_blocks, 10_000);
         assert_eq!(cfg.num_g3_blocks, None);
         assert_eq!(

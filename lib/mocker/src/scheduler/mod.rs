@@ -298,7 +298,7 @@ pub async fn init_kvbm_live(
 ) -> anyhow::Result<Option<std::sync::Arc<std::sync::Mutex<crate::kvbm_offload::MockOffloadEngine>>>>
 {
     use crate::kvbm_offload::KvbmOffloadConfig;
-    let Some(config) = KvbmOffloadConfig::from_args(args) else {
+    let Some(config) = KvbmOffloadConfig::from_args(args)? else {
         return Ok(None);
     };
     let engine = std::thread::spawn(move || build_owned_offload_engine(config))
@@ -317,7 +317,7 @@ pub fn init_kvbm_offline(
 ) -> anyhow::Result<Option<std::sync::Arc<std::sync::Mutex<crate::kvbm_offload::MockOffloadEngine>>>>
 {
     use crate::kvbm_offload::KvbmOffloadConfig;
-    let Some(config) = KvbmOffloadConfig::from_args(args) else {
+    let Some(config) = KvbmOffloadConfig::from_args(args)? else {
         return Ok(None);
     };
     tracing::debug!(

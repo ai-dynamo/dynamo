@@ -1074,6 +1074,8 @@ fn materialize_replay_mocker_args(
     extra_args: MockEngineArgs,
 ) -> PyResult<RsMockEngineArgs> {
     let mut args = extra_args.inner();
+    populate_missing_offload_kv_bytes_per_token(py, &mut args)?;
+
     if let Some(ref backend_name) = args.aic_backend.clone() {
         let backend = backend_name.clone();
         let system = args.aic_system.as_deref().unwrap_or("h200_sxm").to_string();
@@ -1141,6 +1143,33 @@ fn materialize_replay_mocker_args(
     }
 
     Ok(args)
+}
+
+fn populate_missing_offload_kv_bytes_per_token(
+    py: Python<'_>,
+    args: &mut RsMockEngineArgs,
+) -> PyResult<()> {
+    if args.kv_bytes_per_token.is_some() {
+        return Ok(());
+    }
+    let offload_requested =
+        args.num_g2_blocks.unwrap_or_default() > 0 || args.num_g3_blocks.unwrap_or_default() > 0;
+    if !offload_requested {
+        return Ok(());
+    }
+    let Some(model_path) = args.aic_model_path.as_deref() else {
+        return Ok(());
+    };
+
+    let kv_cache_module = py.import("dynamo.mocker.utils.kv_cache")?;
+    let kv_bytes_per_token = kv_cache_module
+        .getattr("compute_kv_bytes_per_token")?
+        .call1((model_path,))?
+        .extract::<Option<usize>>()?;
+    if let Some(kv_bytes_per_token) = kv_bytes_per_token {
+        args.kv_bytes_per_token = Some(kv_bytes_per_token);
+    }
+    Ok(())
 }
 
 fn load_replay_router_config(

@@ -709,14 +709,6 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         ));
     }
 
-    if args.num_g3_blocks.is_some() && args.kv_bytes_per_token.is_none() {
-        return Err(mock_engine_args_validation_error(
-            "g3_requires_kv_bytes_per_token",
-            "num_g3_blocks requires kv_bytes_per_token so mocker can size G2/G3 transfers"
-                .to_string(),
-        ));
-    }
-
     if args.engine_type != EngineType::Sglang {
         return Ok(());
     }
@@ -1237,20 +1229,18 @@ mod tests {
     }
 
     #[test]
-    fn test_normalized_g3_requires_kv_bytes_per_token() {
-        let missing_bpt = MockEngineArgs::builder()
+    fn test_normalized_g3_allows_missing_kv_bytes_for_cli_auto_compute() {
+        let args = MockEngineArgs::builder()
             .num_g2_blocks(Some(10))
             .num_g3_blocks(Some(10))
             .build()
             .unwrap()
             .normalized()
-            .unwrap_err();
-        assert!(
-            missing_bpt
-                .to_string()
-                .contains("requires kv_bytes_per_token"),
-            "unexpected error: {missing_bpt}",
-        );
+            .unwrap();
+
+        assert_eq!(args.num_g2_blocks, Some(10));
+        assert_eq!(args.num_g3_blocks, Some(10));
+        assert_eq!(args.kv_bytes_per_token, None);
     }
 
     #[test]

@@ -131,6 +131,12 @@ impl SharedG3Pool {
         registrations_before: u64,
         owner_id: Option<u64>,
     ) -> SharedDrainCounts {
+        // G2->G3 completions release shared G3 capacity when the global
+        // queue is drained, regardless of which engine owns the completion.
+        if drained.total.offload_blocks > 0 {
+            self.release_capacity_reservations(drained.total.offload_blocks);
+        }
+
         let mut owner_result = SharedDrainCounts::default();
         let mut pending = self
             .pending_owner_drains

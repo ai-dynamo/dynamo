@@ -119,6 +119,29 @@ def test_worker_overrides_drive_runtime_config_for_prefill_worker():
     assert runtime_config.bootstrap_host is not None
 
 
+def test_g3_args_allow_kv_bytes_per_token_worker_override():
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(
+            model_path="/models/mock",
+            kv_bytes_per_token=None,
+            num_g2_blocks=8192,
+            num_g3_blocks=16384,
+        )
+    )
+    payload = json.loads(engine_args.dump_json())
+    assert payload["kv_bytes_per_token"] is None
+    assert payload["num_g2_blocks"] == 8192
+    assert payload["num_g3_blocks"] == 16384
+
+    worker_args = CONFIG.apply_worker_engine_args_overrides(
+        engine_args,
+        kv_bytes_per_token=131072,
+    )
+    worker_payload = json.loads(worker_args.dump_json())
+    assert worker_payload["kv_bytes_per_token"] == 131072
+    assert worker_payload["num_g3_blocks"] == 16384
+
+
 def test_runtime_config_disables_local_indexer_for_decode_worker():
     engine_args = CONFIG.build_mocker_engine_args(
         make_args(is_decode_worker=True, durable_kv_events=False)

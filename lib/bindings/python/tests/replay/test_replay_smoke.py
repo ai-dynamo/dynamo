@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
+
 import pytest
 
 from dynamo.llm import MockEngineArgs
@@ -417,6 +419,37 @@ def test_run_trace_replay_accepts_partial_extra_engine_args_json(tmp_path, repla
         extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
         num_workers=1,
         replay_mode=replay_mode,
+    )
+
+    _assert_basic_report_counts(
+        report,
+        num_requests=2,
+        input_tokens=64,
+        output_tokens=2,
+    )
+
+
+def test_run_trace_replay_materializes_kv_bytes_from_aic_model(monkeypatch, tmp_path):
+    kv_cache = importlib.import_module("dynamo.mocker.utils.kv_cache")
+    monkeypatch.setattr(
+        kv_cache,
+        "compute_kv_bytes_per_token",
+        lambda model_path: 1 if model_path == "test/model" else None,
+    )
+    trace_path = _write_trace_and_args(tmp_path)
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=MockEngineArgs(
+            block_size=64,
+            speedup_ratio=1000.0,
+            num_gpu_blocks=512,
+            num_g2_blocks=512,
+            num_g3_blocks=512,
+            aic_model_path="test/model",
+        ),
+        num_workers=1,
+        replay_mode="offline",
     )
 
     _assert_basic_report_counts(

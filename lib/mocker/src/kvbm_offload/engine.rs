@@ -277,15 +277,16 @@ impl PendingG1ToG2 {
 
 struct PendingG2ToG3 {
     handle: TransferHandle,
-    released_capacity_blocks: usize,
+    released_failed_reservations: usize,
 }
 
 impl PendingG2ToG3 {
-    fn releaseable_capacity_blocks(&mut self) -> usize {
-        let settled = self.handle.completed_blocks().len() + self.handle.failed_blocks().len();
-        let releasable = settled.saturating_sub(self.released_capacity_blocks);
-        self.released_capacity_blocks = self.released_capacity_blocks.saturating_add(releasable);
-        releasable
+    fn take_unreleased_failed_reservations(&mut self) -> usize {
+        let failed = self.handle.failed_blocks().len();
+        let unreleased = failed.saturating_sub(self.released_failed_reservations);
+        self.released_failed_reservations =
+            self.released_failed_reservations.saturating_add(unreleased);
+        unreleased
     }
 
     fn is_complete(&self) -> bool {
@@ -768,24 +769,29 @@ impl MockOffloadEngine {
         }
     }
 
-    fn release_settled_g2_to_g3_reservations(&self) {
+    fn cleanup_g2_to_g3_pending_handles(&self) {
         let Some(shared_g3) = self.shared_g3.as_ref() else {
             return;
         };
 
+        // Successful G2->G3 completions release their shared reservation when
+        // SharedG3Pool drains the global DES queue, regardless of which worker
+        // advanced time. This owner-local pass prunes terminal handles and only
+        // releases reservations for failed blocks that never produced a shared
+        // completion.
         let mut pending = self
             .pending_g2_to_g3
             .lock()
             .expect("pending G2→G3 handles mutex poisoned");
-        let mut releasable = 0usize;
+        let mut failed_reservations = 0usize;
         for pending in pending.iter_mut() {
-            releasable += pending.releaseable_capacity_blocks();
+            failed_reservations += pending.take_unreleased_failed_reservations();
         }
         pending.retain(|pending| !pending.is_complete());
         drop(pending);
 
-        if releasable > 0 {
-            shared_g3.release_capacity_reservations(releasable);
+        if failed_reservations > 0 {
+            shared_g3.release_capacity_reservations(failed_reservations);
         }
     }
 
@@ -957,7 +963,7 @@ impl MockOffloadEngine {
                 .expect("pending G2→G3 handles mutex poisoned");
             pending.push(PendingG2ToG3 {
                 handle: handle.clone(),
-                released_capacity_blocks: 0,
+                released_failed_reservations: 0,
             });
             drop(pending);
             self.wait_for_reservations_or_completion(
@@ -1110,7 +1116,7 @@ impl MockOffloadEngine {
                 );
             }
         }
-        self.release_settled_g2_to_g3_reservations();
+        self.cleanup_g2_to_g3_pending_handles();
         self.pump_pending_staged_swap_ins(now_ms);
     }
 
@@ -1608,6 +1614,109 @@ mod tests {
         assert!(
             !presence[1].1,
             "second engine must not over-admit into reserved shared G3 capacity"
+        );
+    }
+
+    #[test]
+    fn shared_g3_release_is_visible_to_same_time_non_owner_admission() {
+        use dynamo_tokens::PositionalLineageHash;
+
+        let _guard = shared_g3_test_guard_blocking();
+        let rt_a = single_thread_runtime();
+        let rt_b = single_thread_runtime();
+        let config = KvbmOffloadConfig {
+            // Two blocks lets the test isolate the reservation bug. After A's
+            // copy completes, A legitimately occupies one real G3 block; B
+            // should be able to reserve the other block once A's transient
+            // reservation is released by the shared completion event.
+            num_g3_blocks: Some(2),
+            offload_batch_size: 1,
+            ..g3_config()
+        };
+        let mut engine_a = rt_a
+            .block_on(MockOffloadEngine::new(config.clone()))
+            .expect("engine A build");
+        let mut engine_b = rt_b
+            .block_on(MockOffloadEngine::new(config))
+            .expect("engine B build");
+        engine_a.attach_runtime(rt_a);
+        engine_b.attach_runtime(rt_b);
+        engine_a.tick(0.0);
+        engine_b.tick(0.0);
+
+        let plh_a = PositionalLineageHash::new(5100, None, 0);
+        let plh_b = PositionalLineageHash::new(5101, None, 0);
+        register_test_block(engine_a.g2_manager(), plh_a);
+        register_test_block(engine_b.g2_manager(), plh_b);
+
+        let shared_reservations = engine_a
+            .shared_g3
+            .as_ref()
+            .expect("G3 enabled")
+            .capacity_reservations();
+
+        // A starts a G2->G3 copy and reserves one shared G3 capacity slot.
+        engine_a.enqueue_g2_to_g3_background(vec![plh_a]);
+        assert_eq!(
+            engine_a.pending_g2_to_g3.lock().unwrap().len(),
+            1,
+            "engine A should have one owner-local G2->G3 handle"
+        );
+        assert_eq!(
+            shared_reservations.reserved_blocks(),
+            1,
+            "A's in-flight copy should hold one shared G3 reservation"
+        );
+
+        // B, not A, advances the shared G3 queue to A's completion time.
+        let g3_deadline = engine_a
+            .worker
+            .earliest_finish()
+            .expect("engine A should own the shared G3 transfer");
+        engine_b.tick(g3_deadline);
+        assert_eq!(
+            engine_a.pending_g2_to_g3.lock().unwrap().len(),
+            1,
+            "worker B must not perform engine A's owner-local cleanup"
+        );
+        assert_eq!(
+            shared_reservations.reserved_blocks(),
+            0,
+            "B's shared drain should release A's completed G2->G3 reservation"
+        );
+
+        // At the same timestamp, B should see the released reservation and
+        // admit its own G2->G3 copy without waiting for A to tick.
+        let pending_before = engine_b.pending_g2_to_g3.lock().unwrap().len();
+        engine_b.enqueue_g2_to_g3_background(vec![plh_b]);
+        let pending_after = engine_b.pending_g2_to_g3.lock().unwrap().len();
+        assert_eq!(
+            pending_after,
+            pending_before + 1,
+            "same-time G2->G3 admission should see capacity released by the shared drain"
+        );
+        assert_eq!(
+            shared_reservations.reserved_blocks(),
+            1,
+            "B's same-time G2->G3 copy should reserve the remaining G3 block"
+        );
+
+        let second_deadline = engine_b
+            .worker
+            .earliest_finish()
+            .expect("engine B's same-time G2->G3 transfer should reserve bandwidth");
+        engine_b.tick(second_deadline);
+        assert_eq!(
+            shared_reservations.reserved_blocks(),
+            0,
+            "B's G2->G3 reservation should release when its shared completion drains"
+        );
+
+        let g3_manager = engine_a.g3_manager().expect("G3 enabled").clone();
+        let presence = g3_manager.block_registry().check_presence::<G3>(&[plh_b]);
+        assert!(
+            presence[0].1,
+            "engine B's same-time G2->G3 transfer should publish to shared G3"
         );
     }
 
