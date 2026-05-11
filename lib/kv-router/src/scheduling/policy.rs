@@ -73,28 +73,7 @@ impl SchedulingPolicy for WsptPolicy {
 
     fn enqueue_key(&self, _arrival_offset: Duration, request: &SchedulingRequest) -> Self::Key {
         let weight = 1.0 + request.priority_jump.max(0.0);
-        let allowed_ids = request.allowed_worker_ids.as_ref();
-        let cached_tokens = request.pinned_worker.map_or_else(
-            || {
-                request
-                    .effective_cached_tokens
-                    .iter()
-                    .filter(|(worker, _)| {
-                        allowed_ids.is_none_or(|ids| ids.contains(&worker.worker_id))
-                    })
-                    .map(|(_, tokens)| *tokens)
-                    .max()
-                    .unwrap_or(0)
-            },
-            |worker| {
-                request
-                    .effective_cached_tokens
-                    .get(&worker)
-                    .copied()
-                    .unwrap_or(0)
-            },
-        );
-        let new_tokens = request.isl_tokens.saturating_sub(cached_tokens).max(1);
+        let new_tokens = request.best_effective_prefill_tokens().max(1);
         OrderedFloat(weight / new_tokens as f64)
     }
 }
@@ -159,7 +138,6 @@ mod tests {
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks,
             effective_cached_tokens,
-            tree_sizes: std::collections::HashMap::new(),
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
@@ -183,7 +161,6 @@ mod tests {
         OverlapScores {
             scores: map,
             frequencies: vec![],
-            tree_sizes: FxHashMap::default(),
         }
     }
 
@@ -289,6 +266,17 @@ mod tests {
             key_cached > key_no_cache,
             "request with overlap should have higher key (fewer new tokens)"
         );
+    }
+
+    #[test]
+    fn wspt_overlap_applies_when_prefill_tracking_disabled() {
+        let policy = WsptPolicy;
+        let mut req = request_with(1024, 0.0, overlaps_from(&[(0, 60)]));
+        req.track_prefill_tokens = false;
+
+        let key = policy.enqueue_key(Duration::ZERO, &req);
+        let expected = OrderedFloat(1.0 / 64.0);
+        assert_eq!(key, expected);
     }
 
     #[test]

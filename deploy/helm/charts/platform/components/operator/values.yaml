@@ -21,7 +21,13 @@
 # Set to false if CRDs are managed externally (e.g., via GitOps or a separate pipeline).
 upgradeCRD: true
 
+featureGates:
+  # -- Temporary internal gate for GMS + Snapshot.
+  gmsSnapshot: false
+
 # Environment variables to pass to operator Deployment.
+#
+# Prefer featureGates.gmsSnapshot for the temporary GMS + Snapshot gate.
 env: []
 
 # -- DEPRECATED: Namespace-restricted mode is deprecated and will be removed in a future release. Use cluster-wide mode (the default) instead. Do not enable this for new deployments.
@@ -126,10 +132,6 @@ metricsService:
 natsAddr: ""
 etcdAddr: ""
 
-nats:
-  # Whether the NATS is enabled
-  enabled: true
-
 modelExpressURL: ""
 
 # Checkpoint configuration for fast pod restore
@@ -138,6 +140,15 @@ modelExpressURL: ""
 checkpoint:
   # Enable checkpoint/restore functionality
   enabled: false
+  # Localhost seccomp profile applied to checkpoint+restore pods to block
+  # io_uring (which CRIU cannot dump). The default profile is applied unless
+  # seccomp.disabled=true is set. Set seccomp.disabled=true on OpenShift
+  # (custom localhost profiles require privileged SCC) or when using a CRIU
+  # build with io_uring support. Override the default path by setting
+  # seccomp.profile.
+  seccomp:
+    disabled: false
+    profile: profiles/block-iouring.json
 
 # Webhook configuration
 webhook:

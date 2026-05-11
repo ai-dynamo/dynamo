@@ -59,12 +59,24 @@ func RequireMainContainer(podSpec *corev1.PodSpec) (*corev1.Container, error) {
 	return nil, fmt.Errorf("pod spec has no container named %q", commonconsts.MainContainerName)
 }
 
+// InjectCheckpointIntoPodSpec mutates a worker pod spec for restore-from-checkpoint
+// once the referenced DynamoCheckpoint is Ready. It adds the snapshot-control
+// volume + mount, sets DYN_SNAPSHOT_CONTROL_DIR, attaches the checkpoint PVC,
+// applies the localhost seccomp profile (when seccompProfile is non-empty), and
+// — for GMS-enabled workloads — wires the GMS restore sidecars. No-ops when
+// checkpointInfo is nil, disabled, or not Ready (cold-start path).
+//
+// seccompProfile is the path passed to the localhost seccomp profile injection;
+// pass an empty string to skip seccomp injection (e.g. on OpenShift, or when
+// running a CRIU build with io_uring support). Callers typically obtain this
+// from operatorConfig.Checkpoint.EffectiveSeccompProfile().
 func InjectCheckpointIntoPodSpec(
 	ctx context.Context,
 	reader ctrlclient.Reader,
 	namespace string,
 	podSpec *corev1.PodSpec,
 	checkpointInfo *CheckpointInfo,
+	seccompProfile string,
 ) error {
 	// Only mutate the worker pod spec once the checkpoint is Ready. Before
 	// the checkpoint exists, the worker must cold-start normally without
@@ -121,7 +133,7 @@ func InjectCheckpointIntoPodSpec(
 		syntheticAnnotations,
 		info.Hash,
 		info.ArtifactVersion,
-		snapshotprotocol.DefaultSeccompLocalhostProfile,
+		seccompProfile,
 		info.Ready,
 	); err != nil {
 		return err

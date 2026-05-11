@@ -313,6 +313,41 @@ pub mod llm {
         pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
     }
 
+    /// Audit sink configuration
+    pub mod audit {
+        /// Audit sink selection. Comma-separated values: `stderr`, `nats`,
+        /// `jsonl`, `jsonl_gz`. Setting any non-empty value enables audit
+        /// recording.
+        pub const DYN_AUDIT_SINKS: &str = "DYN_AUDIT_SINKS";
+
+        /// Force audit emission even when the request `store` flag is `false`.
+        pub const DYN_AUDIT_FORCE_LOGGING: &str = "DYN_AUDIT_FORCE_LOGGING";
+
+        /// In-process audit bus capacity.
+        pub const DYN_AUDIT_CAPACITY: &str = "DYN_AUDIT_CAPACITY";
+
+        /// NATS subject the JetStream audit sink publishes to.
+        pub const DYN_AUDIT_NATS_SUBJECT: &str = "DYN_AUDIT_NATS_SUBJECT";
+
+        /// Local output path for audit records.
+        ///
+        /// For `jsonl`, this is the literal file path. For `jsonl_gz`, this is
+        /// the segment prefix used to derive `<prefix>.<index>.jsonl.gz` files.
+        pub const DYN_AUDIT_OUTPUT_PATH: &str = "DYN_AUDIT_OUTPUT_PATH";
+
+        /// JSONL audit sink buffer size in bytes.
+        pub const DYN_AUDIT_JSONL_BUFFER_BYTES: &str = "DYN_AUDIT_JSONL_BUFFER_BYTES";
+
+        /// JSONL audit sink periodic flush interval in milliseconds.
+        pub const DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS: &str = "DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS";
+
+        /// Rotating gzip JSONL audit sink roll threshold in uncompressed bytes.
+        pub const DYN_AUDIT_JSONL_GZ_ROLL_BYTES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_BYTES";
+
+        /// Rotating gzip JSONL audit sink roll threshold in record lines.
+        pub const DYN_AUDIT_JSONL_GZ_ROLL_LINES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_LINES";
+    }
+
     /// Agent trace configuration
     pub mod agent_trace {
         /// Agent trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
@@ -340,11 +375,14 @@ pub mod llm {
         /// Rotating gzip JSONL sink roll threshold in record lines.
         pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES";
 
-        /// Local ZMQ endpoint for harness tool events.
+        /// Enable replay-oriented prompt block hashes in agent request trace records.
+        pub const DYN_AGENT_TRACE_REPLAY_HASHES: &str = "DYN_AGENT_TRACE_REPLAY_HASHES";
+
+        /// Local ZMQ PULL endpoint Dynamo binds for harness tool events.
         pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT: &str =
             "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT";
 
-        /// Optional ZMQ topic filter for harness tool events.
+        /// Optional first-frame ZMQ topic filter for harness tool events.
         pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC: &str =
             "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
     }
@@ -558,6 +596,15 @@ mod tests {
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
             llm::metrics::DYN_METRICS_PREFIX,
+            llm::audit::DYN_AUDIT_SINKS,
+            llm::audit::DYN_AUDIT_FORCE_LOGGING,
+            llm::audit::DYN_AUDIT_CAPACITY,
+            llm::audit::DYN_AUDIT_NATS_SUBJECT,
+            llm::audit::DYN_AUDIT_OUTPUT_PATH,
+            llm::audit::DYN_AUDIT_JSONL_BUFFER_BYTES,
+            llm::audit::DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS,
+            llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_BYTES,
+            llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
             llm::agent_trace::DYN_AGENT_TRACE_SINKS,
             llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
             llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,
@@ -565,6 +612,7 @@ mod tests {
             llm::agent_trace::DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,
             llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES,
             llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES,
+            llm::agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES,
             llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             // Model

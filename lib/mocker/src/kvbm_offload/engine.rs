@@ -6,8 +6,8 @@
 //!
 //! Construction is `async` (velo's `Messenger` needs a short TCP warmup).
 //! The hot-path methods ([`tick`](MockOffloadEngine::tick),
-//! [`enqueue_g1_evictions`](MockOffloadEngine::enqueue_g1_evictions),
-//! [`try_onboard_prefix`](MockOffloadEngine::try_onboard_prefix),
+//! [`prepare_onboard_prefix`](MockOffloadEngine::prepare_onboard_prefix),
+//! [`start_onboard_prefix`](MockOffloadEngine::start_onboard_prefix),
 //! [`earliest_pending_deadline`](MockOffloadEngine::earliest_pending_deadline))
 //! are synchronous. `tick` drives PS completion using `now_ms` supplied by
 //! the caller — live replay feeds wall-clock time, offline replay feeds
@@ -15,23 +15,31 @@
 
 use std::future::Future;
 use std::net::TcpListener;
+use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use anyhow::Result;
+use dynamo_tokens::{BlockHash, SequenceHash as RouterSequenceHash};
+use futures::Stream;
 use futures::stream::{FuturesUnordered, StreamExt};
+use futures::task::noop_waker_ref;
 
 use kvbm_engine::leader::{FindMatchesOptions, InstanceLeader, Leader, StagingMode};
 use kvbm_engine::offload::{
-    ExternalBlock, OffloadEngine, PipelineBuilder, PresenceFilter, SourceBlocks, TransferHandle,
-    TransferStatus,
+    ExternalBlock, OffloadEngine, PendingTracker, PipelineBuilder, PresenceFilter, SourceBlocks,
+    TransferHandle, TransferStatus,
 };
 use kvbm_engine::worker::Worker;
 use kvbm_engine::{BlockId, G1 as EngineG1, G2, SequenceHash};
 use kvbm_logical::blocks::{ImmutableBlock, MutableBlock};
+use kvbm_logical::events::{EventsManager, KvCacheEvent as LogicalKvCacheEvent};
 use kvbm_logical::manager::{BlockManager, FrequencyTrackingCapacity};
+use kvbm_logical::pools::BlockDuplicationPolicy;
 use kvbm_logical::registry::BlockRegistry;
+use rustc_hash::FxHashMap;
 
 use crate::common::protocols::G1 as MockerG1;
 
@@ -42,7 +50,7 @@ use super::worker::MockWorker;
 // mock worker's Notify. The timeout is only a hang guard for pipeline bugs.
 const PIPELINE_BARRIER_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Handle returned by [`MockOffloadEngine::try_onboard_prefix`]. Scheduler
+/// Handle returned by [`MockOffloadEngine::start_onboard_prefix`]. Scheduler
 /// parks one per deferred request and polls
 /// [`is_complete`](Self::is_complete) each pass; the bit is flipped by
 /// [`MockOffloadEngine::tick`] when the underlying transfer drains from
@@ -83,6 +91,32 @@ impl PreparedSwapIn {
     pub fn block_count(&self) -> usize {
         self.g2_blocks.len()
     }
+}
+
+/// Router-facing metadata for a block that may become resident in G2.
+///
+/// kvbm-engine indexes G2 by [`SequenceHash`] (a positional lineage hash),
+/// while the router protocol needs the external sequence hash plus the local
+/// token hash edge that reconstructs lower-tier continuations.
+#[derive(Clone, Debug)]
+pub(crate) struct G2BlockEventMetadata {
+    pub(crate) seq_hash: RouterSequenceHash,
+    pub(crate) parent_hash: Option<RouterSequenceHash>,
+    pub(crate) local_hash: BlockHash,
+    pub(crate) token_ids: Option<Vec<u32>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct G2OffloadBlock {
+    pub(crate) block_id: BlockId,
+    pub(crate) plh: SequenceHash,
+    pub(crate) metadata: G2BlockEventMetadata,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum G2RouterEvent {
+    Stored(G2BlockEventMetadata),
+    Removed { seq_hash: RouterSequenceHash },
 }
 
 struct PendingG1ToG2 {
@@ -130,6 +164,8 @@ pub struct MockOffloadEngine {
     registry: Arc<BlockRegistry>,
     g2_manager: Arc<BlockManager<G2>>,
     pending_g1_to_g2: Mutex<Vec<PendingG1ToG2>>,
+    g2_event_stream: Mutex<Pin<Box<dyn Stream<Item = LogicalKvCacheEvent> + Send>>>,
+    g2_event_metadata: Mutex<FxHashMap<SequenceHash, G2BlockEventMetadata>>,
 
     /// Runtime the engine owns for kvbm-engine background pipeline /
     /// session-receiver tasks. Keeping this runtime on the engine lets both
@@ -145,7 +181,9 @@ impl MockOffloadEngine {
     /// runtime and calls this via `block_on`.
     pub async fn new(config: KvbmOffloadConfig) -> Result<Self> {
         let messenger = create_local_messenger().await?;
-        let registry = Arc::new(build_registry());
+        let g2_events_manager = Arc::new(EventsManager::builder().build());
+        let g2_event_stream = Box::pin(g2_events_manager.subscribe());
+        let registry = Arc::new(build_registry(g2_events_manager));
         let g2_manager = Arc::new(build_g2_block_manager(
             config.num_g2_blocks,
             config.block_size_tokens,
@@ -172,10 +210,12 @@ impl MockOffloadEngine {
                 .build()?,
         );
 
+        let g1_to_g2_pending = Arc::new(PendingTracker::new());
+        let g1_to_g2_presence = PresenceFilter::<EngineG1, G2>::new(registry.clone())
+            .with_pending_tracker(g1_to_g2_pending.clone());
         let g1_to_g2_pipeline = PipelineBuilder::<EngineG1, G2>::new()
-            .policy(Arc::new(PresenceFilter::<EngineG1, G2>::new(
-                registry.clone(),
-            )))
+            .policy(Arc::new(g1_to_g2_presence))
+            .pending_tracker(g1_to_g2_pending)
             .batch_size(config.offload_batch_size)
             .max_concurrent_transfers(config.offload_batch_size)
             .build();
@@ -194,6 +234,8 @@ impl MockOffloadEngine {
             registry,
             g2_manager,
             pending_g1_to_g2: Mutex::new(Vec::new()),
+            g2_event_stream: Mutex::new(g2_event_stream),
+            g2_event_metadata: Mutex::new(FxHashMap::default()),
             _runtime: None,
         })
     }
@@ -211,14 +253,68 @@ impl MockOffloadEngine {
         self._runtime = Some(rt);
     }
 
+    fn remember_g2_event_metadata(&self, blocks: &[G2OffloadBlock]) {
+        let mut metadata = self
+            .g2_event_metadata
+            .lock()
+            .expect("G2 event metadata mutex poisoned");
+        for block in blocks {
+            metadata.insert(block.plh, block.metadata.clone());
+        }
+    }
+
+    fn drain_g2_lifecycle_events(&self) -> Vec<LogicalKvCacheEvent> {
+        let mut stream = self
+            .g2_event_stream
+            .lock()
+            .expect("G2 event stream mutex poisoned");
+        let mut events = Vec::new();
+        let mut cx = Context::from_waker(noop_waker_ref());
+        while let Poll::Ready(Some(event)) = stream.as_mut().poll_next(&mut cx) {
+            events.push(event);
+        }
+        events
+    }
+
+    /// Drain kvbm-logical G2 lifecycle notifications and translate them into
+    /// router-tier events. The caller owns event IDs and publishing.
+    pub(crate) fn drain_g2_router_events(&self) -> Vec<G2RouterEvent> {
+        let lifecycle_events = self.drain_g2_lifecycle_events();
+        if lifecycle_events.is_empty() {
+            return Vec::new();
+        }
+
+        let mut metadata = self
+            .g2_event_metadata
+            .lock()
+            .expect("G2 event metadata mutex poisoned");
+        let mut router_events = Vec::new();
+        for event in lifecycle_events {
+            match event {
+                LogicalKvCacheEvent::Create(plh) => {
+                    if let Some(meta) = metadata.get(&plh).cloned() {
+                        router_events.push(G2RouterEvent::Stored(meta));
+                    }
+                }
+                LogicalKvCacheEvent::Remove(plh) => {
+                    if let Some(meta) = metadata.remove(&plh) {
+                        router_events.push(G2RouterEvent::Removed {
+                            seq_hash: meta.seq_hash,
+                        });
+                    }
+                }
+            }
+        }
+        router_events
+    }
+
     async fn with_barrier_timeout<F>(wait: F) -> bool
     where
         F: Future<Output = bool>,
     {
-        match tokio::time::timeout(PIPELINE_BARRIER_TIMEOUT, wait).await {
-            Ok(done) => done,
-            Err(_) => false,
-        }
+        tokio::time::timeout(PIPELINE_BARRIER_TIMEOUT, wait)
+            .await
+            .unwrap_or_default()
     }
 
     fn wait_on_attached_runtime<F>(&self, wait: F) -> bool
@@ -447,28 +543,30 @@ impl MockOffloadEngine {
         self.worker.earliest_finish()
     }
 
-    /// Enqueue a G1→G2 eviction as an `ExternalBlock` reference.
-    pub fn enqueue_g1_eviction(
+    /// Enqueue a burst of G1→G2 evictions with router metadata that will be
+    /// used to publish HostPinned-tier events when G2 lifecycle notifications
+    /// arrive.
+    pub(crate) fn enqueue_g1_evictions_with_metadata(
         &mut self,
-        block_id: BlockId,
-        seq_hash: SequenceHash,
+        evicted: &[G2OffloadBlock],
+        source_slots: Vec<MutableBlock<MockerG1>>,
         now_ms: Option<f64>,
     ) {
-        self.enqueue_g1_evictions(&[(block_id, seq_hash)], now_ms);
-    }
-
-    /// Enqueue a burst of G1→G2 evictions as `ExternalBlock` references.
-    pub fn enqueue_g1_evictions(
-        &mut self,
-        evicted: &[(BlockId, SequenceHash)],
-        now_ms: Option<f64>,
-    ) {
-        self.enqueue_g1_evictions_holding_sources(evicted, Vec::new(), now_ms);
+        if evicted.is_empty() {
+            drop(source_slots);
+            return;
+        }
+        self.remember_g2_event_metadata(evicted);
+        let engine_blocks: Vec<_> = evicted
+            .iter()
+            .map(|block| (block.block_id, block.plh))
+            .collect();
+        self.enqueue_g1_evictions_holding_sources(&engine_blocks, source_slots, now_ms);
     }
 
     /// Enqueue a burst of G1→G2 evictions and hold the reset source slots
     /// until the simulated transfer reaches a terminal state.
-    pub fn enqueue_g1_evictions_holding_sources(
+    fn enqueue_g1_evictions_holding_sources(
         &mut self,
         evicted: &[(BlockId, SequenceHash)],
         source_slots: Vec<MutableBlock<MockerG1>>,
@@ -518,20 +616,6 @@ impl MockOffloadEngine {
         if handle.is_complete() {
             self.prune_releasable_g1_to_g2_sources();
         }
-    }
-
-    /// Attempt to swap in the longest contiguous G2-resident prefix of
-    /// `plhs`. Returns `None` when `plhs` is empty or G2 holds none of
-    /// them. Otherwise pins the matched G2 blocks, reserves the onboard
-    /// bandwidth immediately, and returns a [`SwapInHandle`] that keeps those
-    /// G2 blocks pinned for the transfer's lifetime.
-    pub fn try_onboard_prefix(
-        &mut self,
-        plhs: &[SequenceHash],
-        now_ms: Option<f64>,
-    ) -> Option<SwapInHandle> {
-        let prepared = self.prepare_onboard_prefix(plhs)?;
-        Some(self.start_onboard_prefix(prepared, now_ms))
     }
 
     /// Find and pin the longest G2-resident prefix without reserving G2→G1
@@ -591,19 +675,9 @@ impl MockOffloadEngine {
         }
     }
 
-    #[doc(hidden)]
-    pub fn worker(&self) -> &Arc<MockWorker> {
-        &self.worker
-    }
-
-    #[doc(hidden)]
-    pub fn offload_engine(&self) -> &OffloadEngine {
-        &self.engine
-    }
-
     /// Test-only accessor: integration tests outside this module
     /// register synthetic G2 blocks (allocate → stage → register)
-    /// through it so [`try_onboard_prefix`](Self::try_onboard_prefix)
+    /// through it so [`prepare_onboard_prefix`](Self::prepare_onboard_prefix)
     /// has something to match.
     #[cfg(test)]
     pub(crate) fn g2_manager(&self) -> &Arc<BlockManager<G2>> {
@@ -643,9 +717,10 @@ async fn create_local_messenger() -> Result<Arc<velo::Messenger>> {
     Ok(messenger)
 }
 
-fn build_registry() -> BlockRegistry {
+fn build_registry(events_manager: Arc<EventsManager>) -> BlockRegistry {
     BlockRegistry::builder()
         .frequency_tracker(FrequencyTrackingCapacity::Medium.create_tracker())
+        .event_manager(events_manager)
         .build()
 }
 
@@ -658,6 +733,7 @@ fn build_g2_block_manager(
         .block_count(block_count)
         .block_size(block_size_tokens)
         .registry(registry.clone())
+        .duplication_policy(BlockDuplicationPolicy::Reject)
         .with_lineage_backend()
         .build()
         .expect("BlockManager<G2> should build with valid config")
@@ -674,9 +750,9 @@ mod tests {
             .await
             .expect("construction should succeed");
 
-        assert!(engine.offload_engine().has_g1_to_g2());
-        assert!(!engine.offload_engine().has_g2_to_g3());
-        assert!(!engine.offload_engine().has_g2_to_g4());
+        assert!(engine.engine.has_g1_to_g2());
+        assert!(!engine.engine.has_g2_to_g3());
+        assert!(!engine.engine.has_g2_to_g4());
         assert_eq!(engine.earliest_pending_deadline(), None);
     }
 
@@ -705,15 +781,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_onboard_prefix_empty_input_returns_none() {
+    async fn prepare_onboard_prefix_empty_input_returns_none() {
         let mut engine = MockOffloadEngine::new(KvbmOffloadConfig::default())
             .await
             .unwrap();
-        assert!(engine.try_onboard_prefix(&[], None).is_none());
+        assert!(engine.prepare_onboard_prefix(&[]).is_none());
     }
 
     #[tokio::test]
-    async fn try_onboard_prefix_returns_none_when_g2_empty() {
+    async fn prepare_onboard_prefix_returns_none_when_g2_empty() {
         use dynamo_tokens::PositionalLineageHash;
         let mut engine = MockOffloadEngine::new(KvbmOffloadConfig::default())
             .await
@@ -721,17 +797,17 @@ mod tests {
         let hashes: Vec<SequenceHash> = (0..5)
             .map(|i| PositionalLineageHash::new(i as u64, None, 0))
             .collect();
-        assert!(engine.try_onboard_prefix(&hashes, None).is_none());
+        assert!(engine.prepare_onboard_prefix(&hashes).is_none());
     }
 
     /// End-to-end: register a G2 block directly in the engine's
-    /// `g2_manager`, call `try_onboard_prefix`, and verify (a) the handle
-    /// is produced, (b) the reservation is reflected in
+    /// `g2_manager`, call the prepare/start swap-in path, and verify (a) the
+    /// handle is produced, (b) the reservation is reflected in
     /// `earliest_pending_deadline`, (c) `tick` past the finish time
     /// flips the completion bit, and (d) the handle pins the G2 block
     /// via RAII.
     #[tokio::test]
-    async fn try_onboard_prefix_pins_g2_blocks_until_handle_drops() {
+    async fn start_onboard_prefix_pins_g2_blocks_until_handle_drops() {
         use dynamo_tokens::PositionalLineageHash;
         use kvbm_logical::MutableBlock;
         let config = KvbmOffloadConfig {
@@ -756,9 +832,10 @@ mod tests {
             .expect("G2 stage");
         drop(engine.g2_manager.register_block(complete));
 
-        let handle = engine
-            .try_onboard_prefix(&[plh], Some(0.0))
-            .expect("G2 prefix match must produce a handle");
+        let prepared = engine
+            .prepare_onboard_prefix(&[plh])
+            .expect("G2 prefix match must produce a prepared swap-in");
+        let handle = engine.start_onboard_prefix(prepared, Some(0.0));
         assert_eq!(handle.block_count(), 1);
         assert!(!handle.is_complete());
 

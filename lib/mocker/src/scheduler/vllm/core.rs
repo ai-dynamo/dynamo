@@ -7,7 +7,7 @@ use std::time::Duration;
 use dynamo_kv_router::protocols::WorkerId;
 use dynamo_tokens::blocks::UniqueBlock;
 #[cfg(feature = "kvbm-offload")]
-use kvbm_logical::MutableBlock;
+use kvbm_logical::{ImmutableBlock, MutableBlock};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -21,6 +21,8 @@ use crate::common::protocols::{
 use crate::common::sequence::ActiveSequence;
 use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::kv_manager::KvManager;
+#[cfg(feature = "kvbm-offload")]
+use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
 use crate::replay::TraceCollector;
 use crate::scheduler::{
     AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, ForwardPassSnapshot,
@@ -217,12 +219,14 @@ impl SchedulerState {
 /// cached in G1 at park time; the swap-in covers the next
 /// `handle.block_count()` blocks starting at that offset. We need this
 /// to register the right slice of the request's PLHs into G1 inactive
-/// after the transfer completes.
+/// after the transfer completes. `_prefix_pins` keeps that cached prefix
+/// resident until the suffix can publish Device-tier Stored events against it.
 #[cfg(feature = "kvbm-offload")]
 pub(crate) struct AwaitingSwapIn {
     pub(crate) uuid: Uuid,
     pub(crate) handle: crate::kvbm_offload::SwapInHandle,
     pub(crate) destination_slots: Vec<MutableBlock<G1>>,
+    pub(crate) _prefix_pins: Vec<ImmutableBlock<G1>>,
     pub(crate) skip_blocks: usize,
 }
 
@@ -409,14 +413,21 @@ impl VllmCore {
             let unique = request.sequence.unique_blocks();
             let plhs = request.sequence.positional_lineage_hashes();
             let local_hashes = request.sequence.block_hashes();
+            let token_ids = request.sequence.block_token_ids();
             unique
                 .iter()
                 .zip(plhs.iter())
                 .zip(local_hashes.iter())
+                .zip(token_ids.iter())
                 .skip(skip)
                 .take(count)
-                .filter_map(|((block, plh), local)| match block {
-                    UniqueBlock::FullBlock(seq_hash) => Some((*seq_hash, *plh, *local)),
+                .filter_map(|(((block, plh), local), token_ids)| match block {
+                    UniqueBlock::FullBlock(seq_hash) => Some(SwapInRegistrationBlock {
+                        seq_hash: *seq_hash,
+                        plh: *plh,
+                        local_hash: *local,
+                        token_ids: Some(token_ids.clone()),
+                    }),
                     UniqueBlock::PartialBlock(_) => None,
                 })
                 .collect()
@@ -434,14 +445,12 @@ impl VllmCore {
                 _ => None,
             }
         };
-        let outcome = self.kv_manager.register_swapped_in_blocks(
-            &entries,
-            parent_hash,
-            aws.destination_slots,
-        );
+        let entries_len = entries.len();
+        let outcome =
+            self.kv_manager
+                .register_swapped_in_blocks(entries, parent_hash, aws.destination_slots);
         debug_assert_eq!(
-            outcome.consumed_entries,
-            entries.len(),
+            outcome.consumed_entries, entries_len,
             "reserved destination slots should cover every swapped-in block"
         );
         self.state.prepend_waiting(aws.uuid);
@@ -482,6 +491,10 @@ impl VllmCore {
         if remaining_plhs.is_empty() {
             return SwapInAdmissionAttempt::NoHit;
         }
+        let prefix_pins = match self.kv_manager.try_pin_g1_prefix(&plhs[..skip_blocks]) {
+            Some(pins) => pins,
+            None => return SwapInAdmissionAttempt::NoHit,
+        };
         let (handle, destination_slots) = match self
             .kv_manager
             .try_batch_swap_in(remaining_plhs, Some(now_ms))
@@ -500,6 +513,7 @@ impl VllmCore {
             uuid,
             handle,
             destination_slots,
+            _prefix_pins: prefix_pins,
             skip_blocks,
         });
         SwapInAdmissionAttempt::Parked
@@ -619,10 +633,10 @@ impl VllmCore {
         // but the worker still has blocked requests or pending source-slot
         // releases, so `is_done()` never triggers.
         #[cfg(feature = "kvbm-offload")]
-        if end_ms <= now_ms {
-            if let Some(deadline) = self.kv_manager.earliest_offload_deadline() {
-                end_ms = deadline.max(now_ms);
-            }
+        if end_ms <= now_ms
+            && let Some(deadline) = self.kv_manager.earliest_offload_deadline()
+        {
+            end_ms = deadline.max(now_ms);
         }
 
         let fpm = self.compute_fpm(&scheduled, (end_ms - now_ms) / 1000.0);

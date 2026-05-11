@@ -181,6 +181,24 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	assert.Equal(t, snapshotprotocol.DefaultCheckpointArtifactVersion, ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
 }
 
+func TestCreateOrGetAutoCheckpointRejectsGMSSnapshotWhenGateDisabled(t *testing.T) {
+	t.Setenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar, "")
+	ctx := context.Background()
+	s := testScheme()
+	c := fake.NewClientBuilder().WithScheme(s).Build()
+
+	_, err := CreateOrGetAutoCheckpoint(
+		ctx,
+		c,
+		testNamespace,
+		testIdentity(),
+		corev1.PodTemplateSpec{},
+		&nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GMS + Snapshot is temporarily disabled")
+}
+
 // --- InjectCheckpointIntoPodSpec tests ---
 
 func TestInjectCheckpointIntoPodSpec(t *testing.T) {
@@ -191,7 +209,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		info := &CheckpointInfo{Enabled: true, Ready: false, Hash: testHash}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 
 		assert.Equal(t, originalCmd, podSpec.Containers[0].Command)
 		assert.Equal(t, originalArgs, podSpec.Containers[0].Args)
@@ -209,7 +227,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		podSpec := testPodSpec()
 		info := &CheckpointInfo{Enabled: true, Ready: true, Identity: ptr.To(testIdentity())}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 		assert.Nil(t, podSpec.Containers[0].Args)
 		assert.Len(t, info.Hash, 16)
@@ -250,7 +268,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
 		assert.Nil(t, podSpec.Containers[0].Args)
 		assert.Equal(t, []string{"sidecar"}, podSpec.Containers[1].Command)
@@ -273,7 +291,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		for _, name := range []string{"engine-0", "engine-1"} {
 			c := findContainer(podSpec, name)
 			require.NotNil(t, c, "container %q not found", name)
@@ -298,8 +316,8 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash, GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
-		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		gmsServer := findContainer(podSpec, gms.ServerContainerName)
 		require.NotNil(t, gmsServer)
 		loader := findContainer(podSpec, GMSLoaderContainer)
@@ -353,7 +371,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			{"snapshot daemonset missing", testPodSpec(), testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).Build(), "no snapshot-agent daemonset found"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				err := InjectCheckpointIntoPodSpec(context.Background(), tc.reader, testNamespace, tc.podSpec, tc.info)
+				err := InjectCheckpointIntoPodSpec(context.Background(), tc.reader, testNamespace, tc.podSpec, tc.info, snapshotprotocol.DefaultSeccompLocalhostProfile)
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.errMsg)
 			})
@@ -377,6 +395,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 	})
 
 	t.Run("checkpointRef resolves ready CR", func(t *testing.T) {
+		t.Setenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 		hash, err := ComputeIdentityHash(testIdentity())
 		require.NoError(t, err)
 		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
@@ -403,6 +422,31 @@ func TestResolveCheckpointForService(t *testing.T) {
 		assert.Equal(t, hash, info.CheckpointName)
 		require.NotNil(t, info.GPUMemoryService)
 		assert.True(t, info.GPUMemoryService.Enabled)
+	})
+
+	t.Run("checkpointRef rejects GMS checkpoint when gate is disabled", func(t *testing.T) {
+		t.Setenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar, "")
+		hash, err := ComputeIdentityHash(testIdentity())
+		require.NoError(t, err)
+		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{Name: hash, Namespace: testNamespace},
+			Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
+				Identity:         testIdentity(),
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
+			},
+			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
+				Phase:        nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
+				IdentityHash: hash,
+			},
+		}
+		c := fake.NewClientBuilder().WithScheme(s).WithObjects(ckpt).WithStatusSubresource(ckpt).Build()
+		ref := hash
+
+		_, err = ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
+			Enabled: true, CheckpointRef: &ref,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "GMS + Snapshot is temporarily disabled")
 	})
 
 	t.Run("checkpointRef resolves not-ready CR", func(t *testing.T) {

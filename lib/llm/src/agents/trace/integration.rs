@@ -15,8 +15,8 @@ use futures::Stream;
 
 use crate::agents::context::AgentContext;
 use crate::agents::trace::{
-    AgentRequestMetrics, AgentToolEventRelay, AgentTracePolicy, AgentTraceRecord,
-    DEFAULT_TOOL_EVENTS_TOPIC, WorkerInfo,
+    AgentReplayMetrics, AgentRequestMetrics, AgentToolEventRelay, AgentTracePolicy,
+    AgentTraceRecord, DEFAULT_TOOL_EVENTS_TOPIC, WorkerInfo,
 };
 use crate::local_model::LocalModel;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
@@ -87,6 +87,7 @@ pub(crate) fn request_metrics(
             .as_ref()
             .and_then(|timing| timing.router_queue_depth.map(|v| v as u64)),
         worker,
+        replay: None,
     }
 }
 
@@ -95,12 +96,14 @@ pub(crate) struct AgentTraceRequestEndState {
     pub request_model: String,
     pub request_tracker: Option<Arc<RequestTracker>>,
     pub x_request_id: Option<String>,
+    pub replay_metrics: Option<AgentReplayMetrics>,
 }
 
 pub(crate) fn build_agent_trace_request_end_state(
     common_request: &PreprocessedRequest,
     tracker: &Option<Arc<RequestTracker>>,
     context: &Context<()>,
+    trace_block_size: usize,
 ) -> Option<AgentTraceRequestEndState> {
     if !super::is_enabled() {
         return None;
@@ -119,6 +122,7 @@ pub(crate) fn build_agent_trace_request_end_state(
         request_model: common_request.model.clone(),
         request_tracker: tracker.clone(),
         x_request_id,
+        replay_metrics: super::request_replay_metrics(&common_request.token_ids, trace_block_size),
     })
 }
 
@@ -135,6 +139,7 @@ where
         request_model,
         request_tracker,
         x_request_id,
+        replay_metrics,
     }) = trace_state
     else {
         return stream;
@@ -149,12 +154,13 @@ where
                 "agent_context present but request tracker is missing; emitting partial trace"
             );
         }
-        let metrics = super::request_metrics(
+        let mut metrics = super::request_metrics(
             request_id,
             x_request_id,
             request_model,
             request_tracker.as_deref(),
         );
+        metrics.replay = replay_metrics;
         super::emit_request_end(agent_context, metrics);
     });
     stream
