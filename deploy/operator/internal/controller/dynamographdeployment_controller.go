@@ -1167,7 +1167,15 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 	logger.Info("Component restart completed", "component", currentComponent)
 
 	// Find the next component.
-	nextComponent := getNextComponentInOrder(order, currentComponent)
+	nextComponent, currentFound := getNextComponentInOrder(order, currentComponent)
+	if !currentFound {
+		logger.Info("Current restart component is no longer in order, restarting sequence from first component", "component", currentComponent, "firstComponent", order[0])
+		return &nvidiacomv1beta1.RestartStatus{
+			ObservedID: specID,
+			Phase:      nvidiacomv1beta1.RestartPhaseRestarting,
+			InProgress: []string{order[0]},
+		}
+	}
 
 	if nextComponent == "" {
 		// No more components, restart is complete.
@@ -1187,14 +1195,19 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 	}
 }
 
-// getNextComponentInOrder returns the component after the given component in the order, or empty string if none.
-func getNextComponentInOrder(order []string, currentComponent string) string {
+// getNextComponentInOrder returns the component after the current component.
+// The boolean reports whether currentComponent was found in order.
+func getNextComponentInOrder(order []string, currentComponent string) (string, bool) {
 	for i, componentName := range order {
-		if componentName == currentComponent && i+1 < len(order) {
-			return order[i+1]
+		if componentName != currentComponent {
+			continue
 		}
+		if i+1 < len(order) {
+			return order[i+1], true
+		}
+		return "", true
 	}
-	return ""
+	return "", false
 }
 
 func (r *DynamoGraphDeploymentReconciler) computeRestartStatus(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) *nvidiacomv1beta1.RestartStatus {

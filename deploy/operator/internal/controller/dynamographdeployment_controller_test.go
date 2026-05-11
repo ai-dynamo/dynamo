@@ -1927,6 +1927,53 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 		},
 		{
+			name: "sequential restart - stale in-progress component resets to first service",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+					Strategy: &v1alpha1.RestartStrategy{
+						Type:  v1alpha1.RestartStrategyTypeSequential,
+						Order: []string{"frontend", "decode"},
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+					"decode": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: newID,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"removed"},
+				},
+			},
+			existingResources: []client.Object{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-removed",
+						Namespace:  "default",
+						Generation: 1,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 1,
+						Conditions: []metav1.Condition{
+							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionTrue},
+						},
+					},
+				}),
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"frontend"},
+			},
+		},
+		{
 			name: "default strategy (sequential) - no strategy specified",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{

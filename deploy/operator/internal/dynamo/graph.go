@@ -2258,6 +2258,11 @@ func GetDGDPreservedAlphaPVCs(dgd *v1beta1.DynamoGraphDeployment) []v1alpha1.PVC
 
 func generateAnnotations(component *v1beta1.DynamoComponentDeploymentSharedSpec, dynamoDeployment *v1beta1.DynamoGraphDeployment, componentName string) (map[string]string, error) {
 	annotations := make(map[string]string)
+	if dynamoDeployment.Spec.Annotations != nil {
+		if err := mergo.Merge(&annotations, dynamoDeployment.Spec.Annotations, mergo.WithOverride); err != nil {
+			return nil, fmt.Errorf("failed to merge DGD annotations: %w", err)
+		}
+	}
 	if componentAnnotations := getDGDComponentAlphaAnnotations(dynamoDeployment, componentName); componentAnnotations != nil {
 		if err := mergo.Merge(&annotations, componentAnnotations, mergo.WithOverride); err != nil {
 			return nil, fmt.Errorf("failed to merge preserved component annotations: %w", err)
