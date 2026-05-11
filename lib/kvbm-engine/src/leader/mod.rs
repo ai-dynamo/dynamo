@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod accessor;
+pub mod dispatch;
 mod instance;
 mod onboarding;
 pub mod parallelism;
