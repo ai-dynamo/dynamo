@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::Response;
+use dynamo_runtime::DistributedRuntime;
 
 use super::Metrics;
 use super::RouteDoc;
@@ -209,6 +210,9 @@ pub struct HttpService {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
+    /// RL admin router, served on a dedicated port when `DYN_ENABLE_RL_ENDPOINTS=true`.
+    rl_router: Option<axum::Router>,
+    rl_port: u16,
 }
 
 #[derive(Clone, Builder)]
@@ -264,6 +268,27 @@ pub struct HttpServiceConfig {
     /// are registered using discovery.instance_id() and exposed on /metrics.
     #[builder(default = "None")]
     drt_discovery: Option<Arc<dyn Discovery>>,
+
+    /// When true (or `DYN_ENABLE_RL_ENDPOINTS=true`), mount the RL admin routes
+    /// on a dedicated listener at `rl_port`. Requires `runtime` to be set.
+    #[builder(default = "false")]
+    enable_rl: bool,
+
+    /// Port for the RL admin listener (default 8002). Ignored when `enable_rl` is false.
+    #[builder(default = "default_rl_port()")]
+    rl_port: u16,
+
+    /// The DistributedRuntime used by the RL client for discovery and fan-out.
+    /// Required when `enable_rl` is true or `DYN_ENABLE_RL_ENDPOINTS=true`.
+    #[builder(default = "None")]
+    runtime: Option<Arc<DistributedRuntime>>,
+}
+
+fn default_rl_port() -> u16 {
+    std::env::var("DYN_RL_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8002)
 }
 
 impl HttpService {
@@ -292,6 +317,37 @@ impl HttpService {
         let address = format!("{}:{}", self.host, self.port);
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
+
+        // Spawn the RL admin listener as a background task (separate port).
+        if let Some(rl_router) = self.rl_router.clone() {
+            let rl_addr = format!("{}:{}", self.host, self.rl_port);
+            let rl_cancel = cancel_token.child_token();
+            tokio::spawn(async move {
+                match tokio::net::TcpListener::bind(&rl_addr).await {
+                    Ok(listener) => {
+                        tracing::info!(
+                            address = %rl_addr,
+                            "RL admin listener started on dedicated port"
+                        );
+                        if let Err(e) = axum::serve(listener, rl_router)
+                            .with_graceful_shutdown(async move {
+                                rl_cancel.cancelled_owned().await;
+                            })
+                            .await
+                        {
+                            tracing::error!("RL admin listener error: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            address = %rl_addr,
+                            error = %e,
+                            "Failed to bind RL admin listener"
+                        );
+                    }
+                }
+            });
+        }
 
         let router = self.router.clone();
         let observer = cancel_token.child_token();
@@ -579,6 +635,45 @@ impl HttpServiceConfigBuilder {
         // Echo x-request-id from request to response headers for client correlation
         let router = router.layer(axum::middleware::from_fn(echo_request_id_header));
 
+        // RL admin router: served on a dedicated listener at `rl_port`.
+        // Enabled when `enable_rl || DYN_ENABLE_RL_ENDPOINTS=true` and
+        // `runtime` is provided (required for discovery and fan-out).
+        let rl_router = if config.enable_rl || env_is_truthy("DYN_ENABLE_RL_ENDPOINTS") {
+            match config.runtime.as_ref() {
+                Some(drt) => {
+                    tracing::info!(
+                        rl_port = config.rl_port,
+                        "RL admin routes enabled at /v1/rl/engine on dedicated listener"
+                    );
+                    match super::openai::rl_router(drt.clone()) {
+                        Ok(router) => {
+                            let router = router
+                                .layer(
+                                    TraceLayer::new_for_http()
+                                        .make_span_with(make_system_request_span)
+                                        .on_response(on_response),
+                                )
+                                .layer(axum::middleware::from_fn(echo_request_id_header));
+                            Some(router)
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to build RL router: {e}");
+                            None
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        "RL admin routes requested (DYN_ENABLE_RL_ENDPOINTS=true) but \
+                         HttpServiceConfigBuilder.runtime is None — skipping mount."
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(HttpService {
             state,
             router,
@@ -588,6 +683,8 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
+            rl_router,
+            rl_port: config.rl_port,
         })
     }
 

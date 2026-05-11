@@ -2634,6 +2634,35 @@ pub fn audios_router(
     (vec![doc], router)
 }
 
+// ---------------------------------------------------------------------------
+// RL admin router
+// ---------------------------------------------------------------------------
+
+/// Build the RL admin axum router and mount it on the dedicated RL listener.
+///
+/// Enabled when `DYN_ENABLE_RL_ENDPOINTS=true` or when the caller sets
+/// `HttpServiceConfig.enable_rl = true`. The router is served on a separate
+/// port (`DYN_RL_PORT`, default 8002).
+///
+/// The namespace is read from `DYN_NAMESPACE` (default "dynamo"). Callers can
+/// restrict fan-out to a specific component via `DYN_RL_COMPONENT`.
+pub(super) fn rl_router(
+    drt: std::sync::Arc<dynamo_runtime::DistributedRuntime>,
+) -> anyhow::Result<axum::Router> {
+    let namespace = std::env::var("DYN_NAMESPACE").unwrap_or_else(|_| "dynamo".into());
+
+    let mut config = dynamo_rl::RlClientConfig::new(drt, namespace);
+    if let Ok(timeout) = std::env::var("DYN_RL_DEFAULT_TIMEOUT_SECS") {
+        if let Ok(secs) = timeout.parse::<f64>() {
+            config.default_request_timeout = std::time::Duration::from_secs_f64(secs);
+        }
+    }
+
+    let client = dynamo_rl::RlClient::new(config)?;
+    let state = dynamo_rl::RlState::new(client);
+    Ok(dynamo_rl::rl_router(state))
+}
+
 #[cfg(test)]
 mod tests {
 
