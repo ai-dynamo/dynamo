@@ -5,93 +5,37 @@ use std::sync::Arc;
 
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
-    local_model::runtime_config::ModelRuntimeConfig,
     protocols::{
         common::{self, timing::RequestTracker},
         openai::{
             convert_backend_top_logprobs,
-            nvext::{NvExtProvider, NvExtResponseFieldSelection},
+            delta_common::{self, DeltaGeneratorOptions},
+            nvext::NvExtProvider,
             token_to_utf8_bytes,
         },
     },
     types::TokenIdType,
 };
 
-/// Provides a method for generating a [`DeltaGenerator`] from a chat completion request.
 impl NvCreateChatCompletionRequest {
-    /// Enables usage tracking for non-streaming requests to comply with OpenAI API specification.
-    ///
-    /// According to OpenAI API spec, non-streaming chat completion responses (stream=false)
-    /// must always include usage statistics. This method ensures `stream_options.include_usage`
-    /// is set to `true` for non-streaming requests.
-    ///
-    /// # Arguments
-    /// * `original_stream_flag` - The original value of the `stream` field before any internal processing
     pub fn enable_usage_for_nonstreaming(&mut self, original_stream_flag: bool) {
-        if !original_stream_flag {
-            // For non-streaming requests (stream=false), enable usage by default
-            if self.inner.stream_options.is_none() {
-                self.inner.stream_options =
-                    Some(dynamo_protocols::types::ChatCompletionStreamOptions {
-                        include_usage: true,
-                        continuous_usage_stats: false,
-                    });
-            } else if let Some(ref mut opts) = self.inner.stream_options {
-                // If stream_options exists, ensure include_usage is true for non-streaming
-                opts.include_usage = true;
-            }
-        }
+        delta_common::enable_usage_for_nonstreaming(
+            &mut self.inner.stream_options,
+            original_stream_flag,
+        );
     }
 
-    /// Creates a [`DeltaGenerator`] instance based on the chat completion request.
-    ///
-    /// # Arguments
-    /// * `request_id` - The request ID to use for the chat completion response ID.
-    ///
-    /// # Returns
-    /// * [`DeltaGenerator`] configured with model name and response options.
     pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
-        let response_fields = NvExtResponseFieldSelection::from_nvext(self.nvext());
-
-        let options = DeltaGeneratorOptions {
-            enable_usage: self
-                .inner
-                .stream_options
-                .as_ref()
-                .map(|opts| opts.include_usage)
-                .unwrap_or(false),
-            continuous_usage_stats: self
-                .inner
-                .stream_options
-                .as_ref()
-                .map(|opts| opts.continuous_usage_stats)
-                .unwrap_or(false),
-            enable_logprobs: self.inner.logprobs.unwrap_or(false)
-                || self.inner.top_logprobs.unwrap_or(0) > 0,
-            response_fields,
-            return_tokens_as_token_ids: self.return_tokens_as_token_ids.unwrap_or(false),
-            runtime_config: ModelRuntimeConfig::default(),
-        };
-
+        let enable_logprobs =
+            self.inner.logprobs.unwrap_or(false) || self.inner.top_logprobs.unwrap_or(0) > 0;
+        let options = DeltaGeneratorOptions::new(
+            self.inner.stream_options.as_ref(),
+            self.return_tokens_as_token_ids,
+            enable_logprobs,
+            self.nvext(),
+        );
         DeltaGenerator::new(self.inner.model.clone(), options, request_id)
     }
-}
-
-/// Configuration options for the [`DeltaGenerator`], controlling response behavior.
-#[derive(Debug, Clone, Default)]
-pub struct DeltaGeneratorOptions {
-    /// Determines whether token usage statistics should be included in the response.
-    pub enable_usage: bool,
-    /// Determines whether continuous usage statistics should be included in the response.
-    pub continuous_usage_stats: bool,
-    /// Determines whether log probabilities should be included in the response.
-    pub enable_logprobs: bool,
-    /// Determines which nvext response fields may be emitted for this request.
-    pub response_fields: NvExtResponseFieldSelection,
-    /// When true, logprob token fields use "token_id:<id>" format instead of decoded text.
-    pub return_tokens_as_token_ids: bool,
-
-    pub runtime_config: ModelRuntimeConfig,
 }
 
 /// Generates incremental chat completion responses in a streaming fashion.
@@ -113,47 +57,15 @@ pub struct DeltaGenerator {
     msg_counter: u64,
     /// Configuration options for response generation.
     options: DeltaGeneratorOptions,
-    /// Optional request tracker for per-request metrics (shared with PreprocessedRequest).
-    tracker: Option<Arc<RequestTracker>>,
+    /// Request tracker for per-request metrics (shared with PreprocessedRequest).
+    tracker: Arc<RequestTracker>,
 }
 
 impl DeltaGenerator {
-    /// Creates a new [`DeltaGenerator`] instance with the specified model and options.
-    ///
-    /// # Arguments
-    /// * `model` - The model name used for response generation.
-    /// * `options` - Configuration options for enabling usage and log probabilities.
-    /// * `request_id` - The request ID to use for the chat completion response.
-    ///
-    /// # Returns
-    /// * A new instance of [`DeltaGenerator`].
     pub fn new(model: String, options: DeltaGeneratorOptions, request_id: String) -> Self {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        // SAFETY: Casting from `u64` to `u32` could lead to precision loss after `u32::MAX`,
-        // but this will not be an issue until 2106.
-        let now: u32 = now.try_into().expect("timestamp exceeds u32::MAX");
-
-        let usage = dynamo_protocols::types::CompletionUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            prompt_tokens_details: None,
-            completion_tokens_details: None,
-        };
-
-        let chatcmpl_id = format!("chatcmpl-{request_id}");
-
-        // Always create request tracker for per-worker metrics (TTFT, ITL per worker_id).
-        // `response_fields` only controls which nvext fields are returned to the client;
-        // the tracker still records timing/ITL internally for metrics.
-        let tracker = Some(Arc::new(RequestTracker::new()));
-
+        let (now, usage, tracker) = delta_common::initial_state();
         Self {
-            id: chatcmpl_id,
+            id: format!("chatcmpl-{request_id}"),
             object: "chat.completion.chunk".to_string(),
             created: now,
             model,
@@ -166,15 +78,15 @@ impl DeltaGenerator {
         }
     }
 
-    /// Returns the request tracker if tracking is enabled, for sharing with PreprocessedRequest.
-    pub fn tracker(&self) -> Option<Arc<RequestTracker>> {
+    /// Returns the request tracker. Tracking is enabled. For sharing with PreprocessedRequest.
+    pub fn tracker(&self) -> Arc<RequestTracker> {
         self.tracker.clone()
     }
 
     /// Updates the prompt token usage count.
     ///
     /// # Arguments
-    /// * `isl` - The number of prompt tokens used.
+    /// * `isl` - Input Sequence Length. The number of prompt tokens used.
     pub fn update_isl(&mut self, isl: u32) {
         self.usage.prompt_tokens = isl;
     }
@@ -230,16 +142,7 @@ impl DeltaGenerator {
         })
     }
 
-    /// Creates a choice within a chat completion response.
-    ///
-    /// # Arguments
-    /// * `index` - The index of the choice in the completion response.
-    /// * `text` - The text content for the response.
-    /// * `finish_reason` - The reason why the response finished (e.g., stop, length, etc.).
-    /// * `logprobs` - Optional log probabilities of the generated tokens.
-    ///
-    /// # Returns
-    /// * An [`dynamo_protocols::types::CreateChatCompletionStreamResponse`] instance representing the choice.
+    #[allow(deprecated)]
     pub fn create_choice(
         &mut self,
         index: u32,
@@ -338,12 +241,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 {
     /// Converts a backend response into a structured OpenAI-style streaming response.
     ///
-    /// # Arguments
     /// * `delta` - The backend response containing generated text and metadata.
-    ///
-    /// # Returns
-    /// * `Ok(NvCreateChatCompletionStreamResponse)` if conversion succeeds.
-    /// * `Err(anyhow::Error)` if an error occurs.
     fn choice_from_postprocessor(
         &mut self,
         delta: crate::protocols::common::llm_backend::BackendOutput,
@@ -405,10 +303,8 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Record finish for timing/ITL accounting even when timing is not returned to the client.
         // Kept at call site because it's a side effect on the tracker — not a gating decision.
-        if finish_reason.is_some()
-            && let Some(ref tracker) = self.tracker
-        {
-            tracker.record_finish();
+        if finish_reason.is_some() {
+            self.tracker.record_finish();
         }
 
         // Build the nvext response payload via the shared gating helper on
@@ -416,7 +312,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         // completions delta generators go through the same helper so the gating
         // rules stay in one place.
         if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
-            self.tracker.as_ref(),
+            Some(&self.tracker),
             delta.disaggregated_params.as_ref(),
             finish_reason.is_some(),
             delta.engine_data,
@@ -462,8 +358,8 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         DeltaGenerator::get_usage(self)
     }
 
-    fn tracker(&self) -> Option<std::sync::Arc<crate::protocols::common::timing::RequestTracker>> {
-        self.tracker.clone()
+    fn tracker(&self) -> Option<Arc<RequestTracker>> {
+        Some(self.tracker.clone())
     }
 }
 
@@ -622,8 +518,9 @@ mod tests {
     fn test_plain_request_without_extra_fields_omits_nvext() {
         let request = create_test_request();
         let mut generator = request.response_generator("req-no-nvext".to_string());
-        let tracker = generator.tracker().expect("tracker");
-        tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
+        generator
+            .tracker()
+            .record_worker(42, Some(0), WORKER_TYPE_PREFILL);
 
         let response = generator
             .choice_from_postprocessor(final_backend_output())
@@ -697,8 +594,9 @@ mod tests {
             .unwrap();
         let mut generator =
             make_request_with_nvext(nvext).response_generator("req-qid".to_string());
-        let tracker = generator.tracker().expect("tracker");
-        tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
+        generator
+            .tracker()
+            .record_worker(42, Some(0), WORKER_TYPE_PREFILL);
 
         let response = generator
             .choice_from_postprocessor(final_backend_output())
