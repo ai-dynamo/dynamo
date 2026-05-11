@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# vllm disagg DGD: 1 Frontend + 1 prefill (TP=2) + 2 decode (TP=2 each)
+# vllm disagg DGD: 1 Frontend + 2 prefill (TP=2 each) + 1 decode (TP=2)
 # = 6 GPUs total; fits one 8xH100-80GB node. Model: Qwen3-30B-A3B
 # (30B-param MoE). NixlConnector with kv_role=kv_both for the
-# prefill→decode KV transfer.
+# prefill→decode KV transfer. The 2P:1D ratio reflects a prefill-bound
+# workload (average ISL >> average OSL — long-context / RAG /
+# ranking patterns), making prefill the dominant work and KV
+# handoffs frequent.
 #
 # Image: dynamo v1.0.1 vllm-runtime (released).
 #
@@ -17,7 +20,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-disagg-qwen3-30b-1p2d
+  name: vllm-disagg-qwen3-30b-2p1d
 spec:
   services:
     Frontend:
@@ -31,7 +34,7 @@ spec:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
-      replicas: 1
+      replicas: 2
       resources:
         requests:
           gpu: "2"
@@ -66,7 +69,7 @@ spec:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
-      replicas: 2
+      replicas: 1
       resources:
         requests:
           gpu: "2"
