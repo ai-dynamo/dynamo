@@ -206,11 +206,34 @@ class DynamoConnector(KVConnectorBase_V1):
 
     # Worker methods
 
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        """
+        KVBM prefers a single cross-layer allocation so the device-side
+        layout becomes `FullyContiguousLayout`, letting the transfer planner
+        do per-block transfers across all layers in one operation.
+
+        vLLM still falls back to the per-layer `register_kv_caches` path
+        when the backend doesn't support `get_kv_cache_stride_order(
+        include_num_layers_dimension=True)` or for MLA models.
+        """
+        return True
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register KV caches - no-op for scheduler connector."""
         if self._worker is None:
             raise RuntimeError("Cannot call worker methods on SCHEDULER role")
         self._worker.register_kv_caches(kv_caches)
+
+    def register_cross_layers_kv_cache(
+        self,
+        kv_cache: torch.Tensor,
+        attn_backend: type,
+    ) -> None:
+        """Register a single cross-layer KV cache tensor — delegates to worker."""
+        if self._worker is None:
+            raise RuntimeError("Cannot call worker methods on SCHEDULER role")
+        self._worker.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
     @override
     def bind_connector_metadata(

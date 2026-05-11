@@ -22,6 +22,7 @@ bind happens later, when the leader's `initialize_workers()` RPC drives
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -76,7 +77,7 @@ else:
     ConnectorWorker = None
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheConfig
@@ -264,6 +265,138 @@ class SchedulerConnectorWorker:
         print(f"  - Dtype width bytes: {dtype_width_bytes}")
         print(f"  - Shape: {shape}")
         print("[KVBM] Waiting for leader to trigger initialization...")
+
+    def register_cross_layers_kv_cache(
+        self,
+        kv_cache: torch.Tensor,
+        attn_backend: type["AttentionBackend"],
+    ) -> None:
+        """
+        Register a single cross-layer KV cache tensor with NIXL.
+
+        Called by vLLM when `prefer_cross_layer_blocks` is True and the
+        backend supports a uniform layout. The tensor is the single contiguous
+        allocation produced by `allocate_uniform_kv_caches` — its logical
+        shape is `[num_layers, ...]` permuted by the backend's stride order.
+        We require the physical byte layout to be
+        `[num_blocks, num_layers, outer_dim=2, page_size, num_kv_heads, head_size]`
+        (the last two collapse into `inner_dim` for KVBM), which is what
+        FlashAttention NHD produces. Other layouts are rejected.
+        """
+        print(
+            f"[KVBM] register_cross_layers_kv_cache: shape={tuple(kv_cache.shape)}, "
+            f"dtype={kv_cache.dtype}, device={kv_cache.device}, "
+            f"backend={attn_backend.__name__}",
+            flush=True,
+        )
+
+        # vLLM's get_kv_cache_stride_order is a permutation over the logical
+        # axes when `include_num_layers_dimension=True`. The logical order
+        # (with num_layers prepended) is:
+        #   [num_layers=0, K/V=1, num_blocks=2, block_size=3, heads=4, head_size=5]
+        # FullyContiguousLayout requires the physical order to be:
+        #   [num_blocks, num_layers, outer_dim, page_size, inner_dim...]
+        # i.e. logical-axis 2 (num_blocks) at physical pos 0 and logical-axis
+        # 0 (num_layers) at physical pos 1. Bail otherwise — silently
+        # mis-striding would corrupt the cache.
+        try:
+            stride_order = attn_backend.get_kv_cache_stride_order(
+                include_num_layers_dimension=True
+            )
+        except (AttributeError, NotImplementedError) as e:
+            raise RuntimeError(
+                f"KVBM cross-layer registration requires "
+                f"{attn_backend.__name__}.get_kv_cache_stride_order"
+                f"(include_num_layers_dimension=True); got {type(e).__name__}: {e}"
+            ) from e
+
+        if stride_order.index(2) != 0:
+            raise RuntimeError(
+                f"KVBM requires num_blocks at physical dim 0; got "
+                f"stride_order={stride_order} for backend {attn_backend.__name__}"
+            )
+        if stride_order.index(0) != 1:
+            raise RuntimeError(
+                f"KVBM requires num_layers at physical dim 1; got "
+                f"stride_order={stride_order} for backend {attn_backend.__name__}"
+            )
+
+        if not kv_cache.is_contiguous() or kv_cache.storage_offset() != 0:
+            raise RuntimeError(
+                f"KVBM cross-layer tensor must be contiguous with offset 0; "
+                f"got is_contiguous={kv_cache.is_contiguous()}, "
+                f"storage_offset={kv_cache.storage_offset()}"
+            )
+
+        shape = tuple(kv_cache.shape)
+        if len(shape) < 5:
+            raise RuntimeError(
+                f"KVBM cross-layer tensor must have at least 5 dims "
+                f"(num_blocks, num_layers, outer, page_size, inner...); got shape={shape}"
+            )
+
+        num_blocks, num_layers, outer_dim, page_size = shape[:4]
+        inner_dim = math.prod(shape[4:])
+
+        # Cross-checks against vLLM config — catch a mismatch between the
+        # tensor we got and what vLLM thinks it allocated.
+        config_block_size = self.vllm_config.cache_config.block_size
+        if page_size != config_block_size:
+            raise RuntimeError(
+                f"KVBM cross-layer page_size mismatch: tensor has {page_size}, "
+                f"vllm_config.cache_config.block_size is {config_block_size}"
+            )
+        if outer_dim != 2:
+            raise RuntimeError(
+                f"KVBM cross-layer expects outer_dim=2 (K/V split); got {outer_dim}. "
+                f"MLA backends should not reach this path."
+            )
+
+        config_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks
+        if num_blocks != config_gpu_blocks:
+            print(
+                f"[KVBM] Warning: cross-layer num_blocks from tensor ({num_blocks}) "
+                f"!= config.num_gpu_blocks ({config_gpu_blocks}); using tensor value."
+            )
+
+        dtype_width_bytes = self.kvbm_config.cache_dtype_bytes()
+
+        self.worker.register_cross_layers_kv_cache(
+            kv_cache,
+            num_blocks,
+            num_layers,
+            outer_dim,
+            page_size,
+            inner_dim,
+            dtype_width_bytes,
+        )
+
+        # Downstream save_kv_layer / wait_for_layer_load identify the layer
+        # by its name. With cross-layer we have no per-layer tensor dict to
+        # extract the name order from, so we read it from the kv_cache_config.
+        # Single group is guaranteed by use_uniform_kv_cache.
+        groups = self.vllm_kv_cache_config.kv_cache_groups
+        assert (
+            len(groups) == 1
+        ), f"cross-layer registration expects exactly one KV cache group; got {len(groups)}"
+        layer_names = list(groups[0].layer_names)
+        assert (
+            len(layer_names) == num_layers
+        ), f"layer_names count ({len(layer_names)}) != num_layers ({num_layers})"
+
+        self.layer_name_to_index = {name: i for i, name in enumerate(layer_names)}
+        self._num_device_blocks = num_blocks
+        self._num_layers = num_layers
+        self._last_layer_name = layer_names[-1] if layer_names else None
+
+        print(
+            "[KVBM] Cross-layer KV cache registered (deferred mode):"
+            f" num_blocks={num_blocks} num_layers={num_layers}"
+            f" outer_dim={outer_dim} page_size={page_size} inner_dim={inner_dim}"
+            f" dtype_width_bytes={dtype_width_bytes}",
+            flush=True,
+        )
+        print("[KVBM] Waiting for leader to trigger initialization...", flush=True)
 
     def bind_connector_metadata(self, data: bytes) -> bool:
         """
