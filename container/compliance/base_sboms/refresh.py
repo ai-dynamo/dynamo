@@ -21,16 +21,17 @@ Hard cap: 4 MB per file. Exceeding it splits the SBOM per-ecosystem
 (deb.cdx.json, pypi.cdx.json, rpm.cdx.json) under a directory named
 after the base+digest prefix.
 
-Runs in .github/workflows/base-sboms-refresh.yml weekly. The bot's PR
-re-runs container/compliance/policy/validate.py against any new
-licenses surfaced by base bumps; if validation fails (UNKNOWN, denied,
-or new license category not in licenses.toml), the bot's CI blocks
-the PR until a human updates licenses.toml.
+Triggered manually (or by the bot opening a refresh PR) when
+check_drift.py reports a registry digest that doesn't match
+manifest.json. The PR that lands the refreshed SBOM re-runs
+container/compliance/policy/validate.py against the new licenses;
+if validation fails (UNKNOWN, denied, or new license category not in
+licenses.toml), CI blocks the PR until a human updates licenses.toml.
 
 TODO: implement (requires syft on the runner; bash-out + JSON post-process).
 This is a stub at the right shape so the wiring around it (manifest,
 verifier, CI workflow) can be built and tested. The actual refresh logic
-is a separate focused commit when the cron workflow lands.
+is a separate focused commit when the first drift PR needs to land.
 """
 
 from __future__ import annotations

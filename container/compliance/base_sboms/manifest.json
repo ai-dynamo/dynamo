@@ -1,6 +1,12 @@
 {
   "schema_version": 1,
-  "description": "Maps base-image references (FROM <image>:<tag>) to slim CycloneDX SBOMs in this directory. Refreshed weekly by container/compliance/base_sboms/refresh.py.",
+  "description": "Maps base-image references (FROM <image>:<tag>) to slim CycloneDX SBOMs in this directory. Each entry records the manifest-list digest at the time the SBOM was captured. CI runs container/compliance/base_sboms/check_drift.py on every PR/post-merge; if the live registry digest for any image:tag differs from the recorded digest, CI fails and a refresh PR is required before merge.",
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 4 MB per file in CI.",
+  "entry_schema": {
+    "image": "registry-qualified image name, e.g. nvcr.io/nvidia/cuda-dl-base",
+    "tag": "registry tag, e.g. 25.11-cuda13.0-devel-ubuntu24.04",
+    "digest": "manifest-list digest at capture time, e.g. sha256:abc...",
+    "sbom": "filename of the slim CycloneDX SBOM in this directory"
+  },
   "entries": []
 }
