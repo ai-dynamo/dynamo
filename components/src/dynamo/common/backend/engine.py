@@ -163,10 +163,24 @@ class LLMEngine(ABC):
     async def cleanup(self) -> None:
         """Release all engine resources.
 
-        ``Worker`` invokes ``cleanup()`` at most once, only after ``start()``
-        has returned successfully, and never concurrently with ``start()`` or
-        another ``cleanup()``. Implementations do not need to defend against
-        pre-start, concurrent-with-start, or double-cleanup invocations —
-        ``Worker``'s lifecycle state machine serializes these transitions.
+        ``Worker`` guarantees:
+
+        * ``cleanup()`` runs after a successful ``start()`` on shutdown —
+          the common case.
+        * ``cleanup()`` also runs after ``start()`` raised, on the partial
+          state the engine may have allocated before failing (inner LLM
+          handle, sockets, background tasks). Implementations **must**
+          be null-safe: guard each resource with an ``is None`` check
+          so a partially constructed engine can be released without
+          raising.
+        * ``cleanup()`` is **not** called when ``start()`` was never
+          invoked (e.g. pre-start shutdown). Engines whose constructors
+          allocate resources should release them via ``__del__`` /
+          context-manager semantics rather than rely on ``cleanup()``.
+
+        ``cleanup()`` is never invoked concurrently with ``start()`` or
+        another ``cleanup()`` — ``Worker``'s state machine serializes
+        those transitions. The conformance kit asserts that a second
+        ``cleanup()`` call after a successful first is a safe no-op.
         """
         ...

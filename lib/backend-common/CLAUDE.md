@@ -37,9 +37,12 @@ opt-out and lets `run.rs` stay non-generic.
   release logic inside the `generate` stream body using RAII; use
   `abort` only for out-of-band notifications (e.g. telling a remote
   scheduler to cancel compute early).
-- `cleanup(&self) -> Result<(), DynamoError>` — called once on shutdown.
-  Guaranteed to run if `start()` succeeded, even if later registration or
-  serve fails.
+- `cleanup(&self) -> Result<(), DynamoError>` — called exactly once.
+  Runs after `start()` returns Ok on shutdown (even if registration /
+  serve fails), **and** after `start()` raises — so implementations
+  must be null-safe against partial state (inner LLM, sockets,
+  background tasks). Must also be idempotent: a second call after a
+  successful first returns `Ok(())` without re-entering teardown.
 
 ## Contract for `generate`
 
@@ -266,10 +269,15 @@ use dynamo_backend_common::testing;
 
 #[tokio::test]
 async fn my_engine_satisfies_contract() {
-    let engine = MyEngine::new_for_test();
-    testing::run_conformance(engine).await.expect("conformance");
+    testing::run_conformance(MyEngine::new_for_test)
+        .await
+        .expect("conformance");
 }
 ```
+
+`run_conformance` takes a factory rather than a built engine — it
+constructs one engine for the main lifecycle test and a second
+pristine engine for the "cleanup before start" check.
 
 The kit asserts:
 
@@ -284,6 +292,9 @@ The kit asserts:
   other terminal reason, or no terminal at all — the check raises
   `ConformanceFailure::CancellationIgnored`.
 - `cleanup()` succeeds and is idempotent (two calls in a row both Ok).
+- `cleanup()` is safe on a never-started engine — mirrors `Worker`'s
+  post-start-failure path. Failures here surface as
+  `CleanupWithoutStartFailed`.
 
 Also available: `testing::mock_context()` and
 `testing::cancelling_context(after)` for hand-written tests.

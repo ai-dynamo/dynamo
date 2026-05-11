@@ -21,7 +21,15 @@ from_args(argv) -> start() -> generate()/abort() -> drain() -> cleanup()
 5. `drain()` -- backend-side drain before cleanup (optional, default no-op).
    Called after the discovery unregister + grace period; use it for in-flight
    NIXL transfers (issue #7319) that must complete while the runtime is alive.
-6. `cleanup()` -- called once on shutdown.
+6. `cleanup()` -- called exactly once. Runs after `start()` succeeded
+   on shutdown, **and** after `start()` raised — so implementations
+   must be null-safe against partial state (inner engine handle,
+   sockets, background tasks). All current engines guard each
+   resource with `if self.engine is not None`. Must also be
+   idempotent: a second call after a successful first is a no-op.
+   Not called when `start()` was never invoked (e.g. pre-start
+   shutdown); use `__del__` for resources allocated in the
+   constructor.
 
 ## Design Constraints
 

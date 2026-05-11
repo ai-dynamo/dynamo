@@ -171,7 +171,27 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Release all engine resources. Called once on shutdown.
+    /// Release all engine resources. Called exactly once.
+    ///
+    /// `Worker` guarantees:
+    ///
+    /// * `cleanup` runs after [`start`](LLMEngine::start) succeeded
+    ///   *and* on shutdown — the common case.
+    /// * `cleanup` also runs after `start` raised, on the partial
+    ///   state the engine may have allocated before failing (inner
+    ///   LLM handle, sockets, background tasks). Implementations
+    ///   **must** be null-safe: guard each resource with an `is
+    ///   None` / `Option::is_some` check so a partially constructed
+    ///   engine can be released without panic.
+    /// * `cleanup` is **not** called when `start` was never invoked
+    ///   (pre-start shutdown via SIGTERM during distributed runtime
+    ///   construction). Engines whose constructors allocate
+    ///   resources must release them via `Drop` rather than rely on
+    ///   `cleanup`.
+    ///
+    /// `cleanup` must also be idempotent: a second call after a
+    /// successful first call must return `Ok(())` without re-entering
+    /// teardown (NCCL groups and similar fail noisily on double-free).
     async fn cleanup(&self) -> Result<(), DynamoError>;
 }
 

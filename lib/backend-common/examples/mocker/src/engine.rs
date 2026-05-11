@@ -725,8 +725,7 @@ mod tests {
 
     #[tokio::test]
     async fn mocker_passes_conformance() {
-        let engine = test_engine();
-        dynamo_backend_common::testing::run_conformance(engine)
+        dynamo_backend_common::testing::run_conformance(test_engine)
             .await
             .expect("mocker backend must satisfy conformance");
     }
