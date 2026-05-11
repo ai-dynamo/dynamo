@@ -818,10 +818,7 @@ impl OpenAIPreprocessor {
             && !suppress_reasoning_after_tool
             && !tool_choice_forces_guided_json;
         let should_strip_disabled_reasoning_start = reasoning_disabled_by_request
-            && matches!(
-                self.runtime_config.reasoning_parser.as_deref(),
-                Some("nemotron_nano") | Some("nemotron3") | Some("nemotron_v3")
-            )
+            && Self::is_nemotron_force_reasoning(self.runtime_config.reasoning_parser.as_deref())
             && !suppress_reasoning_after_tool
             && !tool_choice_forces_guided_json;
 
@@ -1313,10 +1310,17 @@ impl OpenAIPreprocessor {
         )
     }
 
+    fn is_nemotron_force_reasoning(reasoning_parser: Option<&str>) -> bool {
+        matches!(
+            reasoning_parser,
+            Some("nemotron_nano" | "nemotron3" | "nemotron_v3")
+        )
+    }
+
     /// Check if reasoning parsing should be disabled based on per-request parameters.
     /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
-    /// For nemotron_nano: disabled when chat_template_args contains "enable_thinking": false
-    ///   or "force_nonempty_content": true.
+    /// For Nemotron force-reasoning aliases: disabled when chat_template_args
+    ///   contains "enable_thinking": false or "force_nonempty_content": true.
     /// For deepseek_r1 / deepseek_v4: disabled when chat_template_args contains
     ///   "thinking": false or "thinking_mode": "chat" — matches the V4 formatter's
     ///   `resolve_thinking_mode` convention, so the parser and the prompt stay in sync.
@@ -1338,7 +1342,7 @@ impl OpenAIPreprocessor {
                 }
                 false
             }
-            Some("nemotron_nano") | Some("nemotron3") | Some("nemotron_v3") => {
+            parser if Self::is_nemotron_force_reasoning(parser) => {
                 if let Some(args) = chat_template_args {
                     if let Some(enable_thinking) = args.get("enable_thinking")
                         && enable_thinking == &serde_json::Value::Bool(false)
