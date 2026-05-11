@@ -576,6 +576,14 @@ impl OpenAIPreprocessor {
         // Cleared and returned to the caller; empty for non-image / text-only requests.
         #[cfg(feature = "lightseek-mm")]
         let mut mm_image_entries: Vec<MmImageEntry> = Vec::new();
+        // Total `image_url` content parts in the request. Bumped at every
+        // image part regardless of which fetch path handles it. Used at
+        // `mm_hashes` forwarding time: if `mm_image_entries.len()` is
+        // smaller (i.e. some image failed dim resolution), we omit
+        // `mm_hashes` for the whole request rather than ship a partial /
+        // misaligned UUID list to vLLM.
+        #[cfg(feature = "lightseek-mm")]
+        let mut total_image_count: usize = 0;
         // For the URL-passthrough case (media_loader is None) we collect image
         // URLs here and resolve dims via header-only HTTP after the loop so we
         // can issue all fetches in parallel.
@@ -603,6 +611,10 @@ impl OpenAIPreprocessor {
                         ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => "audio_url",
                         _ => continue,
                     };
+                    #[cfg(feature = "lightseek-mm")]
+                    if type_str == "image_url" {
+                        total_image_count += 1;
+                    }
                     fetch_tasks.push((type_str.to_string(), content_part));
                 } else {
                     let (type_str, url) = match content_part {
@@ -619,6 +631,7 @@ impl OpenAIPreprocessor {
                     };
                     #[cfg(feature = "lightseek-mm")]
                     if type_str == "image_url" {
+                        total_image_count += 1;
                         let mm_hash = Self::hash_image_url(url.as_str());
                         url_passthrough_images.push((mm_hash, url.to_string()));
                     }
@@ -775,8 +788,13 @@ impl OpenAIPreprocessor {
             // 64 hex chars and reads u64 from the first 16. We pad u64 ->
             // 16 hex chars + 48 zeros so the byte representation matches
             // end-to-end without forcing frontend image decoding.
+            //
+            // Skip forwarding entirely if any image failed dim resolution —
+            // a shorter `mm_hashes` list would misalign with the image
+            // positions vLLM derives from `multi_modal_data`, and the
+            // backend would inject the wrong UUIDs onto the wrong images.
             #[cfg(feature = "lightseek-mm")]
-            if !mm_image_entries.is_empty() {
+            if !mm_image_entries.is_empty() && mm_image_entries.len() == total_image_count {
                 // 48 trailing zeros — paired with the {:016x} prefix this gives
                 // the 64-char hex string the kv-router's parse_mm_hash_from_extra_key
                 // expects (reads u64 from the first 16 chars).
@@ -786,6 +804,13 @@ impl OpenAIPreprocessor {
                     .map(|e| serde_json::Value::String(format!("{:016x}{}", e.mm_hash, HEX_PAD)))
                     .collect();
                 extra_args["mm_hashes"] = serde_json::Value::Array(hexes);
+            } else if !mm_image_entries.is_empty() {
+                tracing::warn!(
+                    target: "mm_routing",
+                    resolved = mm_image_entries.len(),
+                    expected = total_image_count,
+                    "lightseek: not all images resolved an MM-routing entry; skipping mm_hashes forwarding"
+                );
             }
 
             builder.extra_args(Some(extra_args));
@@ -1068,8 +1093,17 @@ impl OpenAIPreprocessor {
                 .send()
                 .await?;
             let status = resp.status();
-            if !status.is_success() {
-                anyhow::bail!("image fetch returned HTTP {}", status);
+            // Require 206 Partial Content — if the origin ignored the
+            // Range header and answered 200 OK, `.bytes()` would buffer
+            // the full image into memory. Bail in that case rather than
+            // download an unbounded payload just to peek at dimensions.
+            // The caller treats Err as "MM routing entry unavailable for
+            // this image", which falls back to text-prefix routing.
+            if status != reqwest::StatusCode::PARTIAL_CONTENT {
+                anyhow::bail!(
+                    "image dim fetch expected 206 Partial Content, got HTTP {}",
+                    status
+                );
             }
             let bytes = resp.bytes().await?;
             match ImageReader::new(Cursor::new(&bytes))
