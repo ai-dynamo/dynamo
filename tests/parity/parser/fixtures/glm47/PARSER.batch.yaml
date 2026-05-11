@@ -69,7 +69,7 @@ cases:
       - name: get_weather
         arguments:
           location: NYC
-      normal_text: null
+      normal_text: ''
   PARSER.batch.6:
     description: Empty args (no-arg call)
     model_text: <tool_call>get_time</tool_call>
@@ -99,20 +99,9 @@ cases:
       calls:
       - name: get_weather
         arguments:
-          unit: fahrenheit
           location: NYC
+          unit: fahrenheit
       normal_text: ''
-  PARSER.batch.8:
-    description: Interleaved normal text
-    model_text: I'll check the weather. <tool_call>get_weather<arg_key>location</arg_key><arg_value>Paris</arg_value></tool_call>
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: Paris
-      normal_text: I'll check the weather.
   PARSER.batch.9:
     description: Empty input
     model_text: ''

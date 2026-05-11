@@ -10,9 +10,17 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
 try:
-    from dynamo.vllm.omni.stage_worker import OmniStageWorker, _Proxy
+    from dynamo.vllm.omni.stage_worker import (
+        OmniStageWorker,
+        _ensure_stage_connectors,
+        _normalize_single_stage_runtime_devices,
+        _prepare_connector_payload,
+        _Proxy,
+        _stage_config_to_dict,
+    )
     from dynamo.vllm.omni.utils import _build_sampling_params
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
@@ -179,7 +187,7 @@ async def test_stage_connector_refs_builds_engine_core_request():
 
 @pytest.mark.asyncio
 async def test_stage_connector_refs_with_processor():
-    """Stage N>0 with processor: processor receives stage_list built from connector output."""
+    """Stage N>0 with processor: v0.20 processors receive direct source outputs."""
     engine = _MockEngine()
     fetched_output = {"latents": [0.1, 0.2]}
     processed_prompt = {"diffusion_input": True}
@@ -192,12 +200,12 @@ async def test_stage_connector_refs_with_processor():
 
     processor_calls = []
 
-    def mock_processor(stage_list, engine_input_source, original_prompts, requires_mm):
+    def mock_processor(source_outputs, original_prompt, requires_mm):
         processor_calls.append(
             {
-                "stage_list": stage_list,
-                "engine_input_source": engine_input_source,
-                "original_prompts": original_prompts,
+                "source_outputs": source_outputs,
+                "original_prompt": original_prompt,
+                "requires_mm": requires_mm,
             }
         )
         return [processed_prompt]
@@ -226,8 +234,107 @@ async def test_stage_connector_refs_with_processor():
     chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
 
     assert len(processor_calls) == 1
+    assert processor_calls[0]["source_outputs"] == [fetched_output]
+    assert processor_calls[0]["original_prompt"] == {"prompt": "hi", "height": 480}
+    assert processor_calls[0]["requires_mm"] is False
+    assert engine.received_prompt == processed_prompt
+    assert chunks[0]["stage_connector_refs"]["1"] == {"name": "ref1"}
+
+
+def test_process_stage_inputs_ignores_var_kwargs_for_dispatch():
+    """Source-output processors with **kwargs should not get a fourth positional arg."""
+    fetched_output = {"latents": [0.1, 0.2]}
+    processed_prompt = {"diffusion_input": True}
+    processor_calls = []
+
+    def mock_processor(source_outputs, original_prompt, requires_mm, **kwargs):
+        processor_calls.append(
+            {
+                "source_outputs": source_outputs,
+                "original_prompt": original_prompt,
+                "requires_mm": requires_mm,
+                "kwargs": kwargs,
+            }
+        )
+        return [processed_prompt]
+
+    worker = OmniStageWorker(
+        engine=_MockEngine(),
+        stage_config=_make_stage_config(
+            custom_process_input_func=None,
+            engine_input_source=[0],
+            requires_multimodal_data=False,
+        ),
+        connectors={},
+        stage_id=1,
+    )
+    worker._processor = mock_processor
+
+    prompt = worker._process_stage_inputs(
+        [_Proxy(engine_outputs=[fetched_output])],
+        {"prompt": "hi"},
+    )
+
+    assert len(processor_calls) == 1
+    assert processor_calls[0]["source_outputs"] == [fetched_output]
+    assert processor_calls[0]["kwargs"] == {}
+    assert prompt == [processed_prompt]
+
+
+@pytest.mark.asyncio
+async def test_stage_connector_refs_with_stage_list_processor():
+    """Stage-list transition processors still receive proxies and sources."""
+    engine = _MockEngine()
+    fetched_output = {"latents": [0.1, 0.2]}
+    processed_prompt = {"stage_list_input": True}
+
+    in_connector = MagicMock()
+    in_connector.get.return_value = {"engine_inputs": fetched_output}
+
+    out_connector = MagicMock()
+    out_connector.put.return_value = (True, 0, {"name": "ref1"})
+
+    processor_calls = []
+
+    def mock_processor(stage_list, engine_input_source, prompt, requires_mm):
+        processor_calls.append(
+            {
+                "stage_list": stage_list,
+                "engine_input_source": engine_input_source,
+                "prompt": prompt,
+                "requires_mm": requires_mm,
+            }
+        )
+        return [processed_prompt]
+
+    cfg = _make_stage_config(
+        stage_type="llm",
+        final_output=False,
+        custom_process_input_func=None,
+        engine_input_source=[0],
+        requires_multimodal_data=True,
+    )
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=cfg,
+        connectors={("0", "1"): in_connector, ("1", "2"): out_connector},
+        stage_id=1,
+    )
+    worker._processor = mock_processor
+
+    request = {
+        "request_id": "req-stage-list-proc",
+        "original_prompt": {"prompt": "hi"},
+        "stage_connector_refs": {"0": {"name": "ref0"}},
+    }
+
+    chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert len(processor_calls) == 1
     assert processor_calls[0]["stage_list"][0].engine_outputs == [fetched_output]
-    assert processor_calls[0]["original_prompts"] == [{"prompt": "hi", "height": 480}]
+    assert processor_calls[0]["engine_input_source"] == [0]
+    assert processor_calls[0]["prompt"] == [{"prompt": "hi"}]
+    assert processor_calls[0]["requires_mm"] is True
     assert engine.received_prompt == processed_prompt
     assert chunks[0]["stage_connector_refs"]["1"] == {"name": "ref1"}
 
@@ -293,6 +400,195 @@ def test_fetch_stage_inputs_calls_correct_connector():
     connector.get.assert_called_once_with("0", "1", "r1", metadata=meta0)
     assert result is not None
     assert result[0].engine_outputs == [{"tok": [1, 2]}]
+
+
+def test_fetch_stage_inputs_restores_dynamic_completion_attrs():
+    meta0 = {"name": "ref0"}
+    fetched_output = SimpleNamespace(outputs=[SimpleNamespace(token_ids=[3])])
+    multimodal_output = {"hidden_states": {"layers": {0: [0.1], 24: [0.2]}}}
+    connector = MagicMock()
+    connector.get.return_value = {
+        "engine_inputs": fetched_output,
+        "_dynamo_completion_output_attrs": [
+            {
+                "cumulative_token_ids": [1, 2, 3],
+                "multimodal_output": multimodal_output,
+            },
+        ],
+    }
+
+    worker = _make_worker_at_stage(
+        1, connectors={("0", "1"): connector}, engine_input_source=[0]
+    )
+    result = worker._fetch_stage_inputs({0: meta0}, "r1")
+
+    completion = result[0].engine_outputs[0].outputs[0]
+    assert completion.cumulative_token_ids == [1, 2, 3]
+    assert completion.multimodal_output == multimodal_output
+
+
+def test_fetch_stage_inputs_adds_cumulative_token_ids_when_missing():
+    meta0 = {"name": "ref0"}
+    fetched_output = SimpleNamespace(outputs=[SimpleNamespace(token_ids=[1, 2, 3])])
+    connector = MagicMock()
+    connector.get.return_value = {"engine_inputs": fetched_output}
+
+    worker = _make_worker_at_stage(
+        1, connectors={("0", "1"): connector}, engine_input_source=[0]
+    )
+    result = worker._fetch_stage_inputs({0: meta0}, "r1")
+
+    completion = result[0].engine_outputs[0].outputs[0]
+    assert completion.cumulative_token_ids == [1, 2, 3]
+
+
+def test_prepare_connector_payload_preserves_dynamic_completion_attrs():
+    multimodal_output = {"hidden_states": {"layers": {0: [0.1], 24: [0.2]}}}
+    output = SimpleNamespace(
+        outputs=[
+            SimpleNamespace(
+                token_ids=[12],
+                cumulative_token_ids=(10, 11, 12),
+                multimodal_output=multimodal_output,
+            ),
+        ]
+    )
+
+    payload = _prepare_connector_payload(output)
+
+    assert payload["engine_inputs"] is output
+    assert payload["_dynamo_completion_output_attrs"] == [
+        {
+            "cumulative_token_ids": [10, 11, 12],
+            "multimodal_output": multimodal_output,
+        },
+    ]
+
+
+def test_prepare_connector_payload_promotes_request_multimodal_output():
+    multimodal_output = {"ids": {"prior_image": [1, 2, 3]}}
+    completion = SimpleNamespace(token_ids=[12], cumulative_token_ids=(10, 11, 12))
+    output = SimpleNamespace(
+        request_output=SimpleNamespace(outputs=[completion]),
+        multimodal_output=multimodal_output,
+    )
+
+    payload = _prepare_connector_payload(output)
+
+    assert completion.multimodal_output == multimodal_output
+    assert payload["_dynamo_completion_output_attrs"] == [
+        {
+            "cumulative_token_ids": [10, 11, 12],
+            "multimodal_output": multimodal_output,
+        },
+    ]
+
+
+def test_prepare_connector_payload_preserves_empty_attr_positions():
+    output = SimpleNamespace(outputs=[SimpleNamespace(token_ids=[12])])
+
+    payload = _prepare_connector_payload(output)
+
+    assert payload["engine_inputs"] is output
+    assert payload["_dynamo_completion_output_attrs"] == [{}]
+
+
+def test_ensure_stage_connectors_adds_missing_shared_memory_edge(tmp_path):
+    config_path = tmp_path / "glm_image.yaml"
+    config_path.write_text(
+        """
+stages:
+  - stage_id: 0
+  - stage_id: 1
+""".lstrip()
+    )
+    stage_configs = [
+        SimpleNamespace(stage_id=0, engine_input_source=[]),
+        SimpleNamespace(stage_id=1, engine_input_source=[0]),
+    ]
+
+    resolved_path = _ensure_stage_connectors(str(config_path), stage_configs)
+
+    assert resolved_path != str(config_path)
+    with open(resolved_path) as f:
+        resolved = yaml.safe_load(f)
+    assert "connector_of_shared_memory" in resolved["connectors"]
+    stage_1 = next(stage for stage in resolved["stages"] if stage["stage_id"] == 1)
+    assert stage_1["input_connectors"]["from_stage_0"] == ("connector_of_shared_memory")
+
+
+def test_ensure_stage_connectors_rejects_non_mapping_connectors(tmp_path):
+    config_path = tmp_path / "glm_image.yaml"
+    config_path.write_text(
+        """
+connectors:
+  - not-a-mapping
+stages:
+  - stage_id: 0
+  - stage_id: 1
+""".lstrip()
+    )
+    stage_configs = [
+        SimpleNamespace(stage_id=0, engine_input_source=[]),
+        SimpleNamespace(stage_id=1, engine_input_source=[0]),
+    ]
+
+    with pytest.raises(ValueError, match="connector_of_shared_memory"):
+        _ensure_stage_connectors(str(config_path), stage_configs)
+
+
+def test_stage_config_to_dict_includes_engine_input_source():
+    result = _stage_config_to_dict(
+        SimpleNamespace(
+            engine_args=SimpleNamespace(model_stage="dit"),
+            engine_input_source=[0],
+            final_output_type="image",
+        ),
+        "diffusion",
+    )
+
+    assert result["engine_input_source"] == [0]
+
+
+def test_stage_config_to_dict_preserves_runtime_devices():
+    result = _stage_config_to_dict(
+        SimpleNamespace(
+            engine_args=SimpleNamespace(model_stage="dit"),
+            runtime=SimpleNamespace(devices="1"),
+            final_output_type="image",
+        ),
+        "diffusion",
+    )
+
+    assert result["runtime"]["devices"] == "1"
+
+
+def test_single_stage_runtime_devices_normalized_when_visibility_is_narrowed(
+    monkeypatch,
+):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    stage_arg = {
+        "stage_id": 0,
+        "stage_type": "diffusion",
+        "runtime": {"devices": "1"},
+    }
+
+    _normalize_single_stage_runtime_devices(stage_arg)
+
+    assert stage_arg["runtime"]["devices"] == "0"
+
+
+def test_single_stage_runtime_devices_preserve_visible_subset(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    stage_arg = {
+        "stage_id": 0,
+        "stage_type": "diffusion",
+        "runtime": {"devices": "1"},
+    }
+
+    _normalize_single_stage_runtime_devices(stage_arg)
+
+    assert stage_arg["runtime"]["devices"] == "1"
 
 
 def test_fetch_stage_inputs_raises_on_missing_connector():
