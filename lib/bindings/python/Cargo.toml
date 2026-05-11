@@ -22,7 +22,7 @@ name = "_core"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["lightseek-mm"]
+default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 kv-indexer = ["dep:clap", "dep:tracing-subscriber"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
@@ -30,7 +30,10 @@ mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]
 nvtx = ["dynamo-runtime/nvtx"]
 # Enable in-process MM-aware KV routing via the lightseek crate
 # (per-image token-count + placeholder expansion + block-level mm_hash).
-# Default-on; opt out with `--no-default-features` for a slimmer wheel.
+# Opt-in at the wheel build (`maturin build --features lightseek-mm`)
+# to keep the default wheel lean. Production containers and the MM
+# recipes pass this flag explicitly; the dev container's
+# `.devcontainer/post-create.sh` also enables it for local workflows.
 lightseek-mm = ["dynamo-llm/lightseek-mm"]
 
 [dependencies]
