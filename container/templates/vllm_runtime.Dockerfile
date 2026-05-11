@@ -153,9 +153,9 @@ RUN set -eu; \
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
-{% if target not in ("dev", "local-dev") %}
 # Upgrade NIXL meta package and all device variants to match our built version.
 # The nixl meta package imports device-specific packages, so all must be at the same version.
+# This is needed for both runtime and dev targets to ensure version consistency for maturin/cargo builds.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eu; \
     export UV_CACHE_DIR=/root/.cache/uv; \
@@ -169,10 +169,19 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         "nixl-cu12==${NIXL_VERSION}" \
         "nixl-cu13==${NIXL_VERSION}"
 
+# Install device-specific NIXL wheels for non-CUDA devices.
+# These are custom-built in wheel_builder and required for dev builds to link against NIXL libraries.
+{% if device != "cuda" %}
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install --no-deps /opt/dynamo/wheelhouse/nixl/nixl*.whl
+{% endif %}
+
+{% if target not in ("dev", "local-dev") %}
 # Keep the upstream Python solve intact: install only Dynamo-owned wheels and
 # suppress transitive dependency resolution unless a later validation proves a
 # missing package must be added explicitly.
-# Install Dynamo wheels and device-specific NIXL (for CPU/XPU).
+# Install Dynamo runtime wheels and optional KVBM/GMS wheels.
 # Use --no-deps to prevent dependency conflicts (e.g., KVBM downgrading nixl).
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
@@ -183,9 +192,6 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-{% if device != "cuda" %}
-        /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-{% endif %}
     && if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -n "$KVBM_WHEEL" ]; then uv pip install \
