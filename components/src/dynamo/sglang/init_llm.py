@@ -119,7 +119,12 @@ async def init_decode(
     ready_event = asyncio.Event()
 
     handler = DecodeWorkerHandler(
-        engine, config, publisher, generate_endpoint, shutdown_event
+        engine,
+        config,
+        publisher,
+        generate_endpoint,
+        shutdown_event,
+        enable_frontend_decoding=dynamo_args.frontend_decoding,
     )
     handler.register_engine_routes(runtime)
 

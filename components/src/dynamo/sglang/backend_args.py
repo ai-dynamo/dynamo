@@ -109,6 +109,20 @@ class DynamoSGLangArgGroup(ArgGroup):
             help="Enable RL training support. Registers the call_tokenizer_manager engine route for generic tokenizer_manager passthrough.",
         )
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--frontend-decoding",
+            env_var="DYN_SGL_FRONTEND_DECODING",
+            default=False,
+            help=(
+                "Enable frontend decoding of multimodal images. "
+                "When enabled, images are decoded in the Rust frontend and transferred "
+                "to the backend via NIXL RDMA. Applies to the aggregated multimodal "
+                "path (default decode worker). Incompatible with --multimodal-encode-worker, "
+                "--multimodal-worker, and --multimodal-prefill-worker."
+            ),
+        )
+
 
 class DynamoSGLangConfig(ConfigBase):
     """Configuration for Dynamo SGLang wrapper (SGLang-specific only)."""
@@ -125,6 +139,7 @@ class DynamoSGLangConfig(ConfigBase):
 
     video_generation_worker: bool
     enable_rl: bool
+    frontend_decoding: bool = False
 
     def validate(self) -> None:
         if not isinstance(self.embedding_transfer_mode, EmbeddingTransferMode):
@@ -135,4 +150,15 @@ class DynamoSGLangConfig(ConfigBase):
         if (self.disagg_config is not None) ^ (self.disagg_config_key is not None):
             raise ValueError(
                 "Both 'disagg_config' and 'disagg_config_key' must be provided together."
+            )
+
+        if self.frontend_decoding and (
+            self.multimodal_encode_worker or self.multimodal_worker
+        ):
+            raise ValueError(
+                "--frontend-decoding is incompatible with the EPD multimodal topology "
+                "(--multimodal-encode-worker / --multimodal-worker). The encode worker "
+                "needs URLs to run MMEncoder, while --frontend-decoding ships pre-decoded "
+                "pixels. Use --frontend-decoding on the default aggregated decode worker "
+                "(no --multimodal-* flag) instead."
             )

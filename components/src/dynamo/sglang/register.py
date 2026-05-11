@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import os
 from typing import Any, List, Optional
 
 import sglang as sgl
@@ -18,7 +19,45 @@ from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang.args import DynamoConfig
 
+# Optional imports for frontend decoding support. The Rust bindings expose
+# MediaDecoder/MediaFetcher only when the lib/llm "media" feature is compiled
+# in; fall back gracefully on builds without them.
+MediaDecoder: type | None = None
+MediaFetcher: type | None = None
+try:
+    from dynamo.llm import MediaDecoder, MediaFetcher
+
+    MEDIA_DECODER_AVAILABLE = True
+except ImportError:
+    MediaDecoder = None
+    MediaFetcher = None
+    MEDIA_DECODER_AVAILABLE = False
+
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
+
+
+def _build_media_decoder_and_fetcher():
+    """Construct MediaDecoder/MediaFetcher for frontend-decoded multimodal.
+
+    Mirrors the vLLM backend pattern (components/src/dynamo/vllm/main.py).
+    """
+    if not MEDIA_DECODER_AVAILABLE:
+        raise RuntimeError(
+            "--frontend-decoding requires MediaDecoder support. "
+            "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
+        )
+    assert MediaDecoder is not None and MediaFetcher is not None
+
+    media_decoder = MediaDecoder()
+    media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+
+    media_fetcher = MediaFetcher()
+    media_fetcher.timeout_ms(30000)
+    allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
+    media_fetcher.allow_direct_ip(allow_internal)
+    media_fetcher.allow_direct_port(allow_internal)
+
+    return media_decoder, media_fetcher
 
 
 async def _register_model_with_runtime_config(
@@ -53,6 +92,13 @@ async def _register_model_with_runtime_config(
         if output_type != ModelType.Embedding:
             output_type = ModelType.Chat
 
+    # Configure the Rust frontend's media decoder so it ships pre-decoded
+    # images via NIXL RDMA instead of forwarding raw URLs / base64 to us.
+    media_decoder = None
+    media_fetcher = None
+    if getattr(dynamo_args, "frontend_decoding", False):
+        media_decoder, media_fetcher = _build_media_decoder_and_fetcher()
+
     try:
         await register_model(
             input_type,
@@ -64,6 +110,8 @@ async def _register_model_with_runtime_config(
             kv_cache_block_size=server_args.page_size,
             runtime_config=runtime_config,
             custom_template_path=dynamo_args.custom_jinja_template,
+            media_decoder=media_decoder,
+            media_fetcher=media_fetcher,
         )
         logging.info("Successfully registered LLM with runtime config")
         return True
