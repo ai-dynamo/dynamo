@@ -19,7 +19,7 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 
 kvbm-common = { workspace = true }
-velo-common = { workspace = true }
+velo-ext = { workspace = true }
 
 [dev-dependencies]
 rmp-serde = { workspace = true }

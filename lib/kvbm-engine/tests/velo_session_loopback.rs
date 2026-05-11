@@ -36,11 +36,11 @@ use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::testing::token_blocks::create_token_sequence;
 use kvbm_logical::blocks::ImmutableBlock;
 use kvbm_logical::manager::BlockManager;
-use velo::backend::tcp::TcpTransportBuilder;
+use velo::transports::tcp::TcpTransportBuilder;
 
 const BLOCK_SIZE: usize = 16;
 
-fn new_velo_transport() -> Arc<velo::backend::tcp::TcpTransport> {
+fn new_velo_transport() -> Arc<velo::transports::tcp::TcpTransport> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     Arc::new(
         TcpTransportBuilder::new()

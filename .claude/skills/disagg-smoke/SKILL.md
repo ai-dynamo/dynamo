@@ -14,6 +14,79 @@ End-to-end two-request smoke against a live `kvbm-hub` + Prefill + Decode topolo
 | `two-request-smoke.sh` | Drive R1 + R2 against a single leader. Mints an experiment dir, brings up hub + Prefill + Decode (via `disagg-bringup` scripts), runs the two prompts, prints a validation grep digest, renders `trace.html` via `disagg-trace`. Inherits `KVBM_DISAGG_LEADER` from env. |
 | `audit-equiv.sh` | Run the smoke twice (`KVBM_DISAGG_LEADER=legacy` then `=unified`), then run `audit_diff` on per-side `kvbm_audit` streams to assert behavioral equivalence. |
 
+## Running via a subagent (recommended)
+
+The smoke produces three multi-MB log files (`hub.log`, `prefill.log`,
+`decode.log`) plus a `trace.html`. Pulling them into the primary
+context burns tokens fast — especially when chasing a specific marker
+across all three. **Delegate the run + log analysis to a
+general-purpose subagent** and ask for a structured short summary;
+the agent does the heavy reading and returns only the answer.
+
+Use `sonnet` for the default subagent model — the workflow is
+well-defined (run a script, grep specific events, return a verdict).
+`haiku` works for pure pass/fail status checks. Save `opus` for
+genuinely ambiguous failures (rare).
+
+### Recommended subagent prompt template
+
+```
+Run the KVBM disagg two-request smoke and answer <SPECIFIC QUESTION>.
+Do NOT dump full logs back — return under 300 words.
+
+Steps:
+1. From /home/ryan/repos/dynamo/.claude/worktrees/page-size (or
+   whatever the user's worktree is), tear down any stale processes:
+     pkill -f vllm.entrypoints.openai 2>/dev/null
+     pkill -9 -f kvbm_hub 2>/dev/null
+     sleep 3
+2. (Optional, if bindings/hub need rebuild) Source env.sh and run
+   the appropriate cargo/maturin commands. Report any build errors.
+3. Run the smoke with KVBM_REPO set to the worktree:
+     KVBM_REPO=<worktree-path> [KVBM_DISAGG_LEADER=unified] \
+       bash <worktree>/.claude/skills/disagg-smoke/two-request-smoke.sh
+   Capture stdout — note the EXP=<path> line for the experiment dir.
+4. Inspect <experiment-dir>/{hub,prefill,decode}.log for the
+   specific markers <USER QUESTION> asks about. Note any ERROR
+   lines (ignoring UCX warnings + kernel_config noise).
+5. Report back:
+   - Verdict (1 line) — answer to the specific question.
+   - 3-5 supporting evidence lines (event names + counts, NOT full
+     log text).
+   - Experiment-dir path for follow-up inspection.
+   - Any unexpected errors.
+
+Constraints:
+- Do NOT cat full log files.
+- Quote at most 2 short matched lines per evidence point.
+- If the smoke fails to bring up, return the failure mode and exit.
+```
+
+### Asymmetric-TP / stamped-path discrimination markers
+
+When asking "did the smoke exercise the stamped (AB-4+) path or the
+legacy fallback?", the subagent grep cheatsheet:
+
+| Marker | Path |
+|---|---|
+| `session_pull_rdma_start` / `session_pull_rdma_done` | AB-5 wiring — `VeloSession::pull` routed through `rdma_pull_with_opts` (regardless of stamped vs legacy inside). |
+| `cd_bound_ensure_started` with `num_sequence_hashes>0` | Live CD pull happened (not zero-passthrough). |
+| `"asymmetric pull"` in tracing | `SpmdParallelWorkers::dispatch_asymmetric_pull` fired — only triggers when `local_tp != remote_tp`. Symmetric TP=1↔TP=1 will NOT emit this. |
+| `"no remote {:?} handle for (instance="` (ERROR) | Stamped path tried but `remote_handles_rank` was empty — pre-fix regression marker. |
+| `"Metadata already imported"` (ERROR) | `ensure_remote_metadata` race surfaced — concurrent imports overlapped. |
+| Pull succeeds + ZERO of the above ERRORs + symmetric topology | Stamped path with degenerate single-shard plan. Legacy fallback is also consistent with this. |
+
+For a strict legacy-vs-stamped discriminator in a SYMMETRIC topology
+(the live smoke is TP=1 both sides), the connector leader's
+`init.rs:433` gate is the source of truth: it stamps only when
+`reference_config.num_heads.is_some()`. The subagent can confirm by
+grepping the prefill log for the rust-side initialisation tracing
+(or by checking that the connector exported its template). A more
+robust approach is to add a `tracing::info!` in
+`rdma_pull_with_opts` legacy-fallback vs stamped branches and grep
+for the marker — see the inline comments in
+`lib/kvbm-engine/src/leader/instance.rs` around line 1186 and 1196.
+
 ## Modes
 
 ### Single-leader (default)

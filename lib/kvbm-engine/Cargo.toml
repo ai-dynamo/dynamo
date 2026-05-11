@@ -69,7 +69,21 @@ nats = ["dep:async-nats", "dep:flume"]
 testing = ["kvbm-logical/testing", "kvbm-physical/testing"]
 testing-s3 = ["s3", "testing"]
 nvtx = ["kvbm-config/nvtx", "dep:nvtx"]
-bench = ["dep:clap", "dep:figment", "dep:libc", "dep:tracing-subscriber", "dep:chrono", "testing"]
+bench = [
+    "dep:clap",
+    "dep:figment",
+    "dep:libc",
+    "dep:tracing-subscriber",
+    "dep:chrono",
+    "testing",
+    # The bench's `--g1-layout`/`--g2-layout` flags can select
+    # `KvBlockLayout::UniversalTP` or `OperationalNHD`. Crossing those
+    # tags requires the transform-kernel catalog in `kvbm-kernels`;
+    # without `permute_kernels`, `plan_and_lower`'s transform branch
+    # is `#[cfg]`-gated away and `plan_copy` would silently route the
+    # mismatched pair through the direct path, producing wrong bytes.
+    "kvbm-physical/permute_kernels",
+]
 static-kernels = ["kvbm-physical/static-kernels"]
 
 [[bin]]

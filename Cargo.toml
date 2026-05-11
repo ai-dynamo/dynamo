@@ -66,9 +66,15 @@ kvbm-physical = { path = "lib/kvbm-physical", version = "1.1.0" }
 kvbm-connector = { path = "lib/kvbm-connector", version = "0.1.0" }
 kvbm-hub = { path = "lib/kvbm-hub", version = "1.1.0" }
 
-# velo
-velo        = { version = "0.2.0" }
-velo-common = { version = "0.1.0" }
+# velo — pinned to versions matching the local clone (`~/repos/velo`)
+# overridden via the workspace `[patch.crates-io]` block below. The
+# `0.3.0`/`0.4.0` releases of velo aren't on crates.io yet, and
+# dynamo consumes APIs (e.g. `velo::transports::tcp`,
+# `velo_ext::{InstanceId, ...}`) that only exist in the local
+# checkout. CI builds that don't have the patched path will pin to
+# the crates.io versions below and surface a clean version mismatch.
+velo     = { version = "0.4.0" }
+velo-ext = { version = "0.2.0" }
 
 
 # External dependencies
@@ -170,3 +176,20 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
+
+# velo + velo-ext 0.4.0/0.2.0 aren't published on crates.io yet — pin
+# both to a specific commit on the upstream repo so every checkout
+# (CI, fresh clone, every worktree) resolves identically without any
+# host-specific path.
+#
+# To iterate against a local velo clone, override per-developer in
+# `.cargo/config.toml` instead of editing this file:
+#
+#   [patch."https://github.com/ai-dynamo/velo"]
+#   velo     = { path = "/your/path/to/velo/lib/velo" }
+#   velo-ext = { path = "/your/path/to/velo/lib/velo-ext" }
+#
+# Bump the `rev` here when velo lands a needed fix.
+[patch.crates-io]
+velo     = { git = "https://github.com/ai-dynamo/velo", rev = "767908fca7dacbaa4b7e6a9d86618089d4f203da" }
+velo-ext = { git = "https://github.com/ai-dynamo/velo", rev = "767908fca7dacbaa4b7e6a9d86618089d4f203da" }

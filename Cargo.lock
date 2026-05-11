@@ -3473,6 +3473,11 @@ name = "hashbrown"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hashlink"
@@ -4535,7 +4540,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "velo-common",
+ "velo-ext",
 ]
 
 [[package]]
@@ -4548,7 +4553,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "uuid",
- "velo-common",
+ "velo-ext",
 ]
 
 [[package]]
@@ -4622,8 +4627,8 @@ dependencies = [
  "url",
  "uuid",
  "velo",
- "velo-common",
- "velo-transports 0.1.0",
+ "velo-ext",
+ "velo-transports",
 ]
 
 [[package]]
@@ -4872,6 +4877,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
 dependencies = [
  "hashbrown 0.16.1",
+]
+
+[[package]]
+name = "lru"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a860605968fce16869fd239cf4237a82f3ac470723415db603b0e8b6c8d4fb9"
+dependencies = [
+ "hashbrown 0.17.0",
 ]
 
 [[package]]
@@ -5365,6 +5379,19 @@ name = "nix"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+dependencies = [
+ "bitflags 2.11.1",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+ "memoffset 0.9.1",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
 dependencies = [
  "bitflags 2.11.1",
  "cfg-if",
@@ -9507,24 +9534,46 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "velo"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6718fde677c836cdd0cc8d8f682eb936050df86783472560aece1169318d6f2b"
+version = "0.4.0"
+source = "git+https://github.com/ai-dynamo/velo?rev=767908fca7dacbaa4b7e6a9d86618089d4f203da#767908fca7dacbaa4b7e6a9d86618089d4f203da"
 dependencies = [
  "anyhow",
+ "async-nats",
+ "async-stream",
+ "axum 0.8.4",
+ "bs58",
  "bytes",
+ "dashmap",
+ "derive-getters",
+ "derive_builder",
+ "flume 0.12.0",
+ "fs4",
+ "futures",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.9.0",
+ "hyper-util",
+ "lru 0.18.0",
+ "nix 0.31.3",
+ "parking_lot",
+ "prometheus",
+ "prost 0.13.5",
+ "rmp-serde",
  "serde",
+ "serde_json",
+ "socket2 0.6.3",
+ "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tokio-util",
- "velo-common",
- "velo-discovery",
- "velo-events",
- "velo-messenger",
- "velo-observability",
- "velo-queue",
- "velo-rendezvous",
- "velo-streaming",
- "velo-transports 0.2.0",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tower 0.5.3",
+ "tracing",
+ "uuid",
+ "velo-ext",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -9544,74 +9593,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "velo-discovery"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5124bffb71e05ada48e07fe819c597f94c11a13d12cb93cd6a3f1b232e705157"
-dependencies = [
- "anyhow",
- "async-stream",
- "bytes",
- "fs4",
- "futures",
- "parking_lot",
- "rmp-serde",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "velo-common",
-]
-
-[[package]]
-name = "velo-events"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2504e857f1ed52ad96ce73792a724be880ba75f3579a27050395e81d38cb42d0"
-dependencies = [
- "anyhow",
- "dashmap",
- "futures",
- "parking_lot",
- "serde",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "xxhash-rust",
-]
-
-[[package]]
-name = "velo-messenger"
+name = "velo-ext"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4aa7577a4a21079219c196ada0c3d0274143fef5d09bade5907e50ce9958d599"
+source = "git+https://github.com/ai-dynamo/velo?rev=767908fca7dacbaa4b7e6a9d86618089d4f203da#767908fca7dacbaa4b7e6a9d86618089d4f203da"
 dependencies = [
  "anyhow",
- "bs58",
  "bytes",
- "dashmap",
- "derive-getters",
- "derive_builder",
  "flume 0.12.0",
  "futures",
- "lru 0.12.5",
- "parking_lot",
  "rmp-serde",
  "serde",
+ "serde_bytes",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
- "tracing",
  "uuid",
- "velo-common",
- "velo-discovery",
- "velo-events",
- "velo-observability",
- "velo-transports 0.2.0",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -9625,114 +9623,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "velo-queue"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f79c9856688745477bde6e802ad9a8084762a64670673393fb15e7123c1d6e7"
-dependencies = [
- "bytes",
- "dashmap",
- "flume 0.12.0",
- "futures",
- "parking_lot",
- "rmp-serde",
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "velo-common",
- "velo-messenger",
-]
-
-[[package]]
-name = "velo-rendezvous"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a91178e37c1ce9f6704c2da7786bb028a007fbe312fcf9d14055a94af314af6"
-dependencies = [
- "anyhow",
- "bytes",
- "dashmap",
- "futures",
- "serde",
- "serde_json",
- "tracing",
- "velo-common",
- "velo-messenger",
- "velo-observability",
-]
-
-[[package]]
-name = "velo-streaming"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c508f272c5d6268695749a781a9e0c25cb0cbd9ef8a9e0cd1052d0b08f05683a"
-dependencies = [
- "anyhow",
- "bytes",
- "dashmap",
- "derive_builder",
- "flume 0.12.0",
- "futures",
- "rmp-serde",
- "serde",
- "serde_json",
- "socket2 0.6.3",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tonic-build 0.13.1",
- "tracing",
- "uuid",
- "velo-common",
- "velo-messenger",
- "velo-observability",
- "velo-transports 0.2.0",
-]
-
-[[package]]
 name = "velo-transports"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb5a348cc2fe13fc560824f170d3bdc3d10ec3a11802bb32489a59f49eb12409"
-dependencies = [
- "anyhow",
- "async-nats",
- "axum 0.8.4",
- "bs58",
- "bytes",
- "dashmap",
- "flume 0.12.0",
- "futures",
- "http 1.4.0",
- "http-body 1.0.1",
- "http-body-util",
- "hyper 1.9.0",
- "hyper-util",
- "nix 0.30.1",
- "parking_lot",
- "prost 0.13.5",
- "rmp-serde",
- "serde",
- "serde_json",
- "socket2 0.6.3",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic 0.13.1",
- "tonic-build 0.13.1",
- "tower 0.5.3",
- "tracing",
- "velo-common",
- "velo-observability",
-]
-
-[[package]]
-name = "velo-transports"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ce09503ab1541a876700fd063e5c4cec5664a90c1ddd0e3819e29cabbbcd44c"
 dependencies = [
  "anyhow",
  "async-nats",

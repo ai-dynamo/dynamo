@@ -9,7 +9,7 @@
 
 use kvbm_common::SequenceHash;
 use serde::{Deserialize, Serialize};
-use velo_common::InstanceId;
+use velo_ext::InstanceId;
 
 /// Current conditional-disaggregation protocol version.
 pub const DISAGG_PROTOCOL_VERSION: u16 = 1;
@@ -46,7 +46,7 @@ mod serde_uuid_string {
 mod serde_instance_id_string {
     use serde::{Deserialize, Deserializer, Serializer, de::Error};
     use uuid::Uuid;
-    use velo_common::InstanceId;
+    use velo_ext::InstanceId;
 
     pub fn serialize<S>(id: &InstanceId, serializer: S) -> Result<S::Ok, S::Error>
     where

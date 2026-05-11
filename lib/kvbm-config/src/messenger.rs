@@ -59,7 +59,7 @@ impl MessengerConfig {
         use std::sync::Arc;
 
         use velo::Velo;
-        use velo::backend::tcp::TcpTransportBuilder;
+        use velo::transports::tcp::TcpTransportBuilder;
 
         // 1. Build TCP transport
         let bind_addr = self.backend.resolve_bind_addr()?;

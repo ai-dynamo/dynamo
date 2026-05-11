@@ -15,7 +15,7 @@ use std::time::Duration;
 use kvbm_hub::HubServer;
 use kvbm_hub::handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
 use velo::Handler;
-use velo::backend::tcp::TcpTransportBuilder;
+use velo::transports::tcp::TcpTransportBuilder;
 
 fn init_tracing() {
     use std::sync::Once;
@@ -33,7 +33,7 @@ fn init_tracing() {
 
 // ---- fixtures ---------------------------------------------------------------
 
-fn new_velo_transport() -> Arc<velo::backend::tcp::TcpTransport> {
+fn new_velo_transport() -> Arc<velo::transports::tcp::TcpTransport> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     Arc::new(
         TcpTransportBuilder::new()
@@ -150,7 +150,7 @@ fn install_wedged_heartbeat(velo: &velo::Velo, sleep: Duration) {
 async fn register_peer(
     server: &HubServer,
     peer_velo: &Arc<velo::Velo>,
-) -> (Arc<kvbm_hub::HubClient>, velo_common::InstanceId) {
+) -> (Arc<kvbm_hub::HubClient>, velo_ext::InstanceId) {
     let client = build_client(server);
     client
         .register_instance(peer_velo.peer_info())
@@ -160,7 +160,7 @@ async fn register_peer(
 }
 
 /// Snapshot of currently-registered instance ids.
-fn registered_ids(server: &HubServer) -> std::collections::HashSet<velo_common::InstanceId> {
+fn registered_ids(server: &HubServer) -> std::collections::HashSet<velo_ext::InstanceId> {
     server
         .state()
         .peers()

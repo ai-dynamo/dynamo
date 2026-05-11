@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use velo::discovery::PeerDiscovery;
-use velo_common::{InstanceId, PeerInfo, WorkerId};
+use velo_ext::{InstanceId, PeerInfo, WorkerId};
 
 /// Errors returned by [`PeerRegistry`] mutations.
 #[derive(Debug, thiserror::Error)]
@@ -336,7 +336,7 @@ impl PeerRegistry for InMemoryRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use velo_common::WorkerAddress;
+    use velo_ext::WorkerAddress;
 
     fn make_peer() -> PeerInfo {
         PeerInfo::new(

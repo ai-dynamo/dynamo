@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use futures::future::BoxFuture;
-use velo_common::InstanceId;
+use velo_ext::InstanceId;
 
 use crate::protocol::{Feature, FeatureKey};
 use crate::registry::PeerRegistry;

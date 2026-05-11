@@ -49,8 +49,8 @@ use kvbm_physical::layout::{KvBlockLayout, LayoutConfig, PhysicalLayout};
 use kvbm_physical::manager::TransferManager;
 use kvbm_physical::transfer::{NixlAgent, StorageKind};
 
-use velo::backend::Transport;
-use velo::backend::tcp::TcpTransportBuilder;
+use velo::Transport;
+use velo::transports::tcp::TcpTransportBuilder;
 
 use crate::disagg::session::VeloSessionFactory;
 use crate::leader::InstanceLeader;

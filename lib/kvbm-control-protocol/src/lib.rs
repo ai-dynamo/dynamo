@@ -16,7 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use velo_common::InstanceId;
+use velo_ext::InstanceId;
 
 // ---------------------------------------------------------------------------
 // Tier

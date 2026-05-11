@@ -13,7 +13,7 @@ use parking_lot::RwLock;
 use tokio::task::JoinHandle;
 use velo::queue::NextOptions;
 use velo::queue::backends::messenger::{MessengerQueueBackend, MessengerQueueConfig};
-use velo_common::InstanceId;
+use velo_ext::InstanceId;
 
 use super::dispatcher::{DispatchOutcome, PrefillRequestDispatcher};
 use crate::features::{FeatureError, FeatureManager, HubContext};

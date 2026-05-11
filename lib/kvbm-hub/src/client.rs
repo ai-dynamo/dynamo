@@ -18,7 +18,7 @@ use futures::future::BoxFuture;
 use reqwest::StatusCode;
 use url::Url;
 use velo::discovery::{PeerDiscovery, PeerRegistrationGuard};
-use velo_common::{InstanceId, PeerInfo, WorkerId};
+use velo_ext::{InstanceId, PeerInfo, WorkerId};
 
 use crate::handlers;
 use crate::protocol::{

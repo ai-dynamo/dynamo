@@ -12,7 +12,7 @@ use velo::Messenger;
 use velo::discovery::PeerDiscovery;
 use velo::queue::NextOptions;
 use velo::queue::backends::messenger::{MessengerQueueBackend, MessengerQueueConfig};
-use velo_common::{InstanceId, PeerInfo};
+use velo_ext::{InstanceId, PeerInfo};
 
 use crate::client::HubClient;
 use crate::protocol::{

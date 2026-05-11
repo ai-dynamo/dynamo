@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use kvbm_hub::config::HubConfig;
-use velo::backend::tcp::TcpTransportBuilder;
+use velo::transports::tcp::TcpTransportBuilder;
 
 #[derive(Parser)]
 #[command(name = "kvbm-hub", about = "KVBM coordination hub server")]

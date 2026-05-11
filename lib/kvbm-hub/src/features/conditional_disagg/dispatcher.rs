@@ -198,7 +198,7 @@ mod tests {
     use super::*;
     use crate::protocol::PrefillRequest;
     use kvbm_disagg_protocol::DISAGG_PROTOCOL_VERSION;
-    use velo_common::InstanceId;
+    use velo_ext::InstanceId;
 
     fn make_request(id: &str) -> PrefillRequest {
         PrefillRequest {

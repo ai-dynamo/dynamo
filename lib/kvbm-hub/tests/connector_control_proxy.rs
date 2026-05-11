@@ -20,11 +20,11 @@ use kvbm_control_protocol::{
 };
 use kvbm_hub::{ConnectorControlManager, HubServer};
 use velo::Handler;
-use velo::backend::tcp::TcpTransportBuilder;
+use velo::transports::tcp::TcpTransportBuilder;
 
 // ---- fixtures ---------------------------------------------------------------
 
-fn new_velo_transport() -> Arc<velo::backend::tcp::TcpTransport> {
+fn new_velo_transport() -> Arc<velo::transports::tcp::TcpTransport> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     Arc::new(
         TcpTransportBuilder::new()
@@ -78,7 +78,7 @@ fn build_client(server: &HubServer) -> Arc<kvbm_hub::HubClient> {
 async fn register_connector(
     server: &HubServer,
     peer_velo: &Arc<velo::Velo>,
-) -> (Arc<kvbm_hub::HubClient>, velo_common::InstanceId) {
+) -> (Arc<kvbm_hub::HubClient>, velo_ext::InstanceId) {
     let client = build_client(server);
     client
         .register_instance(peer_velo.peer_info())
@@ -107,7 +107,7 @@ fn http() -> reqwest::Client {
     reqwest::Client::new()
 }
 
-fn proxy_reset_url(server: &HubServer, id: velo_common::InstanceId) -> String {
+fn proxy_reset_url(server: &HubServer, id: velo_ext::InstanceId) -> String {
     format!("http://{}/v1/instances/{}/reset", server.control_addr(), id)
 }
 
@@ -265,7 +265,7 @@ async fn proxy_partial_failure_in_response_body() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn proxy_unknown_instance_returns_404() {
     let server = start_hub_with_proxy().await;
-    let nonexistent = velo_common::InstanceId::new_v4();
+    let nonexistent = velo_ext::InstanceId::new_v4();
 
     let resp = http()
         .put(proxy_reset_url(&server, nonexistent))
@@ -298,7 +298,7 @@ async fn proxy_discovery_only_returns_503() {
     // path itself reaches the proxy. Use a bogus id; the manager
     // checks velo presence before the registry, so the response is 503.
     let resp = http()
-        .put(proxy_reset_url(&server, velo_common::InstanceId::new_v4()))
+        .put(proxy_reset_url(&server, velo_ext::InstanceId::new_v4()))
         .header("content-type", "application/json")
         .body("{}")
         .send()

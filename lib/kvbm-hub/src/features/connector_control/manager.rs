@@ -15,7 +15,7 @@ use axum::routing::{get, put};
 use futures::future::BoxFuture;
 use kvbm_control_protocol::ControlReply;
 use serde_json::Value as JsonValue;
-use velo_common::InstanceId;
+use velo_ext::InstanceId;
 
 use crate::features::{FeatureError, FeatureManager, HubContext};
 use crate::handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};

@@ -16,9 +16,9 @@ use kvbm_hub::protocol::{
 };
 use kvbm_hub::{ConditionalDisaggClient, ConditionalDisaggManager, HubClientBuilder, HubServer};
 use velo::discovery::PeerDiscovery;
-use velo_common::{InstanceId, PeerInfo, WorkerAddress};
-use velo_transports::Transport;
-use velo_transports::tcp::TcpTransportBuilder;
+use velo_ext::{InstanceId, PeerInfo, WorkerAddress};
+use velo::Transport;
+use velo::transports::tcp::TcpTransportBuilder;
 
 // ---- fixtures ---------------------------------------------------------------
 
@@ -569,7 +569,7 @@ async fn registered_client_visible_in_list_then_removed_on_drop() {
 
 // ---- Velo probe tests -------------------------------------------------------
 
-fn new_velo_transport() -> Arc<velo_transports::tcp::TcpTransport> {
+fn new_velo_transport() -> Arc<velo::transports::tcp::TcpTransport> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     Arc::new(
         TcpTransportBuilder::new()
@@ -588,7 +588,7 @@ async fn new_velo() -> Arc<velo::Velo> {
         .unwrap()
 }
 
-async fn start_server_with_transport() -> (HubServer, Arc<velo_transports::tcp::TcpTransport>) {
+async fn start_server_with_transport() -> (HubServer, Arc<velo::transports::tcp::TcpTransport>) {
     let transport = new_velo_transport();
     let server = kvbm_hub::create_server_builder()
         .bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
@@ -746,7 +746,7 @@ async fn hub_self_entry_survives_reaper() {
 
 async fn start_server_with_cd() -> (
     HubServer,
-    Arc<velo_transports::tcp::TcpTransport>,
+    Arc<velo::transports::tcp::TcpTransport>,
     Arc<ConditionalDisaggManager>,
 ) {
     let transport = new_velo_transport();
@@ -1143,7 +1143,7 @@ fn init_tracing() {
 /// the test can assert which requests the worker handed off.
 async fn start_server_with_cd_dispatcher() -> (
     HubServer,
-    Arc<velo_transports::tcp::TcpTransport>,
+    Arc<velo::transports::tcp::TcpTransport>,
     Arc<ConditionalDisaggManager>,
     Arc<kvbm_hub::RecordingDispatcher>,
 ) {

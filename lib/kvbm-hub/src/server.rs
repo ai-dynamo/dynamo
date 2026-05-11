@@ -33,7 +33,7 @@ use axum::{
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use velo_common::{InstanceId, PeerInfo, WorkerId};
+use velo_ext::{InstanceId, PeerInfo, WorkerId};
 
 use crate::features::{FeatureError, FeatureManager, HubContext};
 use crate::handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};

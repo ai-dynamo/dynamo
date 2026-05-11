@@ -16,7 +16,7 @@
 /// the queue transport, queue name, and feature registration surface.
 pub use kvbm_disagg_protocol::{DISAGG_PROTOCOL_VERSION, RemotePrefillRequest as PrefillRequest};
 use serde::{Deserialize, Serialize};
-use velo_common::{InstanceId, PeerInfo, WorkerId};
+use velo_ext::{InstanceId, PeerInfo, WorkerId};
 
 /// Default HTTP port for peer-discovery lookups (the `PeerDiscovery` surface).
 pub const DEFAULT_DISCOVERY_PORT: u16 = 1337;
@@ -256,7 +256,7 @@ pub fn instance_probe(id: InstanceId) -> String {
 mod tests {
     use super::*;
     use kvbm_common::SequenceHash;
-    use velo_common::WorkerAddress;
+    use velo_ext::WorkerAddress;
 
     fn make_peer_info() -> PeerInfo {
         let id = InstanceId::new_v4();

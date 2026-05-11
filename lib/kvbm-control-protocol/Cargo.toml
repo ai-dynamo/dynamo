@@ -18,6 +18,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
-velo-common = { workspace = true }
+velo-ext = { workspace = true }
 
 [dev-dependencies]
