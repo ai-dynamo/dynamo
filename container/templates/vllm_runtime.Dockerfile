@@ -121,6 +121,7 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     bash /tmp/install_vllm_omni.sh
+{% endif %}
 
 {% endif %}
 {% endif %}
