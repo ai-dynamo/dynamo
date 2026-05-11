@@ -258,13 +258,17 @@ impl InstanceLeaderBuilder {
         // todo: we will need a common builder pattern for creating "general" parallel workers
         // - we could also use an enum and match as the number of types will be limited
 
-        // Create parallel worker if workers are provided
+        // Create parallel worker if workers are provided. When a
+        // parallelism template is configured (AB-1a step 2), install
+        // it on the SPMD layer so connect_remote can run cross-leader
+        // compatibility gates (AB-1b).
         let parallel_worker: Option<Arc<dyn ParallelWorkers>> = if !self.workers.is_empty() {
-            Some(Arc::new(SpmdParallelWorkers::new(
-                self.workers.to_vec(),
-                events.clone(),
-                runtime.clone(),
-            )))
+            let mut spmd =
+                SpmdParallelWorkers::new(self.workers.to_vec(), events.clone(), runtime.clone());
+            if let Some(template) = self.parallelism_template.clone() {
+                spmd = spmd.with_local_template(template);
+            }
+            Some(Arc::new(spmd))
         } else {
             None
         };

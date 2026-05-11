@@ -10,7 +10,8 @@ mod remote;
 
 pub use handle::LayoutHandle;
 pub use metadata::{
-    LogicalLayoutDescriptor, ParallelismDescriptor, SerializedLayout, WorkerAddress,
+    LogicalLayoutDescriptor, ParallelismDescriptor, RdmaLayoutDescriptors, SerializedLayout,
+    WorkerAddress,
 };
 
 pub(crate) use local::LocalLayout;
