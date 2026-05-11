@@ -138,6 +138,8 @@ navbar-links:
         href: /dynamo/dev/digest/agentic-harnesses
       - text: "Full-Stack Optimizations for Agentic Inference"
         href: /dynamo/dev/digest/agentic-inference
+      - text: "Dynamo Bulwark: The End of the Cold Restart"
+        href: /dynamo/dev/digest/dynamo-bulwark
   - type: github
     value: https://github.com/ai-dynamo/dynamo
 

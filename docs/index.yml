@@ -64,6 +64,9 @@ navigation:
       - page: "Flash Indexer: Inter-Galactic KV Routing"
         path: digest/flash-indexer/flash-indexer.md
         slug: flash-indexer
+      - page: "Dynamo Bulwark: The End of the Cold Restart"
+        path: digest/dynamo-bulwark/dynamo-bulwark.md
+        slug: dynamo-bulwark
 
   # ==================== Kubernetes Deployment ====================
   - section: Kubernetes Deployment
