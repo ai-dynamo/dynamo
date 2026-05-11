@@ -110,7 +110,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libclang-dev \
         libfontconfig-dev && \
     # Use system python explicitly: some runtime bases put a framework venv first on PATH.
-    /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir yq && \
+    /usr/bin/python3 -m pip install \
+{% if device == "cuda" %}
+        --break-system-packages \
+{% endif %}
+        --no-cache-dir yq && \
     rm -rf /var/lib/apt/lists/* && \
     # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
     git lfs install
@@ -212,6 +216,11 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
 ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu  \
     NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
     NIXL_PREFIX=/opt/intel/intel_nixl
+{% elif device == "cpu" %}
+# CPU uses lib/x86_64-linux-gnu subdirectory (matching runtime stage)
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/plugins
 {% elif framework == "vllm" %}
 # Reuse the stable symlink created by the upstream vLLM runtime stage so dev
 # builds do not hardcode a CUDA-specific `.nixl_cu*` directory.
@@ -395,7 +404,7 @@ RUN printf '%s\n' \
     '    echo ""' \
     'fi' >> /etc/bash.bashrc
 
-{% if device == "xpu" %}
+{% if device == "xpu" or device == "cpu" %}
 SHELL ["bash", "-c"]
 CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
 {% else %}
