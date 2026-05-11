@@ -194,49 +194,6 @@ fn is_exclusively_mistral_model(directory: &Path) -> bool {
     !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
-/// `flock(LOCK_EX)` on `<blob>.lock`. Per-open-file-description
-/// semantics serialize both intra- and inter-process callers, so a
-/// single layer covers both. Released when `_file` drops.
-struct BlobLock {
-    _file: std::fs::File,
-}
-
-impl BlobLock {
-    async fn acquire(blob_path: &Path) -> anyhow::Result<Self> {
-        let lock_path = blob_path.with_extension("lock");
-        let file = tokio::task::spawn_blocking(move || -> anyhow::Result<std::fs::File> {
-            let f = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(&lock_path)
-                .with_context(|| format!("opening lock file {}", lock_path.display()))?;
-            #[cfg(unix)]
-            {
-                use std::os::fd::AsRawFd;
-                // SAFETY: `f` is open and owned; `flock` is a stable syscall.
-                let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
-                if rc != 0 {
-                    anyhow::bail!(
-                        "flock {} failed: {}",
-                        lock_path.display(),
-                        std::io::Error::last_os_error()
-                    );
-                }
-            }
-            // On non-Unix targets we currently rely on the per-call
-            // unique tmp + atomic rename to give intra-process safety;
-            // cross-process locking would need LockFileEx (winapi).
-            // The dynamo frontend ships on Linux; this path is for
-            // build-time portability only.
-            Ok(f)
-        })
-        .await
-        .context("blob lock spawn_blocking task panicked")??;
-        Ok(Self { _file: file })
-    }
-}
-
 /// MDC cache: `blobs/<blake3>` + `by-slug/<slug>/<mdcsum>/<filename>`.
 /// The `<mdcsum>` segment mirrors HF Hub's `snapshots/<rev>/` and
 /// isolates worker sets that share a model name but publish different
@@ -378,12 +335,6 @@ async fn resolve_uri(
 
     let parsed = url::Url::parse(uri).with_context(|| format!("parsing artifact uri: {uri}"))?;
 
-    let _blob_guard = BlobLock::acquire(dest).await?;
-
-    // Verify-on-write only — a blob at `blobs/<expected_hash>` was
-    // blake3-checked before its atomic rename (below), so its presence
-    // is sufficient. `$HOME` is inside the trust boundary; matches
-    // HF / Git / Nix / Docker / OCI cache semantics.
     if dest.exists() {
         return Ok(());
     }
