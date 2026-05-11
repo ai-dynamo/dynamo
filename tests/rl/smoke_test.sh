@@ -18,11 +18,25 @@
 #   bash tests/rl/smoke_test.sh [--model <name>]
 
 set -euo pipefail
-trap 'echo "[smoke] Cleaning up..."; kill 0 2>/dev/null; exit 0' EXIT INT TERM
+
+BGPIDS=()
+# Track background PIDs and kill only them on exit (not the shell itself).
+cleanup() {
+    trap - EXIT INT TERM
+    echo "[smoke] Cleaning up..."
+    for pid in "${BGPIDS[@]:-}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+}
+trap cleanup EXIT INT TERM
 
 MODEL="${1:-Qwen/Qwen3-0.6B}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 NATS_PORT="${NATS_PORT:-4222}"
+# prime_rl source must be on PYTHONPATH so the spawned vLLM worker subprocess
+# can import prime_rl.inference.vllm.worker.filesystem.FileSystemWeightUpdateWorker.
+PRIME_RL_SRC="${PRIME_RL_SRC:-/home/biswaranjanp/dev/rl/prime-rl/src}"
+PYTHON="${SMOKE_PYTHON:-python}"
 LOG_DIR="${TMPDIR:-/tmp}/dynamo-rl-smoke-$$"
 mkdir -p "$LOG_DIR"
 
@@ -36,25 +50,36 @@ echo "[smoke] Frontend port: $HTTP_PORT"
 # ---------------------------------------------------------------------------
 # 1. NATS
 # ---------------------------------------------------------------------------
-nats-server -p "$NATS_PORT" -l "$LOG_DIR/nats.log" &
-NATS_PID=$!
-echo "[smoke] NATS started (pid=$NATS_PID)"
-sleep 1
+if nc -z localhost "$NATS_PORT" 2>/dev/null; then
+    echo "[smoke] NATS already running on port $NATS_PORT — skipping start"
+else
+    nats-server -p "$NATS_PORT" -l "$LOG_DIR/nats.log" &
+    NATS_PID=$!
+    BGPIDS+=("$NATS_PID")
+    echo "[smoke] NATS started (pid=$NATS_PID)"
+    sleep 1
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Dynamo frontend (RL enabled on same port as OpenAI-compat)
 # ---------------------------------------------------------------------------
-DYN_ENABLE_RL_ENDPOINTS=true \
+HF_HUB_OFFLINE=1 \
+  TRANSFORMERS_OFFLINE=1 \
+  DYN_ENABLE_RL_ENDPOINTS=true \
   DYN_HTTP_PORT="$HTTP_PORT" \
   python -m dynamo.frontend \
     > "$LOG_DIR/frontend.log" 2>&1 &
 FRONTEND_PID=$!
+BGPIDS+=("$FRONTEND_PID")
 echo "[smoke] Frontend started (pid=$FRONTEND_PID)"
 
 # ---------------------------------------------------------------------------
 # 3. Dynamo vLLM worker with FileSystemWeightUpdateWorker extension
 # ---------------------------------------------------------------------------
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
+HF_HUB_OFFLINE=1 \
+  TRANSFORMERS_OFFLINE=1 \
+  PYTHONPATH="${PRIME_RL_SRC}${PYTHONPATH:+:$PYTHONPATH}" \
+  DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
   python -m dynamo.vllm \
     --model "$MODEL" \
     --enforce-eager \
@@ -63,6 +88,7 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     --worker-extension-cls prime_rl.inference.vllm.worker.filesystem.FileSystemWeightUpdateWorker \
     > "$LOG_DIR/worker.log" 2>&1 &
 WORKER_PID=$!
+BGPIDS+=("$WORKER_PID")
 echo "[smoke] Worker started (pid=$WORKER_PID, log=$LOG_DIR/worker.log)"
 
 # ---------------------------------------------------------------------------
