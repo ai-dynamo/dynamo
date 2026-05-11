@@ -1,17 +1,15 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Reasoning
-subtitle: Configure reasoning parsers for models that emit thinking content
+title: Reasoning Parsing (Dynamo)
+subtitle: Configure Dynamo's built-in reasoning parsers for models that emit thinking content
 ---
 
 Some models emit reasoning or thinking content separately from their final response. Dynamo can split that output into `reasoning_content` and normal assistant content by configuring `--dyn-reasoning-parser` on the backend worker.
 
-> [!TIP]
-> This page covers parser names for the default Dynamo-native path. For a
-> comparison of all preprocessing options (including vLLM/SGLang chat-processor
-> swap and tokenizer delegation) and routing
-> compatibility, see [Chat Processor Options](chat-processor-options.md).
+This page covers parser names for the default Dynamo-native path. If Dynamo
+does not list a parser for your model, see
+[Reasoning Parsing (Engine Fallback)](engine-fallback.md).
 
 ## Prerequisites
 
@@ -25,14 +23,14 @@ python -m dynamo.<backend> --help
 ```
 
 > [!TIP]
-> Some models need both a reasoning parser and a tool call parser. For supported tool call parser names, see [Tool Calling](tool-calling.md).
+> Some models need both a reasoning parser and a tool call parser. For supported tool call parser names, see [Tool Call Parsing (Dynamo)](../tool-calling/dynamo.md).
 
 ## Supported Reasoning Parsers
 
 The table below lists the currently supported reasoning parsers in Dynamo's registry. The
 **Upstream name** column shows where the vLLM or SGLang parser name differs
 from Dynamo's -- relevant when using `--dyn-chat-processor vllm` or `sglang`
-(see [Chat Processor Options](chat-processor-options.md)). A blank upstream
+(see [Reasoning Parsing (Engine Fallback)](engine-fallback.md)). A blank upstream
 column means the same name works everywhere. `Dynamo-only` means no upstream
 parser exists for this format.
 

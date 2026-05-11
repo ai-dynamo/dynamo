@@ -1,20 +1,21 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Tool Calling
-subtitle: Connect Dynamo to external tools and services using function calling
+title: Tool Call Parsing (Dynamo)
+subtitle: Connect Dynamo to external tools and services using Dynamo's built-in tool call parsers
 ---
 
-You can connect Dynamo to external tools and services using function calling (also known as tool calling). By providing a list of available functions, Dynamo can choose
-to output function arguments for the relevant function(s) which you can execute to augment the prompt with relevant external information.
+You can connect Dynamo to external tools and services using tool calling. By
+providing a list of available functions, Dynamo can choose to output function
+arguments for the relevant function(s) which you can execute to augment the
+prompt with relevant external information.
 
-Tool calling (AKA function calling) is controlled using the `tool_choice` and `tools` request parameters.
+Tool calling is controlled using the `tool_choice` and `tools` request
+parameters.
 
-> [!TIP]
-> This page covers parser names for the default Dynamo-native path. For a
-> comparison of all preprocessing options (including vLLM/SGLang chat-processor
-> swap and tokenizer delegation) and routing
-> compatibility, see [Chat Processor Options](chat-processor-options.md).
+This page covers parser names for the default Dynamo-native path. If Dynamo
+does not list a parser for your model, see
+[Tool Call Parsing (Engine Fallback)](engine-fallback.md).
 
 ## Prerequisites
 
@@ -35,14 +36,14 @@ python -m dynamo.<backend> --help
 > with `python -m dynamo.<backend> --custom-jinja-template </path/to/template.jinja>`.
 
 > [!TIP]
-> If your model also emits reasoning content that should be separated from normal output, see [Reasoning](reasoning.md) for the supported `--dyn-reasoning-parser` values.
+> If your model also emits reasoning content that should be separated from normal output, see [Reasoning Parsing (Dynamo)](../reasoning/dynamo.md) for the supported `--dyn-reasoning-parser` values.
 
 ## Supported Tool Call Parsers
 
 The table below lists the currently supported tool call parsers in Dynamo's registry. The
 **Upstream name** column shows where the vLLM or SGLang parser name differs
 from Dynamo's -- relevant when using `--dyn-chat-processor vllm` or `sglang`
-(see [Chat Processor Options](chat-processor-options.md)). A blank upstream
+(see [Tool Call Parsing (Engine Fallback)](engine-fallback.md)). A blank upstream
 column means the same name works everywhere. `Dynamo-only` means no upstream
 parser exists for this format.
 
@@ -70,7 +71,7 @@ parser exists for this format.
 
 > [!TIP]
 > For Kimi K2.5 thinking models, pair `--dyn-tool-call-parser kimi_k2` with
-> `--dyn-reasoning-parser kimi_k25` from [Reasoning](reasoning.md) so that both `<think>` blocks and tool calls
+> `--dyn-reasoning-parser kimi_k25` from [Reasoning Parsing (Dynamo)](../reasoning/dynamo.md) so that both `<think>` blocks and tool calls
 > are parsed correctly from the same response.
 
 ## Examples
