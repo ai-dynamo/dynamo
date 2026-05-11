@@ -311,8 +311,7 @@ fn register_model<'p>(
     // pre-strict default — readers apply the missing-field shim. Backends are
     // expected to pass explicit values (one of the four `WorkerType` variants
     // and a DNF `needs` list); enforced strictly in a follow-up.
-    let worker_type_value: Option<llm_rs::worker_type::WorkerType> =
-        worker_type.map(|w| w.into());
+    let worker_type_value: Option<llm_rs::worker_type::WorkerType> = worker_type.map(|w| w.into());
     let needs_value: Vec<Vec<llm_rs::worker_type::WorkerType>> = needs
         .unwrap_or_default()
         .into_iter()
