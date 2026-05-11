@@ -351,6 +351,12 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} && \
+    # Remove any cupy variant that may already be in the inherited venv
+    # (the framework base may install cupy-cuda12x, pyproject.toml also pins
+    # cupy-cuda12x). cupy's `_detect_duplicate_installation` ERRORS at import
+    # if both cu12 and cu13 variants are present, so we install exactly one
+    # variant matching the build target's CUDA major version.
+    uv pip uninstall cupy-cuda11x cupy-cuda12x cupy-cuda13x 2>/dev/null || true && \
     uv pip install \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.vllm.txt \
