@@ -202,6 +202,217 @@ What's **not** covered yet: `PARSER.fmt.*`, `PARSER.xml.*`,
 live in Rust unit tests only and would be added to the YAML corpus
 in follow-up PRs.
 
+## Run the parity harness
+
+One-liner from inside a Dynamo devcontainer:
+
+```bash
+PYTHONPATH=lib/bindings/python/src python3 -m pytest tests/parity/parser/test_parity_parser.py
+```
+
+`PYTHONPATH=lib/bindings/python/src` is required — that's where the
+PyO3 binding (`dynamo._core`) lives. Without it every Dynamo case
+skips. vLLM / SGLang packages must also be installed for their cases
+to run (otherwise they skip cleanly).
+
+**Common filters** — pick what to run:
+
+```bash
+# One family across every bucket
+... -k "kimi_k2"
+
+# One sub-case across every family + every impl
+... -k "PARSER.batch.8.b"
+
+# Exactly one (family, sub-case, impl)
+... "tests/parity/parser/test_parity_parser.py::test_parity[kimi_k2/PARSER.batch.8.b#vllm]"
+```
+
+**From the host** (outside the container), wrap the command in
+`docker exec <container> bash -c 'cd /workspace && …'`. Find the
+container with `docker ps --format '{{.Names}}' | grep vsc-dynamo2 | head -1`.
+
+**Baseline:** on `main` post-#9338, expect ~378 passed / ~299 skipped
+/ ~64 xfailed in ~5 s. The **xfailed count is the size of `KNOWN_DIVERGENCES`**
+— perfect parity is when that count is zero (all three impls produce
+byte-identical output on every fixture).
+
+## Resolving divergences (8 steps)
+
+Each non-`✓` cell in the matrix above is an entry in
+`KNOWN_DIVERGENCES` (`tests/parity/parser/test_parity_parser.py`).
+Goal: drive that count to zero. Walk these steps for one cell at a
+time. Worked example: `kimi_k2 / PARSER.batch.8.b → V` (vLLM drops
+trailing text after the wrapper).
+
+### 1. Pick a cell
+
+Any `V` / `S` / `VS` cell from the matrix above.
+
+### 2. Look up the reason + the side-by-side diff
+
+```bash
+grep -A 1 '"vllm", "kimi_k2", "PARSER.batch.8.b"' \
+  tests/parity/parser/test_parity_parser.py
+```
+
+Then open `tests/parity/parser/fixtures/kimi_k2/PARSER.batch.8.yaml`
+and find the `PARSER.batch.8.b:` block. The `TODO(research)` comment
+right after `expected:` is the side-by-side — Dynamo's output vs
+the impl's. **No harness run needed to read it.**
+
+```yaml
+PARSER.batch.8.b:
+  description: Narration after tool call only
+  ref: originated from https://github.com/vllm-project/vllm/.../test_kimi_k2_tool_parser.py#L435
+  model_text: |-
+    <|tool_calls_section_begin|>...
+  expected:
+    calls: [...]
+    normal_text: <Dynamo's output>
+  # TODO(research): vllm diverges — <reason from KNOWN_DIVERGENCES>
+  # vllm produces:
+  #   calls: [...]
+  #   normal_text: <vLLM's actual output>
+```
+
+If the reason is generic (e.g. `"sglang diverges on this sub-case
+(CI-surfaced)"`), the `TODO(research)` block is the *only* place with
+the actual diff — bulk-registered entries skip per-case analysis.
+
+If `ref: originated from <url>` is present, the URL points at the
+upstream vLLM test the shape was derived from (useful context).
+
+### 3. Reproduce locally
+
+```bash
+PYTHONPATH=lib/bindings/python/src python3 -m pytest \
+  "tests/parity/parser/test_parity_parser.py::test_parity[kimi_k2/PARSER.batch.8.b#vllm]" \
+  -v --tb=short
+```
+
+Impl tag is `#vllm` or `#sglang`.
+
+### 4. Decide who's right
+
+- **Dynamo wrong, impl right** → fix Dynamo (step 5).
+- **Dynamo right, impl wrong intentionally** → leave the entry, file
+  an upstream bug at `vllm-project/vllm` or `sgl-project/sglang`, link
+  it from the divergence reason.
+- **Both wrong / spec-ambiguous** → discuss before touching code.
+
+### 5. Fix the parser
+
+Edit `lib/parsers/src/tool_calling/<family>/...rs`. Rebuild the PyO3
+binding so the fixture regenerator runs against your change:
+
+```bash
+cd lib/bindings/python && maturin develop --uv && cd -
+```
+
+See [the build guide](../../docs/getting-started/building-from-source.md)
+for prerequisites.
+
+### 6. Regenerate fixtures
+
+```bash
+PYTHONPATH=lib/bindings/python/src python3 \
+  -m tests.parity.parser.regenerate_fixtures --overwrite-if-exists
+```
+
+Dynamo is the oracle — your fix changes Dynamo's output, so the
+`expected:` blocks rewrite to match. Skip this and your fix reads as
+a *new* divergence.
+
+### 7. Re-run pytest, watch for XPASS-strict
+
+```bash
+PYTHONPATH=lib/bindings/python/src python3 -m pytest \
+  tests/parity/parser/test_parity_parser.py -q --tb=no
+```
+
+If all impls now agree on the cell, the harness flags the registry
+as stale:
+
+```text
+FAILED ...test_parity[kimi_k2/PARSER.batch.8.b#vllm]
+       XPASS-strict: known divergence (vllm,kimi_k2,PARSER.batch.8.b)
+       now matches expected — remove from KNOWN_DIVERGENCES.
+```
+
+### 8. Remove the entry + add spec_ref + refresh comments + commit
+
+Delete the line from `KNOWN_DIVERGENCES`:
+
+```python
+("vllm", "kimi_k2", "PARSER.batch.8.b"): "...",   # ← delete
+```
+
+Add a `spec_ref:` field to the case's INPUTS entry in
+`regenerate_fixtures.py` so the paper trail survives — point at
+whatever made V/S right (spec section, model card, GH issue, upstream
+PR, or the team-decision doc):
+
+```python
+("kimi_k2", "PARSER.batch.8.b"): {
+    "description": "Narration after tool call only",
+    "ref": "originated from https://github.com/vllm-project/vllm/.../test_kimi_k2_tool_parser.py#L435",
+    "spec_ref": "https://platform.moonshot.ai/docs/tool-call-spec#L42  (or GH issue / PR url)",
+    "text": ...,
+    "tools": [...],
+},
+```
+
+Then re-run regen so the field flows into the fixture YAML, and embed
+to drop the now-stale `TODO(research)` block:
+
+```bash
+PYTHONPATH=lib/bindings/python/src python3 \
+  -m tests.parity.parser.regenerate_fixtures --overwrite-if-exists
+PYTHONPATH=lib/bindings/python/src python3 \
+  -m tests.parity.parser.embed_divergence_comments
+```
+
+Optionally also leave an inline comment next to the case in the YAML
+for human readers (note: this currently gets dropped on the next
+`regenerate_fixtures` run — preserving it is a follow-up tooling
+item):
+
+```yaml
+PARSER.batch.8.b:
+  description: Narration after tool call only
+  ref: originated from https://...
+  spec_ref: https://...
+  # aligned with V+S+spec on YYYY-MM-DD — was a Dynamo-only divergence;
+  #   parser updated to drop trailing text after wrapper end.
+  model_text: ...
+```
+
+Pytest should now be fully green; cell flips to `✓` on next matrix
+regen.
+
+```bash
+git add lib/parsers/ tests/parity/parser/
+git commit -s -m "fix(parser): align <family> with <impl> on PARSER.batch.N.x"
+git push
+```
+
+## When *not* to fix — permanent divergences
+
+The registry should shrink, not grow. But a few classes stay
+registered forever:
+
+- **`PARSER.batch.4` (malformed args) and `PARSER.batch.5`
+  (missing end-token)** — impl-defined recovery per
+  `PARSER_CASES.md`. Each parser picks its own behavior (drop,
+  recover, fall back to string, error). Parity not expected.
+- **Schema-driven coercion vs parser-layer preservation** —
+  e.g. `{"celsius": "20"}` against `celsius: integer`. Some
+  parsers coerce at the parser layer, others preserve raw and
+  defer coercion downstream. Both defensible.
+
+Everything else is a candidate to fix.
+
 ## Fixture file schema
 
 Two file layouts coexist per family. The loader merges them:
