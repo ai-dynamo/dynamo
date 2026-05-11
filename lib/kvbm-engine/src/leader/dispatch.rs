@@ -47,10 +47,11 @@
 //! [`LayoutSlice::axes`] for each shard whose remote rank only owns a
 //! sub-range of layers. The wire format already reserves this room.
 
+use std::collections::HashSet;
 use std::ops::Range;
 
 use anyhow::{Result, bail};
-use kvbm_common::{BlockId, KvDim, KvbmTransferRoute, LogicalLayoutHandle};
+use kvbm_common::{AxisIntersection, BlockId, KvDim, KvbmTransferRoute, LogicalLayoutHandle};
 use kvbm_physical::manager::ParallelismDescriptor;
 use serde::{Deserialize, Serialize};
 use velo::InstanceId;
@@ -354,6 +355,84 @@ fn compute_shards(
 
 fn extent_for(extents: &[(KvDim, usize)], axis: KvDim) -> Option<usize> {
     extents.iter().find(|(d, _)| *d == axis).map(|(_, v)| *v)
+}
+
+/// Translate a planner-emitted [`PullShard`] into the per-axis
+/// [`AxisIntersection`]s that [`kvbm_physical::transfer::TransferSelection`]
+/// expects.
+///
+/// The translation is determined entirely by the two extent lookups —
+/// the planner's [`LayoutSlice`] only carries the *restricted-side*
+/// range, and we fill the unrestricted side's range from the
+/// corresponding per-worker layout extent. Closures are taken (rather
+/// than concrete maps) so unit tests can stub them without
+/// materialising real [`kvbm_physical::layout::LayoutView`]s.
+///
+/// The planner emits at most one of `local_slice` / `remote_slice` per
+/// axis, with `len == the other side's per-worker extent` on that
+/// axis. If the planner ever violates that invariant this function
+/// surfaces it as a hard error rather than silently mis-routing a
+/// partial transfer.
+pub fn build_axis_intersections<L, R>(
+    shard: &PullShard,
+    local_extent_of: L,
+    remote_extent_of: R,
+) -> Result<Vec<AxisIntersection>>
+where
+    L: Fn(KvDim) -> Option<usize>,
+    R: Fn(KvDim) -> Option<usize>,
+{
+    let mut seen: HashSet<KvDim> = HashSet::new();
+    let mut out: Vec<AxisIntersection> = Vec::new();
+
+    for (dim, dst_range) in &shard.local_slice.axes {
+        let remote = remote_extent_of(*dim).ok_or_else(|| {
+            anyhow::anyhow!(
+                "build_axis_intersections: axis {dim:?} missing from remote per-worker layout"
+            )
+        })?;
+        if dst_range.len() != remote {
+            bail!(
+                "build_axis_intersections: PullShard.local_slice on {dim:?} has length {} \
+                 but remote per-worker extent is {} — planner emitted invalid pair",
+                dst_range.len(),
+                remote,
+            );
+        }
+        out.push(AxisIntersection {
+            dim: *dim,
+            src_local: 0..remote,
+            dst_local: dst_range.clone(),
+        });
+        seen.insert(*dim);
+    }
+    for (dim, src_range) in &shard.remote_slice.axes {
+        if seen.contains(dim) {
+            bail!(
+                "build_axis_intersections: PullShard restricts axis {dim:?} on both sides — \
+                 planner output is malformed",
+            );
+        }
+        let local = local_extent_of(*dim).ok_or_else(|| {
+            anyhow::anyhow!(
+                "build_axis_intersections: axis {dim:?} missing from local per-worker layout"
+            )
+        })?;
+        if src_range.len() != local {
+            bail!(
+                "build_axis_intersections: PullShard.remote_slice on {dim:?} has length {} \
+                 but local per-worker extent is {} — planner emitted invalid pair",
+                src_range.len(),
+                local,
+            );
+        }
+        out.push(AxisIntersection {
+            dim: *dim,
+            src_local: src_range.clone(),
+            dst_local: 0..local,
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(all(test, feature = "testing"))]
@@ -765,6 +844,138 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("shard axis"), "msg: {err}");
+    }
+
+    // -- build_axis_intersections tests --
+
+    fn local_extent(map: &[(KvDim, usize)]) -> impl Fn(KvDim) -> Option<usize> + '_ {
+        |d| map.iter().find(|(k, _)| *k == d).map(|(_, v)| *v)
+    }
+
+    #[test]
+    fn build_axis_intersections_local_smaller_pattern() {
+        // Local TP=2 (HeadCount per-worker 16) pulling from remote TP=4
+        // (per-worker 8). Shard touches remote rank 0; local_slice
+        // lands at the front 8 heads of local rank 0's 16-head tensor.
+        let shard = PullShard {
+            remote_rank: 0,
+            local_slice: LayoutSlice::on_axis(KvDim::HeadCount, 0..8),
+            remote_slice: LayoutSlice::full(),
+        };
+        let local = vec![(KvDim::HeadCount, 16)];
+        let remote = vec![(KvDim::HeadCount, 8)];
+        let inters =
+            build_axis_intersections(&shard, local_extent(&local), local_extent(&remote)).unwrap();
+        assert_eq!(inters.len(), 1);
+        assert_eq!(inters[0].dim, KvDim::HeadCount);
+        assert_eq!(inters[0].src_local, 0..8);
+        assert_eq!(inters[0].dst_local, 0..8);
+    }
+
+    #[test]
+    fn build_axis_intersections_local_larger_pattern() {
+        // Local TP=4 (per-worker 8) pulling from remote TP=2 (per-worker
+        // 16). Local rank 1 takes remote rank 0's heads [8, 16) into
+        // its full 0..8 local tensor.
+        let shard = PullShard {
+            remote_rank: 0,
+            local_slice: LayoutSlice::full(),
+            remote_slice: LayoutSlice::on_axis(KvDim::HeadCount, 8..16),
+        };
+        let local = vec![(KvDim::HeadCount, 8)];
+        let remote = vec![(KvDim::HeadCount, 16)];
+        let inters =
+            build_axis_intersections(&shard, local_extent(&local), local_extent(&remote)).unwrap();
+        assert_eq!(inters.len(), 1);
+        assert_eq!(inters[0].dim, KvDim::HeadCount);
+        assert_eq!(inters[0].src_local, 8..16);
+        assert_eq!(inters[0].dst_local, 0..8);
+    }
+
+    #[test]
+    fn build_axis_intersections_symmetric_pattern_empty() {
+        // Symmetric TP: both sides full; no axis_slice needed. The
+        // helper must emit an empty Vec (TransferSelection treats
+        // that as full-extent).
+        let shard = PullShard {
+            remote_rank: 3,
+            local_slice: LayoutSlice::full(),
+            remote_slice: LayoutSlice::full(),
+        };
+        let local = vec![(KvDim::HeadCount, 8)];
+        let remote = vec![(KvDim::HeadCount, 8)];
+        let inters =
+            build_axis_intersections(&shard, local_extent(&local), local_extent(&remote)).unwrap();
+        assert!(inters.is_empty());
+    }
+
+    #[test]
+    fn build_axis_intersections_rejects_local_slice_remote_extent_mismatch() {
+        // Planner mistake: emits local_slice 0..8 but remote per-worker
+        // HeadCount is 7 — the unrestricted side's full extent disagrees
+        // with the slice length, so the resulting intersection lengths
+        // would be (7, 8). Helper must bail.
+        let shard = PullShard {
+            remote_rank: 0,
+            local_slice: LayoutSlice::on_axis(KvDim::HeadCount, 0..8),
+            remote_slice: LayoutSlice::full(),
+        };
+        let local = vec![(KvDim::HeadCount, 16)];
+        let remote = vec![(KvDim::HeadCount, 7)];
+        let err = build_axis_intersections(&shard, local_extent(&local), local_extent(&remote))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("local_slice on HeadCount"),
+            "msg: {err}"
+        );
+    }
+
+    #[test]
+    fn build_axis_intersections_rejects_remote_slice_local_extent_mismatch() {
+        let shard = PullShard {
+            remote_rank: 0,
+            local_slice: LayoutSlice::full(),
+            remote_slice: LayoutSlice::on_axis(KvDim::HeadCount, 0..8),
+        };
+        let local = vec![(KvDim::HeadCount, 7)];
+        let remote = vec![(KvDim::HeadCount, 16)];
+        let err = build_axis_intersections(&shard, local_extent(&local), local_extent(&remote))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("remote_slice on HeadCount"),
+            "msg: {err}"
+        );
+    }
+
+    #[test]
+    fn build_axis_intersections_rejects_double_restriction() {
+        let shard = PullShard {
+            remote_rank: 0,
+            local_slice: LayoutSlice::on_axis(KvDim::HeadCount, 0..8),
+            remote_slice: LayoutSlice::on_axis(KvDim::HeadCount, 0..8),
+        };
+        let local = vec![(KvDim::HeadCount, 8)];
+        let remote = vec![(KvDim::HeadCount, 8)];
+        let err = build_axis_intersections(&shard, local_extent(&local), local_extent(&remote))
+            .unwrap_err();
+        assert!(err.to_string().contains("both sides"), "msg: {err}");
+    }
+
+    #[test]
+    fn build_axis_intersections_rejects_missing_axis_in_remote_layout() {
+        let shard = PullShard {
+            remote_rank: 0,
+            local_slice: LayoutSlice::on_axis(KvDim::HeadCount, 0..8),
+            remote_slice: LayoutSlice::full(),
+        };
+        let local = vec![(KvDim::HeadCount, 16)];
+        let remote: Vec<(KvDim, usize)> = vec![]; // remote layout has no HeadCount
+        let err = build_axis_intersections(&shard, local_extent(&local), local_extent(&remote))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("missing from remote"),
+            "msg: {err}"
+        );
     }
 
     #[test]

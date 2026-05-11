@@ -791,6 +791,125 @@ impl WorkerTransfers for PhysicalWorker {
             self.annotate_options(options, Self::local_route(remote_logical_type, dst)),
         )
     }
+
+    fn execute_remote_pull_plan(
+        &self,
+        plan: crate::leader::dispatch::WorkerPullPlan,
+    ) -> Result<TransferCompleteNotification> {
+        use kvbm_physical::transfer::TransferSelection;
+
+        if plan.shards.is_empty() {
+            anyhow::bail!("execute_remote_pull_plan: plan has no shards");
+        }
+        if plan.src_block_ids.len() != plan.dst_block_ids.len() {
+            anyhow::bail!(
+                "execute_remote_pull_plan: src/dst block id counts disagree ({} vs {})",
+                plan.src_block_ids.len(),
+                plan.dst_block_ids.len(),
+            );
+        }
+
+        // Resolve the local destination handle. G4 isn't a valid pull
+        // target — the cross-parallelism path is for RDMA-backed tiers.
+        let local_handle = match plan.dst_layout {
+            LogicalLayoutHandle::G1 => self.g1_handle(),
+            LogicalLayoutHandle::G2 => self.g2_handle(),
+            LogicalLayoutHandle::G3 => self.g3_handle(),
+            LogicalLayoutHandle::G4 => {
+                anyhow::bail!("execute_remote_pull_plan: G4 cannot be a dst for RDMA pulls");
+            }
+        }
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "execute_remote_pull_plan: no local handle registered for {:?}",
+                plan.dst_layout
+            )
+        })?;
+
+        let local_physical = self.manager.get_physical_layout(local_handle).ok_or_else(|| {
+            anyhow::anyhow!(
+                "execute_remote_pull_plan: local handle {local_handle:?} not in manager registry"
+            )
+        })?;
+        let local_view = local_physical.layout().layout_view()?;
+
+        // Block-pair list is shared across every shard in this plan.
+        let block_pairs: Vec<(usize, usize)> = plan
+            .src_block_ids
+            .iter()
+            .copied()
+            .zip(plan.dst_block_ids.iter().copied())
+            .collect();
+
+        // Project WirePullOptions onto TransferOptions. The wire subset
+        // intentionally omits bounce_buffer / cuda_stream / kv_layout
+        // overrides / use_planner / layer_range; execute_transfer_selection
+        // forces use_planner=true internally, and layer_range is the PP
+        // story.
+        let mut options = TransferOptions::default();
+        options.nixl_write_notification = plan.options.nixl_write_notification;
+        options.metric_route = plan.options.metric_route;
+        // Attach a default transfer route when none was supplied so the
+        // emitted metrics stay consistent with the legacy onboard path.
+        let options = self.annotate_options(
+            options,
+            Self::local_route(plan.source_layout, plan.dst_layout),
+        );
+
+        let mut notifications = Vec::with_capacity(plan.shards.len());
+        for shard in &plan.shards {
+            let remote_handle = {
+                let handles = self.remote_handles_rank.read().unwrap();
+                handles
+                    .get(&(plan.remote_instance, shard.remote_rank, plan.source_layout))
+                    .copied()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "execute_remote_pull_plan: no remote {:?} handle for \
+                             (instance={}, rank={}); peer must have stamped a \
+                             ParallelismDescriptor and connect_remote must have completed",
+                            plan.source_layout,
+                            plan.remote_instance,
+                            shard.remote_rank,
+                        )
+                    })?
+            };
+
+            let remote_physical = self
+                .manager
+                .get_physical_layout(remote_handle)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "execute_remote_pull_plan: remote handle {remote_handle:?} not in manager registry"
+                    )
+                })?;
+            let remote_view = remote_physical.layout().layout_view()?;
+
+            let axis_slices = crate::leader::dispatch::build_axis_intersections(
+                shard,
+                |d| local_view.local_layout().size_of(d),
+                |d| remote_view.local_layout().size_of(d),
+            )?;
+
+            let selection = TransferSelection {
+                block_pairs: block_pairs.clone(),
+                axis_slices,
+            };
+
+            notifications.push(self.manager.execute_transfer_selection(
+                remote_handle,
+                local_handle,
+                selection,
+                options.clone(),
+            )?);
+        }
+
+        TransferCompleteNotification::aggregate(
+            notifications,
+            self.manager.context().event_system(),
+            self.manager.context().tokio(),
+        )
+    }
 }
 
 impl Worker for PhysicalWorker {
