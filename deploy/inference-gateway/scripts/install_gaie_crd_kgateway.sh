@@ -42,7 +42,7 @@ helm upgrade -i --namespace kgateway-system --version $KGTW_VERSION kgateway \
   oci://cr.kgateway.dev/kgateway-dev/charts/kgateway \
   --set inferenceExtension.enabled=true
 
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/refs/tags/${IGW_LATEST_RELEASE}/config/manifests/gateway/kgateway/gateway.yaml -n "$NAMESPACE"
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/refs/tags/${IGW_LATEST_RELEASE}/config/manifests/gateway/agentgateway/gateway.yaml -n "$NAMESPACE"
 
 kubectl patch gateway inference-gateway -n "$NAMESPACE" --type='json' \
   -p='[{"op": "replace", "path": "/spec/gatewayClassName", "value": "kgateway"}]'

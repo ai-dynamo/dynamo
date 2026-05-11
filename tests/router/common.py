@@ -619,8 +619,6 @@ def _test_remote_indexer_decisions(
                 kv_python_router=kv_router,
                 model_name=model_name,
                 token_ids=token_ids,
-                initial_wait=1.0,
-                max_retries=8,
                 stop_conditions={
                     "ignore_eos": True,
                     "max_tokens": 2,
@@ -723,8 +721,6 @@ def _test_python_router_bindings(
             kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids,
-            initial_wait=1.0,
-            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,  # Don't stop on EOS token
                 "max_tokens": 20,  # Generate exactly 20 tokens
@@ -745,8 +741,6 @@ def _test_python_router_bindings(
             kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids[:50],  # Use fewer tokens for second test,
-            initial_wait=1.0,
-            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,  # Don't stop on EOS token
                 "max_tokens": 10,  # Generate exactly 10 tokens for the second test
@@ -768,8 +762,6 @@ def _test_python_router_bindings(
             kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids[:30],  # Use fewer tokens for third test,
-            initial_wait=1.0,
-            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,  # Don't stop on EOS token
                 "max_tokens": 5,  # Generate exactly 5 tokens for the third test
@@ -1504,8 +1496,6 @@ def _test_router_indexers_sync(
                             kv_python_router=router,
                             model_name=model_name,
                             token_ids=request_tokens,
-                            initial_wait=1.0,
-                            max_retries=8,
                             stop_conditions={
                                 "ignore_eos": True,  # Don't stop on EOS token
                                 "max_tokens": 10,  # Generate exactly 10 tokens
@@ -2375,8 +2365,6 @@ def _test_router_decisions(
                 kv_python_router=kv_router,
                 model_name=model_name,
                 token_ids=token_ids,
-                initial_wait=1.0,
-                max_retries=8,
                 stop_conditions={
                     "ignore_eos": True,
                     "max_tokens": 2,

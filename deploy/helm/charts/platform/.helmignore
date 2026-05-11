@@ -22,6 +22,7 @@
 *.tmproj
 .vscode/
 # test files
+tests/
 test-values.yaml
 minikube-demo-values.yaml
 # subchart sources

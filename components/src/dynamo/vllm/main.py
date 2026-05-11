@@ -41,6 +41,7 @@ from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
 from .args import Config, _uses_dynamo_connector, parse_args
+from .cache_info import get_configured_kv_event_block_size
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
@@ -333,6 +334,7 @@ def setup_kv_event_publisher(
     # all served workers should cover all ranks.
     dp_start, dp_size = get_dp_range_for_worker(vllm_config)
     kv_publishers = []
+    kv_event_block_size = get_configured_kv_event_block_size(vllm_config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):
         if consolidator_enabled:
@@ -353,7 +355,7 @@ def setup_kv_event_publisher(
 
         kv_publisher = KvEventPublisher(
             endpoint=generate_endpoint,
-            kv_block_size=vllm_config.cache_config.block_size,
+            kv_block_size=kv_event_block_size,
             zmq_endpoint=zmq_endpoint,
             zmq_topic="",
             enable_local_indexer=config.enable_local_indexer,
@@ -692,7 +694,7 @@ async def register_vllm_model(
         config.model,
         config.served_model_name,
         context_length=vllm_config.model_config.max_model_len,
-        kv_cache_block_size=runtime_values["block_size"],
+        kv_cache_block_size=runtime_values["kv_event_block_size"],
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
         media_decoder=media_decoder,
@@ -701,13 +703,15 @@ async def register_vllm_model(
 
 
 def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
-    """Retrieve cache configuration information from [`AsyncLLM`] engine."""
+    """Return vLLM cache and scheduler limits used for model registration."""
 
     try:
         # Get values directly from vllm_config instead of collective_rpc
+        kv_event_block_size = get_configured_kv_event_block_size(engine.vllm_config)
         cache_values = {
             "num_gpu_blocks": engine.vllm_config.cache_config.num_gpu_blocks,
             "block_size": engine.vllm_config.cache_config.block_size,
+            "kv_event_block_size": kv_event_block_size,
         }
 
         scheduler_values = {
@@ -715,11 +719,12 @@ def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
             "max_num_batched_tokens": engine.vllm_config.scheduler_config.max_num_batched_tokens,
         }
 
-        logging.info(f"Cache config values: {cache_values}")
-        logging.info(f"Scheduler config values: {scheduler_values}")
+        logging.debug(f"Cache config values: {cache_values}")
+        logging.debug(f"Scheduler config values: {scheduler_values}")
         return {
             "num_gpu_blocks": cache_values["num_gpu_blocks"],
             "block_size": cache_values["block_size"],
+            "kv_event_block_size": cache_values["kv_event_block_size"],
             "max_num_seqs": scheduler_values["max_num_seqs"],
             "max_num_batched_tokens": scheduler_values["max_num_batched_tokens"],
         }
