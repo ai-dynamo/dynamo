@@ -575,8 +575,7 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
             .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(
-            result[0].function.arguments,
-            r#"{"location":"San Francisco, USA","unit":"celsius"}"#,
+            result[0].function.arguments, r#"{"location":"San Francisco, USA","unit":"celsius"}"#,
             "arguments must be preserved byte-for-byte (no `, ` or `: ` injected)"
         );
     }
