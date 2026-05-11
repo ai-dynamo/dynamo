@@ -7881,6 +7881,40 @@ func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {
 	assert.Equal(t, int32(1), *frontendDCD.Spec.Replicas)
 }
 
+func TestGenerateDynamoComponentsDeployments_InferBackendFrameworkForGeneratedDCDs(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(1)),
+				},
+				"decode": {
+					ComponentType:    commonconsts.ComponentTypeWorker,
+					SubComponentType: commonconsts.ComponentTypeDecode,
+					Replicas:         ptr.To(int32(1)),
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+						MainContainer: &corev1.Container{
+							Command: []string{"python3"},
+							Args:    []string{"-m", "dynamo.vllm", "--model", "Qwen/Qwen3-0.6B"},
+							Env: []corev1.EnvVar{
+								{Name: "MY_NEW_ENV", Value: "enabled"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), betaDGD(t, dgd), &RestartState{}, nil, RollingUpdateContext{NewWorkerHash: "2dad72b9"})
+	require.NoError(t, err)
+
+	assert.Equal(t, string(BackendFrameworkVLLM), dcds["decode"].Spec.BackendFramework)
+	assert.Equal(t, string(BackendFrameworkVLLM), dcds["frontend"].Spec.BackendFramework)
+}
+
 func TestGenerateSingleDCD_NoRollingUpdate(t *testing.T) {
 	dgd := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
