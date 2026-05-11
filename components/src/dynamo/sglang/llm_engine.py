@@ -109,7 +109,7 @@ class SglangLLMEngine(LLMEngine):
             **input_param,
             sampling_params=sampling_params,
             stream=True,
-            rid=context.trace_id,
+            rid=context.id(),
         )
 
         async for res in stream:
@@ -169,7 +169,7 @@ class SglangLLMEngine(LLMEngine):
             yield out
 
     async def abort(self, context: Context) -> None:
-        rid = context.trace_id
+        rid = context.id()
         if self.engine is not None and rid is not None:
             if (
                 hasattr(self.engine, "tokenizer_manager")

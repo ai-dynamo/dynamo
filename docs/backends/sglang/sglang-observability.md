@@ -143,18 +143,23 @@ SGLang Handler (Python)
     v
 sgl.Engine.async_generate(
     ...,
-    rid=trace_id,                        # request ID = trace ID
+    rid=request_id,                      # SGLang rid = Dynamo per-request id (context.id())
     external_trace_header=traceparent    # W3C header for SGLang internal spans
 )
     |
     v
-SGLang Engine (internal spans attached to same trace)
+SGLang Engine (internal spans attached to same trace via traceparent)
 ```
+
+`rid` is the unique per-request id (`context.id()`), not `trace_id`. A single
+W3C trace can fan out across many requests (retries, parallel tool calls,
+agent loops), so using `trace_id` as `rid` would cause SGLang to reject the
+second concurrent request with `Duplicate request IDs detected`.
 
 Key implementation files:
 - `components/src/dynamo/common/utils/otel_tracing.py` - W3C `traceparent` header builder
-- `components/src/dynamo/sglang/request_handlers/handler_base.py:71-84` - Extracts trace context from Dynamo `Context` object
-- `components/src/dynamo/sglang/request_handlers/llm/decode_handler.py` - Passes `external_trace_header` and `rid=trace_id` to `engine.async_generate()`
+- `components/src/dynamo/sglang/request_handlers/handler_base.py` - Extracts trace context from Dynamo `Context` object
+- `components/src/dynamo/sglang/request_handlers/llm/decode_handler.py` - Passes `external_trace_header` and `rid=context.id()` to `engine.async_generate()`
 
 ### Environment Variables
 
@@ -230,7 +235,7 @@ dynamo-frontend: http-request (root)
       kv_router.schedule
     dynamo-worker-1: handle_payload
       sglang: Bootstrap Room 0x0
-        sglang: Req <trace-id-prefix>
+        sglang: Req <request-id-prefix>
           sglang: Scheduler [TP 0]
             request_process
             prefill_forward
@@ -250,7 +255,7 @@ dynamo-frontend: http-request (root)
 4. Use the **Search** tab:
    - Filter by **Service Name** (e.g., `dynamo-frontend`, `dynamo-worker-1`, `sglang`)
    - Filter by **Span Name** (e.g., `http-request`, `handle_payload`, `Req *`, `decode_loop`)
-   - Filter by **Tags** (e.g., `rid=<trace-id>`, `gen_ai.response.model=Qwen/Qwen3-0.6B`)
+   - Filter by **Tags** (e.g., `rid=<request-id>`, `gen_ai.response.model=Qwen/Qwen3-0.6B`)
 5. Click a trace to view the flame graph spanning frontend -> router -> worker -> engine
 
 Send a request with `x-request-id` for easy lookup:
