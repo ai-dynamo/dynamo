@@ -25,7 +25,7 @@ DEFAULT_PREFILL_COMPONENT = "prefill"
 DEFAULT_ENCODE_COMPONENT = "tensorrt_llm_encode"
 DEFAULT_DIFFUSION_COMPONENT = "diffusion"
 DEFAULT_ENDPOINT_NAME = "generate"
-VALID_TRTLLM_CONNECTORS = {"none", "kvbm"}
+VALID_TRTLLM_CONNECTORS = {"none", "kvbm", "remote_g2"}
 
 
 class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):

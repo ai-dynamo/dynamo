@@ -87,6 +87,12 @@ def build_kv_connector_config(config: Config):
                 connector_scheduler_class="DynamoKVBMConnectorLeader",
                 connector_worker_class="DynamoKVBMConnectorWorker",
             )
+        elif config.connector[0] == "remote_g2":
+            return KvCacheConnectorConfig(
+                connector_module="tensorrt_llm._torch.pyexecutor.connectors.remote_g2_connector",
+                connector_scheduler_class="RemoteG2KvCacheConnectorScheduler",
+                connector_worker_class="RemoteG2KvCacheConnectorWorker",
+            )
         elif config.connector[0] == "none":
             return None
         else:
