@@ -129,9 +129,18 @@ pub struct PullShard {
 ///   rejection.
 /// - `bounce_buffer`, `cuda_stream`, `src_kv_layout`, `dst_kv_layout` —
 ///   per-allocation references that cannot be serialised meaningfully.
+///
+/// Every field is `#[serde(default)]` so a newer sender can add fields
+/// to the wire shape without breaking older receivers — the receiver
+/// silently fills the missing field with `Default::default()`. The
+/// inverse (receiver expects a field the sender doesn't know about) is
+/// not a concern because all current fields are `Option`-shaped and
+/// default to `None`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WirePullOptions {
+    #[serde(default)]
     pub nixl_write_notification: Option<u64>,
+    #[serde(default)]
     pub metric_route: Option<KvbmTransferRoute>,
 }
 
@@ -140,14 +149,26 @@ pub struct WirePullOptions {
 /// Shared across all `shards`: `remote_instance`, `source_layout`,
 /// `dst_layout`, `src_block_ids`, `dst_block_ids`, `options`. The
 /// `shards` vec carries the per-remote-rank slicing.
+///
+/// `options`, `shards`, and the block-id vectors are tagged
+/// `#[serde(default)]` for forward compatibility: a sender that omits
+/// any of these (because a future schema split them off, or a default
+/// is acceptable) decodes cleanly on the receiver. The core targeting
+/// fields (`remote_instance`, `source_layout`, `dst_layout`) are
+/// required; missing any of them is a genuine wire-shape error and
+/// should fail the decode loudly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerPullPlan {
     pub remote_instance: InstanceId,
     pub source_layout: LogicalLayoutHandle,
     pub dst_layout: LogicalLayoutHandle,
+    #[serde(default)]
     pub src_block_ids: Vec<BlockId>,
+    #[serde(default)]
     pub dst_block_ids: Vec<BlockId>,
+    #[serde(default)]
     pub shards: Vec<PullShard>,
+    #[serde(default)]
     pub options: WirePullOptions,
 }
 

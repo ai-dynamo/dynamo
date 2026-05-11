@@ -301,37 +301,45 @@ impl WorkerTransfers for SpmdParallelWorkers {
             }
         }
 
-        // Persist remote tp_size for this instance so
-        // execute_remote_onboard_for_instance can route between
-        // symmetric (same-rank zip) and asymmetric (AB-3 planner)
-        // dispatch. Prefer the stamped descriptor's tp_size; fall
-        // back to the metadata vector length for legacy peers.
+        // Persist remote tp_size and cache descriptors for this
+        // instance so `execute_remote_onboard_for_instance` can route
+        // between symmetric (same-rank zip) and asymmetric (AB-3
+        // planner) dispatch. Reset both caches first so a peer that
+        // re-imports under a different strategy (Strict → Legacy or
+        // shape change) doesn't leak stale state from the prior
+        // import.
         {
-            let remote_tp = unpacked
-                .iter()
-                .find_map(|u| u.parallelism.as_ref().map(|d| d.tp_size))
-                .unwrap_or(metadata.len());
-            self.remote_tp_sizes
-                .write()
-                .unwrap()
-                .insert(instance_id, remote_tp);
-        }
+            let mut tp_map = self.remote_tp_sizes.write().unwrap();
+            let mut desc_map = self.remote_descriptors.write().unwrap();
+            tp_map.remove(&instance_id);
+            desc_map.remove(&instance_id);
 
-        // Cache the full per-rank ParallelismDescriptor set when every
-        // remote rank carried a stamped descriptor. The asymmetric
-        // dispatch branch of execute_remote_onboard_for_instance feeds
-        // these into plan_pull. Legacy (unstamped) peers get no entry
-        // here — and the rank-count match check above ensures they
-        // never reach the asymmetric branch in the first place.
-        if strategy == ImportStrategy::Strict {
-            let descriptors: Vec<ParallelismDescriptor> = unpacked
-                .iter()
-                .map(|u| u.parallelism.clone().expect("strict path: all stamped"))
-                .collect();
-            self.remote_descriptors
-                .write()
-                .unwrap()
-                .insert(instance_id, descriptors);
+            match strategy {
+                ImportStrategy::Strict => {
+                    // All ranks stamped: the descriptors are authoritative.
+                    // Every rank reports the same `tp_size` (gated above),
+                    // so reading from the first is consistent.
+                    let descriptors: Vec<ParallelismDescriptor> = unpacked
+                        .iter()
+                        .map(|u| u.parallelism.clone().expect("strict path: all stamped"))
+                        .collect();
+                    let remote_tp = descriptors[0].tp_size;
+                    tp_map.insert(instance_id, remote_tp);
+                    desc_map.insert(instance_id, descriptors);
+                }
+                ImportStrategy::Legacy => {
+                    // Legacy import enforces metadata.len() == self.workers.len()
+                    // (rank-count match check above), so the peer is
+                    // effectively symmetric from this leader's POV.
+                    // Even if a stray stamped entry slipped in (mixed
+                    // metadata), the legacy path treats the peer as
+                    // symmetric — do NOT read tp_size from that stamp.
+                    // Leaving remote_descriptors empty forces the
+                    // asymmetric branch to bail loudly if it's ever
+                    // mis-routed here.
+                    tp_map.insert(instance_id, metadata.len());
+                }
+            }
         }
 
         // If all responses are ready (synchronous), return immediately
@@ -444,6 +452,20 @@ impl SpmdParallelWorkers {
                      via SpmdParallelWorkers::with_local_template() (instance={instance_id})"
             )
         })?;
+
+        // Coherence guard: the template's tp_size describes the local
+        // worker grid. If it disagrees with `workers.len()`, plan_pull
+        // emits the wrong number of plans — fewer plans than workers
+        // silently skip data on the un-mapped ranks. Catch the
+        // misconfiguration loudly before any RPCs go out.
+        if template.tp_size != self.workers.len() {
+            anyhow::bail!(
+                "asymmetric pull: local ParallelismTemplate tp_size ({}) disagrees with \
+                 worker count ({}); template must describe the local worker grid",
+                template.tp_size,
+                self.workers.len(),
+            );
+        }
 
         let descriptors = self
             .remote_descriptors
@@ -875,6 +897,137 @@ mod tests {
             .get(&instance_id)
             .copied();
         assert_eq!(tp, Some(4));
+    }
+
+    /// AB-3 fixup: Strict re-import for the same instance must
+    /// replace the cached descriptor set, not merge. A peer changing
+    /// shape between connects (e.g. TP=4 → TP=2 reconfiguration)
+    /// would otherwise leave stale descriptor entries that disagree
+    /// with the live tp_size, mis-routing the asymmetric branch.
+    #[test]
+    fn connect_remote_strict_reimport_replaces_cached_descriptors() {
+        use ::velo::EventManager;
+        use kvbm_physical::manager::{LogicalLayoutDescriptor, SerializedLayout, WorkerAddress};
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let spmd = SpmdParallelWorkers::new(
+            Vec::new(),
+            Arc::new(EventManager::local()),
+            rt.handle().clone(),
+        );
+
+        let instance_id = InstanceId::new_v4();
+
+        // First import: TP=4 stamped.
+        let stamped_4: Vec<SerializedLayout> = (0..4)
+            .map(|rank| {
+                SerializedLayout::pack(
+                    WorkerAddress::new(rank as u64, format!("a-{rank}")),
+                    vec![],
+                    Vec::<LogicalLayoutDescriptor>::new(),
+                    Some(descriptor(rank, 4)),
+                )
+                .unwrap()
+            })
+            .collect();
+        spmd.connect_remote(instance_id, stamped_4).unwrap();
+        assert_eq!(
+            spmd.remote_descriptors
+                .read()
+                .unwrap()
+                .get(&instance_id)
+                .map(|v| v.len()),
+            Some(4),
+        );
+        assert_eq!(
+            spmd.remote_tp_sizes
+                .read()
+                .unwrap()
+                .get(&instance_id)
+                .copied(),
+            Some(4),
+        );
+
+        // Second import: same instance, TP=2 stamped. Both caches
+        // must reflect the new shape, not the prior TP=4.
+        let stamped_2: Vec<SerializedLayout> = (0..2)
+            .map(|rank| {
+                SerializedLayout::pack(
+                    WorkerAddress::new(rank as u64, format!("b-{rank}")),
+                    vec![],
+                    Vec::<LogicalLayoutDescriptor>::new(),
+                    Some(descriptor(rank, 2)),
+                )
+                .unwrap()
+            })
+            .collect();
+        spmd.connect_remote(instance_id, stamped_2).unwrap();
+        let cached = spmd.remote_descriptors.read().unwrap();
+        let descriptors = cached.get(&instance_id).unwrap();
+        assert_eq!(
+            descriptors.len(),
+            2,
+            "Strict re-import must replace the cached descriptor set, not append"
+        );
+        for d in descriptors {
+            assert_eq!(d.tp_size, 2);
+        }
+        assert_eq!(
+            spmd.remote_tp_sizes
+                .read()
+                .unwrap()
+                .get(&instance_id)
+                .copied(),
+            Some(2),
+            "remote_tp_sizes must reflect the new import's tp_size",
+        );
+    }
+
+    /// AB-3 fixup: Strict-path `remote_tp_sizes` must come from
+    /// `descriptors[0].tp_size`, not from a `find_map` lookup that
+    /// could pick up a stray stamped entry in mixed metadata.
+    #[test]
+    fn connect_remote_strict_tp_size_from_descriptors_not_first_stamp() {
+        use ::velo::EventManager;
+        use kvbm_physical::manager::{LogicalLayoutDescriptor, SerializedLayout, WorkerAddress};
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let spmd = SpmdParallelWorkers::new(
+            Vec::new(),
+            Arc::new(EventManager::local()),
+            rt.handle().clone(),
+        );
+
+        let instance_id = InstanceId::new_v4();
+        // 4 stamped entries, all reporting tp_size=4 — consistent.
+        let stamped: Vec<SerializedLayout> = (0..4)
+            .map(|rank| {
+                SerializedLayout::pack(
+                    WorkerAddress::new(rank as u64, format!("a-{rank}")),
+                    vec![],
+                    Vec::<LogicalLayoutDescriptor>::new(),
+                    Some(descriptor(rank, 4)),
+                )
+                .unwrap()
+            })
+            .collect();
+        spmd.connect_remote(instance_id, stamped).unwrap();
+
+        // The Strict-path tp_size lookup reads descriptors[0].tp_size,
+        // which validate_remote_metadata's internal-consistency gate
+        // guarantees matches every other rank.
+        assert_eq!(
+            spmd.remote_tp_sizes
+                .read()
+                .unwrap()
+                .get(&instance_id)
+                .copied(),
+            Some(4),
+        );
     }
 
     /// AB-3: Legacy (unstamped) peer metadata must NOT cache
