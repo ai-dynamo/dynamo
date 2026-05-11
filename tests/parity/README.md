@@ -154,9 +154,9 @@ sorted alphabetically within themselves.
 | glm47 (GLM 5.1)                 | ✓   | ✓   | ✓   | ✓   | VS  | ✓   | ✓   | V   | ✓   | ✓   |
 | harmony † (gpt-oss)             | S   | S   | ✓   | S   | S   | S   | S   | S   | ✓   | S   |
 | kimi_k2 (Kimi K2.6)             | ✓   | ✓   | ✓   | S   | ✓   | ✓   | ✓   | VS  | ✓   | ✓   |
-| minimax_m2 (MiniMax 2.7)        | ✓   | ✓   | ✓   | V   | VS  | ✓   | ✓   | VS  | ✓   | ✓   |
+| minimax_m2 (MiniMax 2.7)        | ✓   | ✓   | ✓   | V   | VS  | ✓   | ✓   | ✓   | ✓   | ✓   |
 | nemotron_deci †§ (Nemotron)     | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
-| qwen3_coder (Qwen 3.5)          | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | VS  | ✓   | ✓   |
+| qwen3_coder (Qwen 3.5)          | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
 | **Others**                      |     |     |     |     |     |     |     |     |     |     |
 | deepseek_v3                     | ✓   | ✓   | ✓   | V   | VS  | ✓   | ✓   | S   | ✓   | ✓   |
 | deepseek_v3_1                   | ✓   | ✓   | ✓   | V   | VS  | ✓   | ✓   | S   | ✓   | ✓   |
