@@ -12,7 +12,9 @@ use tokio::sync::watch;
 use crate::{
     discovery::KvWorkerMonitor,
     kv_router::{KvRouter, PrefillRouter},
-    model_card::ModelDeploymentCard,
+    model_card::{ModelDeploymentCard, ModelInfo},
+    preprocessor::prompt::OAIPromptFormatter,
+    tokenizers::Tokenizer,
     types::{
         generic::tensor::TensorStreamingEngine,
         openai::{
@@ -24,6 +26,50 @@ use crate::{
         },
     },
 };
+
+/// Captured-at-construction inputs for the `/tokenize` and `/detokenize` HTTP
+/// endpoints.
+///
+/// Mirrors the per-WorkerSet caching that the chat/completions engines get
+/// implicitly through `OpenAIPreprocessor` (`preprocessor.rs:310-353`): the
+/// tokenizer, default prompt formatter, and model_info are loaded once at
+/// WorkerSet construction and held in memory so subsequent requests don't
+/// touch the MDC store or disk. This makes /tokenize survive the file-backed
+/// worker's WorkerSet being torn down, the same way chat completions
+/// already do — `Model::get_tokenize_handle` selects any live WorkerSet.
+pub struct TokenizeHandle {
+    pub display_name: String,
+    pub tokenizer: Tokenizer,
+    /// Default chat formatter built from the MDC. `None` when the MDC has no
+    /// `prompt_formatter` artifact (completions-only models) — chat-tokenize
+    /// then surfaces a clean error instead of silently falling back.
+    pub formatter: Option<Arc<dyn OAIPromptFormatter>>,
+    /// Cached model_info (eos_token_ids etc.). `None` if absent on the MDC.
+    pub model_info: Option<Arc<dyn ModelInfo>>,
+    pub context_length: u32,
+}
+
+impl TokenizeHandle {
+    /// Direct constructor from pre-loaded Arcs. The watcher loads the
+    /// formatter and ModelInfo once and shares the same Arcs with the chat /
+    /// completions preprocessors, so we don't re-parse `tokenizer_config.json`
+    /// and `config.json` per consumer.
+    pub fn new(
+        display_name: String,
+        tokenizer: Tokenizer,
+        formatter: Option<Arc<dyn OAIPromptFormatter>>,
+        model_info: Option<Arc<dyn ModelInfo>>,
+        context_length: u32,
+    ) -> Self {
+        Self {
+            display_name,
+            tokenizer,
+            formatter,
+            model_info,
+            context_length,
+        }
+    }
+}
 
 /// A set of workers from the same namespace/configuration with their own pipeline.
 pub struct WorkerSet {
@@ -55,6 +101,12 @@ pub struct WorkerSet {
     /// deactivate it when all prefill workers die, and reactivate when they rejoin.
     pub(crate) prefill_router: Option<Arc<PrefillRouter>>,
 
+    /// In-memory state needed by the `/tokenize` and `/detokenize` HTTP
+    /// endpoints. Populated by the watcher at WorkerSet construction so the
+    /// endpoints don't re-resolve through `ModelManager.cards` (which churns
+    /// when individual workers come and go).
+    pub(crate) tokenize_handle: Option<Arc<TokenizeHandle>>,
+
     /// Watcher for available instance IDs (from the Client's discovery watch).
     /// None for in-process models (http/grpc) which don't have a discovery client.
     instance_count_rx: Option<watch::Receiver<Vec<u64>>>,
@@ -76,6 +128,7 @@ impl WorkerSet {
             kv_router: None,
             worker_monitor: None,
             prefill_router: None,
+            tokenize_handle: None,
             instance_count_rx: None,
         }
     }
@@ -133,6 +186,17 @@ impl WorkerSet {
             && !self.has_videos_engine()
             && !self.has_audios_engine()
             && !self.has_tensor_engine()
+    }
+
+    /// In-memory inputs for `/tokenize` and `/detokenize`. `None` for
+    /// WorkerSets whose model has no Rust-loadable tokenizer (e.g. models
+    /// served via a Python chat_engine_factory).
+    pub fn tokenize_handle(&self) -> Option<Arc<TokenizeHandle>> {
+        self.tokenize_handle.clone()
+    }
+
+    pub fn has_tokenize_handle(&self) -> bool {
+        self.tokenize_handle.is_some()
     }
 
     /// Build ParsingOptions from this WorkerSet's card configuration.

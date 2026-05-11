@@ -157,6 +157,14 @@ impl Model {
             .any(|entry| entry.value().has_audios_engine())
     }
 
+    /// Check if any WorkerSet has a tokenize handle (i.e., is reachable from
+    /// the `/tokenize` and `/detokenize` endpoints).
+    pub fn has_tokenize_handle(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_tokenize_handle())
+    }
+
     /// Whether this model should be visible in /v1/models.
     pub fn is_displayable(&self) -> bool {
         let has_serving_engine = |ws: &WorkerSet| {
@@ -224,6 +232,13 @@ impl Model {
     pub fn get_tensor_engine(&self) -> Result<TensorStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.tensor_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_tensor_engine()))
+    }
+
+    /// Select any live WorkerSet's TokenizeHandle. Returns `None` if no
+    /// WorkerSet has one (e.g., the model is only served via a Python
+    /// chat_engine_factory, which doesn't load a Rust tokenizer).
+    pub fn get_tokenize_handle(&self) -> Option<Arc<crate::discovery::TokenizeHandle>> {
+        self.select_worker_set_with(|ws| ws.tokenize_handle.clone())
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --

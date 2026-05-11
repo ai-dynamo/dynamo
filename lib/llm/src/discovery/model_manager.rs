@@ -258,6 +258,27 @@ impl ModelManager {
             .collect()
     }
 
+    /// Models reachable via the `/tokenize` and `/detokenize` endpoints.
+    /// A model qualifies if at least one of its WorkerSets has a
+    /// `TokenizeHandle` (i.e., the watcher was able to load a Rust tokenizer
+    /// at WorkerSet construction).
+    pub fn list_tokenize_models(&self) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|entry| entry.value().has_tokenize_handle())
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Pick any live WorkerSet's tokenize handle for `model`. Returns `None`
+    /// if the model isn't registered, or if no surviving WorkerSet has one.
+    pub fn get_tokenize_handle(
+        &self,
+        model: &str,
+    ) -> Option<Arc<crate::discovery::TokenizeHandle>> {
+        self.models.get(model).and_then(|m| m.get_tokenize_handle())
+    }
+
     pub fn get_embeddings_engine(
         &self,
         model: &str,

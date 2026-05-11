@@ -303,24 +303,37 @@ impl OpenAIPreprocessor {
         let formatter = PromptFormatter::from_mdc(&mdc)?;
         let tokenizer = mdc.tokenizer()?;
         match formatter {
-            PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
+            PromptFormatter::OAI(formatter) => {
+                Self::new_with_parts(mdc, formatter, tokenizer, None)
+            }
         }
     }
 
+    /// Build a preprocessor. When `model_info` is `Some`, the pre-loaded value
+    /// is used directly; when `None`, it is loaded from `mdc.model_info`. The
+    /// pre-loaded path lets the watcher load model_info once and share the
+    /// `Arc` with sibling consumers (e.g. `TokenizeHandle`) instead of each
+    /// preprocessor independently re-parsing `config.json`.
     pub fn new_with_parts(
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
+        model_info: Option<Arc<dyn ModelInfo>>,
     ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
         let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
-        let Some(ref model_info) = mdc.model_info else {
-            anyhow::bail!(
-                "Blank ModelDeploymentCard cannot be used for pre-processing, no model_info"
-            );
+        let model_info = match model_info {
+            Some(mi) => mi,
+            None => {
+                let Some(ref model_info) = mdc.model_info else {
+                    anyhow::bail!(
+                        "Blank ModelDeploymentCard cannot be used for pre-processing, no model_info"
+                    );
+                };
+                model_info.get_model_info()?
+            }
         };
-        let model_info = model_info.get_model_info()?;
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
 
         if let Some(ref lora_name) = lora_name {

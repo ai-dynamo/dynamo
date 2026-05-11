@@ -771,6 +771,43 @@ impl ModelWatcher {
                 None
             };
 
+            // Load the chat formatter and ModelInfo once and share their Arcs
+            // with the chat preprocessor, the completions preprocessor, and
+            // the TokenizeHandle. Without this, each consumer would re-parse
+            // tokenizer_config.json / config.json independently at WorkerSet
+            // construction.
+            let chat_formatter: Option<Arc<dyn crate::preprocessor::prompt::OAIPromptFormatter>> =
+                if needs_local_chat_pipeline && tokenizer.is_some() {
+                    let PromptFormatter::OAI(f) =
+                        PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
+                    Some(f)
+                } else {
+                    None
+                };
+            let model_info: Option<Arc<dyn crate::model_card::ModelInfo>> =
+                if tokenizer.is_some() {
+                    card.model_info
+                        .as_ref()
+                        .and_then(|m| m.get_model_info().ok())
+                } else {
+                    None
+                };
+
+            // Cache the inputs the /tokenize and /detokenize HTTP endpoints
+            // need. Held inside the WorkerSet so a single file-backed worker
+            // crashing doesn't take down /tokenize for sibling WorkerSets —
+            // they each have their own handle. Shares Arcs with the engine
+            // preprocessors so we don't re-parse the same files.
+            let tokenize_handle = tokenizer.as_ref().map(|tk| {
+                Arc::new(crate::discovery::TokenizeHandle::new(
+                    card.display_name.clone(),
+                    tk.clone(),
+                    chat_formatter.clone(),
+                    model_info.clone(),
+                    card.context_length,
+                ))
+            });
+
             // Create prefill chooser once if we're building pipelines
             // Both chat and completions will share the same prefill chooser instance
             let model_name = card.name().to_string();
@@ -821,6 +858,7 @@ impl ModelWatcher {
             worker_set.kv_router = kv_chooser.clone();
             worker_set.worker_monitor = worker_monitor.clone();
             worker_set.prefill_router = prefill_chooser.clone();
+            worker_set.tokenize_handle = tokenize_handle;
 
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
@@ -854,6 +892,8 @@ impl ModelWatcher {
                         worker_monitor.clone(),
                         kv_chooser.clone(),
                         tk,
+                        chat_formatter.clone(),
+                        model_info.clone(),
                         prefill_chooser.clone(),
                         router_config.enforce_disagg,
                         self.migration_limit,
@@ -873,9 +913,13 @@ impl ModelWatcher {
                 if let Some(tk) = tokenizer {
                     let formatter = PromptFormatter::no_op();
                     let PromptFormatter::OAI(formatter) = formatter;
-                    let preprocessor =
-                        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
-                            .context("OpenAIPreprocessor::new_with_parts")?;
+                    let preprocessor = OpenAIPreprocessor::new_with_parts(
+                        card.clone(),
+                        formatter,
+                        tk.clone(),
+                        model_info.clone(),
+                    )
+                    .context("OpenAIPreprocessor::new_with_parts")?;
                     let completions_engine = entrypoint::build_routed_pipeline_with_preprocessor::<
                         NvCreateCompletionRequest,
                         NvCreateCompletionResponse,

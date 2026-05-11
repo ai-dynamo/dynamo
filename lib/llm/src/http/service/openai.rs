@@ -541,6 +541,58 @@ fn render_tokenize_chat_tokens(
     Ok(token_ids)
 }
 
+/// Handle-backed counterpart to [`render_tokenize_chat_tokens`]. Uses the
+/// formatter, tokenizer, and model_info captured on the WorkerSet's
+/// `TokenizeHandle` so the call doesn't touch the MDC store or disk.
+fn render_tokenize_chat_tokens_from_handle(
+    handle: &crate::discovery::TokenizeHandle,
+    model: String,
+    request: &TokenizeChatRequest,
+) -> Result<Vec<u32>, ErrorResponse> {
+    request.validate().map_err(bad_request)?;
+
+    let formatter = handle.formatter.as_ref().ok_or_else(|| {
+        ErrorMessage::internal_server_error(
+            "Chat-tokenize requires a prompt formatter, but none is available for this model.",
+        )
+    })?;
+    let model_info = handle.model_info.as_ref().ok_or_else(|| {
+        ErrorMessage::internal_server_error(
+            "Tokenizer metadata is missing model_info for prefix reuse.",
+        )
+    })?;
+    let eos_token_ids = model_info.eos_token_ids();
+
+    let wrapped_request = make_tokenize_chat_completion_request(model, request);
+    let mut prompt = formatter
+        .render(&wrapped_request)
+        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to render chat prompt"))?;
+
+    if request.continue_final_message {
+        prompt = apply_continue_final_message(prompt, &request.messages)?;
+    }
+
+    let mut token_ids = handle
+        .tokenizer
+        .encode_with_special_tokens(&prompt, request.add_special_tokens)
+        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to tokenize rendered chat prompt"))?
+        .token_ids()
+        .to_vec();
+
+    token_ids = apply_required_prefix_token_ids_to_chat_request(
+        formatter.as_ref(),
+        handle.tokenizer.as_ref(),
+        &wrapped_request,
+        &token_ids,
+        eos_token_ids.as_slice(),
+        request.add_special_tokens,
+    )
+    .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to apply tokenize prefix reuse"))?
+    .unwrap_or(token_ids);
+
+    Ok(token_ids)
+}
+
 fn render_tokenize_chat_prompt(
     card: &ModelDeploymentCard,
     model: String,
@@ -2219,16 +2271,62 @@ struct ModelListing {
     max_output_tokens: Option<u64>,
 }
 
+/// Source of the tokenizer state for `/tokenize` and `/detokenize`. The
+/// `Handle` variant is preferred — it captures `tokenizer`, `formatter`, and
+/// `model_info` once at WorkerSet construction and survives file-backed
+/// worker crashes the same way the chat engine does. The `Card` variant
+/// falls back to the live MDC for models without a handle (and is also used
+/// for chat-tokenize when the request carries a `chat_template` override
+/// that the cached formatter can't honor).
+enum TokenizeSource {
+    Handle(Arc<crate::discovery::TokenizeHandle>),
+    Card(ModelDeploymentCard),
+}
+
+impl TokenizeSource {
+    fn tokenizer(&self) -> crate::tokenizers::Tokenizer {
+        match self {
+            Self::Handle(h) => h.tokenizer.clone(),
+            Self::Card(c) => c.tokenizer().expect("tokenizer load checked at resolve"),
+        }
+    }
+    fn context_length(&self) -> u32 {
+        match self {
+            Self::Handle(h) => h.context_length,
+            Self::Card(c) => c.context_length,
+        }
+    }
+    fn display_name(&self) -> &str {
+        match self {
+            Self::Handle(h) => &h.display_name,
+            Self::Card(c) => &c.display_name,
+        }
+    }
+}
+
+fn resolve_tokenize_source(
+    state: &Arc<service_v2::State>,
+    requested_model: Option<&str>,
+) -> Result<TokenizeSource, ErrorResponse> {
+    let model = resolve_tokenizer_model_name(state, requested_model)?;
+    if let Some(handle) = state.manager().get_tokenize_handle(&model) {
+        return Ok(TokenizeSource::Handle(handle));
+    }
+    let (_, card) = resolve_model_card(state, Some(&model))?;
+    // Probe the tokenizer load now so the resolve failure is reported with
+    // a clean error here instead of from the handler's own load attempt.
+    card.tokenizer()
+        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to load tokenizer"))?;
+    Ok(TokenizeSource::Card(card))
+}
+
 async fn tokenize(
     State(state): State<Arc<service_v2::State>>,
     Json(request): Json<TokenizeRequest>,
 ) -> Result<Response, ErrorResponse> {
     check_ready(&state)?;
-
-    let (_, card) = resolve_model_card(&state, request.model())?;
-    let tokenizer = card
-        .tokenizer()
-        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to load tokenizer"))?;
+    let source = resolve_tokenize_source(&state, request.model())?;
+    let tokenizer = source.tokenizer();
 
     let (tokens, token_strs) = match request {
         TokenizeRequest::Completion(TokenizeCompletionRequest {
@@ -2251,11 +2349,26 @@ async fn tokenize(
             (token_ids, token_strs)
         }
         TokenizeRequest::Chat(request) => {
-            let model = request
+            let model_req = request
                 .model
                 .clone()
-                .unwrap_or_else(|| card.display_name.clone());
-            let token_ids = render_tokenize_chat_tokens(&card, model, &request)?;
+                .unwrap_or_else(|| source.display_name().to_string());
+            // Cached handle works only when there's no chat_template override.
+            // For override requests, fall back to the card-based render so
+            // the override is honored (sensitive to file-backed worker churn
+            // for the override path only — same as today).
+            let token_ids = match &source {
+                TokenizeSource::Handle(handle) if request.chat_template.is_none() => {
+                    render_tokenize_chat_tokens_from_handle(handle, model_req, &request)?
+                }
+                TokenizeSource::Handle(_) => {
+                    let (_, card) = resolve_model_card(&state, request.model.as_deref())?;
+                    render_tokenize_chat_tokens(&card, model_req, &request)?
+                }
+                TokenizeSource::Card(card) => {
+                    render_tokenize_chat_tokens(card, model_req, &request)?
+                }
+            };
             let token_strs = if request.return_token_strs {
                 Some(tokenizer.convert_ids_to_tokens(&token_ids).map_err(|err| {
                     ErrorMessage::from_anyhow(err, "Failed to resolve token strings")
@@ -2269,7 +2382,7 @@ async fn tokenize(
 
     Ok(Json(TokenizeResponse {
         count: tokens.len(),
-        max_model_len: card.context_length,
+        max_model_len: source.context_length(),
         tokens,
         token_strs,
     })
@@ -2281,12 +2394,9 @@ async fn detokenize(
     Json(request): Json<DetokenizeRequest>,
 ) -> Result<Response, ErrorResponse> {
     check_ready(&state)?;
-
-    let (_, card) = resolve_model_card(&state, request.model.as_deref())?;
-    let tokenizer = card
+    let source = resolve_tokenize_source(&state, request.model.as_deref())?;
+    let prompt = source
         .tokenizer()
-        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to load tokenizer"))?;
-    let prompt = tokenizer
         .decode(&request.tokens, false)
         .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to detokenize prompt"))?;
 

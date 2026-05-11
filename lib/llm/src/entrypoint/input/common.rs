@@ -215,7 +215,7 @@ where
     let frontend = ServiceFrontend::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())?
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone(), None)?
             .into_operator();
     let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let engine = ServiceBackend::from_engine(engine);
@@ -238,6 +238,8 @@ pub async fn build_routed_pipeline<Req, Resp>(
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
     tokenizer: crate::tokenizers::Tokenizer,
+    formatter: Option<Arc<dyn crate::preprocessor::prompt::OAIPromptFormatter>>,
+    model_info: Option<Arc<dyn crate::model_card::ModelInfo>>,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
     migration_limit: u32,
@@ -254,10 +256,16 @@ where
             Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
         >,
 {
-    let PromptFormatter::OAI(formatter) =
-        PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
+    let formatter = match formatter {
+        Some(f) => f,
+        None => {
+            let PromptFormatter::OAI(formatter) =
+                PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
+            formatter
+        }
+    };
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone(), model_info)
             .context("OpenAIPreprocessor.new_with_parts")?;
     build_routed_pipeline_with_preprocessor(
         card,

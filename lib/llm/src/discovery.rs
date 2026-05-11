@@ -8,7 +8,7 @@ mod model_manager;
 pub use model_manager::{ModelManager, ModelManagerError};
 
 mod worker_set;
-pub use worker_set::WorkerSet;
+pub use worker_set::{TokenizeHandle, WorkerSet};
 
 pub(crate) mod runtime_configs;
 pub use runtime_configs::{RuntimeConfigWatch, runtime_config_watch};
