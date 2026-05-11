@@ -1143,6 +1143,9 @@ func (r *DynamoComponentDeploymentReconciler) getDCDWorkloadComponentType(
 	if workerHash == "" {
 		return componentType, nil
 	}
+	if labels[commonconsts.KubeLabelDynamoSubComponentType] != componentType {
+		return componentType, nil
+	}
 
 	parentDGD, ok, err := r.getParentDGD(ctx, dcd)
 	if err != nil {
@@ -1186,7 +1189,7 @@ func (r *DynamoComponentDeploymentReconciler) getParentDGD(
 }
 
 // dgdHasLegacyCompatibleWorkerHash reports whether workerHash is an old
-// v1alpha1 worker generation that is still explicitly aliased by the parent DGD.
+// v1alpha1 worker generation that is still recorded by the parent DGD.
 // This lets DCD rendering preserve legacy workload selectors without patching
 // existing DCDs to v2 labels in place.
 func dgdHasLegacyCompatibleWorkerHash(
@@ -1196,25 +1199,7 @@ func dgdHasLegacyCompatibleWorkerHash(
 	if dgd == nil || workerHash == "" || dgd.Annotations == nil {
 		return false
 	}
-
-	if dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashVersion] == commonconsts.CurrentWorkerHashVersionV2 {
-		// In migrated state the DGD's active hash is v2. The only old-hash DCDs
-		// that should keep legacy "worker" selectors are those explicitly named
-		// by current-worker-hash-equivalent-v1.
-		return dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashEquivalentV1] == workerHash
-	}
-
-	if dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash] != workerHash {
-		return false
-	}
-	if dynamo.GetPreservedLegacyAlphaDGDWorkersSpecHash(dgd) == workerHash {
-		// Pre-migration window: conversion preserved the old alpha hash but the
-		// DGD has not yet been updated to v2 bookkeeping. Honor the old DCD
-		// selector shape until migrateCurrentWorkerHashIfNeeded records the alias.
-		return true
-	}
-
-	return false
+	return dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash] == workerHash
 }
 
 // SetupWithManager sets up the controller with the Manager.

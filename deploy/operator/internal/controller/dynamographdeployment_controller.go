@@ -222,15 +222,15 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			}
 		}
 	} else {
-		if r.getCurrentWorkerHash(dynamoDeployment) == "" {
-			hash, err := nvidiacomv1beta1.ComputeDGDWorkersSpecHash(dynamoDeployment)
+		if r.currentWorkerHashes(dynamoDeployment).empty() {
+			hashes, err := r.desiredWorkerHashes(dynamoDeployment)
 			if err != nil {
 				logger.Error(err, "Failed to compute worker hash for unsupported pathway")
 				reason = reasonFailedToInitializeWorkerHash
 				message = Message(err.Error())
 				return ctrl.Result{}, err
 			}
-			r.setCurrentWorkerHash(dynamoDeployment, hash)
+			r.setCurrentWorkerHashes(dynamoDeployment, hashes)
 			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
 				logger.Error(updateErr, "Failed to initialize worker hash for unsupported pathway")
 				reason = reasonFailedToInitializeWorkerHash
@@ -256,7 +256,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 				"Worker spec changed but custom rolling updates are not supported for Grove/multinode deployments")
 
 			// Update the hash to prevent repeated warnings
-			hash, err := nvidiacomv1beta1.ComputeDGDWorkersSpecHash(dynamoDeployment)
+			hashes, err := r.desiredWorkerHashes(dynamoDeployment)
 			if err != nil {
 				logger.Error(err, "Failed to compute worker hash for unsupported pathway")
 				state = nvidiacomv1beta1.DGDStateFailed
@@ -264,7 +264,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 				message = Message(err.Error())
 				return ctrl.Result{}, err
 			}
-			r.setCurrentWorkerHash(dynamoDeployment, hash)
+			r.setCurrentWorkerHashes(dynamoDeployment, hashes)
 			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
 				logger.Error(updateErr, "Failed to update worker hash for unsupported pathway")
 			}
@@ -1103,8 +1103,26 @@ func (r *DynamoGraphDeploymentReconciler) computeRestartStatus(ctx context.Conte
 
 // checkComponentFullyUpdated checks if a DynamoComponentDeployment is fully updated.
 func (r *DynamoGraphDeploymentReconciler) checkComponentFullyUpdated(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, componentName string) (bool, string) {
-	resourceName := dynamo.GetDCDResourceName(dgd, componentName, r.getCurrentWorkerHash(dgd))
-	return checkDCDReady(ctx, r.Client, resourceName, dgd.Namespace)
+	if r.currentWorkerHashes(dgd).empty() {
+		resourceName := dynamo.GetDCDResourceName(dgd, componentName, "")
+		return checkDCDReady(ctx, r.Client, resourceName, dgd.Namespace)
+	}
+
+	hashes, err := r.desiredWorkerHashes(dgd)
+	if err != nil {
+		return false, err.Error()
+	}
+
+	var lastReason string
+	for _, hash := range r.activeWorkerHashCandidates(dgd, hashes) {
+		resourceName := dynamo.GetDCDResourceName(dgd, componentName, hash)
+		ready, reason := checkDCDReady(ctx, r.Client, resourceName, dgd.Namespace)
+		if ready || reason != "resource not found" {
+			return ready, reason
+		}
+		lastReason = reason
+	}
+	return false, lastReason
 }
 
 // checkDCDReady checks if a DynamoComponentDeployment has completed its restart.
@@ -1285,24 +1303,29 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDCD(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) (map[string]string, error) {
 	logger := log.FromContext(ctx)
 
-	computedHash, err := nvidiacomv1beta1.ComputeDGDWorkersSpecHash(dgd)
+	hashes, err := r.desiredWorkerHashes(dgd)
 	if err != nil {
-		return nil, fmt.Errorf("failed to compute worker hash: %w", err)
+		return nil, err
 	}
-	workerHash := r.activeWorkerHashForDCDGeneration(dgd, computedHash)
+	workerHashes := r.activeWorkerHashCandidates(dgd, hashes)
 
 	restartAnnotations := make(map[string]string)
 	for i := range dgd.Spec.Components {
 		componentName := dgd.Spec.Components[i].ComponentName
-		dcdName := dynamo.GetDCDResourceName(dgd, componentName, workerHash)
 		existingDCD := &nvidiacomv1beta1.DynamoComponentDeployment{}
-		err := r.Get(ctx, types.NamespacedName{Name: dcdName, Namespace: dgd.Namespace}, existingDCD)
+		for _, workerHash := range workerHashes {
+			dcdName := dynamo.GetDCDResourceName(dgd, componentName, workerHash)
+			err := r.Get(ctx, types.NamespacedName{Name: dcdName, Namespace: dgd.Namespace}, existingDCD)
 
-		if err != nil && !errors.IsNotFound(err) {
-			return nil, fmt.Errorf("failed to get DynamoComponentDeployment: %w", err)
-		}
-		if errors.IsNotFound(err) {
+			if err == nil {
+				break
+			}
+			if !errors.IsNotFound(err) {
+				return nil, fmt.Errorf("failed to get DynamoComponentDeployment: %w", err)
+			}
 			logger.Info("DynamoComponentDeployment not found", "dcdName", dcdName)
+		}
+		if existingDCD.Name == "" {
 			continue
 		}
 		if restartAt := dynamo.GetPodTemplateAnnotations(&existingDCD.Spec.DynamoComponentDeploymentSharedSpec)[consts.RestartAnnotation]; restartAt != "" {
