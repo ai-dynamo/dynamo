@@ -334,7 +334,7 @@ PYTHONPATH=lib/bindings/python/src python3 -m pytest \
 If all impls now agree on the cell, the harness flags the registry
 as stale:
 
-```
+```text
 FAILED ...test_parity[kimi_k2/PARSER.batch.8.b#vllm]
        XPASS-strict: known divergence (vllm,kimi_k2,PARSER.batch.8.b)
        now matches expected — remove from KNOWN_DIVERGENCES.
