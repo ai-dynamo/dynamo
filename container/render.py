@@ -78,8 +78,9 @@ def parse_args():
     parser.add_argument(
         "--cuda-version",
         type=str,
-        default="",
-        help="CUDA version to use. [12.9 or 13.0 for vllm and sglang, 13.1 for trtllm]. Not required for non-cuda devices.",
+        default="12.9",
+        choices=["12.9", "13.0", "13.1"],
+        help="CUDA version to use. [12.9 or 13.0 for vllm and sglang, 13.1 for trtllm].  Not required for non-cuda devices.",
     )
     parser.add_argument("--make-efa", action="store_true", help="Enable AWS EFA")
     parser.add_argument(
@@ -134,7 +135,7 @@ def validate_args(args):
             "cuda_version": ["12.9", "13.0"],
         },
         "dynamo": {
-            "device": ["cuda", "cpu"],
+            "device": ["cuda"],
             "target": [
                 "runtime",
                 "dev",
