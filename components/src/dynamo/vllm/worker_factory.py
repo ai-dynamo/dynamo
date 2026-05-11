@@ -241,10 +241,17 @@ class WorkerFactory:
         clear_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.clear_kv_blocks"
         )
+        # RL admin endpoint: discoverable as <ns>.<component>.rl on the request
+        # plane (NATS / TCP). The frontend fans out POST /v1/rl/engine payloads
+        # here via strict request-plane direct routing.
+        rl_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.rl"
+        )
 
         shutdown_endpoints[:] = [
             generate_endpoint,
             clear_endpoint,
+            rl_endpoint,
         ]
 
         lora_enabled = config.engine_args.enable_lora
@@ -444,6 +451,11 @@ class WorkerFactory:
                     handler.get_perf_metrics,
                     metrics_labels=model_metrics_labels,
                 ),
+                # RL admin: receive {method, kwargs} fan-out payloads from the frontend
+                rl_endpoint.serve_endpoint(
+                    handler.rl_dispatch,
+                    metrics_labels=model_metrics_labels,
+                ),
             ]
 
             if lora_enabled:
@@ -490,6 +502,9 @@ class WorkerFactory:
         )
         clear_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.clear_kv_blocks"
+        )
+        rl_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.rl"
         )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
@@ -594,7 +609,7 @@ class WorkerFactory:
         perf_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.get_perf_metrics"
         )
-        shutdown_endpoints[:] = [generate_endpoint, clear_endpoint, perf_endpoint]
+        shutdown_endpoints[:] = [generate_endpoint, clear_endpoint, rl_endpoint, perf_endpoint]
 
         # Register prefill model with ModelType.Prefill
         model_input = (
@@ -641,6 +656,10 @@ class WorkerFactory:
                     handler.get_perf_metrics,
                     metrics_labels=prefill_metrics_labels,
                 ),
+                rl_endpoint.serve_endpoint(
+                    handler.rl_dispatch,
+                    metrics_labels=prefill_metrics_labels,
+                ),
             )
             logger.debug("serve_endpoint completed for prefill worker")
         except Exception as e:
@@ -670,48 +689,51 @@ class WorkerFactory:
     ) -> None:
         """Register all engine routes for this handler.
 
-        Includes both the existing system routes (sleep, wake_up, etc.) and the
-        RL admin routes reachable via POST /v1/rl/engine {"method": "<name>"}.
+        Two registration paths:
+        1. System status server (/engine/<name>): via runtime.register_engine_route.
+           Used for direct management calls (profiling, sleep/wake).
+        2. Request-plane rl endpoint (dyn://<ns>.<comp>.rl): handler._rl_routes dict.
+           Used by the frontend fan-out via POST /v1/rl/engine.
 
         Args:
             runtime: The DistributedRuntime instance to register routes on.
         """
-        # System / operational routes
+        # System / operational routes (system status server only)
         runtime.register_engine_route("start_profile", handler.start_profile)
         runtime.register_engine_route("stop_profile", handler.stop_profile)
         runtime.register_engine_route("sleep", handler.sleep)
         runtime.register_engine_route("wake_up", handler.wake_up)
         runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
 
-        # RL admin routes (control plane)
-        runtime.register_engine_route("liveness_probe", handler.liveness_probe)
-        runtime.register_engine_route("pause_generation", handler.pause_generation)
-        runtime.register_engine_route("resume_generation", handler.resume_generation)
-        runtime.register_engine_route("flush_cache", handler.flush_cache)
-        runtime.register_engine_route("abort_request", handler.abort_request)
+        # RL admin routes — registered in both paths.
+        # handler._rl_routes is used by rl_dispatch (request plane).
+        # runtime.register_engine_route also registers on the system status server
+        # for direct management / testing convenience.
+        rl_routes: dict = {
+            # Control plane
+            "liveness_probe":              handler.liveness_probe,
+            "pause_generation":            handler.pause_generation,
+            "resume_generation":           handler.resume_generation,
+            "flush_cache":                 handler.flush_cache,
+            "abort_request":               handler.abort_request,
+            # Weight management
+            "update_weights_from_disk":        handler.update_weights_from_disk,
+            "update_weights_from_distributed": handler.update_weights_from_distributed,
+            "update_weights_from_tensor":      handler.update_weights_from_tensor,
+            "init_weights_update_group":       handler.init_weights_update_group,
+            "destroy_weights_update_group":    handler.destroy_weights_update_group,
+            "get_weight_version":              handler.get_weight_version,
+            # LoRA
+            "load_lora_adapter":           handler.load_lora_adapter,
+            "unload_lora_adapter":         handler.unload_lora_adapter,
+        }
 
-        # RL admin routes (weight management)
-        runtime.register_engine_route("update_weights_from_disk", handler.update_weights_from_disk)
-        runtime.register_engine_route("update_weights_from_distributed", handler.update_weights_from_distributed)
-        runtime.register_engine_route("update_weights_from_tensor", handler.update_weights_from_tensor)
-        runtime.register_engine_route("init_weights_update_group", handler.init_weights_update_group)
-        runtime.register_engine_route("destroy_weights_update_group", handler.destroy_weights_update_group)
-        runtime.register_engine_route("get_weight_version", handler.get_weight_version)
+        for name, fn in rl_routes.items():
+            handler._rl_routes[name] = fn
+            runtime.register_engine_route(name, fn)
 
-        # RL admin routes (LoRA)
-        runtime.register_engine_route("load_lora_adapter", handler.load_lora_adapter)
-        runtime.register_engine_route("unload_lora_adapter", handler.unload_lora_adapter)
-
-        rl_routes = [
-            "liveness_probe", "pause_generation", "resume_generation",
-            "flush_cache", "abort_request",
-            "update_weights_from_disk", "update_weights_from_distributed",
-            "update_weights_from_tensor", "init_weights_update_group",
-            "destroy_weights_update_group", "get_weight_version",
-            "load_lora_adapter", "unload_lora_adapter",
-        ]
         logger.info(
             "Registered engine routes: sleep, wake_up, scale_elastic_ep, "
             "start_profile, stop_profile, and RL admin routes: %s",
-            ", ".join(rl_routes),
+            ", ".join(sorted(rl_routes)),
         )

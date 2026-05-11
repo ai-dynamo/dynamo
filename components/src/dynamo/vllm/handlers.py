@@ -679,6 +679,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # RL state
         self._paused: bool = False
         self._weight_version: str = "initial"
+        # Maps method name → async callable for the request-plane rl_dispatch endpoint.
+        # Populated by register_engine_routes() in worker_factory.py.
+        self._rl_routes: dict[str, Any] = {}
 
     def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
         """Handle EngineDeadError from RL admin handlers.
@@ -947,6 +950,61 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         except Exception as e:
             logger.error(f"Failed to stop profiling: {e}")
             return {"status": "error", "message": str(e)}
+
+    # -------------------------------------------------------------------------
+    # RL admin — request-plane dispatcher (served on dyn://<ns>.<comp>.rl)
+    # -------------------------------------------------------------------------
+
+    async def rl_dispatch(self, request=None):
+        """Request-plane dispatcher for the worker's ``rl`` endpoint.
+
+        The Dynamo frontend discovers live ``rl`` endpoint instances via the
+        discovery plane and fans out ``{method, kwargs}`` payloads here via
+        strict request-plane direct routing (NATS / TCP).
+
+        Wire shape (inbound): ``{"method": str, "kwargs": dict}``
+
+        Special method names:
+          ``__describe__``  Returns ``{"registered_methods": [...]}`` so the
+                            frontend's ``GET /v1/rl/engine`` can list what each
+                            worker supports.
+        """
+        if request is None:
+            yield {"status": "error", "message": "rl_dispatch: request required"}
+            return
+
+        method = request.get("method")
+        kwargs = request.get("kwargs") or {}
+
+        if not isinstance(method, str) or not method:
+            yield {"status": "error", "message": "rl_dispatch: missing 'method' (str)"}
+            return
+
+        # Describe — list registered methods (no handler lookup needed)
+        if method == "__describe__":
+            yield {
+                "status": "ok",
+                "registered_methods": sorted(self._rl_routes),
+            }
+            return
+
+        handler_fn = self._rl_routes.get(method)
+        if handler_fn is None:
+            yield {
+                "status": "error",
+                "message": (
+                    f"rl_dispatch: unknown method {method!r}; "
+                    f"registered: {sorted(self._rl_routes)}"
+                ),
+            }
+            return
+
+        try:
+            result = await handler_fn(kwargs)
+            yield result if result is not None else {"status": "ok"}
+        except Exception as e:
+            logger.exception(f"[RL] rl_dispatch method={method!r} failed: {e}")
+            yield {"status": "error", "method": method, "message": str(e)}
 
     # -------------------------------------------------------------------------
     # RL admin routes
