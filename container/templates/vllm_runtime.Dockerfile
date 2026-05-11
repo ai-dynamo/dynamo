@@ -114,19 +114,16 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
     fi
 
-{% if device != "cuda" %}
-# CPU/XPU: Use virtual environment (not system Python)
-# Upgrade NIXL meta package and all device variants to match our built version.
 # The nixl meta package imports device-specific packages, so all must be at the same version.
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eu; \
-    export UV_CACHE_DIR=/home/dynamo/.cache/uv; \
+    export UV_CACHE_DIR=/root/.cache/uv; \
     NIXL_VERSION="${NIXL_REF#v}"; \
-    uv pip install --force-reinstall --no-deps \
+    uv pip install \
+        {{ pip_target }} --force-reinstall --no-deps \
         "nixl==${NIXL_VERSION}" \
         "nixl-cu12==${NIXL_VERSION}" \
         "nixl-cu13==${NIXL_VERSION}"
-{% endif %}
 
 {% if device == "cuda" %}
 # vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
