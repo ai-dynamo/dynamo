@@ -982,6 +982,13 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 	logger := log.FromContext(ctx)
 
 	specID := dgd.Spec.Restart.ID
+	if len(order) == 0 {
+		logger.Info("Sequential restart completed with no components", "specID", specID)
+		return &nvidiacomv1beta1.RestartStatus{
+			ObservedID: specID,
+			Phase:      nvidiacomv1beta1.RestartPhaseCompleted,
+		}
+	}
 
 	// Get the current component being restarted from previous status.
 	var currentComponent string

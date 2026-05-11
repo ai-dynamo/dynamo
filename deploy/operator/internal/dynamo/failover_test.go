@@ -215,22 +215,27 @@ func TestAugmentEngineForGMS_EmptyContainers(t *testing.T) {
 }
 
 func TestRemoveGPUFromLimits(t *testing.T) {
+	migResource := corev1.ResourceName("nvidia.com/mig-3g.20gb")
 	c := &corev1.Container{
 		Resources: corev1.ResourceRequirements{
 			Limits: corev1.ResourceList{
 				"nvidia.com/gpu":      k8sresource.MustParse("8"),
+				migResource:           k8sresource.MustParse("1"),
 				corev1.ResourceMemory: k8sresource.MustParse("64Gi"),
 			},
 			Requests: corev1.ResourceList{
 				"nvidia.com/gpu": k8sresource.MustParse("8"),
+				migResource:      k8sresource.MustParse("1"),
 			},
 		},
 	}
 
 	removeGPUFromLimits(c)
 	assert.NotContains(t, c.Resources.Limits, corev1.ResourceName("nvidia.com/gpu"))
+	assert.NotContains(t, c.Resources.Limits, migResource)
 	assert.Contains(t, c.Resources.Limits, corev1.ResourceMemory)
 	assert.NotContains(t, c.Resources.Requests, corev1.ResourceName("nvidia.com/gpu"))
+	assert.NotContains(t, c.Resources.Requests, migResource)
 }
 
 func TestAddGPUToleration_Idempotent(t *testing.T) {
