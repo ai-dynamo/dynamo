@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +15,7 @@ try:
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
     from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.vllm.omni import utils as omni_utils
     from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
     from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
     from dynamo.vllm.omni.utils import build_original_prompt, parse_omni_request
@@ -265,6 +267,248 @@ class TestBuildOriginalPrompt:
 class TestParseOmniRequest:
     """parse_omni_request: original_prompt only has prompt/negative_prompt,
     geometry goes into sampling_params_list dict."""
+
+    @pytest.mark.asyncio
+    async def test_chat_uses_renderer_and_preserves_runtime_metadata(self):
+        class FakeRenderer:
+            tokenizer = None
+
+            def get_tokenizer(self):
+                return self.tokenizer
+
+            async def render_chat_async(
+                self, conversations, chat_params, tok_params, *, prompt_extras=None
+            ):
+                assert conversations[0][0]["content"][0]["text"] == "say hello"
+                assert tok_params.max_total_tokens == 1024
+                return (["conversation"],), (
+                    {
+                        "prompt_token_ids": [151644, 872, 198, 151645],
+                        "multi_modal_data": {"audio": object()},
+                    },
+                )
+
+        request = {
+            "model": "qwen3-omni",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "say hello"}],
+                }
+            ],
+            "modalities": ["text", "audio"],
+            "max_tokens": 64,
+            "speaker": "Chelsie",
+            "language": "English",
+        }
+
+        result = await parse_omni_request(
+            request,
+            ["text", "audio"],
+            renderer=FakeRenderer(),
+            model_config=SimpleNamespace(max_model_len=1024),
+        )
+
+        assert result["engine_inputs"]["prompt_token_ids"] == [
+            151644,
+            872,
+            198,
+            151645,
+        ]
+        assert result["engine_inputs"]["additional_information"] == {
+            "speaker": ["chelsie"],
+            "language": ["English"],
+        }
+        assert result["original_prompt"] == {
+            "prompt_token_ids": [151644, 872, 198, 151645],
+            "additional_information": {
+                "speaker": ["chelsie"],
+                "language": ["English"],
+            },
+        }
+        assert result["sampling_params_list"] == {
+            "__stage_overrides__": {"0": {"max_tokens": 64}}
+        }
+
+    @pytest.mark.asyncio
+    async def test_chat_without_renderer_fails_fast(self):
+        request = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "first"},
+                        {"type": "text", "text": "second"},
+                    ],
+                }
+            ],
+        }
+
+        with pytest.raises(ValueError, match="without a vLLM renderer"):
+            await parse_omni_request(request, ["text"])
+
+    @pytest.mark.asyncio
+    async def test_chat_sampling_params_are_stage_scoped_to_comprehension(self):
+        class FakeRenderer:
+            tokenizer = None
+
+            def get_tokenizer(self):
+                return self.tokenizer
+
+            async def render_chat_async(self, *args, **kwargs):
+                return (["conversation"],), ({"prompt": "rendered"},)
+
+        request = {
+            "messages": [{"role": "user", "content": "say more than one word"}],
+            "max_tokens": 32,
+            "min_tokens": 8,
+            "temperature": 0.2,
+        }
+
+        result = await parse_omni_request(
+            request,
+            ["text"],
+            renderer=FakeRenderer(),
+            model_config=SimpleNamespace(max_model_len=1024),
+        )
+
+        assert result["sampling_params_list"] == {
+            "__stage_overrides__": {
+                "0": {"max_tokens": 32, "min_tokens": 8, "temperature": 0.2}
+            }
+        }
+
+    @pytest.mark.asyncio
+    async def test_chat_sampling_params_use_vllm_openai_conversion(self):
+        class FakeRenderer:
+            tokenizer = None
+
+            def get_tokenizer(self):
+                return self.tokenizer
+
+            async def render_chat_async(self, *args, **kwargs):
+                return (["conversation"],), ({"prompt": "rendered"},)
+
+        request = {
+            "messages": [{"role": "user", "content": "say more"}],
+            "logprobs": True,
+            "top_logprobs": 3,
+        }
+
+        result = await parse_omni_request(
+            request,
+            ["text"],
+            renderer=FakeRenderer(),
+            model_config=SimpleNamespace(max_model_len=1024),
+        )
+
+        assert result["sampling_params_list"] == {
+            "__stage_overrides__": {"0": {"logprobs": 3}}
+        }
+
+    @pytest.mark.asyncio
+    async def test_chat_strips_frontend_null_optional_multimodal_fields(self):
+        class FakeRenderer:
+            tokenizer = None
+
+            def get_tokenizer(self):
+                return self.tokenizer
+
+            async def render_chat_async(
+                self, conversations, chat_params, tok_params, *, prompt_extras=None
+            ):
+                image_url = conversations[0][0]["content"][0]["image_url"]
+                assert image_url == {"url": "https://example.com/image.jpg"}
+                return (["conversation"],), ({"prompt": "rendered"},)
+
+        request = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "https://example.com/image.jpg",
+                                "detail": None,
+                            },
+                        },
+                        {"type": "text", "text": "describe"},
+                    ],
+                }
+            ],
+        }
+
+        result = await parse_omni_request(
+            request,
+            ["text"],
+            renderer=FakeRenderer(),
+            model_config=SimpleNamespace(max_model_len=1024),
+        )
+
+        assert result["engine_inputs"]["prompt"] == "rendered"
+
+    @pytest.mark.asyncio
+    async def test_multimodal_chat_renderer_failure_is_returned_as_error(self):
+        class BrokenRenderer:
+            async def render_chat_async(self, *args, **kwargs):
+                raise RuntimeError("missing media")
+
+        request = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe"},
+                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav"}},
+                    ],
+                }
+            ],
+        }
+
+        with pytest.raises(ValueError, match="Failed to render chat"):
+            await parse_omni_request(
+                request,
+                ["text", "audio"],
+                renderer=BrokenRenderer(),
+                model_config=SimpleNamespace(max_model_len=1024),
+            )
+
+    @pytest.mark.asyncio
+    async def test_multimodal_chat_without_renderer_fails_fast(self):
+        request = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe"},
+                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav"}},
+                    ],
+                }
+            ],
+        }
+
+        with pytest.raises(ValueError, match="without a vLLM renderer"):
+            await parse_omni_request(request, ["text", "audio"])
+
+    def test_load_omni_stage_configs_uses_resolved_deploy_loader(self):
+        resolved_stage_configs = [SimpleNamespace(stage_id=0)]
+        with patch.object(
+            omni_utils,
+            "load_and_resolve_stage_configs",
+            return_value=(None, resolved_stage_configs),
+        ) as loader:
+            result = omni_utils.load_omni_stage_configs(
+                "test-model", "/tmp/stages.yaml"
+            )
+
+        assert result == resolved_stage_configs
+        loader.assert_called_once_with(
+            "test-model",
+            "/tmp/stages.yaml",
+            {},
+            default_stage_cfg_factory=None,
+        )
 
     @pytest.mark.asyncio
     async def test_image_sampling_params_has_geometry(self):
