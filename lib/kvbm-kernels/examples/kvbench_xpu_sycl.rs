@@ -23,7 +23,8 @@
 //! - **H2D** -- Host-to-device (upload) via PCIe.
 //! - **D2H** -- Device-to-host (download) via PCIe.
 //! - **D2Dx** -- Cross-device device-to-device (src on `--device`,
-//!   dst on `--dst-device`).  Only `memcpy` backend is supported.
+//!   dst on `--dst-device`). Only `memcpy` backend is supported.
+//!   A `zeDeviceCanAccessPeer` probe is logged at startup.
 //!
 //! # Transfer patterns
 //!
@@ -48,7 +49,7 @@
 //! | **H2D**   | memcpy       | OK       | OK       | OK       | pinned, system | system uses staging internally |
 //! | **D2H**   | vectorized   | OK       | OK       | OK       | pinned     | kernel dereferences USM host ptrs  |
 //! | **D2H**   | memcpy       | OK       | OK       | OK       | pinned, system | system uses staging internally |
-//! | **D2Dx**  | memcpy       | OK       | OK       | OK       | n/a        | cross-device via PCIe          |
+//! | **D2Dx**  | memcpy       | OK       | OK       | OK       | n/a        | cross-device, direct P2P or host-staged |
 //!
 //! **vectorized + system heap**: Skipped. The GPU kernel dereferences raw
 //! pointers — system `Vec<u8>` memory is not USM and cannot be accessed
@@ -131,7 +132,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use clap::Parser;
-use oneapi_rs::sycl::SyclQueue;
+use oneapi_rs::sycl::{SyclContext, SyclDevice, SyclQueue};
 
 use kvbm_kernels::sycl_vectorized_copy;
 
@@ -791,12 +792,9 @@ fn main() {
     }
     eprintln!("  Selected device: {}", cli.device);
 
-    let queue = Arc::new(SyclQueue::new_for_device_ordinal(cli.device)
-        .expect("Failed to create SYCL queue"));
-
     // -- Cross-device D2D setup -----------------------------------------------
     let has_d2dx = cli.direction.iter().any(|s| s == "d2dx" || s == "cross");
-    let dst_queue = if has_d2dx {
+    let (queue, dst_queue) = if has_d2dx {
         if device_count < 2 {
             eprintln!("ERROR: Cross-device D2D (d2dx) requires at least 2 devices.");
             std::process::exit(1);
@@ -815,13 +813,54 @@ fn main() {
             );
         }
         eprintln!("  Destination device: {}", cli.dst_device);
-        Arc::new(
-            SyclQueue::new_for_device_ordinal(cli.dst_device)
-                .expect("Failed to create destination SYCL queue"),
-        )
+
+        let src_dev = SyclDevice::by_ordinal(cli.device)
+            .expect("Failed to get source SYCL device");
+        let dst_dev = SyclDevice::by_ordinal(cli.dst_device)
+            .expect("Failed to get destination SYCL device");
+
+        // Probe direct P2P capability. Informational only — a negative or
+        // "unknown" result does not block the run.
+        match src_dev.can_access_peer(&dst_dev) {
+            Ok(true) => {
+                eprintln!(
+                    "  Direct P2P: src={} → dst={} supported (zeDeviceCanAccessPeer=1)",
+                    cli.device, cli.dst_device
+                );
+                // Probe the reverse direction too for completeness.
+                match dst_dev.can_access_peer(&src_dev) {
+                    Ok(true) => {}
+                    Ok(false) => eprintln!(
+                        "  Direct P2P: dst={} → src={} NOT supported (asymmetric)",
+                        cli.dst_device, cli.device
+                    ),
+                    Err(e) => eprintln!(
+                        "  Direct P2P: dst={} → src={} probe error: {}",
+                        cli.dst_device, cli.device, e
+                    ),
+                }
+            }
+            Ok(false) => eprintln!(
+                "  Direct P2P: NOT supported (zeDeviceCanAccessPeer=0).",
+            ),
+            Err(e) => eprintln!(
+                "  Direct P2P: probe unavailable ({e}).",
+            ),
+        }
+
+        let shared_ctx = SyclContext::new_multi(&[Arc::clone(&src_dev), Arc::clone(&dst_dev)])
+            .expect("Failed to create shared multi-device SyclContext");
+
+        let q_src = SyclQueue::new_on_device(&shared_ctx, &src_dev)
+            .expect("Failed to create source SYCL queue on shared context");
+        let q_dst = SyclQueue::new_on_device(&shared_ctx, &dst_dev)
+            .expect("Failed to create destination SYCL queue on shared context");
+
+        (q_src, q_dst)
     } else {
-        // Placeholder -- unused when d2dx is not requested.
-        Arc::clone(&queue)
+        let q = SyclQueue::new_for_device_ordinal(cli.device)
+            .expect("Failed to create SYCL queue");
+        (Arc::clone(&q), q)
     };
     eprintln!();
 
