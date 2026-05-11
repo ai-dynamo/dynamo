@@ -182,6 +182,156 @@ def _component_key(c: dict) -> tuple[str, str]:
     return (c.get("name") or "", c.get("version") or "")
 
 
+import re as _re
+
+# Canonicalization map for the prose-form license names syft emits in the
+# CycloneDX `{"license": {"name": "..."}}` shape. Without this, every
+# variant of "Apache 2.0 License" / "BSD License" / "MIT-License" turns
+# into a different LicenseRef-* string and the policy gate explodes.
+#
+# Keys are normalized to: lowercased, hyphens-to-spaces, whitespace
+# collapsed. Both "NVIDIA-Proprietary-Software" and "nvidia proprietary
+# software" normalize to "nvidia proprietary software".
+_CANONICAL_NAME_MAP: dict[str, str] = {
+    # Apache family
+    "apache": "Apache-2.0",
+    "apache 2": "Apache-2.0",
+    "apache 2.0": "Apache-2.0",
+    "apache software": "Apache-2.0",
+    "apache 2.0 with llvm exceptions": "Apache-2.0 WITH LLVM-exception",
+    "apache 2 with llvm exceptions": "Apache-2.0 WITH LLVM-exception",
+    "apache 2 llvm exceptions": "Apache-2.0 WITH LLVM-exception",
+    # BSD family
+    "bsd": "BSD-3-Clause",
+    "bsd 2 clause": "BSD-2-Clause",
+    "bsd 3 clause": "BSD-3-Clause",
+    "3 clause bsd": "BSD-3-Clause",
+    "modified bsd": "BSD-3-Clause",
+    "new bsd": "BSD-3-Clause",
+    "revised bsd": "BSD-3-Clause",
+    "bsd2": "BSD-2-Clause",
+    "bsd3": "BSD-3-Clause",
+    # MIT / Expat
+    "mit": "MIT",
+    "expat": "MIT",  # Expat IS MIT (FSF naming)
+    # ISC
+    "isc": "ISC",
+    # LGPL family — denied by policy, but canonicalize so the policy
+    # message says "denied: LGPL-3.0-or-later" rather than "unknown ref".
+    "lgpl": "LGPL-3.0-or-later",
+    "lgpl v3": "LGPL-3.0-or-later",
+    "lgplv3": "LGPL-3.0-or-later",
+    "lgpl 3": "LGPL-3.0-or-later",
+    "lgpl 2.1": "LGPL-2.1-or-later",
+    "gnu lgpl": "LGPL-3.0-or-later",
+    # GPL family — same logic
+    "gpl": "GPL-3.0-or-later",
+    "gnu gpl": "GPL-3.0-or-later",
+    "gpl v3": "GPL-3.0-or-later",
+    "gpl v2": "GPL-2.0-or-later",
+    "gplv3": "GPL-3.0-or-later",
+    "gplv2": "GPL-2.0-or-later",
+    # More Apache prose variants
+    "apache license": "Apache-2.0",
+    "apache license 2.0": "Apache-2.0",
+    "apache license version 2.0": "Apache-2.0",
+    "apache license, version 2.0": "Apache-2.0",
+    # PSF
+    "python": "PSF-2.0",
+    "python software foundation": "PSF-2.0",
+    "psf": "PSF-2.0",
+    # CC0 / Public domain
+    "cc0": "CC0-1.0",
+    "cc0 1.0": "CC0-1.0",
+    "public domain": "LicenseRef-public-domain",
+    # NVIDIA variants
+    "nvidia proprietary": "LicenseRef-NVIDIA-Proprietary",
+    "nvidia proprietary software": "LicenseRef-NVIDIA-Proprietary",
+    # Misc
+    "zlib": "Zlib",
+    "boost": "BSL-1.0",
+    "boost software": "BSL-1.0",
+    "mpl 2.0": "MPL-2.0",
+    "mozilla public 2.0": "MPL-2.0",
+    "unicode": "Unicode-3.0",
+    "unicode 3.0": "Unicode-3.0",
+    "artistic": "Artistic-2.0",
+}
+
+# Tokens syft emits from copyright-file paragraph headers that aren't
+# actually license names — they're prose words ("Permission is hereby
+# granted...", "Redistribution and use...", "By submitting...") that
+# happen to follow a "License:" pseudo-header. Dropping them silently
+# matches what a careful auditor would do: these aren't licenses.
+_NON_LICENSE_TOKENS: frozenset[str] = frozenset({
+    "by", "permission", "redistribution", "this", "the", "see", "for",
+    "unknown", "various", "free", "other", "dual",
+})
+
+# Some syft outputs use sha256:HEX content fingerprints as license "names"
+# when it couldn't identify the license but wants a stable tag. These are
+# not licenses at all — drop them.
+_CONTENT_HASH_RE = _re.compile(r"^sha\d+:[0-9a-f]{16,}$", _re.IGNORECASE)
+
+
+def _canonicalize_license_name(name: str) -> str | None:
+    """Map a syft `license.name` string to canonical SPDX, or None to drop.
+
+    Returns:
+      - A canonical SPDX expression for recognized prose ("MIT License").
+      - None for tokens that aren't license names at all (parser artifacts,
+        content-hash fingerprints).
+      - A LicenseRef-<sanitized> identifier for genuinely unknown licenses
+        we should surface for human review rather than silently drop.
+    """
+    s = name.strip()
+    if not s:
+        return None
+
+    # Drop sha256:HEX-style content-hash entries syft emits when it can't
+    # name the license. Also drop bare "sha256" / "sha1" / etc.
+    if _CONTENT_HASH_RE.match(s) or s.lower().startswith(("sha256", "sha1:", "md5:")):
+        return None
+
+    # Strip a trailing " License" / "-License" suffix so "Apache 2.0 License"
+    # and "Apache 2.0" both hit the same map entry.
+    base = s
+    for suffix in (" License", "-License", " license", "-license"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)].rstrip(" -")
+            break
+
+    # Normalize for key lookup: lowercase, hyphens-to-spaces, collapse
+    # whitespace, drop punctuation that breaks SPDX parsing.
+    key = base.lower().replace("-", " ")
+    for ch in ",()/":
+        key = key.replace(ch, " ")
+    key = " ".join(key.split())
+    if key in _NON_LICENSE_TOKENS:
+        return None
+    if key in _CANONICAL_NAME_MAP:
+        return _CANONICAL_NAME_MAP[key]
+
+    # Expat-<anything> → MIT. Expat IS MIT (FSF naming); the suffixes
+    # we see in the wild ("Expat-Intel", "Expat-NVIDIA", "Expat-RedHat",
+    # "Expat-(MIT/X11)") are vendor copyright tags on permissive MIT
+    # text. All map to plain MIT for policy purposes.
+    if key.startswith("expat ") or key == "expat":
+        return "MIT"
+
+    # Last resort: surface as LicenseRef-<sanitized name>. Sanitization
+    # strips characters that break SPDX parsers (colons, commas, parens,
+    # slashes) and collapses runs of hyphens. Use the post-suffix-strip
+    # form so "Apache-2.0 License" and "Apache-2.0" converge.
+    sanitized = base.replace(" ", "-")
+    for ch in ":,()/":
+        sanitized = sanitized.replace(ch, "-")
+    sanitized = _re.sub(r"-+", "-", sanitized).strip("-")
+    if not sanitized:
+        return None
+    return f"LicenseRef-{sanitized}"
+
+
 def _extract_spdx(component: dict) -> str:
     """Render the component's license[] array to a single SPDX-ish expression."""
     raw = component.get("licenses") or []
@@ -200,7 +350,9 @@ def _extract_spdx(component: dict) -> str:
             if "id" in inner:
                 parts.append(inner["id"])
             elif "name" in inner:
-                parts.append(f"LicenseRef-{inner['name'].replace(' ', '-')}")
+                canonical = _canonicalize_license_name(inner["name"])
+                if canonical is not None:
+                    parts.append(canonical)
     if not parts:
         return "UNKNOWN"
     if len(parts) == 1:
