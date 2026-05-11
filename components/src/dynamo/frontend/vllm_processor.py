@@ -6,8 +6,6 @@
 #
 
 import asyncio
-import hashlib
-import json
 import logging
 import os
 import time
@@ -55,22 +53,6 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
-DEBUG_FRONTEND = os.getenv("DYN_FRONTEND_DEBUG", "0") == "1"
-DEBUG_LONG_WAIT_MS = int(os.getenv("DYN_FRONTEND_DEBUG_LONG_WAIT_MS", "120000"))
-DEBUG_MAX_TEXT = int(os.getenv("DYN_FRONTEND_DEBUG_MAX_TEXT", "240"))
-
-
-def _short_text(value: Any, limit: int = DEBUG_MAX_TEXT) -> str:
-    text = str(value)
-    if len(text) <= limit:
-        return text
-    return f"{text[:limit]}...<trimmed:{len(text) - limit}>"
-
-
-def _hash_request_messages(messages: list[dict[str, Any]]) -> str:
-    return hashlib.sha256(
-        json.dumps(messages, sort_keys=True, default=str).encode("utf-8", "ignore")
-    ).hexdigest()[:16]
 
 
 _FINISH_REASON_MAP: dict[str, FinishReason] = {
@@ -97,50 +79,6 @@ def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
     if mapped is None:
         logger.warning("Unknown finish_reason from router: %s", raw_reason)
     return mapped
-
-
-def _build_reasoning_parser_metadata(
-    reasoning_parser_class: type[ReasoningParser] | None,
-    tokenizer: TokenizerLike,
-    chat_template_kwargs: dict[str, Any],
-    request_for_sampling: Any,
-    prompt_token_ids: list[int],
-) -> tuple[bool | None, dict[str, Any] | None]:
-    if reasoning_parser_class is None:
-        return None, None
-
-    parser_kwargs = {"chat_template_kwargs": chat_template_kwargs}
-    if not getattr(request_for_sampling, "include_reasoning", True):
-        return True, parser_kwargs
-    if getattr(request_for_sampling, "_grammar_from_tool_parser", False):
-        return True, parser_kwargs
-
-    reasoning_parser = reasoning_parser_class(
-        tokenizer,
-        chat_template_kwargs=chat_template_kwargs,
-    )
-    return reasoning_parser.is_reasoning_end(prompt_token_ids), parser_kwargs
-
-
-def _copy_reasoning_metadata_to_extra_args(
-    dynamo_preproc: dict[str, Any], kv_kwargs: dict[str, Any]
-) -> None:
-    reasoning_extra_args: dict[str, Any] = {}
-    if "reasoning_ended" in dynamo_preproc:
-        reasoning_extra_args["reasoning_ended"] = dynamo_preproc["reasoning_ended"]
-    if "reasoning_parser_kwargs" in dynamo_preproc:
-        reasoning_extra_args["reasoning_parser_kwargs"] = dynamo_preproc[
-            "reasoning_parser_kwargs"
-        ]
-
-    if not reasoning_extra_args:
-        return
-
-    extra_args = kv_kwargs.get("extra_args")
-    if not isinstance(extra_args, dict):
-        extra_args = {}
-        kv_kwargs["extra_args"] = extra_args
-    extra_args.update(reasoning_extra_args)
 
 
 class VllmProcessor:
@@ -323,7 +261,6 @@ class VllmProcessor:
         self, request: dict[str, Any]
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
-        t0 = time.monotonic()
 
         # vLLM's Pydantic model requires image_url.detail to be 'auto'/'low'/'high'.
         # The Rust HTTP layer accepts None/missing, so normalize before validation.
@@ -341,23 +278,6 @@ class VllmProcessor:
                     img_url = part.get("image_url")
                     if isinstance(img_url, dict) and img_url.get("detail") is None:
                         img_url["detail"] = "auto"
-
-        if DEBUG_FRONTEND:
-            logger.info(
-                "[DYN_DEBUG ingress rid=%s] model=%r messages=%d messages_hash=%s tools=%d "
-                "tool_choice=%r has_reasoning=%s max_tokens=%r max_completion_tokens=%r routing=%r last_role=%r",
-                request_id,
-                request.get("model"),
-                len(messages),
-                _hash_request_messages(messages),
-                len(request.get("tools") or []),
-                request.get("tool_choice"),
-                request.get("reasoning") is not None,
-                request.get("max_tokens"),
-                request.get("max_completion_tokens"),
-                request.get("routing"),
-                messages[-1].get("role") if messages and isinstance(messages[-1], dict) else None,
-            )
 
         # Images are fetched by vLLM's renderer via DynamoMediaConnector,
         # which wraps our ImageLoader (LRU cache + in-flight dedup).
@@ -377,7 +297,6 @@ class VllmProcessor:
         chat_template_kwargs = pre.chat_template_kwargs
         engine_prompt = pre.engine_prompt
         tokens = pre.prompt_token_ids
-        t_pre = time.monotonic()
 
         if request_for_sampling.max_completion_tokens is not None:
             max_tokens = request_for_sampling.max_completion_tokens
@@ -448,14 +367,6 @@ class VllmProcessor:
         # vLLM 0.17.0 removed EngineCoreRequest.eos_token_id. Dynamo now uses
         # tokenizer metadata for EOS ids when constructing the router payload.
 
-        reasoning_ended, reasoning_parser_kwargs = _build_reasoning_parser_metadata(
-            self.reasoning_parser_class,
-            self.tokenizer,
-            chat_template_kwargs,
-            request_for_sampling,
-            tokens,
-        )
-
         # Convert to a Python object that has fields that match our PreprocessedRequest
         sp = vllm_preproc.sampling_params
         dynamo_preproc = {
@@ -488,10 +399,6 @@ class VllmProcessor:
             "annotations": [],
             "routing": request.get("routing"),
         }
-        if reasoning_ended is not None:
-            dynamo_preproc["reasoning_ended"] = reasoning_ended
-        if reasoning_parser_kwargs is not None:
-            dynamo_preproc["reasoning_parser_kwargs"] = reasoning_parser_kwargs
 
         # Extract MM routing metadata and prepare transfer.
         cleanup_items: list = []
@@ -533,7 +440,6 @@ class VllmProcessor:
                     tool_parser=tool_parser,
                     reasoning_parser_class=self.reasoning_parser_class,
                     chat_template_kwargs=chat_template_kwargs,
-                    debug_request_id=request_id,
                 )
 
             # StreamingPostProcessor keeps delta/tool/reasoning parser state, so
@@ -542,20 +448,6 @@ class VllmProcessor:
             post_processors = {
                 output_idx: new_post_processor() for output_idx in range(sp.n)
             }
-
-            if DEBUG_FRONTEND:
-                logger.info(
-                    "[DYN_DEBUG ingress rid=%s] preprocess_done pre_ms=%.1f prompt_tokens=%d tool_parser=%s "
-                    "reasoning_parser=%s sampling_max_tokens=%r stop=%r stop_token_ids=%r",
-                    request_id,
-                    (t_pre - t0) * 1000,
-                    len(tokens),
-                    tool_parser.__class__.__name__ if tool_parser is not None else None,
-                    self.reasoning_parser_class.__name__ if self.reasoning_parser_class is not None else None,
-                    sampling_params.max_tokens,
-                    sampling_params.stop,
-                    sampling_params.stop_token_ids,
-                )
 
             async for item in self._generate_and_stream(
                 request_id,
@@ -650,7 +542,6 @@ class VllmProcessor:
                         len(ea.get("mm_hashes", [])),
                         len(ea.get("mm_placeholders", [])),
                     )
-                _copy_reasoning_metadata_to_extra_args(dynamo_preproc, kv_kwargs)
                 # Forward mm_processor_kwargs (e.g. use_audio_in_video) to backend.
                 mm_proc_kwargs = dynamo_preproc.get("mm_processor_kwargs")
                 if mm_proc_kwargs is not None:
@@ -681,9 +572,6 @@ class VllmProcessor:
                 "mm_frontend:stream_response", color="purple"
             )
             async for dynamo_response in dynamo_stream:
-                now = time.monotonic()
-                if first_chunk_time is None:
-                    first_chunk_time = now
                 if self.is_kv_router:
                     engine_response = dynamo_response
                 elif hasattr(dynamo_response, "data"):
@@ -712,13 +600,6 @@ class VllmProcessor:
                 raw_finish_reason = engine_response.get("finish_reason")
                 finish_reason = map_finish_reason(raw_finish_reason)
                 stop_reason = engine_response.get("stop_reason")
-                chunk_count += 1
-                total_new_tokens += len(engine_response["token_ids"])
-                if engine_response["token_ids"] and first_token_time is None:
-                    first_token_time = now
-                last_raw_finish_reason = raw_finish_reason
-                last_finish_reason = finish_reason
-                last_stop_reason = stop_reason
 
                 vllm_response = EngineCoreOutput(
                     request_id=output_request_id,
@@ -755,7 +636,6 @@ class VllmProcessor:
                         choices.append(choice)
 
                 if choices:
-                    emitted_choices += len(choices)
                     dynamo_out = {
                         "id": request_id,
                         "choices": choices,
