@@ -4,6 +4,7 @@
 mod accessor;
 mod instance;
 mod onboarding;
+pub mod parallelism;
 #[doc = include_str!("../../docs/session.md")]
 pub mod session;
 mod state;
