@@ -328,6 +328,18 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         name="llava-hf/llava-1.5-7b-hf",
         short_name="llava-1.5-7b",
         topologies={
+            # Rust-frontend MM-aware routing for the LLaVA family. Two
+            # workers, one per GPU on the gpu_2 runner (no SINGLE_GPU
+            # packing — 7B × 2 would exceed 24 GiB on a single card). Each
+            # worker peaks ~19 GiB; the 24 GiB L4 tier has headroom.
+            "agg_router": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=600,
+                gpu_marker="gpu_2",
+                profiled_vram_gib=19.2,
+                requested_vllm_kv_cache_bytes=4_318_854_000,
+                tests=[MmCase(payload=make_image_payload(["green"]))],
+            ),
             "agg": TopologyConfig(
                 # nightly-only: 7B 1-GPU footprint is tight (vram=19.2 GiB).
                 # Exercises a different image (coco bus) + a string-content
@@ -415,6 +427,23 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         )
                     )
                 ],
+            ),
+        },
+    ),
+    # LLaVA-NeXT covers a separate lightseek processor (LlavaNextProcessor,
+    # anyres multi-crop) vs LLaVA-1.5's plain LlavaProcessor. Same gpu_2
+    # multi-GPU layout as LLaVA-1.5 agg_router above; ~14 GiB / GPU.
+    MultimodalModelProfile(
+        name="llava-hf/llava-v1.6-mistral-7b-hf",
+        short_name="llava-next-mistral-7b",
+        topologies={
+            "agg_router": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=600,
+                gpu_marker="gpu_2",
+                profiled_vram_gib=19.2,
+                requested_vllm_kv_cache_bytes=4_318_854_000,
+                tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
         },
     ),
