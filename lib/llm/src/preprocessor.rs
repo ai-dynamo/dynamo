@@ -1580,7 +1580,6 @@ impl OpenAIPreprocessor {
                             choice.delta.refusal = None;
                             choice.delta.reasoning_content = None;
                             choice.finish_reason = None;
-                            choice.stop_reason = None;
                             choice.logprobs = None;
                             true
                         } else {
