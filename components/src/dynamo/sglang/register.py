@@ -13,7 +13,13 @@ from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
 from dynamo.common.utils.output_modalities import get_output_modalities
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.llm import (
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    WorkerType,
+    register_model,
+)
 from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_scheduler_info
 from dynamo.sglang.args import DynamoConfig
 
@@ -27,6 +33,8 @@ async def _register_model_with_runtime_config(
     dynamo_args: DynamoConfig,
     input_type: ModelInput = ModelInput.Tokens,
     output_type: ModelType = ModelType.Chat | ModelType.Completions,
+    worker_type: Optional[WorkerType] = None,
+    needs: Optional[List[List[WorkerType]]] = None,
 ) -> bool:
     """Register LLM with the Dynamo runtime.
 
@@ -37,6 +45,10 @@ async def _register_model_with_runtime_config(
         dynamo_args: Dynamo-specific configuration.
         input_type: Expected model input type. Defaults to ModelInput.Tokens.
         output_type: Expected model output type. Defaults to ModelType.Chat | ModelType.Completions.
+        worker_type: Topology role of this worker (Prefill/Decode/Encode/Aggregated).
+            None lets the missing-field shim treat the worker as Aggregated.
+        needs: DNF list of peer roles this worker requires to serve. None or empty
+            means no peers required.
 
     Returns:
         True if registration succeeded, False otherwise.
@@ -63,6 +75,8 @@ async def _register_model_with_runtime_config(
             kv_cache_block_size=server_args.page_size,
             runtime_config=runtime_config,
             custom_template_path=dynamo_args.custom_jinja_template,
+            worker_type=worker_type,
+            needs=needs,
         )
         logging.info("Successfully registered LLM with runtime config")
         return True
@@ -364,6 +378,8 @@ async def register_model_with_readiness_gate(
     input_type: ModelInput = ModelInput.Tokens,
     output_type: ModelType = ModelType.Chat | ModelType.Completions,
     readiness_gate: Optional[asyncio.Event] = None,
+    worker_type: Optional[WorkerType] = None,
+    needs: Optional[List[List[WorkerType]]] = None,
 ) -> None:
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.
 
@@ -375,6 +391,8 @@ async def register_model_with_readiness_gate(
         input_type: Expected model input type. Defaults to ModelInput.Tokens.
         output_type: Expected model output type. Defaults to ModelType.Chat | ModelType.Completions.
         readiness_gate: Optional event to signal when registration completes.
+        worker_type: Topology role; see `_register_model_with_runtime_config`.
+        needs: DNF peer requirements; see `_register_model_with_runtime_config`.
 
     Raises:
         RuntimeError: If model registration fails.
@@ -386,6 +404,8 @@ async def register_model_with_readiness_gate(
         dynamo_args,
         input_type,
         output_type,
+        worker_type=worker_type,
+        needs=needs,
     )
     if not registration_success:
         logging.error("Model registration failed; shutting down")
