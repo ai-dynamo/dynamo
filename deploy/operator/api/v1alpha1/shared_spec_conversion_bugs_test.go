@@ -279,6 +279,49 @@ func TestBugDGD_ChangedCompilationCacheDoesNotRestoreStaleVolumeMounts(t *testin
 	}
 }
 
+func TestBugDGD_PodTemplateMountSurvivesMultipleCompilationCacheRestore(t *testing.T) {
+	in := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "multi-cache-edited-pod-template", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: "worker",
+					VolumeMounts: []VolumeMount{
+						{Name: "model-cache", MountPoint: "/models", UseAsCompilationCache: true},
+						{Name: "compile-cache", MountPoint: "/compile", UseAsCompilationCache: true},
+					},
+				},
+			},
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := in.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	hub.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:         mainContainerName,
+				VolumeMounts: []corev1.VolumeMount{{Name: "runtime-cache", MountPath: "/runtime"}},
+			}},
+		},
+	}
+
+	out := &DynamoGraphDeployment{}
+	if err := out.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	want := []VolumeMount{
+		{Name: "model-cache", MountPoint: "/models", UseAsCompilationCache: true},
+		{Name: "compile-cache", MountPoint: "/compile", UseAsCompilationCache: true},
+		{Name: "runtime-cache", MountPoint: "/runtime"},
+	}
+	if diff := cmp.Diff(want, out.Spec.Services["worker"].VolumeMounts); diff != "" {
+		t.Fatalf("volume mounts changed after podTemplate edit (-want +got):\n%s", diff)
+	}
+}
+
 func TestBugDGD_HubOriginSpokeMainContainerEnvSplitRoundTrips(t *testing.T) {
 	hub := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "main-container-env-split", Namespace: "ns"},

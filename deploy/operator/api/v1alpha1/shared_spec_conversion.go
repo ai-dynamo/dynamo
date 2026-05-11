@@ -926,7 +926,7 @@ func restoreSharedPreservedFlatVolumeMounts(dst, preserved *DynamoComponentDeplo
 	if !volumeMountsEqual(dst.VolumeMounts, visiblePreservedVolumeMountProjection(src, preserved.VolumeMounts)) {
 		return
 	}
-	dst.VolumeMounts = slices.Clone(preserved.VolumeMounts)
+	dst.VolumeMounts = mergePreservedCompilationCacheVolumeMounts(preserved.VolumeMounts, dst.VolumeMounts)
 }
 
 func firstPreservedCompilationCacheMatches(compilationCache *v1beta1.CompilationCacheConfig, mounts []VolumeMount) bool {
@@ -973,6 +973,21 @@ func volumeMountsEqual(a, b []VolumeMount) bool {
 			left.MountPoint == right.MountPoint &&
 			left.UseAsCompilationCache == right.UseAsCompilationCache
 	})
+}
+
+func mergePreservedCompilationCacheVolumeMounts(preserved, current []VolumeMount) []VolumeMount {
+	out := make([]VolumeMount, 0, len(preserved)+len(current))
+	for _, mount := range preserved {
+		if mount.UseAsCompilationCache && !flatVolumeMountHasNamePath(out, mount.Name, mount.MountPoint) {
+			out = append(out, mount)
+		}
+	}
+	for _, mount := range current {
+		if !flatVolumeMountHasNamePath(out, mount.Name, mount.MountPoint) {
+			out = append(out, mount)
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
