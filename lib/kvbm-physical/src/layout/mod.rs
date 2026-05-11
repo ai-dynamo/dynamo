@@ -38,7 +38,7 @@ pub use serialize::{BlockFormat, FullyContiguousDetails, LayerSeparateDetails, L
 // `intersect_views` is exposed for planner / executor wiring (PR-5+).
 // Today only view.rs's tests call it directly.
 #[allow(unused_imports)]
-pub(crate) use view::{LayoutView, intersect_views};
+pub use view::{LayoutView, intersect_views};
 
 // mod registration;
 // pub use registration::{RegisteredLayout, RegisteredStorageMetadata, RegistrationManager};

@@ -66,6 +66,11 @@ pub use context::{TransferCompleteNotification, TransferConfig};
 pub use dynamo_memory::nixl::NixlAgent;
 pub use fill::{FillPattern, fill_blocks, fill_layers};
 pub use options::{TransferOptions, TransferOptionsBuilder};
+// AB-1d: TransferSelection is the input shape for sliced cross-leader
+// transfers. Exposed for the cross-parallelism dispatcher (AB-2) which
+// builds selections from intersected LayoutViews, and for the worker
+// handler (AB-3) which feeds them into TransferManager.
+pub use plan::TransferSelection;
 
 // TransferContext - managed by TransferManager
 #[doc(hidden)]

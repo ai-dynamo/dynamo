@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// LayoutView is exercised only by this module's tests until the
-// executor / planner integration uses it as the canonical layout
-// carrier (PR-5+). Suppress dead-code warnings until then.
-#![allow(dead_code)]
+// LayoutView is the canonical addressable carrier the planner reasons
+// about. Promoted from pub(crate) to pub in AB-1d so the leader-side
+// cross-parallelism dispatcher (AB-2) can construct sliced views to
+// describe per-shard pulls, and so the worker-side handler (AB-3) can
+// consume them on receipt.
 
 //! Sliced, stride-aware, label-driven layout views.
 //!
@@ -47,7 +48,7 @@ use kvbm_common::{
 /// out dangling pointers. The view does not pin the allocation — keep
 /// the source alive for the view's lifetime explicitly.
 #[derive(Debug, Clone)]
-pub(crate) struct LayoutView {
+pub struct LayoutView {
     /// Axis labels paired with **local** sizes. After slicing on axis
     /// `d`, `local_layout.size_of(d) == slice.len`. Other axes carry
     /// their original sizes.
@@ -107,7 +108,7 @@ impl LayoutView {
     /// Today's producers pass a homogeneous `axis_storage_kinds` (all
     /// axes carry the same [`StorageKind`]). Future producers can pass a
     /// mixed vec to express per-axis heterogeneous storage.
-    pub(crate) fn full(
+    pub fn full(
         layout: KvDimLayout,
         byte_strides: KvDimStrides,
         regions: Vec<usize>,
@@ -175,7 +176,7 @@ impl LayoutView {
     /// careful global-coord arithmetic for the post-slice signature, and
     /// no consumer needs it today). To re-slice, drop and rebuild from
     /// the base.
-    pub(crate) fn slice(mut self, dim: KvDim, start: usize, len: usize) -> Result<Self> {
+    pub fn slice(mut self, dim: KvDim, start: usize, len: usize) -> Result<Self> {
         if self.slices.iter().any(|s| s.dim == dim) {
             bail!("LayoutView::slice: axis {dim:?} already sliced; rebuild from base instead");
         }
@@ -217,7 +218,7 @@ impl LayoutView {
     /// Even-split helper: shard `dim` into `world` equal pieces and keep
     /// the `rank`-th piece. Errors if `world == 0`, `rank >= world`, or
     /// `dim`'s extent is not divisible by `world`.
-    pub(crate) fn shard(self, dim: KvDim, rank: usize, world: usize) -> Result<Self> {
+    pub fn shard(self, dim: KvDim, rank: usize, world: usize) -> Result<Self> {
         let global_len = self.local_layout.size_of(dim).ok_or_else(|| {
             anyhow::anyhow!(
                 "LayoutView::shard: axis {dim:?} not present in layout {:?}",
@@ -230,30 +231,30 @@ impl LayoutView {
 
     /// Local (post-slicing) layout. Every axis `d` reports `size =
     /// slice_for(d).len` if sliced, else its base size.
-    pub(crate) fn local_layout(&self) -> &KvDimLayout {
+    pub fn local_layout(&self) -> &KvDimLayout {
         &self.local_layout
     }
 
     /// Per-axis byte strides over the underlying allocation. Pinned —
     /// slicing does not change these.
-    pub(crate) fn byte_strides(&self) -> &KvDimStrides {
+    pub fn byte_strides(&self) -> &KvDimStrides {
         &self.byte_strides
     }
 
     /// Per-region base addresses (post-narrowing if `region_axis` was
     /// sliced).
-    pub(crate) fn regions(&self) -> &[usize] {
+    pub fn regions(&self) -> &[usize] {
         &self.regions
     }
 
-    pub(crate) fn region_axis(&self) -> Option<KvDim> {
+    pub fn region_axis(&self) -> Option<KvDim> {
         self.region_axis
     }
 
     /// Active axis slices, in `KvDim` ordinal order. Empty when the view
     /// has no restrictions. **Multi-slice-per-axis is not yet exposed;
     /// callers can rely on at most one entry per `dim` for now.**
-    pub(crate) fn slices(&self) -> &[AxisSlice] {
+    pub fn slices(&self) -> &[AxisSlice] {
         &self.slices
     }
 
@@ -262,7 +263,7 @@ impl LayoutView {
     /// Today's views are always homogeneous (all axes carry the same kind).
     /// Future views from heterogeneous-storage layouts (e.g. disk head
     /// axes mixed with device inner axes) will return a mixed slice.
-    pub(crate) fn axis_storage_kinds(&self) -> &[StorageKind] {
+    pub fn axis_storage_kinds(&self) -> &[StorageKind] {
         &self.axis_storage_kinds
     }
 
@@ -272,7 +273,7 @@ impl LayoutView {
     /// An empty view, a single-axis view, or any view where all axes
     /// carry the same kind returns `false`. A view with, say,
     /// `[Device(0), Device(0), System, System]` returns `true`.
-    pub(crate) fn is_heterogeneous(&self) -> bool {
+    pub fn is_heterogeneous(&self) -> bool {
         let mut iter = self.axis_storage_kinds.iter();
         match iter.next() {
             None => false,
@@ -281,14 +282,14 @@ impl LayoutView {
     }
 
     /// Element size (bytes) the strides were built against.
-    pub(crate) fn elem_size(&self) -> usize {
+    pub fn elem_size(&self) -> usize {
         self.byte_strides.elem_size()
     }
 
     /// Address-free, hashable description for catalog lookup and
     /// cross-process matching. See [`LayoutSignature`] for stability
     /// caveats.
-    pub(crate) fn signature(&self) -> LayoutSignature {
+    pub fn signature(&self) -> LayoutSignature {
         let slice_by_dim: HashMap<KvDim, &AxisSlice> =
             self.slices.iter().map(|s| (s.dim, s)).collect();
         let axes: Vec<(KvDim, AxisExtent)> = self
@@ -320,7 +321,7 @@ impl LayoutView {
     /// - any in-tensor axis present in `local_layout` is missing from
     ///   `coord`.
     /// - any provided coord is `>=` its axis's local size.
-    pub(crate) fn addr_of(&self, coord: &CoordByLabel) -> Result<usize> {
+    pub fn addr_of(&self, coord: &CoordByLabel) -> Result<usize> {
         // Resolve region base.
         let region_base = match self.region_axis {
             Some(d) => {
@@ -398,7 +399,7 @@ impl LayoutView {
 /// disagreement (e.g. src has `Layer` as region, dst has `Layer`
 /// in-tensor) — the structural difference is the planner's problem to
 /// resolve via per-region iteration, not the intersection algebra's.
-pub(crate) fn intersect_views(
+pub fn intersect_views(
     src: &LayoutView,
     dst: &LayoutView,
 ) -> Result<Option<Vec<AxisIntersection>>> {
