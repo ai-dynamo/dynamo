@@ -142,3 +142,17 @@ package-lock.json
 # macOS
 .DS_Store
 **/.DS_Store
+
+# Personal-scratch dev manifests (use the templated forms in
+# deploy/planner/dev/ and deploy/power_agent/ instead). Honors the
+# `.tmp-` filename convention used in examples/deployments/.
+.tmp-*
+**/.tmp-*
+
+# Common root-level personal dev files that should not be committed.
+# (Templated/canonical versions live under deploy/planner/dev/.)
+/dev-pod.yaml
+/qwen3-quickstart-dgd.yaml
+/Dockerfile.planner-dev
+/test_k8s_access.py
+/test_planner_launch.py

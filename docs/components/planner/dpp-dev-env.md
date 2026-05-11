@@ -45,7 +45,7 @@ kubectl get nodes
 
 ## Working Image Tags
 
-Last verified **2026-05-10** (full from-scratch repro: **589 tests passing**, 0 failures, 4 documented skips):
+Last verified **2026-05-11** (full from-scratch repro per the script at the bottom of this doc: **677 tests passing**, 0 failures, 4 documented skips after the sanity-check chat completion; **676 / 5** on a cold deploy before the chat). Image-tag table itself was last spot-checked on **2026-05-10**:
 
 | Component | Image |
 |-----------|-------|
@@ -112,9 +112,9 @@ delete this Role/RoleBinding once the cluster is upgraded.
 
 ### 4. Deploy a DGD (your test workload)
 
-A working DGD spec already lives at `qwen3-quickstart-dgd.yaml` in the repo
-root (Qwen3-0.6B, aggregated mode, single GPU). It uses the verified frontend
-SHA from the Working Image Tags table. Apply it as-is:
+A working DGD spec already lives at `deploy/planner/dev/qwen3-quickstart-dgd.yaml`
+(Qwen3-0.6B, aggregated mode, single GPU). It uses the verified frontend SHA
+from the Working Image Tags table. Apply it as-is:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -149,8 +149,12 @@ spec:
 ```
 
 ```powershell
-kubectl apply -f qwen3-quickstart-dgd.yaml -n <your-namespace>
-kubectl get dgd -n <your-namespace> -w   # wait for READY: True (~3-5 min on a fresh node)
+kubectl apply -f deploy/planner/dev/qwen3-quickstart-dgd.yaml -n <your-namespace>
+
+# Programmatic wait — equivalent to watching for READY: True on `kubectl get dgd`.
+# Used identically in the Quick Deploy Checklist (step 5) and From-Scratch Repro
+# (step 4) so you never have to context-switch between manual `-w` and scripted forms.
+kubectl wait --for=jsonpath='{.status.state}'=successful dgd/qwen3-quickstart -n <your-namespace> --timeout=600s
 ```
 
 > **Avoid `qwen3-quickstart.yaml`** if you see one in older branches — it's a
@@ -161,17 +165,22 @@ kubectl get dgd -n <your-namespace> -w   # wait for READY: True (~3-5 min on a f
 
 ### 5. Deploy the Dev Pod
 
-The dev pod uses the lightweight frontend image (has `dynamo._core` Rust bindings, Python 3.12, git, pytest). Update the env vars in `dev-pod.yaml` to match your namespace and DGD name:
+The dev pod uses the lightweight frontend image (has `dynamo._core` Rust bindings, Python 3.12, git, pytest). The shipped manifest at `deploy/planner/dev/planner-dev-pod.yaml` uses `${NS}`, `${DGD}`, and `${DYN_NS}` placeholders for the four namespace-related env vars below — substitute your values before applying:
 
-| Env Var | What to set it to |
-|---------|-------------------|
-| `DYN_NAMESPACE` | `<your-namespace>-<dgd-name>` (matches DGD namespace prefix) |
-| `DYN_NAMESPACE_PREFIX` | Same as `DYN_NAMESPACE` |
-| `DYN_PARENT_DGD_K8S_NAME` | Your DGD name (e.g., `qwen3-quickstart`) |
-| `DYN_PARENT_DGD_K8S_NAMESPACE` | Your K8s namespace |
+| Placeholder | What to set it to | Sets these env vars |
+|-------------|-------------------|---------------------|
+| `${NS}` | Your K8s namespace (e.g., `<your-name>-dynamo-system`) | `DYN_PARENT_DGD_K8S_NAMESPACE` |
+| `${DGD}` | Your DGD name (e.g., `qwen3-quickstart`) | `DYN_PARENT_DGD_K8S_NAME` |
+| `${DYN_NS}` | `${NS}-${DGD}` (the dynamo-namespace; matches the DGD namespace prefix) | `DYN_NAMESPACE`, `DYN_NAMESPACE_PREFIX` |
 
 ```powershell
-kubectl apply -f dev-pod.yaml -n <your-namespace>
+# Option A: Linux/WSL — substitute via envsubst
+$env:NS="<your-namespace>"; $env:DGD="qwen3-quickstart"; $env:DYN_NS="${env:NS}-${env:DGD}"
+envsubst < deploy/planner/dev/planner-dev-pod.yaml | kubectl apply -n $env:NS -f -
+
+# Option B: Windows / no envsubst — copy and edit the file in place, then
+kubectl apply -f deploy/planner/dev/planner-dev-pod.yaml -n <your-namespace>
+
 kubectl wait --for=condition=Ready pod/planner-dev -n <your-namespace> --timeout=60s
 ```
 
@@ -229,8 +238,8 @@ For a fresh setup, run these steps in order:
 1. `$env:KUBECONFIG="$HOME\.kube\dynamo-kubeconfig"` — set kubeconfig (every terminal session)
 2. `kubectl create namespace <your-namespace>`
 3. `kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN="<token>" -n <your-namespace>`
-4. `kubectl apply -f qwen3-quickstart.yaml -n <your-namespace>`
-5. `kubectl get dgd -n <your-namespace>` — wait for `READY: True`
+4. `kubectl apply -f deploy/planner/dev/qwen3-quickstart-dgd.yaml -n <your-namespace>` — **note the `-dgd` suffix**; do NOT use `qwen3-quickstart.yaml` (stale DGDR, see warning under One-Time Setup §4)
+5. `kubectl wait --for=jsonpath='{.status.state}'=successful dgd/qwen3-quickstart -n <your-namespace> --timeout=600s`
 6. `kubectl port-forward svc/qwen3-quickstart-frontend 8000:8000 -n <your-namespace>`
 
 ---
@@ -349,17 +358,58 @@ kubectl exec -n <your-namespace> planner-dev -- bash -c "
 
 **Expected:** `34 passed in ~5 s`.
 
+### Run Power Planner Stress Testbed (α + γ classes, no cluster services needed)
+
+The
+[Power Planner Stress Testbed](../../design-docs/powerplanner-testbed-design.md)
+is a synthetic-metrics harness that drives the **real** `PlannerStateMachine` +
+`AICPowerOptimizer` against parameterized fakes (α-class, 27 scenarios) and the
+real `dynamo-mocker` Rust scheduler with a synthetic power overlay (γ-class,
+3 scenarios + self-consistency tests). No GPU, no real K8s, no real Prometheus.
+
+The dev pod ships a working `dynamo._core` / `PlannerReplayBridge`, so γ-class
+**lights up automatically** here (unlike a local Windows box, where it
+auto-skips — see Appendix C.10 of the testbed design doc).
+
+```powershell
+kubectl exec -n <your-namespace> planner-dev -- bash -c "
+  export PYTHONPATH=/workspace/repo/components/src:/workspace/repo &&
+  cd /workspace/repo &&
+  python3 -m pytest components/src/dynamo/planner/tests/testbed/ -v --tb=short
+"
+```
+
+**Expected (verified 2026-05-11, older `create_disagg` bridge):**
+`86 passed, 1 skipped in ~9 s`.
+
+The 1 skip is `test_alpha_gamma_agree_on_decode_drift` — it requires the newer
+`PlannerReplayBridge.from_synthetic_disagg` API which is not yet built into
+the current dev pod image. Auto-enables once the mocker is rebuilt.
+
+To run just γ-class scenarios (the real-scheduler smoke path):
+
+```powershell
+kubectl exec -n <your-namespace> planner-dev -- bash -c "
+  export PYTHONPATH=/workspace/repo/components/src:/workspace/repo &&
+  cd /workspace/repo &&
+  python3 -m pytest components/src/dynamo/planner/tests/testbed/test_scenarios.py \
+    -k gamma -v --tb=short
+"
+```
+
+**Expected:** `3 passed, 27 deselected in ~6 s` (G1, G2, G3).
+
 ### Run Live Cluster Integration Tests (DGD must be Running)
 
 These tests probe the **real** Prometheus, real DCGM, real router `/metrics`,
 real K8s API, and real frontend admission endpoint of your running DGD. They
 require:
 
-- A `READY=True` DGD in your namespace (the `qwen3-quickstart-dgd.yaml` from
-  step 4)
+- A `READY=True` DGD in your namespace (the
+  `deploy/planner/dev/qwen3-quickstart-dgd.yaml` from step 4)
 - The dev RBAC patch from step 3b applied (otherwise pod-listing fails)
 - Env vars `DYN_PARENT_DGD_K8S_NAME` / `DYN_PARENT_DGD_K8S_NAMESPACE` set on
-  the dev pod (already in `dev-pod.yaml`)
+  the dev pod (already templated in `deploy/planner/dev/planner-dev-pod.yaml`)
 
 ```powershell
 # Live metric paths (Prometheus, router /metrics, DCGM, MDC reads)
@@ -397,8 +447,8 @@ kubectl exec -n <your-namespace> planner-dev -- bash -c "
 
 ### Full Test-Suite Sweep (the "tests pass from scratch" bar)
 
-Runs every unit + integration test in one shot, excluding the pre-existing
-`test_virtual_connector.py` which has unrelated env requirements:
+Runs every unit + integration + testbed test in one shot, excluding the
+pre-existing `test_virtual_connector.py` which has unrelated env requirements:
 
 ```powershell
 kubectl exec -n <your-namespace> planner-dev -- bash -c "
@@ -409,9 +459,11 @@ kubectl exec -n <your-namespace> planner-dev -- bash -c "
 "
 ```
 
-**Expected (verified 2026-05-10):** `546 passed, 4 skipped in ~10 s` (all 4
-skips are documented above; 0 failures). With the power agent suite this
-totals **589 passing tests** for the full power planner patchset.
+**Expected (verified 2026-05-11):** `632 passed, 5 skipped in ~20 s` (546
+unit + integration from the §9.0 baseline of 2026-05-10, plus 86 testbed
+α+γ from 2026-05-11; 1 testbed γ-self-consistency skip joins the 4 from
+the §9.0 baseline). With the power agent suite this totals **675 passing
+tests** for the full power planner patchset.
 
 ### Sanity-check the chat completion path
 
@@ -497,7 +549,7 @@ The dev pod uses `restartPolicy: Never` and `sleep infinity`, so it persists unt
 
 ```powershell
 kubectl delete pod planner-dev -n <your-namespace> --grace-period=0 --force
-kubectl apply -f dev-pod.yaml -n <your-namespace>
+kubectl apply -f deploy/planner/dev/planner-dev-pod.yaml -n <your-namespace>
 # Then re-run the bootstrap step (clone + pip install)
 ```
 
@@ -507,22 +559,30 @@ kubectl apply -f dev-pod.yaml -n <your-namespace>
 
 | File | Purpose |
 |------|---------|
-| `dev-pod.yaml` | Dev pod spec with SA, downward API, env vars |
-| `qwen3-quickstart-dgd.yaml` | Minimal DGD (Qwen3-0.6B, 1× GPU, agg mode) used by all repro steps |
+| `deploy/planner/dev/planner-dev-pod.yaml` | Dev pod spec with SA, downward API, env vars (uses `${NS}`/`${DGD}`/`${DYN_NS}` placeholders) |
+| `deploy/planner/dev/qwen3-quickstart-dgd.yaml` | Minimal DGD (Qwen3-0.6B, 1× GPU, agg mode) used by all repro steps |
+| `deploy/planner/dev/Dockerfile.planner-dev` | Optional pre-baked dev image (skips the bootstrap pip install on every cold start) |
 | `deploy/planner-pod-rbac-dev.yaml` | Dev RBAC patch — `pods` permissions on `planner-dev-sa` (operator chart ≤ 1.2.0 gap) |
-| `test_planner_launch.py` | Script to launch planner in advisory mode against the live cluster |
-| `test_k8s_access.py` | Quick sanity check for K8s API, Prometheus, and NATS connectivity |
+| `test_planner_launch.py` | Personal script to launch planner in advisory mode against the live cluster (gitignored — author your own) |
+| `scripts/dev/test_k8s_access.py` | Quick sanity check for K8s API, Prometheus, and NATS connectivity (reads `DYN_PARENT_DGD_K8S_NAMESPACE`) |
 | `examples/deployments/powerplanner/PIPECLEAN.md` | Step-by-step power planner e2e validation runbook |
 | `examples/deployments/powerplanner/disagg-power-aware.yaml` | Power-aware disaggregated DGD example (Phase 1+2) |
 | `examples/deployments/powerplanner/verify_poweraware.bash` | Phase-2/3 deployment smoke test (Power Agent DS + planner metrics + AIC sanity) |
+| `components/src/dynamo/planner/tests/testbed/` | Power Planner Stress Testbed — α (27 synthetic scenarios) + γ (3 mocker-driven scenarios). See [design doc](../../design-docs/powerplanner-testbed-design.md). |
+| `docs/design-docs/powerplanner-testbed-design.md` | Stress testbed design + defect/fix history (v2.3 = dev-pod γ-class validation) |
 
 ---
 
 ## From-Scratch Repro Script (the canonical "tests pass" recipe)
 
-This is the exact sequence verified on **2026-05-10** that produced
-`589 passing, 4 skipped, 0 failures` on a clean namespace. Run it any time you
-want to convince yourself the dev environment is healthy.
+This is the exact sequence verified on **2026-05-11** that produced
+`676 passing, 5 skipped, 0 failures` on a cold clean namespace, climbing to
+`677 passing, 4 skipped, 0 failures` after the sanity-check chat completion
+lights up `test_frontend_metric_series_exists` (the 2026-05-10 baseline of
+589 / 4 plus the 86 / 1 testbed run from 2026-05-11 plus 1 disruptive
+scaling test from step 8 below; see the pass-criteria table at the end of
+this section for the per-step breakdown). Run it any time you want to
+convince yourself the dev environment is healthy.
 
 ```powershell
 $env:KUBECONFIG="$HOME\.kube\dynamo-kubeconfig"
@@ -543,8 +603,10 @@ kubectl create rolebinding planner-dev-binding `
 kubectl apply -f deploy/planner-pod-rbac-dev.yaml -n $ns
 
 # 3. Apply workload + dev pod
-kubectl apply -f qwen3-quickstart-dgd.yaml -n $ns
-kubectl apply -f dev-pod.yaml              -n $ns
+kubectl apply -f deploy/planner/dev/qwen3-quickstart-dgd.yaml -n $ns
+# Edit deploy/planner/dev/planner-dev-pod.yaml first to substitute
+# ${NS}/${DGD}/${DYN_NS} for your values, OR pipe through envsubst on Linux.
+kubectl apply -f deploy/planner/dev/planner-dev-pod.yaml      -n $ns
 
 # 4. Wait for DGD ready (3-5 min)
 kubectl wait --for=jsonpath='{.status.state}'=successful dgd/qwen3-quickstart -n $ns --timeout=600s
@@ -594,11 +656,20 @@ kubectl exec -n $ns planner-dev -- bash -c "
 
 | Step | Expected (cold) | Expected (after sanity chat) |
 |------|----------|----------|
-| 7a (planner sweep) | `546 passed, 4 skipped in ~10 s` | `547 passed, 3 skipped in ~10 s` |
+| 7a (planner sweep — includes testbed α+γ) | `632 passed, 5 skipped in ~20 s` | `633 passed, 4 skipped in ~20 s` |
 | 7b (power agent) | `43 passed in <1 s` | `43 passed in <1 s` |
 | 8 (disruptive scaling) | `1 passed in ~6 s` | `1 passed in ~6 s` |
-| **Total** | **590 passing, 4 skipped, 0 failures** | **591 passing, 3 skipped, 0 failures** |
+| **Total** | **676 passing, 5 skipped, 0 failures** | **677 passing, 4 skipped, 0 failures** |
 
 The 1-test difference is `test_frontend_metric_series_exists`, which skips on a
 cold deploy and passes after any traffic. Sending the sanity-check chat
 completion above lights it up.
+
+**Skip inventory (all documented, none are failures):**
+
+| Test | Why it skips | Section |
+|------|--------------|---------|
+| `test_metric_paths_live.py::test_frontend_metric_series_exists` | No traffic on cold deploy | Documented in §9.0 |
+| `test_metric_paths_live.py::TestDirectRouterMetricsClientLive::*` (×2) | LocalRouter doesn't expose worker metrics (open-question #14) | Documented in §9.0 |
+| `test_actuation_knobs_live.py::TestScalingRealMutation` | Opt-in via `RUN_DISRUPTIVE_TESTS=1` (step 8 enables it) | Documented in §9.0 |
+| `test_self_consistency.py::test_alpha_gamma_agree_on_decode_drift` | Older `create_disagg` bridge can't drive AIC drift; auto-enables on newer mocker | [Testbed Appendix D.7](../../design-docs/powerplanner-testbed-design.md) |

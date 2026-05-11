@@ -1,8 +1,8 @@
 # Power Planner Design
 
-**Status:** Draft
+**Status:** Validated (Phases 1–3 — 590/4 cold + 86/1 testbed; see §9.0 / §9.0.1). Phases 4–5 still draft.
 **Author:** Kai Ma
-**Date:** 2026-05-08
+**Date:** 2026-05-08 (last validation 2026-05-11)
 **Based on:** [PR #5280](https://github.com/ai-dynamo/dynamo/pull/5280) (unmerged, `power-planner-dev` branch)
 **Target:** Reimplementation on current ToT, phased into five delivery phases
 
@@ -10,7 +10,7 @@
 
 ## 1. Overview
 
-The **Power Planner** adds power-aware intelligence to the Dynamo planner in three complementary layers:
+The **Power Planner** adds power-aware intelligence to the Dynamo planner in five complementary layers, delivered as five phased PRs:
 
 | Layer | What it does | Delivery |
 |-------|-------------|----------|
@@ -145,6 +145,15 @@ aic_throughput_regression_warn_threshold: float = 0.10  # drop fraction for WARN
 ```
 
 **`config/planner_config.py` — `PlannerConfig` additions:**
+
+> **Note on pre-existing fields referenced below.** The `aic_interpolation`
+> field (an `AICInterpolationSpec` with `.system`, `.prefill_pick`, and
+> `.decode_pick` sub-fields) and the `mode: Literal["agg", "disagg"]` field
+> are **already defined on `PlannerConfig` today**, owned by
+> `monitoring/aic_interpolation.py`. They are referenced by the validator and
+> several algorithms below but not re-declared in this snippet (which only
+> shows new additions). They are also intentionally absent from the §3.2
+> Names Registry, which lists net-new additions in this design only.
 
 ```python
 class PlannerConfig(BaseModel):
@@ -788,7 +797,7 @@ If `min_M` cannot be derived (no prefill worker has reported `max_num_batched_to
 | `"inherit"` | Compute `θ_*_impl` for the picked config every tick; emit Prometheus gauges; do NOT push to frontend. | Observability with operator override. |
 | `"autoset"` | Compute `θ_*_impl`; POST `min(1.0, admission_safety_margin × θ_*_impl)` to `/busy_threshold` after every config change. | Phase 3+ closed-loop control. |
 
-`autoset` closes the power-aware loop: when AIC re-optimizes for a new power cap, the new `θ_*_impl` reflects the new physical capacity, and the frontend's shed point follows it. When AIC reverts to a previous config (failure mode #5 in §8), the implied threshold of the *currently-applied* config is re-POSTed — `_apply_aic_config()` idempotently pushes every time it runs. There is no separate revert path.
+`autoset` closes the power-aware loop: when AIC re-optimizes for a new power cap, the new `θ_*_impl` reflects the new physical capacity, and the frontend's shed point follows it. When AIC re-converges on a config with lower predicted throughput than the previous one (the regression case captured by failure mode #5 in §8), the implied threshold of the *currently-applied* config is re-POSTed — `_apply_aic_config()` idempotently pushes every time it runs. There is no separate revert path.
 
 **Multi-replica frontend.** `/busy_threshold` writes a single frontend pod's manager state (the threshold registry isn't yet backed by etcd). When multiple frontend replicas serve the same model, the planner must POST to each. The connector method `connector.list_frontend_pods(model)` returns the set; the planner fans out POSTs and treats partial-success as ERROR (`dynamo_planner_admission_partial_success_total`). Per-pod retry budget is 5s. Tracked as Open Question #7 — a future direction is to back the threshold with etcd in the frontend, removing the fanout.
 
@@ -1306,7 +1315,8 @@ def _restore_orphaned_gpus_on_startup() -> None:
     nvidia-smi -pl from a node bootstrap script, vendor firmware setting)."""
     global _previously_managed
     _previously_managed = _load_previously_managed_gpus()
-    for gpu_idx in range(self.device_count):
+    device_count = pynvml.nvmlDeviceGetCount()
+    for gpu_idx in range(device_count):
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
         uuid   = pynvml.nvmlDeviceGetUUID(handle).decode("ascii")
         if uuid not in _previously_managed:
@@ -1521,7 +1531,7 @@ async def _apply_aic_config(self, new_config: PowerAwareConfig) -> None:
 
 `admission_mode == "inherit"` skips the POST step but still records `theta_*_impl` to Prometheus for dashboards. `admission_mode == "off"` skips both gauges and POSTs.
 
-**Idempotency.** Every `_apply_aic_config()` call POSTs the implied threshold of the *currently-applied* config — no separate revert path. If AIC reverts to a previous config (failure mode #5 in §8), the previous-config implied θ is re-POSTed automatically.
+**Idempotency.** Every `_apply_aic_config()` call POSTs the implied threshold of the *currently-applied* config — no separate revert path. If a re-sweep produces a lower-throughput config (the regression case in failure mode #5 in §8), the implied θ for that newly-picked config is re-POSTed automatically on the same idempotent path.
 
 **Per-tick cost.** One LIST call (cached by the existing `connector` machinery) plus one POST per frontend replica. Frontend replica counts are typically 1–5, so per-tick POST volume is bounded. Frequency is gated upstream by `aic_reoptimize_interval` (default 300s) and `aic_drift_consecutive_ticks` (default 3) — same guards as §6.3 Phase-1 pod annotation rate analysis.
 
@@ -1714,6 +1724,36 @@ cluster.
 [`docs/components/planner/dpp-dev-env.md`](../components/planner/dpp-dev-env.md).
 It is the canonical recipe and it produced exactly the numbers above on a
 clean AKS namespace.
+
+### 9.0.1 γ-class stress testbed — dev-pod validation (2026-05-11)
+
+In addition to the §9.0 product test pass, the
+[Power Planner Stress Testbed](./powerplanner-testbed-design.md) was lit up
+end-to-end on the dev pod for the first time. The γ-class drives the real
+`PlannerStateMachine` + `AICPowerOptimizer` through `PlannerReplayBridge`
+against the real mocker scheduler — the path α-class fakes cannot reproduce.
+
+| Environment | Suite | Pass | Skip | Fail | Time |
+|---|---|---:|---:|---:|---|
+| Local box (no Rust mocker) | `planner/tests/testbed/` | 82 | 5 | 0 | ~2.5 s |
+| Dev pod (older `create_disagg` bridge) | `planner/tests/testbed/` | **86** | **1** | **0** | **~9 s** |
+
+The dev pod row exposed eight defects across the testbed plumbing layer
+(bridge API generation drift, Mooncake trace format, sparse-trace simulation
+semantics, …) plus **one product-adjacent fix in
+`components/src/dynamo/planner/offline/replay_adapter.py`** — `_build_tick_input`
+now floors `now_s` at `tick.at_s` to prevent an infinite-loop when the bridge
+returns a `now_ms` < the requested tick time on a sparse Mooncake trace. The
+change is a no-op for dense traces and for the `_StubBridge`, and it benefits
+any future user of `dynamo replay` against sparse offline traces.
+
+The single skip on the dev pod (`test_alpha_gamma_agree_on_decode_drift`) is
+gated on `PlannerReplayBridge.from_synthetic_disagg` existing — it auto-enables
+once a newer mocker is built into the dev image. **No test or scenario YAML
+changes will be needed when that day arrives.**
+
+Full root-cause breakdown of every defect surfaced and fixed: see
+[`powerplanner-testbed-design.md` Appendix D](./powerplanner-testbed-design.md#appendix-d--dev-pod-γ-class-validation-v22--v23).
 
 ### Phase 1 tests
 
@@ -1995,7 +2035,7 @@ Reset is per-component: a `power_p`-only change rebuilds prefill regression alon
 
 10. **Open-loop arrival pattern variance margin** — The §5.7/§5.8 `theta_*_impl` math uses Little's-law steady-state means. For Poisson-arrival traffic, the instantaneous `active_decode_blocks` and `active_prefill_tokens` fluctuate around those means — setting threshold = mean ⇒ ~50% time-in-busy. The `admission_safety_margin` field (default 1.0) is the lever for queueing variance; values <1.0 push the shed point below the steady-state mean. Empirical guidance for production traffic (Poisson vs bursty vs closed-loop) should be added to the operator playbook once Phase 5 hardware data is available.
 
-11. **`TrafficObservation` fields for per-side scheduled tokens (B1)** — The per-component power EMA gates in §5.3 require `TrafficObservation.scheduled_prefill_tokens` and `TrafficObservation.scheduled_decode_kv_tokens` (and `scheduled_decode_kv_tokens` for the agg sum). The FPM event plane already collects these at the engine boundary (`planner-design.md` §"Load-Based Scaling" describes `sum_prefill_tokens` / `sum_decode_kv_tokens` flowing through `LoadPredictor`). Plumbing the existing values through `TrafficObservation` is a small Phase-3 deliverable: it requires updating the `TrafficObservation` dataclass, the FPM-side serializer, and a new `LoadPredictor.predict_scheduled_tokens()` method (or repurposing `predict_load`). Until then, `update_correction()` falls back to a fleet-wide gate (the previous design's `num_req > 0` semantics) and emits a one-time INFO log saying so. Tracked for closeout in PR 3 alongside the rest of the AIC closed-loop work.
+11. **`TrafficObservation` fields for per-side scheduled tokens (B1)** — The per-component power EMA gates in §5.3 require `TrafficObservation.scheduled_prefill_tokens` and `TrafficObservation.scheduled_decode_kv_tokens` (the agg-mode gate sums the same two fields — see §5.3 line `if (traffic.scheduled_prefill_tokens + traffic.scheduled_decode_kv_tokens) > 0`). The FPM event plane already collects these at the engine boundary (`planner-design.md` §"Load-Based Scaling" describes `sum_prefill_tokens` / `sum_decode_kv_tokens` flowing through `LoadPredictor`). Plumbing the existing values through `TrafficObservation` is a small Phase-3 deliverable: it requires updating the `TrafficObservation` dataclass, the FPM-side serializer, and a new `LoadPredictor.predict_scheduled_tokens()` method (or repurposing `predict_load`). Until then, `update_correction()` falls back to a fleet-wide gate (the previous design's `num_req > 0` semantics) and emits a one-time INFO log saying so. Tracked for closeout in PR 3 alongside the rest of the AIC closed-loop work.
 
 12. **DCGM selector when operator overrides pod naming (B1)** — `get_avg_per_gpu_power_by_component()` (§7) now uses `exported_pod=~"^{dgd_name}-[0-9]+-{service_key.lower()}-.*"` to filter DCGM_FI_DEV_POWER_USAGE samples.  This matches the operator's default `<dgd>-<replica-idx>-<service-key-lc>-<hash>` pod-name format.  When the operator is configured with a non-default pod-name template (overridable via the DGD spec), the regex won't match and `c_power_*` updates will silently NaN-out.  The robust fix is to label DCGM samples with `dynamo_service` (the same label the planner already uses for component identification elsewhere) — but that requires a kube-state-metrics or DCGM-exporter relabeling rule.  Phase-3 ships the regex form; Phase-5 hardware validation should test the operator's name-override path and add a relabeling rule if needed.
 
