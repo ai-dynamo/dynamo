@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Dynamo Bulwark: The End of the Cold Restart"
-subtitle: "Mohammed Abdulwahhab, Schwinn Sareesitthipitak — May 2026"
+subtitle: "Mohammed Abdulwahhab, Schwinn Saereesitthipitak — May 2026"
 description: "Dynamo Bulwark is near-zero downtime LLM engine failover. Pre-initialized shadow engines share GPU-resident weights with the primary and take over within seconds when it dies."
 keywords: engine failover, GPU memory service, GMS, shadow engines, LLM inference, vLLM, fault tolerance, Dynamo
 last-updated: May 8, 2026
