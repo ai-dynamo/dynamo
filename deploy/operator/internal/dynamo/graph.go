@@ -1947,6 +1947,7 @@ func GenerateGrovePodCliqueSet(
 		componentName := component.ComponentName
 		dynamoNamespace := GetDynamoNamespace(dynamoDeployment, component)
 
+		propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
 		podTemplate := ensurePodTemplate(component)
 		podTemplate.Labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 		// Determine backend framework using hybrid approach
