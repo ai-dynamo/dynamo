@@ -1140,26 +1140,32 @@ impl InstanceLeader {
     ///
     /// Steps:
     ///
-    /// 1. Lazily import peer metadata if not already cached.
-    /// 2. Empty `refs` → `Ok(())` immediately (no planning, no RPCs).
-    /// 3. Look up the local [`ParallelismTemplate`] and the cached
-    ///    per-rank [`ParallelismDescriptor`] set for `remote_instance`.
-    /// 4. Coherence guard: `template.tp_size == parallel_worker.worker_count()`.
+    /// 1. Empty `refs` → `Ok(())` immediately (no planning, no RPCs).
+    /// 2. Lazily import peer metadata if not already cached.
+    /// 3. Look up the cached per-rank
+    ///    [`ParallelismDescriptor`] set for `remote_instance`. If
+    ///    absent (Legacy unstamped peer), fall back to the legacy
+    ///    same-rank-zip dispatch on
+    ///    [`crate::worker::group::ParallelWorkers::execute_remote_onboard_for_instance`]
+    ///    — backwards compatible with peers that haven't upgraded to
+    ///    stamping.
+    /// 4. (Strict path only.) Read the local [`ParallelismTemplate`].
+    ///    Coherence guard: `template.tp_size == parallel_worker.worker_count()`.
     /// 5. [`plan_pull`] → `Vec<(local_rank, WorkerPullPlan)>`.
     /// 6. Dispatch each plan to `parallel_worker.workers()[local_rank]`
     ///    via [`crate::worker::WorkerTransfers::execute_remote_pull_plan`].
     /// 7. Aggregate per-plan notifications, await.
     ///
-    /// Locked decision #5: `plan_pull` is the always-on path. The
-    /// symmetric case is the degenerate output (one shard per local
-    /// rank, full extents); the worker handler routes it through the
-    /// planner-driven [`kvbm_physical::manager::TransferManager::execute_transfer_selection`]
-    /// like any other plan. This is a behaviour change for symmetric
-    /// callers vs the legacy direct-onboard path — under symmetric +
-    /// identical layouts the planner still emits a single
+    /// Locked decision #5: `plan_pull` is the always-on path *for peers
+    /// that stamp descriptors*. The symmetric case is the degenerate
+    /// output (one shard per local rank, full extents); the worker
+    /// handler routes it through the planner-driven
+    /// [`kvbm_physical::manager::TransferManager::execute_transfer_selection`]
+    /// like any other plan. This is a behaviour change for stamped
+    /// symmetric callers vs the legacy direct-onboard path — under
+    /// symmetric + identical layouts the planner still emits a single
     /// `CopyPlan::Direct`, but planning overhead lands on the hot path.
-    /// A future `use_planner = false` opt-out can short-circuit this if
-    /// micro-benchmarks ever show it matters.
+    /// Unstamped peers preserve the pre-AB-4 direct-onboard path.
     pub async fn rdma_pull_with_opts(
         &self,
         remote_instance: InstanceId,
@@ -1177,22 +1183,24 @@ impl InstanceLeader {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("rdma_pull: no parallel worker configured"))?;
 
+        // Legacy peers (no stamped descriptors) preserve the pre-AB-4
+        // direct-onboard path. `connect_remote`'s rank-count gate
+        // enforces same-rank symmetry for them, so the per-worker
+        // execute_remote_onboard fan-out is correct.
+        let Some(descriptors) = parallel_worker.remote_descriptors_for(remote_instance) else {
+            return self
+                .rdma_pull_legacy_fallback(parallel_worker.as_ref(), remote_instance, refs, opts)
+                .await;
+        };
+
         let template = self.parallelism_template.clone().ok_or_else(|| {
             anyhow::anyhow!(
-                "rdma_pull: no ParallelismTemplate configured on the leader; cross-parallelism \
-                 transfers require InstanceLeaderBuilder::parallelism_template(...)"
+                "rdma_pull: peer {} has stamped descriptors but no local ParallelismTemplate \
+                 is configured; cross-parallelism transfers require \
+                 InstanceLeaderBuilder::parallelism_template(...)",
+                remote_instance
             )
         })?;
-
-        let descriptors = parallel_worker
-            .remote_descriptors_for(remote_instance)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "rdma_pull: no ParallelismDescriptor cache for instance {}; peer must stamp \
-                     descriptors and connect_remote must have run through the Strict path",
-                    remote_instance
-                )
-            })?;
 
         // Coherence guard: same invariant the asymmetric branch of
         // SpmdParallelWorkers enforces. A template that disagrees with
@@ -1244,6 +1252,49 @@ impl InstanceLeader {
             &tokio::runtime::Handle::current(),
         )?;
         aggregated.await?;
+        Ok(())
+    }
+
+    /// Fallback path for peers that import via the Legacy (unstamped)
+    /// `connect_remote` strategy. Pre-AB-4 every cross-leader pull
+    /// took this path; AB-4 only switches stamped peers onto the
+    /// planner. Refs are unzipped back into parallel `(src_ids,
+    /// dst_ids)` vectors and handed to
+    /// `ParallelWorkers::execute_remote_onboard_for_instance`, whose
+    /// symmetric branch fans the SAME transfer out to every local
+    /// worker (`remote_handles` keyed by local `worker_idx`, which
+    /// equals remote rank for legacy peers by the rank-count match
+    /// gate in `connect_remote`).
+    async fn rdma_pull_legacy_fallback(
+        &self,
+        parallel_worker: &dyn ParallelWorkers,
+        remote_instance: InstanceId,
+        refs: Vec<PullRef>,
+        opts: WirePullOptions,
+    ) -> Result<()> {
+        let mut src_block_ids: Vec<BlockId> = Vec::with_capacity(refs.len());
+        let mut dst_block_ids: Vec<BlockId> = Vec::with_capacity(refs.len());
+        for r in refs {
+            src_block_ids.push(r.src_block_id);
+            dst_block_ids.push(r.dst_block_id);
+        }
+
+        // Project WirePullOptions onto the full TransferOptions for the
+        // legacy path. The legacy executor honours nixl_write_notification
+        // and metric_route; all other TransferOptions fields default.
+        let mut transfer_opts = TransferOptions::default();
+        transfer_opts.nixl_write_notification = opts.nixl_write_notification;
+        transfer_opts.metric_route = opts.metric_route;
+
+        let notification = parallel_worker.execute_remote_onboard_for_instance(
+            remote_instance,
+            LogicalLayoutHandle::G2,
+            src_block_ids,
+            LogicalLayoutHandle::G2,
+            Arc::from(dst_block_ids),
+            transfer_opts,
+        )?;
+        notification.await?;
         Ok(())
     }
 
