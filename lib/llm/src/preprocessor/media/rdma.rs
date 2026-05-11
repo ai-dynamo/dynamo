@@ -84,11 +84,15 @@ impl RdmaMediaDataDescriptor {
             DataType::UINT8 => 0,
         };
         hasher.update(&[dtype_byte]);
-        // raw payload
+        // raw payload via SystemStorage's Slice impl.
         // SAFETY: `storage` is borrowed for the duration of this call;
-        // SystemStorage owns the malloc'd buffer of `len` bytes and won't
-        // free or relocate it while the borrow is alive.
-        let bytes = unsafe { std::slice::from_raw_parts(storage.as_ptr(), len) };
+        // SystemStorage owns the malloc'd buffer and won't free or
+        // relocate it while the borrow is alive. The Slice trait's
+        // safety contract about no concurrent mutable access is upheld
+        // because `content_hash` is only invoked on descriptors during
+        // request building, before they're sent to NIXL.
+        use dynamo_memory::actions::Slice;
+        let bytes = unsafe { storage.as_slice().ok()? };
         hasher.update(bytes);
         Some(hasher.digest())
     }
