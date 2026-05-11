@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -154,6 +153,15 @@ class _DynamoBenchmarkWorker(ManagedProcess):
 
         # Allocate a per-worker system port like the cancellation test does.
         self.system_port = allocate_port(9100)
+        # Allocate a per-worker forward-pass-metrics ZMQ publisher port.
+        # ``InstrumentedScheduler`` (auto-injected by --benchmark-mode) binds
+        # ``tcp://*:DYN_FORWARDPASS_METRIC_PORT + dp_rank`` for the FPM
+        # publisher. Two workers on the same host with the default port
+        # collide on the second bind (``Address already in use (addr='tcp://*:20380')``).
+        # The operator sets this per-engine via DynamoFPMBasePort; the
+        # cancellation test never hits this because it doesn't run with
+        # --benchmark-mode and so doesn't auto-inject InstrumentedScheduler.
+        self.fpm_port = allocate_port(20380)
 
         command = [
             "python3",
@@ -225,6 +233,9 @@ class _DynamoBenchmarkWorker(ManagedProcess):
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
+        # Required so InstrumentedScheduler's FPM publisher doesn't fight
+        # the other worker's publisher for tcp://*:20380.
+        env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
         # Prefill worker publishes KV events on its own ZMQ port and uses
         # a distinct NIXL side-channel port. Same constants as
@@ -276,6 +287,10 @@ class _DynamoBenchmarkWorker(ManagedProcess):
             deallocate_port(self.system_port)
         except Exception as e:
             logger.warning(f"Failed to release worker system port: {e}")
+        try:
+            deallocate_port(self.fpm_port)
+        except Exception as e:
+            logger.warning(f"Failed to release worker FPM port: {e}")
         return super().__exit__(exc_type, exc_val, exc_tb)
 
     def _is_ready(self, response) -> bool:
