@@ -21,7 +21,7 @@ Hard cap: 4 MB per file. Exceeding it splits the SBOM per-ecosystem
 (deb.cdx.json, pypi.cdx.json, rpm.cdx.json) under a directory named
 after the base+digest prefix.
 
-Runs in .github/workflows/license-db-refresh.yml weekly. The bot's PR
+Runs in .github/workflows/base-sboms-refresh.yml weekly. The bot's PR
 re-runs container/compliance/policy/validate.py against any new
 licenses surfaced by base bumps; if validation fails (UNKNOWN, denied,
 or new license category not in licenses.toml), the bot's CI blocks

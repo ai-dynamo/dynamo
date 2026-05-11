@@ -212,10 +212,10 @@ FROM agent_pre AS licenses
 
 USER root
 RUN mkdir -p /legal /sboms
-# Install python3 + python3-yaml. PyYAML is required for the
-# license_db.lookup() override chain — without it, license_overrides.yaml
-# silently no-ops and NVIDIA-proprietary dpkgs (libnccl2 etc.) come back
-# UNKNOWN despite having hand-curated overrides.
+# Install python3 + python3-yaml. PyYAML is required for the override
+# lookup — without it, license_overrides.yaml silently no-ops and
+# NVIDIA-proprietary dpkgs (libnccl2 etc.) come back UNKNOWN despite
+# having hand-curated overrides.
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-yaml \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY --from=compliance . /opt/compliance

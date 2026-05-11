@@ -11,7 +11,6 @@ bundle suitable for NVIDIA's Open Source Review Board:
     /tmp/sboms/                 per-ecosystem deps CSVs (from --target sboms)
     /tmp/sources/sources.tar.gz source archives (from --target sources_archive,
                                 post-merge / RC / release only)
-    container/compliance/license_db/license-db.json
     container/compliance/base_sboms/<base>.cdx.json   if applicable
     container/compliance/osrb/{linkage.yaml,distribution.yaml,modifications/}
 

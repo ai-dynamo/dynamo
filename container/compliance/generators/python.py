@@ -31,7 +31,7 @@ import re
 from pathlib import Path
 
 from .common import UNKNOWN, Component, dedupe_by_name_version
-from ..license_db import lookup as license_db_lookup
+from .. import overrides as license_overrides
 
 logger = logging.getLogger(__name__)
 
@@ -301,9 +301,8 @@ def _resolve_spdx(
          body. Rejected if multi-line (>3 lines) or any single line >80
          chars; matplotlib's License field, for instance, is the entire
          PSF-style license body and would false-match patterns deep inside.
-      4. license_db.lookup(ecosystem, name, version) — checks the committed
-         license-db.json snapshot AND license_overrides.yaml. Catches
-         packages whose upstream metadata is empty (e.g. NVIDIA's older
+      4. license_overrides.yaml — hand-curated overrides for packages
+         whose upstream metadata is empty or wrong (e.g. NVIDIA's older
          CUDA wheels: nvidia-cufft, nvidia-curand, etc.).
       5. UNKNOWN
     """
@@ -323,8 +322,7 @@ def _resolve_spdx(
                 if spdx:
                     return spdx
 
-    # Last resort: hand-curated overrides + committed license-db snapshot.
-    overridden = license_db_lookup.lookup(ECOSYSTEM, name, version)
+    overridden = license_overrides.lookup(ECOSYSTEM, name, version)
     if overridden:
         return overridden
 

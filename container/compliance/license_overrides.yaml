@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Hand-curated license overrides for packages whose upstream metadata is empty,
-# malformed, or otherwise unhelpful. Consulted by container/compliance/license_db/
-# lookup.py as a final fallback after license-db.json and before returning
-# UNKNOWN.
+# malformed, or otherwise unhelpful. Consulted by
+# container/compliance/overrides.py via license_overrides.lookup(), which every
+# NOTICES generator calls before falling back to UNKNOWN.
 #
-# Match is by (ecosystem, name) — version-agnostic. If a package needs
-# version-specific resolution, use license-db.json instead.
+# Match is by (ecosystem, name) — version-agnostic. If a package legitimately
+# changes license across versions, add separate entries with the version baked
+# into the name (e.g. cuda-nvcc-12-9 vs cuda-nvcc-13-0).
 #
 # Schema:
 #   ecosystem: rust | go | python | dpkg | native
