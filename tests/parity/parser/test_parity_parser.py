@@ -281,7 +281,9 @@ def _load_fixtures() -> list[tuple[str, str, dict[str, Any]]]:
         doc = yaml.safe_load(fp.read_text())
         for case_id, case in doc["cases"].items():
             out.append((doc["family"], case_id, case))
-    out.sort(key=lambda t: (t[0], int(t[1].rsplit(".", 1)[1])))
+    # Sort by (family, mode, case_number) so axes group cleanly when a family
+    # has more than one mode (e.g. mistral has both `batch` and `compact`).
+    out.sort(key=lambda t: (t[0], t[1].rsplit(".", 2)[1], int(t[1].rsplit(".", 1)[1])))
     return out
 
 

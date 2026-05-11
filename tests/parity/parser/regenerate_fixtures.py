@@ -81,6 +81,37 @@ _PROCESS_DATA_NESTED = {
         },
     },
 }
+# Tools below seed the post-batch axes (PARSER.types / .edge / .nested / .json /
+# .selfclosing / .noparam / .recovery / .brackets / .envelope / .unicode). They
+# mirror the per-parser unit-test contracts from SGLang's
+# test/registered/unit/function_call/test_function_call_parser.py.
+_GET_WEATHER_LOC_DAYS = {
+    "name": "get_current_weather",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "location": {"type": "string"},
+            "days": {"type": "integer"},
+        },
+    },
+}
+_SQL_QUERY_DRYRUN = {
+    "name": "sql_interpreter",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "dry_run": {"type": "boolean"},
+        },
+    },
+}
+_SQL_QUERY = {
+    "name": "sql_interpreter",
+    "parameters": {
+        "type": "object",
+        "properties": {"query": {"type": "string"}},
+    },
+}
 
 # (family, case_id) -> {"text": str, "tools": list[dict] | None, "description": str}
 # Cases marked with text=None are intentionally skipped (N/A or not yet
@@ -815,6 +846,65 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_weather", "arguments": {"location": "LA"}}][/TOOL_CALLS]',
         "tools": [_GET_WEATHER_LOC],
     },
+    # ----- mistral (compact format `[TOOL_CALLS]name[ARGS]{...}`) -----
+    # SGLang's MistralDetector supports two wire formats: the canonical
+    # JSON-array (`[TOOL_CALLS][{...}]`, covered by the batch axis above)
+    # and a compact per-call form (`[TOOL_CALLS]name[ARGS]{json}`). The
+    # batch axis encodes the JSON-array variant, so SGLang's 6 divergence
+    # cells there bottleneck on format detection rather than parser logic.
+    # This axis replays the same 10 logical scenarios in the compact wire
+    # format so divergences against Dynamo's `mistral` parser become
+    # parser-class diffs (compact-format support / recovery) instead.
+    ("mistral", "PARSER.compact.1"): {
+        "description": "Single tool call (compact format, happy path)",
+        "text": '[TOOL_CALLS]get_weather[ARGS]{"location": "NYC"}',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("mistral", "PARSER.compact.2"): {
+        "description": "Multiple tool calls (compact, consecutive markers)",
+        "text": '[TOOL_CALLS]get_weather[ARGS]{"location": "NYC"}[TOOL_CALLS]get_time[ARGS]{"timezone": "EST"}',
+        "tools": [_GET_WEATHER_LOC, _GET_TIME_TZ],
+    },
+    ("mistral", "PARSER.compact.3"): {
+        "description": "No tool call (plain text)",
+        "text": "Hello, how can I help you today?",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("mistral", "PARSER.compact.4"): {
+        "description": "Malformed JSON args (missing close brace)",
+        "text": '[TOOL_CALLS]get_weather[ARGS]{"location": "NYC"',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("mistral", "PARSER.compact.5"): {
+        "description": "Truncated mid-arguments (max_tokens cutoff)",
+        "text": '[TOOL_CALLS]get_weather[ARGS]{"location":',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("mistral", "PARSER.compact.6"): {
+        "description": "Empty args (no-arg call)",
+        "text": "[TOOL_CALLS]get_time[ARGS]{}",
+        "tools": [_GET_TIME_NOARG],
+    },
+    ("mistral", "PARSER.compact.7"): {
+        "description": "Complex args (nested object + array)",
+        "text": '[TOOL_CALLS]process_data[ARGS]{"items": [1, 2, 3], "config": {"nested": true}}',
+        "tools": [_PROCESS_DATA_NESTED],
+    },
+    ("mistral", "PARSER.compact.8"): {
+        "description": "Interleaved normal text (text before + after wrapper)",
+        "text": 'I will check the weather. [TOOL_CALLS]get_weather[ARGS]{"location": "NYC"} Done.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("mistral", "PARSER.compact.9"): {
+        "description": "Empty input",
+        "text": "",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("mistral", "PARSER.compact.10"): {
+        "description": "Duplicate calls (same name twice, compact)",
+        "text": '[TOOL_CALLS]get_weather[ARGS]{"location": "NYC"}[TOOL_CALLS]get_weather[ARGS]{"location": "LA"}',
+        "tools": [_GET_WEATHER_LOC],
+    },
     # ----- jamba -----
     ("jamba", "PARSER.batch.1"): {
         "description": "Single tool call (happy path)",
@@ -1068,6 +1158,155 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
     ("deepseek_v3_2", "PARSER.batch.10"): {
         "description": "Duplicate calls (same name twice)",
         "text": '<｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">LA</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    # =========================================================================
+    # Post-batch axes — scenarios surfaced by SGLang's per-parser unit tests
+    # (sglang/test/registered/unit/function_call/test_function_call_parser.py)
+    # that the cross-family batch axis doesn't capture. Each new mode encodes
+    # a single focused contract so divergence cells point to a specific bug
+    # class instead of a generic "format mismatch."
+    # =========================================================================
+    #
+    # ----- pythonic: <|python_start|>…<|python_end|> envelope (Llama 4) -----
+    # SGLang ref: test_detect_and_parse_with_python_start_and_end_token.
+    ("pythonic", "PARSER.envelope.1"): {
+        "description": "Llama-4 envelope around bracket-call form",
+        "text": "User wants to get the weather in Mars. <|python_start|>[get_weather(location='Mars')]<|python_end|> In this way we will get the weather in Mars.",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    # ----- pythonic: nested brackets in bracket-form arguments -----
+    # SGLang ref: test_parse_streaming_nested_brackets / _dict.
+    # Tests the bracket-form's own nesting (array / dict literal inside the
+    # call's args). Distinct from batch.7 which exercises JSON-form nesting.
+    ("pythonic", "PARSER.nested.1"): {
+        "description": "Nested array + dict inside bracket-form call",
+        "text": "[process_data(items=[1, 2, 3], config={'nested': True})]",
+        "tools": [_PROCESS_DATA_NESTED],
+    },
+    # ----- deepseek_v3_2 / deepseek_v4: JSON-format inside <|DSML|invoke> -----
+    # Both DSML detectors accept two wire formats inside the invoke tag:
+    # XML <｜DSML｜parameter name="x">v</｜DSML｜parameter> (batch axis) and
+    # JSON {...} (this axis). Encoding both lets the matrix distinguish
+    # "supports XML only" from "supports neither."
+    # SGLang ref: test_detect_and_parse_json_format (v3_2 and v4).
+    ("deepseek_v3_2", "PARSER.json.1"): {
+        "description": "Single call, JSON-format args inside invoke (alt wire format)",
+        "text": '<｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n{"location": "NYC"}\n</｜DSML｜invoke>\n</｜DSML｜function_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v4", "PARSER.json.1"): {
+        "description": "Single call, JSON-format args inside invoke (alt wire format)",
+        "text": '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_weather">\n{"location": "NYC"}\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    # ----- deepseek_v4: self-closing invoke tag -----
+    # SGLang ref: test_self_closing_zero_arg_invoke, test_self_closing_mixed_with_long_form.
+    # Form `<｜DSML｜invoke name="x"/>` is structurally different from the
+    # empty long-form `<…name="x"></…invoke>` (covered by .noparam.1).
+    ("deepseek_v4", "PARSER.selfclosing.1"): {
+        "description": "Self-closing invoke tag, zero args",
+        "text": '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_time"/>\n</｜DSML｜tool_calls>',
+        "tools": [_GET_TIME_NOARG],
+    },
+    ("deepseek_v4", "PARSER.selfclosing.2"): {
+        "description": "Self-closing invoke mixed with long-form invoke",
+        "text": '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n<｜DSML｜invoke name="get_time"/>\n</｜DSML｜tool_calls>',
+        "tools": [_GET_WEATHER_LOC, _GET_TIME_NOARG],
+    },
+    # ----- deepseek_v3_2 / deepseek_v4: zero <|DSML|parameter> tags -----
+    # SGLang ref: test_detect_and_parse_no_parameters.
+    # Distinct from batch.6 ("empty args {}") — here the invoke tag has zero
+    # <｜DSML｜parameter> children, not an empty JSON object literal.
+    ("deepseek_v3_2", "PARSER.noparam.1"): {
+        "description": "Long-form invoke with zero parameter tags",
+        "text": '<｜DSML｜function_calls>\n<｜DSML｜invoke name="get_time">\n</｜DSML｜invoke>\n</｜DSML｜function_calls>',
+        "tools": [_GET_TIME_NOARG],
+    },
+    ("deepseek_v4", "PARSER.noparam.1"): {
+        "description": "Long-form invoke with zero parameter tags",
+        "text": '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_time">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
+        "tools": [_GET_TIME_NOARG],
+    },
+    # ----- Unicode parameter values (Chinese characters) -----
+    # SGLang ref: test_chinese_characters_not_double_escaped (BaseFormatDetector).
+    # Catches JSON double-escaping (e.g. 杭州 vs 杭州). Applied across
+    # representative wire-format families: JSON-with-tokens (kimi_k2),
+    # XML-with-text (qwen3_coder), XML-with-args (glm47), bare-JSON (mistral),
+    # DSML (deepseek_v3_2). Top-N coverage; extend to other families if it
+    # surfaces a divergence class.
+    ("kimi_k2", "PARSER.unicode.1"): {
+        "description": "Chinese characters in arguments",
+        "text": '<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"杭州"}<|tool_call_end|><|tool_calls_section_end|>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("qwen3_coder", "PARSER.unicode.1"): {
+        "description": "Chinese characters in arguments",
+        "text": "<tool_call>\n<function=get_weather>\n<parameter=location>\n杭州\n</parameter>\n</function>\n</tool_call>",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("glm47", "PARSER.unicode.1"): {
+        "description": "Chinese characters in arguments",
+        "text": "<tool_call>get_weather<arg_key>location</arg_key><arg_value>杭州</arg_value></tool_call>",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("mistral", "PARSER.unicode.1"): {
+        "description": "Chinese characters in arguments",
+        "text": '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "杭州"}}][/TOOL_CALLS]',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3_2", "PARSER.unicode.1"): {
+        "description": "Chinese characters in arguments",
+        "text": '<｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">杭州</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    # ----- qwen3_coder: primitive type coercion in XML wire format -----
+    # SGLang ref: test_integer_parameter_conversion, test_boolean_parameter_conversion.
+    # The XML wire format reads parameter values as text between tags, then
+    # coerces by JSON-schema type. This is a distinct code path from batch.7
+    # (which seeds typed values via the JSON wire format).
+    ("qwen3_coder", "PARSER.types.1"): {
+        "description": "Integer parameter coercion (text-between-tags → int)",
+        "text": "<tool_call>\n<function=get_current_weather>\n<parameter=location>Tokyo</parameter>\n<parameter=days>5</parameter>\n</function>\n</tool_call>",
+        "tools": [_GET_WEATHER_LOC_DAYS],
+    },
+    ("qwen3_coder", "PARSER.types.2"): {
+        "description": "Boolean parameter coercion (text-between-tags → bool)",
+        "text": "<tool_call>\n<function=sql_interpreter>\n<parameter=query>SELECT 1</parameter>\n<parameter=dry_run>True</parameter>\n</function>\n</tool_call>",
+        "tools": [_SQL_QUERY_DRYRUN],
+    },
+    # ----- qwen3_coder: parameter-value edge cases -----
+    # SGLang ref: test_empty_parameter_value, test_parameter_with_special_characters.
+    # Distinct from batch.6 (empty arg-dict): here the value itself is empty
+    # or contains chars that could confuse a regex-based extractor.
+    ("qwen3_coder", "PARSER.edge.1"): {
+        "description": "Empty parameter value (between-tags content is empty)",
+        "text": "<tool_call>\n<function=get_weather>\n<parameter=location></parameter>\n</function>\n</tool_call>",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("qwen3_coder", "PARSER.edge.2"): {
+        "description": "Parameter value with quotes and special characters",
+        "text": "<tool_call>\n<function=sql_interpreter>\n<parameter=query>SELECT * FROM users WHERE name = 'John \"Doe\"'</parameter>\n</function>\n</tool_call>",
+        "tools": [_SQL_QUERY],
+    },
+    # ----- llama3_json: invalid-then-valid recovery -----
+    # SGLang ref: test_invalid_then_valid_json.
+    # Distinct from batch.4 (single malformed) and batch.5 (truncated):
+    # tests whether the parser can skip a malformed first call and recover
+    # a well-formed second one.
+    ("llama3_json", "PARSER.recovery.1"): {
+        "description": "Malformed JSON followed by valid JSON (recovery)",
+        "text": '<|python_tag|>{"name": "get_weather", "parameters": {{"name": "get_weather", "parameters": {}}',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    # ----- mistral: bracket characters inside JSON string values -----
+    # SGLang ref: test_detect_and_parse_with_nested_brackets_in_content.
+    # The [TOOL_CALLS]...[/TOOL_CALLS] delimiter scanner has to not mistake
+    # `[` inside a JSON string for the start of a new tool-call section.
+    # Distinct from batch.7 (structural nesting, no in-string delimiters).
+    ("mistral", "PARSER.brackets.1"): {
+        "description": "Bracket chars inside string values (delimiter-collision)",
+        "text": '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "Building [42]"}}][/TOOL_CALLS]',
         "tools": [_GET_WEATHER_LOC],
     },
 }

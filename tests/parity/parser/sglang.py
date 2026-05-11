@@ -30,6 +30,9 @@ from sglang.srt.function_call.hermes_detector import (
 from sglang.srt.function_call.kimik2_detector import (
     KimiK2Detector,  # type: ignore[import-untyped]
 )
+from sglang.srt.function_call.llama32_detector import (
+    Llama32Detector,  # type: ignore[import-untyped]
+)
 from sglang.srt.function_call.minimax_m2 import (
     MinimaxM2Detector,  # type: ignore[import-untyped]
 )
@@ -63,10 +66,11 @@ _FAMILY_TO_SGLANG_DETECTOR = {
     "pythonic": PythonicDetector,
     "hermes": HermesDetector,
     "mistral": MistralDetector,
+    "llama3_json": Llama32Detector,
 }
 
 # Families with no SGLang detector today: nemotron_deci, nemotron_nano,
-# gemma4, deepseek_v4, jamba, llama3_json, phi4.
+# gemma4, deepseek_v4, jamba, phi4.
 
 
 def parse(
