@@ -63,15 +63,33 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     # vLLM and SGLang both truncate normal_text at the *end* of the tool-call
     # wrapper for these parser families. Only Dynamo preserves text after
     # the closing wrapper token.
-    ("vllm", "kimi_k2", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "glm47", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "kimi_k2", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
+    #
+    # kimi_k2 PARSER.batch.8 sub-cases (SGLang has no kimi_k2 detector → skips):
+    #   .a (pre-text only)   — vLLM preserves trailing whitespace; Dynamo trims
+    #   .b (post-text only)  — vLLM drops the trailing text entirely
+    #   .c (sandwich)        — vLLM preserves leading text but drops trailing
+    #   .d (between calls)   — vLLM drops inter-call text after first close
+    (
+        "vllm",
+        "kimi_k2",
+        "PARSER.batch.8.a",
+    ): "preserves trailing space; Dynamo trims it",
+    ("vllm", "kimi_k2", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "kimi_k2", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "kimi_k2", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "glm47", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "glm47", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "glm47", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "glm47", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
     # SGLang's GptOssDetector requires a strict '<|start|>assistant<|channel|>commentary'
     # bot_token; bare '<|channel|>commentary' variants (PARSER.batch.1, .6, .13)
     # are not detected at all.
     ("sglang", "harmony", "PARSER.batch.1"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
     ("sglang", "harmony", "PARSER.batch.6"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
-    ("sglang", "harmony", "PARSER.batch.8"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
+    ("sglang", "harmony", "PARSER.batch.8.a"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
+    ("sglang", "harmony", "PARSER.batch.8.b"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
+    ("sglang", "harmony", "PARSER.batch.8.c"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
+    ("sglang", "harmony", "PARSER.batch.8.d"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
     # SGLang's GptOssDetector drops the analysis-channel preamble entirely;
     # Dynamo surfaces it as normal_text.
     (
@@ -99,18 +117,55 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     (
         "sglang",
         "deepseek_v3_1",
-        "PARSER.batch.8",
+        "PARSER.batch.8.a",
+    ): "trims trailing space from preceding normal_text",
+    (
+        "sglang",
+        "deepseek_v3_1",
+        "PARSER.batch.8.c",
+    ): "trims trailing space from preceding normal_text",
+    (
+        "sglang",
+        "deepseek_v3_1",
+        "PARSER.batch.8.d",
     ): "trims trailing space from preceding normal_text",
     (
         "sglang",
         "deepseek_v3",
-        "PARSER.batch.8",
+        "PARSER.batch.8.a",
     ): "trims trailing space from preceding normal_text",
     (
         "sglang",
-        "pythonic",
-        "PARSER.batch.8",
-    ): _TRAILING_NORMAL_TEXT_DROP,
+        "deepseek_v3",
+        "PARSER.batch.8.c",
+    ): "trims trailing space from preceding normal_text",
+    (
+        "sglang",
+        "deepseek_v3",
+        "PARSER.batch.8.d",
+    ): "trims trailing space from preceding normal_text",
+    ("sglang", "pythonic", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
+    ("sglang", "pythonic", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
+    ("sglang", "pythonic", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
+    ("sglang", "pythonic", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
+    # Inverse of the XML-family pattern: post-#9350 Dynamo trims trailing
+    # text after wrapper-end on minimax_m2; SGLang preserves it. Only .a
+    # matches (no trailing text in that shape).
+    (
+        "sglang",
+        "minimax_m2",
+        "PARSER.batch.8.b",
+    ): "sglang preserves trailing normal_text after wrapper end; Dynamo trims it (post-#9350)",
+    (
+        "sglang",
+        "minimax_m2",
+        "PARSER.batch.8.c",
+    ): "sglang preserves trailing normal_text after wrapper end; Dynamo trims it (post-#9350)",
+    (
+        "sglang",
+        "minimax_m2",
+        "PARSER.batch.8.d",
+    ): "sglang preserves trailing normal_text after wrapper end; Dynamo trims it (post-#9350)",
     (
         "sglang",
         "deepseek_v3",
@@ -126,11 +181,9 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "deepseek_v3",
         "PARSER.batch.5",
     ): _RECOVERY_CONTRACT,
-    (
-        "vllm",
-        "gemma4",
-        "PARSER.batch.8",
-    ): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "gemma4", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "gemma4", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "gemma4", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
     # vLLM's pythonic parser rejects the whole input when the bracket-call form
     # is surrounded by interleaved text — calls=[], normal_text=raw input.
     # Dynamo's pythonic parser extracts the call and surfaces the surrounding
@@ -139,7 +192,22 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     (
         "vllm",
         "pythonic",
-        "PARSER.batch.8",
+        "PARSER.batch.8.a",
+    ): "vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the call",
+    (
+        "vllm",
+        "pythonic",
+        "PARSER.batch.8.b",
+    ): "vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the call",
+    (
+        "vllm",
+        "pythonic",
+        "PARSER.batch.8.c",
+    ): "vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the call",
+    (
+        "vllm",
+        "pythonic",
+        "PARSER.batch.8.d",
     ): "vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the call",
     (
         "vllm",
@@ -177,9 +245,13 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "PARSER.batch.7",
     ): "emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types",
     ("vllm", "hermes", "PARSER.batch.4"): _RECOVERY_CONTRACT,
-    ("vllm", "hermes", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "hermes", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "hermes", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "hermes", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
     ("vllm", "jamba", "PARSER.batch.5"): _RECOVERY_CONTRACT,
-    ("vllm", "jamba", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "jamba", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "jamba", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "jamba", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
     (
         "vllm",
         "llama3_json",
@@ -193,15 +265,24 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "PARSER.batch.10",
     ): "vLLM llama3_json does not parse semicolon-separated calls the same way Dynamo does",
     ("vllm", "mistral", "PARSER.batch.4"): _RECOVERY_CONTRACT,
-    ("vllm", "mistral", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "mistral", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "mistral", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
+    # `("vllm", "mistral", "PARSER.batch.8.d")` lives in the TODO(research) block below
+    # — vLLM raises ValueError on two `[TOOL_CALLS]` envelopes; classified differently
+    # than .a/.c.
     ("vllm", "phi4", "PARSER.batch.5"): _RECOVERY_CONTRACT,
     (
         "vllm",
         "phi4",
         "PARSER.batch.7",
     ): "emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types",
-    ("vllm", "phi4", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "deepseek_v3_2", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "phi4", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "phi4", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "phi4", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
+    ("sglang", "deepseek_v3_2", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
+    ("sglang", "deepseek_v3_2", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
+    ("sglang", "deepseek_v3_2", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
+    ("sglang", "deepseek_v3_2", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
     ("sglang", "hermes", "PARSER.batch.4"): _RECOVERY_CONTRACT,
     # SGLang's MistralDetector and Qwen25Detector both return empty `calls`
     # on the bare wire formats Dynamo emits — format-detection failure rather
@@ -231,7 +312,9 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "mistral",
         "PARSER.batch.7",
     ): "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits",
-    ("sglang", "mistral", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
+    ("sglang", "mistral", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
+    ("sglang", "mistral", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
+    ("sglang", "mistral", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
     (
         "sglang",
         "mistral",
@@ -259,29 +342,128 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "qwen25",
         "PARSER.batch.7",
     ): "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits",
-    ("sglang", "qwen25", "PARSER.batch.8"): _TRAILING_NORMAL_TEXT_DROP,
+    ("sglang", "qwen25", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
+    ("sglang", "qwen25", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
+    ("sglang", "qwen25", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
+    ("sglang", "qwen25", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
     (
         "sglang",
         "qwen25",
         "PARSER.batch.10",
     ): "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits",
+    (
+        "vllm",
+        "deepseek_v3_2",
+        "PARSER.batch.8.b",
+    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
+    (
+        "vllm",
+        "deepseek_v3_2",
+        "PARSER.batch.8.c",
+    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
+    (
+        "vllm",
+        "deepseek_v3_2",
+        "PARSER.batch.8.d",
+    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
+    (
+        "vllm",
+        "deepseek_v4",
+        "PARSER.batch.8.b",
+    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
+    (
+        "vllm",
+        "deepseek_v4",
+        "PARSER.batch.8.c",
+    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
+    (
+        "vllm",
+        "deepseek_v4",
+        "PARSER.batch.8.d",
+    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
+    (
+        "vllm",
+        "llama3_json",
+        "PARSER.batch.8.a",
+    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
+    (
+        "vllm",
+        "llama3_json",
+        "PARSER.batch.8.c",
+    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
+    (
+        "vllm",
+        "llama3_json",
+        "PARSER.batch.8.d",
+    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
+    (
+        "vllm",
+        "mistral",
+        "PARSER.batch.8.d",
+    ): "EXPECTS_ERROR(Only one BOT token): vLLM mistral_tool_parser raises ValueError on two consecutive [TOOL_CALLS] envelopes",
+    # SGLang divergences surfaced by CI (cuda{12.9,13.0} arm64). Reasons are
+    # placeholders pending per-case investigation; concrete divergence shape
+    # to be filled in by `embed_divergence_comments.py` runs against SGLang.
+    # (`sglang/deepseek_v3.b`, `sglang/deepseek_v3_1.b`, and `sglang/mistral.d`
+    # are already registered above as "trims trailing space"-class divergences;
+    # if CI still flags them XPASS-strict, those entries will need updating
+    # rather than re-adding here.)
+    (
+        "sglang",
+        "kimi_k2",
+        "PARSER.batch.8.a",
+    ): "TODO(research): SGLang diverges on this case; investigate vs Dynamo's expected",
+    (
+        "sglang",
+        "kimi_k2",
+        "PARSER.batch.8.b",
+    ): "TODO(research): SGLang diverges on this case; investigate vs Dynamo's expected",
+    (
+        "sglang",
+        "kimi_k2",
+        "PARSER.batch.8.c",
+    ): "TODO(research): SGLang diverges on this case; investigate vs Dynamo's expected",
+    (
+        "sglang",
+        "kimi_k2",
+        "PARSER.batch.8.d",
+    ): "TODO(research): SGLang diverges on this case; investigate vs Dynamo's expected",
 }
+
+
+def _case_sort_key(case_id: str) -> tuple[int, str]:
+    """Sort key for case IDs that may carry a sub-letter.
+
+    `PARSER.batch.5`   → (5, "")
+    `PARSER.batch.8.a` → (8, "a")
+    `PARSER.batch.8.b` → (8, "b")
+    """
+    parts = case_id.split(".")
+    top = int(parts[2])
+    sub = parts[3] if len(parts) > 3 else ""
+    return (top, sub)
 
 
 def _load_fixtures() -> list[tuple[str, str, dict[str, Any]]]:
     """Yields (family, case_id, case_dict) for every case across all families.
 
-    Schema: <family>/PARSER.<mode>.yaml holds
-        {family: "...", mode: "batch", cases: {PARSER.batch.1: {...}, ...}}
-    Case keys are the full PARSER_CASES.md ID (e.g. `PARSER.batch.1`)
-    so they match KNOWN_DIVERGENCES keys and parametrize IDs directly.
+    Two file layouts coexist:
+      <family>/PARSER.<mode>.yaml       — legacy flat: holds 1, 2, ..., 10
+      <family>/PARSER.<mode>.<n>.yaml   — per-top-level-case: holds n.a, n.b, ...
+
+    Both schemas are
+        {family: "...", mode: "batch", cases: {PARSER.batch.<id>: {...}, ...}}
+    Case keys are the full PARSER_CASES.md ID (e.g. `PARSER.batch.1` or
+    `PARSER.batch.8.a`) so they match KNOWN_DIVERGENCES keys and parametrize
+    IDs directly. The merge across the two layouts is conflict-free as long
+    as a given case ID lives in exactly one file.
     """
     out = []
     for fp in sorted(FIXTURES_ROOT.glob("*/PARSER.*.yaml")):
         doc = yaml.safe_load(fp.read_text())
         for case_id, case in doc["cases"].items():
             out.append((doc["family"], case_id, case))
-    out.sort(key=lambda t: (t[0], int(t[1].rsplit(".", 1)[1])))
+    out.sort(key=lambda t: (t[0], *_case_sort_key(t[1])))
     return out
 
 
@@ -330,14 +512,35 @@ def test_parity(
     parse_mod = importlib.import_module(f"tests.parity.parser.{impl_name}")
     got = parse_mod.parse(family, fixture["model_text"], fixture.get("tools"))
 
-    # Runtime / parser errors fail HARD. Wrappers prefix the env-shaped case
+    # Runtime / parser errors. Wrappers prefix the env-shaped case
     # ("impl has no parser registered for this family") with `UNAVAILABLE:`
-    # so we can still skip those cleanly. This check runs *before* the
-    # known-divergence xfail block below, so a crash on a known-divergence
-    # case is not masked.
+    # so we can still skip those cleanly.
+    #
+    # Errors on cases NOT in KNOWN_DIVERGENCES are real bugs → fail HARD.
+    #
+    # Errors on cases IN KNOWN_DIVERGENCES are absorbed as xfail ONLY when the
+    # divergence entry's reason explicitly opts into error-absorption via the
+    # `EXPECTS_ERROR(<pattern>):` prefix and the actual error matches the
+    # pattern. Plain-string divergences (the common case — value mismatches)
+    # do NOT absorb errors. This keeps an unrelated wrapper/runtime crash
+    # (e.g. an upstream API rename) from passing silently on a row that's
+    # only supposed to diverge on output values.
+    #
+    # Example entry that DOES absorb a specific error:
+    #   ("vllm", "mistral", "PARSER.batch.8.d"):
+    #       "EXPECTS_ERROR(Only one BOT token): vllm raises ValueError on two TOOL_CALLS envelopes"
+    div = KNOWN_DIVERGENCES.get((impl_name, family, case_id))
     if got.error:
         if got.error.startswith("UNAVAILABLE:"):
             pytest.skip(f"{impl_name} unavailable for {family}: {got.error}")
+        if div is not None:
+            import re as _re
+
+            m = _re.match(r"^EXPECTS_ERROR\((.+?)\):\s*(.*)$", div, _re.DOTALL)
+            if m and _re.search(m.group(1), got.error):
+                pytest.xfail(
+                    f"known divergence (error matched /{m.group(1)}/): {m.group(2)}"
+                )
         pytest.fail(f"{impl_name} crashed on {family}/{case_id}: {got.error}")
 
     expected = common.ParseResult(
@@ -350,7 +553,6 @@ def test_parity(
     # Known divergences: xfail the value-diff assertion only. If the values
     # now match, surface that as a registry-staleness failure (XPASS-strict
     # equivalent) instead of silently passing.
-    div = KNOWN_DIVERGENCES.get((impl_name, family, case_id))
     if div is not None:
         if got_canonical == expected_canonical:
             pytest.fail(
