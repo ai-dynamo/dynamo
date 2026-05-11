@@ -19,11 +19,13 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	dgdv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	. "github.com/onsi/ginkgo/v2"
@@ -3318,6 +3320,227 @@ var _ = Describe("DGDR Profiling Failure Attribution", func() {
 
 			// profilingPhase should remain unchanged
 			Expect(dgdr.Status.ProfilingPhase).Should(Equal(nvidiacomv1beta1.ProfilingPhaseInitializing))
+		})
+	})
+})
+
+var _ = Describe("DGDR Image Pull Error Detection", func() {
+	const (
+		imagePullTimeout  = time.Second * 10
+		imagePullInterval = time.Millisecond * 250
+	)
+
+	var (
+		reconciler *DynamoGraphDeploymentRequestReconciler
+		recorder   *record.FakeRecorder
+	)
+
+	BeforeEach(func() {
+		recorder = record.NewFakeRecorder(100)
+		reconciler = &DynamoGraphDeploymentRequestReconciler{
+			Client:   k8sClient,
+			Recorder: recorder,
+			Config: &configv1alpha1.OperatorConfiguration{
+				Namespace: configv1alpha1.NamespaceConfiguration{
+					Restricted: "",
+				},
+				RBAC: configv1alpha1.RBACConfiguration{
+					DGDRProfilingClusterRoleName: "test-cluster-role",
+				},
+			},
+			RuntimeConfig: &commonController.RuntimeConfig{},
+			RBACManager:   &MockRBACManager{},
+		}
+	})
+
+	Context("When DGD pods have image pull errors", func() {
+		It("Should return error messages for containers in ErrImagePull or ImagePullBackOff, and ignore others", func() {
+			ctx := context.Background()
+			dgdName := "test-dgd-image-pull-unit"
+			namespace := defaultNamespace
+
+			// Pod with ErrImagePull on a regular container, including a diagnostic message.
+			pod1 := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pod-err-image-pull",
+					Namespace: namespace,
+					Labels: map[string]string{
+						consts.KubeLabelDynamoGraphDeploymentName: dgdName,
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "worker", Image: "bad-image:latest"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod1)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pod1) }()
+			pod1.Status = corev1.PodStatus{
+				ContainerStatuses: []corev1.ContainerStatus{{
+					Name: "worker",
+					State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{
+							Reason:  "ErrImagePull",
+							Message: "pull access denied",
+						},
+					},
+				}},
+			}
+			Expect(k8sClient.Status().Update(ctx, pod1)).Should(Succeed())
+
+			// Pod with ImagePullBackOff on a regular container, no extra message.
+			pod2 := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pod-image-pull-backoff",
+					Namespace: namespace,
+					Labels: map[string]string{
+						consts.KubeLabelDynamoGraphDeploymentName: dgdName,
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "worker", Image: "bad-image2:latest"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod2)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pod2) }()
+			pod2.Status = corev1.PodStatus{
+				ContainerStatuses: []corev1.ContainerStatus{{
+					Name: "worker",
+					State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{
+							Reason: "ImagePullBackOff",
+						},
+					},
+				}},
+			}
+			Expect(k8sClient.Status().Update(ctx, pod2)).Should(Succeed())
+
+			// Pod with an unrelated waiting reason — must NOT appear in output.
+			pod3 := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pod-container-creating",
+					Namespace: namespace,
+					Labels: map[string]string{
+						consts.KubeLabelDynamoGraphDeploymentName: dgdName,
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "worker", Image: "ok-image:latest"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod3)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pod3) }()
+			pod3.Status = corev1.PodStatus{
+				ContainerStatuses: []corev1.ContainerStatus{{
+					Name: "worker",
+					State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"},
+					},
+				}},
+			}
+			Expect(k8sClient.Status().Update(ctx, pod3)).Should(Succeed())
+
+			msgs := reconciler.getDGDPodImagePullErrors(ctx, namespace, dgdName)
+
+			Expect(msgs).Should(HaveLen(2))
+			Expect(msgs).Should(ContainElement(ContainSubstring("ErrImagePull")))
+			Expect(msgs).Should(ContainElement(ContainSubstring("pull access denied")))
+			Expect(msgs).Should(ContainElement(ContainSubstring("ImagePullBackOff")))
+		})
+
+		It("Should emit Warning ImagePullFailed events on the DGDR when DGD pods cannot pull images", func() {
+			ctx := context.Background()
+			dgdrName := "test-dgdr-image-pull-events"
+			namespace := defaultNamespace
+
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
+					Image:   "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         nvidiacomv1beta1.GPUSKUTypeH100SXM,
+						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
+					},
+					SLA: &nvidiacomv1beta1.SLASpec{
+						TTFT: ptr.To(100.0),
+						ITL:  ptr.To(1500.0),
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+
+			dgdName := dgdrName + "-dgd"
+			dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeploying
+			dgdr.Status.DGDName = dgdName
+			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
+
+			// DGD exists but is still in a non-successful state.
+			dgd := &dgdv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						nvidiacomv1beta1.LabelDGDRName:      dgdrName,
+						nvidiacomv1beta1.LabelDGDRNamespace: namespace,
+					},
+				},
+				Spec: dgdv1alpha1.DynamoGraphDeploymentSpec{},
+			}
+			Expect(k8sClient.Create(ctx, dgd)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgd) }()
+			dgd.Status.State = dgdv1alpha1.DGDStatePending
+			Expect(k8sClient.Status().Update(ctx, dgd)).Should(Succeed())
+
+			// Worker pod belonging to the DGD is stuck on ErrImagePull.
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "worker-pod-err-pull",
+					Namespace: namespace,
+					Labels: map[string]string{
+						consts.KubeLabelDynamoGraphDeploymentName: dgdName,
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "worker", Image: "bad-image:latest"}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pod)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, pod) }()
+			pod.Status = corev1.PodStatus{
+				ContainerStatuses: []corev1.ContainerStatus{{
+					Name: "worker",
+					State: corev1.ContainerState{
+						Waiting: &corev1.ContainerStateWaiting{
+							Reason:  "ErrImagePull",
+							Message: "rpc error: pull access denied for bad-image",
+						},
+					},
+				}},
+			}
+			Expect(k8sClient.Status().Update(ctx, pod)).Should(Succeed())
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// The reconciler must have emitted a Warning ImagePullFailed event on the DGDR.
+			Eventually(func() bool {
+				select {
+				case event := <-recorder.Events:
+					return strings.Contains(event, nvidiacomv1beta1.EventReasonImagePullFailed) &&
+						strings.Contains(event, "ErrImagePull")
+				default:
+					return false
+				}
+			}, imagePullTimeout, imagePullInterval).Should(BeTrue())
 		})
 	})
 })

@@ -43,7 +43,7 @@ spec:
         size: 40Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3
           workingDir: /workspace/examples/backends/vllm
           env:
             - name: HF_HOME
@@ -62,7 +62,7 @@ spec:
           - name: compute-domain-channel
             resourceClaimTemplateName: dsv4-pro-compute-domain-channel
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3
           workingDir: /workspace/examples/backends/vllm
           # ~90 min budget for first launch (weights + autotune + cudagraph): 10 * 540 = 5400s.
           startupProbe:
@@ -176,7 +176,7 @@ spec:
           - name: compute-domain-channel
             resourceClaimTemplateName: dsv4-pro-compute-domain-channel
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3
           workingDir: /workspace/examples/backends/vllm
           startupProbe:
             httpGet:
