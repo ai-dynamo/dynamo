@@ -183,6 +183,19 @@ func legacyWorkerHashGoldenCases() []legacyWorkerHashGoldenCase {
 			want: "a0ceefd2",
 		},
 		{
+			name: "multiple compilation cache volume mounts",
+			dgd: legacyWorkerHashDGDFromServices(map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					VolumeMounts: []VolumeMount{
+						{Name: "model-cache", MountPoint: "/models", UseAsCompilationCache: true},
+						{Name: "compile-cache", MountPoint: "/compile", UseAsCompilationCache: true},
+					},
+				},
+			}),
+			want: "5a3c0f65",
+		},
+		{
 			name: "ignored scaling ingress model",
 			dgd: legacyWorkerHashDGDFromServices(map[string]*DynamoComponentDeploymentSharedSpec{
 				"worker": {

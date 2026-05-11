@@ -111,6 +111,27 @@ func TestComputeLegacyAlphaDGDWorkersSpecHash_RecoversNameOnlyMainContainerHash(
 	assert.Equal(t, directAlphaHash, recomputedHash)
 }
 
+func TestComputeLegacyAlphaDGDWorkersSpecHash_RecoversMultipleCompilationCacheVolumeMounts(t *testing.T) {
+	alpha := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			VolumeMounts: []v1alpha1.VolumeMount{
+				{Name: "model-cache", MountPoint: "/models", UseAsCompilationCache: true},
+				{Name: "compile-cache", MountPoint: "/compile", UseAsCompilationCache: true},
+			},
+		},
+	})
+	directAlphaHash, err := v1alpha1.ComputeDGDWorkersSpecHash(alpha)
+	assert.NoError(t, err)
+
+	beta := &v1beta1.DynamoGraphDeployment{}
+	assert.NoError(t, alpha.ConvertTo(beta))
+	recomputedHash, err := ComputeLegacyAlphaDGDWorkersSpecHash(beta)
+	assert.NoError(t, err)
+
+	assert.Equal(t, directAlphaHash, recomputedHash)
+}
+
 func TestComputeBetaDGDWorkersSpecHash_IgnoresNonWorkers(t *testing.T) {
 	withFrontend := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker":   {ComponentType: commonconsts.ComponentTypeWorker},
