@@ -8,7 +8,7 @@ import logging
 import uuid
 from typing import Any, AsyncGenerator, Dict, List
 
-from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
+from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 
 from dynamo import prometheus_names
 from dynamo.common.storage import get_fs
@@ -38,7 +38,11 @@ class OmniStageRouter:
         stage_configs_path: str,
     ) -> None:
         self.config = config
-        self.stage_configs = load_stage_configs_from_yaml(stage_configs_path)
+        _, self.stage_configs = load_and_resolve_stage_configs(
+            config.model,
+            stage_configs_path,
+            kwargs={},
+        )
         self.stage_clients: Dict[str, Any] = {}
 
         media_fs = (

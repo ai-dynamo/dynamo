@@ -216,6 +216,32 @@ class TestReportDiagnosticsEnumGating:
         pm.load_scaling_decision.state.assert_called_once_with("scale_up")
         pm.throughput_scaling_decision.state.assert_not_called()
 
+    def test_scale_down_refused_consolidation_state_registered(self):
+        """The new consolidation-refusal reason must be a registered
+        Enum state; otherwise ``Enum.state(...)`` raises ValueError and
+        crashes the diagnostic publication path on Prometheus-backed
+        planners.
+        """
+        # Mocked Enum's state() doesn't validate, so guard against the
+        # registration list drifting away from the diag stamps by checking
+        # the constant directly.
+        from dynamo.planner.monitoring.planner_metrics import LOAD_DECISION_STATES
+
+        assert "scale_down_refused_consolidation" in LOAD_DECISION_STATES
+
+        # And verify the publication path actually writes it on tick.
+        planner = _make_planner()
+        pm = planner.prometheus_metrics
+
+        planner._report_diagnostics(
+            _tick(run_load=True, run_throughput=False),
+            _diag(load_reason="scale_down_refused_consolidation"),
+        )
+
+        pm.load_scaling_decision.state.assert_called_once_with(
+            "scale_down_refused_consolidation"
+        )
+
     def test_throughput_only_tick_does_not_touch_load_enum(self):
         planner = _make_planner()
         pm = planner.prometheus_metrics
