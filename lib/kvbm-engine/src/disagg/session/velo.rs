@@ -27,7 +27,6 @@ use anyhow::{Context as _, Result, anyhow};
 use dashmap::DashMap;
 use futures::Stream;
 use futures::future::BoxFuture;
-use kvbm_common::LogicalLayoutHandle;
 use kvbm_logical::blocks::{ImmutableBlock, MutableBlock};
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
@@ -37,8 +36,9 @@ use super::{
     AvailabilityDelta, AvailabilityStream, CommitDelta, CommitStream, CommittedBlock, Frame,
     LifecycleEvent, LifecycleStream, Session, SessionFactory, SessionId,
 };
-use crate::disagg::{RemoteBlockRef, RemoteBlockSet, SessionEndpoint};
+use crate::disagg::SessionEndpoint;
 use crate::leader::InstanceLeader;
+use crate::leader::dispatch::{PullRef, WirePullOptions};
 use crate::{BlockId, G2, InstanceId, SequenceHash};
 
 /// Endpoint kind tag for the new symmetric-session wire format.
@@ -989,34 +989,34 @@ impl Session for VeloSession {
                 pull_id
             );
 
-            // Now drive the RDMA read. Build RemoteBlockSet.
-            let block_set = RemoteBlockSet {
-                source_layout: LogicalLayoutHandle::G2,
-                blocks: hashes
-                    .iter()
-                    .zip(peer_block_ids.iter())
-                    .map(|(h, id)| RemoteBlockRef {
-                        block_id: *id,
-                        sequence_hash: *h,
-                    })
-                    .collect(),
-            };
+            // Now drive the RDMA read. AB-5: route through the
+            // public cross-parallelism entrypoint rather than the
+            // legacy pull_remote_block_sets path — InstanceLeader
+            // owns symmetric-vs-stamped dispatch routing internally.
+            // The protocol shell above (peer_available validation,
+            // Frame::Pull/PullComplete/PullAck correlation) is
+            // unchanged.
             let dst_block_ids: Vec<BlockId> = dst.iter().map(|b| b.block_id()).collect();
+            let refs: Vec<PullRef> = peer_block_ids
+                .iter()
+                .zip(dst_block_ids.iter())
+                .map(|(s, d)| PullRef {
+                    src_block_id: *s,
+                    dst_block_id: *d,
+                })
+                .collect();
             crate::engine_audit!(
                 "session_pull_rdma_start",
                 session_id = %session.inner.session_id,
                 pull_id,
                 num_blocks = dst_block_ids.len()
             );
-            let notification = session
+            session
                 .inner
                 .leader
-                .pull_remote_block_sets(peer_instance_id, &[block_set], &dst_block_ids)
+                .rdma_pull_with_opts(peer_instance_id, refs, WirePullOptions::default())
                 .await
-                .context("pull_remote_block_sets enqueue")?;
-            notification
-                .await
-                .context("pull_remote_block_sets notification")?;
+                .context("rdma_pull_with_opts")?;
             crate::engine_audit!(
                 "session_pull_rdma_done",
                 session_id = %session.inner.session_id,
