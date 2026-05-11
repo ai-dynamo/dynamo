@@ -125,7 +125,6 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         "nixl-cu12==${NIXL_VERSION}" \
         "nixl-cu13==${NIXL_VERSION}"
 
-{% if device == "cuda" %}
 # vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
 # jq for readable curl output just like the upstream omni image does.
 RUN set -eux; \
@@ -143,8 +142,8 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
+    export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
-{% endif %}
 {% endif %}
 
 {% if context.vllm.enable_media_ffmpeg == "true" %}
