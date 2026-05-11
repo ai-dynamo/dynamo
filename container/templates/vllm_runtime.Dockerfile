@@ -355,8 +355,10 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     # (the framework base may install cupy-cuda12x, pyproject.toml also pins
     # cupy-cuda12x). cupy's `_detect_duplicate_installation` ERRORS at import
     # if both cu12 and cu13 variants are present, so we install exactly one
-    # variant matching the build target's CUDA major version.
-    uv pip uninstall cupy-cuda11x cupy-cuda12x cupy-cuda13x 2>/dev/null || true && \
+    # variant matching the build target's CUDA major version. Discover the
+    # installed variants instead of hardcoding so future cupy versions
+    # (cupy-cuda14x, etc.) are covered without further edits.
+    (uv pip freeze 2>/dev/null | awk -F= '/^cupy-/{print $1}' | xargs -r uv pip uninstall 2>/dev/null || true) && \
     uv pip install \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.vllm.txt \
