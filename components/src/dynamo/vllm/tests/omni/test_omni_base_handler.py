@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# ruff: noqa: E402
 
 """Tests that every DiffusionParallelConfig field is either exposed in Dynamo or intentionally skipped."""
 
@@ -10,13 +9,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-pytest.importorskip("vllm_omni", reason="vLLM-Omni dependencies not available")
+try:
+    from vllm_omni.diffusion.data import DiffusionParallelConfig
+    from vllm_omni.engine.arg_utils import OmniEngineArgs
 
-from vllm_omni.diffusion.data import DiffusionParallelConfig
-from vllm_omni.engine.arg_utils import OmniEngineArgs
-
-from dynamo.vllm.omni.args import OmniDiffusionKwargs, OmniParallelKwargs
-from dynamo.vllm.omni.base_handler import BaseOmniHandler
+    from dynamo.vllm.omni.args import OmniDiffusionKwargs, OmniParallelKwargs
+    from dynamo.vllm.omni.base_handler import BaseOmniHandler
+except ImportError:
+    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 pytestmark = [
     pytest.mark.unit,
@@ -48,6 +48,7 @@ def _make_config(**parallel_overrides):
     cfg = MagicMock()
     cfg.model = "test-model"
     cfg.stage_configs_path = None
+    cfg.output_modalities = None
     cfg.engine_args.trust_remote_code = False
     cfg.diffusion = OmniDiffusionKwargs()
     cfg.parallel = dataclasses.replace(OmniParallelKwargs(), **parallel_overrides)
@@ -92,3 +93,11 @@ class TestDiffusionParallelConfigCoverage:
             _build_kwargs(config)
             _, kwargs = MockCfg.call_args
             assert kwargs.get("tensor_parallel_size") == 4
+
+    def test_output_modalities_forwarded_to_async_omni(self):
+        config = _make_config()
+        config.output_modalities = ["image"]
+
+        kwargs = _build_kwargs(config)
+
+        assert kwargs["output_modalities"] == ["image"]

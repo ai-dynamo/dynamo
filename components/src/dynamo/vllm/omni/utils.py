@@ -3,7 +3,6 @@
 
 """Shared utilities for the vLLM-Omni backend."""
 
-import importlib
 import json
 import logging
 from pathlib import Path
@@ -27,6 +26,79 @@ def shm_deserialize(shm_meta: dict) -> Any:
     return OmniSerializer.deserialize(shm_read_bytes(shm_meta))
 
 
+def image_generation_mm_processor_kwargs(height: int, width: int) -> dict[str, int]:
+    """Build processor kwargs that force image prompts through multimodal preprocessing."""
+    return {"target_h": height, "target_w": width}
+
+
+def image_generation_size_from_request(request: dict) -> tuple[int, int]:
+    """Resolve image output dimensions from OpenAI-style image or chat requests."""
+    extra_body = request.get("extra_body")
+    if not isinstance(extra_body, dict):
+        extra_body = {}
+
+    size = request.get("size") or extra_body.get("size") or DEFAULT_IMAGE_SIZE
+    width, height = parse_size(size, default_w=1024, default_h=1024)
+
+    for source in (extra_body, request):
+        if source.get("width") is not None:
+            width = int(source["width"])
+        if source.get("height") is not None:
+            height = int(source["height"])
+    return width, height
+
+
+def image_generation_sampling_overrides(
+    request: dict, height: int, width: int
+) -> dict[str, Any]:
+    """Collect diffusion sampling overrides for image-generation chat requests."""
+    overrides: dict[str, Any] = {"height": height, "width": width}
+    for source_name in ("extra_body", "nvext"):
+        source = request.get(source_name)
+        if not isinstance(source, dict):
+            continue
+        for key, value in source.items():
+            if key not in {"height", "width", "size"} and value is not None:
+                overrides[key] = value
+    return overrides
+
+
+def image_generation_negative_prompt_from_request(request: dict) -> str | None:
+    """Resolve negative prompt from the places image requests commonly carry it."""
+    for source in (
+        request,
+        request.get("extra_body"),
+        request.get("nvext"),
+    ):
+        if not isinstance(source, dict):
+            continue
+        negative_prompt = source.get("negative_prompt")
+        if negative_prompt is not None:
+            return negative_prompt
+    return None
+
+
+def build_image_generation_prompt(
+    prompt: str,
+    height: int,
+    width: int,
+    *,
+    negative_prompt: str | None = None,
+    multi_modal_data: dict[str, Any] | None = None,
+) -> OmniTextPrompt:
+    """Build the prompt shape expected by AR-to-diffusion image pipelines."""
+    image_prompt = OmniTextPrompt(prompt=prompt)
+    if negative_prompt is not None:
+        image_prompt["negative_prompt"] = negative_prompt
+    if multi_modal_data:
+        image_prompt["multi_modal_data"] = multi_modal_data
+    image_prompt["modalities"] = ["image"]
+    image_prompt["mm_processor_kwargs"] = image_generation_mm_processor_kwargs(
+        height, width
+    )
+    return image_prompt
+
+
 def build_original_prompt(request: dict, nvext: dict, height: int, width: int) -> Any:
     """Build the rich prompt dict that processor functions (ar2diffusion etc.) read."""
     prompt = OmniTextPrompt(
@@ -38,244 +110,11 @@ def build_original_prompt(request: dict, nvext: dict, height: int, width: int) -
     return prompt
 
 
-def _chat_additional_information(request: dict) -> dict[str, Any]:
-    """Build Omni prompt metadata from chat/audio request fields."""
-    additional_information: dict[str, Any] = {}
-    raw_audio = request.get("audio")
-    audio: dict[str, Any] = raw_audio if isinstance(raw_audio, dict) else {}
-
-    speaker = (
-        request.get("voice")
-        or request.get("speaker")
-        or audio.get("voice")
-        or audio.get("speaker")
-    )
-    if isinstance(speaker, str) and speaker.strip():
-        additional_information["speaker"] = [speaker.lower().strip()]
-
-    language = request.get("language") or audio.get("language")
-    if isinstance(language, str) and language.strip():
-        additional_information["language"] = [language.strip()]
-
-    instructions = request.get("instructions") or audio.get("instructions")
-    if isinstance(instructions, str) and instructions.strip():
-        additional_information["instruction"] = instructions.strip()
-
-    return additional_information
-
-
-_CHATML_PLACEHOLDERS = {
-    "audio": "<|audio_start|><|audio_pad|><|audio_end|>",
-    "input_audio": "<|audio_start|><|audio_pad|><|audio_end|>",
-    "image": "<|vision_start|><|image_pad|><|vision_end|>",
-    "image_url": "<|vision_start|><|image_pad|><|vision_end|>",
-    "video": "<|vision_start|><|video_pad|><|vision_end|>",
-    "video_url": "<|vision_start|><|video_pad|><|vision_end|>",
-}
-
-
-def _message_content_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        pieces: list[str] = []
-        for part in content:
-            if isinstance(part, str):
-                pieces.append(part)
-                continue
-            if not isinstance(part, dict):
-                continue
-            text = part.get("text")
-            if isinstance(text, str):
-                pieces.append(text)
-                continue
-            part_type = part.get("type")
-            if isinstance(part_type, str):
-                pieces.append(_CHATML_PLACEHOLDERS.get(part_type, ""))
-        return "".join(pieces)
-    return "" if content is None else str(content)
-
-
-def _apply_chat_template(tokenizer: Any, messages: list[dict[str, Any]]) -> str:
-    last_error: Exception | None = None
-    candidates = [tokenizer, getattr(tokenizer, "tokenizer", None)]
-    for candidate in candidates:
-        if candidate is None:
-            continue
-        apply_chat_template = getattr(candidate, "apply_chat_template", None)
-        if not callable(apply_chat_template):
-            continue
-        try:
-            return apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-        except Exception as e:
-            last_error = e
-    if last_error is not None:
-        raise last_error
-    raise AttributeError("tokenizer does not expose apply_chat_template")
-
-
-def _tokenizer_supports_chatml(tokenizer: Any) -> bool:
-    candidates = [tokenizer, getattr(tokenizer, "tokenizer", None)]
-    return any(
-        _tokenizer_has_token(candidate, "<|im_start|>")
-        and _tokenizer_has_token(candidate, "<|im_end|>")
-        for candidate in candidates
-        if candidate is not None
-    )
-
-
-def _tokenizer_has_token(tokenizer: Any, token: str) -> bool:
-    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
-    if not callable(convert):
-        return False
-    try:
-        token_id = convert(token)
-    except Exception:
-        return False
-    if token_id is None:
-        return False
-    return token_id != getattr(tokenizer, "unk_token_id", None)
-
-
-def _render_chatml_messages(messages: list[dict[str, Any]]) -> str:
-    prompt_parts = []
-    for message in messages:
-        role = message.get("role")
-        if role == "developer":
-            role = "system"
-        if role not in {"system", "user", "assistant", "tool"}:
-            role = "user"
-        prompt_parts.append(
-            f"<|im_start|>{role}\n"
-            f"{_message_content_text(message.get('content'))}<|im_end|>\n"
-        )
-    prompt_parts.append("<|im_start|>assistant\n")
-    return "".join(prompt_parts)
-
-
-async def _render_chat_with_engine(
-    request: dict,
-    engine: Any | None,
-) -> dict[str, Any] | None:
-    """Use vLLM's renderer for multimodal chat prompts when AsyncOmni exposes it."""
-    if engine is None:
-        return None
-
-    messages = request.get("messages")
-    renderer = getattr(engine, "renderer", None)
-    model_config = getattr(engine, "model_config", None)
-    if not isinstance(messages, list) or renderer is None or model_config is None:
-        return None
-
-    try:
-        params_module = importlib.import_module("vllm.renderers.params")
-        ChatParams = getattr(params_module, "ChatParams")
-        TokenizeParams = getattr(params_module, "TokenizeParams")
-
-        max_output_tokens = request.get(
-            "max_completion_tokens", request.get("max_tokens", 0)
-        )
-        try:
-            max_output_tokens = int(max_output_tokens or 0)
-        except (TypeError, ValueError):
-            max_output_tokens = 0
-
-        chat_template_kwargs = {
-            "add_generation_prompt": request.get("add_generation_prompt", True),
-            "continue_final_message": request.get("continue_final_message", False),
-        }
-        for key in ("documents", "reasoning_effort"):
-            if request.get(key) is not None:
-                chat_template_kwargs[key] = request[key]
-
-        chat_params = ChatParams(
-            chat_template=request.get("chat_template"),
-            chat_template_content_format=request.get(
-                "chat_template_content_format", "auto"
-            ),
-            chat_template_kwargs=chat_template_kwargs,
-            media_io_kwargs=request.get("media_io_kwargs"),
-        )
-        tok_params = TokenizeParams(
-            max_total_tokens=getattr(model_config, "max_model_len", None),
-            max_output_tokens=max_output_tokens,
-            truncate_prompt_tokens=request.get("truncate_prompt_tokens"),
-            add_special_tokens=request.get("add_special_tokens", True),
-        )
-        prompt_extras = {
-            key: value
-            for key in ("mm_processor_kwargs", "cache_salt")
-            if (value := request.get(key)) is not None
-        }
-
-        _, engine_prompts = await renderer.render_chat_async(
-            [messages],
-            chat_params,
-            tok_params,
-            prompt_extras=prompt_extras or None,
-        )
-    except Exception:
-        logging.getLogger(__name__).debug(
-            "vLLM renderer chat preprocessing failed, using fallback prompt",
-            exc_info=True,
-        )
-        return None
-
-    if not engine_prompts or not isinstance(engine_prompts[0], dict):
-        return None
-
-    engine_prompt = engine_prompts[0]
-    additional_information = _chat_additional_information(request)
-    if additional_information:
-        info = engine_prompt.get("additional_information")
-        if not isinstance(info, dict):
-            info = {}
-        info.update(additional_information)
-        engine_prompt["additional_information"] = info
-    if request.get("modalities"):
-        engine_prompt["modalities"] = request["modalities"]
-
-    original_prompt = _serializable_original_prompt(engine_prompt)
-    return {
-        "engine_inputs": engine_prompt,
-        "original_prompt": original_prompt,
-        "sampling_params_list": None,
-    }
-
-
-def _serializable_original_prompt(engine_prompt: dict[str, Any]) -> dict[str, Any]:
-    """Keep only JSON-friendly prompt metadata for Dynamo stage handoff."""
-    original_prompt: dict[str, Any] = {}
-    for key in (
-        "prompt",
-        "negative_prompt",
-        "modalities",
-        "additional_information",
-        "mm_processor_kwargs",
-        "cache_salt",
-    ):
-        value = engine_prompt.get(key)
-        if value is not None and _is_json_serializable(value):
-            original_prompt[key] = value
-    return original_prompt
-
-
-def _is_json_serializable(value: Any) -> bool:
-    try:
-        json.dumps(value)
-    except (TypeError, ValueError):
-        return False
-    return True
-
-
 async def parse_omni_request(
     request: dict,
     output_modalities: list,
     default_video_fps: int = 16,
     tokenizer_getter=None,
-    engine: Any | None = None,
 ) -> dict:
     """Parse a raw frontend request into engine_inputs, original_prompt, sampling_params_list.
 
@@ -296,7 +135,10 @@ async def parse_omni_request(
         nvext = request.get("nvext") or {}
         default_size = DEFAULT_VIDEO_SIZE if is_video else DEFAULT_IMAGE_SIZE
         size_kwargs = {} if is_video else {"default_w": 1024, "default_h": 1024}
-        width, height = parse_size(request.get("size", default_size), **size_kwargs)
+        if is_video:
+            width, height = parse_size(request.get("size", default_size), **size_kwargs)
+        else:
+            width, height = image_generation_size_from_request(request)
         sp: dict = {"height": height, "width": width, **nvext}
         if is_video:
             sp["num_frames"] = compute_num_frames(
@@ -304,26 +146,27 @@ async def parse_omni_request(
                 fps=nvext.get("fps"),
                 default_fps=default_video_fps,
             )
+            engine_inputs = OmniTextPrompt(prompt=request.get("prompt", ""))
+            original_prompt = build_original_prompt(request, nvext, height, width)
+        else:
+            engine_inputs = build_image_generation_prompt(
+                request.get("prompt", ""),
+                height,
+                width,
+                negative_prompt=request.get("negative_prompt"),
+                multi_modal_data=request.get("multi_modal_data"),
+            )
+            original_prompt = dict(engine_inputs)
         return {
-            "engine_inputs": OmniTextPrompt(prompt=request.get("prompt", "")),
-            "original_prompt": build_original_prompt(request, nvext, height, width),
+            "engine_inputs": engine_inputs,
+            "original_prompt": original_prompt,
             "sampling_params_list": sp,
         }
 
     # Chat / text
-    rendered = await _render_chat_with_engine(request, engine)
-    if rendered is not None:
-        return rendered
-
     messages = request.get("messages", [])
-    if not isinstance(messages, list):
-        messages = []
     text = next(
-        (
-            _message_content_text(m.get("content", ""))
-            for m in reversed(messages)
-            if m.get("role") == "user"
-        ),
+        (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
         request.get("prompt", ""),
     )
 
@@ -332,41 +175,36 @@ async def parse_omni_request(
     # without it the thinker receives bare text instead of the full
     # chat-formatted prompt.
     if messages and tokenizer_getter is not None:
-        tokenizer = None
         try:
             tokenizer = await tokenizer_getter()
-            text = _apply_chat_template(tokenizer, messages)
+            text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
         except Exception:
-            if _tokenizer_supports_chatml(tokenizer):
-                text = _render_chatml_messages(messages)
-            else:
-                logging.getLogger(__name__).debug(
-                    "Chat template not available, using raw text", exc_info=True
-                )
-
-        if text == "":
             logging.getLogger(__name__).debug(
-                "Chat template rendered empty prompt, using raw text"
-            )
-            text = next(
-                (
-                    _message_content_text(m.get("content", ""))
-                    for m in reversed(messages)
-                    if m.get("role") == "user"
-                ),
-                request.get("prompt", ""),
+                "Chat template not available, using raw text"
             )
 
-    engine_prompt = OmniTextPrompt(prompt=text)
-    additional_information = _chat_additional_information(request)
-    if additional_information:
-        engine_prompt["additional_information"] = additional_information
-    if request.get("modalities"):
-        engine_prompt["modalities"] = request["modalities"]
+    if any(str(modality).lower() == "image" for modality in output_modalities):
+        width, height = image_generation_size_from_request(request)
+        engine_prompt = build_image_generation_prompt(
+            text,
+            height,
+            width,
+            negative_prompt=image_generation_negative_prompt_from_request(request),
+            multi_modal_data=request.get("multi_modal_data"),
+        )
+        return {
+            "engine_inputs": engine_prompt,
+            "original_prompt": dict(engine_prompt),
+            "sampling_params_list": image_generation_sampling_overrides(
+                request, height, width
+            ),
+        }
 
     return {
-        "engine_inputs": engine_prompt,
-        "original_prompt": dict(engine_prompt),
+        "engine_inputs": text,
+        "original_prompt": {"prompt": text},
         "sampling_params_list": None,
     }
 

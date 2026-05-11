@@ -71,6 +71,8 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
             "model": config.model,
             "trust_remote_code": config.engine_args.trust_remote_code,
         }
+        if config.output_modalities:
+            omni_kwargs["output_modalities"] = config.output_modalities
 
         if config.stage_configs_path:
             omni_kwargs["stage_configs_path"] = config.stage_configs_path
@@ -180,7 +182,7 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
                         "role": "assistant",
                         "content": f"Error: {error_message}",
                     },
-                    "finish_reason": "stop",
+                    "finish_reason": "error",
                 }
             ],
         }

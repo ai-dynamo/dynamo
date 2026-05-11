@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# ruff: noqa: E402
 
 """Tests for output_formatter.py — modality-specific formatters."""
 
@@ -8,17 +7,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-pytest.importorskip("diffusers", reason="Diffusers dependency not available")
-pytest.importorskip("numpy", reason="NumPy dependency not available")
-pytest.importorskip("soundfile", reason="SoundFile dependency not available")
-pytest.importorskip("torch", reason="PyTorch dependency not available")
-
-from dynamo.vllm.omni.output_formatter import (
-    DiffusionFormatter,
-    TextFormatter,
-    _build_completion_usage,
-    _error_chunk,
-)
+try:
+    from dynamo.vllm.omni.output_formatter import (
+        DiffusionFormatter,
+        TextFormatter,
+        _build_completion_usage,
+        _error_chunk,
+    )
+except ImportError:
+    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 pytestmark = [
     pytest.mark.unit,
@@ -103,7 +100,7 @@ class TestErrorChunk:
     def test_error_chunk_format(self):
         chunk = _error_chunk("req-1", "my-model", "something broke")
         assert chunk["choices"][0]["delta"]["content"] == "Error: something broke"
-        assert chunk["choices"][0]["finish_reason"] == "stop"
+        assert chunk["choices"][0]["finish_reason"] == "error"
         assert chunk["model"] == "my-model"
 
 
@@ -338,7 +335,6 @@ class TestAudioFormatterFormat:
     async def test_successful_generation(self):
         import numpy as np
 
-        from dynamo.common.utils.output_modalities import RequestType
         from dynamo.vllm.omni.output_formatter import AudioFormatter
 
         f = AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
@@ -348,19 +344,6 @@ class TestAudioFormatterFormat:
         assert result["object"] == "audio.speech"
         assert len(result["data"]) == 1
         assert result["data"][0]["b64_json"] is not None
-
-        chat_result = await f.format(
-            mm,
-            "req-2",
-            request_type=RequestType.CHAT_COMPLETION,
-            text_output="spoken text",
-        )
-        content = chat_result["choices"][0]["delta"]["content"]
-        assert chat_result["object"] == "chat.completion.chunk"
-        assert content[0] == {"type": "text", "text": "spoken text"}
-        audio_part = content[1]
-        assert audio_part["type"] == "audio_url"
-        assert audio_part["audio_url"]["url"].startswith("data:audio/wav;base64,")
 
 
 # ── OutputFormatter dispatcher ─────────────────────────────
@@ -422,11 +405,6 @@ class TestOutputFormatter:
             stage, "req-1", request_type=RequestType.AUDIO_GENERATION, **self._FULL_CTX
         )
         assert chunk["status"] == "completed"
-
-        chat_chunk = await f.format(
-            stage, "req-2", request_type=RequestType.CHAT_COMPLETION, **self._FULL_CTX
-        )
-        assert chat_chunk["choices"][0]["delta"]["content"][0]["type"] == "audio_url"
 
     @pytest.mark.asyncio
     async def test_unknown_type_returns_none(self):

@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# ruff: noqa: E402
 
 """Unit tests for OmniStageRouter."""
 
@@ -12,9 +11,10 @@ import pytest
 
 from dynamo.common.utils.output_modalities import RequestType
 
-pytest.importorskip("vllm_omni", reason="vLLM-Omni dependencies not available")
-
-from dynamo.vllm.omni import stage_router
+try:
+    from dynamo.vllm.omni import stage_router
+except ImportError:
+    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 pytestmark = [
     pytest.mark.unit,
@@ -44,20 +44,20 @@ class _StageClient:
         return _gen()
 
 
-def _make_stage_cfg(
-    stage_id: int, *, final_output: bool = False, final_output_type: str | None = None
-):
+def _make_stage_cfg(stage_id: int):
     return SimpleNamespace(
         stage_id=stage_id,
-        final_output=final_output,
-        final_output_type=final_output_type,
         engine_args=SimpleNamespace(model_stage=f"stage{stage_id}"),
     )
 
 
 def _make_router(stage_configs, stage_clients, formatter=None, output_modalities=None):
     router = stage_router.OmniStageRouter.__new__(stage_router.OmniStageRouter)
-    router.config = SimpleNamespace(output_modalities=output_modalities)
+    router.config = SimpleNamespace(
+        output_modalities=output_modalities,
+        model="test-model",
+        served_model_name=None,
+    )
     router.stage_configs = stage_configs
     router.stage_clients = stage_clients
     router._formatter = formatter or AsyncMock()
@@ -75,9 +75,8 @@ def _patched_generate(router, request, request_id="req-1", request_type="chat"):
 
 
 def test_router_loads_stage_configs_from_model_deploy_config():
-    """vLLM-Omni v0.20 deploy configs use the model-aware loader."""
     config = SimpleNamespace(
-        model="Qwen/Qwen3-Omni-30B-A3B-Thinking",
+        model="zai-org/GLM-Image",
         served_model_name=None,
         media_output_fs_url=None,
         media_output_http_url=None,
@@ -87,15 +86,17 @@ def test_router_loads_stage_configs_from_model_deploy_config():
 
     with (
         patch(
-            "dynamo.vllm.omni.stage_router.load_stage_configs_from_model",
-            return_value=stage_configs,
-        ) as load_stage_configs_from_model,
+            "dynamo.vllm.omni.stage_router.load_and_resolve_stage_configs",
+            return_value=("/deploy/glm_image.yaml", stage_configs),
+        ) as load_and_resolve_stage_configs,
         patch("dynamo.vllm.omni.stage_router.OutputFormatter") as output_formatter,
     ):
-        router = stage_router.OmniStageRouter(config, "/deploy/qwen3_omni_moe.yaml")
+        router = stage_router.OmniStageRouter(config, "/deploy/glm_image.yaml")
 
-    load_stage_configs_from_model.assert_called_once_with(
-        config.model, deploy_config_path="/deploy/qwen3_omni_moe.yaml"
+    load_and_resolve_stage_configs.assert_called_once_with(
+        config.model,
+        "/deploy/glm_image.yaml",
+        kwargs={},
     )
     output_formatter.assert_called_once()
     assert router.stage_configs == stage_configs
@@ -226,50 +227,10 @@ async def test_generate_stage_error_stops_pipeline():
     with p1, p2:
         chunks = [c async for c in router.generate({"prompt": "x"}, None)]
 
-    assert chunks == [{"error": "thinker exploded", "finished": True}]
-    assert not stage1_called
-
-
-@pytest.mark.asyncio
-async def test_generate_stops_at_requested_text_stage():
-    """Qwen text-only requests should not be forced through audio stages."""
-    stage0_received = {}
-    stage1_called = False
-
-    async def stage0_handler(request):
-        stage0_received.update(request)
-        return {"shm_meta": {"x": 1}, "finished": True}
-
-    async def stage1_handler(request):
-        nonlocal stage1_called
-        stage1_called = True
-        return {"shm_meta": {"x": 2}, "finished": True}
-
-    mock_formatter = AsyncMock()
-    mock_formatter.format.return_value = {"finished": True}
-    router = _make_router(
-        stage_configs=[
-            _make_stage_cfg(0, final_output=True, final_output_type="text"),
-            _make_stage_cfg(1, final_output=True, final_output_type="audio"),
-        ],
-        stage_clients={
-            "stage0": _StageClient(stage0_handler),
-            "stage1": _StageClient(stage1_handler),
-        },
-        formatter=mock_formatter,
-        output_modalities=["text", "audio"],
-    )
-
-    request = {"prompt": "x", "modalities": ["text"]}
-    p1, p2 = _patched_generate(router, request)
-    with p1, p2:
-        with patch.object(
-            stage_router, "shm_deserialize", return_value=SimpleNamespace()
-        ):
-            chunks = [c async for c in router.generate(request, None)]
-
-    assert chunks == [{"finished": True}]
-    assert stage0_received["final_stage_id"] == 0
+    assert chunks[0]["id"] == "req-1"
+    assert chunks[0]["model"] == "test-model"
+    assert chunks[0]["choices"][0]["delta"]["content"] == "Error: thinker exploded"
+    assert chunks[0]["choices"][0]["finish_reason"] == "error"
     assert not stage1_called
 
 
@@ -331,7 +292,11 @@ async def test_generate_yields_error_when_no_shm_meta():
         with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="r"):
             chunks = [c async for c in router.generate({"prompt": "x"}, context=None)]
 
-    assert chunks == [{"error": "No SHM output from final stage", "finished": True}]
+    assert chunks[0]["id"] == "r"
+    assert chunks[0]["choices"][0]["delta"]["content"] == (
+        "Error: No SHM output from final stage"
+    )
+    assert chunks[0]["choices"][0]["finish_reason"] == "error"
 
 
 # ── issue-007: router forwards raw request to stage 0 ────────────
@@ -402,11 +367,7 @@ class TestStageRouterContextNormalization:
         mock_formatter.format = fake_format
 
         async def stage0_handler(request):
-            return {
-                "shm_meta": {"x": 1},
-                "stage_text_output": "spoken text",
-                "finished": True,
-            }
+            return {"shm_meta": {"x": 1}, "finished": True}
 
         router = _make_router(
             stage_configs=[_make_stage_cfg(0)],
@@ -497,48 +458,6 @@ class TestStageRouterContextNormalization:
         ctx = formatter_calls[0]
         assert ctx["response_format"] == "url"
         assert ctx["output_format"] == "mp4"
-
-    @pytest.mark.asyncio
-    async def test_chat_audio_request_maps_nested_audio_format(self):
-        formatter_calls: list = []
-
-        async def fake_format(result, req_id, *, request_type, **ctx):
-            formatter_calls.append(ctx)
-            return {"finished": True}
-
-        mock_formatter = MagicMock()
-        mock_formatter.format = fake_format
-
-        async def stage0_handler(request):
-            return {
-                "shm_meta": {"x": 1},
-                "stage_text_output": "spoken text",
-                "finished": True,
-            }
-
-        router = _make_router(
-            stage_configs=[_make_stage_cfg(0)],
-            stage_clients={"stage0": _StageClient(stage0_handler)},
-            formatter=mock_formatter,
-            output_modalities=["text", "audio"],
-        )
-
-        request = {
-            "messages": [{"role": "user", "content": "say hello"}],
-            "modalities": ["text", "audio"],
-            "audio": {"format": "wav"},
-        }
-        p1, p2 = _patched_generate(
-            router, request, request_type=RequestType.CHAT_COMPLETION
-        )
-        with p1, p2:
-            with patch.object(
-                stage_router, "shm_deserialize", return_value=SimpleNamespace()
-            ):
-                [c async for c in router.generate(request, None)]
-
-        assert formatter_calls[0]["output_format"] == "wav"
-        assert formatter_calls[0]["text_output"] == "spoken text"
 
     @pytest.mark.asyncio
     async def test_no_format_fields_omitted_from_context(self):

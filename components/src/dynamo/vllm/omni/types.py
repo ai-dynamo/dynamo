@@ -27,7 +27,6 @@ class StageEngine(Protocol):
         request_id: str = "",
         *,
         sampling_params_list: Any = None,
-        output_modalities: list[str] | None = None,
     ) -> AsyncGenerator[Any, None]:
         ...
 
@@ -54,9 +53,7 @@ class StageOutput(BaseModel):
                 "shm_meta",
                 "original_prompt",
                 "stage_connector_refs",
-                "stage_text_output",
                 "sampling_params_list",
-                "final_stage_id",
                 "finished",
                 "error",
             }
@@ -80,31 +77,20 @@ class StageOutput(BaseModel):
     #   Mooncake (RDMA):   {"source_host": "...", "source_port": N, "data_size": N, ...}
     # Keys arrive as strings from JSON; workers normalize them to int via _int_keyed().
     stage_connector_refs: dict[str, Any] | None = None
-    stage_text_output: str | None = None
     sampling_params_list: dict | None = None
-    final_stage_id: int | None = None
     finished: bool | None = None
     error: str | None = None
 
-    def to_next_stage_request(
-        self, request_id: str, final_stage_id: int | None = None
-    ) -> dict:
+    def to_next_stage_request(self, request_id: str) -> dict:
         """Build the request dict for the next stage: only inter-stage protocol fields.
 
         shm_meta is intentionally excluded — it is final-stage → router only.
         """
         fields = self.model_dump(
-            include={
-                "original_prompt",
-                "stage_connector_refs",
-                "stage_text_output",
-                "sampling_params_list",
-            },
+            include={"original_prompt", "stage_connector_refs", "sampling_params_list"},
             exclude_none=True,
         )
         fields["request_id"] = request_id
-        if final_stage_id is not None:
-            fields["final_stage_id"] = final_stage_id
         return fields
 
 
@@ -115,7 +101,6 @@ class StageRequest(BaseModel):
       Stage 0:   {request_id, engine_inputs, original_prompt, stage_connector_refs: {}}
       Stage N>0: {request_id, original_prompt, stage_connector_refs: {"0": ref0, ...}}
       Direct:    raw frontend request (no router, single-stage deployment)
-      final_stage_id: requested terminal stage for modality-specific routing
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -126,9 +111,7 @@ class StageRequest(BaseModel):
     # stage_connector_refs: address tickets from previous stages (same format as
     # StageOutput.stage_connector_refs). Callers normalize string keys to int via _int_keyed().
     stage_connector_refs: dict[str, Any] | None = None
-    stage_text_output: str | None = None
     sampling_params_list: dict | None = None
-    final_stage_id: int | None = None
 
 
 def _int_keyed(d: dict | None) -> dict[int, Any]:

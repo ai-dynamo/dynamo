@@ -1,27 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# ruff: noqa: E402
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-pytest.importorskip("PIL", reason="Pillow dependency not available")
-pytest.importorskip("vllm", reason="vLLM dependency not available")
-pytest.importorskip("vllm_omni", reason="vLLM-Omni dependencies not available")
+try:
+    from PIL import Image
+    from vllm.sampling_params import SamplingParams
+    from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
-from PIL import Image
-from vllm.sampling_params import SamplingParams
-from vllm_omni.inputs.data import OmniDiffusionSamplingParams
-
-from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
-from dynamo.common.protocols.image_protocol import NvCreateImageRequest
-from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
-from dynamo.common.utils.output_modalities import RequestType
-from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
-from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
-from dynamo.vllm.omni.utils import build_original_prompt, parse_omni_request
+    from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
+    from dynamo.common.protocols.image_protocol import NvCreateImageRequest
+    from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
+    from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
+    from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
+    from dynamo.vllm.omni.utils import build_original_prompt, parse_omni_request
+except ImportError:
+    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 pytestmark = [
     pytest.mark.unit,
@@ -84,57 +81,6 @@ class TestBuildEngineInputs:
         assert inputs.sampling_params_list is None
 
     @pytest.mark.asyncio
-    async def test_chat_completion_uses_renderer_when_available(self):
-        class FakeRenderer:
-            async def render_chat_async(
-                self,
-                conversations,  # noqa: ARG002
-                chat_params,  # noqa: ARG002
-                tok_params,  # noqa: ARG002
-                *,
-                prompt_extras=None,  # noqa: ARG002
-            ):
-                return conversations, [
-                    {
-                        "prompt_token_ids": [1, 2, 3],
-                        "multi_modal_data": {"image": object()},
-                    }
-                ]
-
-        class FakeEngineClient:
-            renderer = FakeRenderer()
-            model_config = SimpleNamespace(max_model_len=4096)
-
-            async def get_tokenizer(self):
-                return None
-
-        handler = _make_handler()
-        handler.config.output_modalities = ["text", "audio"]
-        handler.engine_client = FakeEngineClient()
-        raw = {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": "https://x/img.jpg"},
-                        },
-                        {"type": "text", "text": "describe this"},
-                    ],
-                }
-            ],
-            "modalities": ["text", "audio"],
-        }
-
-        inputs = await handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)
-
-        assert inputs.request_type == RequestType.CHAT_COMPLETION
-        assert inputs.prompt["prompt_token_ids"] == [1, 2, 3]
-        assert inputs.prompt["modalities"] == ["text", "audio"]
-        assert "multi_modal_data" in inputs.prompt
-
-    @pytest.mark.asyncio
     async def test_image_generation(self):
         """Image request parses prompt, size, and creates diffusion sampling params."""
         handler = _make_handler()
@@ -142,9 +88,38 @@ class TestBuildEngineInputs:
         inputs = await handler.build_engine_inputs(req, RequestType.IMAGE_GENERATION)
         assert inputs.request_type == RequestType.IMAGE_GENERATION
         assert inputs.prompt["prompt"] == "a cat"
+        assert inputs.prompt["modalities"] == ["image"]
+        assert inputs.prompt["mm_processor_kwargs"] == {
+            "target_h": 512,
+            "target_w": 512,
+        }
         assert len(inputs.sampling_params_list) == 1
         sp = inputs.sampling_params_list[0]
         assert sp.height == 512
+        assert sp.width == 512
+
+    @pytest.mark.asyncio
+    async def test_image_chat_completion_uses_multimodal_prompt(self):
+        """Image chat requests must use vLLM-Omni multimodal preprocessing."""
+        handler = _make_handler(stage_types=("llm", "diffusion"))
+        handler.config.output_modalities = ["image"]
+        raw = {
+            "messages": [{"role": "user", "content": "a glass teapot"}],
+            "extra_body": {"height": 768, "width": 512, "seed": 123},
+        }
+
+        inputs = await handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)
+
+        assert inputs.request_type == RequestType.CHAT_COMPLETION
+        assert inputs.prompt["prompt"] == "a glass teapot"
+        assert inputs.prompt["modalities"] == ["image"]
+        assert inputs.prompt["mm_processor_kwargs"] == {
+            "target_h": 768,
+            "target_w": 512,
+        }
+        assert len(inputs.sampling_params_list) == 2
+        sp = inputs.sampling_params_list[1]
+        assert sp.height == 768
         assert sp.width == 512
 
     @pytest.mark.asyncio
@@ -317,8 +292,7 @@ class TestBuildOriginalPrompt:
 
 
 class TestParseOmniRequest:
-    """parse_omni_request: original_prompt only has prompt/negative_prompt,
-    geometry goes into sampling_params_list dict."""
+    """parse_omni_request: image geometry goes into sampling params and processor kwargs."""
 
     @pytest.mark.asyncio
     async def test_image_sampling_params_has_geometry(self):
@@ -333,17 +307,24 @@ class TestParseOmniRequest:
         assert sp["width"] == 512
 
     @pytest.mark.asyncio
-    async def test_image_original_prompt_no_geometry(self):
+    async def test_image_prompt_uses_multimodal_preprocessor_kwargs(self):
         request = {
             "prompt": "a sunset",
             "size": "512x512",
             "output_modalities": ["image"],
         }
         result = await parse_omni_request(request, ["image"])
+        prompt = result["engine_inputs"]
+        assert prompt["prompt"] == "a sunset"
+        assert prompt["modalities"] == ["image"]
+        assert prompt["mm_processor_kwargs"] == {"target_h": 512, "target_w": 512}
+
         op = result["original_prompt"]
         assert op["prompt"] == "a sunset"
         assert "height" not in op
         assert "width" not in op
+        assert op["modalities"] == ["image"]
+        assert op["mm_processor_kwargs"] == {"target_h": 512, "target_w": 512}
 
     @pytest.mark.asyncio
     async def test_nvext_params_go_into_sampling_params_not_prompt(self):
@@ -361,124 +342,24 @@ class TestParseOmniRequest:
         assert "guidance_scale" not in op
 
     @pytest.mark.asyncio
-    async def test_chat_audio_metadata_goes_into_prompt(self):
+    async def test_image_chat_request_uses_multimodal_preprocessor_kwargs(self):
         request = {
-            "messages": [{"role": "user", "content": "say hello"}],
-            "modalities": ["text", "audio"],
-            "audio": {"voice": "Cherry", "format": "wav"},
+            "messages": [{"role": "user", "content": "a glass teapot"}],
+            "extra_body": {"height": 768, "width": 512, "guidance_scale": 1.5},
         }
 
-        result = await parse_omni_request(request, ["text", "audio"])
+        result = await parse_omni_request(request, ["image"])
 
         prompt = result["engine_inputs"]
-        assert prompt["prompt"] == "say hello"
-        assert prompt["modalities"] == ["text", "audio"]
-        assert prompt["additional_information"] == {"speaker": ["cherry"]}
+        assert prompt["prompt"] == "a glass teapot"
+        assert prompt["modalities"] == ["image"]
+        assert prompt["mm_processor_kwargs"] == {"target_h": 768, "target_w": 512}
         assert result["original_prompt"] == prompt
-
-    @pytest.mark.asyncio
-    async def test_chat_uses_engine_renderer_for_multimodal_messages(self):
-        class FakeRenderer:
-            def __init__(self):
-                self.conversations = None
-                self.prompt_extras = None
-
-            async def render_chat_async(
-                self,
-                conversations,
-                chat_params,  # noqa: ARG002
-                tok_params,  # noqa: ARG002
-                *,
-                prompt_extras=None,
-            ):
-                self.conversations = conversations
-                self.prompt_extras = prompt_extras
-                return conversations, [
-                    {
-                        "prompt_token_ids": [1, 2, 3],
-                        "multi_modal_data": {"image": object()},
-                    }
-                ]
-
-        renderer = FakeRenderer()
-        engine = SimpleNamespace(
-            renderer=renderer,
-            model_config=SimpleNamespace(max_model_len=4096),
-        )
-        request = {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": "https://x/img.jpg"},
-                        },
-                        {"type": "text", "text": "describe this"},
-                    ],
-                }
-            ],
-            "modalities": ["text", "audio"],
-            "audio": {"voice": "Cherry"},
+        assert result["sampling_params_list"] == {
+            "height": 768,
+            "width": 512,
+            "guidance_scale": 1.5,
         }
-
-        result = await parse_omni_request(
-            request,
-            ["text", "audio"],
-            engine=engine,
-        )
-
-        prompt = result["engine_inputs"]
-        assert renderer.conversations == [request["messages"]]
-        assert prompt["prompt_token_ids"] == [1, 2, 3]
-        assert "multi_modal_data" in prompt
-        assert prompt["modalities"] == ["text", "audio"]
-        assert prompt["additional_information"] == {"speaker": ["cherry"]}
-        assert result["original_prompt"] == {
-            "modalities": ["text", "audio"],
-            "additional_information": {"speaker": ["cherry"]},
-        }
-
-    @pytest.mark.asyncio
-    async def test_chatml_fallback_when_qwen_tokenizer_has_no_template(self):
-        class QwenTokenizerWithoutTemplate:
-            unk_token_id = None
-
-            def apply_chat_template(self, *args, **kwargs):  # noqa: ARG002
-                raise ValueError("chat template unavailable")
-
-            def convert_tokens_to_ids(self, token):
-                return {
-                    "<|im_start|>": 151644,
-                    "<|im_end|>": 151645,
-                }.get(token)
-
-        async def tokenizer_getter():
-            return QwenTokenizerWithoutTemplate()
-
-        request = {
-            "messages": [
-                {"role": "system", "content": "Be concise."},
-                {"role": "user", "content": "Say hello."},
-            ],
-            "modalities": ["text", "audio"],
-            "audio": {"voice": "Cherry", "format": "wav"},
-        }
-
-        result = await parse_omni_request(
-            request,
-            ["text", "audio"],
-            tokenizer_getter=tokenizer_getter,
-        )
-
-        prompt = result["engine_inputs"]
-        assert prompt["prompt"] == (
-            "<|im_start|>system\nBe concise.<|im_end|>\n"
-            "<|im_start|>user\nSay hello.<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
-        assert prompt["modalities"] == ["text", "audio"]
-        assert prompt["additional_information"] == {"speaker": ["cherry"]}
 
 
 # ---------------------------------------------------------------------------

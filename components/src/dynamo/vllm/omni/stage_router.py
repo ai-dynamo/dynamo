@@ -8,10 +8,7 @@ import logging
 import uuid
 from typing import Any, AsyncGenerator, Dict, List
 
-from vllm_omni.entrypoints.utils import (
-    get_final_stage_id_for_e2e,
-    load_stage_configs_from_model,
-)
+from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 
 from dynamo import prometheus_names
 from dynamo.common.storage import get_fs
@@ -24,7 +21,7 @@ from dynamo.llm import ModelInput, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
-from dynamo.vllm.omni.output_formatter import OutputFormatter
+from dynamo.vllm.omni.output_formatter import OutputFormatter, _error_chunk
 from dynamo.vllm.omni.stage_worker import _resolve_model_type
 from dynamo.vllm.omni.types import StageOutput
 from dynamo.vllm.omni.utils import shm_deserialize
@@ -41,8 +38,10 @@ class OmniStageRouter:
         stage_configs_path: str,
     ) -> None:
         self.config = config
-        self.stage_configs = load_stage_configs_from_model(
-            config.model, deploy_config_path=stage_configs_path
+        _, self.stage_configs = load_and_resolve_stage_configs(
+            config.model,
+            stage_configs_path,
+            kwargs={},
         )
         self.stage_clients: Dict[str, Any] = {}
 
@@ -67,10 +66,9 @@ class OmniStageRouter:
     ) -> AsyncGenerator[dict, None]:
         request_id = str(uuid.uuid4())
         _, request_type = parse_request_type(request, self.config.output_modalities)
-        final_stage_id = self._final_stage_id(request.get("modalities"))
 
         stage_outputs: List[StageOutput] = []
-        for stage_idx, stage_cfg in enumerate(self.stage_configs[: final_stage_id + 1]):
+        for stage_idx, stage_cfg in enumerate(self.stage_configs):
             model_stage = getattr(
                 stage_cfg.engine_args, "model_stage", f"stage{stage_idx}"
             )
@@ -84,22 +82,15 @@ class OmniStageRouter:
 
             if stage_idx == 0:
                 # This is a workaround for now to pass in the raw request to stage 0. StageRequest validates it but ignores any unknown keys, so it gets passed through.
-                stage_request = {
-                    **request,
-                    "request_id": request_id,
-                    "final_stage_id": final_stage_id,
-                }
+                stage_request = {"request_id": request_id, **request}
             else:
-                stage_request = stage_outputs[-1].to_next_stage_request(
-                    request_id, final_stage_id
-                )
+                stage_request = stage_outputs[-1].to_next_stage_request(request_id)
 
             raw_stage_output = {}
             logger.info(
-                "Router: stage %d request keys=%s final_stage_id=%s",
+                "Router: stage %d request keys=%s",
                 stage_idx,
                 list(stage_request.keys()),
-                final_stage_id,
             )
             # For now, it is just one chunk output from the stage. Keeping the loop style in mind if in future we decide to stream multiple chunks from the stage.
             async for chunk in await client.round_robin(stage_request):
@@ -110,12 +101,20 @@ class OmniStageRouter:
             stage_outputs.append(StageOutput.model_validate(raw_stage_output))
 
             if stage_outputs[-1].error:
-                yield {"error": stage_outputs[-1].error, "finished": True}
+                yield _error_chunk(
+                    request_id,
+                    self.config.served_model_name or self.config.model,
+                    stage_outputs[-1].error,
+                )
                 return
 
         final = stage_outputs[-1]
         if not final.shm_meta:
-            yield {"error": "No SHM output from final stage", "finished": True}
+            yield _error_chunk(
+                request_id,
+                self.config.served_model_name or self.config.model,
+                "No SHM output from final stage",
+            )
             return
 
         # Build formatting context from the original request
@@ -138,19 +137,10 @@ class OmniStageRouter:
             if request_type == RequestType.AUDIO_GENERATION
             else request.get("output_format")
         )
-        request_audio = request.get("audio")
-        if (
-            output_format is None
-            and request_type == RequestType.CHAT_COMPLETION
-            and isinstance(request_audio, dict)
-        ):
-            output_format = request_audio.get("format")
         if response_format is not None:
             fmt_ctx["response_format"] = response_format
         if output_format is not None:
             fmt_ctx["output_format"] = output_format
-        if final.stage_text_output:
-            fmt_ctx["text_output"] = final.stage_text_output
 
         async for chunk in self._format_output(
             final, request_id, request_type, fmt_ctx
@@ -186,19 +176,6 @@ class OmniStageRouter:
                 "error": f"Formatter returned no output for type '{final_output_type}'",
                 "finished": True,
             }
-
-    def _final_stage_id(self, request_modalities: list[str] | None) -> int:
-        default_modalities = self.config.output_modalities or [
-            stage_cfg.final_output_type
-            for stage_cfg in self.stage_configs
-            if getattr(stage_cfg, "final_output", False)
-            and getattr(stage_cfg, "final_output_type", None)
-        ]
-        return get_final_stage_id_for_e2e(
-            request_modalities,
-            default_modalities,
-            self.stage_configs,
-        )
 
 
 async def init_omni_stage_router(

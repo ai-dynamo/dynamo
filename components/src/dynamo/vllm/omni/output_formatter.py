@@ -322,23 +322,6 @@ class AudioFormatter:
                     b64_json=base64.b64encode(audio_bytes).decode(),
                 )
 
-            if ctx.get("request_type") == RequestType.CHAT_COMPLETION:
-                audio_url = audio_data_obj.url
-                if audio_url is None and audio_data_obj.b64_json is not None:
-                    audio_url = f"data:{media_type};base64,{audio_data_obj.b64_json}"
-                if audio_url is None:
-                    return _error_chunk(
-                        request_id,
-                        self._model_name,
-                        "No audio URL generated",
-                    )
-                return _audio_chat_chunk(
-                    request_id,
-                    self._model_name,
-                    audio_url,
-                    text=ctx.get("text_output"),
-                )
-
             return NvAudioSpeechResponse(
                 id=request_id,
                 object="audio.speech",
@@ -423,36 +406,6 @@ class AudioFormatter:
         ).model_dump()
 
 
-def _audio_chat_chunk(
-    request_id: str, model_name: str, audio_url: str, *, text: str | None = None
-) -> Dict[str, Any]:
-    content_parts: list[dict[str, Any]] = []
-    if text:
-        content_parts.append({"type": "text", "text": text})
-    content_parts.append(
-        {
-            "type": "audio_url",
-            "audio_url": {"url": audio_url},
-        }
-    )
-    return {
-        "id": request_id,
-        "created": int(time.time()),
-        "object": "chat.completion.chunk",
-        "model": model_name,
-        "choices": [
-            {
-                "index": 0,
-                "delta": {
-                    "role": "assistant",
-                    "content": content_parts,
-                },
-                "finish_reason": "stop",
-            }
-        ],
-    }
-
-
 def _error_chunk(
     request_id: str, model_name: str, error_message: str
 ) -> Dict[str, Any]:
@@ -466,7 +419,7 @@ def _error_chunk(
             {
                 "index": 0,
                 "delta": {"role": "assistant", "content": f"Error: {error_message}"},
-                "finish_reason": "stop",
+                "finish_reason": "error",
             }
         ],
     }
