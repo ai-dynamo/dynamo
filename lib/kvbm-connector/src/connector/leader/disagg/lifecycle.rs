@@ -156,10 +156,7 @@ fn emit_outcome_audit(
     }
 }
 
-async fn watch_until_terminal(
-    session: &Arc<dyn Session>,
-    watchdog: Duration,
-) -> LifecycleOutcome {
+async fn watch_until_terminal(session: &Arc<dyn Session>, watchdog: Duration) -> LifecycleOutcome {
     let result = tokio::time::timeout(watchdog, async {
         let mut lifecycle = session.lifecycle();
         while let Some(event) = lifecycle.next().await {

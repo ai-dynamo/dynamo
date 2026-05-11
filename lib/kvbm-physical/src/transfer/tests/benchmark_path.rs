@@ -69,14 +69,21 @@ fn make_d2d_key(src: &PhysicalLayout, dst: &PhysicalLayout) -> BenchmarkKey {
             (KvDim::Page, AxisExtent::full(cfg.page_size)),
             (KvDim::HeadSize, AxisExtent::full(cfg.inner_dim)),
         ],
-        vec![cfg.page_size * cfg.inner_dim * cfg.dtype_width_bytes as usize,
-             cfg.inner_dim * cfg.dtype_width_bytes as usize,
-             cfg.dtype_width_bytes as usize],
+        vec![
+            cfg.page_size * cfg.inner_dim * cfg.dtype_width_bytes as usize,
+            cfg.inner_dim * cfg.dtype_width_bytes as usize,
+            cfg.dtype_width_bytes as usize,
+        ],
         cfg.dtype_width_bytes as usize,
         None,
     );
     let _ = dst; // dst shape matches src for same-config pairs
-    BenchmarkKey::new(sig.clone(), sig, Some(cfg.dtype_width_bytes as u32), TransferStrategy::CudaAsyncD2D)
+    BenchmarkKey::new(
+        sig.clone(),
+        sig,
+        Some(cfg.dtype_width_bytes as u32),
+        TransferStrategy::CudaAsyncD2D,
+    )
 }
 
 // ── PR-7.5.1 test: TransformKernel end-to-end timing ─────────────────────────
@@ -124,7 +131,7 @@ async fn benchmark_pair_times_transform_kernel_d2d() -> Result<()> {
         outer_dim: 2,
         page_size: 16,
         num_heads: 8,
-        head_dim: 16,  // inner_dim (128) / num_heads (8)
+        head_dim: 16, // inner_dim (128) / num_heads (8)
         dtype: kvbm_kernels::TensorDataType::F16,
         block_layout: kvbm_kernels::BlockLayout::NHD,
     };
@@ -225,7 +232,11 @@ async fn benchmark_pair_compares_three_candidates() -> Result<()> {
         // for counting; real callers would never submit the same variant twice,
         // but the cache doesn't enforce uniqueness).
         BenchmarkCandidate::DirectDma {
-            ops: vec![CopyOp { src_addr: 0, dst_addr: 0, size: 0 }],
+            ops: vec![CopyOp {
+                src_addr: 0,
+                dst_addr: 0,
+                size: 0,
+            }],
         },
         // Candidate 3: TransformKernel — requires permute_kernels.
         BenchmarkCandidate::TransformKernel {

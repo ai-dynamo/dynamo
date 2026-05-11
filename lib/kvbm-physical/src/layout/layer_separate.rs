@@ -402,9 +402,19 @@ impl Layout for LayerSeparateLayout {
         // Homogeneous per-axis storage: all per-layer allocations share the
         // same StorageKind (LS requires uniform allocation type). Use the
         // first region's kind; build validated this uniformity at construction.
-        let sk = self.memory_regions().first().map(|b| b.storage_kind()).unwrap_or(StorageKind::System);
+        let sk = self
+            .memory_regions()
+            .first()
+            .map(|b| b.storage_kind())
+            .unwrap_or(StorageKind::System);
         let axis_storage_kinds = vec![sk; layout.dims().len()];
-        LayoutView::full(layout, strides, regions, Some(KvDim::Layer), axis_storage_kinds)
+        LayoutView::full(
+            layout,
+            strides,
+            regions,
+            Some(KvDim::Layer),
+            axis_storage_kinds,
+        )
     }
 
     fn config(&self) -> &LayoutConfig {

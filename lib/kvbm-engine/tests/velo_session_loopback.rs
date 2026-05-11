@@ -351,7 +351,11 @@ async fn active_session_count_returns_to_zero() -> Result<()> {
     assert_eq!(h.factory.active_session_count(), 1);
     let p_session = p
         .factory
-        .attach(session_id, h.velo.instance_id(), h_session.endpoint().unwrap())
+        .attach(
+            session_id,
+            h.velo.instance_id(),
+            h_session.endpoint().unwrap(),
+        )
         .await?;
     assert_eq!(p.factory.active_session_count(), 1);
 
@@ -540,7 +544,9 @@ async fn sync_methods_callable_from_non_tokio_thread() -> Result<()> {
 
     // Surface the worker-thread panic with a clear message instead of
     // the cryptic JoinError.
-    let result = join.join().expect("worker thread panicked — sync methods must not require Handle::current()");
+    let result = join
+        .join()
+        .expect("worker thread panicked — sync methods must not require Handle::current()");
     result.map_err(|e| anyhow::anyhow!("sync method failed: {}", e))?;
     Ok(())
 }

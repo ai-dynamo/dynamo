@@ -179,8 +179,7 @@ impl FeatureManager for ConditionalDisaggManager {
 
             // Spawn the dispatcher worker if one is configured.
             if let Some(dispatcher) = self.dispatcher.clone() {
-                let task =
-                    tokio::spawn(prefill_dispatcher_loop(Arc::clone(&backend), dispatcher));
+                let task = tokio::spawn(prefill_dispatcher_loop(Arc::clone(&backend), dispatcher));
                 let _ = self.dispatcher_task.set(task);
                 tracing::info!("CD prefill dispatcher worker started");
             }
@@ -270,19 +269,25 @@ async fn prefill_dispatcher_loop(
     loop {
         // Re-create the receiver each iteration. The backend caches the
         // underlying handler; this is cheap.
-        let receiver =
-            match velo::queue::receiver::<Vec<u8>>(backend.as_ref(), protocol::CD_PREFILL_QUEUE)
-                .await
-            {
-                Ok(r) => r,
-                Err(err) => {
-                    tracing::error!(error = %err, "CD dispatcher: receiver build failed; shutting down loop");
-                    return;
-                }
-            };
+        let receiver = match velo::queue::receiver::<Vec<u8>>(
+            backend.as_ref(),
+            protocol::CD_PREFILL_QUEUE,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(err) => {
+                tracing::error!(error = %err, "CD dispatcher: receiver build failed; shutting down loop");
+                return;
+            }
+        };
 
         let batch = match receiver
-            .next_with_options(NextOptions::new().batch_size(BATCH_SIZE).timeout(POLL_TIMEOUT))
+            .next_with_options(
+                NextOptions::new()
+                    .batch_size(BATCH_SIZE)
+                    .timeout(POLL_TIMEOUT),
+            )
             .await
         {
             Ok(b) => b,

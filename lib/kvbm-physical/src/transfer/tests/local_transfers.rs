@@ -8,10 +8,10 @@
 //! - Different layout types (Fully Contiguous, Layer-wise)
 //! - Different transfer strategies (Memcpy, CUDA H2D/D2H)
 
-use super::*;
-use super::gate::{gpu_serial, nixl_only_serial, storage_serial};
 #[cfg(feature = "testing-nixl-gds")]
 use super::gate::nixl_serial;
+use super::gate::{gpu_serial, nixl_only_serial, storage_serial};
+use super::*;
 use crate::transfer::executor::TransferOptionsInternal;
 use crate::transfer::executor::execute_transfer;
 use crate::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};

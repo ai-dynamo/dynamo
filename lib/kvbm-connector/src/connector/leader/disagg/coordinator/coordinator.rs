@@ -16,8 +16,8 @@
 //! so future coordinator variants can drive the same observer.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Weak};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -213,9 +213,7 @@ impl ConditionalDisaggCoordinator {
     }
 
     /// Returns a closure suitable for `Pipeline::add_register_observer`.
-    pub fn observer_callback(
-        &self,
-    ) -> Arc<dyn Fn(&[ImmutableBlock<G2>]) + Send + Sync + 'static> {
+    pub fn observer_callback(&self) -> Arc<dyn Fn(&[ImmutableBlock<G2>]) + Send + Sync + 'static> {
         let observer = Arc::clone(&self.observer);
         Arc::new(move |blocks: &[ImmutableBlock<G2>]| observer.observe(blocks))
     }
@@ -227,12 +225,9 @@ impl ConditionalDisaggCoordinator {
     /// Returns the granular per-side prefill status for `request_id`.
     /// Returns `None` if the request is not tracked or is not prefill-role.
     pub fn status_for(&self, request_id: &str) -> Option<PrefillStatus> {
-        self.states.get(request_id).and_then(|entry| {
-            entry
-                .value()
-                .as_prefill()
-                .map(|bits| *bits.status.lock())
-        })
+        self.states
+            .get(request_id)
+            .and_then(|entry| entry.value().as_prefill().map(|bits| *bits.status.lock()))
     }
 
     pub fn has_active_request(&self, request_id: &str) -> bool {
@@ -301,11 +296,7 @@ impl ConditionalDisaggCoordinator {
     /// 1. `mark_failed_onboarding(rid, g1_or_empty)`
     /// 2. `session.close(reason)` if attached
     /// 3. `states.remove(request_id)`
-    pub async fn cleanup_failed_request(
-        self: &Arc<Self>,
-        request_id: &str,
-        reason: String,
-    ) {
+    pub async fn cleanup_failed_request(self: &Arc<Self>, request_id: &str, reason: String) {
         let state = match self.state_for(request_id) {
             Some(s) => s,
             None => {
@@ -526,13 +517,8 @@ impl ConditionalDisaggCoordinator {
                     if chunk.is_empty() {
                         continue;
                     }
-                    self.pull_and_register_chunk(
-                        &request_id,
-                        &state,
-                        chunk,
-                        &mut filled_index,
-                    )
-                    .await?;
+                    self.pull_and_register_chunk(&request_id, &state, chunk, &mut filled_index)
+                        .await?;
                     let registered = bits.registered_g2.lock();
                     remaining = expected_set.clone();
                     for b in registered.iter() {
@@ -793,16 +779,25 @@ impl ConditionalDisaggCoordinator {
     pub fn state_for_decode(&self, request_id: &str) -> Option<Arc<CdRequest>> {
         self.states.get(request_id).and_then(|e| {
             let req = Arc::clone(e.value());
-            if req.as_decode().is_some() { Some(req) } else { None }
+            if req.as_decode().is_some() {
+                Some(req)
+            } else {
+                None
+            }
         })
     }
 
     /// Coarse decode status, mapped from `CdRequestStatus` + `failure_reason`
     /// to the `RemotePrefillStatus` shape tests use.
-    pub fn status_for_decode(&self, request_id: &str) -> Option<super::super::decode::RemotePrefillStatus> {
+    pub fn status_for_decode(
+        &self,
+        request_id: &str,
+    ) -> Option<super::super::decode::RemotePrefillStatus> {
         use super::super::decode::RemotePrefillStatus;
         let state = self.state_for_decode(request_id)?;
-        let bits = state.as_decode().expect("state_for_decode filters to decode-role");
+        let bits = state
+            .as_decode()
+            .expect("state_for_decode filters to decode-role");
         match *state.status.lock() {
             CdRequestStatus::Released => {
                 if bits.failure_reason.lock().is_some() {
@@ -839,7 +834,8 @@ impl ConditionalDisaggCoordinator {
                     request_id = %request_id,
                     reason = %reason
                 );
-                sink.on_session_failure(request_id.to_string(), reason).await;
+                sink.on_session_failure(request_id.to_string(), reason)
+                    .await;
             } else {
                 crate::audit!(
                     "decode_failure_sink_unavailable",
@@ -958,7 +954,8 @@ impl ConditionalDisaggCoordinator {
             bits,
         );
         *state.session.lock() = Some(Arc::clone(&session));
-        self.states.insert(request_id.to_string(), Arc::clone(&state));
+        self.states
+            .insert(request_id.to_string(), Arc::clone(&state));
 
         // Install the slot RAII payload BEFORE spawning the enqueue task.
         // If install fails, roll back coordinator state and close the
@@ -984,7 +981,9 @@ impl ConditionalDisaggCoordinator {
                 let failure_reason = Self::decode_failure_reason(&outcome);
                 if let Some(coord) = watcher_coord.upgrade() {
                     if let Some(reason) = failure_reason {
-                        coord.invoke_decode_failure_sink_and_evict(&watcher_request_id, reason).await;
+                        coord
+                            .invoke_decode_failure_sink_and_evict(&watcher_request_id, reason)
+                            .await;
                     } else {
                         coord.states.remove(&watcher_request_id);
                     }
@@ -1165,7 +1164,8 @@ impl ConditionalDisaggCoordinator {
         // takes the SUFFIX of the pulled blocks corresponding to
         // [P, D + N*BS).
         let decode_offset_tokens = params.num_computed_tokens;
-        let total_position_end_tokens = decode_offset_tokens + params.sequence_hashes.len() * block_size;
+        let total_position_end_tokens =
+            decode_offset_tokens + params.sequence_hashes.len() * block_size;
         let num_external_tokens =
             total_position_end_tokens.saturating_sub(prefill_num_computed_tokens);
         let expected_hashes: Vec<SequenceHash> = params.sequence_hashes.clone();
@@ -1194,8 +1194,9 @@ impl ConditionalDisaggCoordinator {
             .filter(|h| !pulled.contains(h))
             .copied()
             .collect();
-        let observer_handle: ObserverHandle =
-            self.observer.track(request_id.to_string(), expected_outputs);
+        let observer_handle: ObserverHandle = self
+            .observer
+            .track(request_id.to_string(), expected_outputs);
 
         let bits = PrefillBits {
             num_external_tokens: std::sync::atomic::AtomicUsize::new(num_external_tokens),
@@ -1263,10 +1264,7 @@ impl ConditionalDisaggCoordinator {
                     "prefill setup failed; surfacing to vLLM via cleanup_failed_request"
                 );
                 coord
-                    .cleanup_failed_request(
-                        &request_id_owned,
-                        format!("setup failed: {err}"),
-                    )
+                    .cleanup_failed_request(&request_id_owned, format!("setup failed: {err}"))
                     .await;
             }
         });

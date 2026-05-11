@@ -119,8 +119,7 @@ async fn main() -> anyhow::Result<()> {
     // Build the CD manager, optionally with the HTTP dispatcher.
     let cd_manager = match (&cli.prefill_vllm_url, &cli.prefill_vllm_model) {
         (Some(url), Some(model)) => {
-            let dispatcher =
-                kvbm_hub::HttpVllmDispatcher::new(url.clone(), model.clone())?;
+            let dispatcher = kvbm_hub::HttpVllmDispatcher::new(url.clone(), model.clone())?;
             tracing::info!(
                 prefill_url = %url,
                 prefill_model = %model,
@@ -130,9 +129,7 @@ async fn main() -> anyhow::Result<()> {
                 .with_dispatcher(dispatcher as Arc<dyn kvbm_hub::PrefillRequestDispatcher>)
         }
         (Some(_), None) | (None, Some(_)) => {
-            anyhow::bail!(
-                "--prefill-vllm-url and --prefill-vllm-model must be specified together"
-            );
+            anyhow::bail!("--prefill-vllm-url and --prefill-vllm-model must be specified together");
         }
         (None, None) => {
             tracing::info!(

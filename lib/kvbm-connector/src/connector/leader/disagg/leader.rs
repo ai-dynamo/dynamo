@@ -339,9 +339,10 @@ impl ConnectorLeaderApi for ConditionalDisaggLeader {
                 .as_ref()
                 .ok_or_else(|| anyhow!("classify=Decode but decode flow not wired"))?
                 .update_state_after_alloc(request_id, block_ids, num_external_tokens),
-            RequestRole::NonCd => self
-                .inner
-                .update_state_after_alloc(request_id, block_ids, num_external_tokens),
+            RequestRole::NonCd => {
+                self.inner
+                    .update_state_after_alloc(request_id, block_ids, num_external_tokens)
+            }
         }
     }
 
@@ -512,7 +513,9 @@ mod tests {
     use super::*;
 
     use crate::G2;
-    use crate::connector::leader::disagg::testing::{MockInnerLeaderShim, MockSlot, TEST_BLOCK_SIZE};
+    use crate::connector::leader::disagg::testing::{
+        MockInnerLeaderShim, MockSlot, TEST_BLOCK_SIZE,
+    };
     use kvbm_disagg_protocol::{RemotePrefillParams, TransferParams};
     use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
     use kvbm_logical::manager::BlockManager;

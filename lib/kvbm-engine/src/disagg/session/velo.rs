@@ -1118,11 +1118,9 @@ impl Session for VeloSession {
             let _ = self.enqueue_frame(Frame::Drained);
         }
         if let Some(reason) = reason {
-            self.inner
-                .lifecycle_stream
-                .push(LifecycleEvent::Detached {
-                    reason: Some(reason),
-                });
+            self.inner.lifecycle_stream.push(LifecycleEvent::Detached {
+                reason: Some(reason),
+            });
         }
         // Force the wire finalize even if rendezvous hasn't
         // completed. Idempotent against the cooperative path.
@@ -1231,10 +1229,7 @@ impl VeloSessionFactory {
                     return;
                 };
                 let n = c.load(Ordering::Acquire);
-                crate::engine_audit!(
-                    "session_factory_active_gauge",
-                    active_sessions = n
-                );
+                crate::engine_audit!("session_factory_active_gauge", active_sessions = n);
             }
         });
         factory

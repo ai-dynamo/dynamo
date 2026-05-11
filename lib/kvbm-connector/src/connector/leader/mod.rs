@@ -1054,8 +1054,7 @@ mod tests {
             .collect();
 
         // No onboarding state — the cold-cache path that crashed.
-        let split =
-            compute_slot_match_split(block_size, total_blocks, hashes.clone(), None);
+        let split = compute_slot_match_split(block_size, total_blocks, hashes.clone(), None);
 
         assert_eq!(split.local_match_blocks, 0);
         assert_eq!(split.computed_blocks, 0);
@@ -1080,12 +1079,8 @@ mod tests {
             .collect();
 
         // 2 blocks already computed (32 tokens), 3 blocks matched locally.
-        let split = compute_slot_match_split(
-            block_size,
-            total_blocks,
-            hashes.clone(),
-            Some((3, 32)),
-        );
+        let split =
+            compute_slot_match_split(block_size, total_blocks, hashes.clone(), Some((3, 32)));
 
         assert_eq!(split.computed_blocks, 2);
         assert_eq!(split.local_match_blocks, 3);

@@ -130,8 +130,8 @@ impl TransferCapabilities {
         Self {
             allow_gds: true,
             allow_gpu_rdma: true,
-            cuda_graph_replay: false,    // remains opt-in; requires capturable stream
-            startup_benchmark: false,    // opt-in; caller decides when to benchmark
+            cuda_graph_replay: false, // remains opt-in; requires capturable stream
+            startup_benchmark: false, // opt-in; caller decides when to benchmark
         }
     }
 

@@ -37,7 +37,7 @@ use kvbm_connector::connector::leader::disagg::testing::{
     MockSlot, TEST_BLOCK_SIZE, wait_until,
 };
 use kvbm_connector::connector::leader::disagg::{
-    AlwaysRemote, ConnectorLeaderApi, ConditionalDisaggCoordinator, DecodeDisaggLeader,
+    AlwaysRemote, ConditionalDisaggCoordinator, ConnectorLeaderApi, DecodeDisaggLeader,
 };
 use kvbm_engine::disagg::session::{CommittedBlock, MockSessionFactory};
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};

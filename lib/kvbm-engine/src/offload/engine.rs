@@ -243,10 +243,7 @@ impl OffloadEngine {
     /// pipeline isn't configured. The observer fires after each batch's
     /// destination-tier register step; see
     /// [`Pipeline::add_register_observer`] for the contract.
-    pub fn add_g1_to_g2_register_observer(
-        &self,
-        observer: RegisterObserver<G2>,
-    ) -> Result<()> {
+    pub fn add_g1_to_g2_register_observer(&self, observer: RegisterObserver<G2>) -> Result<()> {
         let pipeline = self
             .g1_to_g2
             .as_ref()

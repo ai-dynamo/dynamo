@@ -82,10 +82,7 @@ fn build_g2_manager(capacity: usize) -> Arc<BlockManager<G2>> {
     )
 }
 
-fn committed_blocks(
-    hashes: &[kvbm_logical::SequenceHash],
-    base: usize,
-) -> Vec<CommittedBlock> {
+fn committed_blocks(hashes: &[kvbm_logical::SequenceHash], base: usize) -> Vec<CommittedBlock> {
     hashes
         .iter()
         .enumerate()
@@ -213,7 +210,10 @@ async fn recompute_policy_pull_failure_evicts_coordinator_state() -> Result<()> 
     // This is the synthetic equivalent of an RDMA / NIXL transport
     // failure mid-request — exactly what a real `Session::pull`
     // would surface from the worker side under `kv_load_failure_policy=recompute`.
-    session.resolve_pull(0, Err(anyhow::anyhow!("simulated KV pull transport failure")));
+    session.resolve_pull(
+        0,
+        Err(anyhow::anyhow!("simulated KV pull transport failure")),
+    );
 
     // ---------- 4. Wait for the failure cascade to surface ----------
     // The chain is:

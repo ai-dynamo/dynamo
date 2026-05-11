@@ -233,11 +233,25 @@ async fn assert_operational_universal_round_trip(operational: KvBlockLayout) -> 
     };
 
     // Forward: operational → universal.
-    let forward = execute_transfer(&src, &mid, &src_blocks, &mid_blocks, options()?, ctx.context())?;
+    let forward = execute_transfer(
+        &src,
+        &mid,
+        &src_blocks,
+        &mid_blocks,
+        options()?,
+        ctx.context(),
+    )?;
     forward.await?;
 
     // Reverse: universal → fresh operational.
-    let reverse = execute_transfer(&mid, &dst, &mid_blocks, &dst_blocks, options()?, ctx.context())?;
+    let reverse = execute_transfer(
+        &mid,
+        &dst,
+        &mid_blocks,
+        &dst_blocks,
+        options()?,
+        ctx.context(),
+    )?;
     reverse.await?;
 
     // dst[0,1] should hold the original src[0,1] pattern.
@@ -287,9 +301,23 @@ async fn assert_nhd_hnd_round_trip(src_layout: KvBlockLayout) -> Result<()> {
         TransferOptionsInternal::builder().use_planner(true).build()
     };
 
-    let forward = execute_transfer(&src, &mid, &src_blocks, &mid_blocks, options()?, ctx.context())?;
+    let forward = execute_transfer(
+        &src,
+        &mid,
+        &src_blocks,
+        &mid_blocks,
+        options()?,
+        ctx.context(),
+    )?;
     forward.await?;
-    let reverse = execute_transfer(&mid, &dst, &mid_blocks, &dst_blocks, options()?, ctx.context())?;
+    let reverse = execute_transfer(
+        &mid,
+        &dst,
+        &mid_blocks,
+        &dst_blocks,
+        options()?,
+        ctx.context(),
+    )?;
     reverse.await?;
 
     verify_checksums_by_position(&src_checksums, &src_blocks, &dst, &dst_blocks)?;
@@ -353,13 +381,23 @@ async fn use_planner_small_inner_threshold_fallback_d2d() -> Result<()> {
 
     // Legacy path (use_planner = false).
     let legacy_checksums = transfer_and_checksum(
-        &src, &dst_legacy, &src_blocks, &dst_blocks, false, ctx.context(),
+        &src,
+        &dst_legacy,
+        &src_blocks,
+        &dst_blocks,
+        false,
+        ctx.context(),
     )
     .await?;
 
     // Planner path (use_planner = true) — must not error, must match legacy.
     let planner_checksums = transfer_and_checksum(
-        &src, &dst_planner, &src_blocks, &dst_blocks, true, ctx.context(),
+        &src,
+        &dst_planner,
+        &src_blocks,
+        &dst_blocks,
+        true,
+        ctx.context(),
     )
     .await?;
 

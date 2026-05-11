@@ -54,8 +54,7 @@ pub enum PrefillStatus {
 /// `commit_output_blocks(request_id, blocks)`.  Decoupled from any
 /// specific coordinator type so the new `ConditionalDisaggCoordinator`
 /// can drive the same observer.
-pub type CommitOutputBlocksFn =
-    dyn Fn(&str, Vec<ImmutableBlock<G2>>) + Send + Sync + 'static;
+pub type CommitOutputBlocksFn = dyn Fn(&str, Vec<ImmutableBlock<G2>>) + Send + Sync + 'static;
 
 pub struct ConditionalDecodeG2Observer {
     /// Per-request residual hashset: hashes we still expect to

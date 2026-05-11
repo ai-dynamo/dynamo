@@ -320,8 +320,6 @@ pub use testing::{MockSession, MockSessionFactory};
 mod tests {
     use super::*;
 
-
-
     #[test]
     fn frame_round_trip_msgpack() {
         let frame = Frame::Pull {
@@ -337,6 +335,4 @@ mod tests {
     fn commit_delta_variants_are_distinct() {
         assert_ne!(CommitDelta::Added(vec![]), CommitDelta::Closed,);
     }
-
-
 }

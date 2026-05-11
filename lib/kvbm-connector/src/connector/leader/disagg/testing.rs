@@ -463,7 +463,9 @@ impl InnerLeaderShim for MockInnerLeaderShim {
         // it via the slot field; production transitions the slot's
         // txn_state. Tests that need to assert the install can
         // inspect `installed_cd_payloads`.
-        slot.installed_cd_payloads.lock().push(request_id.to_string());
+        slot.installed_cd_payloads
+            .lock()
+            .push(request_id.to_string());
         // Hold the payload alive on the mock slot so its `Drop`
         // doesn't fire prematurely. Tests assert against
         // `cd_payloads_dropped` to check Drop behavior.

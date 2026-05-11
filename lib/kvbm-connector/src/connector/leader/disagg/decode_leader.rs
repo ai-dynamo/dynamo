@@ -47,8 +47,8 @@ use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
 use crate::connector::leader::{FinishedStatus, Request};
 use crate::{G2, SequenceHash};
 
-use super::decode::CdFailureSink;
 use super::coordinator::ConditionalDisaggCoordinator;
+use super::decode::CdFailureSink;
 use super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
 use super::{ConnectorLeaderApi, PolicyInputs, PrefillSelection};
 use futures::FutureExt;
@@ -175,7 +175,6 @@ impl Drop for CdRequestStatePayload {
         }
     }
 }
-
 
 struct CdRequestState {
     reserved_tokens: usize,
@@ -319,8 +318,7 @@ impl DecodeDisaggLeader {
         // `worker_hook.mark_failed_onboarding`).  Without this,
         // a failed peer would leave vLLM hanging in `Onboarding`
         // until something else aborts the request.
-        let sink: Weak<dyn CdFailureSink> =
-            Arc::downgrade(&leader) as Weak<dyn CdFailureSink>;
+        let sink: Weak<dyn CdFailureSink> = Arc::downgrade(&leader) as Weak<dyn CdFailureSink>;
         leader.coordinator.install_failure_sink(sink);
         leader
     }
@@ -448,9 +446,7 @@ impl DecodeDisaggLeader {
                     "decode_gnmt: Remote — sized window"
                 );
                 if full_block_external_tokens == 0 {
-                    tracing::info!(
-                        "decode_gnmt: Remote but no full block to send — passthrough"
-                    );
+                    tracing::info!("decode_gnmt: Remote but no full block to send — passthrough");
                     crate::audit!(
                         "policy_remote_passthrough_zero_block",
                         role = "decode",
@@ -547,8 +543,7 @@ impl DecodeDisaggLeader {
                 all_token_ids.len(),
             );
         }
-        let prefill_token_ids: Vec<u32> =
-            all_token_ids[base_offset..prefill_window_end].to_vec();
+        let prefill_token_ids: Vec<u32> = all_token_ids[base_offset..prefill_window_end].to_vec();
 
         let new_state = Arc::new(CdRequestState {
             reserved_tokens: full_block_external_tokens,
@@ -1175,8 +1170,13 @@ impl DecodeDisaggLeader {
         }
 
         for run in runs {
-            self.pull_register_onboard_contiguous_chunk(request_id, state, run, Arc::clone(&session))
-                .await?;
+            self.pull_register_onboard_contiguous_chunk(
+                request_id,
+                state,
+                run,
+                Arc::clone(&session),
+            )
+            .await?;
         }
         Ok(())
     }
@@ -1342,11 +1342,7 @@ impl DecodeDisaggLeader {
             return;
         }
 
-        crate::audit!(
-            "mark_onboarding_complete",
-            role = "decode",
-            request_id
-        );
+        crate::audit!("mark_onboarding_complete", role = "decode", request_id);
         if let Err(err) = self
             .worker_hook
             .mark_onboarding_complete(request_id.to_string())
@@ -1437,7 +1433,6 @@ impl DecodeDisaggLeader {
         self.release_request(request_id);
         self.coordinator.release(request_id);
     }
-
 }
 
 // ============================================================================

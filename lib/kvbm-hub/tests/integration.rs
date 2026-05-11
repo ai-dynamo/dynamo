@@ -1149,10 +1149,10 @@ async fn start_server_with_cd_dispatcher() -> (
 ) {
     let transport = new_velo_transport();
     let dispatcher = kvbm_hub::RecordingDispatcher::new();
-    let cd_manager: Arc<ConditionalDisaggManager> = Arc::new(
-        ConditionalDisaggManager::new()
-            .with_dispatcher(Arc::clone(&dispatcher) as Arc<dyn kvbm_hub::PrefillRequestDispatcher>),
-    );
+    let cd_manager: Arc<ConditionalDisaggManager> =
+        Arc::new(ConditionalDisaggManager::new().with_dispatcher(
+            Arc::clone(&dispatcher) as Arc<dyn kvbm_hub::PrefillRequestDispatcher>
+        ));
     let server = kvbm_hub::create_server_builder()
         .bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
         .discovery_port(0)

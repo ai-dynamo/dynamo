@@ -18,7 +18,9 @@ use kvbm_observability::SharedKvbmObservability;
 use velo::EventManager;
 
 use crate::manager::TransferManager;
-use crate::transfer::benchmark::{BenchmarkCache, BenchmarkCandidate, BenchmarkKey, BenchmarkOutcome};
+use crate::transfer::benchmark::{
+    BenchmarkCache, BenchmarkCandidate, BenchmarkKey, BenchmarkOutcome,
+};
 use crate::transfer::graph_cache::GraphCache;
 
 // Notifications module is declared in ../mod.rs

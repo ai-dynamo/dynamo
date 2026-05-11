@@ -340,12 +340,6 @@ impl InnerLeaderShim for ConnectorLeaderShim {
             .map_err(|e| anyhow!("install_cd_onboarding_payload: {}", e))?;
         let mut slot = shared_slot.lock();
         slot.txn_install_or_attach_cd_payload(cd_payload)
-            .map_err(|e| {
-                anyhow!(
-                    "install_cd_onboarding_payload({}): {}",
-                    request_id,
-                    e
-                )
-            })
+            .map_err(|e| anyhow!("install_cd_onboarding_payload({}): {}", request_id, e))
     }
 }

@@ -546,7 +546,14 @@ mod tests {
 
         // Homogeneous System storage for all 6 axes (Layer + 5 in-tensor).
         let axis_storage_kinds = vec![StorageKind::System; layout.dims().len()];
-        LayoutView::full(layout, strides, regions, Some(KvDim::Layer), axis_storage_kinds).unwrap()
+        LayoutView::full(
+            layout,
+            strides,
+            regions,
+            Some(KvDim::Layer),
+            axis_storage_kinds,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -833,7 +840,10 @@ mod tests {
             kinds.iter().all(|k| *k == StorageKind::System),
             "all axes must report System"
         );
-        assert!(!view.is_heterogeneous(), "homogeneous view must not be heterogeneous");
+        assert!(
+            !view.is_heterogeneous(),
+            "homogeneous view must not be heterogeneous"
+        );
     }
 
     /// LS-like per-layer homogeneous view: all axes report `System`,
@@ -889,7 +899,10 @@ mod tests {
         ];
         let view = LayoutView::full(layout, strides, vec![0x1000], None, mixed.clone()).unwrap();
         assert_eq!(view.axis_storage_kinds(), mixed.as_slice());
-        assert!(view.is_heterogeneous(), "mixed storage kinds must be detected as heterogeneous");
+        assert!(
+            view.is_heterogeneous(),
+            "mixed storage kinds must be detected as heterogeneous"
+        );
     }
 
     /// Build a fully-contiguous (cross-layer) NHD view with `Layer` as an

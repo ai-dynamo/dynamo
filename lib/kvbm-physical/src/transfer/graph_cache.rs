@@ -99,7 +99,10 @@ struct GraphCacheInner {
 
 impl GraphCacheInner {
     fn new() -> Self {
-        Self { entries: HashMap::new(), seq: 0 }
+        Self {
+            entries: HashMap::new(),
+            seq: 0,
+        }
     }
 
     /// Number of currently cached entries.
@@ -137,7 +140,9 @@ pub(crate) struct GraphCache {
 
 impl GraphCache {
     pub(crate) fn new() -> Self {
-        Self { inner: Mutex::new(GraphCacheInner::new()) }
+        Self {
+            inner: Mutex::new(GraphCacheInner::new()),
+        }
     }
 
     /// Returns `true` if the cache contains an entry for `key`.
@@ -165,7 +170,10 @@ impl GraphCache {
         key: &GraphCacheKey,
     ) -> Option<(cu_sys::CUgraphExec, Vec<cu_sys::CUgraphNode>)> {
         let guard = self.inner.lock().expect("GraphCache mutex poisoned");
-        guard.entries.get(key).map(|(_, h)| (h.exec, h.nodes.clone()))
+        guard
+            .entries
+            .get(key)
+            .map(|(_, h)| (h.exec, h.nodes.clone()))
     }
 
     /// Insert a new entry.  Evicts the oldest if the cache is full.

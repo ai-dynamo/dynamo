@@ -112,10 +112,7 @@ fn build_g2_manager(capacity: usize) -> Arc<BlockManager<G2>> {
     )
 }
 
-fn committed_blocks(
-    hashes: &[kvbm_logical::SequenceHash],
-    base: usize,
-) -> Vec<CommittedBlock> {
+fn committed_blocks(hashes: &[kvbm_logical::SequenceHash], base: usize) -> Vec<CommittedBlock> {
     hashes
         .iter()
         .enumerate()
@@ -281,8 +278,9 @@ async fn commit_usaa1_survives_coordinator_release_race() -> Result<()> {
 
     // ---------- 1. GNMT — opens session, installs wrapper + coordinator state ----------
     h.wrapper.create_slot(make_request("req-1"))?;
-    let (count, async_flag) =
-        h.wrapper.get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
+    let (count, async_flag) = h
+        .wrapper
+        .get_num_new_matched_tokens("req-1", COMPUTED_BLOCKS * BLOCK_SIZE)?;
     assert_eq!(count, Some((LOCAL_BLOCKS + REMOTE_BLOCKS) * BLOCK_SIZE));
     assert!(async_flag);
 
@@ -582,7 +580,9 @@ async fn concurrent_recompute_sibling_failure_does_not_cascade() -> Result<()> {
     // ---------- Inject A's pull failure — triggers full cleanup cascade for A ----------
     session_a.resolve_pull(
         0,
-        Err(anyhow::anyhow!("simulated KV pull transport failure for req-A")),
+        Err(anyhow::anyhow!(
+            "simulated KV pull transport failure for req-A"
+        )),
     );
 
     // ---------- A's failure surfaces, B's onboard for the remote slice resolves ----------

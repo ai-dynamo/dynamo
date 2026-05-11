@@ -1669,10 +1669,16 @@ mod tests {
         let regions: Vec<usize> = (0..4).map(|i| 0x1000_0000 + i * 0x10_0000).collect();
 
         let axis_storage_kinds = vec![dynamo_memory::StorageKind::System; layout.dims().len()];
-        let view = LayoutView::full(layout, strides, regions, Some(KvDim::Layer), axis_storage_kinds)
-            .unwrap()
-            .slice(KvDim::HeadCount, 1, 2)
-            .unwrap();
+        let view = LayoutView::full(
+            layout,
+            strides,
+            regions,
+            Some(KvDim::Layer),
+            axis_storage_kinds,
+        )
+        .unwrap()
+        .slice(KvDim::HeadCount, 1, 2)
+        .unwrap();
 
         let projected = AnnotatedLayout::from_view(&view).unwrap();
         // Local coord HeadCount=0 on the projection ↔ global coord
@@ -1686,7 +1692,8 @@ mod tests {
             .with(KvDim::HeadSize, 10);
         let global_coord = local_coord.with(KvDim::HeadCount, 1);
 
-        let unsliced_kinds = vec![dynamo_memory::StorageKind::System; view.local_layout().dims().len()];
+        let unsliced_kinds =
+            vec![dynamo_memory::StorageKind::System; view.local_layout().dims().len()];
         let unsliced = LayoutView::full(
             view.local_layout().clone(), // fine — full() shape is [2,8,16,4,64] with HC=2 here
             view.byte_strides().clone(),
@@ -1843,21 +1850,35 @@ mod tests {
     #[test]
     fn plan_copy_emits_threshold_fallback_for_small_inner() {
         let layout = nhd_cross_layer(
-            /*num_blocks=*/ 2, /*num_layers=*/ 1, /*outer=*/ 2,
-            /*page=*/ 4, /*nh=*/ 4, /*hd=*/ 8, /*elem=*/ 2, 0x1000_0000,
+            /*num_blocks=*/ 2,
+            /*num_layers=*/ 1,
+            /*outer=*/ 2,
+            /*page=*/ 4,
+            /*nh=*/ 4,
+            /*hd=*/ 8,
+            /*elem=*/ 2,
+            0x1000_0000,
         );
         // inner_bytes = 2×4×4×8×2 = 1024; policy threshold = 2048 → fallback.
-        let policy = CopyPolicy { min_inner_bytes: 2048, coalesce: false };
+        let policy = CopyPolicy {
+            min_inner_bytes: 2048,
+            coalesce: false,
+        };
         let selection = TransferSelection::full(vec![(0, 1)]);
         let plan = plan_copy(&layout, &layout, &selection, &policy).unwrap();
         match plan {
-            CopyPlan::Transform { reason, ref ops, .. } => {
+            CopyPlan::Transform {
+                reason, ref ops, ..
+            } => {
                 assert_eq!(
                     reason,
                     TransformReason::ThresholdFallback,
                     "expected ThresholdFallback"
                 );
-                assert!(!ops.is_empty(), "ops must be populated for ThresholdFallback");
+                assert!(
+                    !ops.is_empty(),
+                    "ops must be populated for ThresholdFallback"
+                );
                 // All ops must share the same size (uniform batch contract).
                 let first_size = ops[0].size;
                 assert!(
@@ -1876,13 +1897,17 @@ mod tests {
     /// Same layout as above but policy threshold = 512 < 1024 inner_bytes.
     #[test]
     fn plan_copy_emits_direct_when_inner_bytes_meets_threshold() {
-        let layout = nhd_cross_layer(
-            2, 1, 2, 4, 4, 8, 2, 0x1000_0000,
-        );
-        let policy = CopyPolicy { min_inner_bytes: 512, coalesce: true };
+        let layout = nhd_cross_layer(2, 1, 2, 4, 4, 8, 2, 0x1000_0000);
+        let policy = CopyPolicy {
+            min_inner_bytes: 512,
+            coalesce: true,
+        };
         let selection = TransferSelection::full(vec![(0, 1)]);
         let plan = plan_copy(&layout, &layout, &selection, &policy).unwrap();
-        assert!(matches!(plan, CopyPlan::Direct(_)), "expected Direct, got {plan:?}");
+        assert!(
+            matches!(plan, CopyPlan::Direct(_)),
+            "expected Direct, got {plan:?}"
+        );
     }
 
     /// `plan_copy` emits `Direct` for layout-mismatch pairs (e.g. NHD axis
@@ -1900,7 +1925,10 @@ mod tests {
         let hnd = hnd_per_layer(1, 2, 1, 4, 4, 8, 2, vec![0x2000_0000]);
         // min_inner_bytes = 0: plan_copy should emit Direct for mismatched
         // layouts (per §Lesson 2 — semantic routing is upstream).
-        let policy = CopyPolicy { min_inner_bytes: 0, coalesce: false };
+        let policy = CopyPolicy {
+            min_inner_bytes: 0,
+            coalesce: false,
+        };
         let selection = TransferSelection::full(vec![(0, 0)]);
         let plan = plan_copy(&nhd, &hnd, &selection, &policy).unwrap();
         // plan_copy emits per-coord Direct ops for layout-mismatch pairs.

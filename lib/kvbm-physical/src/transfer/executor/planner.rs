@@ -84,7 +84,11 @@ pub(crate) fn execute_planner_cuda_transfer(
     cuda_stream: Option<Arc<CudaStream>>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
-    validate_cuda_planner_entry(strategy, src.layout().block_layout(), dst.layout().block_layout())?;
+    validate_cuda_planner_entry(
+        strategy,
+        src.layout().block_layout(),
+        dst.layout().block_layout(),
+    )?;
     // PR-7.7.1: reject heterogeneous layouts before any planning work.
     // Heterogeneous-composition planning (disk↔device mixed axes) lands in PR-7.7.2+.
     reject_heterogeneous_views_at_entry(src, dst, "execute_planner_cuda_transfer")?;
@@ -99,8 +103,14 @@ pub(crate) fn execute_planner_cuda_transfer(
     // startup_benchmark is disabled (the default) — zero cost on the hot path.
     let benchmark_outcome = lookup_benchmark_outcome(src, dst, strategy, ctx);
     let outcome = plan_and_lower(
-        src, dst, src_block_ids, dst_block_ids, strategy, ctx.capabilities(),
-        CopyPolicy::default(), benchmark_outcome,
+        src,
+        dst,
+        src_block_ids,
+        dst_block_ids,
+        strategy,
+        ctx.capabilities(),
+        CopyPolicy::default(),
+        benchmark_outcome,
     )?;
 
     // Acquire a stream (caller-provided or pool-acquired). Direction
@@ -227,11 +237,16 @@ pub(crate) fn execute_planner_nixl_transfer(
     src_block_ids: &[BlockId],
     dst_block_ids: &[BlockId],
     strategy: TransferStrategy,
-    #[cfg_attr(not(feature = "permute_kernels"), allow(unused_variables))]
-    bounce_buffer: Option<&crate::transfer::BounceBufferInternal>,
+    #[cfg_attr(not(feature = "permute_kernels"), allow(unused_variables))] bounce_buffer: Option<
+        &crate::transfer::BounceBufferInternal,
+    >,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
-    validate_nixl_planner_entry(strategy, src.layout().block_layout(), dst.layout().block_layout())?;
+    validate_nixl_planner_entry(
+        strategy,
+        src.layout().block_layout(),
+        dst.layout().block_layout(),
+    )?;
     // PR-7.7.1: reject heterogeneous layouts before any planning work.
     // Heterogeneous-composition planning (disk↔device mixed axes) lands in PR-7.7.2+.
     reject_heterogeneous_views_at_entry(src, dst, "execute_planner_nixl_transfer")?;
@@ -250,8 +265,20 @@ pub(crate) fn execute_planner_nixl_transfer(
     //
     // PR-7.5: benchmark lookup for NIXL; see Cuda entrypoint comment.
     let nixl_benchmark_outcome = lookup_benchmark_outcome(src, dst, strategy, ctx);
-    let nixl_policy = CopyPolicy { min_inner_bytes: 0, coalesce: true };
-    let ops = match plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy, ctx.capabilities(), nixl_policy, nixl_benchmark_outcome)? {
+    let nixl_policy = CopyPolicy {
+        min_inner_bytes: 0,
+        coalesce: true,
+    };
+    let ops = match plan_and_lower(
+        src,
+        dst,
+        src_block_ids,
+        dst_block_ids,
+        strategy,
+        ctx.capabilities(),
+        nixl_policy,
+        nixl_benchmark_outcome,
+    )? {
         PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
         PlanOutcome::Direct(ops) => ops,
         #[cfg(feature = "permute_kernels")]
@@ -259,14 +286,23 @@ pub(crate) fn execute_planner_nixl_transfer(
             invocation,
             block_pairs,
         } => {
-            let bounce = bounce_buffer.ok_or_else(|| anyhow!(
-                "execute_planner_nixl_transfer: cross-agent transform requires \
+            let bounce = bounce_buffer.ok_or_else(|| {
+                anyhow!(
+                    "execute_planner_nixl_transfer: cross-agent transform requires \
                  TransferOptions::bounce_buffer to be set (the Staged executor pulls \
                  raw bytes through a local intermediate, runs the kernel, then places). \
                  Pass a registered local-Device PhysicalLayout via TransferOptions::bounce_buffer."
-            ))?;
+                )
+            })?;
             return dispatch_staged_nixl_transform(
-                src, dst, invocation, block_pairs, bounce, strategy, xfer_op, ctx,
+                src,
+                dst,
+                invocation,
+                block_pairs,
+                bounce,
+                strategy,
+                xfer_op,
+                ctx,
             );
         }
         PlanOutcome::SmallStridedCopy(_) => bail!(
@@ -418,7 +454,7 @@ impl PlanOutcome {
     /// `PlanOutcome`.
     fn candidate_class(&self) -> &'static str {
         match self {
-            PlanOutcome::Empty => "Empty",           // not emitted; here for completeness
+            PlanOutcome::Empty => "Empty", // not emitted; here for completeness
             PlanOutcome::Direct(_) => "DirectDma",
             #[cfg(feature = "permute_kernels")]
             PlanOutcome::Transform { .. } => "TransformKernel",
@@ -441,9 +477,7 @@ impl PlanOutcome {
             PlanOutcome::Empty => 0,
             PlanOutcome::Direct(ops) => ops.iter().map(|o| o.size).sum(),
             #[cfg(feature = "permute_kernels")]
-            PlanOutcome::Transform { block_pairs, .. } => {
-                block_pairs.len() * src_bytes_per_block
-            }
+            PlanOutcome::Transform { block_pairs, .. } => block_pairs.len() * src_bytes_per_block,
             PlanOutcome::SmallStridedCopy(ops) => ops.iter().map(|o| o.size).sum(),
             PlanOutcome::CudaGraphReplay { ops, .. } => ops.iter().map(|o| o.size).sum(),
         }
@@ -495,7 +529,12 @@ fn lookup_benchmark_outcome(
     let src_view = physical_to_layout_view(src).ok()?;
     let dst_view = physical_to_layout_view(dst).ok()?;
     let dtype_w = Some(src.layout().config().dtype_width_bytes as u32);
-    let key = BenchmarkKey::new(src_view.signature(), dst_view.signature(), dtype_w, strategy);
+    let key = BenchmarkKey::new(
+        src_view.signature(),
+        dst_view.signature(),
+        dtype_w,
+        strategy,
+    );
     ctx.benchmark_cache().lookup(&key)
 }
 
@@ -588,9 +627,7 @@ fn plan_and_lower(
                     let cache_key = GraphCacheKey {
                         descriptor_count: ops.len(),
                         total_bytes,
-                        dtype_width_bytes: Some(
-                            src.layout().config().dtype_width_bytes as u32,
-                        ),
+                        dtype_width_bytes: Some(src.layout().config().dtype_width_bytes as u32),
                         route_family,
                         candidate_class: 0, // DirectDma-shaped
                     };
@@ -614,12 +651,10 @@ fn plan_and_lower(
             match chosen {
                 Candidate::DirectDma { ops } => Ok(PlanOutcome::Direct(ops.clone())),
                 // PR-7.4.1: CudaGraphReplay selected — emit with ops for capture/rebind.
-                Candidate::CudaGraphReplay { cache_key, ops } => {
-                    Ok(PlanOutcome::CudaGraphReplay {
-                        cache_key: cache_key.clone(),
-                        ops: ops.clone(),
-                    })
-                }
+                Candidate::CudaGraphReplay { cache_key, ops } => Ok(PlanOutcome::CudaGraphReplay {
+                    cache_key: cache_key.clone(),
+                    ops: ops.clone(),
+                }),
                 other => bail!(
                     "plan_and_lower: select_candidate returned unexpected variant for \
                      CopyPlan::Direct: {other:?}"
@@ -653,7 +688,9 @@ fn plan_and_lower(
             };
             let chosen = select_candidate(&candidates, &sel_ctx)?;
             match chosen {
-                Candidate::SmallStridedCopy { ops } => Ok(PlanOutcome::SmallStridedCopy(ops.clone())),
+                Candidate::SmallStridedCopy { ops } => {
+                    Ok(PlanOutcome::SmallStridedCopy(ops.clone()))
+                }
                 other => bail!(
                     "plan_and_lower: select_candidate returned unexpected variant for \
                      ThresholdFallback: {other:?}"
@@ -670,9 +707,9 @@ fn plan_and_lower(
              must be routed through the kernel catalog before plan_copy is called. \
              This is an internal routing bug."
         ),
-        CopyPlan::Staged { .. } => bail!(
-            "plan_and_lower: CopyPlan::Staged is reserved (NIXL transforms in PR-6.2)"
-        ),
+        CopyPlan::Staged { .. } => {
+            bail!("plan_and_lower: CopyPlan::Staged is reserved (NIXL transforms in PR-6.2)")
+        }
     }
 }
 
@@ -684,7 +721,9 @@ fn build_transform_invocation(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
 ) -> Result<crate::transfer::kernel_catalog::KernelInvocation> {
-    use crate::transfer::kernel_catalog::{KernelInvocation, KernelKind, match_kernel, to_kernel_block_layout};
+    use crate::transfer::kernel_catalog::{
+        KernelInvocation, KernelKind, match_kernel, to_kernel_block_layout,
+    };
 
     let src_kv = src.layout().block_layout();
     let dst_kv = dst.layout().block_layout();
@@ -696,9 +735,15 @@ fn build_transform_invocation(
              src.num_layers={}, src.outer_dim={}, src.page_size={}, src.inner_dim={}, \
              dst.num_blocks={}, dst.num_layers={}, dst.outer_dim={}, dst.page_size={}, \
              dst.inner_dim={})",
-            cfg.num_blocks, cfg.num_layers, cfg.outer_dim, cfg.page_size, cfg.inner_dim,
-            dst.layout().config().num_blocks, dst.layout().config().num_layers,
-            dst.layout().config().outer_dim, dst.layout().config().page_size,
+            cfg.num_blocks,
+            cfg.num_layers,
+            cfg.outer_dim,
+            cfg.page_size,
+            cfg.inner_dim,
+            dst.layout().config().num_blocks,
+            dst.layout().config().num_layers,
+            dst.layout().config().outer_dim,
+            dst.layout().config().page_size,
             dst.layout().config().inner_dim,
         );
     }
@@ -709,9 +754,7 @@ fn build_transform_invocation(
         )
     })?;
     let nh = cfg.num_heads.ok_or_else(|| {
-        anyhow!(
-            "build_transform_invocation: cfg.num_heads is required for transform dispatch"
-        )
+        anyhow!("build_transform_invocation: cfg.num_heads is required for transform dispatch")
     })?;
     if !cfg.inner_dim.is_multiple_of(nh) {
         bail!(
@@ -1001,11 +1044,15 @@ pub(crate) fn dispatch_transform_kernel(
         let block_id = op_block_id_of(pair);
         for layer in 0..nl {
             for outer in 0..no {
-                let region = op_layout.layout().memory_region(block_id, layer, outer)
-                    .map_err(|e| anyhow!(
-                        "dispatch_transform_kernel: failed to read operational chunk \
+                let region = op_layout
+                    .layout()
+                    .memory_region(block_id, layer, outer)
+                    .map_err(|e| {
+                        anyhow!(
+                            "dispatch_transform_kernel: failed to read operational chunk \
                          (block={block_id}, layer={layer}, outer={outer}): {e:?}"
-                    ))?;
+                        )
+                    })?;
                 op_ptrs.push(region.addr());
             }
         }
@@ -1115,18 +1162,23 @@ fn dispatch_nhd_hnd_transpose_kernel(
     let nh = invocation.num_heads;
     let hd = invocation.head_dim;
 
-    let build_table = |layout: &PhysicalLayout, block_id_of: fn(&(BlockId, BlockId)) -> BlockId|
-        -> Result<Vec<usize>> {
+    let build_table = |layout: &PhysicalLayout,
+                       block_id_of: fn(&(BlockId, BlockId)) -> BlockId|
+     -> Result<Vec<usize>> {
         let mut table: Vec<usize> = Vec::with_capacity(block_pairs.len() * nl * no);
         for pair in block_pairs {
             let block_id = block_id_of(pair);
             for layer in 0..nl {
                 for outer in 0..no {
-                    let region = layout.layout().memory_region(block_id, layer, outer)
-                        .map_err(|e| anyhow!(
-                            "dispatch_nhd_hnd_transpose_kernel: failed to read chunk \
+                    let region = layout
+                        .layout()
+                        .memory_region(block_id, layer, outer)
+                        .map_err(|e| {
+                            anyhow!(
+                                "dispatch_nhd_hnd_transpose_kernel: failed to read chunk \
                              (block={block_id}, layer={layer}, outer={outer}): {e:?}"
-                        ))?;
+                            )
+                        })?;
                     table.push(region.addr());
                 }
             }
@@ -1285,8 +1337,20 @@ impl OwnedStagedContext {
         // per-leg plan_and_lower never triggers the SmallStridedCopy path.
         // PR-7.5: no benchmark lookup for staged legs — they always produce
         // DirectDma ops (no competing candidates), so the bonus has no effect.
-        let leg_policy = CopyPolicy { min_inner_bytes: 0, coalesce: true };
-        let outcome = plan_and_lower(src, dst, src_block_ids, dst_block_ids, strategy, &self.capabilities, leg_policy, None)?;
+        let leg_policy = CopyPolicy {
+            min_inner_bytes: 0,
+            coalesce: true,
+        };
+        let outcome = plan_and_lower(
+            src,
+            dst,
+            src_block_ids,
+            dst_block_ids,
+            strategy,
+            &self.capabilities,
+            leg_policy,
+            None,
+        )?;
         let ops = match outcome {
             PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
             PlanOutcome::Direct(ops) => ops,
@@ -1820,9 +1884,7 @@ fn dispatch_cuda_graph_replay_planner(
             }
         }
         // Launch on the caller's work stream.
-        let result = unsafe {
-            cu_sys::cuGraphLaunch(exec, work_stream.cu_stream())
-        };
+        let result = unsafe { cu_sys::cuGraphLaunch(exec, work_stream.cu_stream()) };
         if result != cu_sys::CUresult::CUDA_SUCCESS {
             bail!(
                 "dispatch_cuda_graph_replay_planner: cuGraphLaunch (cache hit) \
@@ -1866,7 +1928,9 @@ fn dispatch_cuda_graph_replay_planner(
     impl Drop for StreamGuard {
         fn drop(&mut self) {
             if !self.0.is_null() {
-                unsafe { let _ = cu_sys::cuStreamDestroy_v2(self.0); }
+                unsafe {
+                    let _ = cu_sys::cuStreamDestroy_v2(self.0);
+                }
             }
         }
     }
@@ -1920,7 +1984,9 @@ fn dispatch_cuda_graph_replay_planner(
         if status != cudarc::runtime::sys::cudaError::cudaSuccess {
             // End capture to clean up before bailing.
             let mut _g: cu_sys::CUgraph = std::ptr::null_mut();
-            unsafe { let _ = cu_sys::cuStreamEndCapture(capture_stream_raw, &mut _g as *mut _); }
+            unsafe {
+                let _ = cu_sys::cuStreamEndCapture(capture_stream_raw, &mut _g as *mut _);
+            }
             bail!(
                 "dispatch_cuda_graph_replay_planner: memcpy_batch (FallbackOnly) \
                  during capture failed with status={status:?}"
@@ -1954,7 +2020,9 @@ fn dispatch_cuda_graph_replay_planner(
             )
         };
         if result != cu_sys::CUresult::CUDA_SUCCESS {
-            unsafe { let _ = cu_sys::cuGraphDestroy(cu_graph); }
+            unsafe {
+                let _ = cu_sys::cuGraphDestroy(cu_graph);
+            }
             bail!(
                 "dispatch_cuda_graph_replay_planner: cuGraphInstantiateWithFlags \
                  failed with result={result:?}"
@@ -2045,7 +2113,11 @@ fn dispatch_cuda_graph_replay_planner(
     }
 
     // Store the exec handle in the cache.
-    let handle = ManagedExecHandle { exec: cu_graph_exec, graph: cu_graph, nodes: nodes.clone() };
+    let handle = ManagedExecHandle {
+        exec: cu_graph_exec,
+        graph: cu_graph,
+        nodes: nodes.clone(),
+    };
     graph_cache.insert(cache_key.clone(), handle);
 
     // ── 3 & 4. Rebind addresses then launch (first-time path) ────────────────
@@ -2068,9 +2140,7 @@ fn dispatch_cuda_graph_replay_planner(
         }
     }
 
-    let result = unsafe {
-        cu_sys::cuGraphLaunch(cu_graph_exec, work_stream.cu_stream())
-    };
+    let result = unsafe { cu_sys::cuGraphLaunch(cu_graph_exec, work_stream.cu_stream()) };
     if result != cu_sys::CUresult::CUDA_SUCCESS {
         bail!(
             "dispatch_cuda_graph_replay_planner: cuGraphLaunch (first launch) \
@@ -2265,20 +2335,16 @@ mod tests {
 
     /// Build a minimal 2-axis homogeneous `LayoutView` with all axes = `kind`.
     fn homogeneous_view(kind: StorageKind) -> crate::layout::LayoutView {
-        let layout =
-            KvDimLayout::new(vec![KvDim::Block, KvDim::Page], vec![4, 8]).unwrap();
-        let strides =
-            KvDimStrides::from_byte_strides(vec![8 * 64, 64], 2).unwrap();
+        let layout = KvDimLayout::new(vec![KvDim::Block, KvDim::Page], vec![4, 8]).unwrap();
+        let strides = KvDimStrides::from_byte_strides(vec![8 * 64, 64], 2).unwrap();
         let kinds = vec![kind; 2];
         crate::layout::LayoutView::full(layout, strides, vec![0x1000], None, kinds).unwrap()
     }
 
     /// Build a 2-axis heterogeneous `LayoutView`: axis 0 = Device(0), axis 1 = System.
     fn heterogeneous_view() -> crate::layout::LayoutView {
-        let layout =
-            KvDimLayout::new(vec![KvDim::Block, KvDim::Page], vec![4, 8]).unwrap();
-        let strides =
-            KvDimStrides::from_byte_strides(vec![8 * 64, 64], 2).unwrap();
+        let layout = KvDimLayout::new(vec![KvDim::Block, KvDim::Page], vec![4, 8]).unwrap();
+        let strides = KvDimStrides::from_byte_strides(vec![8 * 64, 64], 2).unwrap();
         let kinds = vec![StorageKind::Device(0), StorageKind::System];
         crate::layout::LayoutView::full(layout, strides, vec![0x2000], None, kinds).unwrap()
     }

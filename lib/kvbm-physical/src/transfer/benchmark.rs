@@ -110,7 +110,12 @@ impl BenchmarkKey {
         strategy: TransferStrategy,
     ) -> Self {
         let route_discriminant = strategy_discriminant(strategy);
-        Self { src_signature, dst_signature, dtype_width_bytes, route_discriminant }
+        Self {
+            src_signature,
+            dst_signature,
+            dtype_width_bytes,
+            route_discriminant,
+        }
     }
 }
 
@@ -176,7 +181,10 @@ struct BenchmarkCacheInner {
 
 impl BenchmarkCacheInner {
     fn new() -> Self {
-        Self { entries: HashMap::new(), seq: 0 }
+        Self {
+            entries: HashMap::new(),
+            seq: 0,
+        }
     }
 
     fn len(&self) -> usize {
@@ -211,7 +219,9 @@ pub(crate) struct BenchmarkCache {
 
 impl BenchmarkCache {
     pub(crate) fn new() -> Self {
-        Self { inner: Mutex::new(BenchmarkCacheInner::new()) }
+        Self {
+            inner: Mutex::new(BenchmarkCacheInner::new()),
+        }
     }
 
     /// Look up an outcome for `key`.
@@ -241,7 +251,10 @@ impl BenchmarkCache {
     /// Number of currently cached entries (for tests / telemetry).
     #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
-        self.inner.lock().expect("BenchmarkCache mutex poisoned").len()
+        self.inner
+            .lock()
+            .expect("BenchmarkCache mutex poisoned")
+            .len()
     }
 
     /// Benchmark a set of candidates, record the winner in the cache, and
@@ -408,7 +421,11 @@ pub(crate) struct CopyOp {
 
 impl From<&crate::transfer::plan::CopyOp> for CopyOp {
     fn from(op: &crate::transfer::plan::CopyOp) -> Self {
-        Self { src_addr: op.src_addr, dst_addr: op.dst_addr, size: op.size }
+        Self {
+            src_addr: op.src_addr,
+            dst_addr: op.dst_addr,
+            size: op.size,
+        }
     }
 }
 
@@ -431,7 +448,12 @@ fn dispatch_benchmark_candidate(
         }
 
         #[cfg(feature = "permute_kernels")]
-        BenchmarkCandidate::TransformKernel { invocation, src, dst, block_pairs } => {
+        BenchmarkCandidate::TransformKernel {
+            invocation,
+            src,
+            dst,
+            block_pairs,
+        } => {
             let t0 = std::time::Instant::now();
             crate::transfer::executor::dispatch_transform_kernel(
                 invocation,
@@ -455,20 +477,18 @@ fn dispatch_benchmark_candidate(
             dst_device_id,
             xfer_op,
             flip_descriptors,
-        } => {
-            dispatch_nixl_dma_ops_timed(
-                ops,
-                nixl_agent,
-                src_agent_name,
-                *src_mem_type,
-                *src_device_id,
-                dst_agent_name,
-                *dst_mem_type,
-                *dst_device_id,
-                *xfer_op,
-                *flip_descriptors,
-            )
-        }
+        } => dispatch_nixl_dma_ops_timed(
+            ops,
+            nixl_agent,
+            src_agent_name,
+            *src_mem_type,
+            *src_device_id,
+            dst_agent_name,
+            *dst_mem_type,
+            *dst_device_id,
+            *xfer_op,
+            *flip_descriptors,
+        ),
     }
 }
 
@@ -666,7 +686,9 @@ mod tests {
         let outcome = make_outcome("DirectDma");
 
         cache.insert(key.clone(), outcome);
-        let got = cache.lookup(&key).expect("cache must return the inserted outcome");
+        let got = cache
+            .lookup(&key)
+            .expect("cache must return the inserted outcome");
         assert_eq!(got.winner, "DirectDma");
         assert_eq!(got.winner_latency_us, 42);
         assert_eq!(got.runs_compared, 1);
@@ -712,7 +734,10 @@ mod tests {
         assert_eq!(strategy_discriminant(TransferStrategy::NixlRead), 10);
         assert_eq!(strategy_discriminant(TransferStrategy::NixlWrite), 11);
         assert_eq!(strategy_discriminant(TransferStrategy::NixlReadFlipped), 12);
-        assert_eq!(strategy_discriminant(TransferStrategy::NixlWriteFlipped), 13);
+        assert_eq!(
+            strategy_discriminant(TransferStrategy::NixlWriteFlipped),
+            13
+        );
     }
 
     // ── BenchmarkCandidate::class_name ────────────────────────────────────────
@@ -727,8 +752,7 @@ mod tests {
         // NixlDirectDma maps to "DirectDma" (same class, different route).
         let nixl = BenchmarkCandidate::NixlDirectDma {
             ops: vec![],
-            nixl_agent: dynamo_memory::nixl::NixlAgent::new("bench-test-cls")
-                .expect("agent"),
+            nixl_agent: dynamo_memory::nixl::NixlAgent::new("bench-test-cls").expect("agent"),
             src_agent_name: "a".to_string(),
             src_mem_type: dynamo_memory::nixl::MemType::Dram,
             src_device_id: 0,
@@ -788,7 +812,7 @@ mod tests {
         let err = dispatch_nixl_dma_ops_timed(
             &[],
             &nixl_agent,
-            "remote-agent",        // src_agent_name (not local)
+            "remote-agent", // src_agent_name (not local)
             dynamo_memory::nixl::MemType::Dram,
             0,
             "local-agent-write-check", // dst_agent_name
@@ -822,7 +846,7 @@ mod tests {
             "local-agent-read-check", // src_agent_name
             dynamo_memory::nixl::MemType::Dram,
             0,
-            "remote-agent",           // dst_agent_name (not local)
+            "remote-agent", // dst_agent_name (not local)
             dynamo_memory::nixl::MemType::Dram,
             0,
             dynamo_memory::nixl::XferOp::Read,

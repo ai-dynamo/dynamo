@@ -243,9 +243,7 @@ impl CdRequest {
     pub fn failed_g1_block_ids(&self) -> Vec<BlockId> {
         match &self.role {
             CdRequestRole::Decode(bits) => bits.unfilled_g1_block_ids(),
-            CdRequestRole::Prefill(bits) => {
-                bits.g1_block_ids.lock().clone().unwrap_or_default()
-            }
+            CdRequestRole::Prefill(bits) => bits.g1_block_ids.lock().clone().unwrap_or_default(),
         }
     }
 }

@@ -632,8 +632,7 @@ mod tests {
             vec![4, 16, 128],
         )
         .unwrap();
-        let strides =
-            KvDimStrides::from_byte_strides(vec![16 * 128 * 2, 128 * 2, 2], 2).unwrap();
+        let strides = KvDimStrides::from_byte_strides(vec![16 * 128 * 2, 128 * 2, 2], 2).unwrap();
         let al = AnnotatedLayout::new(vec![0x1000], None, layout, strides).unwrap();
         let plan = CopyPlan::Transform {
             src: al.clone(),
@@ -641,7 +640,11 @@ mod tests {
             block_pairs: vec![(0, 0)],
             permutation: vec![0, 1],
             reason: TransformReason::ThresholdFallback,
-            ops: vec![CopyOp { src_addr: 0x1000, dst_addr: 0x2000, size: 256 }],
+            ops: vec![CopyOp {
+                src_addr: 0x1000,
+                dst_addr: 0x2000,
+                size: 256,
+            }],
         };
         let cands = lower_to_candidates(plan).unwrap();
         assert_eq!(cands.len(), 1);
@@ -659,8 +662,7 @@ mod tests {
             vec![4, 16, 128],
         )
         .unwrap();
-        let strides =
-            KvDimStrides::from_byte_strides(vec![16 * 128 * 2, 128 * 2, 2], 2).unwrap();
+        let strides = KvDimStrides::from_byte_strides(vec![16 * 128 * 2, 128 * 2, 2], 2).unwrap();
         let al = AnnotatedLayout::new(vec![0x1000], None, layout, strides).unwrap();
         let plan = CopyPlan::Transform {
             src: al.clone(),
@@ -735,10 +737,7 @@ mod tests {
     #[test]
     fn select_filters_placeholder_candidates() {
         let ctx = cuda_ctx();
-        let cands = vec![
-            Candidate::Staged {},
-            Candidate::DirectDma { ops: vec![] },
-        ];
+        let cands = vec![Candidate::Staged {}, Candidate::DirectDma { ops: vec![] }];
         let picked = select_candidate(&cands, &ctx).unwrap();
         assert!(matches!(picked, Candidate::DirectDma { .. }));
     }
@@ -767,10 +766,18 @@ mod tests {
         let ctx = cuda_ctx();
         let cands = vec![
             Candidate::SmallStridedCopy {
-                ops: vec![CopyOp { src_addr: 0x1000, dst_addr: 0x2000, size: 256 }],
+                ops: vec![CopyOp {
+                    src_addr: 0x1000,
+                    dst_addr: 0x2000,
+                    size: 256,
+                }],
             },
             Candidate::DirectDma {
-                ops: vec![CopyOp { src_addr: 0x3000, dst_addr: 0x4000, size: 4096 }],
+                ops: vec![CopyOp {
+                    src_addr: 0x3000,
+                    dst_addr: 0x4000,
+                    size: 4096,
+                }],
             },
         ];
         let picked = select_candidate(&cands, &ctx).unwrap();
@@ -788,7 +795,11 @@ mod tests {
         let cands = vec![
             Candidate::Staged {},
             Candidate::SmallStridedCopy {
-                ops: vec![CopyOp { src_addr: 0x1000, dst_addr: 0x2000, size: 256 }],
+                ops: vec![CopyOp {
+                    src_addr: 0x1000,
+                    dst_addr: 0x2000,
+                    size: 256,
+                }],
             },
         ];
         let picked = select_candidate(&cands, &ctx).unwrap();
@@ -809,17 +820,28 @@ mod tests {
     fn select_stable_ordering_on_tie() {
         let ctx = cuda_ctx();
         let first = Candidate::DirectDma {
-            ops: vec![CopyOp { src_addr: 0x1000, dst_addr: 0x2000, size: 64 }],
+            ops: vec![CopyOp {
+                src_addr: 0x1000,
+                dst_addr: 0x2000,
+                size: 64,
+            }],
         };
         let second = Candidate::DirectDma {
-            ops: vec![CopyOp { src_addr: 0x3000, dst_addr: 0x4000, size: 128 }],
+            ops: vec![CopyOp {
+                src_addr: 0x3000,
+                dst_addr: 0x4000,
+                size: 128,
+            }],
         };
         let cands = vec![first, second];
         let picked = select_candidate(&cands, &ctx).unwrap();
         // The first candidate has src_addr 0x1000; assert that's what we got.
         match picked {
             Candidate::DirectDma { ops } => {
-                assert_eq!(ops[0].src_addr, 0x1000, "expected first candidate to win tie");
+                assert_eq!(
+                    ops[0].src_addr, 0x1000,
+                    "expected first candidate to win tie"
+                );
             }
             other => panic!("expected DirectDma, got {other:?}"),
         }
@@ -1084,7 +1106,11 @@ mod tests {
     fn graph_replay_candidate() -> Candidate {
         Candidate::CudaGraphReplay {
             cache_key: make_graph_cache_key(),
-            ops: vec![CopyOp { src_addr: 0x1000, dst_addr: 0x2000, size: 4096 }],
+            ops: vec![CopyOp {
+                src_addr: 0x1000,
+                dst_addr: 0x2000,
+                size: 4096,
+            }],
         }
     }
 
@@ -1126,7 +1152,10 @@ mod tests {
              DirectDma (score {SCORE_DIRECT_DMA}) when cuda_graph_replay=true, got {picked:?}"
         );
         // Confirm raw score
-        assert_eq!(score_candidate(&graph_replay_candidate(), &ctx), SCORE_CUDA_GRAPH_REPLAY);
+        assert_eq!(
+            score_candidate(&graph_replay_candidate(), &ctx),
+            SCORE_CUDA_GRAPH_REPLAY
+        );
         assert_eq!(SCORE_CUDA_GRAPH_REPLAY, 1050);
     }
 
@@ -1168,7 +1197,10 @@ mod tests {
             validate_cuda_graph_replay_key(&key).is_ok(),
             "well-formed key must pass validation"
         );
-        let zero_key = GraphCacheKey { descriptor_count: 0, ..key.clone() };
+        let zero_key = GraphCacheKey {
+            descriptor_count: 0,
+            ..key.clone()
+        };
         assert!(
             validate_cuda_graph_replay_key(&zero_key).is_err(),
             "zero descriptor_count must fail validation"
@@ -1263,10 +1295,18 @@ mod tests {
         let ctx = ctx_with_benchmark_winner("DirectDma");
         let cands = vec![
             Candidate::SmallStridedCopy {
-                ops: vec![CopyOp { src_addr: 0x1000, dst_addr: 0x2000, size: 256 }],
+                ops: vec![CopyOp {
+                    src_addr: 0x1000,
+                    dst_addr: 0x2000,
+                    size: 256,
+                }],
             },
             Candidate::DirectDma {
-                ops: vec![CopyOp { src_addr: 0x3000, dst_addr: 0x4000, size: 4096 }],
+                ops: vec![CopyOp {
+                    src_addr: 0x3000,
+                    dst_addr: 0x4000,
+                    size: 4096,
+                }],
             },
         ];
         let picked = select_candidate(&cands, &ctx).unwrap();

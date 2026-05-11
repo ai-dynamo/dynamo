@@ -149,7 +149,10 @@ fn main() -> ExitCode {
     let legacy_events = match parse_file(&args.legacy) {
         Ok(e) => e,
         Err(err) => {
-            eprintln!("audit_diff: failed to parse {}: {err}", args.legacy.display());
+            eprintln!(
+                "audit_diff: failed to parse {}: {err}",
+                args.legacy.display()
+            );
             return ExitCode::from(2);
         }
     };
@@ -467,7 +470,10 @@ mod tests {
         assert_eq!(event.event, "gnmt_entry");
         assert_eq!(event.role.as_deref(), Some("decode"));
         assert_eq!(event.request_id.as_deref(), Some("req-1"));
-        assert_eq!(event.fields, vec![("num_computed_tokens".into(), "0".into())]);
+        assert_eq!(
+            event.fields,
+            vec![("num_computed_tokens".into(), "0".into())]
+        );
     }
 
     #[test]

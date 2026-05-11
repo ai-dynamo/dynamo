@@ -209,15 +209,12 @@ impl SerializedLayout {
         let bytes = &self.0[..];
 
         let (worker_address, c1): (WorkerAddress, usize) =
-            bincode::decode_from_slice(bytes, cfg).map_err(|e| {
-                anyhow::anyhow!("failed to decode worker_address: {}", e)
-            })?;
+            bincode::decode_from_slice(bytes, cfg)
+                .map_err(|e| anyhow::anyhow!("failed to decode worker_address: {}", e))?;
         let rest = &bytes[c1..];
 
-        let (nixl_metadata, c2): (Vec<u8>, usize) =
-            bincode::decode_from_slice(rest, cfg).map_err(|e| {
-                anyhow::anyhow!("failed to decode nixl_metadata: {}", e)
-            })?;
+        let (nixl_metadata, c2): (Vec<u8>, usize) = bincode::decode_from_slice(rest, cfg)
+            .map_err(|e| anyhow::anyhow!("failed to decode nixl_metadata: {}", e))?;
         let rest = &rest[c2..];
 
         let (layouts, c3): (Vec<LogicalLayoutDescriptor>, usize) =
@@ -448,8 +445,7 @@ mod tests {
         };
 
         // Encode in the pre-AB-1a wire shape (three fields only).
-        let legacy_bytes =
-            bincode::encode_to_vec(&legacy, bincode::config::standard()).unwrap();
+        let legacy_bytes = bincode::encode_to_vec(&legacy, bincode::config::standard()).unwrap();
 
         // Wrap the legacy bytes in the new SerializedLayout container.
         let packed = SerializedLayout::from_bytes(legacy_bytes);
@@ -466,8 +462,7 @@ mod tests {
     #[test]
     fn test_parallelism_descriptor_absent() {
         let worker_address = WorkerAddress::new(8, "no-parallelism".to_string());
-        let packed =
-            SerializedLayout::pack(worker_address, Vec::new(), Vec::new(), None).unwrap();
+        let packed = SerializedLayout::pack(worker_address, Vec::new(), Vec::new(), None).unwrap();
         let unpacked = packed.unpack().unwrap();
         assert!(unpacked.parallelism.is_none());
     }

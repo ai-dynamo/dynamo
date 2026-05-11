@@ -171,13 +171,7 @@ impl PrefillRequestDispatcher for HttpVllmDispatcher {
                 "kv_transfer_params": transfer_params,
             });
 
-            let resp = match self
-                .client
-                .post(&url)
-                .json(&body)
-                .send()
-                .await
-            {
+            let resp = match self.client.post(&url).json(&body).send().await {
                 Ok(r) => r,
                 Err(err) => {
                     return Ok(DispatchOutcome::Rejected {
@@ -348,7 +342,10 @@ mod tests {
         let outcome = dispatcher.dispatch(make_request("err-1")).await.unwrap();
         match outcome {
             DispatchOutcome::Rejected { reason } => {
-                assert!(reason.contains("500"), "reason should mention status: {reason}");
+                assert!(
+                    reason.contains("500"),
+                    "reason should mention status: {reason}"
+                );
             }
             other => panic!("expected Rejected, got {other:?}"),
         }
@@ -362,7 +359,10 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
         let dispatcher = HttpVllmDispatcher::new(format!("http://{}", addr), "x").unwrap();
-        let outcome = dispatcher.dispatch(make_request("unreachable")).await.unwrap();
+        let outcome = dispatcher
+            .dispatch(make_request("unreachable"))
+            .await
+            .unwrap();
         match outcome {
             DispatchOutcome::Rejected { reason } => {
                 assert!(

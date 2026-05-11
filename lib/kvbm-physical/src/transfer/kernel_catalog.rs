@@ -197,7 +197,12 @@ mod tests {
     #[test]
     fn custom_returns_none() {
         use kvbm_common::BlockDim;
-        let custom = Custom([BlockDim::Layer, BlockDim::Outer, BlockDim::Page, BlockDim::Head]);
+        let custom = Custom([
+            BlockDim::Layer,
+            BlockDim::Outer,
+            BlockDim::Page,
+            BlockDim::Head,
+        ]);
         assert_eq!(
             match_kernel(custom, OperationalNHD, TensorDataType::F16),
             None,

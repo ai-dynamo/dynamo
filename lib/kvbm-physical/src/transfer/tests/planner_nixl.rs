@@ -138,10 +138,10 @@ async fn run_one_transfer(
     role_label: &str,
 ) -> Result<HashMap<BlockId, BlockChecksum>> {
     let (owner_name, remote_name) = agent_pair_names(role_label);
-    let owner = build_ucx_agent(&owner_name)?
-        .expect("UCX backend missing — caller should have skipped");
-    let remote = build_ucx_agent(&remote_name)?
-        .expect("UCX backend missing — caller should have skipped");
+    let owner =
+        build_ucx_agent(&owner_name)?.expect("UCX backend missing — caller should have skipped");
+    let remote =
+        build_ucx_agent(&remote_name)?.expect("UCX backend missing — caller should have skipped");
 
     // owner holds src memory; remote holds dst memory. The
     // TransferContext is anchored on whichever side `Direction`
@@ -339,17 +339,16 @@ async fn assert_staged_pull_round_trip(operational: KvBlockLayout) -> Result<()>
 
     let role = format!("pull-staged-{:?}", operational);
     let (owner_name, remote_name) = agent_pair_names(&role);
-    let owner = build_ucx_agent(&owner_name)?
-        .expect("UCX backend missing — caller should have skipped");
-    let remote = build_ucx_agent(&remote_name)?
-        .expect("UCX backend missing — caller should have skipped");
+    let owner =
+        build_ucx_agent(&owner_name)?.expect("UCX backend missing — caller should have skipped");
+    let remote =
+        build_ucx_agent(&remote_name)?.expect("UCX backend missing — caller should have skipped");
 
     // src on owner (operational), mid on remote (universal),
     // final on remote (operational), bounce on remote (operational
     // — matches src for the raw NIXL leg).
     let src = build_fc_with_block_layout_on_agent(owner.clone(), operational, 4)?;
-    let mid =
-        build_fc_with_block_layout_on_agent(remote.clone(), KvBlockLayout::UniversalTP, 4)?;
+    let mid = build_fc_with_block_layout_on_agent(remote.clone(), KvBlockLayout::UniversalTP, 4)?;
     let final_dst = build_fc_with_block_layout_on_agent(remote.clone(), operational, 4)?;
     let bounce_layout = build_fc_with_block_layout_on_agent(remote.clone(), operational, 4)?;
 
@@ -394,7 +393,9 @@ async fn assert_staged_pull_round_trip(operational: KvBlockLayout) -> Result<()>
 
     // Stage 2: local Cuda* mid → final (PR-6.1 catalog dispatch on
     // the local agent).
-    let local_options = TransferOptionsInternal::builder().use_planner(true).build()?;
+    let local_options = TransferOptionsInternal::builder()
+        .use_planner(true)
+        .build()?;
     let local = execute_transfer(
         &mid,
         &final_dst,
@@ -419,14 +420,13 @@ async fn assert_staged_push_round_trip(operational: KvBlockLayout) -> Result<()>
 
     let role = format!("push-staged-{:?}", operational);
     let (owner_name, remote_name) = agent_pair_names(&role);
-    let owner = build_ucx_agent(&owner_name)?
-        .expect("UCX backend missing — caller should have skipped");
-    let remote = build_ucx_agent(&remote_name)?
-        .expect("UCX backend missing — caller should have skipped");
+    let owner =
+        build_ucx_agent(&owner_name)?.expect("UCX backend missing — caller should have skipped");
+    let remote =
+        build_ucx_agent(&remote_name)?.expect("UCX backend missing — caller should have skipped");
 
     let src = build_fc_with_block_layout_on_agent(owner.clone(), operational, 4)?;
-    let mid =
-        build_fc_with_block_layout_on_agent(owner.clone(), KvBlockLayout::UniversalTP, 4)?;
+    let mid = build_fc_with_block_layout_on_agent(owner.clone(), KvBlockLayout::UniversalTP, 4)?;
     let final_dst = build_fc_with_block_layout_on_agent(remote.clone(), operational, 4)?;
     let bounce_layout = build_fc_with_block_layout_on_agent(owner.clone(), operational, 4)?;
 
@@ -454,7 +454,9 @@ async fn assert_staged_push_round_trip(operational: KvBlockLayout) -> Result<()>
     let ctx = create_transfer_context(owner, Some(caps))?;
 
     // Stage 1: local Cuda* src → mid (PR-6.1).
-    let local_options = TransferOptionsInternal::builder().use_planner(true).build()?;
+    let local_options = TransferOptionsInternal::builder()
+        .use_planner(true)
+        .build()?;
     let local = execute_transfer(
         &src,
         &mid,
@@ -552,10 +554,10 @@ async fn assert_staged_pull_nhd_hnd_round_trip(src_layout: KvBlockLayout) -> Res
 
     let role = format!("pull-staged-nhd-hnd-{:?}", src_layout);
     let (owner_name, remote_name) = agent_pair_names(&role);
-    let owner = build_ucx_agent(&owner_name)?
-        .expect("UCX backend missing — caller should have skipped");
-    let remote = build_ucx_agent(&remote_name)?
-        .expect("UCX backend missing — caller should have skipped");
+    let owner =
+        build_ucx_agent(&owner_name)?.expect("UCX backend missing — caller should have skipped");
+    let remote =
+        build_ucx_agent(&remote_name)?.expect("UCX backend missing — caller should have skipped");
 
     // src on owner (src_layout); mid on remote (other) — the staged
     // pull's destination; final on remote (src_layout) — the local
@@ -607,7 +609,9 @@ async fn assert_staged_pull_nhd_hnd_round_trip(src_layout: KvBlockLayout) -> Res
 
     // Stage 2 (verification): local Cuda* mid → final via the same
     // kernel symbol in the inverse direction.
-    let local_options = TransferOptionsInternal::builder().use_planner(true).build()?;
+    let local_options = TransferOptionsInternal::builder()
+        .use_planner(true)
+        .build()?;
     let local = execute_transfer(
         &mid,
         &final_dst,
@@ -648,10 +652,10 @@ async fn assert_staged_push_nhd_hnd_round_trip(src_layout: KvBlockLayout) -> Res
 
     let role = format!("push-staged-nhd-hnd-{:?}", src_layout);
     let (owner_name, remote_name) = agent_pair_names(&role);
-    let owner = build_ucx_agent(&owner_name)?
-        .expect("UCX backend missing — caller should have skipped");
-    let remote = build_ucx_agent(&remote_name)?
-        .expect("UCX backend missing — caller should have skipped");
+    let owner =
+        build_ucx_agent(&owner_name)?.expect("UCX backend missing — caller should have skipped");
+    let remote =
+        build_ucx_agent(&remote_name)?.expect("UCX backend missing — caller should have skipped");
 
     // src on owner (src_layout); final_dst on remote (other) — the
     // staged push's destination, kv-mismatched from src so the
@@ -708,7 +712,9 @@ async fn assert_staged_push_nhd_hnd_round_trip(src_layout: KvBlockLayout) -> Res
 
     // Stage 2 (verification): local Cuda* final_dst → final2 on
     // remote via the inverse direction of the same kernel symbol.
-    let local_options = TransferOptionsInternal::builder().use_planner(true).build()?;
+    let local_options = TransferOptionsInternal::builder()
+        .use_planner(true)
+        .build()?;
     let local = execute_transfer(
         &final_dst,
         &final2,
@@ -779,15 +785,13 @@ async fn use_planner_nixl_transform_without_bounce_errors() -> Result<()> {
     nixl_serial!();
 
     let (owner_name, remote_name) = agent_pair_names("transform-no-bounce");
-    let owner = build_ucx_agent(&owner_name)?
-        .expect("UCX backend missing — caller should have skipped");
-    let remote = build_ucx_agent(&remote_name)?
-        .expect("UCX backend missing — caller should have skipped");
+    let owner =
+        build_ucx_agent(&owner_name)?.expect("UCX backend missing — caller should have skipped");
+    let remote =
+        build_ucx_agent(&remote_name)?.expect("UCX backend missing — caller should have skipped");
 
-    let src =
-        build_fc_with_block_layout_on_agent(owner.clone(), KvBlockLayout::OperationalNHD, 4)?;
-    let dst =
-        build_fc_with_block_layout_on_agent(remote.clone(), KvBlockLayout::UniversalTP, 4)?;
+    let src = build_fc_with_block_layout_on_agent(owner.clone(), KvBlockLayout::OperationalNHD, 4)?;
+    let dst = build_fc_with_block_layout_on_agent(remote.clone(), KvBlockLayout::UniversalTP, 4)?;
 
     let owner_md = owner
         .get_local_md()
@@ -806,7 +810,9 @@ async fn use_planner_nixl_transform_without_bounce_errors() -> Result<()> {
     let caps = crate::transfer::TransferCapabilities::default().with_gpu_rdma(true);
     let ctx = create_transfer_context(remote, Some(caps))?;
 
-    let options = TransferOptionsInternal::builder().use_planner(true).build()?;
+    let options = TransferOptionsInternal::builder()
+        .use_planner(true)
+        .build()?;
     let result = execute_transfer(&src, &dst, &[0, 1], &[2, 3], options, ctx.context());
     let err = match result {
         Ok(_) => panic!("execute_transfer should bail without bounce_buffer for NIXL transform"),

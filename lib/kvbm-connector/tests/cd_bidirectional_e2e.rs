@@ -218,11 +218,7 @@ impl RequestSeq {
 
 /// Install a decode-flavor slot. Returns the pre-registered local-match G2
 /// blocks (so they're available for inspection if needed).
-fn install_decode_slot(
-    inst: &DualRoleInstance,
-    request_id: &str,
-    seq: &RequestSeq,
-) {
+fn install_decode_slot(inst: &DualRoleInstance, request_id: &str, seq: &RequestSeq) {
     let mutables = inst
         .g2_manager
         .allocate_blocks(LOCAL_BLOCKS)
@@ -349,10 +345,8 @@ async fn drive_one_exchange(
         .find(|r| r.request_id == request_id)
         .expect("queued entry");
     let session_id: SessionId = q.session_id;
-    let decode_endpoint: SessionEndpoint = q
-        .decode_endpoint
-        .clone()
-        .expect("queued decode_endpoint");
+    let decode_endpoint: SessionEndpoint =
+        q.decode_endpoint.clone().expect("queued decode_endpoint");
     let local_match_hashes = q.sequence_hashes.clone();
     assert_eq!(local_match_hashes.len(), LOCAL_BLOCKS);
 
@@ -541,8 +535,8 @@ async fn bidirectional_sequential_same_instance() -> Result<()> {
     drive_one_exchange(
         "req-Y",
         &y_seq,
-        &instance_b, // decode instance
-        &instance_a, // prefill instance
+        &instance_b,                           // decode instance
+        &instance_a,                           // prefill instance
         (3000..3000 + TOTAL_BLOCKS).collect(), // B-decode G1
         (2500..2500 + LOCAL_BLOCKS).collect(), // A-prefill G1
     )

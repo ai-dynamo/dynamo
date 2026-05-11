@@ -714,8 +714,8 @@ impl ConnectorLeader {
                 AlwaysRemote, CdBlockTransport, CdWorkerHook, ConditionalDisaggCoordinator,
                 ConditionalDisaggLeader, ConditionalDisaggPolicy, ConnectorLeaderApi,
                 ConnectorLeaderShim, DecodeDisaggLeader, EngineCdBlockTransport, HubPeerResolver,
-                HubRemotePrefillQueue, InnerLeaderShim, InnerLeaderWorkerHook,
-                PrefillDisaggLeader, RemotePrefillQueue,
+                HubRemotePrefillQueue, InnerLeaderShim, InnerLeaderWorkerHook, PrefillDisaggLeader,
+                RemotePrefillQueue,
             };
             use kvbm_config::DisaggregationRole;
             use kvbm_engine::disagg::session::{SessionFactory, VeloSessionFactory};
@@ -743,15 +743,11 @@ impl ConnectorLeader {
 
             // Common building blocks used by both roles.
             let inner_shim: Arc<dyn InnerLeaderShim> = ConnectorLeaderShim::new(self.clone());
-            let worker_hook: Arc<dyn CdWorkerHook> =
-                InnerLeaderWorkerHook::new(self.clone());
+            let worker_hook: Arc<dyn CdWorkerHook> = InnerLeaderWorkerHook::new(self.clone());
             let transport: Arc<dyn CdBlockTransport> =
                 EngineCdBlockTransport::new(Arc::clone(&leader));
-            let session_factory: Arc<dyn SessionFactory> = VeloSessionFactory::new(
-                velo_runtime,
-                Arc::clone(&leader),
-                tokio_handle.clone(),
-            );
+            let session_factory: Arc<dyn SessionFactory> =
+                VeloSessionFactory::new(velo_runtime, Arc::clone(&leader), tokio_handle.clone());
 
             // Construct the role-specific concrete leader (and, for
             // prefill, its coordinator).  We hold concrete `Arc<...>`
@@ -775,10 +771,8 @@ impl ConnectorLeader {
                     let policy: Arc<dyn ConditionalDisaggPolicy> = Arc::new(AlwaysRemote);
                     let queue: Arc<dyn RemotePrefillQueue> =
                         HubRemotePrefillQueue::new(Arc::clone(&client));
-                    let peer_resolver = HubPeerResolver::new(
-                        Arc::clone(&hub),
-                        self.runtime.messenger().clone(),
-                    );
+                    let peer_resolver =
+                        HubPeerResolver::new(Arc::clone(&hub), self.runtime.messenger().clone());
                     let coord = ConditionalDisaggCoordinator::new_with_decode(
                         Arc::clone(&inner_shim),
                         Arc::clone(&transport),
@@ -803,10 +797,8 @@ impl ConnectorLeader {
                     RoleSpecific::Decode(decode)
                 }
                 DisaggregationRole::Prefill => {
-                    let peer_resolver = HubPeerResolver::new(
-                        Arc::clone(&hub),
-                        self.runtime.messenger().clone(),
-                    );
+                    let peer_resolver =
+                        HubPeerResolver::new(Arc::clone(&hub), self.runtime.messenger().clone());
                     let coord = ConditionalDisaggCoordinator::new(
                         Arc::clone(&inner_shim),
                         Arc::clone(&transport),
@@ -822,9 +814,7 @@ impl ConnectorLeader {
                     if let Some(engine) = self.offload_engine.get() {
                         engine
                             .add_g1_to_g2_register_observer(coord.observer_callback())
-                            .context(
-                                "registering CD output observer on G1→G2 pipeline",
-                            )?;
+                            .context("registering CD output observer on G1→G2 pipeline")?;
                     } else {
                         tracing::warn!(
                             "CD prefill role configured but OffloadEngine missing — \
@@ -869,7 +859,8 @@ impl ConnectorLeader {
                 role = ?disagg_cfg.role,
                 "Conditional-disagg dispatcher installed (ConditionalDisaggLeader)"
             );
-            self.set_cd_api(dispatcher).context("install CD dispatcher")?;
+            self.set_cd_api(dispatcher)
+                .context("install CD dispatcher")?;
         }
 
         Ok(())

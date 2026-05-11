@@ -154,11 +154,7 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
         let Some(remote) = params.as_ref().and_then(remote_prefill_marker) else {
             // Non-CD request: passthrough to inner.
             tracing::info!("prefill_gnmt: non-CD request — passthrough to inner");
-            crate::audit!(
-                "gnmt_passthrough_non_cd",
-                role = "prefill",
-                request_id
-            );
+            crate::audit!("gnmt_passthrough_non_cd", role = "prefill", request_id);
             let r = self
                 .inner
                 .get_num_new_matched_tokens(request_id, num_computed_tokens);
@@ -363,11 +359,7 @@ impl ConnectorLeaderApi for PrefillDisaggLeader {
     }
 }
 
-fn audit_gnmt_exit(
-    role: &'static str,
-    request_id: &str,
-    result: &Result<(Option<usize>, bool)>,
-) {
+fn audit_gnmt_exit(role: &'static str, request_id: &str, result: &Result<(Option<usize>, bool)>) {
     match result {
         Ok((count, async_load)) => crate::audit!(
             "gnmt_exit",

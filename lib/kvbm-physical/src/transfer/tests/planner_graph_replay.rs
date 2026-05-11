@@ -65,7 +65,9 @@ async fn transfer_direct_planner(
     dst_blocks: &[usize],
     ctx: &TransferContext,
 ) -> Result<()> {
-    let options = TransferOptionsInternal::builder().use_planner(true).build()?;
+    let options = TransferOptionsInternal::builder()
+        .use_planner(true)
+        .build()?;
     let notif = execute_transfer(src, dst, src_blocks, dst_blocks, options, ctx)?;
     notif.await?;
     Ok(())
@@ -141,7 +143,10 @@ async fn cuda_graph_replay_byte_equiv_to_direct_dma() -> Result<()> {
     for (&did, &rid) in dst_blocks.iter().zip(dst_blocks.iter()) {
         let d = direct_sums.get(&did).expect("direct checksum");
         let r = replay_sums.get(&rid).expect("replay checksum");
-        assert_eq!(d, r, "DirectDma vs CudaGraphReplay checksum mismatch at dst block {did}");
+        assert_eq!(
+            d, r,
+            "DirectDma vs CudaGraphReplay checksum mismatch at dst block {did}"
+        );
     }
     Ok(())
 }

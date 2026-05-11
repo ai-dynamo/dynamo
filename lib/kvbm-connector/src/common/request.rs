@@ -381,8 +381,7 @@ mod tests {
     /// shape fails immediately rather than only surfacing as "B.2 hangs".
     #[test]
     fn dispatcher_wire_format_deserializes_to_transfer_params() {
-        let remote =
-            RemotePrefillParams::new(uuid::Uuid::new_v4(), uuid::Uuid::new_v4().into());
+        let remote = RemotePrefillParams::new(uuid::Uuid::new_v4(), uuid::Uuid::new_v4().into());
         // Construct the JSON the dispatcher emits today: the value of
         // `kv_transfer_params` is `serde_json::to_value(TransferParams)`.
         let dispatcher_kv_transfer_params =

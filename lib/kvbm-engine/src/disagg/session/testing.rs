@@ -524,11 +524,9 @@ impl MockSession {
         };
         if should_finalize {
             let mut inner = self.inner.lock();
-            inner
-                .lifecycle_state
-                .push(LifecycleEvent::Detached {
-                    reason: Some("rendezvous".to_string()),
-                });
+            inner.lifecycle_state.push(LifecycleEvent::Detached {
+                reason: Some("rendezvous".to_string()),
+            });
             inner.lifecycle_state.terminate();
         }
     }

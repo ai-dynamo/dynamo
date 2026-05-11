@@ -14,8 +14,8 @@ use std::time::Duration;
 use anyhow::Result;
 use kvbm_connector::G2;
 use kvbm_connector::common::Request;
-use kvbm_connector::connector::leader::disagg::prefill_coordinator::PrefillStatus;
 use kvbm_connector::connector::leader::disagg::ConditionalDisaggCoordinator;
+use kvbm_connector::connector::leader::disagg::prefill_coordinator::PrefillStatus;
 use kvbm_connector::connector::leader::disagg::testing::{
     MockCdBlockTransport, MockCdWorkerHook, MockInnerLeaderShim, MockSlot, TEST_BLOCK_SIZE,
     wait_until,
