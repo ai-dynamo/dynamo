@@ -64,6 +64,11 @@ pub async fn run(
     http_service_builder =
         http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
 
+    // Wire the DistributedRuntime so that RL admin routes can use discovery +
+    // request-plane fan-out when DYN_ENABLE_RL_ENDPOINTS=true.
+    http_service_builder =
+        http_service_builder.runtime(Some(Arc::new(distributed_runtime.clone())));
+
     let http_service = match engine_config {
         EngineConfig::Dynamic {
             ref model,
