@@ -155,7 +155,8 @@ where
     //    `Worker` takes after `start()` raises. Engines must guard each
     //    allocated resource with a null-check.
     let fresh = factory();
-    fresh.cleanup()
+    fresh
+        .cleanup()
         .await
         .map_err(|e| CleanupWithoutStartFailed(e.to_string()))?;
 
