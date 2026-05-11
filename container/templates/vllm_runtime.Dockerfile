@@ -199,7 +199,6 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         if [ -n "$GMS_WHEEL" ]; then uv pip install --system --no-deps "$GMS_WHEEL"; fi; \
     fi{% endif %}
 
-{% if device == "cuda" %}
 # vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
 # jq for readable curl output just like the upstream omni image does.
 RUN set -eux; \
@@ -221,8 +220,8 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
+    export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
-{% endif %}
 
 {% endif %}
 
