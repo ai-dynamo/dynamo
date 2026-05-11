@@ -620,6 +620,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     fi && \
     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
     mkdir -p /opt/dynamo/dist/nixl && \
+    source ${VIRTUAL_ENV}/bin/activate && \
     cd /workspace/nixl && \
     ./contrib/build-wheel.sh \
         --python-version "$PYTHON_VERSION" \
