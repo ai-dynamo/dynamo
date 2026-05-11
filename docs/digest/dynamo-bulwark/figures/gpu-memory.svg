@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 550" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <!-- Background -->
+  <rect width="680" height="550" fill="#0d0d0d"/>
+
+  <!-- ====================== Phase headers ====================== -->
+  <!-- Phase 1 -->
+  <text x="68" y="14" text-anchor="middle" font-size="12" font-weight="600" fill="#e0e0e0">Phase 1</text>
+  <text x="68" y="27" text-anchor="middle" font-size="12" fill="#b0b0b0">Init</text>
+  <text x="68" y="40" text-anchor="middle" font-size="11" fill="#888">both engines loaded</text>
+
+  <!-- Phase 2 -->
+  <text x="204" y="14" text-anchor="middle" font-size="12" font-weight="600" fill="#e0e0e0">Phase 2</text>
+  <text x="204" y="27" text-anchor="middle" font-size="12" fill="#b0b0b0">Serving</text>
+  <text x="204" y="40" text-anchor="middle" font-size="11" fill="#888">engine A active</text>
+
+  <!-- Phase 3 -->
+  <text x="340" y="14" text-anchor="middle" font-size="12" font-weight="600" fill="#e0e0e0">Phase 3</text>
+  <text x="340" y="27" text-anchor="middle" font-size="12" fill="#b0b0b0">Failure</text>
+  <text x="340" y="40" text-anchor="middle" font-size="11" fill="#888">engine A dies</text>
+
+  <!-- Phase 4 -->
+  <text x="476" y="14" text-anchor="middle" font-size="12" font-weight="600" fill="#e0e0e0">Phase 4</text>
+  <text x="476" y="27" text-anchor="middle" font-size="12" fill="#b0b0b0">Cutover</text>
+  <text x="476" y="40" text-anchor="middle" font-size="11" fill="#888">engine B KV fills</text>
+
+  <!-- Phase 5 -->
+  <text x="612" y="14" text-anchor="middle" font-size="12" font-weight="600" fill="#e0e0e0">Phase 5</text>
+  <text x="612" y="27" text-anchor="middle" font-size="12" fill="#b0b0b0">Restarted</text>
+  <text x="612" y="40" text-anchor="middle" font-size="11" fill="#888">engine A [r=1] joins as reserve</text>
+
+  <!-- ====================== PHASE 1 ====================== -->
+  <rect x="24" y="56" width="88" height="188" fill="#1a1a1a"/>
+  <text x="68" y="150" text-anchor="middle" font-size="12" fill="#888">free</text>
+  <rect x="24" y="244" width="88" height="36" fill="#3b6cb0"/>
+  <text x="68" y="266" text-anchor="middle" font-size="11" fill="#ffffff">bufs+graphs</text>
+  <rect x="24" y="280" width="88" height="36" fill="#4d7700"/>
+  <text x="68" y="302" text-anchor="middle" font-size="11" fill="#ffffff">bufs+graphs</text>
+  <rect x="24" y="316" width="88" height="140" fill="#5a5a5a"/>
+  <text x="68" y="378" text-anchor="middle" font-size="12" fill="#e0e0e0">weights</text>
+  <text x="68" y="396" text-anchor="middle" font-size="11" fill="#cccccc">(shared)</text>
+  <rect x="24" y="56" width="88" height="400" rx="4" fill="none" stroke="#555" stroke-width="1.2"/>
+
+  <!-- ====================== PHASE 2 ====================== -->
+  <rect x="160" y="56" width="88" height="40" fill="#1a1a1a"/>
+  <text x="204" y="80" text-anchor="middle" font-size="12" fill="#888">free</text>
+  <rect x="160" y="96" width="88" height="36" fill="#3b6cb0"/>
+  <text x="204" y="118" text-anchor="middle" font-size="11" fill="#ffffff">bufs+graphs</text>
+  <rect x="160" y="132" width="88" height="36" fill="#4d7700"/>
+  <text x="204" y="154" text-anchor="middle" font-size="11" fill="#ffffff">bufs+graphs</text>
+  <rect x="160" y="168" width="88" height="148" fill="#5a8fd4"/>
+  <text x="204" y="237" text-anchor="middle" font-size="12" fill="#ffffff">KV cache</text>
+  <text x="204" y="253" text-anchor="middle" font-size="11" fill="#ffffff">(engine A)</text>
+  <rect x="160" y="316" width="88" height="140" fill="#5a5a5a"/>
+  <text x="204" y="378" text-anchor="middle" font-size="12" fill="#e0e0e0">weights</text>
+  <text x="204" y="396" text-anchor="middle" font-size="11" fill="#cccccc">(shared)</text>
+  <rect x="160" y="56" width="88" height="400" rx="4" fill="none" stroke="#555" stroke-width="1.2"/>
+
+  <!-- ====================== PHASE 3 ====================== -->
+  <rect x="296" y="56" width="88" height="224" fill="#1a1a1a"/>
+  <text x="340" y="170" text-anchor="middle" font-size="12" fill="#888">free</text>
+  <rect x="296" y="280" width="88" height="36" fill="#4d7700"/>
+  <text x="340" y="302" text-anchor="middle" font-size="11" fill="#ffffff">bufs+graphs</text>
+  <rect x="296" y="316" width="88" height="140" fill="#5a5a5a"/>
+  <text x="340" y="378" text-anchor="middle" font-size="12" fill="#e0e0e0">weights</text>
+  <text x="340" y="396" text-anchor="middle" font-size="11" fill="#cccccc">(shared)</text>
+  <rect x="296" y="56" width="88" height="400" rx="4" fill="none" stroke="#555" stroke-width="1.2"/>
+
+  <!-- ====================== PHASE 4 ====================== -->
+  <rect x="432" y="56" width="88" height="40" fill="#1a1a1a"/>
+  <text x="476" y="80" text-anchor="middle" font-size="12" fill="#888">free</text>
+  <rect x="432" y="96" width="88" height="36" fill="#4d7700"/>
+  <text x="476" y="118" text-anchor="middle" font-size="11" fill="#ffffff">bufs+graphs</text>
+  <rect x="432" y="132" width="88" height="184" fill="#76b900"/>
+  <text x="476" y="218" text-anchor="middle" font-size="12" fill="#0d0d0d" font-weight="600">KV cache</text>
+  <text x="476" y="234" text-anchor="middle" font-size="11" fill="#0d0d0d" font-weight="600">(engine B)</text>
+  <rect x="432" y="316" width="88" height="140" fill="#5a5a5a"/>
+  <text x="476" y="378" text-anchor="middle" font-size="12" fill="#e0e0e0">weights</text>
+  <text x="476" y="396" text-anchor="middle" font-size="11" fill="#cccccc">(shared)</text>
+  <rect x="432" y="56" width="88" height="400" rx="4" fill="none" stroke="#555" stroke-width="1.2"/>
+
+  <!-- ====================== PHASE 5 ====================== -->
+  <rect x="568" y="56" width="88" height="40" fill="#1a1a1a"/>
+  <text x="612" y="80" text-anchor="middle" font-size="12" fill="#888">free</text>
+  <!-- engine A [r=1] reserve: dashed border, faint blue fill -->
+  <rect x="568" y="96" width="88" height="36" fill="#1a2e4a"/>
+  <rect x="568" y="96" width="88" height="36" fill="none" stroke="#5a8fd4" stroke-width="1" stroke-dasharray="4 2"/>
+  <text x="612" y="118" text-anchor="middle" font-size="11" fill="#7da5d8">bufs+graphs</text>
+  <rect x="568" y="132" width="88" height="36" fill="#4d7700"/>
+  <text x="612" y="154" text-anchor="middle" font-size="11" fill="#ffffff">bufs+graphs</text>
+  <rect x="568" y="168" width="88" height="148" fill="#76b900"/>
+  <text x="612" y="237" text-anchor="middle" font-size="12" fill="#0d0d0d" font-weight="600">KV cache</text>
+  <text x="612" y="253" text-anchor="middle" font-size="11" fill="#0d0d0d" font-weight="600">(engine B)</text>
+  <rect x="568" y="316" width="88" height="140" fill="#5a5a5a"/>
+  <text x="612" y="378" text-anchor="middle" font-size="12" fill="#e0e0e0">weights</text>
+  <text x="612" y="396" text-anchor="middle" font-size="11" fill="#cccccc">(shared)</text>
+  <rect x="568" y="56" width="88" height="400" rx="4" fill="none" stroke="#555" stroke-width="1.2"/>
+
+  <!-- ====================== Time arrow ====================== -->
+  <line x1="24" y1="470" x2="650" y2="470" stroke="#888" stroke-width="1.2"/>
+  <polygon points="650,466 658,470 650,474" fill="#888"/>
+  <text x="340" y="486" text-anchor="middle" font-size="12" fill="#888">time</text>
+
+  <!-- ====================== Legend ====================== -->
+  <!-- Row 1 -->
+  <rect x="24" y="500" width="12" height="12" fill="#3b6cb0"/>
+  <text x="42" y="510" font-size="11" fill="#e0e0e0">engine A bufs+graphs</text>
+  <rect x="194" y="500" width="12" height="12" fill="#5a8fd4"/>
+  <text x="212" y="510" font-size="11" fill="#e0e0e0">engine A KV cache</text>
+  <rect x="358" y="500" width="12" height="12" fill="#5a5a5a"/>
+  <text x="376" y="510" font-size="11" fill="#e0e0e0">weights (shared)</text>
+  <!-- Row 2 -->
+  <rect x="24" y="520" width="12" height="12" fill="#4d7700"/>
+  <text x="42" y="530" font-size="11" fill="#e0e0e0">engine B bufs+graphs</text>
+  <rect x="194" y="520" width="12" height="12" fill="#76b900"/>
+  <text x="212" y="530" font-size="11" fill="#e0e0e0">engine B KV cache</text>
+  <rect x="358" y="520" width="12" height="12" fill="#1a1a1a" stroke="#555" stroke-width="1"/>
+  <text x="376" y="530" font-size="11" fill="#e0e0e0">free</text>
+  <rect x="448" y="520" width="12" height="12" fill="#1a2e4a" stroke="#5a8fd4" stroke-width="1" stroke-dasharray="3 2"/>
+  <text x="466" y="530" font-size="11" fill="#e0e0e0">engine A [r=1] reserve</text>
+</svg>

@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <!-- Background -->
+  <rect width="960" height="360" fill="#0d0d0d"/>
+
+  <!-- ==================== T0 Steady ==================== -->
+  <g transform="translate(10, 10)">
+    <text x="115" y="18" text-anchor="middle" font-size="12" font-weight="600" fill="#e0e0e0">T₀ Steady</text>
+    <rect x="0" y="28" width="230" height="260" fill="#1a1a1a" stroke="#76b900" stroke-dasharray="4 3" stroke-width="1.2" rx="6"/>
+    <!-- engine A active -->
+    <rect x="14" y="44" width="92" height="54" fill="#152008" stroke="#76b900" stroke-width="1.6" rx="3"/>
+    <text x="60" y="64" text-anchor="middle" font-size="10" font-weight="600" fill="#e0e0e0">engine A</text>
+    <text x="60" y="83" text-anchor="middle" font-size="10" fill="#76b900" font-weight="600">Active 🔒</text>
+    <!-- engine B shadow -->
+    <rect x="124" y="44" width="92" height="54" fill="#1f1f1f" stroke="#666" stroke-width="1.2" stroke-dasharray="3 2" rx="3"/>
+    <text x="170" y="64" text-anchor="middle" font-size="10" font-weight="600" fill="#cccccc">engine B</text>
+    <text x="170" y="83" text-anchor="middle" font-size="10" fill="#999" font-weight="600">Shadow 💤</text>
+    <!-- Lines -->
+    <line x1="60" y1="98" x2="60" y2="130" stroke="#76b900" stroke-width="1.6"/>
+    <line x1="170" y1="98" x2="170" y2="130" stroke="#666" stroke-width="1.2" stroke-dasharray="3 3"/>
+    <!-- GMS -->
+    <rect x="22" y="130" width="186" height="42" fill="#101820" stroke="#3b6cb0" stroke-width="1.2" rx="3"/>
+    <text x="115" y="156" text-anchor="middle" font-size="11" font-weight="600" fill="#e0e0e0">GMS sidecar</text>
+    <line x1="115" y1="172" x2="115" y2="222" stroke="#888" stroke-width="1.2"/>
+    <!-- GPU -->
+    <rect x="65" y="222" width="100" height="28" fill="#1a1a1a" stroke="#e0e0e0" stroke-width="1.2" rx="3"/>
+    <text x="115" y="241" text-anchor="middle" font-size="10" font-weight="600" fill="#e0e0e0">GPU(s)</text>
+  </g>
+
+  <!-- ==================== T1 Failure ==================== -->
+  <g transform="translate(250, 10)">
+    <text x="115" y="18" text-anchor="middle" font-size="12" font-weight="600" fill="#e0e0e0">T₁ Failure</text>
+    <rect x="0" y="28" width="230" height="260" fill="#1a1a1a" stroke="#76b900" stroke-dasharray="4 3" stroke-width="1.2" rx="6"/>
+    <!-- engine A failed -->
+    <rect x="14" y="44" width="92" height="54" fill="#2a1010" stroke="#c43d3d" stroke-width="1.2" stroke-dasharray="2 2" rx="3"/>
+    <text x="60" y="64" text-anchor="middle" font-size="10" font-weight="600" fill="#e07070">engine A</text>
+    <text x="60" y="83" text-anchor="middle" font-size="10" fill="#c43d3d" font-weight="600">Failed ✗</text>
+    <!-- engine B shadow -->
+    <rect x="124" y="44" width="92" height="54" fill="#1f1f1f" stroke="#666" stroke-width="1.2" stroke-dasharray="3 2" rx="3"/>
+    <text x="170" y="64" text-anchor="middle" font-size="10" font-weight="600" fill="#cccccc">engine B</text>
+    <text x="170" y="83" text-anchor="middle" font-size="10" fill="#999" font-weight="600">Shadow 💤</text>
+    <!-- No line from A; dotted from B -->
+    <line x1="170" y1="98" x2="170" y2="130" stroke="#666" stroke-width="1.2" stroke-dasharray="3 3"/>
+    <rect x="22" y="130" width="186" height="42" fill="#101820" stroke="#3b6cb0" stroke-width="1.2" rx="3"/>
+    <text x="115" y="156" text-anchor="middle" font-size="11" font-weight="600" fill="#e0e0e0">GMS sidecar</text>
+    <line x1="115" y1="172" x2="115" y2="222" stroke="#888" stroke-width="1.2"/>
+    <rect x="65" y="222" width="100" height="28" fill="#1a1a1a" stroke="#e0e0e0" stroke-width="1.2" rx="3"/>
+    <text x="115" y="241" text-anchor="middle" font-size="10" font-weight="600" fill="#e0e0e0">GPU(s)</text>
+  </g>
+
+  <!-- ==================== T2 Cutover ==================== -->
+  <g transform="translate(490, 10)">
+    <text x="115" y="18" text-anchor="middle" font-size="12" font-weight="600" fill="#e0e0e0">T₂ Cutover</text>
+    <rect x="0" y="28" width="230" height="260" fill="#1a1a1a" stroke="#76b900" stroke-dasharray="4 3" stroke-width="1.2" rx="6"/>
+    <!-- engine A restarting -->
+    <rect x="14" y="44" width="92" height="54" fill="#2a2010" stroke="#d4a82c" stroke-width="1.2" stroke-dasharray="2 2" rx="3"/>
+    <text x="60" y="64" text-anchor="middle" font-size="10" font-weight="600" fill="#f0c878">engine A</text>
+    <text x="60" y="83" text-anchor="middle" font-size="10" fill="#d4a82c" font-weight="600">Restarting 🔄</text>
+    <!-- engine B active -->
+    <rect x="124" y="44" width="92" height="54" fill="#152008" stroke="#76b900" stroke-width="1.6" rx="3"/>
+    <text x="170" y="64" text-anchor="middle" font-size="10" font-weight="600" fill="#e0e0e0">engine B</text>
+    <text x="170" y="83" text-anchor="middle" font-size="10" fill="#76b900" font-weight="600">Active 🔒</text>
+    <!-- No line from A; solid from B -->
+    <line x1="170" y1="98" x2="170" y2="130" stroke="#76b900" stroke-width="1.6"/>
+    <rect x="22" y="130" width="186" height="42" fill="#101820" stroke="#3b6cb0" stroke-width="1.2" rx="3"/>
+    <text x="115" y="156" text-anchor="middle" font-size="11" font-weight="600" fill="#e0e0e0">GMS sidecar</text>
+    <line x1="115" y1="172" x2="115" y2="222" stroke="#888" stroke-width="1.2"/>
+    <rect x="65" y="222" width="100" height="28" fill="#1a1a1a" stroke="#e0e0e0" stroke-width="1.2" rx="3"/>
+    <text x="115" y="241" text-anchor="middle" font-size="10" font-weight="600" fill="#e0e0e0">GPU(s)</text>
+  </g>
+
+  <!-- ==================== T3 Restarted ==================== -->
+  <g transform="translate(730, 10)">
+    <text x="115" y="18" text-anchor="middle" font-size="12" font-weight="600" fill="#e0e0e0">T₃ Restarted</text>
+    <rect x="0" y="28" width="230" height="260" fill="#1a1a1a" stroke="#76b900" stroke-dasharray="4 3" stroke-width="1.2" rx="6"/>
+    <!-- engine A [r=1] shadow -->
+    <rect x="14" y="44" width="92" height="54" fill="#1f1f1f" stroke="#666" stroke-width="1.2" stroke-dasharray="3 2" rx="3"/>
+    <text x="60" y="64" text-anchor="middle" font-size="10" font-weight="600" fill="#cccccc">engine A [r=1]</text>
+    <text x="60" y="83" text-anchor="middle" font-size="10" fill="#999" font-weight="600">Shadow 💤</text>
+    <!-- engine B active -->
+    <rect x="124" y="44" width="92" height="54" fill="#152008" stroke="#76b900" stroke-width="1.6" rx="3"/>
+    <text x="170" y="64" text-anchor="middle" font-size="10" font-weight="600" fill="#e0e0e0">engine B</text>
+    <text x="170" y="83" text-anchor="middle" font-size="10" fill="#76b900" font-weight="600">Active 🔒</text>
+    <!-- Dotted from A; solid from B -->
+    <line x1="60" y1="98" x2="60" y2="130" stroke="#666" stroke-width="1.2" stroke-dasharray="3 3"/>
+    <line x1="170" y1="98" x2="170" y2="130" stroke="#76b900" stroke-width="1.6"/>
+    <rect x="22" y="130" width="186" height="42" fill="#101820" stroke="#3b6cb0" stroke-width="1.2" rx="3"/>
+    <text x="115" y="156" text-anchor="middle" font-size="11" font-weight="600" fill="#e0e0e0">GMS sidecar</text>
+    <line x1="115" y1="172" x2="115" y2="222" stroke="#888" stroke-width="1.2"/>
+    <rect x="65" y="222" width="100" height="28" fill="#1a1a1a" stroke="#e0e0e0" stroke-width="1.2" rx="3"/>
+    <text x="115" y="241" text-anchor="middle" font-size="10" font-weight="600" fill="#e0e0e0">GPU(s)</text>
+  </g>
+
+  <!-- Bottom annotation -->
+  <text x="480" y="335" text-anchor="middle" font-size="11" fill="#999">
+    active role: engine A → engine B   ·   shadow role: engine B → engine A
+  </text>
+</svg>

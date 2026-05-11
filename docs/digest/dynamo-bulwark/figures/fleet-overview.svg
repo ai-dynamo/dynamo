@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 460" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <defs>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <polygon points="0,0 8,3 0,6" fill="#76b900"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="960" height="460" fill="#0d0d0d"/>
+
+  <!-- Frontend / Router (top) -->
+  <rect x="280" y="30" width="400" height="60" fill="#1a1a1a" stroke="#76b900" stroke-width="2" rx="6"/>
+  <text x="480" y="56" text-anchor="middle" font-size="14" font-weight="600" fill="#e0e0e0">Frontend / Router</text>
+  <text x="480" y="76" text-anchor="middle" font-size="11" fill="#999">discovery plane: routes to active engines only</text>
+
+  <!-- Arrows from router to each worker's active engine -->
+  <!-- Targets: Worker 1 engine A (active) center x=97; Worker 2 engine B (active) center x=542; Worker 3 engine A (active) center x=737 -->
+  <line x1="380" y1="90" x2="97" y2="168" stroke="#76b900" stroke-width="1.6" marker-end="url(#arrow-green)"/>
+  <line x1="480" y1="90" x2="542" y2="168" stroke="#76b900" stroke-width="1.6" marker-end="url(#arrow-green)"/>
+  <line x1="580" y1="90" x2="737" y2="168" stroke="#76b900" stroke-width="1.6" marker-end="url(#arrow-green)"/>
+
+  <!-- ==================== Worker 1: engine A active ==================== -->
+  <g transform="translate(20, 130)">
+    <rect x="0" y="0" width="280" height="280" fill="#1a1a1a" stroke="#76b900" stroke-dasharray="5 4" stroke-width="1.5" rx="6"/>
+    <text x="14" y="22" font-size="11" font-weight="600" fill="#76b900">Bulwark Worker 1</text>
+    <!-- engine A active -->
+    <rect x="20" y="40" width="115" height="58" fill="#152008" stroke="#76b900" stroke-width="1.8" rx="4"/>
+    <text x="77" y="62" text-anchor="middle" font-size="11" font-weight="600" fill="#e0e0e0">engine A</text>
+    <text x="77" y="82" text-anchor="middle" font-size="11" fill="#76b900" font-weight="600">Active 🔒</text>
+    <!-- engine B shadow -->
+    <rect x="145" y="40" width="115" height="58" fill="#1f1f1f" stroke="#666" stroke-width="1.4" stroke-dasharray="3 2" rx="4"/>
+    <text x="202" y="62" text-anchor="middle" font-size="11" font-weight="600" fill="#cccccc">engine B</text>
+    <text x="202" y="82" text-anchor="middle" font-size="11" fill="#999" font-weight="600">Shadow 💤</text>
+    <line x1="77" y1="98" x2="77" y2="135" stroke="#76b900" stroke-width="1.8"/>
+    <line x1="202" y1="98" x2="202" y2="135" stroke="#666" stroke-width="1.4" stroke-dasharray="3 3"/>
+    <rect x="40" y="135" width="200" height="44" fill="#101820" stroke="#3b6cb0" stroke-width="1.4" rx="4"/>
+    <text x="140" y="162" text-anchor="middle" font-size="12" font-weight="600" fill="#e0e0e0">GMS sidecar</text>
+    <line x1="140" y1="179" x2="140" y2="225" stroke="#888" stroke-width="1.4"/>
+    <rect x="80" y="225" width="120" height="32" fill="#1a1a1a" stroke="#e0e0e0" stroke-width="1.4" rx="4"/>
+    <text x="140" y="246" text-anchor="middle" font-size="11" font-weight="600" fill="#e0e0e0">GPU(s)</text>
+  </g>
+
+  <!-- ==================== Worker 2: engine B active ==================== -->
+  <g transform="translate(340, 130)">
+    <rect x="0" y="0" width="280" height="280" fill="#1a1a1a" stroke="#76b900" stroke-dasharray="5 4" stroke-width="1.5" rx="6"/>
+    <text x="14" y="22" font-size="11" font-weight="600" fill="#76b900">Bulwark Worker 2</text>
+    <!-- engine A shadow -->
+    <rect x="20" y="40" width="115" height="58" fill="#1f1f1f" stroke="#666" stroke-width="1.4" stroke-dasharray="3 2" rx="4"/>
+    <text x="77" y="62" text-anchor="middle" font-size="11" font-weight="600" fill="#cccccc">engine A</text>
+    <text x="77" y="82" text-anchor="middle" font-size="11" fill="#999" font-weight="600">Shadow 💤</text>
+    <!-- engine B active -->
+    <rect x="145" y="40" width="115" height="58" fill="#152008" stroke="#76b900" stroke-width="1.8" rx="4"/>
+    <text x="202" y="62" text-anchor="middle" font-size="11" font-weight="600" fill="#e0e0e0">engine B</text>
+    <text x="202" y="82" text-anchor="middle" font-size="11" fill="#76b900" font-weight="600">Active 🔒</text>
+    <line x1="77" y1="98" x2="77" y2="135" stroke="#666" stroke-width="1.4" stroke-dasharray="3 3"/>
+    <line x1="202" y1="98" x2="202" y2="135" stroke="#76b900" stroke-width="1.8"/>
+    <rect x="40" y="135" width="200" height="44" fill="#101820" stroke="#3b6cb0" stroke-width="1.4" rx="4"/>
+    <text x="140" y="162" text-anchor="middle" font-size="12" font-weight="600" fill="#e0e0e0">GMS sidecar</text>
+    <line x1="140" y1="179" x2="140" y2="225" stroke="#888" stroke-width="1.4"/>
+    <rect x="80" y="225" width="120" height="32" fill="#1a1a1a" stroke="#e0e0e0" stroke-width="1.4" rx="4"/>
+    <text x="140" y="246" text-anchor="middle" font-size="11" font-weight="600" fill="#e0e0e0">GPU(s)</text>
+  </g>
+
+  <!-- ==================== Worker 3: engine A active ==================== -->
+  <g transform="translate(660, 130)">
+    <rect x="0" y="0" width="280" height="280" fill="#1a1a1a" stroke="#76b900" stroke-dasharray="5 4" stroke-width="1.5" rx="6"/>
+    <text x="14" y="22" font-size="11" font-weight="600" fill="#76b900">Bulwark Worker 3</text>
+    <!-- engine A active -->
+    <rect x="20" y="40" width="115" height="58" fill="#152008" stroke="#76b900" stroke-width="1.8" rx="4"/>
+    <text x="77" y="62" text-anchor="middle" font-size="11" font-weight="600" fill="#e0e0e0">engine A</text>
+    <text x="77" y="82" text-anchor="middle" font-size="11" fill="#76b900" font-weight="600">Active 🔒</text>
+    <!-- engine B shadow -->
+    <rect x="145" y="40" width="115" height="58" fill="#1f1f1f" stroke="#666" stroke-width="1.4" stroke-dasharray="3 2" rx="4"/>
+    <text x="202" y="62" text-anchor="middle" font-size="11" font-weight="600" fill="#cccccc">engine B</text>
+    <text x="202" y="82" text-anchor="middle" font-size="11" fill="#999" font-weight="600">Shadow 💤</text>
+    <line x1="77" y1="98" x2="77" y2="135" stroke="#76b900" stroke-width="1.8"/>
+    <line x1="202" y1="98" x2="202" y2="135" stroke="#666" stroke-width="1.4" stroke-dasharray="3 3"/>
+    <rect x="40" y="135" width="200" height="44" fill="#101820" stroke="#3b6cb0" stroke-width="1.4" rx="4"/>
+    <text x="140" y="162" text-anchor="middle" font-size="12" font-weight="600" fill="#e0e0e0">GMS sidecar</text>
+    <line x1="140" y1="179" x2="140" y2="225" stroke="#888" stroke-width="1.4"/>
+    <rect x="80" y="225" width="120" height="32" fill="#1a1a1a" stroke="#e0e0e0" stroke-width="1.4" rx="4"/>
+    <text x="140" y="246" text-anchor="middle" font-size="11" font-weight="600" fill="#e0e0e0">GPU(s)</text>
+  </g>
+
+  <!-- Caption -->
+  <text x="480" y="446" text-anchor="middle" font-size="11" fill="#999" font-style="italic">Each worker holds two engines and a GMS sidecar; the router only sees the active engine in each.</text>
+</svg>

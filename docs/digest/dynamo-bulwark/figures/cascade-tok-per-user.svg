@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 420" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <!-- Background -->
+  <rect width="720" height="420" fill="#0d0d0d"/>
+
+  <!-- Title -->
+  <text x="360" y="24" text-anchor="middle" font-size="14" font-weight="600" fill="#e0e0e0">Per-user decode rate over time</text>
+  <text x="360" y="40" text-anchor="middle" font-size="11" fill="#888">3 workers killed in succession, 60 s apart</text>
+
+  <!-- Y-axis -->
+  <line x1="70" y1="60" x2="70" y2="300" stroke="#555" stroke-width="1"/>
+  <text x="62" y="304" text-anchor="end" font-size="10" fill="#888">0</text>
+  <text x="62" y="254" text-anchor="end" font-size="10" fill="#888">25</text>
+  <text x="62" y="204" text-anchor="end" font-size="10" fill="#888">50</text>
+  <text x="62" y="154" text-anchor="end" font-size="10" fill="#888">75</text>
+  <text x="62" y="104" text-anchor="end" font-size="10" fill="#888">100</text>
+  <text x="62" y="64" text-anchor="end" font-size="10" fill="#888">125</text>
+  <text x="22" y="180" text-anchor="middle" font-size="11" fill="#888" transform="rotate(-90, 22, 180)">tok/s/user</text>
+
+  <!-- Gridlines (subtle) -->
+  <line x1="70" y1="254" x2="690" y2="254" stroke="#222" stroke-width="1"/>
+  <line x1="70" y1="204" x2="690" y2="204" stroke="#222" stroke-width="1"/>
+  <line x1="70" y1="154" x2="690" y2="154" stroke="#222" stroke-width="1"/>
+  <line x1="70" y1="104" x2="690" y2="104" stroke="#222" stroke-width="1"/>
+
+  <!-- X-axis -->
+  <line x1="70" y1="300" x2="690" y2="300" stroke="#555" stroke-width="1"/>
+  <text x="70" y="318" text-anchor="middle" font-size="10" fill="#888">0</text>
+  <text x="173" y="318" text-anchor="middle" font-size="10" fill="#888">300</text>
+  <text x="277" y="318" text-anchor="middle" font-size="10" fill="#888">600</text>
+  <text x="380" y="318" text-anchor="middle" font-size="10" fill="#888">900</text>
+  <text x="483" y="318" text-anchor="middle" font-size="10" fill="#888">1200</text>
+  <text x="587" y="318" text-anchor="middle" font-size="10" fill="#888">1500</text>
+  <text x="690" y="318" text-anchor="middle" font-size="10" fill="#888">1800</text>
+  <text x="380" y="340" text-anchor="middle" font-size="11" fill="#888">time (s)</text>
+
+  <!-- Kill event markers -->
+  <line x1="277" y1="60" x2="277" y2="300" stroke="#888" stroke-width="1" stroke-dasharray="3 3" opacity="0.5"/>
+  <line x1="297" y1="60" x2="297" y2="300" stroke="#888" stroke-width="1" stroke-dasharray="3 3" opacity="0.5"/>
+  <line x1="318" y1="60" x2="318" y2="300" stroke="#888" stroke-width="1" stroke-dasharray="3 3" opacity="0.5"/>
+  <text x="297" y="56" text-anchor="middle" font-size="10" fill="#999">3 kills, 60 s apart</text>
+
+  <!-- Baseline polyline (red): 95 → blackout near zero → recovery -->
+  <!-- y mapping: y = 300 - (v / 125) * 240; v=95 → y=118; v=70 → y=166; v=50 → y=204; v=20 → y=262; v=2 → y=296 -->
+  <polyline
+    points="70,118 100,116 130,120 160,118 190,116 220,118 250,116 277,118 283,166 297,204 304,262 318,290 338,296 359,296 380,294 400,281 421,253 442,205 463,160 483,135 504,124 525,120 545,118 566,116 587,118 620,116 660,118 690,118"
+    fill="none" stroke="#c43d3d" stroke-width="2"/>
+
+  <!-- Blackout band annotation -->
+  <rect x="318" y="60" width="62" height="240" fill="#c43d3d" opacity="0.08"/>
+  <text x="349" y="78" text-anchor="middle" font-size="9" fill="#c43d3d" font-style="italic">baseline blackout</text>
+
+  <!-- Failover polyline (NVIDIA green): ~85 with tiny dips at kills -->
+  <!-- v=85 → y=137; v=75 → y=156 (dip); v=83 → y=141 -->
+  <polyline
+    points="70,137 100,136 130,138 160,136 190,138 220,136 250,138 277,137 282,156 289,141 297,138 302,156 309,141 318,137 323,156 330,141 345,138 380,137 420,138 460,137 500,138 540,137 580,138 620,137 660,138 690,137"
+    fill="none" stroke="#76b900" stroke-width="2"/>
+
+  <!-- Legend -->
+  <rect x="510" y="68" width="170" height="42" rx="3" fill="#1a1a1a" stroke="#444" stroke-width="1"/>
+  <line x1="520" y1="80" x2="540" y2="80" stroke="#c43d3d" stroke-width="2"/>
+  <text x="546" y="83" font-size="10" fill="#e0e0e0">baseline</text>
+  <line x1="520" y1="100" x2="540" y2="100" stroke="#76b900" stroke-width="2"/>
+  <text x="546" y="103" font-size="10" fill="#e0e0e0">Bulwark failover</text>
+
+  <!-- Caption -->
+  <text x="360" y="380" text-anchor="middle" font-size="11" fill="#cccccc">Three engines killed 60 seconds apart on a 3-replica cluster. Without failover, the cluster goes silent for roughly 3 minutes</text>
+  <text x="360" y="400" text-anchor="middle" font-size="11" fill="#cccccc">while workers cold-restart. Bulwark holds steady because shadow engines take over within seconds.</text>
+</svg>

@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 360" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <!-- Background -->
+  <rect width="720" height="360" fill="#0d0d0d"/>
+
+  <!-- Title -->
+  <text x="360" y="24" text-anchor="middle" font-size="14" font-weight="600" fill="#e0e0e0">Time to first token — 30 s mean</text>
+  <text x="360" y="40" text-anchor="middle" font-size="11" fill="#888">3 workers killed in succession, 60 s apart</text>
+
+  <!-- Y-axis -->
+  <line x1="70" y1="60" x2="70" y2="300" stroke="#555" stroke-width="1"/>
+  <text x="62" y="304" text-anchor="end" font-size="10" fill="#888">0</text>
+  <text x="62" y="244" text-anchor="end" font-size="10" fill="#888">3k</text>
+  <text x="62" y="184" text-anchor="end" font-size="10" fill="#888">6k</text>
+  <text x="62" y="124" text-anchor="end" font-size="10" fill="#888">9k</text>
+  <text x="62" y="64" text-anchor="end" font-size="10" fill="#888">12k</text>
+  <text x="22" y="180" text-anchor="middle" font-size="11" fill="#888" transform="rotate(-90, 22, 180)">TTFT (ms)</text>
+
+  <!-- Y gridlines (subtle) -->
+  <line x1="70" y1="240" x2="690" y2="240" stroke="#222" stroke-width="1"/>
+  <line x1="70" y1="180" x2="690" y2="180" stroke="#222" stroke-width="1"/>
+  <line x1="70" y1="120" x2="690" y2="120" stroke="#222" stroke-width="1"/>
+  <line x1="70" y1="60" x2="690" y2="60" stroke="#222" stroke-width="1"/>
+
+  <!-- X-axis -->
+  <line x1="70" y1="300" x2="690" y2="300" stroke="#555" stroke-width="1"/>
+  <text x="70" y="318" text-anchor="middle" font-size="10" fill="#888">0</text>
+  <text x="173" y="318" text-anchor="middle" font-size="10" fill="#888">300</text>
+  <text x="277" y="318" text-anchor="middle" font-size="10" fill="#888">600</text>
+  <text x="380" y="318" text-anchor="middle" font-size="10" fill="#888">900</text>
+  <text x="483" y="318" text-anchor="middle" font-size="10" fill="#888">1200</text>
+  <text x="587" y="318" text-anchor="middle" font-size="10" fill="#888">1500</text>
+  <text x="690" y="318" text-anchor="middle" font-size="10" fill="#888">1800</text>
+  <text x="380" y="340" text-anchor="middle" font-size="11" fill="#888">time (s)</text>
+
+  <!-- Blackout band (baseline only — T+720 to T+900) -->
+  <rect x="318" y="60" width="62" height="240" fill="#c43d3d" opacity="0.08"/>
+  <text x="349" y="78" text-anchor="middle" font-size="9" fill="#c43d3d" font-style="italic">baseline blackout</text>
+
+  <!-- Kill event markers -->
+  <line x1="277" y1="60" x2="277" y2="300" stroke="#888" stroke-width="1" stroke-dasharray="3 3" opacity="0.5"/>
+  <line x1="297" y1="60" x2="297" y2="300" stroke="#888" stroke-width="1" stroke-dasharray="3 3" opacity="0.5"/>
+  <line x1="318" y1="60" x2="318" y2="300" stroke="#888" stroke-width="1" stroke-dasharray="3 3" opacity="0.5"/>
+  <text x="297" y="56" text-anchor="middle" font-size="10" fill="#999">3 kills, 60 s apart</text>
+
+  <!-- Baseline polyline (red/amber) -->
+  <polyline
+    points="70,278 100,277 130,279 160,277 190,278 220,277 250,278 277,275 283,200 297,113 318,70 339,120 360,150 380,185 400,205 421,222 442,236 463,246 483,256 504,263 525,269 545,275 566,277 587,278 620,278 660,277 690,278"
+    fill="none" stroke="#c43d3d" stroke-width="2"/>
+
+  <!-- Failover polyline (NVIDIA green) -->
+  <polyline
+    points="70,278 100,277 130,279 160,277 190,278 220,277 250,278 277,278 282,248 289,271 297,275 302,250 309,271 318,275 323,252 330,271 345,278 380,277 420,278 460,277 500,278 540,277 580,278 620,277 660,278 690,277"
+    fill="none" stroke="#76b900" stroke-width="2"/>
+
+  <!-- Legend -->
+  <rect x="510" y="68" width="170" height="42" rx="3" fill="#1a1a1a" stroke="#444" stroke-width="1"/>
+  <line x1="520" y1="80" x2="540" y2="80" stroke="#c43d3d" stroke-width="2"/>
+  <text x="546" y="83" font-size="10" fill="#e0e0e0">baseline</text>
+  <line x1="520" y1="100" x2="540" y2="100" stroke="#76b900" stroke-width="2"/>
+  <text x="546" y="103" font-size="10" fill="#e0e0e0">Bulwark failover</text>
+</svg>

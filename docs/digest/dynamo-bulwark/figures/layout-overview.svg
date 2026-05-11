@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 460" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <!-- Background -->
+  <rect width="660" height="460" fill="#0d0d0d"/>
+
+  <!-- Bulwark Worker (Pod) boundary -->
+  <rect x="40" y="40" width="580" height="320" fill="#1a1a1a" stroke="#76b900" stroke-dasharray="5 4" stroke-width="1.5" rx="8"/>
+  <text x="56" y="62" font-size="11" font-weight="600" fill="#76b900">Bulwark Worker</text>
+
+  <!-- engine A (Active) -->
+  <rect x="80" y="84" width="220" height="80" fill="#152008" stroke="#76b900" stroke-width="2" rx="4"/>
+  <text x="190" y="110" text-anchor="middle" font-size="13" font-weight="600" fill="#e0e0e0">engine A</text>
+  <text x="190" y="135" text-anchor="middle" font-size="12" fill="#76b900" font-weight="600">Active 🔒</text>
+  <text x="190" y="154" text-anchor="middle" font-size="10" fill="#999" font-style="italic">holds the lock</text>
+
+  <!-- engine B (Shadow) -->
+  <rect x="360" y="84" width="220" height="80" fill="#1f1f1f" stroke="#666" stroke-width="1.5" stroke-dasharray="3 2" rx="4"/>
+  <text x="470" y="110" text-anchor="middle" font-size="13" font-weight="600" fill="#cccccc">engine B</text>
+  <text x="470" y="135" text-anchor="middle" font-size="12" fill="#999" font-weight="600">Shadow 💤</text>
+  <text x="470" y="154" text-anchor="middle" font-size="10" fill="#777" font-style="italic">waits on the lock</text>
+
+  <!-- Solid green line A→GMS -->
+  <line x1="190" y1="164" x2="190" y2="200" stroke="#76b900" stroke-width="2"/>
+  <!-- Dotted gray line B→GMS -->
+  <line x1="470" y1="164" x2="470" y2="200" stroke="#666" stroke-width="1.5" stroke-dasharray="3 3"/>
+
+  <!-- GMS sidecar -->
+  <rect x="100" y="200" width="460" height="70" fill="#101820" stroke="#3b6cb0" stroke-width="1.5" rx="4"/>
+  <text x="330" y="226" text-anchor="middle" font-size="13" font-weight="600" fill="#e0e0e0">GMS sidecar</text>
+  <text x="330" y="248" text-anchor="middle" font-size="11" fill="#a8b8c8">owns physical GPU memory · mediates GPU access</text>
+
+  <!-- Line GMS→GPU -->
+  <line x1="330" y1="270" x2="330" y2="385" stroke="#888" stroke-width="1.5"/>
+
+  <!-- GPU(s) -->
+  <rect x="220" y="385" width="220" height="50" fill="#1a1a1a" stroke="#e0e0e0" stroke-width="1.5" rx="4"/>
+  <text x="330" y="416" text-anchor="middle" font-size="13" font-weight="600" fill="#e0e0e0">GPU(s)</text>
+</svg>

@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 460" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <!-- Background -->
+  <rect width="920" height="460" fill="#0d0d0d"/>
+
+  <!-- ====================== PANEL 1: Init (scratch-aliased) ====================== -->
+  <g transform="translate(10, 0)">
+    <!-- Panel frame -->
+    <rect x="0" y="20" width="290" height="420" rx="6" fill="#1a1a1a" stroke="#444" stroke-width="1"/>
+
+    <!-- Phase header -->
+    <text x="145" y="46" text-anchor="middle" font-size="14" font-weight="600" fill="#e0e0e0">Init</text>
+    <text x="145" y="64" text-anchor="middle" font-size="11" fill="#888">scratch-aliased KV</text>
+
+    <!-- VA section label -->
+    <text x="145" y="92" text-anchor="middle" font-size="10" fill="#888" font-style="italic">KV virtual addresses</text>
+
+    <!-- VA blocks (5 + ellipsis) -->
+    <rect x="35" y="100" width="32" height="28" rx="3" fill="#1f1f1f" stroke="#888" stroke-width="1"/>
+    <text x="51" y="118" text-anchor="middle" font-size="10" fill="#cccccc">0</text>
+    <rect x="73" y="100" width="32" height="28" rx="3" fill="#1f1f1f" stroke="#888" stroke-width="1"/>
+    <text x="89" y="118" text-anchor="middle" font-size="10" fill="#cccccc">1</text>
+    <rect x="111" y="100" width="32" height="28" rx="3" fill="#1f1f1f" stroke="#888" stroke-width="1"/>
+    <text x="127" y="118" text-anchor="middle" font-size="10" fill="#cccccc">2</text>
+    <rect x="149" y="100" width="32" height="28" rx="3" fill="#1f1f1f" stroke="#888" stroke-width="1"/>
+    <text x="165" y="118" text-anchor="middle" font-size="10" fill="#cccccc">3</text>
+    <rect x="187" y="100" width="32" height="28" rx="3" fill="#1f1f1f" stroke="#888" stroke-width="1"/>
+    <text x="203" y="118" text-anchor="middle" font-size="10" fill="#cccccc">4</text>
+    <text x="240" y="120" text-anchor="middle" font-size="16" fill="#888">…</text>
+
+    <!-- Arrows fanning to scratch chunk (5 + 1 implied for ellipsis) -->
+    <line x1="51" y1="128" x2="145" y2="245" stroke="#d4a82c" stroke-width="1" opacity="0.85"/>
+    <line x1="89" y1="128" x2="145" y2="245" stroke="#d4a82c" stroke-width="1" opacity="0.85"/>
+    <line x1="127" y1="128" x2="145" y2="245" stroke="#d4a82c" stroke-width="1" opacity="0.85"/>
+    <line x1="165" y1="128" x2="145" y2="245" stroke="#d4a82c" stroke-width="1" opacity="0.85"/>
+    <line x1="203" y1="128" x2="145" y2="245" stroke="#d4a82c" stroke-width="1" opacity="0.85"/>
+    <line x1="240" y1="128" x2="145" y2="245" stroke="#d4a82c" stroke-width="1" opacity="0.5" stroke-dasharray="3 2"/>
+
+    <!-- Scratch chunk (centered) -->
+    <rect x="105" y="245" width="80" height="56" rx="4" fill="#2a2010" stroke="#d4a82c" stroke-width="1.5"/>
+    <text x="145" y="270" text-anchor="middle" font-size="12" font-weight="600" fill="#f0c878">scratch</text>
+    <text x="145" y="288" text-anchor="middle" font-size="10" fill="#d4a82c">~2 MiB</text>
+
+    <!-- Annotation -->
+    <text x="145" y="402" text-anchor="middle" font-size="11" fill="#888">1 × 2 MiB physical · N aliases</text>
+  </g>
+
+  <!-- ====================== PANEL 2: Parked (VAs only) ====================== -->
+  <g transform="translate(315, 0)">
+    <!-- Panel frame -->
+    <rect x="0" y="20" width="290" height="420" rx="6" fill="#1a1a1a" stroke="#444" stroke-width="1"/>
+
+    <!-- Phase header -->
+    <text x="145" y="46" text-anchor="middle" font-size="14" font-weight="600" fill="#e0e0e0">Parked</text>
+    <text x="145" y="64" text-anchor="middle" font-size="11" fill="#888">VAs only, no backing</text>
+
+    <!-- VA section label -->
+    <text x="145" y="92" text-anchor="middle" font-size="10" fill="#888" font-style="italic">KV virtual addresses</text>
+
+    <!-- VA blocks (5 + ellipsis) -->
+    <rect x="35" y="100" width="32" height="28" rx="3" fill="#1f1f1f" stroke="#888" stroke-width="1"/>
+    <text x="51" y="118" text-anchor="middle" font-size="10" fill="#cccccc">0</text>
+    <rect x="73" y="100" width="32" height="28" rx="3" fill="#1f1f1f" stroke="#888" stroke-width="1"/>
+    <text x="89" y="118" text-anchor="middle" font-size="10" fill="#cccccc">1</text>
+    <rect x="111" y="100" width="32" height="28" rx="3" fill="#1f1f1f" stroke="#888" stroke-width="1"/>
+    <text x="127" y="118" text-anchor="middle" font-size="10" fill="#cccccc">2</text>
+    <rect x="149" y="100" width="32" height="28" rx="3" fill="#1f1f1f" stroke="#888" stroke-width="1"/>
+    <text x="165" y="118" text-anchor="middle" font-size="10" fill="#cccccc">3</text>
+    <rect x="187" y="100" width="32" height="28" rx="3" fill="#1f1f1f" stroke="#888" stroke-width="1"/>
+    <text x="203" y="118" text-anchor="middle" font-size="10" fill="#cccccc">4</text>
+    <text x="240" y="120" text-anchor="middle" font-size="16" fill="#888">…</text>
+
+    <!-- Empty backing area: faint dashed outline + label -->
+    <rect x="60" y="240" width="170" height="66" rx="4" fill="none" stroke="#444" stroke-width="1" stroke-dasharray="3 3"/>
+    <text x="145" y="278" text-anchor="middle" font-size="11" fill="#888" font-style="italic">no physical backing</text>
+
+    <!-- Annotation -->
+    <text x="145" y="402" text-anchor="middle" font-size="11" fill="#888">0 physical · VAs reserved</text>
+  </g>
+
+  <!-- ====================== PANEL 3: Wake (real backing) ====================== -->
+  <g transform="translate(620, 0)">
+    <!-- Panel frame -->
+    <rect x="0" y="20" width="290" height="420" rx="6" fill="#1a1a1a" stroke="#444" stroke-width="1"/>
+
+    <!-- Phase header -->
+    <text x="145" y="46" text-anchor="middle" font-size="14" font-weight="600" fill="#e0e0e0">Wake</text>
+    <text x="145" y="64" text-anchor="middle" font-size="11" fill="#888">real backing materialized</text>
+
+    <!-- VA section label -->
+    <text x="145" y="92" text-anchor="middle" font-size="10" fill="#888" font-style="italic">KV virtual addresses</text>
+
+    <!-- VA blocks (5 + ellipsis) -->
+    <rect x="35" y="100" width="32" height="28" rx="3" fill="#1f1f1f" stroke="#888" stroke-width="1"/>
+    <text x="51" y="118" text-anchor="middle" font-size="10" fill="#cccccc">0</text>
+    <rect x="73" y="100" width="32" height="28" rx="3" fill="#1f1f1f" stroke="#888" stroke-width="1"/>
+    <text x="89" y="118" text-anchor="middle" font-size="10" fill="#cccccc">1</text>
+    <rect x="111" y="100" width="32" height="28" rx="3" fill="#1f1f1f" stroke="#888" stroke-width="1"/>
+    <text x="127" y="118" text-anchor="middle" font-size="10" fill="#cccccc">2</text>
+    <rect x="149" y="100" width="32" height="28" rx="3" fill="#1f1f1f" stroke="#888" stroke-width="1"/>
+    <text x="165" y="118" text-anchor="middle" font-size="10" fill="#cccccc">3</text>
+    <rect x="187" y="100" width="32" height="28" rx="3" fill="#1f1f1f" stroke="#888" stroke-width="1"/>
+    <text x="203" y="118" text-anchor="middle" font-size="10" fill="#cccccc">4</text>
+    <text x="240" y="120" text-anchor="middle" font-size="16" fill="#888">…</text>
+
+    <!-- Vertical arrows: each VA → its own chunk -->
+    <line x1="51" y1="128" x2="51" y2="240" stroke="#76b900" stroke-width="1.2"/>
+    <line x1="89" y1="128" x2="89" y2="240" stroke="#76b900" stroke-width="1.2"/>
+    <line x1="127" y1="128" x2="127" y2="240" stroke="#76b900" stroke-width="1.2"/>
+    <line x1="165" y1="128" x2="165" y2="240" stroke="#76b900" stroke-width="1.2"/>
+    <line x1="203" y1="128" x2="203" y2="240" stroke="#76b900" stroke-width="1.2"/>
+    <line x1="240" y1="128" x2="240" y2="240" stroke="#76b900" stroke-width="1.2" opacity="0.5" stroke-dasharray="3 2"/>
+
+    <!-- Real chunks (one per VA, same x positions) -->
+    <rect x="35" y="240" width="32" height="56" rx="3" fill="#152008" stroke="#76b900" stroke-width="1.5"/>
+    <rect x="73" y="240" width="32" height="56" rx="3" fill="#152008" stroke="#76b900" stroke-width="1.5"/>
+    <rect x="111" y="240" width="32" height="56" rx="3" fill="#152008" stroke="#76b900" stroke-width="1.5"/>
+    <rect x="149" y="240" width="32" height="56" rx="3" fill="#152008" stroke="#76b900" stroke-width="1.5"/>
+    <rect x="187" y="240" width="32" height="56" rx="3" fill="#152008" stroke="#76b900" stroke-width="1.5"/>
+    <text x="240" y="272" text-anchor="middle" font-size="16" fill="#888">…</text>
+
+    <!-- Backing label -->
+    <text x="125" y="328" text-anchor="middle" font-size="10" fill="#888" font-style="italic">one physical chunk per block</text>
+
+    <!-- Annotation -->
+    <text x="145" y="402" text-anchor="middle" font-size="11" fill="#888">N × real chunks · full KV pool</text>
+  </g>
+
+</svg>
