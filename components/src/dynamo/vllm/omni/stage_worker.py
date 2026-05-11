@@ -615,8 +615,10 @@ def _iter_completion_outputs(engine_inputs: Any):
 
 def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngine:
     """Create AsyncOmni with a single-stage YAML."""
+    stage_arg = _stage_config_to_dict(stage_config, stage_type)
+    _normalize_single_stage_runtime_devices(stage_arg)
     single_stage_config = {
-        "stage_args": [_stage_config_to_dict(stage_config, stage_type)],
+        "stage_args": [stage_arg],
         "runtime": {"edges": []},
     }
 
@@ -665,6 +667,44 @@ def _stage_config_to_dict(stage_config: Any, stage_type: str) -> dict:
         result["runtime"] = rt
 
     return result
+
+
+def _normalize_single_stage_runtime_devices(stage_arg: dict) -> None:
+    """Map stage-local device visibility to vLLM-Omni logical device IDs."""
+    runtime = stage_arg.get("runtime")
+    if not isinstance(runtime, dict):
+        return
+
+    devices = runtime.get("devices")
+    visible_devices = _get_visible_devices()
+    if devices in (None, "cpu") or not visible_devices:
+        return
+
+    requested_devices = _parse_runtime_devices(devices)
+    if requested_devices != visible_devices:
+        return
+
+    # Dynamo starts each stage worker with the process visibility already
+    # narrowed to that stage's devices. vLLM-Omni then interprets runtime.devices
+    # as logical indexes inside that visible set.
+    runtime["devices"] = ",".join(str(i) for i in range(len(requested_devices)))
+
+
+def _get_visible_devices() -> list[str]:
+    for env_var in ("CUDA_VISIBLE_DEVICES", "ASCEND_RT_VISIBLE_DEVICES"):
+        if devices := os.environ.get(env_var):
+            return _parse_runtime_devices(devices)
+    return []
+
+
+def _parse_runtime_devices(devices: Any) -> list[str]:
+    if isinstance(devices, int):
+        return [str(devices)]
+    if isinstance(devices, str):
+        return [device.strip() for device in devices.split(",") if device.strip()]
+    if isinstance(devices, (list, tuple)):
+        return [str(device).strip() for device in devices if str(device).strip()]
+    return []
 
 
 def _resolve_model_type(final_output_type: str) -> ModelType:

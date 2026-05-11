@@ -15,6 +15,7 @@ try:
     from dynamo.vllm.omni.stage_worker import (
         OmniStageWorker,
         _ensure_stage_connectors,
+        _normalize_single_stage_runtime_devices,
         _prepare_connector_payload,
         _Proxy,
         _stage_config_to_dict,
@@ -476,6 +477,47 @@ def test_stage_config_to_dict_includes_engine_input_source():
     )
 
     assert result["engine_input_source"] == [0]
+
+
+def test_stage_config_to_dict_preserves_runtime_devices():
+    result = _stage_config_to_dict(
+        SimpleNamespace(
+            engine_args=SimpleNamespace(model_stage="dit"),
+            runtime=SimpleNamespace(devices="1"),
+            final_output_type="image",
+        ),
+        "diffusion",
+    )
+
+    assert result["runtime"]["devices"] == "1"
+
+
+def test_single_stage_runtime_devices_normalized_when_visibility_is_narrowed(
+    monkeypatch,
+):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    stage_arg = {
+        "stage_id": 0,
+        "stage_type": "diffusion",
+        "runtime": {"devices": "1"},
+    }
+
+    _normalize_single_stage_runtime_devices(stage_arg)
+
+    assert stage_arg["runtime"]["devices"] == "0"
+
+
+def test_single_stage_runtime_devices_preserve_visible_subset(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    stage_arg = {
+        "stage_id": 0,
+        "stage_type": "diffusion",
+        "runtime": {"devices": "1"},
+    }
+
+    _normalize_single_stage_runtime_devices(stage_arg)
+
+    assert stage_arg["runtime"]["devices"] == "1"
 
 
 def test_fetch_stage_inputs_raises_on_missing_connector():
