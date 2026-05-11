@@ -106,32 +106,20 @@ class SglangLLMEngine(LLMEngine):
         )
         self._input_param_manager = InputParamManager(tokenizer)
 
-        # Wrap warmup in try/except so an early-fail leaves no orphan SGLang
-        # engine subprocess. Worker won't call cleanup() on a failed start().
-        try:
-            if self.serving_mode == DisaggregationMode.PREFILL:
-                # Cache bootstrap host/port; warm the engine to avoid first-
-                # request JIT/cuda-graph compile latency.
-                (
-                    self._bootstrap_host,
-                    self._bootstrap_port,
-                ) = self._resolve_bootstrap_info()
-                if _warmup_enabled():
-                    await self._warmup_prefill()
-                else:
-                    logger.info(
-                        "Skipping SGLang prefill warmup (%s set)",
-                        _DYN_SGLANG_SKIP_WARMUP_ENV,
-                    )
-        except Exception:
-            try:
-                self.engine.shutdown()
-            except Exception:
-                logger.warning(
-                    "engine shutdown after start failure raised", exc_info=True
+        if self.serving_mode == DisaggregationMode.PREFILL:
+            # Cache bootstrap host/port; warm the engine to avoid first-
+            # request JIT/cuda-graph compile latency.
+            (
+                self._bootstrap_host,
+                self._bootstrap_port,
+            ) = self._resolve_bootstrap_info()
+            if _warmup_enabled():
+                await self._warmup_prefill()
+            else:
+                logger.info(
+                    "Skipping SGLang prefill warmup (%s set)",
+                    _DYN_SGLANG_SKIP_WARMUP_ENV,
                 )
-            self.engine = None
-            raise
 
         # Capacity fields — match register.py in the legacy path.
         total_kv_blocks = None
