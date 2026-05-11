@@ -8,6 +8,7 @@ on:
     branches:
       - main
       - 'release/*.*.*'
+      - 'anants/kvbm-nixl-wheel-refactor'  # TEMP: validate post-merge on this branch; revert before merge
   workflow_dispatch:
     inputs:
       framework:
@@ -897,7 +898,7 @@ jobs:
   notify-slack:
     name: Notify Slack
     runs-on: ubuntu-slim
-    if: always() && github.event_name != 'workflow_dispatch'
+    if: always() && github.event_name != 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
     needs: [ deploy-status-check ]
     permissions:
       contents: read
