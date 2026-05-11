@@ -10,29 +10,29 @@ For general TensorRT-LLM features and engine configuration, see the
 ## Recommended Path
 
 For multinode TensorRT-LLM deployments, start from the checked-in Kubernetes
-recipes under [`recipes/`](../../../../recipes/README.md). Those manifests are
+recipes under [`recipes/`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/README.md). Those manifests are
 the supported entrypoints for launching multi-node workers, frontend services,
 and related routing components.
 
 The main TRT-LLM recipe entrypoints are:
 
-- [DeepSeek-R1 WideEP on GB200](../../../../recipes/deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml)
-- [Qwen3-235B-A22B-FP8 aggregated](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/agg/deploy.yaml)
-- [Qwen3-235B-A22B-FP8 disaggregated](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/disagg/deploy.yaml)
-- [Qwen3-32B-FP8 aggregated](../../../../recipes/qwen3-32b-fp8/trtllm/agg/deploy.yaml)
-- [Qwen3-32B-FP8 disaggregated](../../../../recipes/qwen3-32b-fp8/trtllm/disagg/deploy.yaml)
-- [GPT-OSS-120B aggregated](../../../../recipes/gpt-oss-120b/trtllm/agg/deploy.yaml)
-- [GPT-OSS-120B disaggregated](../../../../recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml)
-- [Nemotron-3-Super-FP8 disaggregated](../../../../recipes/nemotron-3-super-fp8/trtllm/disagg/deploy.yaml)
+- [DeepSeek-R1 WideEP on GB200](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml)
+- [Qwen3-235B-A22B-FP8 aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/deploy.yaml)
+- [Qwen3-235B-A22B-FP8 disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/deploy.yaml)
+- [Qwen3-32B-FP8 aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b-fp8/trtllm/agg/deploy.yaml)
+- [Qwen3-32B-FP8 disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b-fp8/trtllm/disagg/deploy.yaml)
+- [GPT-OSS-120B aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/agg/deploy.yaml)
+- [GPT-OSS-120B disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml)
+- [Nemotron-3-Super-FP8 disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super-fp8/trtllm/disagg/deploy.yaml)
 
 For model-level setup, prerequisites, and hardware notes, use the recipe
 README files:
 
-- [DeepSeek-R1 recipes](../../../../recipes/deepseek-r1/README.md)
-- [Qwen3-235B-A22B-FP8 recipes](../../../../recipes/qwen3-235b-a22b-fp8/README.md)
-- [Qwen3-32B-FP8 recipes](../../../../recipes/qwen3-32b-fp8/README.md)
-- [GPT-OSS-120B recipes](../../../../recipes/gpt-oss-120b/README.md)
-- [Kimi-K2.5 recipes](../../../../recipes/kimi-k2.5/README.md)
+- [DeepSeek-R1 recipes](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-r1/README.md)
+- [Qwen3-235B-A22B-FP8 recipes](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/README.md)
+- [Qwen3-32B-FP8 recipes](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b-fp8/README.md)
+- [GPT-OSS-120B recipes](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/README.md)
+- [Kimi-K2.5 recipes](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/README.md)
 
 ## Quick Start
 
@@ -76,7 +76,7 @@ curl http://localhost:8000/v1/models
 ## Notes
 
 - The TRT-LLM engine config files used by launch and deploy flows live under
-  [`examples/backends/trtllm/engine_configs/`](../../../../examples/backends/trtllm/engine_configs/README.md).
+  [`examples/backends/trtllm/engine_configs/`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/engine_configs/README.md).
 - If you need to customize model parallelism, replica counts, or routing mode,
   edit the recipe-local manifest rather than introducing a separate scheduler-specific guide.
-- For the current catalog of supported recipes, see [recipes/README.md](../../../../recipes/README.md).
+- For the current catalog of supported recipes, see [recipes/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/README.md).

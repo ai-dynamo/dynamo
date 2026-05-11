@@ -86,7 +86,7 @@ The `agent_hints` fields:
 - **`osl`** (output sequence length) is the harness's estimate of how many tokens this request will generate. The router uses this to gauge how long a worker will be occupied, which improves load balancing. A harness can learn this over time by tracking average output lengths per tool call type.
 - **`speculative_prefill`** signals the orchestrator to begin caching this request's prefix on a likely worker before the full request is ready. This is useful when the harness knows a tool call is about to return and wants to warm the cache ahead of time.
 
-The `cache_control` field will look familiar to anyone who has used Anthropic's prompt caching API. It tells the orchestrator to pin the computed prefix on the worker for the specified TTL, protecting it from eviction during tool call gaps. Currently `ephemeral` is the only supported type (to match Anthropic's API). We discuss how this works in the cache retention section below. You can find complete documentation on agent hints [here](../../components/frontend/nvext.md#cache-control).
+The `cache_control` field will look familiar to anyone who has used Anthropic's prompt caching API. It tells the orchestrator to pin the computed prefix on the worker for the specified TTL, protecting it from eviction during tool call gaps. Currently `ephemeral` is the only supported type (to match Anthropic's API). We discuss how this works in the cache retention section below. You can find complete documentation on [Agent Hints](../../agents/agent-hints.md) and [NVIDIA Request Extensions](../../components/frontend/nvext.md).
 
 ## Layer 2: The Router
 
