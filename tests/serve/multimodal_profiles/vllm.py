@@ -269,7 +269,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "epd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                # Moved to post_merge: same LLaVA-1.5 flake as e_pd above.
+                marks=[pytest.mark.post_merge],
                 timeout_s=600,
                 gpu_marker="gpu_4",
                 # Default 3-GPU layout: encode → GPU 0, prefill → GPU 1,

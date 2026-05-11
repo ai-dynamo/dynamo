@@ -30,7 +30,7 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3
           workingDir: /workspace/examples/backends/vllm
           env:
             - name: HF_HOME
@@ -48,7 +48,7 @@ spec:
         size: 200Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3
           workingDir: /workspace/examples/backends/vllm
           # Up to ~60 min for first launch: weight load + FlashInfer autotune +
           # cudagraph warmup. periodSeconds * failureThreshold = 10 * 360 = 3600s.
