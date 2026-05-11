@@ -62,7 +62,7 @@ vllm:
   cpu:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
-    base_image_tag: 24.04
+    base_image_tag: 22.04
     runtime_image_tag: v0.20.1
     vllm_ref: v0.20.1
   flashinf_ref: v0.6.6
