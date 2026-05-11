@@ -10,7 +10,20 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+func TestGetContainerGPUsRecognizesMIGResources(t *testing.T) {
+	resources := &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceName("nvidia.com/mig-3g.20gb"): resource.MustParse("2"),
+		},
+	}
+
+	if got := getContainerGPUs(resources); got != 2 {
+		t.Fatalf("getContainerGPUs() = %d, want 2", got)
+	}
+}
 
 func TestVLLMBackend_UpdateContainer(t *testing.T) {
 	backend := &VLLMBackend{}
@@ -834,6 +847,49 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			initialPodSpec: &corev1.PodSpec{
 				Containers: []corev1.Container{
 					{Name: "main", Image: "vllm:v2"},
+				},
+			},
+			expectInitContainer: false,
+		},
+		{
+			name:          "elastic EP worker command in pod spec: no MP init container injected",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:    "main",
+						Image:   "vllm:latest",
+						Command: []string{"python3 -m dynamo.vllm --model test --enable-elastic-ep"},
+					},
+				},
+			},
+			expectInitContainer: false,
+		},
+		{
+			name:          "elastic EP worker command in component: no MP init container injected",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+				},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Command: []string{"python3 -m dynamo.vllm --model test --enable-elastic-ep"},
+					},
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "main", Image: "vllm:latest"},
 				},
 			},
 			expectInitContainer: false,

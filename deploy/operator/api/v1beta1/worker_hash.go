@@ -35,6 +35,8 @@ type dgdWorkerHashInput struct {
 	Version          string                              `json:"version"`
 	BackendFramework string                              `json:"backendFramework,omitempty"`
 	Env              []corev1.EnvVar                     `json:"env,omitempty"`
+	Annotations      map[string]string                   `json:"annotations,omitempty"`
+	Labels           map[string]string                   `json:"labels,omitempty"`
 	Workers          map[string]workerComponentHashInput `json:"workers,omitempty"`
 }
 
@@ -86,6 +88,8 @@ func ComputeDGDWorkersSpecHash(dgd *DynamoGraphDeployment) (string, error) {
 		Version:          dgdWorkerHashInputVersion,
 		BackendFramework: dgd.Spec.BackendFramework,
 		Env:              dgd.Spec.Env,
+		Annotations:      dgd.Spec.Annotations,
+		Labels:           dgd.Spec.Labels,
 		Workers:          make(map[string]workerComponentHashInput, len(workerNames)),
 	}
 	for _, name := range workerNames {

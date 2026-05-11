@@ -1144,12 +1144,7 @@ func (r *DynamoComponentDeploymentReconciler) getDCDWorkloadComponentType(
 	// this DCD generation is already serving with legacy v1alpha1 worker
 	// selectors, keep rendering pod labels/env and service selectors as
 	// "worker" so a no-op upgrade keeps matching already-running pods.
-	labels := dcd.GetLabels()
-	workerHash := labels[commonconsts.KubeLabelDynamoWorkerHash]
-	if workerHash == "" {
-		return componentType, nil
-	}
-	if hasLegacyWorkerSelector(labels, componentType) {
+	if hasLegacyWorkerSelector(dcd.GetLabels(), componentType) {
 		return commonconsts.ComponentTypeWorker, nil
 	}
 
@@ -1180,6 +1175,21 @@ func (r *DynamoComponentDeploymentReconciler) hasExistingLegacyWorkerSelector(
 		}
 	} else if !k8serrors.IsNotFound(err) {
 		return false, fmt.Errorf("failed to get deployment %s/%s: %w", dcd.Namespace, dcd.Name, err)
+	}
+
+	if r.RuntimeConfig != nil && r.RuntimeConfig.LWSEnabled {
+		leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{}
+		if err := r.Get(ctx, types.NamespacedName{Name: dcd.Name, Namespace: dcd.Namespace}, leaderWorkerSet); err == nil {
+			template := leaderWorkerSet.Spec.LeaderWorkerTemplate
+			if template.LeaderTemplate != nil && hasLegacyWorkerSelector(template.LeaderTemplate.Labels, componentType) {
+				return true, nil
+			}
+			if hasLegacyWorkerSelector(template.WorkerTemplate.Labels, componentType) {
+				return true, nil
+			}
+		} else if !k8serrors.IsNotFound(err) {
+			return false, fmt.Errorf("failed to get leaderworkerset %s/%s: %w", dcd.Namespace, dcd.Name, err)
+		}
 	}
 
 	serviceName := dynamo.NormalizeKubeResourceName(dcd.Name)
