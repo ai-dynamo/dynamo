@@ -17,7 +17,7 @@
 //! `export_metadata_callback` is a separate step.
 
 use anyhow::{Result, bail};
-use kvbm_common::KvDim;
+use kvbm_common::{KvDim, LogicalLayoutHandle};
 use kvbm_config::ParallelismMode;
 use kvbm_physical::layout::LayoutConfig;
 use kvbm_physical::manager::{ParallelismDescriptor, SerializedLayout};
@@ -97,8 +97,11 @@ impl ParallelismTemplate {
             pp_size: 1,
             parallelism_mode: mode,
             shard_axis: KvDim::HeadCount,
+            // global_extents covers axes that are model-global (same
+            // across leaders running the same model). Block is
+            // deliberately omitted — block-id space is per-leader and
+            // two leaders can legitimately have different block counts.
             global_extents: vec![
-                (KvDim::Block, layout.num_blocks),
                 (KvDim::Layer, layout.num_layers),
                 (KvDim::Outer, layout.outer_dim),
                 (KvDim::Page, layout.page_size),
@@ -135,6 +138,320 @@ impl ParallelismTemplate {
             layer_ownership: 0..self.num_layers,
         })
     }
+}
+
+/// Compatibility error variants surfaced by [`validate_remote_metadata`].
+///
+/// Each variant pinpoints exactly which gate rejected the remote
+/// metadata so callers (and operators reading logs) can diagnose the
+/// configuration mismatch without re-deriving the check.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum CompatError {
+    /// Either side reported `tp_size == 0` or `pp_size == 0`.
+    #[error(
+        "compatibility: zero-sized parallelism (tp_size={tp_size}, pp_size={pp_size}, side={side})"
+    )]
+    ZeroSize {
+        side: &'static str,
+        tp_size: usize,
+        pp_size: usize,
+    },
+
+    /// `pp_size != 1` on either side. PP is a non-goal for AB-1..AB-6.
+    #[error(
+        "compatibility: pipeline-parallel unsupported (pp_size={pp_size} on {side}); only pp_size=1 is accepted"
+    )]
+    PipelineParallelUnsupported { side: &'static str, pp_size: usize },
+
+    /// The two TP sizes are neither equal nor a clean multiple of one
+    /// another (e.g. local TP=3 vs remote TP=2).
+    #[error(
+        "compatibility: coprime tensor-parallel sizes (local_tp={local_tp}, remote_tp={remote_tp}); \
+         one must divide the other"
+    )]
+    Coprime { local_tp: usize, remote_tp: usize },
+
+    /// The two sides shard along different axes (e.g. local on
+    /// `HeadCount`, remote on `Layer`).
+    #[error("compatibility: shard axis mismatch (local={local:?}, remote={remote:?})")]
+    ShardAxisMismatch { local: KvDim, remote: KvDim },
+
+    /// Two leaders disagree on a global extent. `global_extents` is
+    /// the pre-shard model-global value (e.g. total HeadCount across
+    /// all ranks), so it must match on every axis including the
+    /// shard axis — tp_size scales the *per-worker* value, not the
+    /// global one.
+    #[error("compatibility: extent mismatch on axis {axis:?} (local={local}, remote={remote})")]
+    ExtentMismatch {
+        axis: KvDim,
+        local: usize,
+        remote: usize,
+    },
+
+    /// A global axis is reported by one side but not the other.
+    /// `usize::MAX` is the sentinel value used for the missing side.
+    #[error("compatibility: axis {axis:?} missing on {missing_on} side (present={present})")]
+    MissingExtent {
+        axis: KvDim,
+        missing_on: &'static str,
+        present: usize,
+    },
+
+    /// Remote descriptors disagree among themselves about parallelism
+    /// shape (different ranks reported different tp_size / shard_axis /
+    /// global_extents). Indicates a buggy stamper on the peer.
+    #[error("compatibility: remote descriptors are internally inconsistent: {reason}")]
+    InconsistentRemote { reason: String },
+
+    /// The peer reported `tp_size * pp_size = expected` but the vector
+    /// of descriptors has a different length, or rank values do not
+    /// form a complete `0..expected` set (duplicates, out-of-range, or
+    /// missing ranks).
+    #[error(
+        "compatibility: incomplete remote rank metadata: {reason} \
+         (expected {expected} ranks, got {actual})"
+    )]
+    IncompleteRemoteRanks {
+        reason: String,
+        expected: usize,
+        actual: usize,
+    },
+
+    /// The required logical tier (typically G2) is absent from at
+    /// least one remote worker's layouts list.
+    #[error("compatibility: required logical tier {tier:?} missing from remote rank {rank}")]
+    MissingLogicalTier {
+        rank: usize,
+        tier: LogicalLayoutHandle,
+    },
+}
+
+/// Validate that a vector of remote per-worker [`ParallelismDescriptor`]s
+/// (one per remote rank) is compatible with the local leader's
+/// [`ParallelismTemplate`] for cross-parallelism transfers.
+///
+/// Each remote rank's layout list (`remote_tiers[i]`) is also checked
+/// to contain `required_tier`. The lists must be parallel:
+/// `remote_descriptors.len() == remote_tiers.len()`.
+///
+/// On success, returns `Ok(())`. On failure, returns the first gate
+/// that rejected — gates are checked in this order:
+///   1. zero-sized parallelism on either side
+///   2. `pp_size != 1` on either side
+///   3. internal consistency of remote descriptors
+///   4. TP divisibility
+///   5. shard axis agreement
+///   6. non-shard extent agreement
+///   7. required logical tier presence on every remote rank
+pub fn validate_remote_metadata(
+    local: &ParallelismTemplate,
+    remote_descriptors: &[ParallelismDescriptor],
+    remote_tiers: &[&[LogicalLayoutHandle]],
+    required_tier: LogicalLayoutHandle,
+) -> std::result::Result<(), CompatError> {
+    if remote_descriptors.len() != remote_tiers.len() {
+        return Err(CompatError::InconsistentRemote {
+            reason: format!(
+                "remote_descriptors.len() ({}) != remote_tiers.len() ({})",
+                remote_descriptors.len(),
+                remote_tiers.len()
+            ),
+        });
+    }
+    if remote_descriptors.is_empty() {
+        return Err(CompatError::InconsistentRemote {
+            reason: "remote_descriptors is empty".to_string(),
+        });
+    }
+
+    // Gate 1: zero-sized parallelism
+    if local.tp_size == 0 || local.pp_size == 0 {
+        return Err(CompatError::ZeroSize {
+            side: "local",
+            tp_size: local.tp_size,
+            pp_size: local.pp_size,
+        });
+    }
+    for d in remote_descriptors {
+        if d.tp_size == 0 || d.pp_size == 0 {
+            return Err(CompatError::ZeroSize {
+                side: "remote",
+                tp_size: d.tp_size,
+                pp_size: d.pp_size,
+            });
+        }
+    }
+
+    // Gate 2: pp_size == 1
+    if local.pp_size != 1 {
+        return Err(CompatError::PipelineParallelUnsupported {
+            side: "local",
+            pp_size: local.pp_size,
+        });
+    }
+    for d in remote_descriptors {
+        if d.pp_size != 1 {
+            return Err(CompatError::PipelineParallelUnsupported {
+                side: "remote",
+                pp_size: d.pp_size,
+            });
+        }
+    }
+
+    // Gate 3: internal consistency of remote descriptors. All ranks
+    // from one peer leader must agree on tp_size, shard_axis, and
+    // global_extents.
+    let head = &remote_descriptors[0];
+    for (i, d) in remote_descriptors.iter().enumerate().skip(1) {
+        if d.tp_size != head.tp_size {
+            return Err(CompatError::InconsistentRemote {
+                reason: format!(
+                    "remote rank {} reports tp_size={} but rank 0 reports {}",
+                    i, d.tp_size, head.tp_size
+                ),
+            });
+        }
+        if d.shard_axis != head.shard_axis {
+            return Err(CompatError::InconsistentRemote {
+                reason: format!(
+                    "remote rank {} reports shard_axis={:?} but rank 0 reports {:?}",
+                    i, d.shard_axis, head.shard_axis
+                ),
+            });
+        }
+        if d.global_extents != head.global_extents {
+            return Err(CompatError::InconsistentRemote {
+                reason: format!("remote rank {} has different global_extents than rank 0", i),
+            });
+        }
+    }
+
+    // Gate 3.5: rank coverage. The remote descriptor vector must
+    // have exactly tp_size * pp_size entries, and the union of their
+    // `rank` values must be exactly {0, 1, ..., total-1}. Anything
+    // else means we received partial / duplicated / out-of-range
+    // rank metadata and cannot safely plan transfers.
+    let expected = head.tp_size * head.pp_size;
+    let actual = remote_descriptors.len();
+    if actual != expected {
+        return Err(CompatError::IncompleteRemoteRanks {
+            reason: format!(
+                "descriptor count {} does not match tp_size * pp_size = {} * {} = {}",
+                actual, head.tp_size, head.pp_size, expected
+            ),
+            expected,
+            actual,
+        });
+    }
+    let mut seen = vec![false; expected];
+    for d in remote_descriptors {
+        if d.rank >= expected {
+            return Err(CompatError::IncompleteRemoteRanks {
+                reason: format!(
+                    "rank {} is out of range for tp_size * pp_size = {}",
+                    d.rank, expected
+                ),
+                expected,
+                actual,
+            });
+        }
+        if seen[d.rank] {
+            return Err(CompatError::IncompleteRemoteRanks {
+                reason: format!("rank {} appears more than once", d.rank),
+                expected,
+                actual,
+            });
+        }
+        seen[d.rank] = true;
+    }
+    if let Some(missing) = seen.iter().position(|present| !*present) {
+        return Err(CompatError::IncompleteRemoteRanks {
+            reason: format!("rank {missing} is missing from remote descriptor set"),
+            expected,
+            actual,
+        });
+    }
+
+    // Gate 4: TP divisibility — one tp_size must divide the other.
+    let local_tp = local.tp_size;
+    let remote_tp = head.tp_size;
+    if local_tp % remote_tp != 0 && remote_tp % local_tp != 0 {
+        return Err(CompatError::Coprime {
+            local_tp,
+            remote_tp,
+        });
+    }
+
+    // Gate 5: shard axis agreement
+    if local.shard_axis != head.shard_axis {
+        return Err(CompatError::ShardAxisMismatch {
+            local: local.shard_axis,
+            remote: head.shard_axis,
+        });
+    }
+
+    // Gate 6: global extents agree on EVERY axis. `global_extents` is
+    // the pre-shard model-global value, so even the shard axis must
+    // match — tp_size scales the per-worker extent, not the global
+    // one (e.g. global HeadCount=32 is the same whether the leader
+    // runs TP=2 or TP=4; the per-worker value differs). Axes present
+    // on one side but not the other are also rejected: silent
+    // pass-through would let mis-stamped descriptors through.
+    let local_axes: std::collections::HashSet<KvDim> =
+        local.global_extents.iter().map(|(a, _)| *a).collect();
+    let remote_axes: std::collections::HashSet<KvDim> =
+        head.global_extents.iter().map(|(a, _)| *a).collect();
+    let mut all_axes: Vec<KvDim> = local_axes.union(&remote_axes).copied().collect();
+    // Deterministic iteration order for error reproducibility.
+    all_axes.sort_by_key(|d| format!("{d:?}"));
+    for axis in &all_axes {
+        let local_val = local
+            .global_extents
+            .iter()
+            .find(|(a, _)| a == axis)
+            .map(|(_, v)| *v);
+        let remote_val = head
+            .global_extents
+            .iter()
+            .find(|(a, _)| a == axis)
+            .map(|(_, v)| *v);
+        match (local_val, remote_val) {
+            (Some(l), Some(r)) if l != r => {
+                return Err(CompatError::ExtentMismatch {
+                    axis: *axis,
+                    local: l,
+                    remote: r,
+                });
+            }
+            (Some(l), None) => {
+                return Err(CompatError::MissingExtent {
+                    axis: *axis,
+                    missing_on: "remote",
+                    present: l,
+                });
+            }
+            (None, Some(r)) => {
+                return Err(CompatError::MissingExtent {
+                    axis: *axis,
+                    missing_on: "local",
+                    present: r,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    // Gate 7: required logical tier present on every remote rank.
+    for (i, tiers) in remote_tiers.iter().enumerate() {
+        if !tiers.iter().any(|t| *t == required_tier) {
+            return Err(CompatError::MissingLogicalTier {
+                rank: i,
+                tier: required_tier,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Stamp a [`ParallelismDescriptor`] onto every per-worker
@@ -376,6 +693,325 @@ mod tests {
             err.to_string().contains("tp_size * pp_size"),
             "unexpected error: {err}"
         );
+    }
+
+    // -- compatibility gate tests --
+
+    fn local_template_tp(tp_size: usize) -> ParallelismTemplate {
+        ParallelismTemplate {
+            tp_size,
+            pp_size: 1,
+            parallelism_mode: ParallelismMode::TensorParallel,
+            shard_axis: KvDim::HeadCount,
+            global_extents: vec![
+                (KvDim::Layer, 24),
+                (KvDim::Page, 8),
+                (KvDim::HeadCount, 32),
+                (KvDim::HeadSize, 64),
+            ],
+            num_layers: 24,
+        }
+    }
+
+    fn remote_descriptor_tp(tp_size: usize, rank: usize) -> ParallelismDescriptor {
+        ParallelismDescriptor {
+            tp_size,
+            pp_size: 1,
+            rank,
+            shard_axis: KvDim::HeadCount,
+            global_extents: vec![
+                (KvDim::Layer, 24),
+                (KvDim::Page, 8),
+                (KvDim::HeadCount, 32),
+                (KvDim::HeadSize, 64),
+            ],
+            layer_ownership: 0..24,
+        }
+    }
+
+    fn g2_tiers_for(n_ranks: usize) -> Vec<Vec<LogicalLayoutHandle>> {
+        (0..n_ranks)
+            .map(|_| vec![LogicalLayoutHandle::G2])
+            .collect()
+    }
+
+    fn tier_refs<'a>(t: &'a [Vec<LogicalLayoutHandle>]) -> Vec<&'a [LogicalLayoutHandle]> {
+        t.iter().map(|v| v.as_slice()).collect()
+    }
+
+    #[test]
+    fn compat_accepts_symmetric_tp() {
+        let local = local_template_tp(2);
+        let remote: Vec<_> = (0..2).map(|r| remote_descriptor_tp(2, r)).collect();
+        let tiers = g2_tiers_for(2);
+        validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+            .expect("symmetric TP=2 accepted");
+    }
+
+    #[test]
+    fn compat_accepts_asymmetric_tp_local_smaller() {
+        let local = local_template_tp(2);
+        let remote: Vec<_> = (0..4).map(|r| remote_descriptor_tp(4, r)).collect();
+        let tiers = g2_tiers_for(4);
+        validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+            .expect("TP=2 local pulling from TP=4 remote accepted");
+    }
+
+    #[test]
+    fn compat_accepts_asymmetric_tp_local_larger() {
+        let local = local_template_tp(4);
+        let remote: Vec<_> = (0..2).map(|r| remote_descriptor_tp(2, r)).collect();
+        let tiers = g2_tiers_for(2);
+        validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+            .expect("TP=4 local pulling from TP=2 remote accepted");
+    }
+
+    #[test]
+    fn compat_rejects_coprime_tp() {
+        let local = local_template_tp(3);
+        let remote: Vec<_> = (0..2).map(|r| remote_descriptor_tp(2, r)).collect();
+        let tiers = g2_tiers_for(2);
+        let err =
+            validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            CompatError::Coprime {
+                local_tp: 3,
+                remote_tp: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn compat_rejects_shard_axis_mismatch() {
+        let local = local_template_tp(2);
+        let mut remote: Vec<_> = (0..2).map(|r| remote_descriptor_tp(2, r)).collect();
+        for d in &mut remote {
+            d.shard_axis = KvDim::Layer;
+        }
+        let tiers = g2_tiers_for(2);
+        let err =
+            validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            CompatError::ShardAxisMismatch {
+                local: KvDim::HeadCount,
+                remote: KvDim::Layer,
+            }
+        ));
+    }
+
+    #[test]
+    fn compat_rejects_non_shard_extent_mismatch() {
+        let local = local_template_tp(2);
+        let mut remote: Vec<_> = (0..2).map(|r| remote_descriptor_tp(2, r)).collect();
+        for d in &mut remote {
+            // Change `Layer` (non-shard axis) to a different value.
+            if let Some(entry) = d
+                .global_extents
+                .iter_mut()
+                .find(|(a, _)| *a == KvDim::Layer)
+            {
+                entry.1 = 48;
+            }
+        }
+        let tiers = g2_tiers_for(2);
+        let err =
+            validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            CompatError::ExtentMismatch {
+                axis: KvDim::Layer,
+                local: 24,
+                remote: 48
+            }
+        ));
+    }
+
+    #[test]
+    fn compat_rejects_shard_axis_global_extent_mismatch() {
+        // `global_extents` is the pre-shard model-global value, so it
+        // must match on every axis — including the shard axis. The
+        // per-worker (post-shard) value is `global / tp_size` and
+        // legitimately differs across asymmetric-TP sides, but the
+        // GLOBAL must agree between leaders running the same model.
+        let mut local = local_template_tp(2);
+        if let Some(e) = local
+            .global_extents
+            .iter_mut()
+            .find(|(a, _)| *a == KvDim::HeadCount)
+        {
+            e.1 = 16;
+        }
+        // Remote keeps the canonical 32.
+        let remote: Vec<_> = (0..2).map(|r| remote_descriptor_tp(2, r)).collect();
+        let tiers = g2_tiers_for(2);
+        let err =
+            validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            CompatError::ExtentMismatch {
+                axis: KvDim::HeadCount,
+                local: 16,
+                remote: 32,
+            }
+        ));
+    }
+
+    #[test]
+    fn compat_rejects_missing_extent_on_remote() {
+        let local = local_template_tp(2);
+        let mut remote: Vec<_> = (0..2).map(|r| remote_descriptor_tp(2, r)).collect();
+        for d in &mut remote {
+            d.global_extents.retain(|(a, _)| *a != KvDim::Layer);
+        }
+        let tiers = g2_tiers_for(2);
+        let err =
+            validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            CompatError::MissingExtent {
+                axis: KvDim::Layer,
+                missing_on: "remote",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compat_rejects_missing_extent_on_local() {
+        let mut local = local_template_tp(2);
+        local.global_extents.retain(|(a, _)| *a != KvDim::HeadSize);
+        let remote: Vec<_> = (0..2).map(|r| remote_descriptor_tp(2, r)).collect();
+        let tiers = g2_tiers_for(2);
+        let err =
+            validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            CompatError::MissingExtent {
+                axis: KvDim::HeadSize,
+                missing_on: "local",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compat_rejects_pp_not_one_on_remote() {
+        let local = local_template_tp(2);
+        let mut remote: Vec<_> = (0..2).map(|r| remote_descriptor_tp(2, r)).collect();
+        for d in &mut remote {
+            d.pp_size = 2;
+        }
+        let tiers = g2_tiers_for(2);
+        let err =
+            validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            CompatError::PipelineParallelUnsupported {
+                side: "remote",
+                pp_size: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn compat_rejects_missing_logical_tier() {
+        let local = local_template_tp(2);
+        let remote: Vec<_> = (0..2).map(|r| remote_descriptor_tp(2, r)).collect();
+        // Rank 0 has G2, rank 1 does not.
+        let tiers = vec![vec![LogicalLayoutHandle::G2], vec![LogicalLayoutHandle::G1]];
+        let err =
+            validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            CompatError::MissingLogicalTier {
+                rank: 1,
+                tier: LogicalLayoutHandle::G2
+            }
+        ));
+    }
+
+    #[test]
+    fn compat_rejects_zero_tp() {
+        let mut local = local_template_tp(0);
+        local.tp_size = 0;
+        let remote: Vec<_> = (0..2).map(|r| remote_descriptor_tp(2, r)).collect();
+        let tiers = g2_tiers_for(2);
+        let err =
+            validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+                .unwrap_err();
+        assert!(matches!(err, CompatError::ZeroSize { side: "local", .. }));
+    }
+
+    #[test]
+    fn compat_rejects_partial_remote_rank_set() {
+        // Remote descriptors claim tp_size=4 but only 2 ranks present.
+        let local = local_template_tp(2);
+        let remote: Vec<_> = (0..2).map(|r| remote_descriptor_tp(4, r)).collect();
+        let tiers = g2_tiers_for(2);
+        let err =
+            validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            CompatError::IncompleteRemoteRanks {
+                expected: 4,
+                actual: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compat_rejects_duplicate_remote_rank() {
+        let local = local_template_tp(2);
+        // Two ranks both claim rank=0.
+        let remote = vec![remote_descriptor_tp(2, 0), remote_descriptor_tp(2, 0)];
+        let tiers = g2_tiers_for(2);
+        let err =
+            validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+                .unwrap_err();
+        let msg = match &err {
+            CompatError::IncompleteRemoteRanks { reason, .. } => reason.clone(),
+            other => panic!("expected IncompleteRemoteRanks, got {other:?}"),
+        };
+        assert!(msg.contains("more than once"), "msg: {msg}");
+    }
+
+    #[test]
+    fn compat_rejects_out_of_range_remote_rank() {
+        let local = local_template_tp(2);
+        let remote = vec![remote_descriptor_tp(2, 0), remote_descriptor_tp(2, 7)];
+        let tiers = g2_tiers_for(2);
+        let err =
+            validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+                .unwrap_err();
+        let msg = match &err {
+            CompatError::IncompleteRemoteRanks { reason, .. } => reason.clone(),
+            other => panic!("expected IncompleteRemoteRanks, got {other:?}"),
+        };
+        assert!(msg.contains("out of range"), "msg: {msg}");
+    }
+
+    #[test]
+    fn compat_rejects_inconsistent_remote_tp_size() {
+        let local = local_template_tp(2);
+        let mut remote: Vec<_> = (0..2).map(|r| remote_descriptor_tp(2, r)).collect();
+        remote[1].tp_size = 4;
+        let tiers = g2_tiers_for(2);
+        let err =
+            validate_remote_metadata(&local, &remote, &tier_refs(&tiers), LogicalLayoutHandle::G2)
+                .unwrap_err();
+        assert!(matches!(err, CompatError::InconsistentRemote { .. }));
     }
 
     #[test]
