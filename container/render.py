@@ -134,7 +134,7 @@ def validate_args(args):
             "cuda_version": ["12.9", "13.0"],
         },
         "dynamo": {
-            "device": ["cuda"],
+            "device": ["cuda", "cpu"],
             "target": [
                 "runtime",
                 "dev",

@@ -263,7 +263,7 @@ jobs:
           fi
           # If CUDA version is empty, use empty arg to fallback to default (eg. for planner)
           if [ "${{ matrix.cuda_version }}" == "" ]; then
-            CUDA_FLAG=""
+            CUDA_FLAG="--device=cpu"
           else
             CUDA_FLAG="--cuda-version=${{ matrix.cuda_version }}"
           fi
