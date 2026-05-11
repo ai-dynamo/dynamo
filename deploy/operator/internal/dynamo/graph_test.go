@@ -900,6 +900,11 @@ func TestGenerateLabelsAndAnnotations_UsePreservedAlphaDGDServiceMetadata(t *tes
 			Namespace: "default",
 		},
 		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Annotations: map[string]string{
+				"dgd-annotation":          "from-dgd",
+				"legacy-annotation":       "from-dgd",
+				"pod-template-annotation": "from-dgd",
+			},
 			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {
 					ComponentType:    commonconsts.ComponentTypeWorker,
@@ -916,6 +921,7 @@ func TestGenerateLabelsAndAnnotations_UsePreservedAlphaDGDServiceMetadata(t *tes
 	service := beta.GetComponentByName("worker")
 	require.NotNil(t, service)
 	component := service
+	ensurePodTemplate(component).Annotations["pod-template-annotation"] = "from-pod-template"
 
 	labels, err := generateLabels(component, beta, "worker", DiscoveryContext{})
 	require.NoError(t, err)
@@ -924,7 +930,9 @@ func TestGenerateLabelsAndAnnotations_UsePreservedAlphaDGDServiceMetadata(t *tes
 
 	annotations, err := generateAnnotations(component, beta, "worker")
 	require.NoError(t, err)
+	assert.Equal(t, "from-dgd", annotations["dgd-annotation"])
 	assert.Equal(t, "kept", annotations["legacy-annotation"])
+	assert.Equal(t, "from-pod-template", annotations["pod-template-annotation"])
 }
 
 // TestGenerateComponentContext tests the generateComponentContext function
