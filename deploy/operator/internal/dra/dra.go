@@ -79,22 +79,23 @@ func ResourceClaimTemplateName(parentName, componentName string) string {
 	return fmt.Sprintf("%s-%s-gpu", parentName, strings.ToLower(componentName))
 }
 
-func ExtractGPUParamsFromResourceRequirements(gmsSpec *v1beta1.GPUMemoryServiceSpec, resources corev1.ResourceRequirements) (gpuCount int, deviceClassName string) {
+func ExtractGPUParamsFromResourceRequirements(gmsSpec *v1beta1.GPUMemoryServiceSpec, resources corev1.ResourceRequirements) (gpuCount int, deviceClassName string, err error) {
 	if gmsSpec == nil {
-		return 0, ""
+		return 0, "", nil
 	}
 	deviceClassName = gmsSpec.DeviceClassName
-	return ExtractGPUCountFromResourceRequirements(resources), deviceClassName
+	gpuCount, err = ExtractGPUCountFromResourceRequirements(resources)
+	return gpuCount, deviceClassName, err
 }
 
-func ExtractGPUCountFromResourceRequirements(resources corev1.ResourceRequirements) int {
-	if q, ok := gpuResourceQuantity(resources.Limits); ok {
-		return int(q.Value())
+func ExtractGPUCountFromResourceRequirements(resources corev1.ResourceRequirements) (int, error) {
+	if name, q, ok := gpuResourceQuantity(resources.Limits); ok {
+		return gpuCountFromQuantity(name, q)
 	}
-	if q, ok := gpuResourceQuantity(resources.Requests); ok {
-		return int(q.Value())
+	if name, q, ok := gpuResourceQuantity(resources.Requests); ok {
+		return gpuCountFromQuantity(name, q)
 	}
-	return 0
+	return 0, nil
 }
 
 // RemoveGPUResources deletes all scalar GPU resource entries from a resource list.
@@ -104,12 +105,20 @@ func RemoveGPUResources(resources corev1.ResourceList) {
 	}
 }
 
-func gpuResourceQuantity(resources corev1.ResourceList) (resource.Quantity, bool) {
+func gpuResourceQuantity(resources corev1.ResourceList) (corev1.ResourceName, resource.Quantity, bool) {
 	names := gpuResourceNames(resources)
 	if len(names) == 0 {
-		return resource.Quantity{}, false
+		return "", resource.Quantity{}, false
 	}
-	return resources[names[0]], true
+	return names[0], resources[names[0]], true
+}
+
+func gpuCountFromQuantity(name corev1.ResourceName, q resource.Quantity) (int, error) {
+	value := q.Value()
+	if q.CmpInt64(value) != 0 {
+		return 0, fmt.Errorf("GPU resource %q quantity %q must be a whole number", name, q.String())
+	}
+	return int(value), nil
 }
 
 func isGPUResourceName(name corev1.ResourceName) bool {

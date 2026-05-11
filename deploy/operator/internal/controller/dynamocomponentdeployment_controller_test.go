@@ -677,6 +677,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 		env[item.Name] = item.Value
 	}
 	require.Equal(t, commonconsts.ComponentTypeWorker, env[commonconsts.DynamoComponentEnvVar])
+	require.Equal(t, "db6b6891", env[commonconsts.DynamoNamespaceWorkerSuffixEnvVar])
 
 	service, toDelete, err := r.generateService(context.Background(), generateResourceOption{dynamoComponentDeployment: dcd})
 	require.NoError(t, err)

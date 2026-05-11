@@ -113,7 +113,7 @@ func TestApplyClaim_AlwaysTargetsFirstContainer(t *testing.T) {
 }
 
 func TestExtractGPUParamsFromResourceRequirements_MIGResource(t *testing.T) {
-	gpuCount, deviceClassName := ExtractGPUParamsFromResourceRequirements(
+	gpuCount, deviceClassName, err := ExtractGPUParamsFromResourceRequirements(
 		&v1beta1.GPUMemoryServiceSpec{DeviceClassName: "gpu.nvidia.com"},
 		corev1.ResourceRequirements{
 			Limits: corev1.ResourceList{
@@ -122,6 +122,7 @@ func TestExtractGPUParamsFromResourceRequirements_MIGResource(t *testing.T) {
 		},
 	)
 
+	require.NoError(t, err)
 	assert.Equal(t, 1, gpuCount)
 	assert.Equal(t, "gpu.nvidia.com", deviceClassName)
 }
@@ -134,7 +135,22 @@ func TestExtractGPUCountFromResourceRequirements_DeterministicResourceSelection(
 		},
 	}
 
-	assert.Equal(t, 4, ExtractGPUCountFromResourceRequirements(resources))
+	gpuCount, err := ExtractGPUCountFromResourceRequirements(resources)
+	require.NoError(t, err)
+	assert.Equal(t, 4, gpuCount)
+}
+
+func TestExtractGPUCountFromResourceRequirements_RejectsFractionalGPU(t *testing.T) {
+	resources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("500m"),
+		},
+	}
+
+	_, err := ExtractGPUCountFromResourceRequirements(resources)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be a whole number")
+	assert.Contains(t, err.Error(), "500m")
 }
 
 func TestGenerateResourceClaimTemplate_Enabled(t *testing.T) {

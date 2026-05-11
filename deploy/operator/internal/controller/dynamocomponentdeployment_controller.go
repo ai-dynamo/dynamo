@@ -188,7 +188,10 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	if r.RuntimeConfig.DRAEnabled {
 		componentName := dynamo.GetDCDComponentName(dynamoComponentDeployment)
 		spec := &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec
-		gpuCount, deviceClassName := dra.ExtractGPUParamsFromResourceRequirements(dynamo.GetGPUMemoryService(spec), dynamo.GetMainContainerResources(spec))
+		gpuCount, deviceClassName, err := dra.ExtractGPUParamsFromResourceRequirements(dynamo.GetGPUMemoryService(spec), dynamo.GetMainContainerResources(spec))
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("invalid GPU resource requirements for GMS ResourceClaimTemplate: %w", err)
+		}
 		parentName := dynamoComponentDeployment.GetParentGraphDeploymentName()
 		if parentName == "" {
 			parentName = dynamoComponentDeployment.Name
