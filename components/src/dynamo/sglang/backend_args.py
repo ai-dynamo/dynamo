@@ -116,6 +116,17 @@ class DynamoSGLangArgGroup(ArgGroup):
         # EPD multimodal flags happens in DynamoSGLangConfig.validate() below.
         add_frontend_decoding_arg(g, env_prefix="SGL")
 
+        add_argument(
+            g,
+            flag_name="--sglang-trace-level",
+            env_var="SGLANG_TRACE_LEVEL",
+            default=2,
+            arg_type=int,
+            choices=[1, 2, 3, 4],
+            help="SGLang global trace level when --enable-trace is set "
+            "(1=minimal, 2=per-request [default], 3=+decode_loop, 4=full).",
+        )
+
 
 class DynamoSGLangConfig(ConfigBase):
     """Configuration for Dynamo SGLang wrapper (SGLang-specific only)."""
@@ -133,6 +144,7 @@ class DynamoSGLangConfig(ConfigBase):
     video_generation_worker: bool
     enable_rl: bool
     frontend_decoding: bool = False
+    sglang_trace_level: int
 
     def validate(self) -> None:
         if not isinstance(self.embedding_transfer_mode, EmbeddingTransferMode):

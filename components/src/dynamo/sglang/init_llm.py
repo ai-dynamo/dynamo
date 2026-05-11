@@ -8,6 +8,7 @@ import time
 from typing import Awaitable, Callable, Optional
 
 import sglang as sgl
+from sglang.srt.observability.trace import set_global_trace_level
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
@@ -93,10 +94,8 @@ async def init_decode(
         engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
 
-    if getattr(server_args, "enable_trace", False):
-        from sglang.srt.observability.trace import set_global_trace_level
-
-        set_global_trace_level(int(os.environ.get("SGLANG_TRACE_LEVEL", "2")))
+    if server_args.enable_trace:
+        set_global_trace_level(dynamo_args.sglang_trace_level)
 
     load_lora_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"
@@ -240,10 +239,8 @@ async def init_prefill(
         engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
 
-    if getattr(server_args, "enable_trace", False):
-        from sglang.srt.observability.trace import set_global_trace_level
-
-        set_global_trace_level(int(os.environ.get("SGLANG_TRACE_LEVEL", "2")))
+    if server_args.enable_trace:
+        set_global_trace_level(dynamo_args.sglang_trace_level)
 
     load_lora_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"
