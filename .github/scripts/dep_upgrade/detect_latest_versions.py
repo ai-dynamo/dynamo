@@ -39,14 +39,20 @@ def gh_releases(repo: str) -> list[dict]:
 def parse_version(v: str) -> tuple:
     """Parse '1.3.0rc12' / '1.2.1' / '1.3.0' into a sortable tuple.
 
-    Stable releases sort after pre-releases of the same X.Y.Z.
+    Sort order within the same X.Y.Z is dev < rc < final < post.
     """
     m = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:(rc|post|dev)\.?(\d+))?$", v.lstrip("v"))
     if not m:
-        return (0, 0, 0, ("", v))
+        return (0, 0, 0, -1, -1)
     major, minor, patch, suf, sufnum = m.groups()
-    suf_key = suf or "z"
-    return (int(major), int(minor), int(patch), (suf_key, int(sufnum or 0)))
+    suffix_rank = {"dev": 0, "rc": 1, None: 2, "post": 3}
+    return (
+        int(major),
+        int(minor),
+        int(patch),
+        suffix_rank[suf],
+        int(sufnum or 0),
+    )
 
 
 def latest_release(repo: str, include_prereleases: bool) -> str:

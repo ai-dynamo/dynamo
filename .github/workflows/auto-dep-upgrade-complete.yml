@@ -53,6 +53,7 @@ jobs:
         id: pr
         env:
           GH_TOKEN: ${{ secrets.OPS_BOT_PAT }}
+          GH_REPO: ${{ github.repository }}
           FW:    ${{ steps.ctx.outputs.framework }}
           VER:   ${{ steps.ctx.outputs.version }}
           BR:    ${{ steps.ctx.outputs.branch }}
