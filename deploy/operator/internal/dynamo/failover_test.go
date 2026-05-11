@@ -282,7 +282,9 @@ func TestGetGPUCount(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, getGPUCount(tt.resources))
+			got, err := getGPUCount(tt.resources)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -379,7 +381,8 @@ func TestGmsResourceClaimTemplateConfigs_SingleNode(t *testing.T) {
 		{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
 	}
 
-	configs := gmsResourceClaimTemplateConfigs("svc", gmsSpec, resources, roles)
+	configs, err := gmsResourceClaimTemplateConfigs("svc", gmsSpec, resources, roles)
+	require.NoError(t, err)
 
 	require.Len(t, configs, 1)
 	assert.Equal(t, "svc-gpu-rank-0", configs[0].Name)
@@ -399,7 +402,8 @@ func TestGmsResourceClaimTemplateConfigs_Multinode(t *testing.T) {
 		{Name: "svc-wkr-1", Role: RoleWorker, Rank: 1, Replicas: 3},
 	}
 
-	configs := gmsResourceClaimTemplateConfigs("svc", &v1beta1.GPUMemoryServiceSpec{}, resources, roles)
+	configs, err := gmsResourceClaimTemplateConfigs("svc", &v1beta1.GPUMemoryServiceSpec{}, resources, roles)
+	require.NoError(t, err)
 
 	require.Len(t, configs, 2)
 	assert.Equal(t, "svc-gpu-rank-0", configs[0].Name)

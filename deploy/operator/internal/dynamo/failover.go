@@ -285,8 +285,12 @@ func removeEnvVar(c *corev1.Container, name string) {
 }
 
 // getGPUCount extracts the GPU count from the component's Kubernetes resource requirements.
-func getGPUCount(resources corev1.ResourceRequirements) int32 {
-	return int32(dra.ExtractGPUCountFromResourceRequirements(resources))
+func getGPUCount(resources corev1.ResourceRequirements) (int32, error) {
+	gpuCount, err := dra.ExtractGPUCountFromResourceRequirements(resources)
+	if err != nil {
+		return 0, err
+	}
+	return int32(gpuCount), nil
 }
 
 // getDeviceClassName returns the DRA device class name from the GMS config,
@@ -308,7 +312,11 @@ func gmsRCTName(serviceName string, rank int32) string {
 // gmsResourceClaimTemplateConfigs builds one PCS-level ResourceClaimTemplateConfig
 // per rank. Each RCT has the same GPU spec but a distinct per-rank name so that
 // each rank's GMS + engine pods get their own ResourceClaim.
-func gmsResourceClaimTemplateConfigs(serviceName string, gmsSpec *v1beta1.GPUMemoryServiceSpec, resources corev1.ResourceRequirements, roles []ServiceRole) []grovev1alpha1.ResourceClaimTemplateConfig {
+func gmsResourceClaimTemplateConfigs(serviceName string, gmsSpec *v1beta1.GPUMemoryServiceSpec, resources corev1.ResourceRequirements, roles []ServiceRole) ([]grovev1alpha1.ResourceClaimTemplateConfig, error) {
+	gpuCount, err := getGPUCount(resources)
+	if err != nil {
+		return nil, err
+	}
 	seen := map[int32]bool{}
 	configs := make([]grovev1alpha1.ResourceClaimTemplateConfig, 0, len(roles))
 	for _, r := range roles {
@@ -327,7 +335,7 @@ func gmsResourceClaimTemplateConfigs(serviceName string, gmsSpec *v1beta1.GPUMem
 								Exactly: &resourcev1.ExactDeviceRequest{
 									DeviceClassName: getDeviceClassName(gmsSpec),
 									AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
-									Count:           int64(getGPUCount(resources)),
+									Count:           int64(gpuCount),
 								},
 							},
 						},
@@ -336,7 +344,7 @@ func gmsResourceClaimTemplateConfigs(serviceName string, gmsSpec *v1beta1.GPUMem
 			},
 		})
 	}
-	return configs
+	return configs, nil
 }
 
 // gmsResourceSharingEntries builds one PCSG-level ResourceSharingSpec per rank.

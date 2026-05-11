@@ -2004,7 +2004,11 @@ func GenerateGrovePodCliqueSet(
 		applyCliqueStartupDependencies(gangSet, roles, backendFramework, numberOfNodes, isInterPodGMS)
 
 		if isInterPodGMS {
-			resourceClaimTemplates = append(resourceClaimTemplates, gmsResourceClaimTemplateConfigs(componentName, GetGPUMemoryService(component), GetMainContainerResources(component), roles)...)
+			configs, err := gmsResourceClaimTemplateConfigs(componentName, GetGPUMemoryService(component), GetMainContainerResources(component), roles)
+			if err != nil {
+				return nil, fmt.Errorf("failed to build GMS ResourceClaimTemplate configs for component %s: %w", componentName, err)
+			}
+			resourceClaimTemplates = append(resourceClaimTemplates, configs...)
 		}
 
 		if usesPCSG {
@@ -2056,7 +2060,11 @@ func generatePodSpecForRole(
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate base podSpec for GMS: %w", err)
 		}
-		return gmsWeightServerPodSpec(basePodSpec, r.Rank, int(getGPUCount(GetMainContainerResources(component)))), nil
+		gpuCount, err := getGPUCount(GetMainContainerResources(component))
+		if err != nil {
+			return nil, fmt.Errorf("failed to get GPU count for GMS weight server: %w", err)
+		}
+		return gmsWeightServerPodSpec(basePodSpec, r.Rank, int(gpuCount)), nil
 	}
 
 	// Engine pod (or non-GMS pod): optionally use a rank-aware deployer for multinode inter-pod GMS
@@ -2378,6 +2386,9 @@ func GenerateBasePodSpecForController(
 	componentSpec := ConvertDynamoComponentDeploymentToSpec(dynComponent)
 	if options.WorkloadComponentType != "" {
 		componentSpec.ComponentType = options.WorkloadComponentType
+	}
+	if workerHash := dynComponent.GetLabels()[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" && IsWorkerComponent(string(componentSpec.ComponentType)) {
+		ensurePodTemplate(componentSpec).Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
 
 	numberOfNodes := componentSpec.GetNumberOfNodes()
