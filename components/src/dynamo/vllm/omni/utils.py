@@ -78,6 +78,16 @@ def image_generation_negative_prompt_from_request(request: dict) -> str | None:
     return None
 
 
+def _normalize_nvext(request: dict) -> dict[str, Any]:
+    nvext = request.get("nvext")
+    if isinstance(nvext, dict):
+        return nvext
+    model_dump = getattr(nvext, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(exclude_none=True)
+    return {}
+
+
 def build_image_generation_prompt(
     prompt: str,
     height: int,
@@ -132,14 +142,18 @@ async def parse_omni_request(
 
     if request_type in (RequestType.VIDEO_GENERATION, RequestType.IMAGE_GENERATION):
         is_video = request_type == RequestType.VIDEO_GENERATION
-        nvext = request.get("nvext") or {}
+        nvext = _normalize_nvext(request)
         default_size = DEFAULT_VIDEO_SIZE if is_video else DEFAULT_IMAGE_SIZE
         size_kwargs = {} if is_video else {"default_w": 1024, "default_h": 1024}
         if is_video:
             width, height = parse_size(request.get("size", default_size), **size_kwargs)
         else:
             width, height = image_generation_size_from_request(request)
-        sp: dict = {"height": height, "width": width, **nvext}
+            if nvext.get("width") is not None:
+                width = int(nvext["width"])
+            if nvext.get("height") is not None:
+                height = int(nvext["height"])
+        sp: dict = {**nvext, "height": height, "width": width}
         if is_video:
             sp["num_frames"] = compute_num_frames(
                 num_frames=nvext.get("num_frames"),

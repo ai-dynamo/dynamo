@@ -339,6 +339,26 @@ class TestParseOmniRequest:
         assert result["engine_inputs"]["negative_prompt"] == "blurry, low quality"
         assert result["original_prompt"]["negative_prompt"] == "blurry, low quality"
 
+    def test_image_request_uses_nvext_dimensions_consistently(self):
+        request = {
+            "prompt": "a red apple",
+            "size": "512x512",
+            "nvext": {"height": 640, "width": 768},
+        }
+
+        result = asyncio.run(parse_omni_request(request, ["image"]))
+
+        assert result["sampling_params_list"]["height"] == 640
+        assert result["sampling_params_list"]["width"] == 768
+        assert result["engine_inputs"]["mm_processor_kwargs"] == {
+            "target_h": 640,
+            "target_w": 768,
+        }
+        assert result["original_prompt"]["mm_processor_kwargs"] == {
+            "target_h": 640,
+            "target_w": 768,
+        }
+
     @pytest.mark.asyncio
     async def test_nvext_params_go_into_sampling_params_not_prompt(self):
         request = {
