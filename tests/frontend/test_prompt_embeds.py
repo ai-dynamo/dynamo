@@ -31,7 +31,6 @@ import pytest
 import torch
 from openai import OpenAI
 
-from tests.utils.device import detect_target_device
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import ServicePorts
@@ -46,7 +45,6 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.nightly,
     pytest.mark.gpu_1,
-    pytest.mark.xpu_1,
     pytest.mark.model(TEST_MODEL),
 ]
 
@@ -70,12 +68,6 @@ class VllmPromptEmbedsWorkerProcess(ManagedProcess):
         self.frontend_port = int(frontend_port)
         self.system_port = int(system_port)
 
-        # On XPU, set an explicit max-num-seqs to ensure the worker can handle
-        # concurrent requests without OOM or scheduling timeouts on single-device CI.
-        extra_worker_args: list[str] = []
-        if detect_target_device() == "xpu":
-            extra_worker_args = ["--max-num-seqs", "8"]
-
         command = [
             "python3",
             "-m",
@@ -84,13 +76,10 @@ class VllmPromptEmbedsWorkerProcess(ManagedProcess):
             TEST_MODEL,
             "--max-model-len",
             "4096",
-            *extra_worker_args,
             "--discovery-backend",
             "file",
             "--request-plane",
             "tcp",
-            "--event-plane",
-            "zmq",
             "--enable-prompt-embeds",
             "--kv-events-config",
             '{"enable_kv_cache_events": false}',
@@ -163,14 +152,7 @@ def start_services(
         request,
         frontend_port=frontend_port,
         terminate_all_matching_process_names=False,
-        extra_args=[
-            "--discovery-backend",
-            "file",
-            "--request-plane",
-            "tcp",
-            "--event-plane",
-            "zmq",
-        ],
+        extra_args=["--discovery-backend", "file", "--request-plane", "tcp"],
     ):
         logger.info("Frontend started for prompt embeds tests")
         with VllmPromptEmbedsWorkerProcess(
@@ -237,9 +219,6 @@ class TestPromptEmbedsE2E:
 
         This tests the Python-side torch.load() error handling, which
         Rust validation cannot cover (Rust only checks base64 and size).
-
-        Non-streaming mode should surface invalid prompt_embeds as an error and
-        the OpenAI client should raise an exception.
         """
         # Create data that passes Rust validation (valid base64, >100 bytes)
         # but fails Python torch.load()
@@ -251,7 +230,6 @@ class TestPromptEmbedsE2E:
                 model=TEST_MODEL,
                 prompt="",
                 max_tokens=5,
-                stream=False,
                 extra_body={"prompt_embeds": invalid_base64},
             )
 
@@ -283,17 +261,11 @@ class TestPromptEmbedsE2E:
 
         assert response.usage is not None, "Should have usage statistics"
         assert (
-            response.usage.prompt_tokens is not None
-        ), "prompt_tokens should not be None when using embeddings"
-        assert (
             response.usage.prompt_tokens != 0
         ), "BUG REGRESSION: prompt_tokens is 0! This was the bug in v2.0.3."
         assert (
             response.usage.prompt_tokens == sequence_length
         ), f"Expected prompt_tokens={sequence_length}, got {response.usage.prompt_tokens}"
-        assert (
-            response.usage.total_tokens is not None
-        ), "total_tokens should not be None"
         assert response.usage.total_tokens == (
             response.usage.prompt_tokens + response.usage.completion_tokens
         ), "total_tokens should equal prompt_tokens + completion_tokens"
@@ -346,17 +318,12 @@ class TestPromptEmbedsE2E:
                 extra_body={"prompt_embeds": embeddings_base64},
             )
 
-        # XPU has limited parallelism: 5 concurrent requests can exceed
-        # max-num-seqs causing OOM or scheduling timeouts on single-device CI.
-        # CUDA runners have sufficient VRAM for the original 5 concurrent requests.
-        NUM_CONCURRENT = 3 if detect_target_device() == "xpu" else 5
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=NUM_CONCURRENT
-        ) as executor:
-            futures = [executor.submit(send_request) for _ in range(NUM_CONCURRENT)]
+        # Send 5 concurrent requests
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(send_request) for _ in range(5)]
             results = [f.result() for f in concurrent.futures.as_completed(futures)]
 
-        assert len(results) == NUM_CONCURRENT, "All concurrent requests should complete"
+        assert len(results) == 5, "All concurrent requests should complete"
         for response in results:
             assert response.choices, "Each response should have choices"
             assert len(response.choices[0].text) > 0, "Each response should have text"
