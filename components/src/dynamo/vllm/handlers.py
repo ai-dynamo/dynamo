@@ -637,6 +637,21 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._quiesce_lock = asyncio.Lock()
         self._mm_kwargs_receiver: MmKwargsNixlReceiver | None = None
 
+        # Some models (Kimi-K2.5) declare their image modality as
+        # "vision_chunk" rather than "image". vLLM's openai entrypoint
+        # renames the dict key + wraps images via the chat_utils tracker,
+        # but dynamo bypasses chat_utils and builds `multi_modal_data`
+        # directly — so we mirror the rename + wrap here. The flag lives
+        # on the model's HF config; defaults to False for all other
+        # families.
+        self._use_unified_vision_chunk = bool(
+            getattr(
+                self.engine_client.vllm_config.model_config.hf_config,
+                "use_unified_vision_chunk",
+                False,
+            )
+        )
+
         # Serialise concurrent scale_elastic_ep calls.  vLLM's elastic-EP
         # bootstrap creates a fresh TCPStore per scale operation and stores it
         # in engine_client._coord_store.  When two callers race through
@@ -1700,17 +1715,38 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 )
 
         image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
-        if "image" not in vllm_mm_data and image_mm_items:
+        # Kimi-K2.5 (and any model with `use_unified_vision_chunk=True`)
+        # consumes images under the `vision_chunk` modality, not `image`,
+        # and expects each item to be a `VisionChunkImage` TypedDict.
+        # See chat_utils.use_unified_vision_chunk_modality for the
+        # upstream rename + wrap path.
+        image_modality_key = (
+            "vision_chunk" if self._use_unified_vision_chunk else "image"
+        )
+        if image_modality_key not in vllm_mm_data and image_mm_items:
             with _nvtx.annotate("mm_backend:image_download", color="green"):
                 images = await self.image_loader.load_image_batch(
                     image_mm_items,
                 )
 
             if images:
-                # vLLM expects single image or list
-                vllm_mm_data["image"] = images[0] if len(images) == 1 else images
+                if self._use_unified_vision_chunk:
+                    # `VisionChunkImage` is a TypedDict — a plain dict
+                    # with `type`/`image`/`uuid` keys is structurally
+                    # equivalent. uuid=None matches vLLM's chat_utils
+                    # path when the request doesn't pre-supply one.
+                    chunks = [
+                        {"type": "image", "image": img, "uuid": None} for img in images
+                    ]
+                    vllm_mm_data["vision_chunk"] = (
+                        chunks[0] if len(chunks) == 1 else chunks
+                    )
+                else:
+                    # vLLM expects single image or list
+                    vllm_mm_data["image"] = images[0] if len(images) == 1 else images
                 logger.debug(
-                    f"Extracted {len(images)} image(s) for multimodal processing"
+                    f"Extracted {len(images)} image(s) for multimodal "
+                    f"processing under modality={image_modality_key!r}"
                 )
 
         video_mm_items = mm_map.get(VIDEO_URL_KEY, [])
