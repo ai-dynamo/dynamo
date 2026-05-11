@@ -38,6 +38,7 @@ use super::{
     SessionId,
     StagingMode,
     accessor::{BlockAccessor, PolicyContext},
+    dispatch::{PullRef, WirePullOptions, plan_pull},
     parallelism::{ParallelismTemplate, stamp_parallelism_descriptors},
     session::{
         BlockHolder, ControlRole, ControllableSessionOptions, ControllableSessionResult,
@@ -1115,51 +1116,156 @@ impl InstanceLeader {
         self.import_remote_metadata(remote_instance, metadata).await
     }
 
-    /// Pull remote block sets into local G2 block IDs.
+    /// Public cross-parallelism RDMA pull entrypoint (AB-4).
     ///
-    /// This is the conditional-disaggregation primitive for block-set transfer:
-    /// callers exchange `RemoteBlockSet`s over a disagg session, ensure peer
-    /// metadata once, then execute RDMA pulls through the engine.
+    /// Resolves `refs` into per-local-worker pull plans via
+    /// [`plan_pull`], dispatches each plan to its target local worker,
+    /// and awaits all per-rank notifications. Source and destination
+    /// layouts are hardcoded to [`LogicalLayoutHandle::G2`] (locked
+    /// decision #1 — `T = G2` concrete).
+    ///
+    /// `refs` must be paired (`src_block_id` in the remote leader's
+    /// block-id space, `dst_block_id` in the local leader's). The
+    /// caller (typically a session) owns hash→block-id resolution.
+    ///
+    /// Convenience wrapper around [`Self::rdma_pull_with_opts`] with
+    /// default [`WirePullOptions`].
+    pub async fn rdma_pull(&self, remote_instance: InstanceId, refs: Vec<PullRef>) -> Result<()> {
+        self.rdma_pull_with_opts(remote_instance, refs, WirePullOptions::default())
+            .await
+    }
+
+    /// As [`Self::rdma_pull`] but takes a caller-supplied
+    /// [`WirePullOptions`] (NIXL write notification + metric route).
+    ///
+    /// Steps:
+    ///
+    /// 1. Lazily import peer metadata if not already cached.
+    /// 2. Empty `refs` → `Ok(())` immediately (no planning, no RPCs).
+    /// 3. Look up the local [`ParallelismTemplate`] and the cached
+    ///    per-rank [`ParallelismDescriptor`] set for `remote_instance`.
+    /// 4. Coherence guard: `template.tp_size == parallel_worker.worker_count()`.
+    /// 5. [`plan_pull`] → `Vec<(local_rank, WorkerPullPlan)>`.
+    /// 6. Dispatch each plan to `parallel_worker.workers()[local_rank]`
+    ///    via [`crate::worker::WorkerTransfers::execute_remote_pull_plan`].
+    /// 7. Aggregate per-plan notifications, await.
+    ///
+    /// Locked decision #5: `plan_pull` is the always-on path. The
+    /// symmetric case is the degenerate output (one shard per local
+    /// rank, full extents); the worker handler routes it through the
+    /// planner-driven [`kvbm_physical::manager::TransferManager::execute_transfer_selection`]
+    /// like any other plan. This is a behaviour change for symmetric
+    /// callers vs the legacy direct-onboard path — under symmetric +
+    /// identical layouts the planner still emits a single
+    /// `CopyPlan::Direct`, but planning overhead lands on the hot path.
+    /// A future `use_planner = false` opt-out can short-circuit this if
+    /// micro-benchmarks ever show it matters.
+    pub async fn rdma_pull_with_opts(
+        &self,
+        remote_instance: InstanceId,
+        refs: Vec<PullRef>,
+        opts: WirePullOptions,
+    ) -> Result<()> {
+        if refs.is_empty() {
+            return Ok(());
+        }
+
+        self.ensure_remote_metadata(remote_instance).await?;
+
+        let parallel_worker = self
+            .parallel_worker
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("rdma_pull: no parallel worker configured"))?;
+
+        let template = self.parallelism_template.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "rdma_pull: no ParallelismTemplate configured on the leader; cross-parallelism \
+                 transfers require InstanceLeaderBuilder::parallelism_template(...)"
+            )
+        })?;
+
+        let descriptors = parallel_worker
+            .remote_descriptors_for(remote_instance)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "rdma_pull: no ParallelismDescriptor cache for instance {}; peer must stamp \
+                     descriptors and connect_remote must have run through the Strict path",
+                    remote_instance
+                )
+            })?;
+
+        // Coherence guard: same invariant the asymmetric branch of
+        // SpmdParallelWorkers enforces. A template that disagrees with
+        // the worker count would produce mis-shaped plans.
+        if template.tp_size != parallel_worker.worker_count() {
+            anyhow::bail!(
+                "rdma_pull: local ParallelismTemplate tp_size ({}) disagrees with worker count ({}); \
+                 template must describe the local worker grid",
+                template.tp_size,
+                parallel_worker.worker_count(),
+            );
+        }
+
+        let plans = plan_pull(
+            &template,
+            &descriptors,
+            remote_instance,
+            LogicalLayoutHandle::G2,
+            LogicalLayoutHandle::G2,
+            &refs,
+            &opts,
+        )?;
+
+        if plans.is_empty() {
+            // plan_pull skips local ranks with no shards. With refs
+            // non-empty and PP=1 every rank participates, so this
+            // shouldn't normally happen — but guard against future
+            // layer-range filtering quietly producing nothing to do.
+            return Ok(());
+        }
+
+        let workers = parallel_worker.workers();
+        let mut notifications = Vec::with_capacity(plans.len());
+        for (local_rank, plan) in plans {
+            let worker = workers.get(local_rank).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "rdma_pull: plan_pull produced a plan for local_rank {local_rank} but only \
+                     {} workers are registered",
+                    workers.len()
+                )
+            })?;
+            notifications.push(worker.execute_remote_pull_plan(plan)?);
+        }
+
+        let events = Arc::new(self.messenger.event_manager());
+        let aggregated = TransferCompleteNotification::aggregate(
+            notifications,
+            &events,
+            &tokio::runtime::Handle::current(),
+        )?;
+        aggregated.await?;
+        Ok(())
+    }
+
+    /// Pull remote block sets into local G2 block IDs (legacy shim).
+    ///
+    /// AB-4: this is now a thin wrapper around [`Self::rdma_pull_with_opts`]
+    /// — every `RemoteBlockSet` is flattened into combined `PullRef`s
+    /// (the prior per-block-set loop), then a single rdma_pull call
+    /// dispatches the work through the cross-parallelism planner.
+    ///
+    /// The notification return type is preserved by spawning the
+    /// async pull on the current tokio runtime and wrapping its
+    /// future via a fresh velo Event. AB-5 swaps callers to
+    /// `rdma_pull_with_opts` directly and this shim can be retired.
     pub async fn pull_remote_block_sets(
         &self,
         remote_instance: InstanceId,
         block_sets: &[RemoteBlockSet],
         local_dst_block_ids: &[BlockId],
     ) -> Result<TransferCompleteNotification> {
-        self.ensure_remote_metadata(remote_instance).await?;
-        self.pull_remote_block_sets_explicit(
-            remote_instance,
-            block_sets,
-            LogicalLayoutHandle::G2,
-            local_dst_block_ids,
-            TransferOptions::default(),
-        )
-    }
-
-    /// Pull remote block sets into a selected local logical layout.
-    ///
-    /// Caller must have already imported peer metadata via
-    /// `ensure_remote_metadata` or `import_remote_metadata`.
-    pub fn pull_remote_block_sets_explicit(
-        &self,
-        remote_instance: InstanceId,
-        block_sets: &[RemoteBlockSet],
-        dst_layout: LogicalLayoutHandle,
-        local_dst_block_ids: &[BlockId],
-        options: TransferOptions,
-    ) -> Result<TransferCompleteNotification> {
-        let parallel_worker = self
-            .parallel_worker
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No parallel worker configured"))?;
-
-        if !parallel_worker.has_remote_metadata(remote_instance) {
-            anyhow::bail!(
-                "Remote metadata not imported for instance {}",
-                remote_instance
-            );
-        }
-
+        // Length / count validation up front so callers see the same
+        // hard bail they used to see, before any async work spawns.
         let source_count: usize = block_sets.iter().map(|set| set.blocks.len()).sum();
         if source_count != local_dst_block_ids.len() {
             anyhow::bail!(
@@ -1169,37 +1275,44 @@ impl InstanceLeader {
             );
         }
 
-        let mut offset = 0;
-        let mut notifications = Vec::new();
+        // Flatten every block_set into a single combined ref vector.
+        // Order across sets must match local_dst_block_ids — same
+        // offset bookkeeping the pre-shim loop used.
+        let mut refs: Vec<PullRef> = Vec::with_capacity(source_count);
+        let mut offset = 0usize;
         for block_set in block_sets {
-            let len = block_set.blocks.len();
-            if len == 0 {
-                continue;
+            for block in &block_set.blocks {
+                refs.push(PullRef {
+                    src_block_id: block.block_id,
+                    dst_block_id: local_dst_block_ids[offset],
+                });
+                offset += 1;
             }
-            let src_block_ids: Vec<BlockId> = block_set
-                .blocks
-                .iter()
-                .map(|block| block.block_id)
-                .collect();
-            let dst_block_ids: Arc<[BlockId]> =
-                Arc::from(local_dst_block_ids[offset..offset + len].to_vec());
-            offset += len;
-
-            notifications.push(parallel_worker.execute_remote_onboard_for_instance(
-                remote_instance,
-                block_set.source_layout,
-                src_block_ids,
-                dst_layout,
-                dst_block_ids,
-                options.clone(),
-            )?);
         }
 
-        TransferCompleteNotification::aggregate(
-            notifications,
-            &Arc::new(self.messenger.event_manager()),
-            &tokio::runtime::Handle::current(),
-        )
+        // Wrap the async rdma_pull as a TransferCompleteNotification
+        // so this shim keeps its pre-AB-4 return type. The leader is
+        // already inside a tokio runtime (callers `.await` this fn).
+        let events = self.messenger.event_manager();
+        let event = events.new_event()?;
+        let awaiter = events.awaiter(event.handle())?;
+
+        let leader = self.clone();
+        tokio::runtime::Handle::current().spawn(async move {
+            match leader
+                .rdma_pull_with_opts(remote_instance, refs, WirePullOptions::default())
+                .await
+            {
+                Ok(()) => {
+                    let _ = event.trigger();
+                }
+                Err(e) => {
+                    let _ = event.poison(e.to_string());
+                }
+            }
+        });
+
+        Ok(TransferCompleteNotification::from_awaiter(awaiter))
     }
 
     // ========================================================================

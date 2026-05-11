@@ -652,6 +652,17 @@ impl ParallelWorkers for SpmdParallelWorkers {
     fn workers(&self) -> &[Arc<dyn Worker>] {
         &self.workers
     }
+
+    fn remote_descriptors_for(
+        &self,
+        instance_id: InstanceId,
+    ) -> Option<Vec<ParallelismDescriptor>> {
+        self.remote_descriptors
+            .read()
+            .unwrap()
+            .get(&instance_id)
+            .cloned()
+    }
 }
 
 impl ObjectBlockOps for SpmdParallelWorkers {
@@ -1027,6 +1038,67 @@ mod tests {
                 .get(&instance_id)
                 .copied(),
             Some(4),
+        );
+    }
+
+    /// AB-4: the `ParallelWorkers::remote_descriptors_for` accessor
+    /// returns the cached set after a Strict import.
+    #[test]
+    fn remote_descriptors_for_returns_cached_strict_set() {
+        use ::velo::EventManager;
+        use kvbm_physical::manager::{LogicalLayoutDescriptor, SerializedLayout, WorkerAddress};
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let spmd = SpmdParallelWorkers::new(
+            Vec::new(),
+            Arc::new(EventManager::local()),
+            rt.handle().clone(),
+        );
+
+        let instance_id = InstanceId::new_v4();
+        let stamped: Vec<SerializedLayout> = (0..3)
+            .map(|rank| {
+                SerializedLayout::pack(
+                    WorkerAddress::new(rank as u64, format!("a-{rank}")),
+                    vec![],
+                    Vec::<LogicalLayoutDescriptor>::new(),
+                    Some(descriptor(rank, 3)),
+                )
+                .unwrap()
+            })
+            .collect();
+        spmd.connect_remote(instance_id, stamped).unwrap();
+
+        // Call the trait accessor (the path rdma_pull uses).
+        let cached =
+            <SpmdParallelWorkers as ParallelWorkers>::remote_descriptors_for(&spmd, instance_id)
+                .expect("Strict import must surface descriptors via the accessor");
+        assert_eq!(cached.len(), 3);
+        for (i, d) in cached.iter().enumerate() {
+            assert_eq!(d.rank, i);
+            assert_eq!(d.tp_size, 3);
+        }
+    }
+
+    /// AB-4: `remote_descriptors_for` returns `None` for an instance
+    /// the leader hasn't connected to.
+    #[test]
+    fn remote_descriptors_for_returns_none_for_unknown_instance() {
+        use ::velo::EventManager;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let spmd = SpmdParallelWorkers::new(
+            Vec::new(),
+            Arc::new(EventManager::local()),
+            rt.handle().clone(),
+        );
+        let absent = InstanceId::new_v4();
+        assert!(
+            <SpmdParallelWorkers as ParallelWorkers>::remote_descriptors_for(&spmd, absent)
+                .is_none()
         );
     }
 
