@@ -279,13 +279,21 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
     export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} && \
+    # Remove any cupy variant that may already be in the inherited venv.
+    # cupy's `_detect_duplicate_installation` ERRORS at import if both cu12
+    # and cu13 variants are present, so we install exactly one variant
+    # matching the build target's CUDA major version. Discover the installed
+    # variants instead of hardcoding so future cupy versions (cupy-cuda14x,
+    # etc.) are covered without further edits.
+    (uv pip freeze 2>/dev/null | awk -F= '/^cupy-/{print $1}' | xargs -r uv pip uninstall 2>/dev/null || true) && \
     uv pip install \
         --no-cache \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.benchmark.txt \
-        cupy-cuda13x && \
+        cupy-cuda${CUDA_VERSION_MAJOR}x && \
     # nvidia-cutlass-dsl-libs-base==4.4.1 (transitive dep) ships a stub cute/experimental/__init__.py
     # that unconditionally raises NotImplementedError, crashing TRT-LLM on import. cutlass-dsl==4.3.4
     # (pinned by TRT-LLM) works without cute/experimental/. Remove the stub to fix the NotImplementedError.
