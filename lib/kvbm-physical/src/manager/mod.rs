@@ -335,6 +335,117 @@ impl TransferManager {
         }
     }
 
+    /// Sliced cross-leader transfer — AB-1d.
+    ///
+    /// The caller supplies a [`crate::transfer::TransferSelection`] carrying
+    /// `(src_block_id, dst_block_id)` pairs and the per-axis coordinate-space
+    /// restrictions (`axis_slices`) describing the slice of each block to move.
+    /// Typical construction: intersect two [`crate::layout::LayoutView`]s via
+    /// [`crate::layout::intersect_views`] and drop the resulting
+    /// `Vec<AxisIntersection>` into a [`crate::transfer::TransferSelection`].
+    ///
+    /// Routes through the planner-driven NIXL/Cuda path
+    /// (`use_planner = true` is forced internally; `axis_slices` cannot
+    /// be expressed on the legacy executor). `layer_range` is incompatible
+    /// with the planner today; passing both errors. Empty `axis_slices`
+    /// is accepted and degenerates to a full-extent transfer through the
+    /// planner.
+    pub fn execute_transfer_selection(
+        &self,
+        src_handle: LayoutHandle,
+        dst_handle: LayoutHandle,
+        selection: crate::transfer::TransferSelection,
+        options: TransferOptions,
+    ) -> Result<TransferCompleteNotification> {
+        // Split out block pairs into parallel vecs for the executor entry.
+        let (src_blocks, dst_blocks): (Vec<BlockId>, Vec<BlockId>) =
+            selection.block_pairs.iter().copied().unzip();
+        let axis_slices = selection.axis_slices;
+
+        let (src_layout, dst_layout) = {
+            let registry = self.registry.read().unwrap();
+            let src = registry
+                .get_layout(src_handle)
+                .ok_or_else(|| anyhow!("invalid source handle: {}", src_handle))?
+                .clone();
+            let dst = registry
+                .get_layout(dst_handle)
+                .ok_or_else(|| anyhow!("invalid destination handle: {}", dst_handle))?
+                .clone();
+            (src, dst)
+        };
+
+        let (
+            layer_range,
+            nixl_write_notification,
+            bounce_buffer,
+            cuda_stream,
+            src_kv_layout,
+            dst_kv_layout,
+            metric_route,
+            _use_planner_caller_choice,
+        ) = options.dissolve();
+
+        let mut internal_options = TransferOptionsInternal::builder()
+            .use_planner(true)
+            .axis_slices(axis_slices);
+
+        if let Some(range) = layer_range {
+            internal_options = internal_options.layer_range(range);
+        }
+        if let Some(notification) = nixl_write_notification {
+            internal_options = internal_options.nixl_write_notification(notification);
+        }
+        if let Some(bounce) = bounce_buffer {
+            let (handle, block_ids) = bounce.into_parts();
+            let bounce_buffer = self.create_bounce_buffer(handle, block_ids)?;
+            internal_options = internal_options.bounce_buffer(bounce_buffer);
+        }
+        if let Some(stream) = cuda_stream {
+            internal_options = internal_options.cuda_stream(stream);
+        }
+        if let Some(layout) = src_kv_layout {
+            internal_options = internal_options.src_kv_layout(layout);
+        }
+        if let Some(layout) = dst_kv_layout {
+            internal_options = internal_options.dst_kv_layout(layout);
+        }
+        if let Some(route) = metric_route {
+            internal_options = internal_options.metric_route(route);
+        }
+
+        let options = internal_options.build()?;
+        let metric_route = options.metric_route;
+        let transfer_start = metric_route.map(|_| Instant::now());
+
+        let notification = super::transfer::executor::execute_transfer(
+            &src_layout,
+            &dst_layout,
+            &src_blocks,
+            &dst_blocks,
+            options,
+            &self.context,
+        );
+
+        match notification {
+            Ok(notification) => match (metric_route, transfer_start) {
+                (Some(route), Some(started_at)) => self.wrap_notification_with_metrics(
+                    route,
+                    dst_blocks.len() as u64,
+                    started_at,
+                    notification,
+                ),
+                _ => Ok(notification),
+            },
+            Err(error) => {
+                if let Some(route) = metric_route {
+                    self.record_transfer_failure(route, "internal");
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Execute a G4 offload.
     ///
     /// Takes a LayoutHandle and a vector of block IDs for the source blocks and

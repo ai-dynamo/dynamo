@@ -75,6 +75,7 @@ use crate::transfer::plan::{
 ///   raw-copy without going through the kernel catalog would silently
 ///   transpose-corrupt the data. PR-6.1 wires the kernel catalog
 ///   and removes this gate from the Cuda* entrypoint.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_planner_cuda_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
@@ -82,6 +83,7 @@ pub(crate) fn execute_planner_cuda_transfer(
     dst_block_ids: &[BlockId],
     strategy: TransferStrategy,
     cuda_stream: Option<Arc<CudaStream>>,
+    axis_slices: Vec<kvbm_common::AxisIntersection>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     validate_cuda_planner_entry(
@@ -111,6 +113,7 @@ pub(crate) fn execute_planner_cuda_transfer(
         ctx.capabilities(),
         CopyPolicy::default(),
         benchmark_outcome,
+        axis_slices,
     )?;
 
     // Acquire a stream (caller-provided or pool-acquired). Direction
@@ -231,6 +234,7 @@ pub(crate) fn execute_planner_cuda_transfer(
 /// - locality is wrong for the chosen op (Write requires src local;
 ///   Read requires dst local — same invariants the legacy executor
 ///   asserts).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_planner_nixl_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
@@ -240,6 +244,7 @@ pub(crate) fn execute_planner_nixl_transfer(
     #[cfg_attr(not(feature = "permute_kernels"), allow(unused_variables))] bounce_buffer: Option<
         &crate::transfer::BounceBufferInternal,
     >,
+    axis_slices: Vec<kvbm_common::AxisIntersection>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
     validate_nixl_planner_entry(
@@ -278,6 +283,7 @@ pub(crate) fn execute_planner_nixl_transfer(
         ctx.capabilities(),
         nixl_policy,
         nixl_benchmark_outcome,
+        axis_slices,
     )? {
         PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
         PlanOutcome::Direct(ops) => ops,
@@ -538,6 +544,7 @@ fn lookup_benchmark_outcome(
     ctx.benchmark_cache().lookup(&key)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_and_lower(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
@@ -547,6 +554,7 @@ fn plan_and_lower(
     capabilities: &crate::transfer::TransferCapabilities,
     policy: CopyPolicy,
     benchmark_outcome: Option<BenchmarkOutcome>,
+    axis_slices: Vec<kvbm_common::AxisIntersection>,
 ) -> Result<PlanOutcome> {
     if validate_planner_block_ids(src_block_ids, dst_block_ids)?.is_noop() {
         return Ok(PlanOutcome::Empty);
@@ -570,16 +578,52 @@ fn plan_and_lower(
     // copies and surfaces a no-matching-kernel error precisely
     // when no kernel covers the pair (e.g. NHD↔HND in PR-6.1
     // before PR-6.3 lands a transpose kernel).
+    //
+    // AB-1d: the transform path builds a whole-block invocation that
+    // would silently discard caller-supplied axis_slices — reject
+    // explicitly rather than mis-transferring the wrong region.
+    // Cross-leader sliced transfers under layout-mismatch + permute
+    // is a future PR (combine kernel staged-bounce with a sliced
+    // post-kernel leg).
     #[cfg(feature = "permute_kernels")]
     {
         let src_kv = src.layout().block_layout();
         let dst_kv = dst.layout().block_layout();
         if src_kv.requires_transform(&dst_kv) {
+            if !axis_slices.is_empty() {
+                bail!(
+                    "plan_and_lower: axis_slices not supported when the layout pair \
+                     requires a permute-kernel transform (src={:?}, dst={:?}); \
+                     cross-leader sliced transfers under layout-mismatch is a future PR",
+                    src_kv,
+                    dst_kv,
+                );
+            }
             let invocation = build_transform_invocation(src, dst)?;
             return Ok(PlanOutcome::Transform {
                 invocation,
                 block_pairs,
             });
+        }
+    }
+    // AB-1d: when the permute_kernels feature is OFF, the transform
+    // path doesn't exist — but neither does the slice machinery for
+    // it, so the same invariant holds. Reject axis_slices when we'd
+    // otherwise route them at a `KvBlockLayout::requires_transform`
+    // pair under the non-permute build.
+    #[cfg(not(feature = "permute_kernels"))]
+    {
+        if !axis_slices.is_empty() {
+            let src_kv = src.layout().block_layout();
+            let dst_kv = dst.layout().block_layout();
+            if src_kv.requires_transform(&dst_kv) {
+                bail!(
+                    "plan_and_lower: axis_slices requires the permute_kernels feature \
+                     when src/dst KvBlockLayout differ (src={:?}, dst={:?})",
+                    src_kv,
+                    dst_kv,
+                );
+            }
         }
     }
 
@@ -589,9 +633,18 @@ fn plan_and_lower(
     let dst_al = AnnotatedLayout::from_view(&dst_view)?;
 
     // `block_pairs` was already built above; `plan_copy` consumes
-    // a `usize`-typed pair list.
+    // a `usize`-typed pair list. AB-1d: thread caller-supplied
+    // axis_slices into the selection when present (empty = full extent
+    // along every axis, equivalent to TransferSelection::full).
     let plan_block_pairs: Vec<(usize, usize)> = block_pairs.iter().map(|&(s, d)| (s, d)).collect();
-    let selection = TransferSelection::full(plan_block_pairs);
+    let selection = if axis_slices.is_empty() {
+        TransferSelection::full(plan_block_pairs)
+    } else {
+        TransferSelection {
+            block_pairs: plan_block_pairs,
+            axis_slices,
+        }
+    };
     // `policy` is caller-supplied:
     // - Cuda entry uses CopyPolicy::default() (min_inner_bytes = 4096, PR-7.3).
     // - NIXL entry and staged NIXL legs use min_inner_bytes = 0 so same-layout
@@ -1350,6 +1403,7 @@ impl OwnedStagedContext {
             &self.capabilities,
             leg_policy,
             None,
+            Vec::new(), // axis_slices: staged NIXL legs run full-extent
         )?;
         let ops = match outcome {
             PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),

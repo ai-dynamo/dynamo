@@ -145,6 +145,11 @@ pub(crate) struct TransferOptionsInternal {
     /// for the CudaAsync (H2D / D2H / D2D) strategies; other paths
     /// ignore the flag.
     pub(crate) use_planner: bool,
+    /// AB-1d: per-axis coordinate-space restrictions for sliced
+    /// cross-leader transfers. Empty = full extent (legacy behaviour).
+    /// Non-empty requires `use_planner = true`; the planner threads
+    /// them into [`crate::transfer::plan::TransferSelection`].
+    pub(crate) axis_slices: Vec<kvbm_common::AxisIntersection>,
 }
 
 impl TransferOptionsInternal {
@@ -163,6 +168,7 @@ pub(crate) struct TransferOptionsInternalBuilder {
     dst_kv_layout: Option<KvBlockLayout>,
     metric_route: Option<KvbmTransferRoute>,
     use_planner: bool,
+    axis_slices: Vec<kvbm_common::AxisIntersection>,
 }
 
 impl TransferOptionsInternalBuilder {
@@ -226,7 +232,20 @@ impl TransferOptionsInternalBuilder {
         self
     }
 
+    /// Per-axis coordinate-space restrictions for sliced transfers.
+    /// Forces `use_planner = true` when non-empty.
+    pub(crate) fn axis_slices(mut self, slices: Vec<kvbm_common::AxisIntersection>) -> Self {
+        if !slices.is_empty() {
+            self.use_planner = true;
+        }
+        self.axis_slices = slices;
+        self
+    }
+
     pub(crate) fn build(self) -> Result<TransferOptionsInternal> {
+        if !self.axis_slices.is_empty() && !self.use_planner {
+            anyhow::bail!("TransferOptionsInternal: axis_slices requires use_planner=true");
+        }
         Ok(TransferOptionsInternal {
             layer_range: self.layer_range,
             nixl_write_notification: self.nixl_write_notification,
@@ -236,6 +255,7 @@ impl TransferOptionsInternalBuilder {
             dst_kv_layout: self.dst_kv_layout,
             metric_route: self.metric_route,
             use_planner: self.use_planner,
+            axis_slices: self.axis_slices,
         })
     }
 }
@@ -278,23 +298,32 @@ pub(crate) fn execute_transfer(
             options.cuda_stream,
             options.use_planner,
             options.bounce_buffer.as_ref(),
+            options.axis_slices,
             ctx,
         ),
         TransferPlan::TwoHop {
             first,
             bounce_location,
             second,
-        } => execute_two_hop_transfer(TwoHopTransferParams {
-            src,
-            dst,
-            src_block_ids,
-            dst_block_ids,
-            first_strategy: first,
-            bounce_location,
-            second_strategy: second,
-            options,
-            ctx,
-        }),
+        } => {
+            if !options.axis_slices.is_empty() {
+                anyhow::bail!(
+                    "execute_transfer: axis_slices not supported on two-hop transfers \
+                     (cross-leader sliced transfers must take a direct planner path)"
+                );
+            }
+            execute_two_hop_transfer(TwoHopTransferParams {
+                src,
+                dst,
+                src_block_ids,
+                dst_block_ids,
+                first_strategy: first,
+                bounce_location,
+                second_strategy: second,
+                options,
+                ctx,
+            })
+        }
     }
 }
 
@@ -310,8 +339,19 @@ fn execute_direct_transfer(
     cuda_stream: Option<Arc<CudaStream>>,
     use_planner: bool,
     bounce_buffer: Option<&BounceBufferInternal>,
+    axis_slices: Vec<kvbm_common::AxisIntersection>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
+    // axis_slices is only meaningful on planner paths; the legacy
+    // memcpy / cuda / nixl-builder paths don't honour it and would
+    // silently produce wrong data, so refuse early.
+    if !axis_slices.is_empty() && !use_planner {
+        anyhow::bail!(
+            "execute_direct_transfer: axis_slices requires use_planner=true \
+             (axis_slices contains {} entries)",
+            axis_slices.len()
+        );
+    }
     match strategy {
         TransferStrategy::Memcpy => {
             if cuda_stream.is_some() {
@@ -349,6 +389,7 @@ fn execute_direct_transfer(
                     dst_block_ids,
                     strategy,
                     cuda_stream,
+                    axis_slices,
                     ctx,
                 );
             }
@@ -388,6 +429,7 @@ fn execute_direct_transfer(
                     dst_block_ids,
                     strategy,
                     bounce_buffer,
+                    axis_slices,
                     ctx,
                 );
             }
@@ -515,9 +557,10 @@ async fn execute_two_hop_transfer_chunk(
         bounce_ids_to_use,
         layer_range.clone(),
         first_strategy,
-        None,  // Two-hop transfers don't support caller-provided streams
-        false, // Two-hop chunks stay on the legacy path for now
-        None,  // bounce_buffer only used by use_planner=true NIXL transforms
+        None,       // Two-hop transfers don't support caller-provided streams
+        false,      // Two-hop chunks stay on the legacy path for now
+        None,       // bounce_buffer only used by use_planner=true NIXL transforms
+        Vec::new(), // axis_slices: two-hop chunks never carry slices (rejected upstream)
         ctx,
     )?
     .await?;
@@ -532,6 +575,7 @@ async fn execute_two_hop_transfer_chunk(
         None,  // Two-hop transfers don't support caller-provided streams
         false, // Two-hop chunks stay on the legacy path for now
         None,
+        Vec::new(), // axis_slices: two-hop chunks never carry slices
         ctx,
     )?
     .await?;
