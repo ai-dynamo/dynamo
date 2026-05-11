@@ -413,6 +413,7 @@ impl ConnectorLeader {
         let g2_manager_for_offload = g2_manager.clone();
         let g3_manager_for_offload = g3_manager.clone();
 
+        let num_workers = worker_clients.len();
         let mut leader_builder = InstanceLeader::builder()
             .messenger(self.runtime.messenger().clone())
             .registry(registry)
@@ -424,6 +425,20 @@ impl ConnectorLeader {
                     .collect(),
             )
             .with_cached_worker_metadata(worker_metadata);
+
+        // Stamp ParallelismDescriptors on per-worker metadata exported to
+        // peer leaders, so cross-parallelism dispatch is informed (AB-1a).
+        // Skip if num_heads is absent — leader falls back to the symmetric
+        // path (descriptor remains None on the wire).
+        if reference_config.num_heads.is_some() {
+            let template =
+                kvbm_engine::leader::parallelism::ParallelismTemplate::from_layout_config(
+                    reference_config,
+                    self.runtime.config().cache.parallelism,
+                    num_workers,
+                )?;
+            leader_builder = leader_builder.parallelism_template(template);
+        }
 
         // Conditionally add G3 manager
         if let Some(g3_mgr) = g3_manager {

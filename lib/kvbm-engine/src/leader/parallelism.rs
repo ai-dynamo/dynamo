@@ -19,6 +19,7 @@
 use anyhow::{Result, bail};
 use kvbm_common::KvDim;
 use kvbm_config::ParallelismMode;
+use kvbm_physical::layout::LayoutConfig;
 use kvbm_physical::manager::{ParallelismDescriptor, SerializedLayout};
 
 /// Per-leader parallelism template — the knobs the leader applies when
@@ -47,6 +48,67 @@ pub struct ParallelismTemplate {
 }
 
 impl ParallelismTemplate {
+    /// Build a template from the leader's per-worker [`LayoutConfig`], the
+    /// configured [`ParallelismMode`], and the worker count.
+    ///
+    /// Today PP is unsupported (`pp_size = 1`). The shard axis is
+    /// [`KvDim::HeadCount`] under [`ParallelismMode::TensorParallel`]; under
+    /// [`ParallelismMode::ReplicatedData`] no axis is actually sharded but
+    /// the field is set to [`KvDim::HeadCount`] by convention — the receiver
+    /// disambiguates by comparing per-worker layout extents to
+    /// `global_extents`.
+    pub fn from_layout_config(
+        layout: &LayoutConfig,
+        mode: ParallelismMode,
+        num_workers: usize,
+    ) -> Result<Self> {
+        if num_workers == 0 {
+            bail!("from_layout_config: num_workers must be > 0");
+        }
+        let per_worker_heads = layout.num_heads.ok_or_else(|| {
+            anyhow::anyhow!(
+                "from_layout_config: LayoutConfig.num_heads must be set to derive HeadCount extent"
+            )
+        })?;
+        if per_worker_heads == 0 {
+            bail!("from_layout_config: num_heads must be > 0");
+        }
+        // `inner_dim` is the trailing dim of the block tensor and equals
+        // `num_heads * head_size` (see kvbm-physical/src/layout/mod.rs
+        // `resolve_head_dims`). Per-head channel count is the ratio. Under
+        // TensorParallel both `inner_dim` and `num_heads` shard by the same
+        // factor, so the ratio is invariant — `head_size` is a global
+        // constant either way.
+        if !layout.inner_dim.is_multiple_of(per_worker_heads) {
+            bail!(
+                "from_layout_config: inner_dim ({}) is not divisible by num_heads ({}) \
+                 — cannot derive HeadSize extent",
+                layout.inner_dim,
+                per_worker_heads,
+            );
+        }
+        let head_size = layout.inner_dim / per_worker_heads;
+        let global_heads = match mode {
+            ParallelismMode::TensorParallel => per_worker_heads * num_workers,
+            ParallelismMode::ReplicatedData => per_worker_heads,
+        };
+        Ok(Self {
+            tp_size: num_workers,
+            pp_size: 1,
+            parallelism_mode: mode,
+            shard_axis: KvDim::HeadCount,
+            global_extents: vec![
+                (KvDim::Block, layout.num_blocks),
+                (KvDim::Layer, layout.num_layers),
+                (KvDim::Outer, layout.outer_dim),
+                (KvDim::Page, layout.page_size),
+                (KvDim::HeadCount, global_heads),
+                (KvDim::HeadSize, head_size),
+            ],
+            num_layers: layout.num_layers,
+        })
+    }
+
     /// Build the [`ParallelismDescriptor`] for a specific rank.
     pub fn descriptor_for(&self, rank: usize) -> Result<ParallelismDescriptor> {
         if self.pp_size != 1 {
@@ -194,6 +256,115 @@ mod tests {
             let unpacked = layout.unpack().unwrap();
             assert_eq!(unpacked.parallelism.unwrap().rank, i);
         }
+    }
+
+    /// Build a per-worker LayoutConfig with realistic `inner_dim =
+    /// num_heads * head_size`. Returns the config plus the head_size so
+    /// tests can assert the derived `HeadSize` extent.
+    fn layout_with_heads(num_heads: usize, head_size: usize) -> LayoutConfig {
+        LayoutConfig::builder()
+            .num_blocks(16)
+            .num_layers(24)
+            .outer_dim(2)
+            .page_size(8)
+            .inner_dim(num_heads * head_size)
+            .dtype_width_bytes(2)
+            .num_heads(Some(num_heads))
+            .build()
+            .unwrap()
+    }
+
+    fn extent_for(tpl: &ParallelismTemplate, axis: KvDim) -> Option<usize> {
+        tpl.global_extents
+            .iter()
+            .find(|(d, _)| *d == axis)
+            .map(|(_, v)| *v)
+    }
+
+    #[test]
+    fn from_layout_config_tp_multiplies_heads() {
+        // Per-worker num_heads = 8, head_size = 64. Under TP across 4
+        // workers, global HeadCount = 32 and HeadSize stays 64.
+        let layout = layout_with_heads(8, 64);
+        let tpl =
+            ParallelismTemplate::from_layout_config(&layout, ParallelismMode::TensorParallel, 4)
+                .unwrap();
+        assert_eq!(tpl.tp_size, 4);
+        assert_eq!(tpl.pp_size, 1);
+        assert_eq!(tpl.shard_axis, KvDim::HeadCount);
+        assert_eq!(
+            extent_for(&tpl, KvDim::HeadCount),
+            Some(32),
+            "global HeadCount = per-worker num_heads * tp_size",
+        );
+        assert_eq!(
+            extent_for(&tpl, KvDim::HeadSize),
+            Some(64),
+            "HeadSize = inner_dim / num_heads (head_size is global, not sharded)",
+        );
+        assert_eq!(tpl.num_layers, 24);
+    }
+
+    #[test]
+    fn from_layout_config_replicated_keeps_heads() {
+        let layout = layout_with_heads(8, 64);
+        let tpl =
+            ParallelismTemplate::from_layout_config(&layout, ParallelismMode::ReplicatedData, 4)
+                .unwrap();
+        assert_eq!(
+            extent_for(&tpl, KvDim::HeadCount),
+            Some(8),
+            "ReplicatedData → global HeadCount == per-worker (no shard)",
+        );
+        assert_eq!(
+            extent_for(&tpl, KvDim::HeadSize),
+            Some(64),
+            "HeadSize is invariant across parallelism modes",
+        );
+    }
+
+    #[test]
+    fn from_layout_config_rejects_indivisible_inner_dim() {
+        let layout = LayoutConfig::builder()
+            .num_blocks(16)
+            .num_layers(24)
+            .outer_dim(2)
+            .page_size(8)
+            .inner_dim(100)
+            .dtype_width_bytes(2)
+            .num_heads(Some(7))
+            .build()
+            .unwrap();
+        let err =
+            ParallelismTemplate::from_layout_config(&layout, ParallelismMode::TensorParallel, 2)
+                .unwrap_err();
+        assert!(err.to_string().contains("not divisible"));
+    }
+
+    #[test]
+    fn from_layout_config_rejects_zero_workers() {
+        let layout = layout_with_heads(8, 64);
+        let err =
+            ParallelismTemplate::from_layout_config(&layout, ParallelismMode::TensorParallel, 0)
+                .unwrap_err();
+        assert!(err.to_string().contains("num_workers"));
+    }
+
+    #[test]
+    fn from_layout_config_rejects_missing_heads() {
+        let layout = LayoutConfig::builder()
+            .num_blocks(16)
+            .num_layers(24)
+            .outer_dim(2)
+            .page_size(8)
+            .inner_dim(64)
+            .dtype_width_bytes(2)
+            .build()
+            .unwrap();
+        let err =
+            ParallelismTemplate::from_layout_config(&layout, ParallelismMode::TensorParallel, 2)
+                .unwrap_err();
+        assert!(err.to_string().contains("num_heads"));
     }
 
     #[test]

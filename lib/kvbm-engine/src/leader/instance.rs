@@ -38,6 +38,7 @@ use super::{
     SessionId,
     StagingMode,
     accessor::{BlockAccessor, PolicyContext},
+    parallelism::{ParallelismTemplate, stamp_parallelism_descriptors},
     session::{
         BlockHolder, ControlRole, ControllableSessionOptions, ControllableSessionResult,
         InitiatorSession, MessageTransport, OnboardMessage, OnboardSessionTx, ResponderSession,
@@ -115,6 +116,16 @@ pub struct InstanceLeader {
     /// Object storage client for G4 search and load operations.
     /// Leader calls has_blocks on S3 directly, coordinates workers for get_blocks.
     object_client: Option<Arc<dyn ObjectBlockOps>>,
+
+    // ========================================================================
+    // Cross-parallelism metadata
+    // ========================================================================
+    /// Parallelism template used to stamp [`ParallelismDescriptor`]s onto
+    /// per-worker [`SerializedLayout`] payloads before forwarding to peer
+    /// leaders. When `None`, the export callback returns the raw worker
+    /// metadata unchanged — preserving pre-AB-1a behaviour for callers
+    /// that have not yet configured cross-parallelism.
+    parallelism_template: Option<ParallelismTemplate>,
 }
 
 /// Builder for InstanceLeader.
@@ -129,6 +140,7 @@ pub struct InstanceLeaderBuilder {
     remote_leaders: Option<Vec<InstanceId>>,
     cached_worker_metadata: Option<Vec<SerializedLayout>>,
     object_client: Option<Arc<dyn ObjectBlockOps>>,
+    parallelism_template: Option<ParallelismTemplate>,
 }
 
 impl InstanceLeaderBuilder {
@@ -216,6 +228,16 @@ impl InstanceLeaderBuilder {
         self
     }
 
+    /// Set the parallelism template used to stamp [`ParallelismDescriptor`]s
+    /// onto per-worker metadata exported to peer leaders. When unset, the
+    /// export RPC returns raw worker metadata (pre-AB-1a behaviour); the
+    /// peer's cross-parallelism dispatcher then falls back to the symmetric
+    /// path.
+    pub fn parallelism_template(mut self, template: ParallelismTemplate) -> Self {
+        self.parallelism_template = Some(template);
+        self
+    }
+
     pub fn build(self) -> Result<InstanceLeader> {
         let messenger = self
             .messenger
@@ -267,6 +289,7 @@ impl InstanceLeaderBuilder {
             transport,
             session_sessions: Arc::new(DashMap::new()),
             object_client: self.object_client,
+            parallelism_template: self.parallelism_template,
         })
     }
 }
@@ -509,6 +532,32 @@ impl InstanceLeader {
         InstanceLeaderBuilder::default()
     }
 
+    /// Assemble the per-worker [`SerializedLayout`] vector that the
+    /// `kvbm.leader.export_metadata` RPC handler returns to a peer leader.
+    ///
+    /// Collects from the cache when present, else queries each worker.
+    /// If a [`ParallelismTemplate`] is configured, stamps a
+    /// [`ParallelismDescriptor`] onto each per-worker payload via
+    /// [`stamp_parallelism_descriptors`]; otherwise returns the raw worker
+    /// metadata unchanged (pre-AB-1a shape) and the peer's cross-parallelism
+    /// dispatcher falls back to the symmetric path.
+    pub async fn assemble_export_metadata(&self) -> Result<Vec<SerializedLayout>> {
+        let raw = if let Some(cached) = self.cached_worker_metadata.clone() {
+            cached
+        } else {
+            let mut metadata = Vec::with_capacity(self.workers.len());
+            for worker in &self.workers {
+                metadata.push(worker.export_metadata()?.await?);
+            }
+            metadata
+        };
+
+        match &self.parallelism_template {
+            Some(template) => stamp_parallelism_descriptors(template, raw),
+            None => Ok(raw),
+        }
+    }
+
     /// Register Velo handlers for leader-to-leader communication.
     ///
     /// This must be called after construction to enable distributed onboarding.
@@ -552,27 +601,15 @@ impl InstanceLeader {
             }
         };
 
-        // Create export_metadata callback if we have workers or cached metadata
+        // Create export_metadata callback if we have workers or cached metadata.
+        // Delegates to assemble_export_metadata so the stamping logic is
+        // testable without Velo plumbing.
         let export_metadata_callback: Option<ExportMetadataCallback> =
             if !self.workers.is_empty() || self.cached_worker_metadata.is_some() {
-                let workers = self.workers.clone();
-                let cached_metadata = self.cached_worker_metadata.clone();
+                let leader = self.clone();
                 Some(Arc::new(move || {
-                    let workers = workers.clone();
-                    let cached_metadata = cached_metadata.clone();
-                    Box::pin(async move {
-                        // Return cached metadata if available
-                        if let Some(cached) = cached_metadata {
-                            return Ok(cached);
-                        }
-                        // Otherwise, query workers
-                        let mut metadata = Vec::with_capacity(workers.len());
-                        for worker in &workers {
-                            let serialized = worker.export_metadata()?.await?;
-                            metadata.push(serialized);
-                        }
-                        Ok(metadata)
-                    })
+                    let leader = leader.clone();
+                    Box::pin(async move { leader.assemble_export_metadata().await })
                 }))
             } else {
                 None
@@ -1392,5 +1429,111 @@ impl Leader for InstanceLeader {
             match_breakdown,
             session_handle,
         )))
+    }
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod tests {
+    use super::*;
+    use crate::G2;
+    use crate::testing::{managers::TestManagerBuilder, messenger::create_messenger_tcp};
+    use kvbm_common::KvDim;
+    use kvbm_config::ParallelismMode;
+    use kvbm_logical::blocks::BlockRegistry;
+    use kvbm_physical::manager::{LogicalLayoutDescriptor, WorkerAddress};
+
+    fn stub_metadata_for(worker_id: u64) -> SerializedLayout {
+        SerializedLayout::pack(
+            WorkerAddress::new(worker_id, format!("agent-{worker_id}")),
+            Vec::new(),
+            Vec::<LogicalLayoutDescriptor>::new(),
+            None,
+        )
+        .unwrap()
+    }
+
+    async fn leader_with_cached_metadata(
+        cached: Vec<SerializedLayout>,
+        template: Option<ParallelismTemplate>,
+    ) -> Result<InstanceLeader> {
+        let messenger = create_messenger_tcp().await?;
+        let registry = BlockRegistry::builder().build();
+        let g2 = Arc::new(
+            TestManagerBuilder::<G2>::new()
+                .block_count(2)
+                .block_size(4)
+                .registry(registry.clone())
+                .build(),
+        );
+
+        let mut builder = InstanceLeader::builder()
+            .messenger(messenger)
+            .registry(registry)
+            .g2_manager(g2)
+            .with_cached_worker_metadata(cached);
+        if let Some(t) = template {
+            builder = builder.parallelism_template(t);
+        }
+        builder.build()
+    }
+
+    fn template(tp_size: usize) -> ParallelismTemplate {
+        ParallelismTemplate {
+            tp_size,
+            pp_size: 1,
+            parallelism_mode: ParallelismMode::TensorParallel,
+            shard_axis: KvDim::HeadCount,
+            global_extents: vec![(KvDim::HeadCount, 16)],
+            num_layers: 12,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn assemble_export_metadata_stamps_when_template_set() -> Result<()> {
+        let cached = vec![stub_metadata_for(0), stub_metadata_for(1)];
+        let leader = leader_with_cached_metadata(cached, Some(template(2))).await?;
+
+        let exported = leader.assemble_export_metadata().await?;
+        assert_eq!(exported.len(), 2);
+        for (i, layout) in exported.iter().enumerate() {
+            let unpacked = layout.unpack()?;
+            let desc = unpacked
+                .parallelism
+                .expect("descriptor must be stamped when template is set");
+            assert_eq!(desc.rank, i);
+            assert_eq!(desc.tp_size, 2);
+            assert_eq!(desc.shard_axis, KvDim::HeadCount);
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn assemble_export_metadata_passes_through_when_no_template() -> Result<()> {
+        let cached = vec![stub_metadata_for(0), stub_metadata_for(1)];
+        let leader = leader_with_cached_metadata(cached, None).await?;
+
+        let exported = leader.assemble_export_metadata().await?;
+        assert_eq!(exported.len(), 2);
+        for layout in &exported {
+            let unpacked = layout.unpack()?;
+            assert!(
+                unpacked.parallelism.is_none(),
+                "no template configured → no descriptor stamped"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn assemble_export_metadata_errors_on_length_mismatch() -> Result<()> {
+        // Template says tp_size = 4 but cache only has 2 entries.
+        let cached = vec![stub_metadata_for(0), stub_metadata_for(1)];
+        let leader = leader_with_cached_metadata(cached, Some(template(4))).await?;
+        let err = leader.assemble_export_metadata().await.unwrap_err();
+        assert!(
+            err.to_string().contains("tp_size * pp_size"),
+            "expected length-mismatch error, got: {err}"
+        );
+        Ok(())
     }
 }
