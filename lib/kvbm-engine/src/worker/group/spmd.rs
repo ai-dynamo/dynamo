@@ -58,6 +58,13 @@ pub struct SpmdParallelWorkers {
     /// asymmetric-TP branch to feed [`plan_pull`]. Absent for legacy
     /// (unstamped) peers — those force the symmetric-only branch via
     /// the rank-count match check in `connect_remote`.
+    ///
+    /// Invariant: cached descriptors are only *meaningful* when a
+    /// `local_template` is also installed. Strict-without-template
+    /// (legal — the compat gate skips when no template exists) still
+    /// caches the descriptors, but the asymmetric-pull dispatch will
+    /// bail on missing template before reading them. Don't rely on
+    /// the cache as a stand-in for "compatibility verified".
     remote_descriptors: RwLock<HashMap<InstanceId, Vec<ParallelismDescriptor>>>,
 
     /// Local parallelism template for cross-leader compatibility gating
@@ -811,5 +818,118 @@ mod tests {
         let mappings = build_handle_mappings(id, &per_rank);
         // No layouts => no mappings; structural test only.
         assert!(mappings.is_empty());
+    }
+
+    /// AB-3: `connect_remote` caches the full per-rank
+    /// ParallelismDescriptor set when every entry is stamped (Strict
+    /// path). The asymmetric-pull branch of
+    /// `execute_remote_onboard_for_instance` consults this cache —
+    /// missing entries would force a hard bail rather than a
+    /// silent mis-route.
+    #[test]
+    fn connect_remote_caches_descriptors_in_strict_path() {
+        use ::velo::EventManager;
+        use kvbm_physical::manager::{LogicalLayoutDescriptor, SerializedLayout, WorkerAddress};
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let spmd = SpmdParallelWorkers::new(
+            Vec::new(),
+            Arc::new(EventManager::local()),
+            rt.handle().clone(),
+        );
+
+        let instance_id = InstanceId::new_v4();
+        let stamped: Vec<SerializedLayout> = (0..4)
+            .map(|rank| {
+                SerializedLayout::pack(
+                    WorkerAddress::new(rank as u64, format!("agent-{rank}")),
+                    vec![],
+                    Vec::<LogicalLayoutDescriptor>::new(),
+                    Some(descriptor(rank, 4)),
+                )
+                .unwrap()
+            })
+            .collect();
+
+        spmd.connect_remote(instance_id, stamped).unwrap();
+
+        let cached = spmd.remote_descriptors.read().unwrap();
+        let descriptors = cached
+            .get(&instance_id)
+            .expect("Strict-path import must cache descriptors for the asymmetric branch");
+        assert_eq!(descriptors.len(), 4);
+        for (i, d) in descriptors.iter().enumerate() {
+            assert_eq!(d.rank, i);
+            assert_eq!(d.tp_size, 4);
+        }
+
+        // The companion tp_size cache also lands so the dispatch
+        // branch decision (symmetric vs asymmetric) doesn't need to
+        // peek into `remote_descriptors`.
+        let tp = spmd
+            .remote_tp_sizes
+            .read()
+            .unwrap()
+            .get(&instance_id)
+            .copied();
+        assert_eq!(tp, Some(4));
+    }
+
+    /// AB-3: Legacy (unstamped) peer metadata must NOT cache
+    /// descriptors. The asymmetric branch would otherwise read a
+    /// missing entry and bail with a misleading "no descriptors"
+    /// message rather than the underlying "peer didn't stamp" cause.
+    /// `connect_remote`'s rank-count check already forces symmetric
+    /// for unstamped peers, but this guards against the cache
+    /// being populated by accident.
+    #[test]
+    fn connect_remote_does_not_cache_descriptors_in_legacy_path() {
+        use ::velo::EventManager;
+        use kvbm_physical::manager::{LogicalLayoutDescriptor, SerializedLayout, WorkerAddress};
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        // workers.len() = 0 matches metadata.len() = 0 for the
+        // unstamped no-op import, exercising the Legacy branch.
+        let spmd = SpmdParallelWorkers::new(
+            Vec::new(),
+            Arc::new(EventManager::local()),
+            rt.handle().clone(),
+        );
+
+        let instance_id = InstanceId::new_v4();
+        // Single rank, no parallelism stamp → Legacy path.
+        let unstamped = vec![
+            SerializedLayout::pack(
+                WorkerAddress::new(0, "agent-0".to_string()),
+                vec![],
+                Vec::<LogicalLayoutDescriptor>::new(),
+                None,
+            )
+            .unwrap(),
+        ];
+
+        // Legacy path bails because metadata.len() (1) != workers.len() (0).
+        // The bail happens before any cache write — which is exactly the
+        // invariant we want to confirm: no Legacy descriptor leak.
+        let err = match spmd.connect_remote(instance_id, unstamped) {
+            Ok(_) => panic!("Legacy-path import with rank mismatch must bail"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("not stamped"),
+            "expected Legacy-path bail, got: {err}"
+        );
+        assert!(
+            spmd.remote_descriptors
+                .read()
+                .unwrap()
+                .get(&instance_id)
+                .is_none(),
+            "Legacy bail must not have populated the descriptor cache"
+        );
     }
 }
