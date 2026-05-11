@@ -28,7 +28,6 @@ from dynamo.planner.connectors.mdc import (
     worker_info_from_mdc,
 )
 from dynamo.planner.errors import (
-    ConnectorBusyError,
     DeploymentModelNameMismatchError,
     DeploymentValidationError,
     EmptyTargetReplicasError,
@@ -547,19 +546,10 @@ class KubernetesConnector(PlannerConnector):
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
         if not self.kube_api.is_deployment_ready(deployment):
-            # Surface as a typed exception rather than a silent return so
-            # the tick-execute funnel in ``core/base.py`` records this
-            # against ``execute_total{result=skipped_connector_blocked}``
-            # instead of falsely counting it as a success. Operators
-            # spent days chasing "scaling never happens but dashboards
-            # are green" before this signal existed.
             logger.warning(
                 f"Deployment {self.graph_deployment_name} is not ready, ignoring this scaling"
             )
-            raise ConnectorBusyError(
-                reason="deployment_not_ready",
-                detail=f"DGD {self.graph_deployment_name} Ready=False",
-            )
+            return
 
         for target_replica in target_replicas:
             service = get_service_from_sub_component_type_or_name(

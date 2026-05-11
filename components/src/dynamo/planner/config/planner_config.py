@@ -154,10 +154,12 @@ class GatewayConfig(BaseModel):
         ),
     )
     listen: str = Field(
-        default="unix:///tmp/dynamo-planner-registry.sock",
+        default="unix:///var/run/dynamo/planner/registry.sock",
         description=(
             "Bind address. ``unix:/path`` for same-Pod sidecar plugins "
-            "(recommended; Pod boundary is the trust boundary). "
+            "(recommended; Pod boundary is the trust boundary). The "
+            "default matches ``EndpointsConfig.uds_socket_path`` in "
+            "``plugins/registry/config.py`` — keep these aligned. "
             "``host:port`` for cross-Pod (e.g. ``0.0.0.0:9099``) — "
             "production cross-Pod deployments should pair with mTLS, "
             "but the gateway itself currently only takes the bind "

@@ -35,7 +35,6 @@ __all__ = [
     "DuplicateSubComponentError",
     "DeploymentValidationError",
     "EmptyTargetReplicasError",
-    "ConnectorBusyError",
 ]
 
 
@@ -205,31 +204,4 @@ class EmptyTargetReplicasError(PlannerError):
         self,
     ):
         message = "target_replicas cannot be empty"
-        super().__init__(message)
-
-
-class ConnectorBusyError(PlannerError):
-    """Connector skipped a scaling call because the underlying backend
-    is not in a state to accept changes. NOT a true error condition —
-    the planner should keep running and retry on the next tick.
-
-    Distinguished from generic ``Exception`` so the tick-execute funnel
-    in ``core/base.py:_apply_scaling_targets`` can record the skip
-    against ``execute_total{result=skipped_connector_blocked}`` instead
-    of falsely incrementing ``result=success``. Without this signal,
-    operators saw "100% successful scaling" while the K8s connector was
-    silently dropping every command (e.g. DGD ``Ready=False`` due to
-    operator-cache staleness — the failure mode that drove this class
-    into existence).
-
-    The ``reason`` is a short stable string (used as a Prometheus label
-    value) — keep it lower_snake_case and bounded cardinality.
-    """
-
-    def __init__(self, reason: str, detail: str = ""):
-        self.reason = reason
-        self.detail = detail
-        message = f"connector busy: {reason}"
-        if detail:
-            message += f" ({detail})"
         super().__init__(message)

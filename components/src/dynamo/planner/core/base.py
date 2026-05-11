@@ -32,7 +32,6 @@ from dynamo.planner.connectors.virtual import VirtualConnector
 from dynamo.planner.core.budget import _initialize_gpu_counts
 from dynamo.planner.core.engine_protocol import EngineProtocol, _PSMEngineAdapter
 from dynamo.planner.core.state_machine import PlannerStateMachine
-from dynamo.planner.errors import ConnectorBusyError
 from dynamo.planner.core.types import (
     EngineCapabilities,
     FpmObservations,
@@ -836,52 +835,10 @@ class NativePlannerBase:
         """Shared helper: send scaling targets to connector.
 
         Skipped in advisory mode (decisions are logged but not executed).
-
-        PR 8 8-5 wiring: emits ``execute_total`` / ``execute_latency_seconds``
-        / ``execute_skip_reason_total`` so dashboards can see scaling
-        activity regardless of which engine path (PSM or orchestrator)
-        produced the targets — ``_apply_scaling_targets`` is the single
-        funnel both paths pass through.
         """
-        pm = self.prometheus_metrics
-        if self.config.advisory:
-            if pm is not None:
-                pm.execute_total.labels(result="advisory").inc()
-                pm.execute_skip_reason_total.labels(reason="advisory").inc()
+        if self.config.advisory or not targets:
             return
-        if not targets:
-            if pm is not None:
-                pm.execute_total.labels(result="skipped_no_change").inc()
-                pm.execute_skip_reason_total.labels(reason="no_scale_to").inc()
-            return
-
-        start = time.monotonic() if pm is not None else 0.0
-        try:
-            await self.connector.set_component_replicas(targets, blocking=blocking)
-        except ConnectorBusyError as cbe:
-            # Connector signalled "I refused this call because the
-            # backend isn't ready" — record as a skip with the precise
-            # reason, NOT as an error and NOT as a false success. Don't
-            # re-raise: this is a recoverable transient condition (e.g.
-            # DGD Ready=False); the next tick will retry.
-            if pm is not None:
-                elapsed = time.monotonic() - start
-                pm.execute_total.labels(result="skipped_connector_blocked").inc()
-                pm.execute_latency_seconds.labels(
-                    result="skipped_connector_blocked"
-                ).observe(elapsed)
-                pm.execute_skip_reason_total.labels(reason=cbe.reason).inc()
-            return
-        except Exception:
-            if pm is not None:
-                elapsed = time.monotonic() - start
-                pm.execute_total.labels(result="error").inc()
-                pm.execute_latency_seconds.labels(result="error").observe(elapsed)
-            raise
-        if pm is not None:
-            elapsed = time.monotonic() - start
-            pm.execute_total.labels(result="success").inc()
-            pm.execute_latency_seconds.labels(result="success").observe(elapsed)
+        await self.connector.set_component_replicas(targets, blocking=blocking)
 
     # ------------------------------------------------------------------
     # Periodic decision summary
