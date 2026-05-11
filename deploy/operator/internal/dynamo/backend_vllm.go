@@ -224,12 +224,12 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 	// The MP init container waits on VLLMMpMasterPort (29500), which never opens
 	// in the elastic EP path — injecting it would cause the worker to hang forever.
 	if len(podSpec.Containers) > 0 {
-		if hasFlag(getExpandedArgs(&podSpec.Containers[0]), enableElasticEPFlag) {
+		if hasFlag(getExpandedCommandAndArgs(&podSpec.Containers[0]), enableElasticEPFlag) {
 			return
 		}
 	}
 	if main := GetMainContainer(component); main != nil {
-		if hasFlag(getExpandedArgs(main), enableElasticEPFlag) {
+		if hasFlag(getExpandedCommandAndArgs(main), enableElasticEPFlag) {
 			return
 		}
 	}
@@ -315,6 +315,14 @@ func getExpandedArgs(container *corev1.Container) []string {
 		expandedArgs = append(expandedArgs, strings.Fields(arg)...)
 	}
 	return expandedArgs
+}
+
+func getExpandedCommandAndArgs(container *corev1.Container) []string {
+	expandedArgs := make([]string, 0, len(container.Command)+len(container.Args))
+	for _, arg := range container.Command {
+		expandedArgs = append(expandedArgs, strings.Fields(arg)...)
+	}
+	return append(expandedArgs, getExpandedArgs(container)...)
 }
 
 // shouldUseMpBackend determines whether to use multiprocessing (mp) or Ray for vLLM
@@ -617,7 +625,9 @@ func resourceNameIsGPU(name corev1.ResourceName) bool {
 	return normalized == "gpu" ||
 		normalized == "nvidia/gpu" ||
 		strings.HasSuffix(normalized, "/gpu") ||
-		strings.Contains(normalized, ".com/gpu")
+		strings.Contains(normalized, ".com/gpu") ||
+		strings.HasPrefix(normalized, "mig-") ||
+		strings.Contains(normalized, "/mig-")
 }
 
 func resourceRequirementsWithFallback(resources, fallback corev1.ResourceRequirements) corev1.ResourceRequirements {

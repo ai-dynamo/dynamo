@@ -600,7 +600,7 @@ func GetDCDResourceName(dgd *v1beta1.DynamoGraphDeployment, componentName string
 // contract while making names acceptable for Kubernetes resources that reject
 // dots, such as Services.
 func NormalizeKubeResourceName(name string) string {
-	return strings.ReplaceAll(name, ".", "-")
+	return strings.ToLower(strings.ReplaceAll(name, ".", "-"))
 }
 
 type SecretsRetriever interface {

@@ -431,7 +431,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 		// Check if DCDs with the new hash already exist and are serving.
 		// If so, this is just a stale annotation — update it without starting a new rollout.
 		newInfo, err := r.getWorkerInfoForWorkerHash(ctx, dgd, newWorkerHash)
-		if err == nil && newInfo.TotalReadyWorkers() > 0 {
+		oldInfo, oldErr := r.getOldWorkerInfo(ctx, dgd, newWorkerHash)
+		if err == nil && oldErr == nil && workerGenerationComplete(dgd, oldInfo, newInfo) {
 			logger.Info("Updating stale worker hash annotation",
 				"currentV1WorkerHash", current.v1,
 				"currentV2WorkerHash", current.v2,
@@ -533,14 +534,39 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 		"desiredReplicas", desiredReplicas,
 		"newWorkerHash", newWorkerHash)
 
-	// Compute per-component completion.
+	updatedComponents, totalWorkerComponents := completedWorkerComponents(dgd, oldInfo, newInfo)
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
+	rollingUpdateStatus.UpdatedComponents = updatedComponents
+
+	// Rolling update is complete when every worker component is individually updated.
+	if len(updatedComponents) == totalWorkerComponents && totalWorkerComponents > 0 {
+		return r.completeRollingUpdate(ctx, dgd, newWorkerHash)
+	}
+
+	return nil // deferred function in Reconcile() persists UpdatedComponents
+}
+
+func completedWorkerComponents(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	oldInfo *dynamoNamespaceWorkerInfo,
+	newInfo *dynamoNamespaceWorkerInfo,
+) ([]string, int) {
+	if oldInfo == nil {
+		oldInfo = &dynamoNamespaceWorkerInfo{}
+	}
+	if newInfo == nil {
+		newInfo = &dynamoNamespaceWorkerInfo{}
+	}
+
 	var updatedComponents []string
+	totalWorkerComponents := 0
 	for i := range dgd.Spec.Components {
 		spec := &dgd.Spec.Components[i]
 		componentName := spec.ComponentName
 		if !dynamo.IsWorkerComponent(string(spec.ComponentType)) {
 			continue
 		}
+		totalWorkerComponents++
 
 		desired := int32(1)
 		if spec.Replicas != nil {
@@ -558,24 +584,16 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 		}
 	}
 	sort.Strings(updatedComponents)
-	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
-	rollingUpdateStatus.UpdatedComponents = updatedComponents
+	return updatedComponents, totalWorkerComponents
+}
 
-	// Count total worker components.
-	totalWorkerComponents := 0
-	for i := range dgd.Spec.Components {
-		spec := &dgd.Spec.Components[i]
-		if dynamo.IsWorkerComponent(string(spec.ComponentType)) {
-			totalWorkerComponents++
-		}
-	}
-
-	// Rolling update is complete when every worker component is individually updated.
-	if len(updatedComponents) == totalWorkerComponents && totalWorkerComponents > 0 {
-		return r.completeRollingUpdate(ctx, dgd, newWorkerHash)
-	}
-
-	return nil // deferred function in Reconcile() persists UpdatedComponents
+func workerGenerationComplete(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	oldInfo *dynamoNamespaceWorkerInfo,
+	newInfo *dynamoNamespaceWorkerInfo,
+) bool {
+	updatedComponents, totalWorkerComponents := completedWorkerComponents(dgd, oldInfo, newInfo)
+	return totalWorkerComponents > 0 && len(updatedComponents) == totalWorkerComponents
 }
 
 // completeRollingUpdate marks the rolling update as completed, cleans up old resources, and updates status.
@@ -636,7 +654,7 @@ type dcdComponentState struct {
 
 // dcdComponentStateFromDCD extracts replica signals from a single DCD.
 func dcdComponentStateFromDCD(dcd *nvidiacomv1beta1.DynamoComponentDeployment) dcdComponentState {
-	s := dcdComponentState{}
+	s := dcdComponentState{Spec: 1}
 	if dcd.Spec.Replicas != nil {
 		s.Spec = *dcd.Spec.Replicas
 	}

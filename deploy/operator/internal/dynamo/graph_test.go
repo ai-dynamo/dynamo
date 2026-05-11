@@ -7800,15 +7800,15 @@ func TestGenerateComponentIngressResources_NormalizeBackendServiceName(t *testin
 	require.NotNil(t, ingress.Spec.Rules[0].HTTP)
 	require.Len(t, ingress.Spec.Rules[0].HTTP.Paths, 1)
 	require.NotNil(t, ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service)
-	assert.Equal(t, "model-Qwen3-0-6B", ingress.Name)
-	assert.Equal(t, "model-Qwen3-0-6B", ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name)
+	assert.Equal(t, "model-qwen3-0-6b", ingress.Name)
+	assert.Equal(t, "model-qwen3-0-6b", ingress.Spec.Rules[0].HTTP.Paths[0].Backend.Service.Name)
 
 	virtualService := GenerateComponentVirtualService(context.Background(), "model.Qwen3-0.6B", "default", ingressSpec)
 	require.Len(t, virtualService.Spec.Http, 1)
 	require.Len(t, virtualService.Spec.Http[0].Route, 1)
 	require.NotNil(t, virtualService.Spec.Http[0].Route[0].Destination)
-	assert.Equal(t, "model-Qwen3-0-6B", virtualService.Name)
-	assert.Equal(t, "model-Qwen3-0-6B", virtualService.Spec.Http[0].Route[0].Destination.Host)
+	assert.Equal(t, "model-qwen3-0-6b", virtualService.Name)
+	assert.Equal(t, "model-qwen3-0-6b", virtualService.Spec.Http[0].Route[0].Destination.Host)
 }
 
 func TestApplyDynDeploymentConfig_FallsBackToFrontendConfigKeyForRenamedFrontend(t *testing.T) {
