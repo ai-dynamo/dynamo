@@ -56,6 +56,10 @@ pub(crate) mod handler_names {
     pub const REMOTE_ONBOARD_FOR_INSTANCE: &str = "kvbm.worker.remote_onboard_for_instance";
     pub const REMOTE_ONBOARD_FOR_INSTANCE_RANK: &str =
         "kvbm.worker.remote_onboard_for_instance_rank";
+    /// AB-3: multi-shard cross-parallelism pull. Carries a
+    /// `crate::leader::dispatch::WorkerPullPlan` whose `shards` list
+    /// drives one or more sliced reads from rank-aware remote handles.
+    pub const REMOTE_PULL_PLAN: &str = "kvbm.worker.remote_pull_plan";
     pub const OBJECT_HAS_BLOCKS: &str = "kvbm.worker.object_has_blocks";
     pub const OBJECT_PUT_BLOCKS: &str = "kvbm.worker.object_put_blocks";
     pub const OBJECT_GET_BLOCKS: &str = "kvbm.worker.object_get_blocks";
@@ -189,6 +193,25 @@ struct ExecuteRemoteOnboardForInstanceRankMessage {
     dst: LogicalLayoutHandle,
     dst_block_ids: Vec<BlockId>,
     options: SerializableTransferOptions,
+}
+
+/// Multi-shard pull message for AB-3. The plan was produced by the
+/// peer leader's [`crate::leader::dispatch::plan_pull`] and carries
+/// everything one local worker needs to execute its share of an
+/// asymmetric-TP transfer: a target [`InstanceId`], source/destination
+/// [`LogicalLayoutHandle`]s, paired `(src_block_id, dst_block_id)`
+/// vectors that apply to every shard, the per-remote-rank shard list
+/// with coordinate-space slices on both sides, and a
+/// [`crate::leader::dispatch::WirePullOptions`].
+///
+/// On the wire we wrap the plan in a one-field struct so future
+/// additions (e.g. retry hints) can land without re-encoding existing
+/// fields — serde_json named fields handle the forward-compat
+/// gracefully, but the wrapper keeps the door open for sibling fields
+/// without forcing a fresh top-level type.
+#[derive(Serialize, Deserialize)]
+struct RemotePullPlanMessage {
+    plan: crate::leader::dispatch::WorkerPullPlan,
 }
 
 // ============================================================================

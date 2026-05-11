@@ -796,5 +796,4 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("not divisible"), "msg: {err}");
     }
-
 }

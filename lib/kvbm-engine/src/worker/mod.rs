@@ -183,6 +183,27 @@ pub trait WorkerTransfers: Send + Sync {
              for this Worker impl (instance={instance_id}, remote_rank={remote_rank})"
         )
     }
+
+    /// AB-3: execute a [`crate::leader::dispatch::WorkerPullPlan`] — a
+    /// multi-shard pull resolved by the peer leader's
+    /// cross-parallelism planner.
+    ///
+    /// The plan carries one or more [`crate::leader::dispatch::PullShard`]s,
+    /// each addressing a specific remote rank under
+    /// `plan.remote_instance` with coordinate-space slices on both the
+    /// local destination and remote source sides. Workers that own a
+    /// rank-aware remote-handle map and a sliced-transfer entry point
+    /// override this; the default impl bails because the legacy
+    /// transfer path cannot honour `axis_slices`.
+    fn execute_remote_pull_plan(
+        &self,
+        plan: crate::leader::dispatch::WorkerPullPlan,
+    ) -> Result<TransferCompleteNotification> {
+        let _ = plan;
+        anyhow::bail!(
+            "execute_remote_pull_plan: multi-shard pull dispatch not implemented for this Worker impl"
+        )
+    }
 }
 
 pub trait Worker: WorkerTransfers + ObjectBlockOps + Send + Sync {

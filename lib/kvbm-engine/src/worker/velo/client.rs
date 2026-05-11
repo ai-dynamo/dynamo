@@ -279,6 +279,39 @@ impl WorkerTransfers for VeloWorkerClient {
         Ok(TransferCompleteNotification::from_awaiter(awaiter))
     }
 
+    fn execute_remote_pull_plan(
+        &self,
+        plan: crate::leader::dispatch::WorkerPullPlan,
+    ) -> Result<TransferCompleteNotification> {
+        let message = RemotePullPlanMessage { plan };
+        let bytes = Bytes::from(serde_json::to_vec(&message)?);
+
+        let event = self.messenger.events().new_event()?;
+        let awaiter = self.messenger.events().awaiter(event.handle())?;
+
+        let velo = self.messenger.clone();
+        let remote_instance = self.remote;
+
+        self.messenger.tracker().spawn_on(
+            async move {
+                let result = velo
+                    .unary(handler_names::REMOTE_PULL_PLAN)?
+                    .raw_payload(bytes)
+                    .instance(remote_instance)
+                    .send()
+                    .await;
+
+                match result {
+                    Ok(_) => event.trigger(),
+                    Err(e) => event.poison(e.to_string()),
+                }
+            },
+            self.messenger.runtime(),
+        );
+
+        Ok(TransferCompleteNotification::from_awaiter(awaiter))
+    }
+
     fn execute_remote_onboard_for_instance_rank(
         &self,
         instance_id: InstanceId,

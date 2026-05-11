@@ -7,8 +7,8 @@ use super::{
     Arc, ConnectRemoteMessage, DirectWorker, ExecuteRemoteOnboardForInstanceMessage,
     ExecuteRemoteOnboardForInstanceRankMessage, LocalTransferMessage, ObjectGetBlocksMessage,
     ObjectHasBlocksMessage, ObjectHasBlocksResponse, ObjectPutBlocksMessage,
-    ObjectPutGetBlocksResponse, RemoteOffloadMessage, RemoteOnboardMessage, Result,
-    TransferOptions, WorkerTransfers, handler_names,
+    ObjectPutGetBlocksResponse, RemoteOffloadMessage, RemoteOnboardMessage, RemotePullPlanMessage,
+    Result, TransferOptions, WorkerTransfers, handler_names,
 };
 use crate::object::ObjectBlockOps;
 
@@ -57,6 +57,7 @@ impl VeloWorkerService {
         self.register_connect_remote_handler()?;
         self.register_execute_remote_onboard_for_instance_handler()?;
         self.register_execute_remote_onboard_for_instance_rank_handler()?;
+        self.register_execute_remote_pull_plan_handler()?;
         // Object storage handlers
         self.register_object_has_blocks_handler()?;
         self.register_object_put_blocks_handler()?;
@@ -299,6 +300,26 @@ impl VeloWorkerService {
                 }
             },
         )
+        .build();
+
+        self.messenger.register_handler(handler)?;
+        Ok(())
+    }
+
+    /// Register handler for execute_remote_pull_plan — the AB-3
+    /// multi-shard cross-parallelism pull entrypoint.
+    fn register_execute_remote_pull_plan_handler(&self) -> Result<()> {
+        let worker = self.worker.clone();
+
+        let handler = Handler::unary_handler_async(handler_names::REMOTE_PULL_PLAN, move |ctx| {
+            let worker = worker.clone();
+            async move {
+                let message: RemotePullPlanMessage = serde_json::from_slice(&ctx.payload)?;
+                let notification = worker.execute_remote_pull_plan(message.plan)?;
+                notification.await?;
+                Ok(Some(Bytes::new()))
+            }
+        })
         .build();
 
         self.messenger.register_handler(handler)?;
