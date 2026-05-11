@@ -241,20 +241,19 @@ class WorkerFactory:
             f"{config.namespace}.{config.component}.clear_kv_blocks"
         )
 
-        # PR B: unified RL admin endpoint on the request plane. Discoverable
-        # via etcd as ``<ns>.<component>.rl``; the dynamo-rl frontend crate
-        # uses Discovery::list(NamespacedEndpoints) + PushRouter::direct to
-        # fan out admin ops here, replacing the legacy HTTP-on-system-port
-        # ``register_engine_route("pause_generation", …)`` etc. mechanism.
-        rl_endpoint = runtime.endpoint(
-            f"{config.namespace}.{config.component}.rl"
-        )
-
         shutdown_endpoints[:] = [
             generate_endpoint,
             clear_endpoint,
-            rl_endpoint,
         ]
+
+        # RL admin endpoint — registered only when --enable-rl / DYN_ENABLE_RL=true.
+        # Discoverable via etcd as ``<ns>.<component>.rl``; the dynamo-rl frontend
+        # crate fans out pause/resume/update_weights operations here.
+        if config.enable_rl:
+            rl_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.rl"
+            )
+            shutdown_endpoints.append(rl_endpoint)
 
         lora_enabled = config.engine_args.enable_lora
         if lora_enabled:
@@ -452,13 +451,15 @@ class WorkerFactory:
                     handler.get_perf_metrics,
                     metrics_labels=model_metrics_labels,
                 ),
-                # PR B: unified RL admin endpoint (rl_dispatch dispatches
-                # by op name to pause/resume/init_transport/update_weights).
-                rl_endpoint.serve_endpoint(
-                    handler.rl_dispatch,
-                    metrics_labels=model_metrics_labels,
-                ),
             ]
+
+            if config.enable_rl:
+                serve_tasks.append(
+                    rl_endpoint.serve_endpoint(
+                        handler.rl_dispatch,
+                        metrics_labels=model_metrics_labels,
+                    )
+                )
 
             if lora_enabled:
                 serve_tasks.extend(

@@ -136,6 +136,16 @@ class DynamoVllmArgGroup(ArgGroup):
             choices=[m.value for m in EmbeddingTransferMode],
         )
 
+        # RL admin control plane
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-rl",
+            env_var="DYN_ENABLE_RL",
+            default=False,
+            help="Register the RL admin endpoint (dyn://<ns>.<component>.rl) so the "
+            "frontend can fan out pause/resume/update_weights operations to this worker.",
+        )
+
         # Headless mode for multi-node TP/PP
         add_negatable_bool_argument(
             g,
@@ -266,6 +276,9 @@ class DynamoVllmConfig(ConfigBase):
     embedding_transfer_mode: Union[
         str, EmbeddingTransferMode
     ]  # resolved to enum in validate()
+
+    # RL admin control plane
+    enable_rl: bool = False
 
     # Headless mode for multi-node TP/PP
     headless: bool = False
