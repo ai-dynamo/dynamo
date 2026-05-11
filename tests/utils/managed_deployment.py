@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import shlex
+import signal
 import time
 from dataclasses import dataclass, field
 from typing import Any, List, Literal, Optional
@@ -327,22 +328,9 @@ class ServiceSpec:
                 }
             )
 
-        # 2. chmod 1777 the log mount. Some CSI drivers (fsx.csi.aws.com
-        #    Lustre) don't honour pod fsGroup, leaving the volume root
-        #    as root:root 0755 — the non-root main container then can't
-        #    mkdir its per-pod log subdir. Sticky 1777 mirrors /tmp.
-        #    NFS / k3s local-path / nfs-rwx honour fsGroup correctly so
-        #    this is a no-op there.
-        if not any(c.get("name") == "log-pvc-chmod" for c in init_containers):
-            init_containers.append(
-                {
-                    "name": "log-pvc-chmod",
-                    "image": "busybox:1.36",
-                    "command": ["sh", "-c", f"chmod 1777 {log_dir} || true"],
-                    "securityContext": {"runAsUser": 0, "runAsGroup": 0},
-                    "volumeMounts": [{"name": pvc_name, "mountPath": log_dir}],
-                }
-            )
+        # 2. Ensure the log PVC mount is writable for the non-root
+        #    main container. See _ensure_pvc_mount_writable.
+        self._ensure_pvc_mount_writable(pvc_name, log_dir)
 
         # 3. Volumes: ConfigMap (read-only), shared emptyDir (rw to
         #    init, ro fine for main since wrapper is exec'd not edited).
@@ -387,10 +375,48 @@ class ServiceSpec:
         self._add_env_var("HF_HOME", value=mount_path)
         self._add_env_var("HF_HUB_CACHE", value=mount_path)
         self._add_env_var("TRANSFORMERS_CACHE", value=mount_path)
-        # hf_transfer accelerates large-file downloads (Qwen3-30B + LLM
-        # tokenizer indexes are big enough to benefit). Costs nothing
-        # when the cache is warm.
-        self._add_env_var("HF_HUB_ENABLE_HF_TRANSFER", value="1")
+        # NOTE: HF_HUB_ENABLE_HF_TRANSFER=1 would speed up large-file
+        # downloads but requires the `hf_transfer` package, which the
+        # released vllm-runtime / sglang-runtime images don't ship.
+        # Pre-fetching the model out-of-band (see dynamo's
+        # recipes/<model>/model-cache/model-download.yaml pattern —
+        # python:3.10-slim + pip install hf_transfer + hf download)
+        # is the recommended way to populate this cache.
+
+        # Ensure the model-cache PVC mount is writable for the
+        # non-root main container. See _ensure_pvc_mount_writable.
+        self._ensure_pvc_mount_writable(pvc_name, mount_path)
+
+    def _ensure_pvc_mount_writable(self, pvc_name: str, mount_path: str) -> None:
+        """Schedule a chmod-1777 init container on this service's pod
+        for ``pvc_name`` mounted at ``mount_path``.
+
+        Some CSI drivers (notably fsx.csi.aws.com for Lustre) don't
+        honour pod fsGroup, leaving the volume root as ``root:root
+        0755`` — the non-root main container then can't write to it.
+        Sticky ``1777`` mirrors ``/tmp``: every pod writes its own
+        subtree without stepping on others'. NFS / k3s local-path /
+        nfs-rwx honour fsGroup correctly so this is a no-op there.
+
+        Idempotent — repeated calls for the same (pvc, path) pair
+        leave a single init container in place.
+        """
+        extra_pod_spec = self._ensure_path("extraPodSpec")
+        init_containers = extra_pod_spec.setdefault("initContainers", [])
+        # Init-container names must be unique per pod and ≤63 chars.
+        # Hash-and-truncate keeps it deterministic across runs.
+        init_name = f"chmod-{pvc_name}"[:63]
+        if any(c.get("name") == init_name for c in init_containers):
+            return
+        init_containers.append(
+            {
+                "name": init_name,
+                "image": "busybox:1.36",
+                "command": ["sh", "-c", f"chmod 1777 {mount_path} || true"],
+                "securityContext": {"runAsUser": 0, "runAsGroup": 0},
+                "volumeMounts": [{"name": pvc_name, "mountPath": mount_path}],
+            }
+        )
 
     # ----- ported from _2 (full surface area) -----
     def set_readiness_probe(
@@ -862,6 +888,13 @@ class ManagedDeployment:
     # the wrapper ConfigMap), and _cleanup_log_collection_pvc skips
     # delete. Set when the user passes --log-pvc.
     reuse_log_pvc: bool = False
+    # When set, run a one-shot prefetch Job before applying the DGD
+    # that downloads every non-frontend service's model into this
+    # PVC. Avoids the lock-thrash when N worker pods hit HF
+    # concurrently on a cold cache. Idempotent — skips already-cached
+    # models. Set by run_scenario when --prefetch-model + --model-pvc
+    # are both passed.
+    model_pvc: Optional[str] = None
 
     _custom_api: Optional[client.CustomObjectsApi] = None
     _core_api: Optional[client.CoreV1Api] = None
@@ -1569,12 +1602,21 @@ class ManagedDeployment:
                     leftovers.append(f"DGD/{meta['name']}")
         except exceptions.ApiException:
             pass
+        # When --log-pvc is set, the user supplied a reusable PVC and asked
+        # the framework not to delete it. Don't flag it as a leftover.
+        reused_pvc = (
+            getattr(self.deployment_spec, "_log_collection_pvc_name", None)
+            if self.reuse_log_pvc
+            else None
+        )
         try:
             pvcs = await self._core_api.list_namespaced_persistent_volume_claim(
                 namespace=self.namespace, label_selector="purpose=log-collection"
             )
             for pvc in pvcs.items:
                 if pvc.metadata.deletion_timestamp is None:
+                    if reused_pvc and pvc.metadata.name == reused_pvc:
+                        continue
                     leftovers.append(f"PVC/{pvc.metadata.name}")
         except exceptions.ApiException:
             pass
@@ -1785,6 +1827,17 @@ class ManagedDeployment:
             logging.getLogger("httpx").setLevel(logging.WARNING)
             await self._init_kubernetes()
 
+            # Convert SIGTERM / SIGINT into KeyboardInterrupt so a plain
+            # `kill <pytest-pid>` (or Ctrl-C, or a runner that sends
+            # SIGTERM on cancel) lands in our `except:` branch below
+            # AND in __aexit__'s _cleanup. Without this, a SIGTERM
+            # bypasses both and leaves orphan DGDs + PVCs + pods in
+            # the namespace. The standalone scripts/clean-test-ns.sh
+            # is the backup for cases this can't catch — SIGKILL,
+            # OOM-kill, or a wedged process holding the GIL.
+            self._prev_sigterm = signal.signal(signal.SIGTERM, self._signal_to_kbi)
+            self._prev_sigint = signal.signal(signal.SIGINT, self._signal_to_kbi)
+
             # Scrub the namespace clean of any state left over from prior
             # runs (failed-mid-test deployments, orphan PVCs, stale load
             # jobs). Without this, residual pods can sit alongside the
@@ -1801,6 +1854,11 @@ class ManagedDeployment:
             # the deployment go up and come down together.
             await self._create_log_collection_pvc()
 
+            # Optional: pre-fetch model weights into the cache PVC
+            # before workers come up, so N pods don't race on HF
+            # locks. No-op when --prefetch-model wasn't passed.
+            await self._prefetch_models()
+
             await self._create_deployment()
             await self._wait_for_ready()
 
@@ -1810,7 +1868,33 @@ class ManagedDeployment:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self._cleanup()
+        try:
+            await self._cleanup()
+        finally:
+            # Restore prior signal handlers so a subsequent test in the
+            # same pytest session (or pytest's own SIGINT handler) is
+            # not stuck with our converter.
+            for sig, prev in (
+                (signal.SIGTERM, getattr(self, "_prev_sigterm", None)),
+                (signal.SIGINT, getattr(self, "_prev_sigint", None)),
+            ):
+                if prev is not None:
+                    try:
+                        signal.signal(sig, prev)
+                    except (ValueError, OSError):
+                        # signal.signal raises ValueError outside the
+                        # main thread; OSError on some platforms. Best
+                        # effort — handlers will be replaced anyway by
+                        # the next __aenter__ or by interpreter exit.
+                        pass
+
+    @staticmethod
+    def _signal_to_kbi(signum, frame):
+        """Signal handler: convert SIGTERM / SIGINT into
+        KeyboardInterrupt so the async context manager's `except:` /
+        `__aexit__` runs the normal cleanup. Restored on __aexit__.
+        """
+        raise KeyboardInterrupt(f"received signal {signum}")
 
     async def wait_for_ready(self, timeout: int = 1800, sleep=1, log_interval=60):
         """Public alias used by events.WaitForRecovery and RollingUpgrade.
@@ -1920,11 +2004,15 @@ class ManagedDeployment:
                         f"the flag to let the framework provision a fresh one."
                     ) from None
                 raise
+            # If the PVC was just created or hasn't bound yet (FSx-Lustre
+            # provisioning takes ~5-7 min on AWS dev clusters), poll for
+            # Bound the same way the create path does — don't fail fast
+            # on Pending.
             if pvc.status.phase != "Bound":
-                raise RuntimeError(
-                    f"--log-pvc {pvc_name!r} is in phase {pvc.status.phase}, "
-                    f"expected Bound. Resolve the binding before re-running."
+                self._logger.info(
+                    f"--log-pvc {pvc_name!r} is {pvc.status.phase}; waiting for Bound..."
                 )
+                await self._verify_pvc_binding(pvc_name)
             await self._install_log_wrapper_configmap()
             self._log_collection_pvc_created = True
             self._log_collection_pvc_verified = True
@@ -1981,6 +2069,152 @@ class ManagedDeployment:
         await self._install_log_wrapper_configmap()
         self._log_collection_pvc_created = True
         return pvc_name
+
+    async def _prefetch_models(self) -> None:
+        """Pre-fetch every non-frontend service's model into the model
+        cache PVC so concurrent worker pods don't race on HF Hub locks
+        on a cold cache.
+
+        No-op when ``model_pvc`` is unset (i.e. ``--prefetch-model``
+        was not passed). Idempotent — skips models whose snapshot
+        directory already exists in the cache. Mirrors dynamo's
+        ``recipes/<model>/model-cache/model-download.yaml`` pattern:
+        a one-shot ``python:3.10-slim`` Job runs ``pip install
+        huggingface_hub hf_transfer`` and ``hf download $MODEL`` with
+        ``HF_HUB_ENABLE_HF_TRANSFER=1``. Waits for the Job to
+        ``Succeeded`` before returning so the deployment apply that
+        follows sees a populated cache.
+        """
+        if not self.model_pvc:
+            return
+
+        # Collect unique model names from worker services.
+        models: list[str] = []
+        for svc in self.deployment_spec.services:
+            if svc.component_type == "frontend":
+                continue
+            m = svc.model
+            if not m:
+                # ServiceSpec.model only sees args[]; if the launch
+                # script wraps the worker (log-collection wrapper) the
+                # --model lives inside command[]. Best-effort regex.
+                container = svc._spec.get("extraPodSpec", {}).get("mainContainer", {})
+                cmd_text = " ".join(container.get("command", []) or []) + " "
+                cmd_text += " ".join(container.get("args", []) or [])
+                match = re.search(r"--(?:model|model-path)[\s=]+(\S+)", cmd_text)
+                if match:
+                    m = match.group(1)
+            if m and m not in models:
+                models.append(m)
+
+        if not models:
+            self._logger.info(
+                "Prefetch: no worker services have a --model arg; skipping"
+            )
+            return
+
+        assert self._core_api is not None
+        for model in models:
+            await self._prefetch_one_model(model)
+
+    async def _prefetch_one_model(self, model: str) -> None:
+        """Run a single model-download Job and wait for it to succeed."""
+        # Job name: derive from model + suffix to keep ≤63 chars.
+        slug = re.sub(r"[^a-z0-9-]", "-", model.lower()).strip("-")
+        job_name = f"prefetch-{slug}-{secrets.token_hex(2)}"[:63]
+
+        body = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": job_name,
+                "namespace": self.namespace,
+                "labels": {
+                    "managed-by": "managed-deployment",
+                    "purpose": "model-prefetch",
+                },
+            },
+            "spec": {
+                "backoffLimit": 1,
+                "ttlSecondsAfterFinished": 60,
+                "template": {
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "securityContext": {
+                            "runAsUser": 1000,
+                            "fsGroup": 1000,
+                        },
+                        "containers": [
+                            {
+                                "name": "prefetch",
+                                "image": "python:3.10-slim",
+                                "envFrom": [{"secretRef": {"name": "hf-token-secret"}}],
+                                "env": [
+                                    {"name": "HOME", "value": "/tmp"},
+                                    {"name": "HF_HOME", "value": "/model-cache"},
+                                    {"name": "HF_HUB_CACHE", "value": "/model-cache"},
+                                    {
+                                        "name": "HF_HUB_ENABLE_HF_TRANSFER",
+                                        "value": "1",
+                                    },
+                                    {"name": "MODEL", "value": model},
+                                ],
+                                "command": ["sh", "-c"],
+                                "args": [
+                                    "set -eux\n"
+                                    "pip install --no-cache-dir --user "
+                                    "huggingface_hub hf_transfer\n"
+                                    '"$HOME/.local/bin/hf" download "$MODEL"\n'
+                                ],
+                                "volumeMounts": [
+                                    {
+                                        "name": "cache",
+                                        "mountPath": "/model-cache",
+                                    }
+                                ],
+                            }
+                        ],
+                        "volumes": [
+                            {
+                                "name": "cache",
+                                "persistentVolumeClaim": {"claimName": self.model_pvc},
+                            }
+                        ],
+                    }
+                },
+            },
+        }
+
+        batch = client.BatchV1Api()
+        await batch.create_namespaced_job(namespace=self.namespace, body=body)
+        self._logger.info(
+            f"Prefetch: scheduled {job_name} for model={model!r} "
+            f"(pvc={self.model_pvc})"
+        )
+        # Poll until Succeeded or Failed; 30 min cap covers
+        # cold-cache 30B-class downloads.
+        deadline = asyncio.get_event_loop().time() + 1800
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                job = await batch.read_namespaced_job(
+                    name=job_name, namespace=self.namespace
+                )
+                if job.status.succeeded is not None and job.status.succeeded > 0:
+                    self._logger.info(f"Prefetch: {model!r} cached successfully")
+                    return
+                if job.status.failed is not None and job.status.failed >= 1:
+                    raise RuntimeError(
+                        f"Prefetch Job {job_name} for model {model!r} "
+                        f"failed; check `kubectl logs -n {self.namespace} "
+                        f"job/{job_name}`."
+                    )
+            except exceptions.ApiException:
+                pass
+            await asyncio.sleep(5)
+        raise RuntimeError(
+            f"Prefetch Job {job_name} for model {model!r} did not "
+            f"complete within 30 min."
+        )
 
     async def _install_log_wrapper_configmap(self) -> None:
         """Apply the ConfigMap that holds the dyn_tee.sh log-tee wrapper.

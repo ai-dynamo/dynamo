@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Production-scale vllm disagg DGD: 2 Frontend + 4 prefill (TP=2) + 2 decode (TP=2)
+# = 12 GPUs total; spans 2× 8×H100-80GB nodes. Model: Qwen3-30B-A3B (30B-param MoE).
+# NixlConnector with kv_role=kv_both.
+#
+# Used for cascade-causality experiments — heavy ISL (~7000 tokens) / short OSL
+# (~100 tokens) sustained load that pressures both prefill batching and the
+# decode-side KV transfer path. The 2× prefill ratio over decode reflects a
+# prefill-bound workload with frequent KV handoffs (common in long-context,
+# short-output inference patterns like retrieval / RAG / ranking).
+#
+# Image: dynamo v1.0.1 vllm-runtime (released).
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg-qwen3-30b-4p2d
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 2
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 4
+      resources:
+        requests:
+          gpu: "2"
+        limits:
+          gpu: "2"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-30B-A3B
+            - --disaggregation-mode
+            - prefill
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            - --tensor-parallel-size
+            - "2"
+            - --max-model-len
+            - "8192"
+            - --kv-events-config
+            - '{"enable_kv_cache_events":false}'
+
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 2
+      resources:
+        requests:
+          gpu: "2"
+        limits:
+          gpu: "2"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-30B-A3B
+            - --disaggregation-mode
+            - decode
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            - --tensor-parallel-size
+            - "2"
+            - --max-model-len
+            - "8192"
+            - --kv-events-config
+            - '{"enable_kv_cache_events":false}'

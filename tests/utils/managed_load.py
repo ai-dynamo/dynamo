@@ -183,8 +183,6 @@ class ManagedLoad:
             str(cfg.output_tokens_stddev),
             "--concurrency",
             str(cfg.concurrency),
-            "--warmup-request-count",
-            str(cfg.warmup_requests),
             "--request-timeout-seconds",
             str(cfg.request_timeout_seconds),
             "--num-dataset-entries",
@@ -206,6 +204,12 @@ class ManagedLoad:
         elif cfg.request_count:
             args.extend(["--request-count", str(cfg.request_count)])
 
+        # aiperf 0.7.0 rejects --warmup-request-count 0 (requires > 0).
+        # Only emit the flag when the caller wants warmup; otherwise let
+        # aiperf use its default (no warmup or its own default count).
+        if cfg.warmup_requests:
+            args.extend(["--warmup-request-count", str(cfg.warmup_requests)])
+
         if cfg.streaming:
             args.append("--streaming")
 
@@ -219,12 +223,49 @@ class ManagedLoad:
             # aiperf accepts: --server-metrics <url1> <url2> ... — the
             # base URL is scraped automatically by default, the URLs
             # passed here are *additional* endpoints.
+            # Note: requires aiperf >= 0.7.0 for the flag to take effect;
+            # earlier versions silently ignored it.
             args.extend(["--server-metrics", *cfg.extra_server_metrics_urls])
+            # Default formats are JSON + CSV — aggregated summaries only.
+            # Add JSONL (raw 1Hz time-series, line-delimited) so we can
+            # post-process which signal spiked first vs. last. Skip
+            # PARQUET: redundant for our minute-scale runs and pulls in
+            # pyarrow as a downstream-tool dep with no real benefit at
+            # this data volume.
+            args.extend(
+                [
+                    "--server-metrics-formats",
+                    "json",
+                    "csv",
+                    "jsonl",
+                ]
+            )
 
-        # Build extra inputs
+        # Build extra inputs.
+        #
+        # max_tokens / min_tokens semantics in vllm:
+        #   - We pass our requested max_tokens to the engine.
+        #   - vllm INTERNALLY clamps max_tokens down to
+        #     `max_model_len − prompt_token_count` per-request. If a high
+        #     ISL sample (e.g. 8112 tokens with max_model_len=8192) leaves
+        #     only 80 tokens of budget, vllm uses max_tokens=80 for THAT
+        #     request — even though the client asked for 100.
+        #   - If the client's `min_tokens` exceeds vllm's clamped
+        #     max_tokens, vllm rejects the request with
+        #       `ValueError: min_tokens=N must be ≤ max_tokens=K, got K<N`.
+        #
+        # Default (here): min_tokens=1. vllm's per-request clamp is
+        # always allowed to drop the cap; the floor is permissive; no
+        # rejection. Tests get the load they ask for.
+        #
+        # Opt-in failure mode (e.g. test_scenario_bad_input_distribution
+        # passes `extra_inputs={"min_tokens": output_tokens_mean}`):
+        # rigid min=max forces vllm to reject any request whose ISL
+        # leaves <min_tokens of budget. Useful for modeling the "client
+        # sends out-of-spec request" failure that climbs error counters.
         extra_inputs = {
             "max_tokens": cfg.output_tokens_mean,
-            "min_tokens": cfg.output_tokens_mean,
+            "min_tokens": 1,
             "temperature": cfg.temperature,
             "repetition_penalty": cfg.repetition_penalty,
         }
@@ -389,7 +430,7 @@ class ManagedLoad:
 
     async def wait_for_started(self, timeout: int = 300) -> bool:
         """Wait for the load test to start (5 minute timeout by default)."""
-        marker_file = f"{self.container_results_dir}/status/started"
+        marker_file = f"{self.container_results_dir}/status/{self.job_name}/started"
         return await self._wait_for_status_marker(
             marker_file, "Load test start", timeout
         )
@@ -406,7 +447,7 @@ class ManagedLoad:
             else:
                 timeout = 600  # Default 10 minutes
 
-        marker_file = f"{self.container_results_dir}/status/completed"
+        marker_file = f"{self.container_results_dir}/status/{self.job_name}/completed"
         result = await self._wait_for_status_marker(
             marker_file, "Load test completion", timeout
         )

@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Sanity test for the 1F + 1P (TP=2) + 2D (TP=2) vllm disagg topology
-# on Qwen3-30B-A3B. Verifies: PVC binding, all 4 pods reach Ready,
+# Sanity test for the 1F + 2P (TP=2 each) + 1D (TP=2) vllm disagg
+# topology on Qwen3-30B-A3B (matches the documented 2P:1D ratio for
+# prefill-bound workloads — heavy ISL, very short OSL).
+# Verifies: PVC binding, all 4 pods reach Ready,
 # the prefill→decode NIXL KV-transfer path comes up clean, the model
 # registers on the frontend, and a small request burst returns with
 # zero errors. Baseline for the disagg failure-mode repros that
@@ -35,12 +37,10 @@ from tests.utils.managed_load import LoadConfig
 @pytest.mark.e2e
 @pytest.mark.weekly
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
-async def test_sanity_vllm_qwen3_30b(
-    namespace, image, skip_service_restart, storage_class, log_pvc, model_pvc
-):
+async def test_sanity_vllm_qwen3_30b(runtime_env):
     spec = DeploymentSpec(
         "/workspace/tests/fault_tolerance/deploy/templates/vllm/"
-        "disagg_qwen3_30b_1p2d.yaml"
+        "disagg_qwen3_30b_2p1d.yaml"
     )
     served_model = spec["VllmDecodeWorker"].model
     await run_scenario(
@@ -67,11 +67,6 @@ async def test_sanity_vllm_qwen3_30b(
             ZeroErrors(),
         ],
         reports=[FaultToleranceReport()],
-        namespace=namespace,
-        image=image,
         test_name="test_sanity_vllm_qwen3_30b",
-        skip_service_restart=skip_service_restart,
-        storage_class=storage_class,
-        log_pvc=log_pvc,
-        model_pvc=model_pvc,
+        runtime_env=runtime_env,
     )

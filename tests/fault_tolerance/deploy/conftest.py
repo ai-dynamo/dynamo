@@ -55,6 +55,14 @@ def pytest_addoption(parser):
         help="Client type for load generation: 'aiperf' (default) or 'legacy'",
     )
     parser.addoption(
+        "--baseline-concurrency",
+        type=int,
+        default=8,
+        help="Initial concurrency for the cascade-console long-running driver "
+        "(test_cascade_console.py). Adjust on the fly via "
+        "`python -m tests.utils.cascade_inject load <N>`.",
+    )
+    parser.addoption(
         "--include-custom-build",
         action="store_true",
         default=False,
@@ -89,6 +97,17 @@ def pytest_addoption(parser):
         "PVC must already exist in the test namespace and be RWX. "
         "Many shared clusters auto-provision a 'shared-model-cache' "
         "PVC per namespace.",
+    )
+    parser.addoption(
+        "--prefetch-model",
+        action="store_true",
+        default=False,
+        help="Before applying the DGD, schedule a one-shot Job that "
+        "downloads every non-frontend service's model into the model "
+        "cache. Avoids the concurrent-download lock thrash that "
+        "happens when N worker pods all hit HuggingFace simultaneously "
+        "on a cold cache. Idempotent — skips models already present. "
+        "Requires --model-pvc.",
     )
     parser.addoption(
         "--restart-services",
@@ -207,3 +226,41 @@ def log_pvc(request):
 def model_pvc(request):
     """Existing RWX PVC name to reuse as the HF model cache (mounted on workers)."""
     return request.config.getoption("--model-pvc")
+
+
+@pytest.fixture
+def prefetch_model(request):
+    """Run a one-shot model-download Job before applying the DGD."""
+    return request.config.getoption("--prefetch-model")
+
+
+@pytest.fixture
+def runtime_env(
+    namespace,
+    image,
+    skip_service_restart,
+    storage_class,
+    log_pvc,
+    model_pvc,
+    prefetch_model,
+):
+    """Bundle of every CLI-driven runtime knob a scenario needs.
+
+    Tests take just this one fixture and forward it to
+    ``run_scenario(runtime_env=...)`` instead of declaring seven
+    individual fixtures. Adding a new CLI flag means: define an
+    addoption + fixture above, add the field below, and update
+    ``run_scenario`` to read it from the bundle. Test signatures
+    stay unchanged.
+    """
+    from tests.fault_tolerance.deploy.scenario import RuntimeEnv
+
+    return RuntimeEnv(
+        namespace=namespace,
+        image=image,
+        skip_service_restart=skip_service_restart,
+        storage_class=storage_class,
+        log_pvc=log_pvc,
+        model_pvc=model_pvc,
+        prefetch_model=prefetch_model,
+    )

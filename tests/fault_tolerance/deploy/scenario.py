@@ -35,6 +35,24 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class RuntimeEnv:
+    """Bundle of CLI-driven runtime knobs forwarded into ``run_scenario``.
+
+    Lets a test declare just one ``runtime_env`` fixture instead of
+    seven individual ones. Forward to ``run_scenario`` via
+    ``run_scenario(..., runtime_env=runtime_env)``.
+    """
+
+    namespace: str
+    image: Optional[str] = None
+    skip_service_restart: bool = True
+    storage_class: Optional[str] = None
+    log_pvc: Optional[str] = None
+    model_pvc: Optional[str] = None
+    prefetch_model: bool = False
+
+
+@dataclass
 class ScenarioContext:
     """Runtime context - holds deployment, events, checks, and reports.
 
@@ -67,13 +85,18 @@ async def run_scenario(
     deployment_spec: DeploymentSpec,
     events: list[Event],
     checks: list[Check],
-    namespace: str,
-    image: str | None = None,
     test_name: str | None = None,
+    runtime_env: Optional[RuntimeEnv] = None,
+    # ----- legacy individual kwargs (kept for back-compat) -----
+    # Tests written before RuntimeEnv landed pass these directly.
+    # New tests should pass ``runtime_env=runtime_env`` instead.
+    namespace: str | None = None,
+    image: str | None = None,
     skip_service_restart: bool = True,
     storage_class: str | None = None,
     log_pvc: str | None = None,
     model_pvc: str | None = None,
+    prefetch_model: bool = False,
     reports: list[Report] | None = None,
     resource_config: Optional["ResourceMonitorConfig"] = None,
 ) -> ScenarioContext:
@@ -102,6 +125,22 @@ async def run_scenario(
     7. Generate reports (BEFORE checks, so failures don't block reports)
     8. Run checks (assertions happen last)
     """
+    # Collapse runtime_env (preferred) or individual kwargs (legacy) into
+    # one source of truth. RuntimeEnv values win when both are passed.
+    if runtime_env is not None:
+        namespace = runtime_env.namespace
+        image = runtime_env.image
+        skip_service_restart = runtime_env.skip_service_restart
+        storage_class = runtime_env.storage_class
+        log_pvc = runtime_env.log_pvc
+        model_pvc = runtime_env.model_pvc
+        prefetch_model = runtime_env.prefetch_model
+    if namespace is None:
+        raise ValueError(
+            "run_scenario: namespace required. Pass either "
+            "runtime_env=runtime_env (preferred) or namespace=...."
+        )
+
     # Resolve the test output dir ONCE so every component (ManagedDeployment,
     # ManagedLoad, the FaultToleranceReport, the conftest test.log handler)
     # writes to the same canonical location. Without this, ManagedLoad lands
@@ -177,6 +216,7 @@ async def run_scenario(
         deployment_spec=deployment_spec,
         skip_service_restart=skip_service_restart,
         reuse_log_pvc=bool(log_pvc),
+        model_pvc=model_pvc if prefetch_model else None,
     ) as deployment:
         ctx.deployment = deployment
 

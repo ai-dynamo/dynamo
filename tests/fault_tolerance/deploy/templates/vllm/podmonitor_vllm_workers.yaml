@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# PodMonitor for any Dynamo DGD's worker + frontend pods in this namespace.
+# Picked up automatically by the Prometheus operator (operator namespace
+# `prometheus-operator`); the resulting metrics are then visible in
+# Grafana at kube-prometheus-stack-grafana.monitoring.
+#
+# Targets every pod with label `nvidia.com/dynamo-component` (set by the
+# operator on every DGD-managed pod), scrapes path /metrics on the
+# Dynamo system port. The system port name is `system` on the operator-
+# created Service, and is 9090 on the pod.
+#
+# Apply once per namespace (idempotent), separate from any specific DGD:
+#   kubectl --context <ctx> -n <ns> apply -f podmonitor_vllm_workers.yaml
+
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: dynamo-workers
+  labels:
+    app.kubernetes.io/managed-by: dynamo-test-framework
+spec:
+  selector:
+    matchExpressions:
+      - key: nvidia.com/dynamo-component
+        operator: Exists
+  podMetricsEndpoints:
+    # Workers expose Dynamo + vllm engine metrics on `system:9090`.
+    - port: system
+      path: /metrics
+      interval: 5s          # fast scrape — match aiperf's 1Hz default-ish cadence
+      scrapeTimeout: 4s
+      relabelings: &relabel
+        # Surface useful labels into Prometheus so Grafana can group by them.
+        - sourceLabels: [__meta_kubernetes_pod_label_nvidia_com_dynamo_component]
+          targetLabel: dynamo_component
+        - sourceLabels: [__meta_kubernetes_pod_label_nvidia_com_dynamo_subcomponent]
+          targetLabel: dynamo_subcomponent
+        - sourceLabels: [__meta_kubernetes_pod_label_nvidia_com_dynamo_graph_deployment_name]
+          targetLabel: dgd
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+    # Frontend exposes its own /metrics on `http:8000` (no separate system port).
+    - port: http
+      path: /metrics
+      interval: 5s
+      scrapeTimeout: 4s
+      relabelings: *relabel

@@ -28,7 +28,18 @@ spec:
               pip install --quiet aiperf
 
               echo "=== Creating output directories ==="
-              mkdir -p /tmp/aiperf/status
+              # Per-Job marker path under /tmp/aiperf/status/<job-name>/.
+              # This avoids the stale-marker race when the PVC is reused
+              # across chained loads — the framework's wait_for_completion
+              # checks the per-job path, which only this Job's pod creates.
+              # We also still wipe the loose top-level files so chained
+              # loads don't read each other's exports.
+              JOB_NAME="${HOSTNAME%-*}"  # strip random pod suffix → job-name
+              JOB_STATUS_DIR=/tmp/aiperf/status/${JOB_NAME}
+              rm -rf /tmp/aiperf/aiperf.log \
+                     /tmp/aiperf/server_metrics_export.* \
+                     /tmp/aiperf/profile_export*
+              mkdir -p "${JOB_STATUS_DIR}"
 
               echo "=== Waiting for model '${MODEL_NAME}' to be available ==="
               MAX_RETRIES=120
@@ -53,7 +64,7 @@ spec:
               fi
 
               echo "=== Starting aiperf load test ==="
-              touch /tmp/aiperf/status/started
+              touch "${JOB_STATUS_DIR}/started"
 
               # Define signal handler to keep container alive when aiperf is terminated
               # (matches ManagedAIPerfDeployment pattern for graceful shutdown)
@@ -64,7 +75,7 @@ spec:
                       wait $AIPERF_PID
                       AIPERF_EXIT_CODE=$?
                       echo "aiperf process finished with exit code: $AIPERF_EXIT_CODE"
-                      echo "$AIPERF_EXIT_CODE" > /tmp/aiperf/status/exit_code
+                      echo "$AIPERF_EXIT_CODE" > "${JOB_STATUS_DIR}/exit_code"
                   fi
               }
               trap cleanup_handler SIGTERM SIGINT
@@ -84,8 +95,8 @@ spec:
               # Brief delay to ensure all file writes complete (matches ManagedAIPerfDeployment)
               sleep 2
 
-              echo "$AIPERF_EXIT_CODE" > /tmp/aiperf/status/exit_code
-              touch /tmp/aiperf/status/completed
+              echo "$AIPERF_EXIT_CODE" > "${JOB_STATUS_DIR}/exit_code"
+              touch "${JOB_STATUS_DIR}/completed"
 
               echo "=== aiperf completed with exit code: $AIPERF_EXIT_CODE ==="
 
