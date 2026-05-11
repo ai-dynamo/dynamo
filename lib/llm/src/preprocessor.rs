@@ -1539,7 +1539,7 @@ impl OpenAIPreprocessor {
                         }
 
                         choice_state.decided = true;
-                        if choice_state.buffer.starts_with(&state.think_start_token) {
+                        if choice_state.buffer.starts_with(state.think_start_token) {
                             choice_state.buffer[state.think_start_token.len()..].to_string()
                         } else {
                             choice_state.buffer.clone()
