@@ -166,6 +166,16 @@ pub struct OffloadConfig {
     #[serde(default)]
     #[validate(nested)]
     pub g2_to_g3: TierOffloadConfig,
+
+    /// G1 (GPU) → G3 (Disk) direct offload policies (host-bypass mode).
+    ///
+    /// Only consulted when the cache config has `bypass_host_cache() == true`
+    /// (disk configured, host not). In that mode the G1→G2 + G2→G3 chain is
+    /// replaced by a single G1→G3 pipeline that uses GDS for direct GPU→disk
+    /// transfers.
+    #[serde(default)]
+    #[validate(nested)]
+    pub g1_to_g3: TierOffloadConfig,
 }
 
 #[cfg(test)]

@@ -51,6 +51,18 @@ impl ConnectorLeader {
         block_ids: Vec<BlockId>,
         num_external_tokens: usize,
     ) -> Result<()> {
+        // Intra-pass onboarding currently only supports G2→G1 (the worker's
+        // CudaStream layer-by-layer load expects G2 sources). Host-bypass
+        // mode has no G2 to source from, so reject the combination loudly
+        // rather than silently producing wrong results. Use Inter mode if
+        // bypass is required.
+        if self.runtime.config().cache.bypass_host_cache() {
+            bail!(
+                "Intra-pass onboarding is not supported when host (G2) cache is bypassed. \
+                 Set DYN_KVBM_CPU_CACHE_GB to enable G2, or use Inter onboard mode \
+                 (the default) which supports the bypass + GDS direct G3→G1 path."
+            );
+        }
         let shared_slot = self.get_slot(request_id)?;
         let mut slot = shared_slot.lock();
         let num_computed_tokens = slot
@@ -151,12 +163,14 @@ impl ConnectorLeader {
         let handle = self.runtime.tokio();
         let request_id = request_id.to_string();
 
+        let bypass_host = self.runtime.config().cache.bypass_host_cache();
         handle.spawn(async move {
             match execute_onboarding(
                 leader.clone(),
                 shared_slot.clone(),
                 onboard_blocks_ids.clone(),
                 staging_fut,
+                bypass_host,
             )
             .await
             {
@@ -210,6 +224,7 @@ async fn execute_onboarding(
     slot: Arc<Mutex<RequestSlot>>,
     block_ids: Vec<BlockId>,
     staging_fut: Either<Ready<Result<()>>, BoxFuture<'static, Result<()>>>,
+    bypass_host: bool,
 ) -> Result<()> {
     let g1_block_ids = block_ids;
     let start = Instant::now();
@@ -220,35 +235,49 @@ async fn execute_onboarding(
         .context("Onboarding find_session operation failed")?;
     let staging_complete = Instant::now();
 
-    let g2_blocks = slot
-        .lock()
-        .onboarding_state_mut()
-        .expect("Onboarding state not found")
-        .find_session
-        .take_g2_blocks()
-        .ok_or_else(|| anyhow::anyhow!("No G2 blocks found"))?;
+    // Pull source blocks from the find session. In host-bypass mode the
+    // Ready result carries G3 blocks (no staging happened); otherwise the
+    // AsyncSession has already staged into G2.
+    let (src_layout, src_block_ids) = {
+        let mut slot_guard = slot.lock();
+        let session = slot_guard
+            .onboarding_state_mut()
+            .expect("Onboarding state not found");
+        if bypass_host {
+            let g3_blocks = session
+                .find_session
+                .take_g3_blocks()
+                .ok_or_else(|| anyhow::anyhow!("No G3 blocks found (bypass mode)"))?;
+            let ids: Vec<BlockId> = g3_blocks.iter().map(|b| b.block_id()).collect();
+            (LogicalLayoutHandle::G3, ids)
+        } else {
+            let g2_blocks = session
+                .find_session
+                .take_g2_blocks()
+                .ok_or_else(|| anyhow::anyhow!("No G2 blocks found"))?;
+            let ids: Vec<BlockId> = g2_blocks.iter().map(|b| b.block_id()).collect();
+            (LogicalLayoutHandle::G2, ids)
+        }
+    };
 
-    let g2_block_ids: Vec<BlockId> = g2_blocks.iter().map(|b| b.block_id()).collect();
-
-    let num_blocks = g2_block_ids.len();
+    let num_blocks = src_block_ids.len();
     assert_eq!(num_blocks, g1_block_ids.len());
 
-    // All blocks are now in G2
     let instance_leader = leader.instance_leader().expect("InstanceLeader not set");
     let parallel_worker = instance_leader
         .parallel_worker()
         .ok_or_else(|| anyhow::anyhow!("No parallel worker available for local transfer"))?;
 
-    // TODO: potential optimization would be to stream G2 blocks to G1 blocks as G2 blocks are ready.
-    // The current implementation awaits all G2 blocks to be ready before executing the transfer.
-    // The balance here is when do we acquire/allocate G1 blocks as they are a precious commodity vs.,
-    // when should we start onboarding. More analysis is needed here to determine the optimal strategy.
+    // TODO: potential optimization would be to stream blocks to G1 as they
+    // become ready. The current implementation awaits all source blocks
+    // before issuing the transfer. The balance is when to acquire/allocate
+    // G1 blocks (a precious commodity) vs. when to start onboarding.
     let start_xfer = Instant::now();
     parallel_worker
         .execute_local_transfer(
-            LogicalLayoutHandle::G2,
+            src_layout,
             LogicalLayoutHandle::G1,
-            Arc::from(g2_block_ids),
+            Arc::from(src_block_ids),
             Arc::from(g1_block_ids),
             TransferOptions::default(),
         )?
@@ -260,7 +289,7 @@ async fn execute_onboarding(
         staging_ms = staging_complete.duration_since(start).as_millis() as u64,
         xfer_ms = end_xfer.duration_since(start_xfer).as_millis() as u64,
         total_ms = end_xfer.duration_since(start).as_millis() as u64,
-        src = "kvbm_engine::G2",
+        src = if bypass_host { "kvbm_engine::G3" } else { "kvbm_engine::G2" },
         dst = "kvbm_engine::G1",
         "Onboard transfer complete"
     );
