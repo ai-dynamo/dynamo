@@ -49,13 +49,20 @@ const (
 	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
 	KubeLabelDynamoNamespace           = "nvidia.com/dynamo-namespace"
-	KubeLabelDynamoComponentType       = "nvidia.com/dynamo-component-type"
-	KubeLabelDynamoSubComponentType    = "nvidia.com/dynamo-sub-component-type"
-	KubeLabelDynamoBaseModel           = "nvidia.com/dynamo-base-model"
-	KubeLabelDynamoBaseModelHash       = "nvidia.com/dynamo-base-model-hash"
-	KubeAnnotationDynamoBaseModel      = "nvidia.com/dynamo-base-model"
-	KubeLabelDynamoDiscoveryBackend    = "nvidia.com/dynamo-discovery-backend"
-	KubeLabelDynamoDiscoveryEnabled    = "nvidia.com/dynamo-discovery-enabled"
+	// KubeLabelDynamoComponentType is the workload selector contract stamped on
+	// DCDs and rendered onto pods/services. Native v1beta1 prefill/decode worker
+	// DCDs use "prefill" or "decode". A DCD generation that is already serving
+	// alpha-era selectors uses "worker" and pairs it with
+	// KubeLabelDynamoSubComponentType so a no-op upgrade keeps matching existing
+	// pods. This selector contract is separate from worker-hash currentness:
+	// matching current-worker-hash does not imply legacy selectors.
+	KubeLabelDynamoComponentType    = "nvidia.com/dynamo-component-type"
+	KubeLabelDynamoSubComponentType = "nvidia.com/dynamo-sub-component-type"
+	KubeLabelDynamoBaseModel        = "nvidia.com/dynamo-base-model"
+	KubeLabelDynamoBaseModelHash    = "nvidia.com/dynamo-base-model-hash"
+	KubeAnnotationDynamoBaseModel   = "nvidia.com/dynamo-base-model"
+	KubeLabelDynamoDiscoveryBackend = "nvidia.com/dynamo-discovery-backend"
+	KubeLabelDynamoDiscoveryEnabled = "nvidia.com/dynamo-discovery-enabled"
 	// KubeLabelDynamoWorkerHash is the worker generation label on worker DCDs
 	// and worker pods. During v1/v2 hash compatibility the label key remains
 	// stable and the value may be either the active v1 hash or the active v2 hash
