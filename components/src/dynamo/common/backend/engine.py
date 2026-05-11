@@ -40,12 +40,13 @@ class GenerateRequest(TypedDict, total=False):
 class GenerateChunk(TypedDict, total=False):
     """Single chunk yielded by ``LLMEngine.generate()``.
 
-    Every chunk must include ``token_ids``.
-    The final chunk must additionally include ``finish_reason`` and
-    ``completion_usage``.
+    Every chunk must include ``token_ids`` and ``index``.
+    Use ``index=0`` for single-choice responses. The final chunk must
+    additionally include ``finish_reason`` and ``completion_usage``.
     """
 
     token_ids: Required[list[int]]
+    index: Required[int]
     finish_reason: str
     completion_usage: dict[str, int]
 
@@ -108,9 +109,9 @@ class LLMEngine(ABC):
 
         Called concurrently for multiple in-flight requests.
 
-        Each chunk: ``{"token_ids": [...]}``
-        Final chunk must include: ``{"token_ids": [...], "finish_reason": "...",
-        "completion_usage": {...}}``
+        Each chunk: ``{"token_ids": [...], "index": 0}``
+        Final chunk must include: ``{"token_ids": [...], "index": 0,
+        "finish_reason": "...", "completion_usage": {...}}``
         """
         ...
         yield  # type: ignore[misc]
@@ -125,5 +126,12 @@ class LLMEngine(ABC):
 
     @abstractmethod
     async def cleanup(self) -> None:
-        """Release all engine resources.  Called once on shutdown."""
+        """Release all engine resources.
+
+        ``Worker`` invokes ``cleanup()`` at most once, only after ``start()``
+        has returned successfully, and never concurrently with ``start()`` or
+        another ``cleanup()``. Implementations do not need to defend against
+        pre-start, concurrent-with-start, or double-cleanup invocations —
+        ``Worker``'s lifecycle state machine serializes these transitions.
+        """
         ...

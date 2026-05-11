@@ -47,4 +47,5 @@ types re-exported from the crate root.
 - Router guide: <https://docs.nvidia.com/dynamo/components/router>
 - Indexer internals:
   <https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/indexer/README.md>
+- Benchmarking the sharded KV router: [INDEXER_BENCH.md](src/indexer/INDEXER_BENCH.md)
 - Dynamo repository: <https://github.com/ai-dynamo/dynamo>

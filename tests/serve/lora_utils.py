@@ -31,6 +31,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # LoRA testing constants
+#
+# Port 9000 / container name / bucket are hardcoded singletons — only one MinIO
+# can exist per host at a time. NOT multi-tenant safe:
+#   - Two concurrent pytest runs (or CI jobs) on the same host race on the
+#     `dynamo-minio-test` container; whichever calls `docker rm -f` second
+#     kills the other's mid-test.
+#   - xdist workers within one pytest run only work because CI pre-starts MinIO
+#     externally (see action.yml "Start MinIO Service" step) so all workers
+#     skip the start path and just connect.
+#   - If a host already has MinIO on :9000 with different creds, the fixture
+#     connects, fails to auth on bucket create, and surfaces a confusing error.
+#
+# TODO: make these overridable per-worker / per-job (env vars or PYTEST_XDIST_WORKER-
+# derived suffixes) so concurrent runs don't collide. Pattern to mirror is
+# tests/utils/runtime_services_dynamic_ports for ETCD/NATS.
 MINIO_ENDPOINT = "http://localhost:9000"
 MINIO_ACCESS_KEY = "minioadmin"
 MINIO_SECRET_KEY = "minioadmin"

@@ -79,6 +79,7 @@ pub fn create_handle(req: &NvCreateChatCompletionRequest, request_id: &str) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use temp_env::with_vars;
 
     fn create_test_request(model: &str, store: bool) -> NvCreateChatCompletionRequest {
@@ -88,6 +89,41 @@ mod tests {
             "store": store
         });
         serde_json::from_value(json).expect("Failed to create test request")
+    }
+
+    fn create_test_request_with_agent_context() -> NvCreateChatCompletionRequest {
+        let json = serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "test"}],
+            "store": true,
+            "nvext": {
+                "agent_context": {
+                    "workflow_type_id": "deep_research",
+                    "workflow_id": "run-123",
+                    "program_id": "run-123:researcher",
+                    "parent_program_id": "run-123:planner"
+                }
+            }
+        });
+        serde_json::from_value(json).expect("Failed to create test request")
+    }
+
+    fn create_test_response(content: &str) -> NvCreateChatCompletionResponse {
+        let json = serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1234567890,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": content
+                },
+                "finish_reason": "stop"
+            }]
+        });
+        serde_json::from_value(json).expect("Failed to create test response")
     }
 
     /// Test that DYN_AUDIT_FORCE_LOGGING=true bypasses store=false
@@ -109,6 +145,33 @@ mod tests {
                     "When DYN_AUDIT_FORCE_LOGGING=true, handle should be created even with store=false"
                 );
             },
+        );
+    }
+
+    #[test]
+    fn audit_record_serializes_agent_context_and_response_content() {
+        let record = AuditRecord {
+            schema_version: 1,
+            request_id: "req-123".to_string(),
+            requested_streaming: true,
+            model: "test-model".to_string(),
+            request: Some(Arc::new(create_test_request_with_agent_context())),
+            response: Some(Arc::new(create_test_response("final answer"))),
+        };
+
+        let value = serde_json::to_value(record).unwrap();
+
+        assert_eq!(
+            value["request"]["nvext"]["agent_context"]["workflow_id"],
+            "run-123"
+        );
+        assert_eq!(
+            value["request"]["nvext"]["agent_context"]["program_id"],
+            "run-123:researcher"
+        );
+        assert_eq!(
+            value["response"]["choices"][0]["message"]["content"],
+            "final answer"
         );
     }
 }

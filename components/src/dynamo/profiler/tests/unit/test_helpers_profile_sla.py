@@ -61,6 +61,12 @@ except ImportError as e:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def dgdr_name_env(monkeypatch):
+    """Set DGDR_NAME so _validate_dgd_service_name_lengths runs in tests."""
+    monkeypatch.setenv("DGDR_NAME", "test-dgdr")
+
+
 def _make_dgdr(**overrides) -> DynamoGraphDeploymentRequestSpec:
     """Build a minimal dgdr with all required fields set."""
     base = dict(
@@ -1113,3 +1119,122 @@ class TestRunProfileSkipsInterpolationForAggConfig:
         assert (
             called_backend == "vllm"
         ), f"run_interpolation must be called with resolved backend 'vllm', got {called_backend!r}"
+
+
+# ---------------------------------------------------------------------------
+# _validate_dgd_service_name_lengths
+# ---------------------------------------------------------------------------
+
+
+class TestValidateDgdServiceNameLengths:
+    """Unit tests for _validate_dgd_service_name_lengths."""
+
+    try:
+        from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
+    except ImportError:
+        pass
+
+    def _make_final_config(self, service_names: list[str]) -> dict:
+        return {"spec": {"services": {name: {} for name in service_names}}}
+
+    def _make_dgdr(self) -> "DynamoGraphDeploymentRequestSpec":
+        return DynamoGraphDeploymentRequestSpec(
+            backend="vllm",
+            hardware=HardwareSpec(totalGpus=1),
+            model="meta-llama/Llama-2-7b",
+        )
+
+    def test_passes_when_combined_length_at_limit(self, monkeypatch):
+        """Names summing to exactly 45 should not raise."""
+        from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
+
+        # dgdr_name="a" * 9 → dgd_name="a"*9 + "-dgd" = 13 chars; svc = 32 chars → 45 total
+        monkeypatch.setenv("DGDR_NAME", "a" * 9)
+        dgdr = self._make_dgdr()
+        config = self._make_final_config(["s" * 32])
+        _validate_dgd_service_name_lengths(dgdr, config)  # must not raise
+
+    def test_raises_when_combined_length_exceeds_limit(self, monkeypatch):
+        """Names summing to 46 should raise ValueError with detail."""
+        from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
+
+        # dgdr_name="a"*9 → dgd_name=13; svc=33 → combined=46
+        monkeypatch.setenv("DGDR_NAME", "a" * 9)
+        dgdr = self._make_dgdr()
+        config = self._make_final_config(["s" * 33])
+        with pytest.raises(ValueError, match="pod-naming limit"):
+            _validate_dgd_service_name_lengths(dgdr, config)
+
+    def test_raises_lists_all_violations(self, monkeypatch):
+        """All offending service names should appear in the error message."""
+        from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
+
+        # dgdr_name="a"*27 → dgd_name=31 chars; TRTLLM names (18-19) → combined 49-50 > 45
+        monkeypatch.setenv("DGDR_NAME", "a" * 27)
+        dgdr = self._make_dgdr()
+        config = self._make_final_config(
+            ["TRTLLMPrefillWorker", "TRTLLMDecodeWorker", "ok"]
+        )
+        with pytest.raises(ValueError) as exc_info:
+            _validate_dgd_service_name_lengths(dgdr, config)
+        msg = str(exc_info.value)
+        assert "TRTLLMPrefillWorker" in msg
+        assert "TRTLLMDecodeWorker" in msg
+        assert "ok" not in msg
+
+    def test_fallback_to_config_metadata_name_when_dgdr_name_unset(self, monkeypatch):
+        """Without DGDR_NAME, the name in final_config.metadata.name is used."""
+        from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
+
+        monkeypatch.delenv("DGDR_NAME", raising=False)
+        dgdr = self._make_dgdr()
+        # "x" * 40 + "svc" (3) = 43 ≤ 45 → passes
+        config = {"metadata": {"name": "x" * 40}, "spec": {"services": {"svc": {}}}}
+        _validate_dgd_service_name_lengths(dgdr, config)  # must not raise
+
+    def test_fallback_raises_when_config_name_causes_violation(self, monkeypatch):
+        """Without DGDR_NAME, a long metadata.name still triggers a violation."""
+        from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
+
+        monkeypatch.delenv("DGDR_NAME", raising=False)
+        dgdr = self._make_dgdr()
+        # "x" * 40 + "TRTLLMPrefillWorker" (19) = 59 > 45
+        config = {
+            "metadata": {"name": "x" * 40},
+            "spec": {"services": {"TRTLLMPrefillWorker": {}}},
+        }
+        with pytest.raises(ValueError, match="pod-naming limit"):
+            _validate_dgd_service_name_lengths(dgdr, config)
+
+    def test_skips_when_neither_dgdr_name_nor_config_name_available(
+        self, monkeypatch, caplog
+    ):
+        """No DGDR_NAME and no metadata.name in config → debug log, no raise."""
+        import logging
+
+        from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
+
+        monkeypatch.delenv("DGDR_NAME", raising=False)
+        dgdr = self._make_dgdr()
+        config = self._make_final_config(["s" * 45])  # no metadata key
+        with caplog.at_level(logging.DEBUG):
+            _validate_dgd_service_name_lengths(dgdr, config)
+        assert any("skipping" in r.message for r in caplog.records)
+
+    def test_respects_dgd_name_override(self, monkeypatch):
+        """User-supplied DGD name override is used instead of dgdr_name + '-dgd'."""
+        from dynamo.profiler.profile_sla import _validate_dgd_service_name_lengths
+        from dynamo.profiler.utils.dgdr_v1beta1_types import OverridesSpec
+
+        monkeypatch.setenv("DGDR_NAME", "a" * 9)
+        # Override makes dgd_name very long; "x"*43 + "svc"(3) = 46 > 45
+        long_override = "x" * 43
+        dgdr = DynamoGraphDeploymentRequestSpec(
+            backend="vllm",
+            hardware=HardwareSpec(totalGpus=1),
+            model="meta-llama/Llama-2-7b",
+            overrides=OverridesSpec(dgd={"metadata": {"name": long_override}}),
+        )
+        config = self._make_final_config(["svc"])
+        with pytest.raises(ValueError, match="pod-naming limit"):
+            _validate_dgd_service_name_lengths(dgdr, config)

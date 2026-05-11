@@ -980,3 +980,73 @@ func TestShouldUseMpBackend(t *testing.T) {
 		})
 	}
 }
+
+// TestVLLMBackend_UpdateContainer_InterPodGMS asserts that when the inter-pod
+// GMS layout is enabled (gpuMemoryService.mode=interPod, with or without
+// failover), the vLLM backend is the one responsible for injecting both the
+// --load-format=gms flag and the DYN_VLLM_GMS_SHADOW_MODE env var. These are
+// vLLM-runtime switches and must live in the backend adapter, not in the
+// backend-agnostic GMS helpers (see gmsEngineEnvVars).
+func TestVLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
+	backend := &VLLMBackend{}
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+			Enabled: true,
+			Mode:    v1alpha1.GMSModeInterPod,
+		},
+		Failover: &v1alpha1.FailoverSpec{
+			Enabled: true,
+			Mode:    v1alpha1.GMSModeInterPod,
+		},
+	}
+	container := &corev1.Container{
+		Command: []string{"python3"},
+		Args:    []string{"-m", "dynamo.vllm"},
+	}
+
+	backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{})
+
+	// --load-format gms flag must be injected into the container args.
+	joined := ""
+	for _, a := range container.Args {
+		joined += " " + a
+	}
+	if !reflect.DeepEqual(containerHasArg(container, "--load-format", "gms"), true) {
+		t.Errorf("expected --load-format gms to be injected; got args=%q", joined)
+	}
+
+	// DYN_VLLM_GMS_SHADOW_MODE must be set exactly once.
+	count := 0
+	for _, e := range container.Env {
+		if e.Name == "DYN_VLLM_GMS_SHADOW_MODE" {
+			count++
+			if e.Value != "true" {
+				t.Errorf("DYN_VLLM_GMS_SHADOW_MODE value = %q, want %q", e.Value, "true")
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("DYN_VLLM_GMS_SHADOW_MODE env var count = %d, want 1", count)
+	}
+}
+
+// TestVLLMBackend_UpdateContainer_NoInterPodGMS asserts the complementary
+// invariant: when inter-pod GMS failover is NOT enabled, the vLLM backend
+// must not inject the GMS-specific env var (it is meaningless outside the
+// inter-pod layout).
+func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
+	backend := &VLLMBackend{}
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{}
+	container := &corev1.Container{
+		Command: []string{"python3"},
+		Args:    []string{"-m", "dynamo.vllm"},
+	}
+
+	backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{})
+
+	for _, e := range container.Env {
+		if e.Name == "DYN_VLLM_GMS_SHADOW_MODE" {
+			t.Errorf("DYN_VLLM_GMS_SHADOW_MODE must not be injected when inter-pod GMS is disabled")
+		}
+	}
+}

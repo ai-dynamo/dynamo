@@ -51,6 +51,10 @@ inputs:
     description: 'Additional Docker build args (newline-separated list of KEY=VALUE pairs)'
     required: false
     default: ''
+  build_target:
+    description: 'Docker build target stage (passed as --target); empty = build to last stage'
+    required: false
+    default: ''
 outputs:
   image_tag:
     description: 'Image Tag'
@@ -97,28 +101,6 @@ runs:
         echo "BUILD_LOG_FILE=${BUILD_LOG_FILE}" >> $GITHUB_ENV
         echo "📝 Build log will be saved to: ${BUILD_LOG_FILE}"
 
-        # Collect optional overrides provided by the workflow
-        # Set base cache args and set --cache-to if this is a main commit
-        CACHE_ARGS=""
-        if [[ "${{ inputs.target }}" != "frontend" ]]; then
-          CACHE_TAG="${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM_SAFE}-cache"
-          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG} "
-          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG} "
-          if [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
-            # Release branches also use release cache
-            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max "
-          elif [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max "
-          fi
-        else
-          CACHE_TAG="${{ inputs.target }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM_SAFE}-cache"
-          CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG} "
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max "
-          fi
-        fi
-
-        echo "$CACHE_ARGS"
         # Collect optional overrides provided by the workflow
         if [ "${{ inputs.no_cache }}" == "true" ]; then
           EXTRA_ARGS+=" --no-cache"
@@ -169,12 +151,17 @@ runs:
           fi
         fi
 
+        TARGET_ARG=""
+        if [ -n "${{ inputs.build_target }}" ]; then
+          TARGET_ARG="--target ${{ inputs.build_target }}"
+        fi
+
         docker buildx build \
           --progress=plain \
           --tag "$IMAGE_TAG" \
           --platform "${PLATFORM_FLAG}" \
           -f ./container/rendered.Dockerfile \
-          $CACHE_ARGS $EXTRA_ARGS $SECRET_ARGS . 2>&1 | tee "${BUILD_LOG_FILE}"
+          $TARGET_ARG $EXTRA_ARGS $SECRET_ARGS . 2>&1 | tee "${BUILD_LOG_FILE}"
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
 

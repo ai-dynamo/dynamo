@@ -199,10 +199,10 @@ fn test_required_tool_choice_preserves_content_filter() {
     );
 }
 
-#[test]
-fn test_named_tool_choice_normal_stop_becomes_stop() {
+#[tokio::test]
+async fn test_named_tool_choice_normal_stop_becomes_tool_calls() {
     let mut request = create_test_request();
-    request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Named(
+    let tool_choice = Some(ChatCompletionToolChoiceOption::Named(
         ChatCompletionNamedToolChoice {
             r#type: ChatCompletionToolType::Function,
             function: FunctionName {
@@ -210,6 +210,7 @@ fn test_named_tool_choice_normal_stop_becomes_stop() {
             },
         },
     ));
+    request.inner.tool_choice = tool_choice.clone();
 
     let mut generator = request.response_generator("req-stop-1".to_string());
     let backend_output = build_backend_output_with_finish(
@@ -217,14 +218,17 @@ fn test_named_tool_choice_normal_stop_becomes_stop() {
         common::FinishReason::Stop,
     );
 
-    let response = generator
+    let raw_response = generator
         .choice_from_postprocessor(backend_output)
         .expect("choice generation");
 
-    // Normal completion: Stop should remain Stop for named tool choice
+    let response = apply_jail_transformation(raw_response, tool_choice).await;
+
+    // OpenAI spec: when tool_calls are emitted, finish_reason must be ToolCalls
+    // regardless of whether tool_choice was auto, required, or a named function.
     assert_eq!(
         response.inner.choices[0].finish_reason,
-        Some(dynamo_protocols::types::FinishReason::Stop),
+        Some(dynamo_protocols::types::FinishReason::ToolCalls),
     );
 }
 

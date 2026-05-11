@@ -19,7 +19,7 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.runtime import run_async
 
-from .http_client import get_http_client
+from .http_client import get_http_client, get_http_semaphore
 from .url_validator import (
     UrlValidationPolicy,
     fetch_with_revalidation,
@@ -102,13 +102,14 @@ class ImageLoader:
         try:
             with _nvtx.annotate("mm:img:http_fetch", color="lime"):
                 http_client = get_http_client(self._http_timeout)
-                response = await fetch_with_revalidation(
-                    http_client, image_url, self._url_policy
-                )
-                response.raise_for_status()
-                if not response.content:
-                    raise ValueError("Empty response content from image URL")
-                image_data = BytesIO(response.content)
+                async with get_http_semaphore():
+                    response = await fetch_with_revalidation(
+                        http_client, image_url, self._url_policy
+                    )
+                    response.raise_for_status()
+                    if not response.content:
+                        raise ValueError("Empty response content from image URL")
+                    image_data = BytesIO(response.content)
 
             return await self._open_image(image_data)
 

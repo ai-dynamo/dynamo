@@ -22,6 +22,17 @@ Three gaps stand out with current workflows:
 
 Dynamo exposes **agentic hints** and uses them at the frontend API, router, and backend scheduling layers. Together, these enable workload-aware inference instead of generic, state-of-the-moment optimization.
 
+### Agent Context
+
+Agent context is passive workflow and program identity carried in
+[`nvext.agent_context`](../components/frontend/nvext.md#agent-context). It lets
+an agent harness label each request with `workflow_type_id`, `workflow_id`,
+`program_id`, and optional `parent_program_id` so Dynamo request traces can be
+joined with harness-side events. It does not change routing or scheduling.
+
+See [Agent Context and Tracing](../agents/agent-context.md) for the request
+contract, trace sink configuration, and JSONL trace schema.
+
 ### Agentic Hints
 
 Agentic hints are per-request metadata that the agent client (e.g. Claude Code, Codex, [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit)) sends to Dynamo's frontend. They are carried in the request body under [**nvext**](../components/frontend/nvext.md#agent-hints) on chat completions. The frontend parses them and passes them to the KV router and, where applicable, to backends.

@@ -79,8 +79,8 @@ impl PrefillRouter {
             Some(WorkerWithDpRank::new(worker_id, dp_rank))
         });
 
-        let (worker, overlap_blocks) = decode_router
-            .find_best_match(
+        let details = decode_router
+            .find_best_match_details(
                 Some(request_id),
                 routing_token_ids,
                 block_mm_infos,
@@ -93,6 +93,8 @@ impl PrefillRouter {
                 allowed_worker_ids,
             )
             .await?;
+        let worker = details.worker;
+        let overlap_blocks = details.cache_hit.rounded_overlap_blocks();
 
         let block_size = decode_router.block_size() as usize;
         let overlap_tokens = overlap_blocks as usize * block_size;
@@ -392,7 +394,6 @@ impl PrefillRouter {
                         update_states,
                         lora_name,
                         priority_jump,
-                        None,
                         None,
                         allowed_worker_ids,
                     )

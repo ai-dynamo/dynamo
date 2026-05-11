@@ -523,8 +523,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--event-plane",
         type=str,
         choices=["nats", "zmq"],
-        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
-        help="Determines how events are published [nats|zmq]",
+        default=os.environ.get("DYN_EVENT_PLANE"),
+        help="Determines how events are published [nats|zmq]. If unset, "
+        "auto-detected from --discovery-backend (zmq for file/mem, nats "
+        "for etcd/kubernetes).",
     )
 
     args = parser.parse_args(argv)

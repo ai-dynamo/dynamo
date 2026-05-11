@@ -3,65 +3,49 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
 import pandas as pd
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
-from dynamo.llm import MockEngineArgs
-
-from .models import ReplayConstraints, SyntheticReplayWorkload, TraceReplayWorkload
 from .scoring import _pick_best_record
 from .search import optimize_dense_agg_with_replay, optimize_dense_disagg_with_replay
+from .specs import ReplayOptimizeSpec
 
 
 def compare_aic_and_replay_disagg(
-    *,
-    model: str,
-    backend: str,
-    system: str,
-    isl: int,
-    osl: int,
-    max_total_gpus: int,
-    replay_request_count: int,
-    replay_concurrency: int,
-    base_prefill_engine_args: MockEngineArgs,
-    base_decode_engine_args: MockEngineArgs,
-    constraints: Mapping[str, float] | None = None,
-    max_parallel_evals: int = 1,
+    spec: ReplayOptimizeSpec,
 ) -> dict[str, Any]:
-    aic_constraints = ReplayConstraints.from_mapping(constraints, max_total_gpus)
+    """Run AIC pareto + replay optimization side-by-side for a disagg config.
+
+    Uses SLA bounds from `spec.sla` as AIC's latency targets; round_robin router
+    mode is forced for the replay run (AIC itself has no router sweep).
+    """
+    if spec.workload.isTraceBased:
+        raise ValueError("compare_aic_and_replay_disagg requires a synthetic workload")
+    if spec.workload.requestCount is None or spec.workload.concurrency is None:
+        raise ValueError(
+            "compare_aic_and_replay_disagg requires synthetic WorkloadSpec with "
+            "requestCount and concurrency"
+        )
+
     aic_task = TaskConfig(
         serving_mode="disagg",
-        model_path=model,
-        system_name=system,
-        backend_name=backend,
-        total_gpus=max_total_gpus,
-        isl=isl,
-        osl=osl,
-        **aic_constraints.aic_task_kwargs(),
+        model_path=spec.engine.model,
+        system_name=str(spec.hardware.gpuSku),
+        backend_name=spec.engine.backend.value,
+        total_gpus=spec.hardware.totalGpus,
+        isl=spec.workload.isl,
+        osl=spec.workload.osl,
+        **spec.sla.aic_task_kwargs(),
     )
     aic_result = TaskRunner().run(aic_task)
     aic_df = aic_result.get("pareto_df", pd.DataFrame())
 
-    replay_result = optimize_dense_disagg_with_replay(
-        model=model,
-        backend=backend,
-        system=system,
-        workload=SyntheticReplayWorkload(
-            isl=isl,
-            osl=osl,
-            request_count=replay_request_count,
-            replay_concurrency=replay_concurrency,
-        ),
-        base_prefill_engine_args=base_prefill_engine_args,
-        base_decode_engine_args=base_decode_engine_args,
-        max_total_gpus=max_total_gpus,
-        constraints=constraints,
-        router_mode="round_robin",
-        max_parallel_evals=max_parallel_evals,
+    replay_spec = spec.model_copy(
+        update={"router": spec.router.model_copy(update={"mode": "round_robin"})}
     )
+    replay_result = optimize_dense_disagg_with_replay(replay_spec)
 
     aic_best = None
     if not aic_df.empty:
@@ -108,45 +92,15 @@ def compare_aic_and_replay_disagg(
 
 
 def compare_agg_and_disagg_with_replay(
-    *,
-    model: str,
-    backend: str,
-    system: str,
-    workload: SyntheticReplayWorkload | TraceReplayWorkload,
-    base_engine_args: MockEngineArgs,
-    base_prefill_engine_args: MockEngineArgs,
-    base_decode_engine_args: MockEngineArgs,
-    max_total_gpus: int,
-    constraints: Mapping[str, float] | None = None,
-    router_mode: str = "kv_router",
-    overlap_score_weights: tuple[float, ...] | list[float] | None = None,
-    max_parallel_evals: int = 1,
+    spec: ReplayOptimizeSpec,
 ) -> dict[str, Any]:
-    agg_result = optimize_dense_agg_with_replay(
-        model=model,
-        backend=backend,
-        system=system,
-        workload=workload,
-        base_engine_args=base_engine_args,
-        max_total_gpus=max_total_gpus,
-        constraints=constraints,
-        router_mode=router_mode,
-        overlap_score_weights=overlap_score_weights,
-        max_parallel_evals=max_parallel_evals,
-    )
-    disagg_result = optimize_dense_disagg_with_replay(
-        model=model,
-        backend=backend,
-        system=system,
-        workload=workload,
-        base_prefill_engine_args=base_prefill_engine_args,
-        base_decode_engine_args=base_decode_engine_args,
-        max_total_gpus=max_total_gpus,
-        constraints=constraints,
-        router_mode=router_mode,
-        overlap_score_weights=overlap_score_weights,
-        max_parallel_evals=max_parallel_evals,
-    )
+    """Run both agg and disagg replay optimizations on the same spec and pick the winner.
+
+    The spec must populate `spec.engine.baseEngineArgs` (agg path) plus
+    `basePrefillEngineArgs` / `baseDecodeEngineArgs` (disagg path).
+    """
+    agg_result = optimize_dense_agg_with_replay(spec)
+    disagg_result = optimize_dense_disagg_with_replay(spec)
 
     agg_best = agg_result.best_feasible
     disagg_best = disagg_result.best_feasible

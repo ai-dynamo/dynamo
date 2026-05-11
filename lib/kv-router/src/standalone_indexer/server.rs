@@ -76,7 +76,6 @@ pub struct QueryByHashRequest {
 struct ScoreResponse {
     scores: HashMap<String, HashMap<String, u32>>,
     frequencies: Vec<usize>,
-    tree_sizes: HashMap<String, HashMap<String, usize>>,
 }
 
 async fn register(
@@ -166,17 +165,9 @@ fn build_score_response(
             .or_default()
             .insert(k.dp_rank.to_string(), v * block_size);
     }
-    let mut tree_sizes: HashMap<String, HashMap<String, usize>> = HashMap::new();
-    for (k, v) in &overlap.tree_sizes {
-        tree_sizes
-            .entry(k.worker_id.to_string())
-            .or_default()
-            .insert(k.dp_rank.to_string(), *v);
-    }
     ScoreResponse {
         scores,
         frequencies: overlap.frequencies,
-        tree_sizes,
     }
 }
 

@@ -236,6 +236,15 @@ type WorkloadSpec struct {
 	RequestRate *float64 `json:"requestRate,omitempty"`
 }
 
+// OptimizationType defines the optimization target for SLA-based profiling.
+// +kubebuilder:validation:Enum=latency;throughput
+type OptimizationType string
+
+const (
+	OptimizationTypeLatency    OptimizationType = "latency"
+	OptimizationTypeThroughput OptimizationType = "throughput"
+)
+
 // SLASpec defines the service-level agreement targets for profiling optimization.
 type SLASpec struct {
 	// TTFT is the Time To First Token target in milliseconds.
@@ -252,6 +261,11 @@ type SLASpec struct {
 	// Alternative to specifying TTFT + ITL.
 	// +optional
 	E2ELatency *float64 `json:"e2eLatency,omitempty"`
+
+	// OptimizationType is the optimization target for SLA profiling.
+	// Valid values: latency, throughput.
+	// +optional
+	OptimizationType *OptimizationType `json:"optimizationType,omitempty"`
 }
 
 // ModelCacheSpec references a PVC containing pre-downloaded model weights.
@@ -428,7 +442,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	Backend BackendType `json:"backend,omitempty"`
 
 	// Image is the container image reference for the profiling job (frontend image).
-	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0".
+	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0".
 	// +optional
 	Image string `json:"image,omitempty"`
 

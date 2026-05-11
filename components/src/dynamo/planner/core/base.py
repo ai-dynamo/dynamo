@@ -174,6 +174,7 @@ class NativePlannerBase:
         # Shared metrics state
         self._last_metrics = Metrics()
         self._cumulative_gpu_hours: float = 0.0
+        self._last_gpu_hours_update_ts: Optional[float] = None
 
         # Diagnostics recorder
         self._recorder = DiagnosticsRecorder(config=config)
@@ -495,22 +496,6 @@ class NativePlannerBase:
 
     async def _collect_traffic(self) -> Optional[TrafficObservation]:
         """Pull traffic metrics from Prometheus over the throughput interval."""
-        num_p, num_d, _ = await self._get_worker_counts_raw()
-
-        if self.prometheus_port != 0:
-            self.prometheus_metrics.num_prefill_replicas.set(num_p)
-            self.prometheus_metrics.num_decode_replicas.set(num_d)
-            gpu_hours = (
-                (
-                    num_p * (self.config.prefill_engine_num_gpu or 0)
-                    + num_d * (self.config.decode_engine_num_gpu or 0)
-                )
-                * self.config.throughput_adjustment_interval
-                / 3600
-            )
-            self._cumulative_gpu_hours += gpu_hours
-            self.prometheus_metrics.gpu_hours.set(self._cumulative_gpu_hours)
-
         assert self.model_name is not None
         interval_str = f"{self.config.throughput_adjustment_interval}s"
         m = self._last_metrics
@@ -773,7 +758,41 @@ class NativePlannerBase:
     # Diagnostics reporting (shared across all adapters)
     # ------------------------------------------------------------------
 
-    def _report_diagnostics(self, diag: TickDiagnostics) -> None:
+    def _publish_inventory_and_gpu_hours(self, tick_input: TickInput) -> None:
+        """Publish replica counts and cumulative gpu_hours every tick.
+
+        Sourced from tick_input.worker_counts (populated every tick via
+        need_worker_states=True); independent of enable_throughput_scaling
+        so non-SLA planners also report inventory and cost accounting.
+        ``_cumulative_gpu_hours`` is updated regardless of Prometheus
+        port so the HTML recorder / live dashboard stay accurate even
+        when Prometheus export is disabled.
+        """
+        if tick_input.worker_counts is None:
+            return
+        num_p = tick_input.worker_counts.ready_num_prefill or 0
+        num_d = tick_input.worker_counts.ready_num_decode or 0
+
+        now = tick_input.now_s
+        if self._last_gpu_hours_update_ts is not None:
+            dt_s = max(0.0, now - self._last_gpu_hours_update_ts)
+            self._cumulative_gpu_hours += (
+                (
+                    num_p * (self.config.prefill_engine_num_gpu or 0)
+                    + num_d * (self.config.decode_engine_num_gpu or 0)
+                )
+                * dt_s
+                / 3600.0
+            )
+        self._last_gpu_hours_update_ts = now
+
+        if self.prometheus_port == 0:
+            return
+        self.prometheus_metrics.num_prefill_replicas.set(num_p)
+        self.prometheus_metrics.num_decode_replicas.set(num_d)
+        self.prometheus_metrics.gpu_hours.set(self._cumulative_gpu_hours)
+
+    def _report_diagnostics(self, tick: ScheduledTick, diag: TickDiagnostics) -> None:
         if self.prometheus_port == 0:
             return
         pm = self.prometheus_metrics
@@ -793,8 +812,12 @@ class NativePlannerBase:
         pm.engine_prefill_capacity_requests_per_second.set(diag.engine_rps_prefill or 0)
         pm.engine_decode_capacity_requests_per_second.set(diag.engine_rps_decode or 0)
 
-        pm.load_scaling_decision.state(diag.load_decision_reason or "unset")
-        pm.throughput_scaling_decision.state(diag.throughput_decision_reason or "unset")
+        if tick.run_load_scaling:
+            pm.load_scaling_decision.state(diag.load_decision_reason or "unset")
+        if tick.run_throughput_scaling:
+            pm.throughput_scaling_decision.state(
+                diag.throughput_decision_reason or "unset"
+            )
 
     # ------------------------------------------------------------------
     # Main loop
@@ -814,9 +837,10 @@ class NativePlannerBase:
                 self._refresh_worker_info_from_connector()
 
                 tick_input = await self._gather_tick_input(next_tick)
+                self._publish_inventory_and_gpu_hours(tick_input)
                 effects = self.state_machine.on_tick(next_tick, tick_input)
                 await self._apply_effects(effects)
-                self._report_diagnostics(effects.diagnostics)
+                self._report_diagnostics(next_tick, effects.diagnostics)
                 self._log_decision_summary(effects)
 
                 if self._recorder.enabled:

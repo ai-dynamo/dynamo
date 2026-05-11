@@ -417,6 +417,37 @@ class TestThroughputScaling:
         assert core._throughput_lower_bound_d >= 1
         assert effects.diagnostics.throughput_decision_reason == "set_lower_bound"
 
+    def test_ttft_sla_floor_overrides_throughput_ratio_under_backpressure(self):
+        """Regression: when demand_rps << engine_rps (backpressure), the latency
+        violation must still drive scale-up rather than resolving to 1."""
+        # ttft_sla=200ms; regression gives wt(1000 tokens) ≈ 1.002s → ttft≈1002ms.
+        # sla_floor = ceil(1002/200) = 6.  With near-zero demand the raw
+        # ceil(demand_rps/engine_rps) would return 1 without the fix.
+        core = _make_core(
+            mode="prefill",
+            enable_load_scaling=False,
+            enable_throughput_scaling=True,
+            ttft=200.0,
+        )
+        _train_prefill_regression(core)
+
+        # Tiny demand to reproduce the backpressure equilibrium
+        core._observe_traffic(
+            TrafficObservation(duration_s=60, num_req=1, isl=1000, osl=150)
+        )
+
+        tick = TickInput(
+            now_s=60.0,
+            traffic=TrafficObservation(duration_s=60, num_req=1, isl=1000, osl=150),
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is not None
+        # ceil(demand_rps/engine_rps) = ceil(0.017/1.0) = 1 without the floor.
+        # With the SLA floor: ceil(1002/200) = 6.
+        assert effects.scale_to.num_prefill is not None
+        assert effects.scale_to.num_prefill >= 6
+
     def test_next_tick_scheduled_after_traffic(self):
         core = _make_core(mode="prefill")
         tick = TickInput(

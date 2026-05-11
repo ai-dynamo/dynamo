@@ -34,10 +34,11 @@ import (
 func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 	profilingBlob := map[string]interface{}{
 		"sla": map[string]interface{}{
-			"ttft": float64(500),
-			"itl":  float64(20),
-			"isl":  float64(2048),
-			"osl":  float64(512),
+			"ttft":             float64(500),
+			"itl":              float64(20),
+			"isl":              float64(2048),
+			"osl":              float64(512),
+			"optimizationType": "latency",
 		},
 		"deployment": map[string]interface{}{
 			"modelCache": map[string]interface{}{
@@ -185,6 +186,9 @@ func TestConvertTo_SpecFields(t *testing.T) {
 	}
 	if dst.Spec.SLA.ITL == nil || *dst.Spec.SLA.ITL != 20 {
 		t.Errorf("SLA.ITL: got %v, want 20", dst.Spec.SLA.ITL)
+	}
+	if dst.Spec.SLA.OptimizationType == nil || *dst.Spec.SLA.OptimizationType != v1beta1.OptimizationTypeLatency {
+		t.Errorf("SLA.OptimizationType: got %v, want %q", dst.Spec.SLA.OptimizationType, v1beta1.OptimizationTypeLatency)
 	}
 
 	// Workload from JSON blob

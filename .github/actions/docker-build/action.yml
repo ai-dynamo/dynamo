@@ -80,7 +80,9 @@ runs:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
         sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler libclang-dev
-        curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
+        curl --retry 5 --retry-delay 2 --fail --show-error -sSL -o /tmp/rustup-init.sh https://sh.rustup.rs
+        sh /tmp/rustup-init.sh -y --default-toolchain stable
+        rm -f /tmp/rustup-init.sh
         . "$HOME/.cargo/env"
         echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
         cargo install cbindgen

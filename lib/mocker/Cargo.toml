@@ -12,11 +12,23 @@ homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
 
+[features]
+default = []
+# Enables G1↔G2 offload simulation via kvbm-engine.
+kvbm-offload = ["dep:kvbm-engine", "dep:kvbm-physical", "dep:kvbm-common", "dep:velo", "dep:futures"]
+
 [dependencies]
 # repo
 dynamo-kv-router = { workspace = true }
 dynamo-tokens = { workspace = true }
 kvbm-logical = { workspace = true }
+
+# kvbm-offload feature dependencies (G1↔G2 transport simulation)
+kvbm-engine = { workspace = true, optional = true }
+kvbm-physical = { workspace = true, optional = true }
+kvbm-common = { workspace = true, optional = true }
+velo = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 
 # workspace
 anyhow = { workspace = true }

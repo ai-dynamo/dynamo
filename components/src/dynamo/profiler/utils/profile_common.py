@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 # Mapping from backend name to the image-name component of the published
 # backend runtime image.
-# e.g. vllm → nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+# e.g. vllm → nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
 BACKEND_IMAGE_NAMES: dict[str, str] = {
     "vllm": "vllm-runtime",
     "sglang": "sglang-runtime",
@@ -80,12 +80,12 @@ def derive_backend_image(profiler_image: str, backend: str) -> str:
     Examples::
 
         derive_backend_image(
-            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0", "vllm"
+            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0", "vllm"
         )
-        # → "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0"
+        # → "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0"
 
-        derive_backend_image("myregistry.io/sglang-runtime:1.0.0", "sglang")
-        # → "myregistry.io/sglang-runtime:1.0.0"
+        derive_backend_image("myregistry.io/sglang-runtime:1.1.0", "sglang")
+        # → "myregistry.io/sglang-runtime:1.1.0"
 
     Args:
         profiler_image: Any Docker image reference of the form

@@ -13,6 +13,7 @@ from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.sglang._compat import filter_supported_async_generate_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -66,12 +67,36 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             generate_endpoint,
             shutdown_event,
         )
+        # Resolve the optional return_routed_experts kwarg once. Gating on the
+        # opt-in flag avoids sending the kwarg on sglang builds whose
+        # Engine.async_generate does not declare it (notably the deepseek_v4
+        # branch). Doing this at init keeps the per-request hot path free of
+        # signature inspection.
+        self._routed_experts_kwargs: Dict[
+            str, Any
+        ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
             )
         else:
             logging.info("Decode worker handler initialized (aggregated mode)")
+
+    @staticmethod
+    def _resolve_routed_experts_kwargs(engine: Any, server_args: Any) -> Dict[str, Any]:
+        """Resolve the return_routed_experts kwarg for this engine.
+
+        Returns ``{"return_routed_experts": True}`` only when the user opted in
+        via ``enable_return_routed_experts=True`` AND the engine's
+        ``async_generate`` signature declares the kwarg. Returns ``{}`` for the
+        default-off path and for sglang builds that do not declare the kwarg
+        (e.g. the ``deepseek_v4`` branch).
+        """
+        if not getattr(server_args, "enable_return_routed_experts", False):
+            return {}
+        return filter_supported_async_generate_kwargs(
+            engine, {"return_routed_experts": True}
+        )
 
     def cleanup(self) -> None:
         """Shutdown the engine and cleanup resources."""
@@ -102,6 +127,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "temperature": sampling_opts.get("temperature"),
                 "top_p": sampling_opts.get("top_p"),
                 "top_k": sampling_opts.get("top_k"),
+                "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
                 "stop_token_ids": stop_token_ids,
@@ -115,11 +141,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "temperature": request.get("temperature"),
                 "top_p": request.get("top_p"),
                 "top_k": request.get("top_k"),
+                "n": request.get("n"),
                 "max_new_tokens": request.get("max_tokens"),
                 **self._get_guided_decoding_params(request.get("guided_decoding")),
             }
 
-        return {k: v for k, v in param_mapping.items() if v is not None}
+        # Keep max_new_tokens even when None — SGLang treats None as "generate
+        # until EOS/context-length" whereas omitting it triggers a default of 128.
+        keep_if_none = {"max_new_tokens"}
+        return {
+            k: v for k, v in param_mapping.items() if v is not None or k in keep_if_none
+        }
 
     @staticmethod
     def _build_logprob_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -272,9 +304,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
-        return_routed_experts = getattr(
-            self.config.server_args, "enable_return_routed_experts", False
-        )
         priority = (request.get("routing") or {}).get("priority")
         logprob_kwargs = self._build_logprob_kwargs(request)
 
@@ -308,7 +337,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
-                return_routed_experts=return_routed_experts,
+                **self._routed_experts_kwargs,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
@@ -346,7 +375,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 video_data=video_data,
                 sampling_params=sampling_params,
                 stream=True,
-                return_routed_experts=return_routed_experts,
+                **self._routed_experts_kwargs,
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
@@ -381,9 +410,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
-        # Logprob offset: output_ids are disjoint (stream_output=True) but
-        # meta_info logprobs are cumulative — track how many we've emitted.
-        num_output_logprobs_so_far = 0
+        # SGLang's token stream is asymmetric: output_ids are disjoint deltas
+        # when stream_output=True, but meta_info output logprobs are cumulative.
+        # With n>1, chunks for different choices are interleaved, so track the
+        # cumulative-logprob cursor per choice index instead of globally.
+        output_logprobs_per_choice: dict[int, int] = {}
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 # Extract SGLang request ID from the first response and set the future
@@ -398,7 +429,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # This lets SGLang proceed to the second token generation, which will
                 # async context switch and allow the abort monitor to signal cancellation.
                 # The loop should exit by itself when context.is_stopped() returns True.
-                out: dict[str, Any] = {}
+                # SGLang omits index for non-n/legacy chunks; treat those as
+                # choice 0 while preserving explicit indices for n>1.
+                output_idx = res.get("index") or 0
+                out: dict[str, Any] = {"index": output_idx}
                 finish_reason = res["meta_info"]["finish_reason"]
                 if finish_reason:
                     out["finish_reason"] = normalize_finish_reason(
@@ -421,8 +455,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 (
                     log_probs,
                     top_logprobs,
-                    num_output_logprobs_so_far,
-                ) = self._extract_logprobs(res["meta_info"], num_output_logprobs_so_far)
+                    next_logprobs_total,
+                ) = self._extract_logprobs(
+                    res["meta_info"], output_logprobs_per_choice.get(output_idx, 0)
+                )
+                output_logprobs_per_choice[output_idx] = next_logprobs_total
                 if log_probs is not None:
                     out["log_probs"] = log_probs
                 if top_logprobs is not None:
@@ -466,7 +503,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Yields:
             OpenAI-formatted chat completion chunk dicts.
         """
-        count = 0
+        # SGLang text chunks are cumulative per choice. Keep independent text
+        # offsets so interleaved n>1 choices do not compute deltas from each
+        # other's previous text.
+        text_counts_per_choice: dict[int, int] = {}
 
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
@@ -485,7 +525,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # async context switch and allow the abort monitor to signal cancellation.
                 # The loop should exit by itself when context.is_stopped() returns True.
 
-                index = res.get("index", 0)
+                # Same defaulting as token mode: non-n chunks are choice 0.
+                index = res.get("index") or 0
                 text = res.get("text", "")
 
                 finish_reason = res["meta_info"]["finish_reason"]
@@ -495,6 +536,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     else None
                 )
                 next_count = len(text)
+                count = text_counts_per_choice.get(index, 0)
                 delta = text[count:]
 
                 choice_data = {
@@ -519,4 +561,4 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     response["nvext"] = {"routed_experts": routed_experts}
                 if not context.is_stopped():
                     yield response
-                count = next_count
+                text_counts_per_choice[index] = next_count

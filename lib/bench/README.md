@@ -12,7 +12,9 @@ pre-warms the KV cache with the predicted next-turn prefix after each assistant
 response, cutting TTFT on subsequent turns.
 
 `offline_replay_bench` runs the Rust-native replay loop directly for profiling
-and throughput measurements without going through the Python wrapper.
+and throughput measurements without going through the Python wrapper. It uses
+the mocker's internal polynomial perf model so the results stay focused on
+replay overhead instead of external timing backends.
 
 ## Quick start
 
@@ -114,3 +116,10 @@ cargo bench --package dynamo-bench --bench offline_replay_bench -- \
   --trace-block-size 512 \
   --block-size 64
 ```
+
+Use `--speedup-ratio` and `--decode-speedup-ratio` if you want a simple scaling
+knob while keeping the same internal polynomial model.
+
+## KV router / sharded indexer benchmarks
+
+See [lib/kv-router/src/indexer/INDEXER_BENCH.md](../kv-router/src/indexer/INDEXER_BENCH.md) for trace acquisition, benchmark commands, and results for the `mooncake_bench` suite (`concurrent-radix-tree-compressed` baseline vs `branch-sharded-crtc`).
