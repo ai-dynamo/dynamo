@@ -1280,15 +1280,22 @@ impl OpenAIPreprocessor {
         tool_call_parser: Option<&str>,
         reasoning_parser: Option<&str>,
     ) -> bool {
-        // gpt-oss / harmony parsers consume `<|channel|>analysis<|message|>...<|end|>`
-        // markers; without them the parser silently produces empty
-        // reasoning_content. Same shape as gemma4's `<|think|>` markers.
+        // Parsers in this allow-list match against special tokens that the
+        // tokenizer would otherwise strip when `skip_special_tokens=true`
+        // (the OpenAI-API default). Without the tokens preserved through
+        // decode the parsers silently produce empty reasoning_content /
+        // tool_calls.
+        //
+        // - gemma4: `<|think|>` markers (reasoning + tool-call).
+        // - harmony / gpt_oss: `<|channel|>analysis<|message|>...<|end|>`.
+        // - kimi_k2: `<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>`.
+        // - kimi_k25: `</think>` (special token id 163607).
         matches!(
             tool_call_parser,
-            Some("gemma4") | Some("gemma-4") | Some("harmony")
+            Some("gemma4") | Some("gemma-4") | Some("harmony") | Some("kimi_k2")
         ) || matches!(
             reasoning_parser,
-            Some("gemma4") | Some("gemma-4") | Some("gpt_oss")
+            Some("gemma4") | Some("gemma-4") | Some("gpt_oss") | Some("kimi_k25")
         )
     }
 
@@ -1889,8 +1896,24 @@ mod tests {
             (
                 Some("kimi_k2"),
                 Some("kimi_k25"),
-                false,
-                "kimi_k2 paired → not required",
+                true,
+                "kimi_k2 + kimi_k25 paired → required \
+                 (tool-call markers `<|tool_calls_section_*|>` and reasoning \
+                  marker `</think>` are special tokens that get stripped under \
+                  the default skip_special_tokens=true)",
+            ),
+            (
+                None,
+                Some("kimi_k25"),
+                true,
+                "kimi_k25 reasoning only → required (`</think>` is special token id 163607)",
+            ),
+            (
+                Some("kimi_k2"),
+                None,
+                true,
+                "kimi_k2 tool-call only → required \
+                 (`<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>` are special)",
             ),
             (None, None, false, "no parsers → not required"),
         ];

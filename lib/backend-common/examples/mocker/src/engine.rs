@@ -259,7 +259,7 @@ impl LLMEngine for MockerBackend {
         &self,
         request: PreprocessedRequest,
         ctx: Arc<dyn AsyncEngineContext>,
-    ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError> {
+    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         let request_tx = self
             .request_tx
             .get()
@@ -282,9 +282,9 @@ impl LLMEngine for MockerBackend {
                 // Honour cancellation even on this fast path so the
                 // terminal's finish_reason reflects what the client asked for.
                 if ctx.is_stopped() {
-                    yield LLMEngineOutput::cancelled().with_usage(usage(prompt_len, 0));
+                    yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_len, 0)));
                 } else {
-                    yield LLMEngineOutput::length().with_usage(usage(prompt_len, 0));
+                    yield Ok(LLMEngineOutput::length().with_usage(usage(prompt_len, 0)));
                 }
             }));
         }
@@ -336,15 +336,15 @@ impl LLMEngine for MockerBackend {
                 tokio::select! {
                     biased;
                     _ = ctx.stopped() => {
-                        yield LLMEngineOutput::cancelled()
-                            .with_usage(usage(prompt_len, generated));
+                        yield Ok(LLMEngineOutput::cancelled()
+                            .with_usage(usage(prompt_len, generated)));
                         break;
                     }
                     maybe_signal = rx.recv() => {
                         let Some(signal) = maybe_signal else {
-                            yield LLMEngineOutput::error(
+                            yield Ok(LLMEngineOutput::error(
                                 "mocker backend: scheduler channel closed before completion".to_string(),
-                            );
+                            ));
                             break;
                         };
                         generated += 1;
@@ -356,17 +356,17 @@ impl LLMEngine for MockerBackend {
                             // If it ever fires early, surface it instead of
                             // silently truncating.
                             if (generated as usize) < max_output_tokens {
-                                yield LLMEngineOutput::error(format!(
+                                yield Ok(LLMEngineOutput::error(format!(
                                     "mocker backend: scheduler signalled completion at {generated}/{max_output_tokens} tokens"
-                                ));
+                                )));
                                 break;
                             }
-                            yield LLMEngineOutput::length()
+                            yield Ok(LLMEngineOutput::length()
                                 .with_tokens(vec![token_id])
-                                .with_usage(usage(prompt_len, generated));
+                                .with_usage(usage(prompt_len, generated)));
                             break;
                         }
-                        yield chunk::token(token_id);
+                        yield Ok(chunk::token(token_id));
                     }
                 }
             }
@@ -439,6 +439,17 @@ mod tests {
         MockerBackend::new(args.model_name, args.context_length, engine_args)
     }
 
+    async fn collect_ok(
+        stream: futures::stream::BoxStream<'static, Result<LLMEngineOutput, DynamoError>>,
+    ) -> Vec<LLMEngineOutput> {
+        stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|item| item.expect("engine yielded Err in test"))
+            .collect()
+    }
+
     fn request(max_tokens: Option<u32>) -> PreprocessedRequest {
         PreprocessedRequest::builder()
             .model("mocker-model".to_string())
@@ -504,7 +515,7 @@ mod tests {
             .generate(request(Some(2)), ctx.context())
             .await
             .expect("engine must still be usable after rejected double-start");
-        let chunks: Vec<_> = stream.collect().await;
+        let chunks: Vec<_> = collect_ok(stream).await;
         let terminal = chunks.last().expect("at least a terminal");
         assert!(
             matches!(terminal.finish_reason, Some(FinishReason::Length)),
@@ -559,7 +570,7 @@ mod tests {
             .generate(request(Some(0)), ctx.context())
             .await
             .expect("stream");
-        let chunks: Vec<_> = stream.collect().await;
+        let chunks: Vec<_> = collect_ok(stream).await;
 
         assert_eq!(chunks.len(), 1, "zero max_tokens should yield one terminal");
         assert!(chunks[0].token_ids.is_empty());
@@ -590,7 +601,7 @@ mod tests {
             .generate(request(Some(0)), ctrl)
             .await
             .expect("stream");
-        let chunks: Vec<_> = stream.collect().await;
+        let chunks: Vec<_> = collect_ok(stream).await;
 
         assert_eq!(chunks.len(), 1);
         assert!(matches!(
@@ -612,7 +623,7 @@ mod tests {
             .generate(request(Some(4)), ctrl)
             .await
             .expect("stream");
-        let chunks: Vec<_> = stream.collect().await;
+        let chunks: Vec<_> = collect_ok(stream).await;
 
         assert!(!chunks.is_empty(), "expected at least one chunk");
         let terminal = chunks.last().unwrap();
@@ -641,7 +652,7 @@ mod tests {
             .expect("stream");
         ctrl.stop_generating();
 
-        let chunks: Vec<_> = stream.collect().await;
+        let chunks: Vec<_> = collect_ok(stream).await;
         let terminal = chunks.last().expect("at least a terminal");
         assert!(
             matches!(terminal.finish_reason, Some(FinishReason::Cancelled)),
