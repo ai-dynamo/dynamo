@@ -149,6 +149,50 @@ func TestBugDGD_HubEmptyPodTemplateRoundTrips(t *testing.T) {
 	}
 }
 
+func TestBugDGD_SpokeMainContainerNameOnlyRoundTrips(t *testing.T) {
+	in := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "main-container-name-only", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: "worker",
+					ExtraPodSpec: &ExtraPodSpec{
+						MainContainer: &corev1.Container{Name: mainContainerName},
+					},
+				},
+			},
+		},
+	}
+	wantHash, err := ComputeDGDWorkersSpecHash(in)
+	if err != nil {
+		t.Fatalf("ComputeDGDWorkersSpecHash(in) error = %v", err)
+	}
+
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := in.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	out := &DynamoGraphDeployment{}
+	if err := out.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+
+	got := out.Spec.Services["worker"]
+	if got == nil || got.ExtraPodSpec == nil || got.ExtraPodSpec.MainContainer == nil {
+		t.Fatalf("mainContainer was lost after round-trip: %#v", got)
+	}
+	if got.ExtraPodSpec.MainContainer.Name != mainContainerName {
+		t.Fatalf("mainContainer.name = %q, want %q", got.ExtraPodSpec.MainContainer.Name, mainContainerName)
+	}
+	gotHash, err := ComputeDGDWorkersSpecHash(out)
+	if err != nil {
+		t.Fatalf("ComputeDGDWorkersSpecHash(out) error = %v", err)
+	}
+	if gotHash != wantHash {
+		t.Fatalf("round-trip worker hash = %q, want %q", gotHash, wantHash)
+	}
+}
+
 func TestBugDGD_HubOriginSpokeMainContainerEnvSplitRoundTrips(t *testing.T) {
 	hub := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "main-container-env-split", Namespace: "ns"},

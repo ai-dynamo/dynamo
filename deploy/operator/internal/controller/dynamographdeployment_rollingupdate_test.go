@@ -190,8 +190,7 @@ func TestShouldTriggerRollingUpdate(t *testing.T) {
 				hash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
 				require.NoError(t, err)
 				dgd.Annotations = map[string]string{
-					consts.AnnotationCurrentWorkerHash:              hash,
-					nvidiacomv1alpha1.AnnotationDGDLegacyWorkerHash: hash,
+					consts.AnnotationCurrentWorkerHash: hash,
 				}
 			} else if tt.existingHash != "" {
 				dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: tt.existingHash}
@@ -296,7 +295,6 @@ func TestInitializeWorkerHashIfNeeded_PreservesLegacyAlphaHash(t *testing.T) {
 		dgd.Annotations = map[string]string{}
 	}
 	dgd.Annotations[consts.AnnotationCurrentWorkerHash] = legacyHash
-	dgd.Annotations[nvidiacomv1alpha1.AnnotationDGDLegacyWorkerHash] = legacyHash
 
 	r := createTestReconcilerWithStatus(dgd)
 	err = r.initializeWorkerHashIfNeeded(context.Background(), dgd)
@@ -348,7 +346,6 @@ func TestLegacyAlphaHashCompatibility_NoOpUpgradeUsesExistingWorkerGeneration(t 
 		dgd.Annotations = map[string]string{}
 	}
 	dgd.Annotations[consts.AnnotationCurrentWorkerHash] = legacyHash
-	dgd.Annotations[nvidiacomv1alpha1.AnnotationDGDLegacyWorkerHash] = legacyHash
 
 	r := createTestReconcilerWithStatus(dgd)
 	require.NoError(t, r.initializeWorkerHashIfNeeded(context.Background(), dgd))
@@ -386,7 +383,6 @@ func TestLegacyAlphaHashCompatibility_WorkerSpecChangeUsesNewV1Generation(t *tes
 		dgd.Annotations = map[string]string{}
 	}
 	dgd.Annotations[consts.AnnotationCurrentWorkerHash] = legacyHash
-	dgd.Annotations[nvidiacomv1alpha1.AnnotationDGDLegacyWorkerHash] = legacyHash
 
 	r := createTestReconcilerWithStatus(dgd)
 	require.NoError(t, r.initializeWorkerHashIfNeeded(context.Background(), dgd))

@@ -90,6 +90,27 @@ func TestComputeLegacyAlphaDGDWorkersSpecHash_MatchesV1Alpha1Hash(t *testing.T) 
 	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, beta), legacyHash)
 }
 
+func TestComputeLegacyAlphaDGDWorkersSpecHash_RecoversNameOnlyMainContainerHash(t *testing.T) {
+	alpha := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+				MainContainer: &corev1.Container{Name: commonconsts.MainContainerName},
+			},
+		},
+	})
+	directAlphaHash, err := v1alpha1.ComputeDGDWorkersSpecHash(alpha)
+	assert.NoError(t, err)
+	assert.Equal(t, "0c322ce0", directAlphaHash)
+
+	beta := &v1beta1.DynamoGraphDeployment{}
+	assert.NoError(t, alpha.ConvertTo(beta))
+	recomputedHash, err := ComputeLegacyAlphaDGDWorkersSpecHash(beta)
+	assert.NoError(t, err)
+
+	assert.Equal(t, directAlphaHash, recomputedHash)
+}
+
 func TestComputeBetaDGDWorkersSpecHash_IgnoresNonWorkers(t *testing.T) {
 	withFrontend := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker":   {ComponentType: commonconsts.ComponentTypeWorker},

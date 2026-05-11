@@ -240,7 +240,6 @@ func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
 		return nil
 	}
 	r.setCurrentWorkerHashes(dgd, next)
-	dynamo.ClearLegacyAlphaDGDWorkersSpecHash(dgd)
 	if err := r.Update(ctx, dgd); err != nil {
 		return fmt.Errorf("failed to migrate worker hash annotations: %w", err)
 	}

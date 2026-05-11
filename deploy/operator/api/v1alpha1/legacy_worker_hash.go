@@ -11,36 +11,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
-
-const (
-	AnnotationDGDLegacyWorkerHash = "nvidia.com/dgd-legacy-worker-hash"
-	annCurrentWorkerHash          = "nvidia.com/current-worker-hash"
-)
-
-// GetDGDLegacyWorkerHash returns the preserved v1alpha1 worker hash carried on
-// converted v1beta1 DGD objects.
-func GetDGDLegacyWorkerHash(obj metav1.Object) string {
-	return obj.GetAnnotations()[AnnotationDGDLegacyWorkerHash]
-}
-
-// ClearDGDLegacyWorkerHash removes the preserved v1alpha1 worker hash from a
-// DGD object after the v1beta1 controller has consumed it.
-func ClearDGDLegacyWorkerHash(obj metav1.Object) {
-	annotations := obj.GetAnnotations()
-	delete(annotations, AnnotationDGDLegacyWorkerHash)
-	obj.SetAnnotations(annotations)
-}
 
 // ComputeDGDWorkersSpecHash computes the worker hash used by the
-// v1alpha1 DGD controller before v1beta1 conversion. ConvertTo stores this
-// value on the v1beta1 hub object so the v1beta1 controller can migrate
-// existing v1alpha1 hashes without rolling workers.
+// v1alpha1 DGD controller. Controller reconciliation may use this to compare
+// v1/v2 worker generations, but API conversion must not derive controller
+// rollout state from it.
 //
-// Keep this in the api/v1alpha1 package so conversion can call it without an
-// api/v1alpha1 -> internal/dynamo -> api/v1alpha1 import cycle.
+// Keep this in the api/v1alpha1 package so internal controller helpers can
+// reproduce the legacy hash without duplicating the old algorithm.
 func ComputeDGDWorkersSpecHash(dgd *DynamoGraphDeployment) (string, error) {
 	if dgd == nil {
 		return "", fmt.Errorf("nil DynamoGraphDeployment")

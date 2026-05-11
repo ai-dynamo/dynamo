@@ -1963,7 +1963,8 @@ func pruneEmptyExtraPodSpec(dst, restored *DynamoComponentDeploymentSharedSpec) 
 	if dst == nil || dst.ExtraPodSpec == nil {
 		return
 	}
-	if containerIsEmpty(dst.ExtraPodSpec.MainContainer) {
+	if containerIsEmpty(dst.ExtraPodSpec.MainContainer) &&
+		!extraPodSpecOnlyPreservesMainContainerName(restoredExtraPodSpec(restored)) {
 		dst.ExtraPodSpec.MainContainer = nil
 	}
 	if extraPodSpecIsZero(dst.ExtraPodSpec) {
@@ -1972,6 +1973,13 @@ func pruneEmptyExtraPodSpec(dst, restored *DynamoComponentDeploymentSharedSpec) 
 		}
 		dst.ExtraPodSpec = nil
 	}
+}
+
+func restoredExtraPodSpec(restored *DynamoComponentDeploymentSharedSpec) *ExtraPodSpec {
+	if restored == nil {
+		return nil
+	}
+	return restored.ExtraPodSpec
 }
 
 func restoreMainContainerFieldOrigins(dst, preserved *DynamoComponentDeploymentSharedSpec, mainContainerPresent bool) {

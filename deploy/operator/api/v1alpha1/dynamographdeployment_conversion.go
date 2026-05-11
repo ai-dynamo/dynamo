@@ -75,18 +75,6 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	}
 	hubOrigin := restoredHubSpec != nil
 	scrubDGDInternalAnnotations(&dst.ObjectMeta)
-	// Preserve the alpha-era desired worker hash when a v1alpha1 object already
-	// carries active worker-hash state. The v1beta1 controller keeps the public
-	// current-worker-hash annotation in the v1 meaning and adds a separate v2
-	// annotation, so this conversion-only value is only a recomputed legacy
-	// reference for v2 controller initialization.
-	if hash, ok := getAnnFromObj(&src.ObjectMeta, annCurrentWorkerHash); ok && hash != "" {
-		legacyHash, err := ComputeDGDWorkersSpecHash(src)
-		if err != nil {
-			return fmt.Errorf("compute v1alpha1 DGD worker hash: %w", err)
-		}
-		setAnnOnObj(&dst.ObjectMeta, AnnotationDGDLegacyWorkerHash, legacyHash)
-	}
 
 	ctx := DynamoGraphDeploymentConversionContext{
 		IncludeOriginSplits: !hubOrigin,
@@ -524,7 +512,6 @@ func scrubDGDInternalAnnotations(obj metav1.Object) {
 	for _, key := range []string{
 		annDGDSpec,
 		annDGDStatus,
-		AnnotationDGDLegacyWorkerHash,
 	} {
 		delAnnFromObj(obj, key)
 	}
