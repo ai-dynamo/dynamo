@@ -89,7 +89,16 @@ impl PrefillRouter {
             return PrefillResolveDecision::NoBootstrapEndpoint;
         };
 
-        let bootstrap_room: u64 = rand::random_range(0..=i64::MAX.cast_unsigned());
+        // Constrain to positive i32 range so the room survives any backend's
+        // proto wire format. SGLang's gRPC schema carries `bootstrap_room` as
+        // `int32`, and the decode-side scheduler stores it in a uint64
+        // metadata buffer (sglang/srt/disaggregation/decode.py); a negative
+        // i32 sign-extends to a huge u64 on read and the corruption check
+        // (`actual_room != expected_room`) mis-fires. Using positive 31-bit
+        // values keeps the equality holds across signed/unsigned boundaries
+        // and is still a 2B-value space — collision probability is
+        // negligible for any practical concurrency.
+        let bootstrap_room: u64 = rand::random_range(1..=(i32::MAX as u64));
 
         tracing::debug!(
             worker_id = worker_id,

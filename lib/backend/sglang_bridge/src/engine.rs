@@ -38,8 +38,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
-    AsyncEngineContext, BackendError, CommonArgs, DynamoError, EngineConfig, ErrorType,
-    FinishReason, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest,
+    AsyncEngineContext, BackendError, CommonArgs, DisaggregatedEndpoint, DynamoError, EngineConfig,
+    ErrorType, FinishReason, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest,
     WorkerConfig, chunk, usage,
 };
 use futures::stream::BoxStream;
@@ -69,7 +69,7 @@ pub enum DisaggMode {
 
 #[derive(clap::Parser, Debug)]
 #[command(
-    name = env!("CARGO_BIN_NAME"),
+    name = "dynamo-sglang-bridge",
     about = "Dynamo sidecar bridge to upstream SGLang's gRPC scheduler (sglang.grpc.scheduler)."
 )]
 pub struct Args {
@@ -122,6 +122,27 @@ pub struct SglangBridge {
 }
 
 impl SglangBridge {
+    /// Programmatic constructor for in-process callers (B1). Skips CLI
+    /// parsing; the launcher provides the values directly.
+    pub fn new(
+        grpc_endpoint: String,
+        served_model_name: String,
+        connect_timeout_secs: u64,
+        disaggregation_mode: DisaggMode,
+        bootstrap_host_override: Option<String>,
+    ) -> Self {
+        Self {
+            grpc_endpoint,
+            served_model_name,
+            connect_timeout_secs,
+            disaggregation_mode,
+            bootstrap_host_override,
+            bootstrap_host: OnceCell::new(),
+            bootstrap_port: OnceCell::new(),
+            client: OnceCell::new(),
+        }
+    }
+
     pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
         let args = match argv {
             Some(a) => <Args as clap::Parser>::try_parse_from(a),
@@ -142,19 +163,27 @@ impl SglangBridge {
             DisaggMode::Decode | DisaggMode::None => args.common.endpoint_types,
         };
 
-        let engine = SglangBridge {
-            grpc_endpoint: args.sglang_grpc_endpoint,
-            served_model_name: served.clone(),
-            connect_timeout_secs: args.connect_timeout_secs,
-            disaggregation_mode: args.disaggregation_mode,
-            bootstrap_host_override: args.bootstrap_host,
-            bootstrap_host: OnceCell::new(),
-            bootstrap_port: OnceCell::new(),
-            client: OnceCell::new(),
+        // Prefill workers register under component=prefill so they live on a
+        // separate discovery endpoint from decode workers. Without this both
+        // bridges register on `{ns}.backend.generate` and the frontend's
+        // prefill PushRouter routes prefill traffic to either bridge at
+        // random. Mirrors `dynamo.sglang` (components/.../args.py:265:
+        // `dyn://{ns}.prefill.generate`).
+        let component = match args.disaggregation_mode {
+            DisaggMode::Prefill => "prefill".to_string(),
+            DisaggMode::Decode | DisaggMode::None => args.common.component,
         };
+
+        let engine = SglangBridge::new(
+            args.sglang_grpc_endpoint,
+            served.clone(),
+            args.connect_timeout_secs,
+            args.disaggregation_mode,
+            args.bootstrap_host,
+        );
         let config = WorkerConfig {
             namespace: args.common.namespace,
-            component: args.common.component,
+            component,
             endpoint: args.common.endpoint,
             endpoint_types,
             custom_jinja_template: args.common.custom_jinja_template,
@@ -319,10 +348,22 @@ impl LLMEngine for SglangBridge {
             "sglang_bridge: connected"
         );
 
+        // Advertise our bootstrap rendezvous to the frontend's PrefillRouter
+        // via ModelRuntimeConfig. Without this, the router can't find the
+        // prefill worker's bootstrap_host/port and falls into the
+        // "original prefill path" that forwards prefill output via the
+        // wire instead of letting SGLang do NIXL KV transfer directly.
+        let disaggregated_endpoint = matches!(self.disaggregation_mode, DisaggMode::Prefill)
+            .then(|| DisaggregatedEndpoint {
+                bootstrap_host: self.bootstrap_host.get().cloned(),
+                bootstrap_port: self.bootstrap_port.get().copied(),
+            });
+
         Ok(EngineConfig {
             model: self.served_model_name.clone(),
             served_model_name: Some(self.served_model_name.clone()),
             context_length,
+            disaggregated_endpoint,
             // KV-cache hints intentionally omitted for now: KvRouter falls back
             // to round-robin. Wire `SubscribeKvEvents` in a follow-up to enable
             // KV-aware routing.
@@ -369,6 +410,12 @@ impl SglangBridge {
         request: PreprocessedRequest,
         ctx: Arc<dyn AsyncEngineContext>,
     ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError> {
+        tracing::info!(
+            request_id = ctx.id(),
+            disagg_mode = ?self.disaggregation_mode,
+            has_bootstrap_info = request.bootstrap_info.is_some(),
+            "sglang_bridge decode: generate_decode ENTRY"
+        );
         let mut client = self
             .client
             .get()
@@ -380,10 +427,16 @@ impl SglangBridge {
         let sampling = build_sampling_params(&request);
 
         // Decode side: pull bootstrap_info forwarded from the prefill leg.
+        // Mask to a positive i32 (drop the sign bit) so the proto wire value
+        // matches what SGLang stores in its uint64 metadata buffer. SGLang's
+        // `decode.py::Context corruption detected` compares decode-side
+        // `expected_room` (proto signed int32) against the buffer's uint64;
+        // a negative i32 sign-extends to a huge u64 and the equality fails
+        // even though the room is the same. Forcing positive avoids this.
         let disagg = request.bootstrap_info.as_ref().map(|bi| DisaggregatedParams {
             bootstrap_host: bi.bootstrap_host.clone(),
             bootstrap_port: bi.bootstrap_port as i32,
-            bootstrap_room: bi.bootstrap_room as i32,
+            bootstrap_room: (bi.bootstrap_room & 0x7FFF_FFFF) as i32,
         });
 
         let grpc_req = GenerateRequest {
@@ -496,6 +549,10 @@ impl SglangBridge {
         request: PreprocessedRequest,
         ctx: Arc<dyn AsyncEngineContext>,
     ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError> {
+        tracing::info!(
+            request_id = ctx.id(),
+            "sglang_bridge prefill: generate_prefill ENTRY"
+        );
         let mut client = self
             .client
             .get()
@@ -514,11 +571,14 @@ impl SglangBridge {
 
         // Honor a router-provided room if the frontend already chose one;
         // otherwise generate a fresh 31-bit room (positive i32 for proto wire,
-        // round-trips via u64 in PreprocessedRequest.bootstrap_info).
+        // round-trips via u64 in PreprocessedRequest.bootstrap_info). Mask to
+        // 31 bits so both prefill and decode bridges emit the same positive
+        // value — SGLang's decode-side corruption check otherwise mis-fires
+        // when the i32 sign-extends into the uint64 metadata buffer slot.
         let bootstrap_room: i32 = request
             .bootstrap_info
             .as_ref()
-            .map(|bi| bi.bootstrap_room as i32)
+            .map(|bi| (bi.bootstrap_room & 0x7FFF_FFFF) as i32)
             .unwrap_or_else(|| rand::thread_rng().gen_range(1..i32::MAX));
 
         let prompt_len = request.token_ids.len() as u32;
@@ -554,12 +614,6 @@ impl SglangBridge {
             stream: true,
         };
 
-        let response = client
-            .generate(grpc_req)
-            .await
-            .map_err(|e| backend_error(format!("Generate RPC: {e}")))?;
-        let mut stream = response.into_inner();
-
         // First chunk: bootstrap info for the frontend to forward to decode.
         let mut bootstrap_chunk = LLMEngineOutput::default();
         bootstrap_chunk.disaggregated_params = Some(serde_json::json!({
@@ -567,60 +621,105 @@ impl SglangBridge {
             "bootstrap_port": bootstrap_port,
             "bootstrap_room": bootstrap_room as u64,
         }));
+        tracing::debug!(
+            request_id = ctx.id(),
+            bootstrap_host = %bootstrap_host,
+            bootstrap_port = bootstrap_port,
+            bootstrap_room = bootstrap_room,
+            "sglang_bridge prefill: yielding bootstrap chunk"
+        );
 
-        Ok(Box::pin(async_stream::stream! {
-            yield bootstrap_chunk;
-
-            // Drain SGLang's stream silently. Prefill tokens are consumed by
-            // the decode worker via NIXL/Mooncake, not by us. We only watch
-            // for errors and the terminal. Honor cancellation along the way.
+        // Run the gRPC `Generate` call in a background task and decouple it
+        // from the response stream we hand back to Dynamo's frontend. The
+        // `--grpc-mode` servicer doesn't yield its first gRPC response until
+        // the engine produces output, and SGLang prefill in disagg mode does
+        // not produce output until the decode worker reads KV via NIXL — so
+        // awaiting `client.generate(...).await` here would deadlock with the
+        // frontend's prefill router (which drains our stream before
+        // dispatching to decode). Instead the bridge stream emits bootstrap
+        // + a synthetic terminal so the prefill router unblocks immediately,
+        // and the spawned task keeps the gRPC call alive in parallel until
+        // SGLang closes it (KV transfer complete) or the request is
+        // cancelled.
+        let request_id = ctx.id().to_string();
+        let ctx_for_bg = ctx.clone();
+        tokio::spawn(async move {
+            tracing::debug!(
+                request_id = %request_id,
+                "sglang_bridge prefill bg: issuing gRPC Generate"
+            );
+            let response = match client.generate(grpc_req).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        err = %e,
+                        "sglang_bridge prefill bg: Generate RPC failed"
+                    );
+                    return;
+                }
+            };
+            tracing::debug!(
+                request_id = %request_id,
+                "sglang_bridge prefill bg: gRPC stream opened, draining"
+            );
+            let mut stream = response.into_inner();
             loop {
                 tokio::select! {
                     biased;
-                    _ = ctx.stopped() => {
-                        yield LLMEngineOutput::cancelled()
-                            .with_usage(usage(prompt_len, 0));
-                        break;
+                    _ = ctx_for_bg.stopped() => {
+                        tracing::debug!(request_id = %request_id, "sglang_bridge prefill bg: cancellation observed");
+                        return;
                     }
                     maybe_chunk = stream.next() => {
-                        let Some(chunk_res) = maybe_chunk else {
-                            // Stream closed without Complete — treat as stop.
-                            yield LLMEngineOutput::stop().with_usage(usage(prompt_len, 0));
-                            break;
-                        };
-                        match chunk_res {
-                            Ok(resp) => match resp.response {
+                        match maybe_chunk {
+                            Some(Ok(resp)) => match resp.response {
                                 Some(GenResponse::Chunk(_)) => {
                                     // Drop — decode worker reads from KV rendezvous.
                                 }
                                 Some(GenResponse::Complete(_)) => {
-                                    yield LLMEngineOutput::stop().with_usage(usage(prompt_len, 0));
-                                    break;
+                                    tracing::debug!(request_id = %request_id, "sglang_bridge prefill bg: SGLang Complete");
+                                    return;
                                 }
                                 Some(GenResponse::Error(err)) => {
-                                    yield LLMEngineOutput::error(format!(
-                                        "sglang_bridge prefill: {} ({})",
-                                        err.message, err.http_status_code
-                                    ));
-                                    break;
-                                }
-                                None => {
-                                    yield LLMEngineOutput::error(
-                                        "sglang_bridge prefill: empty oneof response".to_string()
+                                    tracing::warn!(
+                                        request_id = %request_id,
+                                        err = ?err,
+                                        "sglang_bridge prefill bg: SGLang Error"
                                     );
-                                    break;
+                                    return;
                                 }
+                                None => return,
                             },
-                            Err(status) => {
-                                yield LLMEngineOutput::error(
-                                    format!("sglang_bridge prefill: gRPC stream error: {status}")
-                                );
-                                break;
+                            Some(Err(status)) => {
+                                tracing::warn!(request_id = %request_id, %status, "sglang_bridge prefill bg: gRPC stream error");
+                                return;
+                            }
+                            None => {
+                                tracing::debug!(request_id = %request_id, "sglang_bridge prefill bg: stream closed");
+                                return;
                             }
                         }
                     }
                 }
             }
+        });
+
+        // Suppress unused warning when we drop the synthetic stop chunk's usage helper.
+        let _ = prompt_len;
+
+        Ok(Box::pin(async_stream::stream! {
+            // The bootstrap chunk delivers disaggregated_params to the
+            // frontend's prefill_router. We then end the stream naturally
+            // (no terminal finish_reason) so the prefill_router's drain
+            // loop exits cleanly without short-circuiting the rest of the
+            // chat completion (which otherwise treats a Stop terminal here
+            // as the *whole request*'s end and skips decode dispatch).
+            //
+            // The actual prefill compute + KV transfer continues in the
+            // spawned background task; the decode worker fetches KV via
+            // NIXL using the bootstrap_room we just delivered.
+            yield bootstrap_chunk;
         }))
     }
 }

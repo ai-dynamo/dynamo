@@ -12,7 +12,7 @@
 //!
 //! See `CLAUDE.md` in this crate for the design contract.
 
-mod adapter;
+pub mod adapter;
 pub mod args;
 pub mod engine;
 pub mod error;
@@ -23,11 +23,12 @@ pub mod testing;
 mod validate;
 pub mod worker;
 
+pub use adapter::EngineAdapter;
 pub use args::CommonArgs;
 pub use engine::{
-    AsyncEngineContext, CompletionUsage, EngineConfig, FinishReason, LLMEngine, LLMEngineOutput,
-    LLMEngineOutputExt, OutputOptions, PreprocessedRequest, SamplingOptions, StopConditions, chunk,
-    usage,
+    AsyncEngineContext, CompletionUsage, DisaggregatedEndpoint, EngineConfig, FinishReason,
+    LLMEngine, LLMEngineOutput, LLMEngineOutputExt, OutputOptions, PreprocessedRequest,
+    SamplingOptions, StopConditions, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use run::run;

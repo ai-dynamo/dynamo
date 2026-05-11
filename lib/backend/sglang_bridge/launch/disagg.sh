@@ -63,12 +63,23 @@ CUDA_VISIBLE_DEVICES=1 \
     --disaggregation-transfer-backend nixl \
     --disable-piecewise-cuda-graph &
 
-sleep 8
+# Wait for both SGLang gRPC ports to bind. Stock model load on Qwen3-0.6B
+# takes ~30-60s; the bridge's HealthCheck on start() will fail if we race it.
+echo "Waiting for SGLang prefill (:30000) and decode (:30001) ports..."
+for port in 30000 30001; do
+    for _ in $(seq 1 120); do
+        if (echo > /dev/tcp/127.0.0.1/$port) 2>/dev/null; then
+            echo "  :$port open"
+            break
+        fi
+        sleep 1
+    done
+done
 
 # Prefill bridge — registers with endpoint_types=prefill, generates bootstrap_room
 # per request and yields it as the first chunk for the frontend to forward.
 DYN_SYSTEM_PORT=8082 OTEL_SERVICE_NAME=sglang-bridge-prefill \
-RUST_LOG=info \
+DYN_LOG=info,dynamo_sglang_bridge=debug \
 "$BRIDGE_BIN" \
     --model-path "$MODEL" --served-model-name "$MODEL" \
     --sglang-grpc-endpoint http://127.0.0.1:30000 \
@@ -77,7 +88,7 @@ RUST_LOG=info \
 # Decode bridge — pulls bootstrap_info from incoming requests and forwards
 # via DisaggregatedParams in the gRPC Generate call.
 DYN_SYSTEM_PORT=8083 OTEL_SERVICE_NAME=sglang-bridge-decode \
-RUST_LOG=info \
+DYN_LOG=info,dynamo_sglang_bridge=debug \
 "$BRIDGE_BIN" \
     --model-path "$MODEL" --served-model-name "$MODEL" \
     --sglang-grpc-endpoint http://127.0.0.1:30001 \

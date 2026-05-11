@@ -17,6 +17,7 @@ use futures::stream::BoxStream;
 
 use crate::error::DynamoError;
 
+pub use dynamo_llm::local_model::runtime_config::DisaggregatedEndpoint;
 pub use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 pub use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 pub use dynamo_llm::protocols::common::{
@@ -52,6 +53,11 @@ pub struct EngineConfig {
     pub max_num_seqs: Option<u64>,
     /// Maximum tokens the engine will process in a single batched step.
     pub max_num_batched_tokens: Option<u64>,
+    /// Disaggregated bootstrap endpoint (prefill workers only). The
+    /// frontend's PrefillRouter reads this from each prefill worker's
+    /// `ModelRuntimeConfig` and stamps `{host, port, room}` onto requests
+    /// so SGLang's NIXL KV-transfer can rendezvous prefill ↔ decode.
+    pub disaggregated_endpoint: Option<DisaggregatedEndpoint>,
 }
 
 /// Inference engine trait.

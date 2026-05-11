@@ -257,6 +257,7 @@ async fn build_local_model(
         total_kv_blocks: engine_config.total_kv_blocks,
         max_num_seqs: engine_config.max_num_seqs,
         max_num_batched_tokens: engine_config.max_num_batched_tokens,
+        disaggregated_endpoint: engine_config.disaggregated_endpoint.clone(),
         ..ModelRuntimeConfig::default()
     };
 

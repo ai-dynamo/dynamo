@@ -294,7 +294,22 @@ async def async_main():
     if config.router_prefill_load_model == "aic":
         kwargs["aic_perf_config"] = AicPerfConfig(**config.aic_perf_kwargs())
 
-    e = EntrypointArgs(EngineType.Dynamic, **kwargs)
+    # Engine type selection. Defaults to Dynamic (worker-discovery via etcd).
+    # Set DYN_ENGINE_TYPE=sglang-grpc to embed the dynamo-sglang-bridge
+    # crate as an in-process tokens engine, dialing a stock SGLang
+    # `--grpc-mode` server directly. SGLang endpoint comes from
+    # SGLANG_GRPC_ENDPOINT (default http://127.0.0.1:30000).
+    engine_type_env = os.environ.get("DYN_ENGINE_TYPE", "dynamic").lower()
+    if engine_type_env in ("sglang-grpc", "sglang_grpc"):
+        engine_type = EngineType.SglangGrpc
+        # InProcessTokens path doesn't talk to the discovery layer for
+        # workers, so chat_engine_factory wiring above is irrelevant —
+        # drop it to avoid confusing the launcher.
+        kwargs.pop("chat_engine_factory", None)
+    else:
+        engine_type = EngineType.Dynamic
+
+    e = EntrypointArgs(engine_type, **kwargs)
     engine = await make_engine(runtime, e)
 
     try:
