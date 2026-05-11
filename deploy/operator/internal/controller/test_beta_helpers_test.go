@@ -7,6 +7,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -81,6 +82,15 @@ func betaDGDWorkersSpecHash(t testing.TB, dgd *v1beta1.DynamoGraphDeployment) st
 	hash, err := v1beta1.ComputeDGDWorkersSpecHash(dgd)
 	if err != nil {
 		t.Fatalf("compute v1beta1 DGD worker hash: %v", err)
+	}
+	return hash
+}
+
+func legacyDGDWorkersSpecHash(t testing.TB, dgd *v1beta1.DynamoGraphDeployment) string {
+	t.Helper()
+	hash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
+	if err != nil {
+		t.Fatalf("compute v1alpha1-compatible DGD worker hash: %v", err)
 	}
 	return hash
 }

@@ -22,32 +22,13 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
-// ComputeLegacyAlphaDGDWorkersSpecHash returns the v1alpha1 worker hash used by
-// pre-v1beta1 controllers. Converted v1alpha1 DGDs carry the exact old hash in
-// an annotation; the ConvertFrom fallback is only for synthetic beta objects.
+// ComputeLegacyAlphaDGDWorkersSpecHash returns the v1alpha1 worker hash that a
+// pre-v1beta1 controller would compute for the DGD's current spec. Conversion
+// must preserve every v1alpha1 hash input shape this depends on.
 func ComputeLegacyAlphaDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, error) {
-	if hash := v1alpha1.GetDGDLegacyWorkerHash(dgd); hash != "" {
-		return hash, nil
-	}
 	alpha := &v1alpha1.DynamoGraphDeployment{}
 	if err := alpha.ConvertFrom(dgd); err != nil {
 		return "", err
 	}
 	return v1alpha1.ComputeDGDWorkersSpecHash(alpha)
-}
-
-// GetPreservedLegacyAlphaDGDWorkersSpecHash returns only the alpha hash value
-// that conversion already preserved on the v1beta1 object. Unlike
-// ComputeLegacyAlphaDGDWorkersSpecHash, it never converts back to v1alpha1 and
-// never recomputes the old algorithm. Use this in controller migration logic
-// when the alpha hash should be treated as immutable history.
-func GetPreservedLegacyAlphaDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) string {
-	return v1alpha1.GetDGDLegacyWorkerHash(dgd)
-}
-
-// ClearLegacyAlphaDGDWorkersSpecHash removes the transient conversion-only
-// alpha hash after the controller has either recorded the v1 alias or decided
-// not to use legacy compatibility for this DGD.
-func ClearLegacyAlphaDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) {
-	v1alpha1.ClearDGDLegacyWorkerHash(dgd)
 }

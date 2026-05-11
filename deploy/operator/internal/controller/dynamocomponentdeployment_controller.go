@@ -1134,87 +1134,68 @@ func (r *DynamoComponentDeploymentReconciler) getDCDWorkloadComponentType(
 		return componentType, nil
 	}
 
-	// Decode/prefill are the current v1beta1 workload-facing worker types. When
-	// their DCD hash is still aliased to a legacy-compatible generation, keep
-	// rendering pod labels/env and service selectors as "worker" so a no-op
-	// upgrade keeps matching the already-running v1alpha1 worker pods.
+	// Decode/prefill are the current v1beta1 workload-facing worker types. If
+	// this DCD generation is already serving with legacy v1alpha1 worker
+	// selectors, keep rendering pod labels/env and service selectors as
+	// "worker" so a no-op upgrade keeps matching already-running pods.
 	labels := dcd.GetLabels()
 	workerHash := labels[commonconsts.KubeLabelDynamoWorkerHash]
 	if workerHash == "" {
 		return componentType, nil
 	}
+	if hasLegacyWorkerSelector(labels, componentType) {
+		return commonconsts.ComponentTypeWorker, nil
+	}
 
-	parentDGD, ok, err := r.getParentDGD(ctx, dcd)
+	legacy, err := r.hasExistingLegacyWorkerSelector(ctx, dcd, componentType)
 	if err != nil {
 		return "", err
 	}
-	if !ok {
-		return componentType, nil
-	}
-
-	if dgdHasLegacyCompatibleWorkerHash(parentDGD, workerHash) {
+	if legacy {
 		return commonconsts.ComponentTypeWorker, nil
 	}
 
 	return componentType, nil
 }
 
-func (r *DynamoComponentDeploymentReconciler) getParentDGD(
+func (r *DynamoComponentDeploymentReconciler) hasExistingLegacyWorkerSelector(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
-) (*nvidiacomv1beta1.DynamoGraphDeployment, bool, error) {
+	componentType string,
+) (bool, error) {
 	if dcd == nil || r == nil || r.Client == nil {
-		return nil, false, nil
-	}
-	labels := dcd.GetLabels()
-	parentDGDName := dcd.GetParentGraphDeploymentName()
-	if parentDGDName == "" {
-		parentDGDName = labels[commonconsts.KubeLabelDynamoGraphDeploymentName]
-	}
-	if parentDGDName == "" {
-		return nil, false, nil
+		return false, nil
 	}
 
-	parentDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
-	if err := r.Get(ctx, types.NamespacedName{Name: parentDGDName, Namespace: dcd.Namespace}, parentDGD); err != nil {
-		if k8serrors.IsNotFound(err) {
-			return nil, false, nil
+	deployment := &appsv1.Deployment{}
+	if err := r.Get(ctx, types.NamespacedName{Name: dcd.Name, Namespace: dcd.Namespace}, deployment); err == nil {
+		if hasLegacyWorkerSelector(deployment.Spec.Template.Labels, componentType) {
+			return true, nil
 		}
-		return nil, false, fmt.Errorf("failed to get parent DynamoGraphDeployment %s/%s: %w", dcd.Namespace, parentDGDName, err)
+	} else if !k8serrors.IsNotFound(err) {
+		return false, fmt.Errorf("failed to get deployment %s/%s: %w", dcd.Namespace, dcd.Name, err)
 	}
-	return parentDGD, true, nil
+
+	serviceName := dynamo.NormalizeKubeResourceName(dcd.Name)
+	service := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: dcd.Namespace}, service); err == nil {
+		return hasLegacyWorkerSelector(service.Spec.Selector, componentType), nil
+	} else if !k8serrors.IsNotFound(err) {
+		return false, fmt.Errorf("failed to get service %s/%s: %w", dcd.Namespace, serviceName, err)
+	}
+
+	return false, nil
 }
 
-// dgdHasLegacyCompatibleWorkerHash reports whether workerHash is an old
-// v1alpha1 worker generation that is still explicitly aliased by the parent DGD.
-// This lets DCD rendering preserve legacy workload selectors without patching
-// existing DCDs to v2 labels in place.
-func dgdHasLegacyCompatibleWorkerHash(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	workerHash string,
-) bool {
-	if dgd == nil || workerHash == "" || dgd.Annotations == nil {
+func hasLegacyWorkerSelector(labels map[string]string, componentType string) bool {
+	if labels[commonconsts.KubeLabelDynamoComponentType] != commonconsts.ComponentTypeWorker {
 		return false
 	}
-
-	if dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashVersion] == commonconsts.CurrentWorkerHashVersionV2 {
-		// In migrated state the DGD's active hash is v2. The only old-hash DCDs
-		// that should keep legacy "worker" selectors are those explicitly named
-		// by current-worker-hash-equivalent-v1.
-		return dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashEquivalentV1] == workerHash
-	}
-
-	if dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash] != workerHash {
+	if componentType != commonconsts.ComponentTypePrefill && componentType != commonconsts.ComponentTypeDecode {
 		return false
 	}
-	if dynamo.GetPreservedLegacyAlphaDGDWorkersSpecHash(dgd) == workerHash {
-		// Pre-migration window: conversion preserved the old alpha hash but the
-		// DGD has not yet been updated to v2 bookkeeping. Honor the old DCD
-		// selector shape until migrateCurrentWorkerHashIfNeeded records the alias.
-		return true
-	}
-
-	return false
+	subComponentType := labels[commonconsts.KubeLabelDynamoSubComponentType]
+	return subComponentType == "" || subComponentType == componentType
 }
 
 // SetupWithManager sets up the controller with the Manager.
