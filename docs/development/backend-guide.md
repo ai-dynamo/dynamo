@@ -67,7 +67,7 @@ The `model_input` can be:
 - ModelInput.Text. Your engine expects raw text input and handles its own tokenization and pre-processing.
 
 The `model_type` can be:
-- ModelType.Chat. Your `generate` method receives a `request` and must return a response dict of type [OpenAI Chat Completion](https://platform.openai.com/docs/api-reference/chat).
+- ModelType.Chat. Your `generate` method receives a `request` and must return a response dict of type [OpenAI Chat Completion](https://platform.openai.com/docs/api-reference/chat/completions).
 - ModelType.Completions. Your `generate` method receives a `request` and must return a response dict of the older [Completions](https://platform.openai.com/docs/api-reference/completions).
 
 `register_model` can also take the following kwargs:

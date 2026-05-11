@@ -1402,6 +1402,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dynamo-graph-deployment",
 					Namespace: "test-namespace",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+					},
 				},
 				Spec: grovev1alpha1.PodCliqueSetSpec{
 					Replicas: 1,
@@ -1494,10 +1497,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 												},
 												Env: []corev1.EnvVar{
-													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
 													{
 														Name:  "DYN_HTTP_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
@@ -1704,10 +1703,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
-													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -2019,6 +2014,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dynamo-graph-deployment",
 					Namespace: "test-namespace",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+					},
 				},
 				Spec: grovev1alpha1.PodCliqueSetSpec{
 					Replicas: 1,
@@ -2103,10 +2101,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 												},
 												Env: []corev1.EnvVar{
-													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -2322,10 +2316,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
-													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
@@ -2516,10 +2506,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 												},
 												Env: []corev1.EnvVar{
-													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
 													{
 														Name:  "DYN_HTTP_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
@@ -2717,10 +2703,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
-													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -3055,6 +3037,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dynamo-graph-deployment",
 					Namespace: "test-namespace",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
+					},
 				},
 				Spec: grovev1alpha1.PodCliqueSetSpec{
 					Replicas: 1,
@@ -3138,10 +3123,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 												},
 												Env: []corev1.EnvVar{
-													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -3344,10 +3325,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
-													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
@@ -3538,10 +3515,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 												},
 												Env: []corev1.EnvVar{
-													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
 													{
 														Name:  "DYN_HTTP_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
@@ -3739,10 +3712,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
-													{
-														Name:  "CONTAINER_NAME",
-														Value: commonconsts.MainContainerName,
-													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -5651,7 +5620,6 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 						Env: []corev1.EnvVar{
 							{Name: "ANOTHER_COMPONENTENV", Value: "true"},
 							{Name: "ANOTHER_CONTAINER_ENV", Value: "true"},
-							{Name: "CONTAINER_NAME", Value: commonconsts.MainContainerName},
 							{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
 							{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 							{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "20380"},
@@ -7749,26 +7717,72 @@ func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {
 	assert.True(t, found, "DYN_NAMESPACE_PREFIX should be set on frontend")
 }
 
+func TestBaseComponentDefaults_ContainerNameOnlyInContainerDiscoveryMode(t *testing.T) {
+	w := NewWorkerDefaults()
+
+	podModeContainer, err := w.GetBaseContainer(ComponentContext{
+		DynamoNamespace: "ns-dgd",
+		ComponentType:   commonconsts.ComponentTypeWorker,
+		Discovery: DiscoveryContext{
+			Backend: configv1alpha1.DiscoveryBackendKubernetes,
+			Mode:    configv1alpha1.KubeDiscoveryModePod,
+		},
+	})
+	require.NoError(t, err)
+	podModeEnv := envVarsToMap(podModeContainer.Env)
+	assert.NotContains(t, podModeEnv, "CONTAINER_NAME")
+	assert.NotContains(t, podModeEnv, "DYN_KUBE_DISCOVERY_MODE")
+
+	containerModeContainer, err := w.GetBaseContainer(ComponentContext{
+		DynamoNamespace: "ns-dgd",
+		ComponentType:   commonconsts.ComponentTypeWorker,
+		Discovery: DiscoveryContext{
+			Backend: configv1alpha1.DiscoveryBackendKubernetes,
+			Mode:    configv1alpha1.KubeDiscoveryModeContainer,
+		},
+	})
+	require.NoError(t, err)
+	containerModeEnv := envVarsToMap(containerModeContainer.Env)
+	assert.Equal(t, commonconsts.MainContainerName, containerModeEnv["CONTAINER_NAME"])
+	assert.Equal(t, string(configv1alpha1.KubeDiscoveryModeContainer), containerModeEnv["DYN_KUBE_DISCOVERY_MODE"])
+}
+
+func envVarsToMap(envs []corev1.EnvVar) map[string]string {
+	out := make(map[string]string, len(envs))
+	for _, env := range envs {
+		out[env.Name] = env.Value
+	}
+	return out
+}
+
 func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
-	controllerConfig := &configv1alpha1.OperatorConfiguration{}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{
+		MPI: configv1alpha1.MPIConfiguration{SSHSecretName: "mpi-ssh-secret"},
+	}
 
 	envFromSecret := "hf-token-secret"
 
 	tests := []struct {
-		name               string
-		component          *v1alpha1.DynamoComponentDeploymentSharedSpec
-		parentDGDName      string
-		namespace          string
-		wantSidecarCount   int
-		wantSidecarName    string
-		wantSidecarImage   string
-		wantSidecarArgs    []string
-		wantSidecarEnvVars map[string]string
-		wantSidecarEnvFrom int
-		wantSidecarProbes  bool
-		wantSidecarPorts   bool
-		wantErr            bool
+		name                    string
+		component               *v1alpha1.DynamoComponentDeploymentSharedSpec
+		parentDGDName           string
+		namespace               string
+		backendFramework        BackendFramework
+		numberOfNodes           int32
+		wantSidecarCount        int
+		wantSidecarName         string
+		wantSidecarImage        string
+		wantSidecarArgs         []string
+		wantSidecarEnvVars      map[string]string
+		wantSidecarEnvFrom      int
+		wantSidecarProbes       bool
+		wantSidecarPorts        bool
+		wantSidecarMounts       []corev1.VolumeMount
+		wantSidecarMountsAbsent []string
+		wantWorkerMounts        []corev1.VolumeMount
+		wantUniqueVolumes       map[string]int
+		wantErr                 bool
 	}{
 		{
 			name: "worker without frontendSidecar has no sidecar",
@@ -7846,18 +7860,115 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			wantSidecarProbes: true,
 			wantSidecarPorts:  true,
 		},
+		{
+			name: "frontendSidecar inherits worker PVC volume mount",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{Name: "model-cache", MountPoint: "/opt/models"},
+				},
+				SharedMemory: &v1alpha1.SharedMemorySpec{Disabled: true},
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
+					Image: "my-frontend:latest",
+				},
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			wantSidecarCount: 2,
+			wantSidecarName:  commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage: "my-frontend:latest",
+			wantSidecarMounts: []corev1.VolumeMount{
+				{Name: "model-cache", MountPath: "/opt/models"},
+			},
+			wantUniqueVolumes: map[string]int{"model-cache": 1},
+			wantSidecarProbes: true,
+			wantSidecarPorts:  true,
+		},
+		{
+			name: "frontendSidecar inherits user PVC mounts but not shared memory",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{Name: "model-cache", MountPoint: "/opt/models"},
+					{Name: "extra-data", MountPoint: "/mnt/data"},
+				},
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
+					Image: "my-frontend:latest",
+				},
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			wantSidecarCount: 2,
+			wantSidecarName:  commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage: "my-frontend:latest",
+			wantSidecarMounts: []corev1.VolumeMount{
+				{Name: "model-cache", MountPath: "/opt/models"},
+				{Name: "extra-data", MountPath: "/mnt/data"},
+			},
+			wantSidecarMountsAbsent: []string{commonconsts.KubeValueNameSharedMemory},
+			wantUniqueVolumes: map[string]int{
+				"model-cache":                          1,
+				"extra-data":                           1,
+				commonconsts.KubeValueNameSharedMemory: 1,
+			},
+			wantSidecarProbes: true,
+			wantSidecarPorts:  true,
+		},
+		{
+			// TRT-LLM multinode injects the /ssh-pk MPI secret onto the worker.
+			// The sidecar must not inherit it; only user-declared mounts propagate.
+			name: "frontendSidecar does not inherit TRT-LLM multinode SSH mount",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				VolumeMounts: []v1alpha1.VolumeMount{
+					{Name: "model-cache", MountPoint: "/opt/models"},
+				},
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
+					Image: "my-frontend:latest",
+				},
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			backendFramework: BackendFrameworkTRTLLM,
+			numberOfNodes:    2,
+			wantSidecarCount: 2,
+			wantSidecarName:  commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage: "my-frontend:latest",
+			wantSidecarMounts: []corev1.VolumeMount{
+				{Name: "model-cache", MountPath: "/opt/models"},
+			},
+			wantSidecarMountsAbsent: []string{"mpi-ssh-secret", commonconsts.KubeValueNameSharedMemory},
+			wantWorkerMounts: []corev1.VolumeMount{
+				{Name: "model-cache", MountPath: "/opt/models"},
+				{Name: "mpi-ssh-secret", MountPath: "/ssh-pk"},
+			},
+			wantSidecarProbes: true,
+			wantSidecarPorts:  true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			backendFramework := tt.backendFramework
+			if backendFramework == "" {
+				backendFramework = BackendFrameworkVLLM
+			}
+			numberOfNodes := tt.numberOfNodes
+			if numberOfNodes == 0 {
+				numberOfNodes = 1
+			}
+			role := RoleMain
+			if numberOfNodes > 1 {
+				role = RoleLeader
+			}
 			podSpec, err := GenerateBasePodSpec(
 				tt.component,
-				BackendFrameworkVLLM,
+				backendFramework,
 				secretsRetriever,
 				tt.parentDGDName,
 				tt.namespace,
-				RoleMain,
-				1,
+				role,
+				numberOfNodes,
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
@@ -7928,6 +8039,48 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			}
 			for name, found := range hasDownwardAPI {
 				assert.True(t, found, "sidecar should have downward API env var %s", name)
+			}
+
+			// Verify the sidecar's volume mounts match the expected set exactly.
+			// The frontend base container ships with no mounts, so sidecar.VolumeMounts
+			// should equal wantSidecarMounts element-for-element.
+			if tt.wantSidecarMounts != nil {
+				assert.ElementsMatch(t, tt.wantSidecarMounts, sidecar.VolumeMounts, "sidecar volume mounts")
+			}
+
+			// Verify the sidecar did NOT inherit mounts that belong only to the worker
+			// (shared memory, backend-injected secrets like TRT-LLM's /ssh-pk, etc.).
+			for _, absentName := range tt.wantSidecarMountsAbsent {
+				for _, got := range sidecar.VolumeMounts {
+					assert.NotEqual(t, absentName, got.Name,
+						"sidecar must not inherit worker-only mount %s", absentName)
+				}
+			}
+
+			// Verify the worker container still has its expected mounts — propagation
+			// must not strip anything off the worker.
+			if len(tt.wantWorkerMounts) > 0 {
+				worker := podSpec.Containers[0]
+				for _, want := range tt.wantWorkerMounts {
+					found := false
+					for _, got := range worker.VolumeMounts {
+						if got.Name == want.Name && got.MountPath == want.MountPath {
+							found = true
+							break
+						}
+					}
+					assert.True(t, found, "worker should have volume mount %s at %s", want.Name, want.MountPath)
+				}
+			}
+
+			// Verify pod-level volume counts exactly match the expected set
+			// (catches duplicates as well as unexpected extra volumes).
+			if tt.wantUniqueVolumes != nil {
+				counts := make(map[string]int)
+				for _, v := range podSpec.Volumes {
+					counts[v.Name]++
+				}
+				assert.Equal(t, tt.wantUniqueVolumes, counts, "pod volume counts")
 			}
 		})
 	}
@@ -8320,6 +8473,119 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 				if _, found := actualPCSGNames[expectedName]; !found {
 					t.Errorf("expected PCSG %q not found in PCS", expectedName)
 				}
+			}
+		})
+	}
+}
+
+func TestPCSNameForDGD(t *testing.T) {
+	singleNodeSvc := &v1alpha1.DynamoComponentDeploymentSharedSpec{}
+	multinodeSvc := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+	}
+
+	tests := []struct {
+		name     string
+		dgdName  string
+		services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec
+		want     string
+		wantLen  int // 0 means check exact match via want; >0 means check length
+	}{
+		{
+			name:    "short name passes through unchanged",
+			dgdName: "trtllm-disagg",
+			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": singleNodeSvc,
+				"decode":  singleNodeSvc,
+			},
+			want: "trtllm-disagg",
+		},
+		{
+			name:    "short name with multinode passes through unchanged",
+			dgdName: "my-dgd",
+			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": multinodeSvc,
+				"decode":  multinodeSvc,
+			},
+			want: "my-dgd",
+		},
+		{
+			name:    "long name gets truncated with hash",
+			dgdName: "deepseek-v32-fp4-trtllm-dgd",
+			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": multinodeSvc,
+				"decode":  multinodeSvc,
+			},
+			// prefill multinode: PCSG=7, PCLQ=7+1+3=11 → budget=18, pcsBudget=45-18=27
+			// dgdName is 28 chars → needs truncation to 27
+			wantLen: 27,
+		},
+		{
+			name:    "deterministic - same input always produces same output",
+			dgdName: "deepseek-v32-fp4-trtllm-dgd",
+			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": multinodeSvc,
+			},
+			// Just verify determinism by calling twice
+			wantLen: 27,
+		},
+		{
+			name:    "old long vllm service names get truncated more aggressively",
+			dgdName: "my-deployment-dgd",
+			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"VllmPrefillWorker": multinodeSvc,
+			},
+			// VllmPrefillWorker multinode: PCSG=17, PCLQ=17+1+3=21 → budget=38, pcsBudget=45-38=7
+			// 7 < minPCSNameLength(8), so clamped to 8
+			wantLen: 8,
+		},
+		{
+			name:     "empty services - no truncation needed",
+			dgdName:  "my-dgd",
+			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			want:     "my-dgd",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PCSNameForDGD(tt.dgdName, tt.services)
+
+			if tt.want != "" {
+				if got != tt.want {
+					t.Errorf("PCSNameForDGD() = %q, want %q", got, tt.want)
+				}
+			}
+			if tt.wantLen > 0 {
+				if len(got) != tt.wantLen {
+					t.Errorf("PCSNameForDGD() = %q (len %d), want len %d", got, len(got), tt.wantLen)
+				}
+			}
+
+			// Verify determinism
+			got2 := PCSNameForDGD(tt.dgdName, tt.services)
+			if got != got2 {
+				t.Errorf("PCSNameForDGD() not deterministic: %q != %q", got, got2)
+			}
+
+			// Verify the result actually fits within the Grove limit
+			maxServiceBudget := 0
+			for svcName, svc := range tt.services {
+				lowerName := strings.ToLower(svcName)
+				var budget int
+				if svc != nil && svc.GetNumberOfNodes() > 1 {
+					budget = len(lowerName) + len(lowerName) + 1 + len(commonconsts.GroveRoleSuffixLeader)
+				} else {
+					budget = len(lowerName)
+				}
+				if budget > maxServiceBudget {
+					maxServiceBudget = budget
+				}
+			}
+			combinedLength := len(got) + maxServiceBudget
+			if combinedLength > commonconsts.MaxCombinedGroveResourceNameLength && len(got) > 8 {
+				t.Errorf("PCSNameForDGD() result %q (len %d) + max service budget %d = %d, exceeds %d",
+					got, len(got), maxServiceBudget, combinedLength, commonconsts.MaxCombinedGroveResourceNameLength)
 			}
 		})
 	}

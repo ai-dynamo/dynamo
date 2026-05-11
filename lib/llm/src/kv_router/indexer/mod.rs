@@ -81,10 +81,26 @@ impl Indexer {
 
         if !kv_router_config.use_kv_events {
             let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
-            let cancellation_token = component.drt().primary_token();
             let prune_config = Some(PruneConfig {
                 ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
             });
+            if kv_router_config.router_event_threads > 1 {
+                return Ok(Self::Concurrent {
+                    primary: Arc::new(ThreadPoolIndexer::new_with_metrics_and_pruning(
+                        ConcurrentRadixTreeCompressed::new(),
+                        kv_router_config.router_event_threads as usize,
+                        block_size,
+                        Some(kv_indexer_metrics),
+                        prune_config,
+                    )),
+                    lower_tier: LowerTierIndexers::new(
+                        kv_router_config.router_event_threads as usize,
+                        block_size,
+                    ),
+                });
+            }
+
+            let cancellation_token = component.drt().primary_token();
             return Ok(Self::KvIndexer {
                 primary: KvIndexer::new_with_frequency(
                     cancellation_token,
@@ -201,11 +217,10 @@ impl Indexer {
                     .process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
                     .await
             }
-            Self::Concurrent { .. } => {
-                tracing::warn!(
-                    "Hashed routing-decision recording is unsupported for concurrent indexers"
-                );
-                Err(KvRouterError::IndexerDroppedRequest)
+            Self::Concurrent { primary, .. } => {
+                primary
+                    .process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
+                    .await
             }
             Self::Remote(remote) => remote
                 .record_hashed_routing_decision(worker, local_hashes, sequence_hashes)
@@ -432,6 +447,7 @@ pub(super) mod test_util {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use tokio_util::sync::CancellationToken;
 
@@ -439,8 +455,12 @@ mod tests {
     use super::{Indexer, LowerTierIndexers};
     use dynamo_kv_router::{
         ConcurrentRadixTreeCompressed, ThreadPoolIndexer,
+        approx::PruneConfig,
         indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics},
-        protocols::{LocalBlockHash, StorageTier, WorkerWithDpRank},
+        protocols::{
+            BlockHashOptions, LocalBlockHash, StorageTier, WorkerWithDpRank,
+            compute_block_hash_for_seq, compute_seq_hash_for_block,
+        },
     };
 
     fn make_test_indexer() -> Indexer {
@@ -460,6 +480,20 @@ mod tests {
                 ConcurrentRadixTreeCompressed::new(),
                 2,
                 4,
+            )),
+            lower_tier: LowerTierIndexers::new(2, 4),
+        }
+    }
+
+    fn make_test_concurrent_approx_indexer() -> Indexer {
+        Indexer::Concurrent {
+            primary: Arc::new(ThreadPoolIndexer::new_with_pruning(
+                ConcurrentRadixTreeCompressed::new(),
+                2,
+                4,
+                PruneConfig {
+                    ttl: Duration::from_secs(60),
+                },
             )),
             lower_tier: LowerTierIndexers::new(2, 4),
         }
@@ -675,6 +709,24 @@ mod tests {
                 .and_then(|tier| tier.hits.get(&worker)),
             Some(&1)
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_records_hashed_routing_decision() {
+        let indexer = make_test_concurrent_approx_indexer();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let tokens = vec![1, 2, 3, 4];
+        let block_hashes = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
+        let sequence_hashes = compute_seq_hash_for_block(&block_hashes);
+
+        indexer
+            .record_hashed_routing_decision(worker, block_hashes.clone(), sequence_hashes)
+            .await
+            .unwrap();
+        flush_indexer(&indexer).await;
+
+        let matches = indexer.find_matches_by_tier(block_hashes).await.unwrap();
+        assert_eq!(matches.device.overlap_scores.scores.get(&worker), Some(&1));
     }
 
     #[tokio::test]

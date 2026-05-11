@@ -496,7 +496,7 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
         MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
         MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
-        MooncakeIndexerConfig::anchor_aware_branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
+        MooncakeIndexerConfig::branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
     ];
 
     for mode in [MooncakeReplayMode::KvEvents, MooncakeReplayMode::Approx] {
@@ -559,6 +559,20 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
     assert_overlap_score_parity(&variants, &traces, &artifacts).await?;
 
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mooncake_trace_branch_sharded_depth4_matches_baseline() -> anyhow::Result<()> {
+    let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
+    let traces =
+        process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, NUM_UNIQUE_INFERENCE_WORKERS, 42)?;
+    let artifacts = generate_replay_artifacts(&traces, NUM_GPU_BLOCKS, BLOCK_SIZE, None).await?;
+    let variants = [
+        MooncakeIndexerConfig::radix_tree(),
+        MooncakeIndexerConfig::branch_sharded_crtc(2, NUM_EVENT_WORKERS, 4),
+    ];
+
+    assert_overlap_score_parity(&variants, &traces, &artifacts).await
 }
 
 #[cfg(feature = "mocker-kvbm-offload")]

@@ -537,18 +537,20 @@ class TestDiffusionEngineGenerate:
         class FakeDiffusionRequest:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
-                self.extra_params = kwargs.get("extra_params")
                 for k, v in kwargs.items():
                     setattr(self, k, v)
 
         # DiffusionRequest is imported inside generate() via
         #   from tensorrt_llm._torch.visual_gen.executor import DiffusionRequest
-        # so we inject a fake module into sys.modules.
+        #   from tensorrt_llm.visual_gen.params import VisualGenParams
+        # so we inject fake modules into sys.modules.
         fake_executor = MagicMock(DiffusionRequest=FakeDiffusionRequest)
+        fake_params_module = MagicMock(VisualGenParams=MagicMock)
         with patch.dict(
             "sys.modules",
             {
                 "tensorrt_llm._torch.visual_gen.executor": fake_executor,
+                "tensorrt_llm.visual_gen.params": fake_params_module,
             },
         ):
             engine.generate(
