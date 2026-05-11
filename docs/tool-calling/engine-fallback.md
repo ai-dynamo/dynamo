@@ -15,6 +15,12 @@ For the list of Dynamo-native parser names, see
 [Tool Call Parsing (Dynamo)](dynamo.md). For the equivalent reasoning-parser
 fallback, see [Reasoning Parsing (Engine Fallback)](../reasoning/engine-fallback.md).
 
+> [!WARNING]
+> **Known Issue:** Engine-fallback tool call parsing (options B/C/D/E below)
+> does not currently work with [disaggregated serving](../features/disaggregated-serving/README.md).
+> Use the [Dynamo-native tool call parser](dynamo.md) (option A) for
+> disaggregated deployments.
+
 ## Configurations
 
 There are five supported configurations. Each is set at startup -- Dynamo does
