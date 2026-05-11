@@ -3,65 +3,143 @@
 """Detect drift in tracked base-image SBOMs.
 
 Reads container/compliance/base_sboms/manifest.json and, for each entry,
-resolves the current registry manifest-list digest for image:tag. Fails
-if any digest differs from what's recorded — that means the underlying
-base image was rebuilt without our SBOM corpus being refreshed, so the
-SBOM-diff verifier would be checking against the wrong reference.
+runs three structural checks against the live registry:
 
-Replaces the planned weekly cron: rather than always re-pulling on a
-schedule (most refresh runs would be no-ops), we make every CI run
-verify the digests it cares about. The first run after a base bump
-fails fast and points the human at the refresh path.
+  1. from_image digest matches the recorded from_digest.
+     Catches the vendor pushing the same tag with different bits.
+  2. baseline_image digest matches the recorded baseline_digest.
+     Catches NGC (or whoever) rebuilding the floor underneath us.
+  3. The from_image's current layer list still starts with the
+     baseline_image's current full layer list (layer-prefix invariant).
+     Catches the subtle case: vendor silently switched their FROM line
+     to a different upstream while keeping the from_image tag stable.
+
+Any one failing surfaces as build-blocking output with the action to
+take: rerun capture_base_sboms.py for the affected entry, and update
+manifest.json with the new digests.
 
 Resolution uses `docker buildx imagetools inspect --raw <ref>` and
-hashes the returned canonical manifest bytes. By OCI spec, sha256 of
-the raw manifest IS its digest, so this is deterministic and doesn't
-depend on a Go-template format string (which renders Digest as a
-struct dump on multi-arch manifests). Available on any runner with
-buildx (every runner we use to build images). No registry credentials
-needed for public bases; private bases must be `docker login`-ed by
-the calling workflow.
+hashes the canonical manifest bytes locally; that hash is the OCI
+manifest digest by spec. Same approach for the per-platform layer
+lists, with one extra fetch for multi-arch indices.
 
 Exit codes:
   0  all manifest entries match the live registry, OR manifest is empty
   1  one or more entries drifted (output explains which and how to fix)
-  2  registry/network failure on at least one entry (treated as drift —
+  2  registry/network failure on at least one entry (treated as drift -
      CI should not silently pass if we can't verify)
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import subprocess
 import sys
 from pathlib import Path
 
+# Reuse digest + layer-list helpers from the capture tool. Both files
+# live in the same dir, so the bare module import works whether the
+# script is invoked as `python3 .../check_drift.py` or via `-m`.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from capture_base_sboms import (  # noqa: E402
+    resolve_index_digest,
+    resolve_platform_layers,
+)
+
 logger = logging.getLogger(__name__)
 
 _MANIFEST_PATH = Path(__file__).resolve().parent / "manifest.json"
+_DEFAULT_PLATFORM = "linux/amd64"
 
 
-def resolve_current_digest(image: str, tag: str) -> str:
-    """Return the registry's current manifest-list digest for image:tag.
+def check_entry(entry: dict) -> list[str]:
+    """Run all three checks for one manifest entry. Return list of problem strings."""
+    problems: list[str] = []
 
-    Per the OCI distribution spec, the manifest's digest is the SHA-256
-    of its canonical-form bytes. `imagetools inspect --raw` returns
-    exactly those bytes, so we can hash them locally and avoid the
-    template-formatting issues with imagetools' default output.
-
-    Raises subprocess.CalledProcessError on registry/network failure;
-    the caller folds that into the drift report rather than crashing.
-    """
-    ref = f"{image}:{tag}"
-    result = subprocess.run(
-        ["docker", "buildx", "imagetools", "inspect", "--raw", ref],
-        check=True,
-        capture_output=True,
+    required = (
+        "from_image",
+        "from_tag",
+        "from_digest",
+        "baseline_image",
+        "baseline_tag",
+        "baseline_digest",
     )
-    return "sha256:" + hashlib.sha256(result.stdout).hexdigest()
+    missing = [k for k in required if not entry.get(k)]
+    if missing:
+        return [f"manifest entry malformed (missing {missing}): {entry!r}"]
+
+    from_ref = f"{entry['from_image']}:{entry['from_tag']}"
+    baseline_ref = f"{entry['baseline_image']}:{entry['baseline_tag']}"
+    platform = entry.get("platform", _DEFAULT_PLATFORM)
+
+    # Check 1: from_image digest still matches.
+    try:
+        from_current = resolve_index_digest(from_ref)
+    except subprocess.CalledProcessError as exc:
+        return [
+            f"{from_ref}: from_image registry lookup failed "
+            f"({(exc.stderr or b'').decode().strip()})"
+        ]
+    if from_current != entry["from_digest"]:
+        problems.append(
+            f"{from_ref}: FROM-IMAGE DRIFT\n"
+            f"      recorded: {entry['from_digest']}\n"
+            f"      current : {from_current}\n"
+            f"      action  : rerun capture_base_sboms.py "
+            f"--from {from_ref} --baseline {baseline_ref}"
+        )
+
+    # Check 2: baseline_image digest still matches.
+    try:
+        baseline_current = resolve_index_digest(baseline_ref)
+    except subprocess.CalledProcessError as exc:
+        problems.append(
+            f"{baseline_ref}: baseline_image registry lookup failed "
+            f"({(exc.stderr or b'').decode().strip()})"
+        )
+        baseline_current = None
+    if baseline_current and baseline_current != entry["baseline_digest"]:
+        problems.append(
+            f"{baseline_ref}: BASELINE DRIFT (underneath {from_ref})\n"
+            f"      recorded: {entry['baseline_digest']}\n"
+            f"      current : {baseline_current}\n"
+            f"      action  : rerun capture_base_sboms.py "
+            f"--from {from_ref} --baseline {baseline_ref}"
+        )
+
+    # Check 3: layer-prefix invariant. Skipped only if explicitly opted out
+    # at capture time (recorded on the entry).
+    if entry.get("layer_prefix_check_skipped"):
+        logger.debug(
+            "skipping layer-prefix check for %s (opted out at capture)", from_ref
+        )
+        return problems
+
+    try:
+        baseline_layers = resolve_platform_layers(baseline_ref, platform)
+        from_layers = resolve_platform_layers(from_ref, platform)
+    except (subprocess.CalledProcessError, ValueError) as exc:
+        problems.append(
+            f"{from_ref}/{baseline_ref}: layer-prefix lookup failed ({exc})"
+        )
+        return problems
+
+    n = len(baseline_layers)
+    if from_layers[:n] != baseline_layers:
+        problems.append(
+            f"{from_ref}: LAYER-PREFIX MISMATCH (built on a DIFFERENT base than recorded)\n"
+            f"      recorded baseline: {baseline_ref}\n"
+            f"      baseline layers ({n}): {baseline_layers}\n"
+            f"      from_image's first {n} layers do not match.\n"
+            f"      from_image layers[:{n}]: {from_layers[:n]}\n"
+            f"      action: investigate; vendor may have switched their FROM line. "
+            f"Either pick a different baseline or pin the from_image to a "
+            f"version that does match."
+        )
+
+    return problems
 
 
 def check(manifest_path: Path) -> int:
@@ -75,69 +153,41 @@ def check(manifest_path: Path) -> int:
         print("base_sboms manifest is empty; nothing to verify.")
         return 0
 
-    drifts: list[str] = []
-    network_fails: list[str] = []
-
+    all_problems: list[str] = []
     for entry in entries:
-        image = entry.get("image")
-        tag = entry.get("tag")
-        recorded = entry.get("digest")
-        sbom = entry.get("sbom", "<missing>")
-
-        if not image or not tag or not recorded:
-            drifts.append(
-                f"manifest entry malformed (missing image/tag/digest): {entry!r}"
-            )
-            continue
-
-        try:
-            current = resolve_current_digest(image, tag)
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or "").strip()
-            network_fails.append(f"{image}:{tag}: registry lookup failed ({stderr})")
-            continue
-
-        if current != recorded:
-            drifts.append(
-                f"{image}:{tag}: DRIFT\n"
-                f"      recorded: {recorded}\n"
-                f"      current : {current}\n"
-                f"      action  : refresh base_sboms/{sbom} "
-                f"(run container/compliance/base_sboms/refresh.py) "
-                f"and update manifest.json"
-            )
+        problems = check_entry(entry)
+        if problems:
+            all_problems.extend(problems)
         else:
-            print(f"  {image}:{tag} OK ({recorded[:19]}…)")
+            from_ref = f"{entry['from_image']}:{entry['from_tag']}"
+            print(f"  {from_ref} OK ({entry['from_digest'][:19]}...)")
 
-    if drifts or network_fails:
-        print("", file=sys.stderr)
-        if drifts:
-            print(
-                f"Base-image drift detected ({len(drifts)} entr"
-                f"{'y' if len(drifts) == 1 else 'ies'}):",
-                file=sys.stderr,
-            )
-            for d in drifts:
-                print(f"  - {d}", file=sys.stderr)
-        if network_fails:
-            print(
-                f"Registry lookup failures ({len(network_fails)} entr"
-                f"{'y' if len(network_fails) == 1 else 'ies'}; "
-                "treated as drift):",
-                file=sys.stderr,
-            )
-            for f in network_fails:
-                print(f"  - {f}", file=sys.stderr)
-        return 1 if drifts and not network_fails else 2
+    if not all_problems:
+        print(f"All {len(entries)} tracked base images current.")
+        return 0
 
-    print(f"All {len(entries)} tracked base images current.")
-    return 0
+    print("", file=sys.stderr)
+    print(
+        f"Base-image drift detected ({len(all_problems)} problem"
+        f"{'' if len(all_problems) == 1 else 's'}):",
+        file=sys.stderr,
+    )
+    for p in all_problems:
+        print(f"  - {p}", file=sys.stderr)
+    # Distinguish drift from registry failure for the exit code — both fail
+    # CI, but the cause matters for triage.
+    if any("registry lookup failed" in p or "lookup failed" in p for p in all_problems):
+        return 2
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="check_drift",
-        description="Verify base-image digests in base_sboms/manifest.json against the live registry.",
+        description=(
+            "Verify base_sboms/manifest.json entries against the live registry: "
+            "from_digest, baseline_digest, and the layer-prefix invariant."
+        ),
     )
     parser.add_argument(
         "--manifest",
