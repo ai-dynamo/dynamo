@@ -3,9 +3,11 @@
 
 use super::*;
 
+use crate::leader::dispatch::{PullRef, WirePullOptions, plan_pull};
 use crate::leader::parallelism::{ParallelismTemplate, validate_remote_metadata};
 use crate::object::ObjectBlockOps;
 use anyhow::{Context, Result};
+use kvbm_physical::manager::ParallelismDescriptor;
 // velo event types used via fully-qualified paths (::velo::Event, ::velo::EventManager)
 use futures::future::BoxFuture;
 
@@ -43,11 +45,20 @@ pub struct SpmdParallelWorkers {
     /// Remote peer tp_size per instance. Populated by `connect_remote`
     /// from the stamped `ParallelismDescriptor` (or from the metadata
     /// vector length for pre-AB-1a senders). Read by
-    /// `execute_remote_onboard_for_instance` to refuse asymmetric
-    /// routing until the cross-parallelism dispatcher (AB-2/AB-3)
-    /// lands. Without this guard the existing same-rank-zip dispatch
-    /// would silently mis-route under TP=2 ↔ TP=4.
+    /// `execute_remote_onboard_for_instance` to decide between the
+    /// symmetric same-rank-zip dispatch and the AB-3
+    /// cross-parallelism planner path.
     remote_tp_sizes: RwLock<HashMap<InstanceId, usize>>,
+
+    /// Per-instance cache of the full per-rank
+    /// [`ParallelismDescriptor`] set received from a peer leader.
+    /// Populated by `connect_remote` only when every remote rank
+    /// carries a stamped descriptor (the Strict import path);
+    /// `execute_remote_onboard_for_instance` consults it under the
+    /// asymmetric-TP branch to feed [`plan_pull`]. Absent for legacy
+    /// (unstamped) peers — those force the symmetric-only branch via
+    /// the rank-count match check in `connect_remote`.
+    remote_descriptors: RwLock<HashMap<InstanceId, Vec<ParallelismDescriptor>>>,
 
     /// Local parallelism template for cross-leader compatibility gating
     /// in `connect_remote`. When unset (pre-AB-1a behaviour), gates are
@@ -75,6 +86,7 @@ impl SpmdParallelWorkers {
             runtime,
             remote_handles: RwLock::new(HashMap::new()),
             remote_tp_sizes: RwLock::new(HashMap::new()),
+            remote_descriptors: RwLock::new(HashMap::new()),
             local_template: RwLock::new(None),
         }
     }
@@ -283,11 +295,10 @@ impl WorkerTransfers for SpmdParallelWorkers {
         }
 
         // Persist remote tp_size for this instance so
-        // execute_remote_onboard_for_instance can detect asymmetric
-        // pairings and refuse to dispatch until AB-2/AB-3 wire the
-        // cross-parallelism routing. Prefer the stamped descriptor's
-        // tp_size; fall back to the metadata vector length for
-        // legacy peers.
+        // execute_remote_onboard_for_instance can route between
+        // symmetric (same-rank zip) and asymmetric (AB-3 planner)
+        // dispatch. Prefer the stamped descriptor's tp_size; fall
+        // back to the metadata vector length for legacy peers.
         {
             let remote_tp = unpacked
                 .iter()
@@ -297,6 +308,23 @@ impl WorkerTransfers for SpmdParallelWorkers {
                 .write()
                 .unwrap()
                 .insert(instance_id, remote_tp);
+        }
+
+        // Cache the full per-rank ParallelismDescriptor set when every
+        // remote rank carried a stamped descriptor. The asymmetric
+        // dispatch branch of execute_remote_onboard_for_instance feeds
+        // these into plan_pull. Legacy (unstamped) peers get no entry
+        // here — and the rank-count match check above ensures they
+        // never reach the asymmetric branch in the first place.
+        if strategy == ImportStrategy::Strict {
+            let descriptors: Vec<ParallelismDescriptor> = unpacked
+                .iter()
+                .map(|u| u.parallelism.clone().expect("strict path: all stamped"))
+                .collect();
+            self.remote_descriptors
+                .write()
+                .unwrap()
+                .insert(instance_id, descriptors);
         }
 
         // If all responses are ready (synchronous), return immediately
@@ -329,14 +357,6 @@ impl WorkerTransfers for SpmdParallelWorkers {
         dst_block_ids: Arc<[BlockId]>,
         options: kvbm_physical::transfer::TransferOptions,
     ) -> Result<TransferCompleteNotification> {
-        // AB-1b safety guard: this dispatch path uses local worker_idx
-        // to look up remote handles (one remote rank per local worker).
-        // That's correct only for symmetric TP. Under asymmetric TP
-        // (local_tp != remote_tp) a single local worker may need to
-        // read from multiple remote ranks, which AB-3 will implement.
-        // Until then we MUST refuse to dispatch with stale routing —
-        // connect_remote happily imports asymmetric stamped metadata,
-        // so silent same-rank routing would mis-read data.
         let local_tp = self.workers.len();
         let remote_tp = *self
             .remote_tp_sizes
@@ -344,25 +364,25 @@ impl WorkerTransfers for SpmdParallelWorkers {
             .unwrap()
             .get(&instance_id)
             .unwrap_or(&local_tp);
+
         if local_tp != remote_tp {
-            anyhow::bail!(
-                "execute_remote_onboard_for_instance: asymmetric TP routing not yet \
-                 implemented (local_tp={}, remote_tp={}, instance={}); \
-                 connect_remote accepts asymmetric metadata via the compat gate but \
-                 the dispatcher needs AB-2/AB-3 cross-parallelism planner to land \
-                 before it can use it",
-                local_tp,
-                remote_tp,
+            return self.dispatch_asymmetric_pull(
                 instance_id,
+                remote_logical_type,
+                &src_block_ids,
+                dst,
+                &dst_block_ids,
+                options,
             );
         }
 
+        // Symmetric path (unchanged): SPMD same-rank zip. Each local
+        // worker reads from its identically-numbered remote rank via
+        // the legacy `execute_remote_onboard` entry on the underlying
+        // worker. Stays in place until AB-4 hoists every pull through
+        // `plan_pull` (locked decision #5).
         let handles = self.remote_handles.read().unwrap();
         let mut notifications = Vec::with_capacity(self.workers.len());
-
-        // SPMD: Execute SAME transfer on EVERY worker, each with its own
-        // remote handle. Safe today because local_tp == remote_tp
-        // (guarded above), so worker_idx == remote_rank.
         for (worker_idx, worker) in self.workers.iter().enumerate() {
             let remote_handle = handles
                 .get(&(instance_id, worker_idx, remote_logical_type))
@@ -386,6 +406,101 @@ impl WorkerTransfers for SpmdParallelWorkers {
                 dst_block_ids.clone(),
                 options.clone(),
             )?);
+        }
+
+        TransferCompleteNotification::aggregate(notifications, &self.events, &self.runtime)
+    }
+}
+
+impl SpmdParallelWorkers {
+    /// AB-3: asymmetric-TP dispatch via the cross-parallelism planner.
+    ///
+    /// Replaces the AB-1b precautionary bail. Invoked from
+    /// [`Self::execute_remote_onboard_for_instance`] when
+    /// `local_tp != remote_tp`. Calls [`plan_pull`] to produce one
+    /// [`crate::leader::dispatch::WorkerPullPlan`] per participating
+    /// local rank, dispatches each to its target local worker via
+    /// the new `execute_remote_pull_plan` trait method, then aggregates
+    /// the per-rank notifications.
+    fn dispatch_asymmetric_pull(
+        &self,
+        instance_id: InstanceId,
+        remote_logical_type: LogicalLayoutHandle,
+        src_block_ids: &[BlockId],
+        dst: LogicalLayoutHandle,
+        dst_block_ids: &[BlockId],
+        options: kvbm_physical::transfer::TransferOptions,
+    ) -> Result<TransferCompleteNotification> {
+        let template = self.local_template.read().unwrap().clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "asymmetric pull requires a local ParallelismTemplate; install one \
+                     via SpmdParallelWorkers::with_local_template() (instance={instance_id})"
+            )
+        })?;
+
+        let descriptors = self
+            .remote_descriptors
+            .read()
+            .unwrap()
+            .get(&instance_id)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "asymmetric pull needs the full ParallelismDescriptor set for instance \
+                     {instance_id}; peer must stamp descriptors and connect_remote must \
+                     have run through the Strict path"
+                )
+            })?;
+
+        if src_block_ids.len() != dst_block_ids.len() {
+            anyhow::bail!(
+                "asymmetric pull requires equal-length src/dst block id lists ({} vs {})",
+                src_block_ids.len(),
+                dst_block_ids.len(),
+            );
+        }
+
+        let refs: Vec<PullRef> = src_block_ids
+            .iter()
+            .zip(dst_block_ids.iter())
+            .map(|(s, d)| PullRef {
+                src_block_id: *s,
+                dst_block_id: *d,
+            })
+            .collect();
+
+        // Project to the wire-restricted option subset. Local-only
+        // toggles (use_planner, layer_range, bounce_buffer,
+        // cuda_stream, *_kv_layout) intentionally don't propagate —
+        // see WirePullOptions docs.
+        let wire_opts = WirePullOptions {
+            nixl_write_notification: options.nixl_write_notification,
+            metric_route: options.metric_route,
+        };
+
+        let plans = plan_pull(
+            &template,
+            &descriptors,
+            instance_id,
+            remote_logical_type,
+            dst,
+            &refs,
+            &wire_opts,
+        )?;
+        if plans.is_empty() {
+            return Ok(TransferCompleteNotification::completed());
+        }
+
+        let mut notifications = Vec::with_capacity(plans.len());
+        for (local_rank, plan) in plans {
+            let worker = self.workers.get(local_rank).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "plan_pull produced a plan for local_rank {local_rank} but only {} \
+                     local workers are registered",
+                    self.workers.len()
+                )
+            })?;
+            notifications.push(worker.execute_remote_pull_plan(plan)?);
         }
 
         TransferCompleteNotification::aggregate(notifications, &self.events, &self.runtime)
