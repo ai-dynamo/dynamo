@@ -322,6 +322,16 @@ class AudioFormatter:
                     b64_json=base64.b64encode(audio_bytes).decode(),
                 )
 
+            if ctx.get("request_type") == RequestType.CHAT_COMPLETION:
+                return self._chat_audio_chunk(
+                    request_id,
+                    audio_data_obj,
+                    sample_rate=sample_rate,
+                    num_samples=len(audio_np),
+                    media_type=media_type,
+                    inference_time_s=time.time() - start_time,
+                )
+
             return NvAudioSpeechResponse(
                 id=request_id,
                 object="audio.speech",
@@ -336,6 +346,49 @@ class AudioFormatter:
         except Exception as e:
             logger.error("Failed to process audio for request %s: %s", request_id, e)
             return self._error_response(request_id, str(e))
+
+    def _chat_audio_chunk(
+        self,
+        request_id: str,
+        audio_data_obj: AudioData,
+        *,
+        sample_rate: int,
+        num_samples: int,
+        media_type: str,
+        inference_time_s: float,
+    ) -> Dict[str, Any]:
+        audio_payload = audio_data_obj.model_dump(exclude_none=True)
+        audio_payload.update(
+            {
+                "sample_rate": sample_rate,
+                "num_samples": num_samples,
+                "media_type": media_type,
+            }
+        )
+
+        delta: Dict[str, Any] = {"role": "assistant", "content": ""}
+        if audio_data_obj.url:
+            delta["content"] = [
+                {"type": "audio_url", "audio_url": {"url": audio_data_obj.url}}
+            ]
+
+        return {
+            "id": request_id,
+            "created": int(time.time()),
+            "object": "chat.completion.chunk",
+            "model": self._model_name,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": delta,
+                    "finish_reason": "stop",
+                }
+            ],
+            "nvext": {
+                "audio": audio_payload,
+                "inference_time_s": inference_time_s,
+            },
+        }
 
     def _extract_audio_tensor(self, mm_output: Dict[str, Any]) -> tuple:
         audio_key = "audio" if "audio" in mm_output else "model_outputs"

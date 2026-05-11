@@ -15,11 +15,16 @@ from dataclasses import dataclass
 from typing import Any, AsyncGenerator
 
 import yaml
+from vllm.v1.request import EngineCoreRequest
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
 from vllm_omni.engine.orchestrator import build_engine_core_request_from_tokens
+from vllm_omni.engine.async_omni_engine import _apply_omni_final_stage_metadata
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
-from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
+from vllm_omni.entrypoints.utils import (
+    get_final_stage_id_for_e2e,
+    load_and_resolve_stage_configs,
+)
 from vllm_omni.inputs.data import OmniTokensPrompt
 
 from dynamo import prometheus_names
@@ -65,6 +70,7 @@ class OmniStageWorker:
         stage_id: int,
         output_modalities: list | None = None,
         default_video_fps: int = 16,
+        pipeline_stage_configs: list[Any] | None = None,
     ) -> None:
         self.engine = engine
         self.stage_id = stage_id
@@ -72,6 +78,7 @@ class OmniStageWorker:
         self._output_modalities = output_modalities or []
         self._default_video_fps = default_video_fps
         self.stage_config = stage_config
+        self._pipeline_stage_configs = pipeline_stage_configs or [stage_config]
 
         func_path = getattr(stage_config, "custom_process_input_func", None)
         self._processor = _load_processor(func_path)
@@ -88,6 +95,7 @@ class OmniStageWorker:
         original_prompt = req.original_prompt
         # JSON sends dict keys as strings; normalize to int for stage_connector_refs.
         stage_connector_refs = _int_keyed(req.stage_connector_refs)
+        final_stage_id = req.final_stage_id
 
         # --- Resolve engine inputs ---
         sampling_params_list_override: dict | None = None
@@ -110,10 +118,12 @@ class OmniStageWorker:
                     len(stage_list),
                 )
 
+            processor_output = False
             if self._processor is not None:
                 prompt = self._process_stage_inputs(stage_list, original_prompt)
                 if isinstance(prompt, list) and len(prompt) == 1:
                     prompt = prompt[0]
+                processor_output = True
             else:
                 # No processor: check if the upstream output has the
                 # structure needed to build an OmniEngineCoreRequest
@@ -132,6 +142,7 @@ class OmniStageWorker:
                     prompt = upstream
         elif req.request_id is not None:
             # Stage 0 via router: raw request forwarded with request_id — parse it.
+            final_stage_id = self._resolve_final_stage_id(request, final_stage_id)
             parsed = await parse_omni_request(
                 request,
                 self._output_modalities,
@@ -143,6 +154,7 @@ class OmniStageWorker:
             sampling_params_list_override = parsed["sampling_params_list"]
         else:
             # Direct frontend → stage (single-stage, no router).
+            final_stage_id = self._resolve_final_stage_id(request, final_stage_id)
             prompt = request
 
         logger.debug(
@@ -153,6 +165,22 @@ class OmniStageWorker:
         )
 
         sp = _build_sampling_params(self.stage_config, sampling_params_list_override)
+        if stage_connector_refs and processor_output:
+            try:
+                prompt = self._build_engine_core_request_from_processor_prompt(
+                    prompt,
+                    request_id=request_id,
+                    sampling_params_list=sp,
+                )
+            except RuntimeError as e:
+                yield {"error": str(e), "finished": True}
+                return
+        prompt = self._prepare_downstream_payload_prompt(
+            prompt,
+            request_id=request_id,
+            sampling_params_list=sp,
+            final_stage_id=final_stage_id,
+        )
         last_result = None
 
         try:
@@ -210,6 +238,8 @@ class OmniStageWorker:
                 },
                 "finished": True,
             }
+            if final_stage_id is not None:
+                out["final_stage_id"] = final_stage_id
             if sampling_params_list_override is not None:
                 out["sampling_params_list"] = sampling_params_list_override
             yield out
@@ -279,6 +309,98 @@ class OmniStageWorker:
         )
         return prompt
 
+    def _build_engine_core_request_from_processor_prompt(
+        self,
+        prompt: Any,
+        *,
+        request_id: str,
+        sampling_params_list: list | None,
+    ) -> Any:
+        """Mirror native inter-stage admission for processor outputs.
+
+        vLLM-Omni wraps non-diffusion downstream processor outputs in an
+        OmniEngineCoreRequest before submitting them to the stage engine. This
+        matters for non-AR stages such as code2wav, whose model does not pass
+        normal vLLM input validation from a raw OmniTokensPrompt.
+        """
+        if isinstance(prompt, EngineCoreRequest):
+            if prompt.external_req_id is None:
+                prompt.external_req_id = prompt.request_id
+            return prompt
+        if isinstance(prompt, list):
+            if len(prompt) != 1:
+                raise RuntimeError(
+                    f"Stage {self.stage_id}: expected one processor output, "
+                    f"got {len(prompt)}"
+                )
+            prompt = prompt[0]
+        if not _has_prompt_token_ids(prompt):
+            return prompt
+
+        params = sampling_params_list[0] if sampling_params_list else None
+        if params is None:
+            raise RuntimeError(
+                f"Stage {self.stage_id}: missing sampling params for "
+                "processor output"
+            )
+        request = build_engine_core_request_from_tokens(
+            request_id=request_id,
+            prompt=prompt,
+            params=params,
+        )
+        request.external_req_id = request.request_id
+        return request
+
+    def _resolve_final_stage_id(
+        self,
+        request: dict,
+        existing: int | None,
+    ) -> int:
+        if existing is not None:
+            return int(existing)
+        return get_final_stage_id_for_e2e(
+            request.get("modalities"),
+            self._output_modalities,
+            self._pipeline_stage_configs,
+        )
+
+    def _prepare_downstream_payload_prompt(
+        self,
+        prompt: Any,
+        *,
+        request_id: str,
+        sampling_params_list: list | None,
+        final_stage_id: int | None,
+    ) -> Any:
+        if final_stage_id is None or final_stage_id <= self.stage_id:
+            return prompt
+
+        # vLLM-Omni's AR runner only emits inter-stage multimodal payloads
+        # (hidden states, audio codes, etc.) when omni_final_stage_id points to
+        # a downstream stage. Dynamo runs each stage in a one-stage AsyncOmni,
+        # so the normal generate() path would stamp final_stage_id=0 and drop
+        # those payloads. Prebuilding the EngineCoreRequest preserves the
+        # pipeline-level final stage metadata while keeping this local
+        # one-stage engine from routing to nonexistent downstream stages.
+        if isinstance(prompt, EngineCoreRequest):
+            return _apply_omni_final_stage_metadata(prompt, final_stage_id)
+
+        inner_engine = getattr(self.engine, "engine", None)
+        build_message = getattr(inner_engine, "_build_add_request_message", None)
+        if not callable(build_message):
+            raise RuntimeError(
+                f"Stage {self.stage_id}: engine cannot prebuild request with "
+                f"final_stage_id={final_stage_id}"
+            )
+
+        message = build_message(
+            request_id=request_id,
+            prompt=prompt,
+            sampling_params_list=sampling_params_list,
+            final_stage_id=final_stage_id,
+        )
+        return message["prompt"]
+
     def _process_stage_inputs(self, stage_list: list[_Proxy], original_prompt: Any):
         """Call vLLM-Omni stage processors using the v0.20 transition API."""
         if self._processor is None:
@@ -333,7 +455,7 @@ class OmniStageWorker:
             f"Stage {self.stage_id}: unsupported processor signature for "
             f"{self._processor!r}; expected stage-list parameters "
             "('stage_list', 'engine_input_source', ...) or source-output "
-            "parameters ('source_outputs', 'original_prompt', ...), got "
+            "parameters ('source_outputs', 'original_prompt|prompt', ...), got "
             f"{parameter_names}"
         )
 
@@ -434,6 +556,7 @@ async def init_omni_stage(
         output_modalities=config.output_modalities,
         default_video_fps=config.default_video_fps,
         stage_id=stage_id,
+        pipeline_stage_configs=stage_configs,
     )
 
     setup_metrics_collection(config, generate_endpoint, logger)
@@ -652,9 +775,21 @@ def _iter_completion_outputs(engine_inputs: Any):
 def _accepts_source_outputs_processor(parameter_names: list[str]) -> bool:
     if len(parameter_names) < 3:
         return False
-    return parameter_names[:2] == ["source_outputs", "original_prompt"] and (
-        parameter_names[2] in {"requires_mm", "requires_multimodal_data"}
+    second = parameter_names[1].lstrip("_")
+    third = parameter_names[2].lstrip("_")
+    return (
+        parameter_names[0] == "source_outputs"
+        and second in {"original_prompt", "prompt"}
+        and third in {"requires_mm", "requires_multimodal_data"}
     )
+
+
+def _has_prompt_token_ids(prompt: Any) -> bool:
+    try:
+        prompt["prompt_token_ids"]
+    except (KeyError, TypeError):
+        return False
+    return True
 
 
 def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngine:

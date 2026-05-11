@@ -15,6 +15,7 @@ import yaml
 try:
     from dynamo.vllm.omni.stage_worker import (
         OmniStageWorker,
+        _accepts_source_outputs_processor,
         _ensure_stage_connectors,
         _normalize_single_stage_runtime_devices,
         _prepare_connector_payload,
@@ -241,6 +242,48 @@ async def test_stage_connector_refs_with_processor():
     assert chunks[0]["stage_connector_refs"]["1"] == {"name": "ref1"}
 
 
+@pytest.mark.asyncio
+async def test_stage_connector_refs_processor_token_prompt_builds_engine_core_request():
+    """Processor OmniTokensPrompt outputs are wrapped like native inter-stage inputs."""
+    engine = _MockEngine()
+    fetched_output = SimpleNamespace(outputs=[SimpleNamespace(token_ids=[1])])
+    processed_prompt = {"prompt_token_ids": [10, 20, 30]}
+
+    in_connector = MagicMock()
+    in_connector.get.return_value = {"engine_inputs": fetched_output}
+
+    out_connector = MagicMock()
+    out_connector.put.return_value = (True, 0, {"name": "ref1"})
+
+    def mock_processor(source_outputs, original_prompt, requires_mm):
+        return [processed_prompt]
+
+    worker = OmniStageWorker(
+        engine=engine,
+        stage_config=_make_stage_config(
+            custom_process_input_func=None,
+            engine_input_source=[0],
+            default_sampling_params={"temperature": 0.0, "max_tokens": 4},
+        ),
+        connectors={("0", "2"): in_connector, ("2", "3"): out_connector},
+        stage_id=2,
+    )
+    worker._processor = mock_processor
+
+    request = {
+        "request_id": "req-token-prompt",
+        "original_prompt": {"prompt": "hi"},
+        "stage_connector_refs": {"0": {"name": "ref0"}},
+    }
+
+    chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert hasattr(engine.received_prompt, "prompt_token_ids")
+    assert engine.received_prompt.prompt_token_ids == [10, 20, 30]
+    assert engine.received_prompt.external_req_id == "req-token-prompt"
+    assert chunks[0]["stage_connector_refs"]["2"] == {"name": "ref1"}
+
+
 def test_process_stage_inputs_ignores_var_kwargs_for_dispatch():
     """Source-output processors with **kwargs should not get a fourth positional arg."""
     fetched_output = {"latents": [0.1, 0.2]}
@@ -279,6 +322,15 @@ def test_process_stage_inputs_ignores_var_kwargs_for_dispatch():
     assert processor_calls[0]["source_outputs"] == [fetched_output]
     assert processor_calls[0]["kwargs"] == {}
     assert prompt == [processed_prompt]
+
+
+def test_source_output_processor_signature_accepts_qwen25_names():
+    assert _accepts_source_outputs_processor(
+        ["source_outputs", "prompt", "requires_multimodal_data"]
+    )
+    assert _accepts_source_outputs_processor(
+        ["source_outputs", "_prompt", "_requires_multimodal_data"]
+    )
 
 
 @pytest.mark.asyncio

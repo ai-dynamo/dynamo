@@ -86,6 +86,16 @@ class TestStageOutput:
         assert req["stage_connector_refs"] == {"0": {"ref": "abc"}}
         assert req["request_id"] == "req-3"
 
+    def test_to_next_stage_request_passes_final_stage_id(self):
+        out = StageOutput.model_validate(
+            {
+                "stage_connector_refs": {"0": {"ref": "abc"}},
+                "final_stage_id": 2,
+            }
+        )
+        req = out.to_next_stage_request("req-final")
+        assert req["final_stage_id"] == 2
+
 
 # ── OmniInterStageRequest ──────────────────────────────────
 

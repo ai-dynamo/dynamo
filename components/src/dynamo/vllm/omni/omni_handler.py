@@ -8,7 +8,10 @@ from typing import Any, AsyncGenerator, Dict, Optional, Union, cast
 
 import PIL.Image
 from fsspec.implementations.dirfs import DirFileSystem
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.renderers import merge_kwargs
 from vllm.sampling_params import SamplingParams
+from vllm_omni.entrypoints.utils import coerce_param_message_types
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo._core import Context
@@ -174,9 +177,11 @@ class OmniHandler(BaseOmniHandler):
             yield self._error_chunk(request_id, str(e), request_type)
             return
 
+        output_modalities = request.get("modalities") or self.config.output_modalities
         generate_kwargs: Dict[str, Any] = {
             "prompt": inputs.prompt,
             "request_id": request_id,
+            "output_modalities": output_modalities,
         }
         if inputs.sampling_params_list is not None:
             generate_kwargs["sampling_params_list"] = inputs.sampling_params_list
@@ -238,7 +243,7 @@ class OmniHandler(BaseOmniHandler):
         """
         if request_type == RequestType.CHAT_COMPLETION:
             assert isinstance(parsed_request, dict)
-            return self._engine_inputs_from_chat(parsed_request)
+            return await self._engine_inputs_from_chat(parsed_request)
         elif request_type == RequestType.IMAGE_GENERATION:
             assert isinstance(parsed_request, NvCreateImageRequest)
             return self._engine_inputs_from_image(parsed_request)
@@ -251,7 +256,7 @@ class OmniHandler(BaseOmniHandler):
 
         raise ValueError(f"Unknown request type: {request_type}")
 
-    def _engine_inputs_from_chat(self, request: Dict[str, Any]) -> EngineInputs:
+    async def _engine_inputs_from_chat(self, request: Dict[str, Any]) -> EngineInputs:
         """Build engine inputs from a chat completions request dict."""
 
         text_prompt = self._extract_text_prompt(request)
@@ -278,8 +283,10 @@ class OmniHandler(BaseOmniHandler):
                     setattr(sp, arg, value)
             sampling_params_list = self._build_sampling_params_list(sp)
         else:
-            prompt = OmniTextPrompt(prompt=text_prompt)
-            sampling_params_list = None
+            prompt = await self._native_engine_prompt_from_chat(request)
+            if prompt is None:
+                prompt = OmniTextPrompt(prompt=text_prompt)
+            sampling_params_list = self._build_chat_sampling_params_list(request)
 
         return EngineInputs(
             prompt=prompt,
@@ -287,6 +294,121 @@ class OmniHandler(BaseOmniHandler):
             request_type=RequestType.CHAT_COMPLETION,
             fps=0,
         )
+
+    def _build_chat_sampling_params_list(self, request: Dict[str, Any]) -> list | None:
+        """Clone vLLM-Omni stage defaults and only adjust output message kind."""
+        defaults = list(self.engine_client.default_sampling_params_list or [])
+        if not defaults:
+            return None
+
+        params = [self._clone_sampling_params(default) for default in defaults]
+        return coerce_param_message_types(params, bool(request.get("stream", False)))
+
+    @staticmethod
+    def _clone_sampling_params(default: Any) -> SamplingParams:
+        if isinstance(default, dict):
+            return SamplingParams(**default)
+        return default.clone() if hasattr(default, "clone") else SamplingParams()
+
+    async def _native_engine_prompt_from_chat(
+        self,
+        request: Dict[str, Any],
+    ) -> Dict[str, Any] | None:
+        """Render chat through vLLM's model-owned renderer when available."""
+        try:
+            renderer = self.engine_client.renderer
+            model_config = self.engine_client.model_config
+            if renderer is None or model_config is None:
+                return None
+
+            chat_request = ChatCompletionRequest.model_validate(request)
+            chat_template_kwargs = chat_request.chat_template_kwargs or {}
+            chat_template_kwargs.update(reasoning_effort=chat_request.reasoning_effort)
+            default_template_kwargs = merge_kwargs(
+                chat_template_kwargs,
+                {
+                    "tools": self._tool_dicts_from_request(chat_request),
+                    "documents": getattr(chat_request, "documents", None),
+                    "add_generation_prompt": chat_request.add_generation_prompt,
+                    "continue_final_message": chat_request.continue_final_message,
+                    "add_special_tokens": chat_request.add_special_tokens,
+                },
+            )
+
+            tok_params = chat_request.build_tok_params(model_config)
+            chat_params = chat_request.build_chat_params(
+                default_template=None,
+                default_template_content_format="auto",
+            ).with_defaults(default_template_kwargs)
+
+            (_,), (engine_prompt,) = await renderer.render_chat_async(
+                [chat_request.messages],
+                chat_params,
+                tok_params,
+                prompt_extras={
+                    k: v
+                    for k in ("mm_processor_kwargs", "cache_salt")
+                    if (v := getattr(chat_request, k, None)) is not None
+                },
+            )
+
+            if not isinstance(engine_prompt, dict):
+                return None
+
+            mm_processor_kwargs = getattr(chat_request, "mm_processor_kwargs", None)
+            if mm_processor_kwargs is not None:
+                engine_prompt["mm_processor_kwargs"] = mm_processor_kwargs
+            if getattr(chat_request, "cache_salt", None) is not None:
+                engine_prompt["cache_salt"] = chat_request.cache_salt
+
+            self._copy_additional_info_field(
+                engine_prompt,
+                "speaker",
+                getattr(chat_request, "voice", None)
+                or getattr(chat_request, "speaker", None),
+                list_value=True,
+            )
+            self._copy_additional_info_field(
+                engine_prompt,
+                "language",
+                getattr(chat_request, "language", None),
+                list_value=True,
+            )
+            self._copy_additional_info_field(
+                engine_prompt,
+                "instruction",
+                getattr(chat_request, "instructions", None),
+                list_value=False,
+            )
+            return engine_prompt
+        except Exception:
+            logger.debug(
+                "Failed to render chat with vLLM renderer; falling back",
+                exc_info=True,
+            )
+            return None
+
+    @staticmethod
+    def _tool_dicts_from_request(request: ChatCompletionRequest) -> list | None:
+        if request.tools is None:
+            return None
+        return [tool.model_dump() for tool in request.tools]
+
+    @staticmethod
+    def _copy_additional_info_field(
+        prompt: Dict[str, Any],
+        key: str,
+        value: Any,
+        *,
+        list_value: bool,
+    ) -> None:
+        if not isinstance(value, str) or not value.strip():
+            return
+        additional = prompt.setdefault("additional_information", {})
+        if additional is None:
+            additional = {}
+            prompt["additional_information"] = additional
+        additional[key] = [value.strip()] if list_value else value.strip()
 
     @staticmethod
     def _update_if_not_none(object: Any, key: str, val: Any) -> None:

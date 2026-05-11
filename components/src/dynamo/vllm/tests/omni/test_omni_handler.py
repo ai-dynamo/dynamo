@@ -8,7 +8,7 @@ import pytest
 
 try:
     from PIL import Image
-    from vllm.sampling_params import SamplingParams
+    from vllm.sampling_params import RequestOutputKind, SamplingParams
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
     from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
@@ -39,6 +39,8 @@ def _make_handler(stage_types=("diffusion",)):
     config.model = "test-model"
     config.served_model_name = None
     config.output_modalities = ["text"]
+    config.engine_args = MagicMock()
+    config.engine_args.trust_remote_code = True
     handler.config = config
 
     defaults = []
@@ -74,12 +76,32 @@ class TestBuildEngineInputs:
     @pytest.mark.asyncio
     async def test_chat_completion(self):
         """Chat request extracts text prompt with no sampling params."""
-        handler = _make_handler()
+        handler = _make_handler(stage_types=("llm",))
         raw = {"messages": [{"role": "user", "content": "hello"}]}
         inputs = await handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)
         assert inputs.request_type == RequestType.CHAT_COMPLETION
         assert inputs.prompt["prompt"] == "hello"
-        assert inputs.sampling_params_list is None
+        assert len(inputs.sampling_params_list) == 1
+        assert inputs.sampling_params_list[0].output_kind == RequestOutputKind.FINAL_ONLY
+
+    @pytest.mark.asyncio
+    async def test_text_audio_chat_completion_uses_vllm_renderer(self):
+        """Non-image chat requests use the model-owned vLLM renderer."""
+        handler = _make_handler(stage_types=("llm",))
+        handler.config.output_modalities = ["text", "audio"]
+        raw = {"messages": [{"role": "user", "content": "hello"}]}
+
+        async def render_chat_async(*args, **kwargs):
+            return (["conversation"],), ({"prompt": "<rendered>hello"},)
+
+        handler.engine_client.renderer = MagicMock()
+        handler.engine_client.renderer.render_chat_async = render_chat_async
+        handler.engine_client.model_config = MagicMock()
+
+        inputs = await handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)
+
+        assert inputs.prompt["prompt"] == "<rendered>hello"
+        assert inputs.sampling_params_list[0].output_kind == RequestOutputKind.FINAL_ONLY
 
     @pytest.mark.asyncio
     async def test_image_generation(self):
@@ -155,6 +177,51 @@ class TestBuildEngineInputs:
         )
         assert inputs.request_type == RequestType.AUDIO_GENERATION
         assert inputs.prompt["prompt"] == "Hello world"
+
+
+class TestGenerateOpenAIMode:
+    @pytest.mark.asyncio
+    async def test_forwards_request_modalities_to_async_omni_generate(self):
+        """Qwen3 Omni needs the request modality to reach AsyncOmni."""
+        handler = _make_handler()
+        handler.config.output_modalities = ["text", "audio"]
+
+        async def build_engine_inputs(parsed_request, request_type, image=None):
+            return EngineInputs(prompt={"prompt": "hello"})
+
+        handler.build_engine_inputs = build_engine_inputs
+
+        stage_output = MagicMock()
+        stage_output.final_output_type = "text"
+        stage_output.request_output.outputs = [MagicMock(text="done")]
+
+        async def generate_stream():
+            yield stage_output
+
+        handler.engine_client.generate = MagicMock(return_value=generate_stream())
+
+        async def format_output(*args, **kwargs):
+            return {"finished": True}
+
+        handler.output_formatter = MagicMock()
+        handler.output_formatter.format = format_output
+
+        chunks = [
+            chunk
+            async for chunk in handler._generate_openai_mode(
+                {
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "modalities": ["audio"],
+                },
+                MagicMock(),
+                "req-1",
+            )
+        ]
+
+        assert chunks == [{"finished": True}]
+        assert handler.engine_client.generate.call_args.kwargs["output_modalities"] == [
+            "audio"
+        ]
 
 
 class TestI2VEngineInputs:
