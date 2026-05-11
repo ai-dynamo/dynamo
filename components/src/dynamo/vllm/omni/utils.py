@@ -153,7 +153,7 @@ async def parse_omni_request(
                 request.get("prompt", ""),
                 height,
                 width,
-                negative_prompt=request.get("negative_prompt"),
+                negative_prompt=image_generation_negative_prompt_from_request(request),
                 multi_modal_data=request.get("multi_modal_data"),
             )
             original_prompt = dict(engine_inputs)

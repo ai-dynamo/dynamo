@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -325,6 +326,18 @@ class TestParseOmniRequest:
         assert "width" not in op
         assert op["modalities"] == ["image"]
         assert op["mm_processor_kwargs"] == {"target_h": 512, "target_w": 512}
+
+    def test_image_request_uses_nvext_negative_prompt(self):
+        request = {
+            "prompt": "a red apple",
+            "size": "1024x1024",
+            "nvext": {"negative_prompt": "blurry, low quality"},
+        }
+
+        result = asyncio.run(parse_omni_request(request, ["image"]))
+
+        assert result["engine_inputs"]["negative_prompt"] == "blurry, low quality"
+        assert result["original_prompt"]["negative_prompt"] == "blurry, low quality"
 
     @pytest.mark.asyncio
     async def test_nvext_params_go_into_sampling_params_not_prompt(self):
