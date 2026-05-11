@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"regexp"
 	"sort"
@@ -1001,6 +1002,47 @@ func expandMultinodeGMSRoles(serviceName string, numberOfNodes int32, totalEngin
 	return roles
 }
 
+// PCSNameForDGD computes the PodCliqueSet name for a DGD, auto-truncating if
+// the DGD name is too long to fit within Grove's combined resource name limit.
+//
+// For short DGD names the PCS name equals the DGD name (backwards compatible).
+// For long names, the PCS name is truncated with a deterministic 4-char hash
+// suffix to guarantee uniqueness and reconcile-loop stability.
+func PCSNameForDGD(dgdName string, services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) string {
+	maxServiceBudget := 0
+	for serviceName, svc := range services {
+		lowerName := strings.ToLower(serviceName)
+		var budget int
+		if svc != nil && svc.GetNumberOfNodes() > 1 {
+			// Multinode: PCSG = lowerName, PCLQ = lowerName + "-" + "ldr"
+			budget = len(lowerName) + len(lowerName) + 1 + len(commonconsts.GroveRoleSuffixLeader)
+		} else {
+			// Single-node: PCLQ = lowerName (no PCSG)
+			budget = len(lowerName)
+		}
+		if budget > maxServiceBudget {
+			maxServiceBudget = budget
+		}
+	}
+
+	pcsBudget := commonconsts.MaxCombinedGroveResourceNameLength - maxServiceBudget
+	// Clamp to a minimum so we always produce a usable name
+	const minPCSNameLength = 8
+	if pcsBudget < minPCSNameLength {
+		pcsBudget = minPCSNameLength
+	}
+
+	if len(dgdName) <= pcsBudget {
+		return dgdName
+	}
+
+	// Truncate with a deterministic hash suffix for uniqueness
+	hash := fnv.New32a()
+	hash.Write([]byte(dgdName))
+	suffix := fmt.Sprintf("%04x", hash.Sum32()&0xFFFF)
+	return dgdName[:pcsBudget-5] + "-" + suffix
+}
+
 // Define BackendFramework enum for sglang, vllm, trtllm
 
 type BackendFramework string
@@ -1722,9 +1764,13 @@ func GenerateGrovePodCliqueSet(
 	checkpointInfoByService map[string]*checkpoint.CheckpointInfo, // Optional checkpoint info per service
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	gangSet := &grovev1alpha1.PodCliqueSet{}
-	gangSet.Name = dynamoDeployment.Name
+	gangSet.Name = PCSNameForDGD(dynamoDeployment.Name, dynamoDeployment.Spec.Services)
 	gangSet.Namespace = dynamoDeployment.Namespace
 	gangSet.Labels = maps.Clone(dynamoDeployment.Spec.Labels)
+	if gangSet.Labels == nil {
+		gangSet.Labels = make(map[string]string)
+	}
+	gangSet.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	gangSet.Annotations = maps.Clone(dynamoDeployment.Spec.Annotations)
 	gangSet.Spec.Replicas = 1
 	gangSet.Spec.Template.HeadlessServiceConfig = &grovev1alpha1.HeadlessServiceConfig{
