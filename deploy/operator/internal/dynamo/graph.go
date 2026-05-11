@@ -1152,6 +1152,45 @@ func PCSNameForDGD(dgdName string, components []v1beta1.DynamoComponentDeploymen
 	return dgdName[:pcsBudget-5] + "-" + suffix
 }
 
+func PCSNameForAlphaDGDServices(dgdName string, services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) string {
+	componentNames := make([]string, 0, len(services))
+	for componentName := range services {
+		componentNames = append(componentNames, componentName)
+	}
+	sort.Strings(componentNames)
+
+	components := make([]v1beta1.DynamoComponentDeploymentSharedSpec, 0, len(componentNames))
+	for _, componentName := range componentNames {
+		service := services[componentName]
+		component := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: componentName}
+		if service != nil {
+			if service.Multinode != nil {
+				component.Multinode = &v1beta1.MultinodeSpec{}
+				v1alpha1.ConvertFromMultinodeSpec(service.Multinode, component.Multinode)
+			}
+			if service.Replicas != nil {
+				component.Replicas = ptr.To(*service.Replicas)
+			}
+			if service.GPUMemoryService != nil && service.GPUMemoryService.Enabled {
+				if component.Experimental == nil {
+					component.Experimental = &v1beta1.ExperimentalSpec{}
+				}
+				component.Experimental.GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{}
+				v1alpha1.ConvertFromGPUMemoryServiceSpec(service.GPUMemoryService, component.Experimental.GPUMemoryService)
+			}
+			if service.Failover != nil && service.Failover.Enabled {
+				if component.Experimental == nil {
+					component.Experimental = &v1beta1.ExperimentalSpec{}
+				}
+				component.Experimental.Failover = &v1beta1.FailoverSpec{}
+				v1alpha1.ConvertFromFailoverSpec(service.Failover, component.Experimental.Failover)
+			}
+		}
+		components = append(components, component)
+	}
+	return PCSNameForDGD(dgdName, components)
+}
+
 // Define BackendFramework enum for sglang, vllm, trtllm
 
 type BackendFramework string
