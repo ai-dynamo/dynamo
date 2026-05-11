@@ -103,6 +103,11 @@ func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admissio
 		return nil, err
 	}
 
+	// Validate KV-cache transfer topology
+	if err := v.validateKvCacheTransferTopology(); err != nil {
+		return nil, err
+	}
+
 	// Validate that failover-enabled services have the required discovery mode annotation
 	if err := v.validateFailoverRequiresDiscoveryMode(); err != nil {
 		return nil, err
@@ -904,6 +909,41 @@ func (v *DynamoGraphDeploymentValidator) validateNoRestartDuringRollingUpdate(ol
 	}
 
 	return nil
+}
+
+// validateKvCacheTransferTopology validates the spec.kvCacheTransferTopology
+// configuration when set. In this phase only the `label` path is supported
+// (clusterTopologyName is added in a future PR).
+func (v *DynamoGraphDeploymentValidator) validateKvCacheTransferTopology() error {
+	kvt := v.deployment.Spec.KvCacheTransferTopology
+	if kvt == nil {
+		return nil
+	}
+
+	var errs []error
+
+	// label is required (only supported path in this phase)
+	if kvt.Label == "" {
+		errs = append(errs, fmt.Errorf("spec.kvCacheTransferTopology.label is required"))
+	}
+
+	// level is required and must be a valid topology domain format
+	if kvt.Level == "" {
+		errs = append(errs, fmt.Errorf("spec.kvCacheTransferTopology.level is required"))
+	} else if !nvidiacomv1alpha1.IsValidTopologyDomainFormat(kvt.Level) {
+		errs = append(errs, fmt.Errorf("spec.kvCacheTransferTopology.level %q is not a valid topology domain; "+
+			"must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", kvt.Level))
+	}
+
+	// mismatchPolicy must be a valid enum value when explicitly set
+	if kvt.MismatchPolicy != "" &&
+		kvt.MismatchPolicy != nvidiacomv1alpha1.MismatchPolicyFail &&
+		kvt.MismatchPolicy != nvidiacomv1alpha1.MismatchPolicyFallback {
+		errs = append(errs, fmt.Errorf("spec.kvCacheTransferTopology.mismatchPolicy %q is invalid; "+
+			"must be \"fail\" or \"fallback\"", kvt.MismatchPolicy))
+	}
+
+	return errors.Join(errs...)
 }
 
 // validateFailoverRequiresDiscoveryMode checks that when any service has

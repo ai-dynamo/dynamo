@@ -76,3 +76,37 @@ var topologyDomainRegex = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 func IsValidTopologyDomainFormat(d TopologyDomain) bool {
 	return topologyDomainRegex.MatchString(string(d))
 }
+
+// MismatchPolicy controls behavior when no decode workers exist in the same
+// topology domain as the prefill worker during KV-cache transfer routing.
+// +kubebuilder:validation:Enum=fail;fallback
+type MismatchPolicy string
+
+const (
+	// MismatchPolicyFail returns an error to the client when no same-domain
+	// decode workers are available.
+	MismatchPolicyFail MismatchPolicy = "fail"
+	// MismatchPolicyFallback allows cross-domain KV transfer if no decode
+	// workers exist in the prefill worker's topology domain.
+	MismatchPolicyFallback MismatchPolicy = "fallback"
+)
+
+// KvCacheTransferTopology constrains KV-cache transfers between prefill and
+// decode workers to the same topology domain.
+type KvCacheTransferTopology struct {
+	// Label is a raw pod label key (e.g. "topology.kubernetes.io/zone") used
+	// to identify the topology domain of each worker pod.
+	// +kubebuilder:validation:MinLength=1
+	Label string `json:"label"`
+
+	// Level is the topology domain to enforce for KV-cache transfers
+	// (e.g. "zone", "rack").
+	Level TopologyDomain `json:"level"`
+
+	// MismatchPolicy controls behavior when no same-domain decode workers
+	// exist. Defaults to "fail".
+	// +optional
+	// +kubebuilder:default=fail
+	// +kubebuilder:validation:Enum=fail;fallback
+	MismatchPolicy MismatchPolicy `json:"mismatchPolicy,omitempty"`
+}

@@ -78,6 +78,10 @@ const (
 
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
 
+	// KV-cache transfer topology router env vars
+	EnvRouterKvTransferTopologyLevel  = "DYN_ROUTER_KV_TRANSFER_TOPOLOGY_LEVEL"
+	EnvRouterKvTransferMismatchPolicy = "DYN_ROUTER_KV_TRANSFER_MISMATCH_POLICY"
+
 	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
 	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"
 	DynamoNamespacePrefixEnvVar       = "DYN_NAMESPACE_PREFIX"

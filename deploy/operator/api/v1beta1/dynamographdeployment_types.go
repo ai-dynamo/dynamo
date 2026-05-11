@@ -68,6 +68,15 @@ type DynamoGraphDeploymentSpec struct {
 	// Components without their own `topologyConstraint` inherit from this value.
 	// +optional
 	TopologyConstraint *SpecTopologyConstraint `json:"topologyConstraint,omitempty"`
+
+	// kvCacheTransferTopology constrains KV-cache transfers between prefill
+	// and decode workers to the same topology domain. When set, the frontend
+	// router receives topology-level and mismatch-policy env vars, and
+	// workers publish their topology metadata. Only the `label` path is
+	// supported in this release; `clusterTopologyName` support will be added
+	// in a future release.
+	// +optional
+	KvCacheTransferTopology *KvCacheTransferTopology `json:"kvCacheTransferTopology,omitempty"`
 }
 
 // DynamoGraphDeploymentStatus defines the observed state of a DynamoGraphDeployment.

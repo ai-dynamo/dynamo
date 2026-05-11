@@ -111,6 +111,10 @@ func ConvertFromDynamoGraphDeploymentSpec(src *DynamoGraphDeploymentSpec, dst *v
 		dst.TopologyConstraint = &v1beta1.SpecTopologyConstraint{}
 		ConvertFromSpecTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
 	}
+	if src.KvCacheTransferTopology != nil {
+		dst.KvCacheTransferTopology = &v1beta1.KvCacheTransferTopology{}
+		ConvertFromKvCacheTransferTopology(src.KvCacheTransferTopology, dst.KvCacheTransferTopology)
+	}
 	dst.Env = src.Envs
 	if save != nil && len(src.PVCs) > 0 {
 		save.PVCs = slices.Clone(src.PVCs)
@@ -413,6 +417,10 @@ func ConvertToDynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, 
 		dst.TopologyConstraint = &SpecTopologyConstraint{}
 		ConvertToSpecTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
 	}
+	if src.KvCacheTransferTopology != nil {
+		dst.KvCacheTransferTopology = &KvCacheTransferTopology{}
+		ConvertToKvCacheTransferTopology(src.KvCacheTransferTopology, dst.KvCacheTransferTopology)
+	}
 	dst.Envs = src.Env
 
 	if len(src.Components) > 0 {
@@ -550,6 +558,26 @@ func ConvertToRestartStrategy(src *v1beta1.RestartStrategy, dst *RestartStrategy
 	*dst = RestartStrategy{
 		Type:  RestartStrategyType(src.Type),
 		Order: slices.Clone(src.Order),
+	}
+}
+
+// ConvertFromKvCacheTransferTopology converts KV-cache transfer topology from
+// v1alpha1 to v1beta1.
+func ConvertFromKvCacheTransferTopology(src *KvCacheTransferTopology, dst *v1beta1.KvCacheTransferTopology) {
+	*dst = v1beta1.KvCacheTransferTopology{
+		Label:          src.Label,
+		Level:          v1beta1.TopologyDomain(src.Level),
+		MismatchPolicy: v1beta1.MismatchPolicy(src.MismatchPolicy),
+	}
+}
+
+// ConvertToKvCacheTransferTopology converts KV-cache transfer topology from
+// v1beta1 to v1alpha1.
+func ConvertToKvCacheTransferTopology(src *v1beta1.KvCacheTransferTopology, dst *KvCacheTransferTopology) {
+	*dst = KvCacheTransferTopology{
+		Label:          src.Label,
+		Level:          TopologyDomain(src.Level),
+		MismatchPolicy: MismatchPolicy(src.MismatchPolicy),
 	}
 }
 
