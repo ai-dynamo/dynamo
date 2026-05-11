@@ -53,7 +53,7 @@ require the opening tag to be present in the model output.
 | `kimi_k25` | Kimi K2.5 | Dynamo-only | Yes | `<think>...</think>` with force-reasoning |
 | `minimax_append_think` | MiniMax M2 / M2.1 | Dynamo-only | No | Implicit opening `<think>` prepended |
 | `mistral` | Magistral | | Yes | `[THINK]...[/THINK]` |
-| `nemotron3` | Nemotron-3 / Mini | Dynamo-only | Yes | Alias for `deepseek_r1` |
+| `nemotron3` | Nemotron-3 / Mini | vLLM: `nemotron_v3` | Yes | Alias for `deepseek_r1`. Also accepts `nemotron_v3` |
 | `nemotron_deci` | Nemotron-Super / -Ultra / -Deci, Llama-Nemotron | Dynamo-only | No | `<think>...</think>` |
 | `nemotron_nano` | Nemotron-Nano | Dynamo-only | Yes | Alias for `deepseek_r1` |
 | `qwen3` | QwQ-32B, Qwen3-Think, Qwen3-Coder, Qwen3.5 | | No | `<think>...</think>` |

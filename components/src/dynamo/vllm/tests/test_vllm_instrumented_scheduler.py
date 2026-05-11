@@ -13,6 +13,7 @@ spinning up vLLM engine internals.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from vllm.v1.request import RequestStatus  # noqa: E402
@@ -25,7 +26,10 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 # If this import is deferred to inside a test body, the real ``vllm`` will
 # not be resolvable and ``instrumented_scheduler`` will fail to load with
 # ``ModuleNotFoundError: No module named 'vllm.sampling_params'``.
-from dynamo.vllm.instrumented_scheduler import InstrumentedScheduler  # noqa: E402
+from dynamo.vllm.instrumented_scheduler import (  # noqa: E402
+    InstrumentedScheduler,
+    _BenchPhase,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -315,3 +319,241 @@ def test_decode_variance_spans_both_queues():
     assert q.num_decode_requests == 2
     assert q.sum_decode_kv_tokens == 2000
     assert q.var_decode_kv_tokens == pytest.approx(250000.0)
+
+
+# ---------------------------------------------------------------------------
+# kv_connector_metadata population on benchmark-built SchedulerOutputs
+# ---------------------------------------------------------------------------
+#
+# When a KV connector is configured (e.g. NixlConnector for disagg),
+# vLLM's worker-side ``_get_kv_connector_output`` asserts
+# ``scheduler_output.kv_connector_metadata is not None`` before calling
+# ``bind_connector_metadata``. The parent ``Scheduler.schedule()``
+# satisfies that contract by calling ``connector.build_connector_meta(...)``
+# on every SchedulerOutput it produces.
+#
+# ``InstrumentedScheduler`` builds two SchedulerOutputs from scratch
+# during ``DYN_BENCHMARK_MODE=decode``:
+#
+#   1. The synthetic decode batch in ``_bench_inject_fake_decode``.
+#   2. The empty drain frame in ``schedule()`` between decode points.
+#
+# Both must mirror the parent's connector hook or EngineCore dies with
+# ``AssertionError`` on the first iteration of the decode sweep.
+# (Repro: launching a vLLM disagg decode worker with
+# ``--kv-transfer-config '{"kv_connector":"NixlConnector",...}'`` and
+# ``DYN_BENCHMARK_MODE=decode`` -- assertion fires before the worker
+# can register and the planner never receives ``get_perf_metrics``.)
+
+
+def _make_decode_sweep_stub(connector, ec_connector=None):
+    """Build the minimal stub needed to drive ``schedule()`` into the
+    DECODE_SWEEP empty-frame branch without spinning up the parent
+    scheduler's vLLM-side state.
+    """
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_active = True
+    stub._bench_phase = _BenchPhase.DECODE_SWEEP
+    stub._bench_active_req_ids = {"__bench_0"}
+    stub.kv_cache_manager = MagicMock()
+    stub.kv_cache_manager.num_kv_cache_groups = 1
+    stub.finished_req_ids = set()
+    stub.connector = connector
+    stub.ec_connector = ec_connector
+    stub._update_after_schedule = MagicMock()
+    # Force the empty-frame branch: ``_bench_step`` returns None, drain
+    # path is selected because there are active req IDs.
+    stub._bench_step = MagicMock(return_value=None)
+    # Defensive: if the empty-frame branch isn't taken the test would
+    # otherwise fall through to ``_schedule_and_record_time`` which
+    # touches real parent state.
+    stub._schedule_and_record_time = MagicMock(
+        side_effect=AssertionError("empty-frame branch should have returned")
+    )
+    return stub
+
+
+def test_decode_sweep_empty_frame_attaches_kv_connector_metadata():
+    """Parent's ``build_connector_meta`` must be called on the empty drain
+    frame; metadata is then attached to the returned SchedulerOutput.
+    """
+    sentinel = object()
+    connector = MagicMock()
+    connector.build_connector_meta = MagicMock(return_value=sentinel)
+
+    stub = _make_decode_sweep_stub(connector=connector)
+    out = InstrumentedScheduler.schedule(stub)
+
+    assert out.kv_connector_metadata is sentinel
+    connector.build_connector_meta.assert_called_once_with(out)
+    # ec_connector is None on the stub; the ec field stays untouched.
+    assert out.ec_connector_metadata is None
+
+
+def test_decode_sweep_empty_frame_attaches_ec_connector_metadata_when_set():
+    kv_meta = object()
+    ec_meta = object()
+    connector = MagicMock()
+    connector.build_connector_meta = MagicMock(return_value=kv_meta)
+    ec_connector = MagicMock()
+    ec_connector.build_connector_meta = MagicMock(return_value=ec_meta)
+
+    stub = _make_decode_sweep_stub(connector=connector, ec_connector=ec_connector)
+    out = InstrumentedScheduler.schedule(stub)
+
+    assert out.kv_connector_metadata is kv_meta
+    assert out.ec_connector_metadata is ec_meta
+    connector.build_connector_meta.assert_called_once_with(out)
+    ec_connector.build_connector_meta.assert_called_once_with(out)
+
+
+def test_decode_sweep_empty_frame_no_connector_leaves_metadata_none():
+    """No connector configured (aggregated worker without
+    --kv-transfer-config): the empty frame is returned with both
+    metadata fields still None -- exercising the ``getattr(..., None)``
+    guard in the fix.
+    """
+    stub = _make_decode_sweep_stub(connector=None)
+    out = InstrumentedScheduler.schedule(stub)
+
+    assert out.kv_connector_metadata is None
+    assert out.ec_connector_metadata is None
+
+
+# ---------------------------------------------------------------------------
+# Prompt padding in _bench_inject_fake_decode (batch>1 OOB regression)
+# ---------------------------------------------------------------------------
+#
+# vLLM's worker (gpu_model_runner._update_states_after_model_execute) writes
+# a ``-1`` placeholder into ``token_ids_cpu[req_idx, num_tokens_no_spec]``
+# after every async-scheduling sample, where ``num_tokens_no_spec`` equals
+# the request's prompt length. If the synthetic decode prompt is exactly
+# ``ctx_len`` long, the placeholder lands at position ``ctx_len`` -- the
+# exact slot the next decode iteration's request reads as its input token
+# when the InputBatch slot gets reused. The embedding lookup OOBs because
+# -1 is out of vocab.
+#
+# Padding the synthetic prompt by +1 keeps the placeholder write at
+# ``ctx_len + 1`` (out of the read range) and leaves position ``ctx_len``
+# as a valid token id (0).
+
+
+def test_bench_inject_fake_decode_pads_prompt_for_async_placeholder():
+    """The injected NewRequestData must carry ``ctx_len + 1`` prompt tokens
+    (not ``ctx_len``) and ``num_computed_tokens == ctx_len`` so the worker
+    reads input at position ``ctx_len`` from a guaranteed-zero prompt slot.
+
+    Bypasses ``Request`` construction by short-circuiting allocate_slots
+    on the first iteration -- the function still builds and returns the
+    SchedulerOutput when the batch was empty due to KV exhaustion.
+    """
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_seq = 0
+    stub._bench_active_req_ids = set()
+    stub.requests = {}
+    stub.running = []
+    stub.finished_req_ids = set()
+    stub._bench_block_hasher = None
+    stub.kv_cache_manager = MagicMock()
+    stub.kv_cache_manager.num_kv_cache_groups = 1
+    stub.kv_cache_manager.take_new_block_ids = MagicMock(return_value=None)
+    stub.connector = None
+    stub.ec_connector = None
+
+    captured_num_new_tokens: list[int] = []
+
+    def _allocate_slots(req, num_new_tokens, **kwargs):
+        captured_num_new_tokens.append(num_new_tokens)
+        return None  # short-circuit the loop body before NewRequestData append
+
+    stub.kv_cache_manager.allocate_slots = _allocate_slots
+
+    InstrumentedScheduler._bench_inject_fake_decode(stub, ctx_len=16, batch_size=1)
+
+    # Critical regression assertion: the +1 padding is applied.
+    assert captured_num_new_tokens == [17], (
+        f"Expected allocate_slots(req, ctx_len + 1 = 17, ...) to leave room "
+        f"for the async-scheduler placeholder write at position ctx_len. "
+        f"Got num_new_tokens={captured_num_new_tokens}."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Decode-grid sizing must account for the +1-padded allocation
+# ---------------------------------------------------------------------------
+#
+# ``_bench_inject_fake_decode`` allocates ``ctx_len + 1`` tokens per request
+# (rounded UP to the next block boundary by the KV cache manager). If
+# ``_bench_generate_decode_grid`` keeps sizing ``max_batch`` from a raw
+# ``ctx_len`` token count it will under-count blocks per request and the
+# allocator will silently truncate the batch on boundary points
+# (``KV exhausted at ctx_len=...``). The benchmark would then record the
+# point under the wrong (over-stated) batch size.
+
+
+def _grid_stub_with_kv_capacity(num_gpu_blocks: int, block_size: int):
+    """Bypass ``__init__`` and populate only the attributes
+    ``_bench_generate_decode_grid`` reads."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_grid = []
+    stub._bench_config = SimpleNamespace(
+        decode_length_granularity=2,
+        decode_batch_size_granularity=2,
+    )
+    stub.cache_config = SimpleNamespace(num_gpu_blocks=num_gpu_blocks)
+    stub.block_size = block_size
+    stub.max_model_len = 256
+    # Generous so the KV cap (not max_num_running_reqs) drives the boundary.
+    stub.max_num_running_reqs = 10_000
+    return stub
+
+
+def test_decode_grid_sizes_max_batch_from_padded_allocation():
+    """Each emitted decode point's ``batch_size`` must be feasible at the
+    actual per-request allocation size of
+    ``ceil((ctx_len + 1) / block_size)`` blocks. A regression that sized
+    the cap from raw ``ctx_len`` would emit batches that the allocator
+    truncates -- e.g. ctx_len=block_size yields 2 blocks/req, but the
+    old code would advertise ``num_gpu_blocks // 1`` requests.
+    """
+    block_size = 16
+    num_gpu_blocks = 64
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks, block_size)
+
+    InstrumentedScheduler._bench_generate_decode_grid(stub)
+
+    assert len(stub._bench_grid) > 0, "decode grid should produce points"
+    for point in stub._bench_grid:
+        ctx_len = point.context_length
+        bs = point.batch_size
+        blocks_per_req = -(-(ctx_len + 1) // block_size)  # ceil
+        max_feasible = num_gpu_blocks // blocks_per_req
+        assert bs <= max_feasible, (
+            f"point ctx_len={ctx_len} batch_size={bs} would exceed KV "
+            f"capacity: needs {bs * blocks_per_req} blocks, only "
+            f"{num_gpu_blocks} available "
+            f"(blocks_per_req={blocks_per_req}, max_feasible={max_feasible})."
+        )
+
+
+def test_decode_grid_first_ctx_yields_block_aligned_capacity():
+    """At ``ctx_len == block_size`` the per-request allocation is exactly
+    2 blocks (16 prompt + 1 placeholder = 17 tokens, rounded up). The
+    grid's largest batch for this ctx must respect that.
+    """
+    block_size = 16
+    num_gpu_blocks = 100
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks, block_size)
+
+    InstrumentedScheduler._bench_generate_decode_grid(stub)
+
+    boundary_points = [p for p in stub._bench_grid if p.context_length == block_size]
+    assert (
+        len(boundary_points) > 0
+    ), f"grid missing ctx_len={block_size} entries: {stub._bench_grid}"
+    # 100 blocks // 2 blocks-per-req == 50 max batch.
+    assert max(p.batch_size for p in boundary_points) <= 50, (
+        f"boundary ctx_len={block_size}: max batch must not exceed "
+        f"num_gpu_blocks // 2 = 50; got "
+        f"{[p.batch_size for p in boundary_points]}"
+    )

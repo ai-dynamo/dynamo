@@ -296,10 +296,11 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     /// * `Some(Vec<String>)` if stop conditions are set.
     /// * `None` if no stop conditions are defined.
     fn get_stop(&self) -> Option<Vec<String>> {
-        self.inner.stop.as_ref().map(|stop| match stop {
-            dynamo_protocols::types::Stop::String(s) => vec![s.clone()],
-            dynamo_protocols::types::Stop::StringArray(arr) => arr.clone(),
-        })
+        self.inner.stop.as_ref().and_then(|stop| stop.strings())
+    }
+
+    fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
+        self.inner.stop.as_ref().and_then(|stop| stop.token_ids())
     }
 
     /// Returns a reference to the optional `NvExt` extension, if available.
@@ -396,7 +397,8 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::OutputOptionsProvider;
+    use crate::engines::ValidateRequest;
+    use crate::protocols::common::{OutputOptionsProvider, StopConditionsProvider};
     use serde_json::json;
 
     #[test]
@@ -459,5 +461,88 @@ mod tests {
         assert!(!request
             .unsupported_fields
             .contains_key("required_prefix_token_ids"));
+    }
+
+    #[test]
+    fn test_stop_contract() {
+        let one_stop = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": " The"
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(one_stop).expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), Some(vec![" The".to_string()]));
+        assert_eq!(request.get_stop_token_ids(), None);
+
+        let many_stops = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": ["A", "B"]
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(many_stops).expect("Failed to deserialize request");
+        assert_eq!(
+            request.get_stop(),
+            Some(vec!["A".to_string(), "B".to_string()])
+        );
+        assert_eq!(request.get_stop_token_ids(), None);
+
+        let token_id_stops = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": [32, 34]
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(token_id_stops).expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), None);
+        assert_eq!(request.get_stop_token_ids(), Some(vec![32, 34]));
+
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("extract stop conditions");
+        assert_eq!(stop_conditions.stop, None);
+        assert_eq!(stop_conditions.stop_token_ids, Some(vec![32, 34]));
+
+        let token_id_display_string_stop = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": "token_id:576"
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(token_id_display_string_stop)
+                .expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), Some(vec!["token_id:576".to_string()]));
+        assert_eq!(request.get_stop_token_ids(), None);
+
+        let token_id_display_string_array_stop = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": ["token_id:576"]
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(token_id_display_string_array_stop)
+                .expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), Some(vec!["token_id:576".to_string()]));
+        assert_eq!(request.get_stop_token_ids(), None);
+
+        let scalar_token_id_stop = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": 576
+        });
+        let result: Result<NvCreateChatCompletionRequest, _> =
+            serde_json::from_value(scalar_token_id_stop);
+        assert!(result.is_err());
+
+        let unsupported_stop_token_ids = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop_token_ids": [576]
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(unsupported_stop_token_ids)
+                .expect("Failed to deserialize request");
+        assert!(ValidateRequest::validate(&request).is_err());
     }
 }

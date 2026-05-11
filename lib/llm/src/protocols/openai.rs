@@ -64,6 +64,10 @@ pub(crate) trait OpenAIStopConditionsProvider {
 
     fn get_stop(&self) -> Option<Vec<String>>;
 
+    fn get_stop_token_ids(&self) -> Option<Vec<TokenIdType>> {
+        None
+    }
+
     fn nvext(&self) -> Option<&nvext::NvExt>;
 
     /// Get ignore_eos from CommonExt if the type supports it.
@@ -181,12 +185,18 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
         let max_tokens = self.get_max_tokens();
         let min_tokens = self.get_min_tokens();
         let stop = self.get_stop();
+        let stop_token_ids = self.get_stop_token_ids();
         let max_thinking_tokens = self.get_max_thinking_tokens();
 
         if let Some(stop) = &stop
             && stop.len() > 4
         {
             anyhow::bail!("stop conditions must be less than 4")
+        }
+        if let Some(stop_token_ids) = &stop_token_ids
+            && stop_token_ids.len() > 4
+        {
+            anyhow::bail!("stop token IDs must be less than 4")
         }
 
         // Use the trait method to get ignore_eos, which handles precedence
@@ -196,6 +206,7 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             max_tokens,
             min_tokens,
             stop,
+            stop_token_ids,
             stop_token_ids_hidden: None,
             ignore_eos,
             max_thinking_tokens,
@@ -238,14 +249,23 @@ pub(crate) fn convert_backend_top_logprobs(
     selected_token: &str,
     selected_token_id: TokenIdType,
     selected_logprob: f32,
+    return_tokens_as_token_ids: bool,
 ) -> Vec<dynamo_protocols::types::TopLogprobs> {
     let mut found_selected = false;
     let mut result: Vec<dynamo_protocols::types::TopLogprobs> = top_lps
         .iter()
         .map(|top_lp| {
-            let tok = top_lp.token.clone().unwrap_or_default();
+            let tok = if return_tokens_as_token_ids {
+                format!("token_id:{}", top_lp.token_id)
+            } else {
+                top_lp.token.clone().unwrap_or_default()
+            };
             found_selected = found_selected || top_lp.token_id == selected_token_id;
-            let bytes = top_lp.bytes.clone().or_else(|| token_to_utf8_bytes(&tok));
+            let bytes = if return_tokens_as_token_ids {
+                token_to_utf8_bytes(&tok)
+            } else {
+                top_lp.bytes.clone().or_else(|| token_to_utf8_bytes(&tok))
+            };
             dynamo_protocols::types::TopLogprobs {
                 token: tok,
                 logprob: top_lp.logprob as f32,
@@ -255,10 +275,15 @@ pub(crate) fn convert_backend_top_logprobs(
         .collect();
 
     if !found_selected {
+        let token = if return_tokens_as_token_ids {
+            format!("token_id:{}", selected_token_id)
+        } else {
+            selected_token.to_string()
+        };
         result.push(dynamo_protocols::types::TopLogprobs {
-            token: selected_token.to_string(),
+            bytes: token_to_utf8_bytes(&token),
+            token,
             logprob: selected_logprob,
-            bytes: token_to_utf8_bytes(selected_token),
         });
     }
     result

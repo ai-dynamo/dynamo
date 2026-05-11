@@ -28,7 +28,7 @@ DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
 FLASHINF_REF="v0.6.8.post1"
 LMCACHE_REF="0.4.4"
-VLLM_OMNI_REF="release/v0.19.0rc1"
+VLLM_OMNI_REF="v0.20.0"
 TORCH_REF="2.11.0"
 TORCHVISION_REF="0.26.0"
 
@@ -154,12 +154,12 @@ git checkout $VLLM_REF
 echo "✓ vLLM repository cloned"
 
 echo "\n=== Installing vLLM-Omni ==="
-# Install omni BEFORE vLLM. Its transitive dependencies can otherwise upgrade the
+# Install Omni BEFORE vLLM. Its transitive dependencies can otherwise upgrade the
 # torch/transformers stack after vLLM is installed, which can leave vllm._C ABI-mismatched.
 # vLLM should remain the final owner of the runtime stack in this environment.
 if [ -n "$VLLM_OMNI_REF" ] && [ "$ARCH" = "amd64" ]; then
-    # Try PyPI first, fall back to building from source
-    if uv pip install ${VLLM_UV_ARGS} vllm-omni==${VLLM_OMNI_REF#v} 2>&1; then
+    # Try PyPI first, fall back to building from source.
+    if uv pip install ${VLLM_UV_ARGS} "vllm-omni==${VLLM_OMNI_REF#v}" 2>&1; then
         echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from PyPI"
     else
         echo "⚠ PyPI install failed, building from source..."

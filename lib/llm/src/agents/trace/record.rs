@@ -127,7 +127,12 @@ mod tests {
             },
         );
 
-        let record = rx.recv().await.expect("trace record should publish");
+        let record = loop {
+            let r = rx.recv().await.expect("trace record should publish");
+            if r.event_type == TraceEventType::RequestEnd {
+                break r;
+            }
+        };
         assert_eq!(record.event_time_unix_ms, 1000);
         let request = record.request.expect("request metrics should be present");
         assert_eq!(request.prefill_wait_time_ms, None);
@@ -170,7 +175,12 @@ mod tests {
             }),
         });
 
-        let record = rx.recv().await.expect("tool record should publish");
+        let record = loop {
+            let r = rx.recv().await.expect("tool record should publish");
+            if r.event_type == TraceEventType::ToolEnd {
+                break r;
+            }
+        };
         assert_eq!(record.schema, TraceSchema::V1);
         assert_eq!(record.event_type, TraceEventType::ToolEnd);
         assert_eq!(record.event_source, TraceEventSource::Harness);

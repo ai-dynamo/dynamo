@@ -2409,6 +2409,53 @@ mod local_indexer_tests {
     }
 
     #[tokio::test]
+    async fn test_local_indexer_buffer_response_starts_at_last_clear() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            16,
+        );
+
+        for event in [
+            make_local_store_event(10, 10),
+            make_local_clear_event(11),
+            make_local_store_event(12, 12),
+            make_local_store_event(13, 13),
+            make_local_clear_event(14),
+            make_local_store_event(15, 15),
+        ] {
+            indexer.apply_event_with_buffer(event).await.unwrap();
+        }
+        indexer.flush().await;
+
+        let event_ids = |response: WorkerKvQueryResponse| -> (Vec<u64>, u64) {
+            match response {
+                WorkerKvQueryResponse::Events {
+                    events,
+                    last_event_id,
+                } => (
+                    events.iter().map(|event| event.event.event_id).collect(),
+                    last_event_id,
+                ),
+                other => panic!("Expected Events, got: {other:?}"),
+            }
+        };
+
+        let (ids, last_event_id) = event_ids(indexer.get_events_in_id_range(Some(10), None).await);
+        assert_eq!(ids, vec![14, 15]);
+        assert_eq!(last_event_id, 15);
+
+        let (ids, last_event_id) = event_ids(indexer.get_events_in_id_range(Some(12), None).await);
+        assert_eq!(ids, vec![14, 15]);
+        assert_eq!(last_event_id, 15);
+
+        let (ids, last_event_id) = event_ids(indexer.get_events_in_id_range(Some(15), None).await);
+        assert_eq!(ids, vec![15]);
+        assert_eq!(last_event_id, 15);
+    }
+
+    #[tokio::test]
     async fn test_local_indexer_buffer_and_serialization() {
         let worker_id = 42u64;
         let token = CancellationToken::new();
