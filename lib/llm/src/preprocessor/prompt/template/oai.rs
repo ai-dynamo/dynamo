@@ -165,11 +165,16 @@ fn may_be_fix_msg_content(
                                 serde_json::Value::String(concatenated_text),
                             );
                         } else if !preserve_arrays
+                            && !content_array.is_empty()
                             && let Some(placeholder_tpl) = image_placeholder_template
                         {
                             // Mixed text+image array for a string-content
                             // template — flatten with model-family image
                             // placeholders inlined where the image parts were.
+                            // The `is_empty` guard preserves a literal `[]`
+                            // content (matches pre-PR behavior); flattening
+                            // an empty array to `""` would silently change
+                            // what the template renders.
                             let flattened = flatten_mixed_content(&content_array, placeholder_tpl);
                             msg_object.insert(
                                 "content".to_string(),
@@ -202,6 +207,16 @@ fn may_be_fix_msg_content(
 /// Used in `may_be_fix_msg_content` when `preserve_arrays=false` and the
 /// template knows a placeholder convention — currently Phi-3-vision
 /// (`<|image_{n}|>`) and LLaVA-1.5 (`<image>`).
+///
+/// **Caveat — non-text index slot:** `img_idx` increments for every non-text
+/// part, not just images. The current supported families (Phi-3, LLaVA-1.5)
+/// are image-only so there's no collision today, but a future image+video
+/// family would silently consume an image-index slot for each video/audio
+/// part and emit the image placeholder there. When adding a family that
+/// mixes modalities in one message, either:
+///   1. expand this function with per-modality placeholder strings, or
+///   2. assert in `convert_media_url_to_placeholder` that only "image"
+///      placeholders reach this path.
 fn flatten_mixed_content(parts: &[serde_json::Value], placeholder_tpl: &str) -> String {
     let mut out = String::new();
     let mut img_idx: u32 = 1;
@@ -918,6 +933,43 @@ mod tests {
 
         // Verify: Empty arrays are preserved as-is
         assert!(messages[0]["content"].is_array());
+        assert_eq!(messages[0]["content"].as_array().unwrap().len(), 0);
+    }
+
+    /// Empty arrays must stay as `[]` even when a flatten-time placeholder
+    /// template is provided (Phi-3 / LLaVA-1.5 path). Without the
+    /// `!content_array.is_empty()` guard in `may_be_fix_msg_content`,
+    /// an empty content array would silently flatten to `""` and the
+    /// chat template would render an entirely empty message instead of
+    /// failing or being preserved.
+    #[test]
+    fn test_may_be_fix_msg_content_empty_array_with_placeholder_template() {
+        let json_str = r#"{
+            "model": "phi-3-vision",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": []
+                }
+            ]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let messages_raw = serde_json::to_value(request.messages()).unwrap();
+
+        // preserve_arrays=false + image_placeholder_template=Some(...) is
+        // the combination that previously flattened `[]` to `""`.
+        let messages = serde_json::to_value(may_be_fix_msg_content(
+            messages_raw,
+            false,
+            Some("<|image_{n}|>"),
+        ))
+        .unwrap();
+
+        assert!(
+            messages[0]["content"].is_array(),
+            "empty array should be preserved as `[]`, not flattened to `\"\"`"
+        );
         assert_eq!(messages[0]["content"].as_array().unwrap().len(), 0);
     }
 
