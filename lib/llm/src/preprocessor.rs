@@ -214,6 +214,30 @@ fn is_cache_buster_query_key(key: &str) -> bool {
     )
 }
 
+/// Shared SSRF-aware `MediaFetcher` + `reqwest::Client` for the dim-fetch
+/// path used by MM-aware routing. Inherits the same policy contract as the
+/// frontend-decode path (`MediaLoader`): blocklist DNS resolver, redirect
+/// revalidation, hostname/IP blocklist, `DYN_MM_ALLOW_INTERNAL` opt-in.
+///
+/// **Lifecycle:** `LazyLock` so the closure runs on first access. For MM-
+/// routable preprocessors, `OpenAIPreprocessor::new_with_parts` calls
+/// `LazyLock::force(...)` at startup — that surfaces TLS-root / reqwest-
+/// init / env-misconfig failures at deployment time, not on the first MM
+/// request 20 minutes in. Text-only deployments skip the force, leaving
+/// the LazyLock dormant.
+#[cfg(feature = "lightseek-mm")]
+static DIM_FETCH_MEDIA_FETCHER: std::sync::LazyLock<
+    crate::preprocessor::media::MediaFetcher,
+> = std::sync::LazyLock::new(crate::preprocessor::media::MediaFetcher::from_env);
+
+#[cfg(feature = "lightseek-mm")]
+static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(|| {
+        DIM_FETCH_MEDIA_FETCHER
+            .build_http_client()
+            .expect("dim-fetch http client construction failed")
+    });
+
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
@@ -366,6 +390,18 @@ impl OpenAIPreprocessor {
 
         #[cfg(feature = "lightseek-mm")]
         let image_placeholder_template = formatter.image_placeholder_template();
+
+        // Force the dim-fetch HTTP client to build at startup for any
+        // MM-routable preprocessor, so TLS / env-var / reqwest-init
+        // failures fail the deployment instead of crashing the first
+        // MM request 20 minutes in. Text-only preprocessors skip the
+        // force (both lightseek hooks resolved to `None`) — no point
+        // building a client they'll never use.
+        #[cfg(feature = "lightseek-mm")]
+        if image_token_counter.is_some() || image_token_id.is_some() {
+            std::sync::LazyLock::force(&DIM_FETCH_MEDIA_FETCHER);
+            std::sync::LazyLock::force(&DIM_FETCH_HTTP_CLIENT);
+        }
 
         Ok(Arc::new(Self {
             formatter,
@@ -1198,10 +1234,8 @@ impl OpenAIPreprocessor {
 
     #[cfg(feature = "lightseek-mm")]
     async fn fetch_image_dims_uncached(url: &str) -> Result<(u32, u32)> {
-        use crate::preprocessor::media::MediaFetcher;
         use image::ImageReader;
         use std::io::Cursor;
-        use std::sync::LazyLock;
 
         // Most JPEG SOF markers and PNG/WebP headers fit in the first 4 KB.
         // Start small and only escalate to 64 KB if the parser fails on the
@@ -1237,28 +1271,23 @@ impl OpenAIPreprocessor {
             anyhow::bail!("unsupported url scheme for dim fetch: {}", url);
         }
 
-        // Shared SSRF-aware Client + connection pool. Reuses the same
-        // policy contract as the frontend-decode path (`MediaLoader`):
-        // blocklist DNS resolver, redirect revalidation, hostname/IP
-        // blocklist, `DYN_MM_ALLOW_INTERNAL` opt-in. Constructed once per
-        // process — Client connection-pooling kicks in across requests.
-        static MEDIA_FETCHER: LazyLock<MediaFetcher> = LazyLock::new(MediaFetcher::from_env);
-        static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-            MEDIA_FETCHER
-                .build_http_client()
-                .expect("dim-fetch http client construction failed")
-        });
+        // `DIM_FETCH_MEDIA_FETCHER` and `DIM_FETCH_HTTP_CLIENT` are
+        // module-scope `LazyLock`s forced at startup in `new_with_parts`
+        // for MM-routable preprocessors — see their definitions for the
+        // lifecycle and policy contract.
 
         // Pre-flight SSRF check on the original URL. Redirect targets are
         // revalidated by the Client's redirect policy, and DNS-resolved
         // IPs are filtered by the resolver — so a URL that passes here
         // can't escape the contract on the wire either.
         let parsed = url::Url::parse(url)?;
-        MEDIA_FETCHER.check_if_url_allowed_with_dns(&parsed).await?;
+        DIM_FETCH_MEDIA_FETCHER
+            .check_if_url_allowed_with_dns(&parsed)
+            .await?;
 
         let mut range_end = SMALL_RANGE;
         loop {
-            let resp = HTTP_CLIENT
+            let resp = DIM_FETCH_HTTP_CLIENT
                 .get(url)
                 .header("Range", format!("bytes=0-{}", range_end))
                 .timeout(DIM_FETCH_TIMEOUT)
