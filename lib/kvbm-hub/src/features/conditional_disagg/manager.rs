@@ -267,6 +267,27 @@ async fn prefill_dispatcher_loop(
     const POLL_TIMEOUT: Duration = Duration::from_secs(30);
     const BATCH_SIZE: usize = 1;
 
+    // CD audit: hub-side dispatcher lifecycle event for the audit log.
+    // Pairs with `hub_dispatcher_loop_exited` below so post-mortem can
+    // confirm the dispatcher was alive on a given hub instance when a
+    // PrefillRequest was enqueued.
+    //
+    // Hub-side audit events use direct `tracing::info!(target: "kvbm_audit",
+    // event = ..., ...)` instead of the `crate::audit!` macro that
+    // `kvbm-connector` uses — the macro is defined in the connector
+    // crate (see `lib/kvbm-connector/src/connector/leader/audit.rs`) and
+    // pulling it in here would either require a circular crate
+    // dependency or a new shared macro crate. The wire format is
+    // identical: `event` is the stable name, `target: "kvbm_audit"`
+    // gates filtering via `RUST_LOG=kvbm_audit=info`.
+    tracing::info!(
+        target: "kvbm_audit",
+        event = "hub_dispatcher_loop_started",
+        role = "hub",
+        poll_timeout_secs = POLL_TIMEOUT.as_secs(),
+        batch_size = BATCH_SIZE,
+    );
+
     loop {
         // Re-create the receiver each iteration. The backend caches the
         // underlying handler; this is cheap.
@@ -277,6 +298,13 @@ async fn prefill_dispatcher_loop(
                 Ok(r) => r,
                 Err(err) => {
                     tracing::error!(error = %err, "CD dispatcher: receiver build failed; shutting down loop");
+                    tracing::info!(
+                        target: "kvbm_audit",
+                        event = "hub_dispatcher_loop_exited",
+                        role = "hub",
+                        reason = "receiver_build_failed",
+                        error_msg = %err,
+                    );
                     return;
                 }
             };
@@ -288,6 +316,12 @@ async fn prefill_dispatcher_loop(
             Ok(b) => b,
             Err(err) => {
                 tracing::warn!(error = %err, "CD dispatcher: dequeue failed; retrying");
+                tracing::info!(
+                    target: "kvbm_audit",
+                    event = "hub_queue_dequeue_error",
+                    role = "hub",
+                    error_msg = %err,
+                );
                 continue;
             }
         };
@@ -306,25 +340,89 @@ async fn prefill_dispatcher_loop(
                         bytes_len = bytes.len(),
                         "CD dispatcher: undecodable PrefillRequest; dropping"
                     );
+                    tracing::info!(
+                        target: "kvbm_audit",
+                        event = "hub_queue_decode_error",
+                        role = "hub",
+                        bytes_len = bytes.len(),
+                        error_msg = %err,
+                    );
                     continue;
                 }
             };
             let request_id = req.request_id.clone();
+            let session_id = req.session_id;
+            let initiator = req.initiator_instance_id;
+            let num_computed_tokens = req.num_computed_tokens;
+            let num_hashes = req.sequence_hashes.len();
+            let num_token_ids = req.token_ids.len();
+            let dispatch_started = std::time::Instant::now();
             tracing::info!(
                 request_id = request_id,
-                session_id = %req.session_id,
-                initiator = %req.initiator_instance_id,
+                session_id = %session_id,
+                initiator = %initiator,
                 "CD dispatcher: dispatching PrefillRequest"
+            );
+            // CD audit: hub dispatched a PrefillRequest to the
+            // configured `PrefillRequestDispatcher`. This is the hub-side
+            // counterpart of the decode worker's enqueue site —
+            // post-mortem cross-references on `request_id` + `session_id`
+            // tie the two together.
+            tracing::info!(
+                target: "kvbm_audit",
+                event = "hub_session_dispatched",
+                role = "hub",
+                request_id = request_id,
+                session_id = %session_id,
+                initiator = %initiator,
+                num_computed_tokens = num_computed_tokens,
+                num_hashes = num_hashes,
+                num_token_ids = num_token_ids,
             );
             match dispatcher.dispatch(req).await {
                 Ok(DispatchOutcome::Accepted) => {
                     tracing::info!(request_id, "CD dispatcher: accepted");
+                    // CD audit: the prefill peer accepted the request.
+                    // "Acked" here is the dispatcher-level ack — the
+                    // downstream prefill connector has not yet completed
+                    // the prefill at this point; this fires on the HTTP
+                    // 200 (HttpVllmDispatcher) or the synchronous
+                    // record (RecordingDispatcher).
+                    tracing::info!(
+                        target: "kvbm_audit",
+                        event = "hub_session_acked",
+                        role = "hub",
+                        request_id = request_id,
+                        session_id = %session_id,
+                        initiator = %initiator,
+                        elapsed_ms = dispatch_started.elapsed().as_millis() as u64,
+                    );
                 }
                 Ok(DispatchOutcome::Rejected { reason }) => {
-                    tracing::warn!(request_id, reason, "CD dispatcher: rejected");
+                    tracing::warn!(request_id, reason = reason.as_str(), "CD dispatcher: rejected");
+                    tracing::info!(
+                        target: "kvbm_audit",
+                        event = "hub_session_rejected",
+                        role = "hub",
+                        request_id = request_id,
+                        session_id = %session_id,
+                        initiator = %initiator,
+                        elapsed_ms = dispatch_started.elapsed().as_millis() as u64,
+                        reason = reason.as_str(),
+                    );
                 }
                 Err(err) => {
                     tracing::error!(request_id, error = %err, "CD dispatcher: error");
+                    tracing::info!(
+                        target: "kvbm_audit",
+                        event = "hub_session_dispatch_error",
+                        role = "hub",
+                        request_id = request_id,
+                        session_id = %session_id,
+                        initiator = %initiator,
+                        elapsed_ms = dispatch_started.elapsed().as_millis() as u64,
+                        error_msg = %err,
+                    );
                 }
             }
         }

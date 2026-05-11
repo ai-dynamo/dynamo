@@ -132,10 +132,65 @@ impl FullyContiguousLayout {
     /// # Arguments
     /// * `config` - Layout configuration
     /// * `memory` - Owned memory region that backs this layout
+    /// * `reason` - Stable tag for *why* this caller is constructing
+    ///   a layout with `KvBlockLayout::Unknown`. Surfaced as the
+    ///   `reason` field on the emitted `kvbm_layout_unknown` audit
+    ///   event so post-processing / alerting can match only the
+    ///   production-meaningful cases.  Canonical values:
+    ///   - `"hardcoded_default"` — the legacy pre-connector-plumbing
+    ///     fallback (kept around until `lib/llm/v2` callers are
+    ///     migrated to `new_with_format`).
+    ///   - `"test_synthesis"` — unit / integration test constructing
+    ///     a layout from a hand-built `LayoutConfig`; never reaches
+    ///     production traffic.
+    ///   - `"missing_engine_config"` — production builder fallback
+    ///     when the engine did not report a `kv_cache_layout`; this
+    ///     is the alert-worthy case.
     ///
     /// # Returns
     /// A new FullyContiguousLayout instance with `KvBlockLayout::Unknown`
-    pub(crate) fn new(config: LayoutConfig, memory: Buffer) -> Result<Self> {
+    ///
+    /// # Note
+    /// `PhysicalLayoutBuilder::build()` now routes through
+    /// `new_with_format` so it can plumb the explicit `KvBlockLayout`
+    /// from the connector layer. This bare `new` remains for the lib's
+    /// own unit tests and downstream `lib/llm/v2` callers that have
+    /// not yet been migrated.
+    #[track_caller]
+    #[allow(dead_code)]
+    pub(crate) fn new(
+        config: LayoutConfig,
+        memory: Buffer,
+        reason: &'static str,
+    ) -> Result<Self> {
+        // CD audit: a layout constructed with KvBlockLayout::Unknown
+        // silently passes `requires_transform` against another Unknown
+        // (returns false), which lets the NIXL transfer build a
+        // descriptor list without any layout transformation. If both
+        // sides land in Unknown the transfer can succeed bytewise but
+        // be semantically wrong. Emit a kvbm_audit event so post-mortem
+        // traces show exactly where the Unknown was born and what the
+        // surrounding shape looked like at construction time.
+        //
+        // The `reason` field lets alerting separate alert-worthy
+        // production fallbacks (`missing_engine_config`) from benign
+        // legitimate paths (`test_synthesis`, `hardcoded_default`)
+        // without grepping file paths.
+        let caller = std::panic::Location::caller();
+        tracing::info!(
+            target: "kvbm_audit",
+            event = "kvbm_layout_unknown",
+            site = "FullyContiguousLayout::new",
+            reason = reason,
+            file = caller.file(),
+            line = caller.line(),
+            num_blocks = config.num_blocks,
+            num_layers = config.num_layers,
+            outer_dim = config.outer_dim,
+            page_size = config.page_size,
+            inner_dim = config.inner_dim,
+            num_heads = ?config.num_heads,
+        );
         Self::new_internal(
             config,
             memory,
@@ -375,7 +430,7 @@ mod tests {
 
         let memory = Buffer::from_arc(MockMemory::new(0x1000, required_bytes));
 
-        let layout = FullyContiguousLayout::new(config, memory).unwrap();
+        let layout = FullyContiguousLayout::new(config, memory, "test_synthesis").unwrap();
         assert_eq!(layout.num_blocks(), 10);
         assert!(layout.is_fully_contiguous());
     }
@@ -394,7 +449,7 @@ mod tests {
 
         let required_size = config.required_bytes();
         let memory = Buffer::from_arc(MockMemory::new(0x1000, required_size));
-        let layout = FullyContiguousLayout::new(config.clone(), memory).unwrap();
+        let layout = FullyContiguousLayout::new(config.clone(), memory, "test_synthesis").unwrap();
 
         // Test accessing specific memory regions
         let region_size = config.page_size * config.inner_dim * config.dtype_width_bytes;

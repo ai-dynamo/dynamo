@@ -8,6 +8,7 @@
 
 use super::{PhysicalLayout, TransferContext, TransferStrategy};
 use crate::BlockId;
+use crate::layout::KvBlockLayout;
 use crate::transfer::context::TransferCompleteNotification;
 use crate::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};
 use anyhow::{Result, anyhow};
@@ -357,6 +358,84 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
             XferOp::Write => dst_metadata.agent_name(),
             XferOp::Read => src_metadata.agent_name(),
         };
+
+        // CD audit (#3): observability at the createXferReq call site.
+        // `validate_layout_compatibility` above accepts Unknown→Unknown
+        // as "compatible" (returns Ok), so this is the last line where
+        // we still know what layouts we picked AND have all the NIXL
+        // strategy / xfer_op / size context to correlate post-mortem.
+        // Always emit at trace; warn loudly on Unknown layouts because
+        // those are the silent-corruption hazard for CD pull.
+        let src_kv_layout = src_layout.block_layout();
+        let dst_kv_layout = dst_layout.block_layout();
+        let has_unknown_layout = matches!(src_kv_layout, KvBlockLayout::Unknown)
+            || matches!(dst_kv_layout, KvBlockLayout::Unknown);
+        // Best-effort transfer-size estimate: bytes per block × num blocks.
+        // `bytes_per_block` is a pure compute over LayoutConfig, so it is
+        // safe to call here.
+        let approx_xfer_bytes: usize = src_layout
+            .config()
+            .bytes_per_block()
+            .saturating_mul(src_block_ids.len());
+        if has_unknown_layout {
+            tracing::warn!(
+                target: "kvbm_audit",
+                event = "create_xfer_req_unknown_layout",
+                strategy = ?strategy,
+                xfer_op = ?xfer_op,
+                src_layout = ?src_kv_layout,
+                dst_layout = ?dst_kv_layout,
+                src_dim_order = ?src_kv_layout.dim_order(),
+                dst_dim_order = ?dst_kv_layout.dim_order(),
+                src_num_layers = src_layout.num_layers(),
+                dst_num_layers = dst_layout.num_layers(),
+                src_outer_dim = src_layout.outer_dim(),
+                dst_outer_dim = dst_layout.outer_dim(),
+                src_num_heads = ?src_layout.config().num_heads,
+                dst_num_heads = ?dst_layout.config().num_heads,
+                num_blocks = src_block_ids.len(),
+                use_whole_block,
+                approx_xfer_bytes,
+                src_agent = %src_metadata.agent_name(),
+                dst_agent = %dst_metadata.agent_name(),
+                "create_xfer_req with Unknown KvBlockLayout — NIXL will move \
+                 bytes without any layout transform; verify peers agree on layout"
+            );
+        } else {
+            // Success-path companion to the Unknown-layout warn above.
+            // Promoted from trace! → info! so post-mortem traces can
+            // confirm a CD pull went through the expected
+            // strategy/xfer_op/agent pair WITHOUT needing to re-enable
+            // trace logging cluster-wide.
+            //
+            // "Backend" here = the `TransferStrategy` enum + NIXL agent
+            // names. NIXL's per-request *transport* selection
+            // (cuda_ipc / ucx_rc / posix etc.) is an internal NIXL
+            // decision driven by the remote agent's metadata and is not
+            // exposed through the nixl-sys Rust API at this site.
+            // Capturing strategy + agent names is enough to correlate
+            // a successful R1 trace with the right NIXL log lines if
+            // a finer answer is needed.
+            tracing::info!(
+                target: "kvbm_audit",
+                event = "create_xfer_req_ok",
+                strategy = ?strategy,
+                xfer_op = ?xfer_op,
+                src_layout = ?src_kv_layout,
+                dst_layout = ?dst_kv_layout,
+                src_dim_order = ?src_kv_layout.dim_order(),
+                dst_dim_order = ?dst_kv_layout.dim_order(),
+                src_num_layers = src_layout.num_layers(),
+                dst_num_layers = dst_layout.num_layers(),
+                src_outer_dim = src_layout.outer_dim(),
+                dst_outer_dim = dst_layout.outer_dim(),
+                num_blocks = src_block_ids.len(),
+                use_whole_block,
+                approx_xfer_bytes,
+                src_agent = %src_metadata.agent_name(),
+                dst_agent = %dst_metadata.agent_name(),
+            );
+        }
 
         let xfer_req = nixl_agent.create_xfer_req(
             xfer_op,

@@ -140,14 +140,51 @@ impl LayerSeparateLayout {
     /// - `config` - Layout configuration
     /// - `memory` - Vector of owned memory regions (one per layer)
     /// - `block_dim` - Whether block or outer dimension is first
+    /// - `reason` - Stable tag for *why* this caller is constructing
+    ///   a layout with `KvBlockLayout::Unknown`. Surfaced as the
+    ///   `reason` field on the emitted `kvbm_layout_unknown` audit
+    ///   event so post-processing / alerting can match only the
+    ///   production-meaningful cases.  Canonical values: see
+    ///   [`FullyContiguousLayout::new`].
     ///
     /// # Returns
     /// A new LayerSeparateLayout instance with `KvBlockLayout::Unknown`
+    ///
+    /// # Note
+    /// `PhysicalLayoutBuilder::build()` now routes through the
+    /// `LayerSeparateLayout::builder()` so it can plumb the explicit
+    /// `KvBlockLayout` from the connector layer. This bare `new`
+    /// remains for the lib's own unit tests and downstream `lib/llm/v2`
+    /// callers that have not yet been migrated.
+    #[track_caller]
+    #[allow(dead_code)]
     pub(crate) fn new(
         config: LayoutConfig,
         memory: Vec<Buffer>,
         block_dim: BlockDimension,
+        reason: &'static str,
     ) -> Result<Self> {
+        // CD audit: see the matching note on `FullyContiguousLayout::new`.
+        // Capture the call site so post-mortem traces can pinpoint where
+        // the Unknown layout was born and what the shape looked like.
+        // `reason` lets alerting suppress benign test/legacy paths and
+        // fire only on production fallbacks (e.g. `missing_engine_config`).
+        let caller = std::panic::Location::caller();
+        tracing::info!(
+            target: "kvbm_audit",
+            event = "kvbm_layout_unknown",
+            site = "LayerSeparateLayout::new",
+            reason = reason,
+            file = caller.file(),
+            line = caller.line(),
+            num_blocks = config.num_blocks,
+            num_layers = config.num_layers,
+            outer_dim = config.outer_dim,
+            page_size = config.page_size,
+            inner_dim = config.inner_dim,
+            num_heads = ?config.num_heads,
+            block_dim = ?block_dim,
+        );
         Self::new_internal(config, memory, block_dim, KvBlockLayout::Unknown)
     }
 
@@ -359,8 +396,13 @@ mod tests {
             .map(|i| Buffer::from_arc(MockMemory::new(0x1000 + i * per_layer_size, per_layer_size)))
             .collect();
 
-        let layout =
-            LayerSeparateLayout::new(config, memory, BlockDimension::BlockIsFirstDim).unwrap();
+        let layout = LayerSeparateLayout::new(
+            config,
+            memory,
+            BlockDimension::BlockIsFirstDim,
+            "test_synthesis",
+        )
+        .unwrap();
 
         assert_eq!(layout.num_blocks(), 10);
         assert!(!layout.is_fully_contiguous());
@@ -384,8 +426,13 @@ mod tests {
             .map(|i| Buffer::from_arc(MockMemory::new(0x1000 + i * per_layer_size, per_layer_size)))
             .collect();
 
-        let layout =
-            LayerSeparateLayout::new(config, memory, BlockDimension::BlockIsSecondDim).unwrap();
+        let layout = LayerSeparateLayout::new(
+            config,
+            memory,
+            BlockDimension::BlockIsSecondDim,
+            "test_synthesis",
+        )
+        .unwrap();
         assert_eq!(layout.num_blocks(), 10);
         assert!(!layout.is_fully_contiguous());
     }
@@ -407,8 +454,13 @@ mod tests {
             .map(|i| Buffer::from_arc(MockMemory::new(0x1000 + i * per_layer_size, per_layer_size)))
             .collect();
 
-        let layout =
-            LayerSeparateLayout::new(config, memory, BlockDimension::BlockIsFirstDim).unwrap();
+        let layout = LayerSeparateLayout::new(
+            config,
+            memory,
+            BlockDimension::BlockIsFirstDim,
+            "test_synthesis",
+        )
+        .unwrap();
 
         // Test accessing specific memory regions
         let region_size = 16 * 128 * 2;

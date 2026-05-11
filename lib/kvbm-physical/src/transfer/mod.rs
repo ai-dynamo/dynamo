@@ -121,6 +121,8 @@ impl BounceBufferInternal {
 use anyhow::anyhow;
 use std::ops::Range;
 
+use crate::layout::KvBlockLayout;
+
 /// Validate that layouts are compatible for transfer.
 ///
 /// Returns an error if layouts require transformation, which is not yet supported.
@@ -131,16 +133,39 @@ pub(crate) fn validate_layout_compatibility(
 ) -> anyhow::Result<()> {
     let src_layout = src.layout();
     let dst_layout = dst.layout();
+    let src_kv = src_layout.block_layout();
+    let dst_kv = dst_layout.block_layout();
 
-    if src_layout
-        .block_layout()
-        .requires_transform(&dst_layout.block_layout())
-    {
+    if src_kv.requires_transform(&dst_kv) {
         return Err(anyhow!(
             "Layout transformation not supported: src={:?}, dst={:?}",
-            src_layout.block_layout(),
-            dst_layout.block_layout()
+            src_kv,
+            dst_kv
         ));
+    }
+
+    // CD audit (#3 silent-pass): Unknown→Unknown returns false from
+    // `requires_transform` (with its own internal warn), so it falls
+    // through here and reaches `create_xfer_req` without any layout
+    // transform applied. Bytes will be moved, but neither side has
+    // declared what the bytes mean. Emit a structured warning whenever
+    // any Unknown is observed at this gate so post-mortem traces tie
+    // the createXferReq decision to the layout state at that moment.
+    if matches!(src_kv, KvBlockLayout::Unknown) || matches!(dst_kv, KvBlockLayout::Unknown) {
+        tracing::warn!(
+            target: "kvbm_audit",
+            event = "validate_layout_compatibility_unknown",
+            src_layout = ?src_kv,
+            dst_layout = ?dst_kv,
+            src_dim_order = ?src_kv.dim_order(),
+            dst_dim_order = ?dst_kv.dim_order(),
+            src_num_layers = src_layout.num_layers(),
+            dst_num_layers = dst_layout.num_layers(),
+            src_outer_dim = src_layout.outer_dim(),
+            dst_outer_dim = dst_layout.outer_dim(),
+            "Unknown KvBlockLayout reached transfer compatibility gate; \
+             bytes will move with no layout transform — silent corruption hazard"
+        );
     }
 
     Ok(())

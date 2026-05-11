@@ -31,6 +31,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
+use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use dashmap::DashMap;
@@ -53,6 +54,90 @@ use super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
 use super::{ConnectorLeaderApi, PolicyInputs, PrefillSelection};
 use futures::FutureExt;
 use futures::future::BoxFuture;
+
+// ============================================================================
+// Pull-error classification
+// ============================================================================
+
+/// Stable string tags emitted on `worker_session_pull_error` so audit
+/// post-processing can group failures without re-parsing the free-form
+/// `error_msg`.
+///
+/// The tags are heuristic — `anyhow::Error` carries no structured kind
+/// — but the substring matches below cover the three failure modes
+/// that motivated this audit (`session.pull` returning Err
+/// synchronously due to xfer-req creation, no available backend, or
+/// timeout). Anything we can't classify falls back to `Other`.
+///
+/// IMPORTANT: keep these strings stable; downstream tooling matches on
+/// them.
+#[allow(dead_code)]
+pub(crate) const PULL_ERROR_KIND_XFER_REQ_CREATE: &str = "XferReqCreate";
+#[allow(dead_code)]
+pub(crate) const PULL_ERROR_KIND_BACKEND_UNAVAILABLE: &str = "BackendUnavailable";
+#[allow(dead_code)]
+pub(crate) const PULL_ERROR_KIND_TIMEOUT: &str = "Timeout";
+#[allow(dead_code)]
+pub(crate) const PULL_ERROR_KIND_OTHER: &str = "Other";
+
+/// Heuristic substring classifier for `session.pull` errors.
+///
+/// We can't add structured error kinds to `Session::pull` without
+/// touching the trait surface, and the engine wraps NIXL/UCX errors
+/// in `anyhow::Error`. So the classifier walks the error chain and
+/// matches lowercased substrings. Order matters — the first match
+/// wins. Keep the matches narrow enough to avoid false positives.
+pub(crate) fn classify_pull_error(err: &anyhow::Error) -> &'static str {
+    // Fold every link in the error chain into one searchable blob.
+    let mut buf = String::new();
+    for link in err.chain() {
+        if !buf.is_empty() {
+            buf.push('\n');
+        }
+        // Display impl is what the engine layers ultimately produce;
+        // Debug would add type-name noise that defeats substring match.
+        buf.push_str(&format!("{}", link));
+    }
+    let s = buf.to_ascii_lowercase();
+
+    if s.contains("xferreq")
+        || s.contains("xfer_req")
+        || s.contains("xfer req")
+        || s.contains("createxferreq")
+        || s.contains("create_xfer_req")
+        || s.contains("not in peer_available")
+    {
+        PULL_ERROR_KIND_XFER_REQ_CREATE
+    } else if s.contains("no backend")
+        || s.contains("backend unavailable")
+        || s.contains("ucx_tls")
+        || s.contains("nixl agent")
+        || s.contains("session detached")
+        || s.contains("peer detached")
+    {
+        PULL_ERROR_KIND_BACKEND_UNAVAILABLE
+    } else if s.contains("timeout") || s.contains("timed out") || s.contains("deadline") {
+        PULL_ERROR_KIND_TIMEOUT
+    } else {
+        PULL_ERROR_KIND_OTHER
+    }
+}
+
+/// Interval between `pull_heartbeat` emissions while `session.pull(...)`
+/// is awaited.  Defaults to 5 seconds; can be overridden via the
+/// `KVBM_PULL_HEARTBEAT_MS` env var for tests that don't want to wait
+/// real seconds.  Reads the env var at every call (cheap; called once
+/// per chunk dispatch) so tests can set it per-process without a
+/// rebuild.
+fn heartbeat_interval() -> std::time::Duration {
+    const DEFAULT_MS: u64 = 5_000;
+    let ms = std::env::var("KVBM_PULL_HEARTBEAT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MS);
+    // Tokio rejects zero-period intervals; enforce a 1ms floor.
+    std::time::Duration::from_millis(ms.max(1))
+}
 
 // ============================================================================
 // Inflight token budget
@@ -971,6 +1056,15 @@ impl DecodeDisaggLeader {
         // 2. Drain availability and pull each chunk.
         let mut filled: HashSet<SequenceHash> = HashSet::new();
         let mut avail = session.availability();
+        // CD audit (#4): track when we last emitted pull_progress so the
+        // event fires at most every ~5s during a long pipeline. Always
+        // emit once on the FINAL chunk so post-mortem traces have a
+        // terminal marker for "filled.len() == expected" before the
+        // remote_pipeline_complete_set audit fires.
+        let pipeline_started = Instant::now();
+        let mut last_progress_emit = pipeline_started;
+        let progress_interval = std::time::Duration::from_secs(5);
+        let expected_remote = state.remote_slots.len();
         while let Some(d) = avail.next().await {
             match d {
                 AvailabilityDelta::Available(blocks) => {
@@ -1005,7 +1099,23 @@ impl DecodeDisaggLeader {
                     )
                     .await?;
                     filled.extend(chunk_hashes);
-                    if filled.len() == state.remote_slots.len() {
+                    let is_final_chunk = filled.len() == expected_remote;
+                    let now = Instant::now();
+                    if is_final_chunk
+                        || now.duration_since(last_progress_emit) >= progress_interval
+                    {
+                        crate::audit!(
+                            "pull_progress",
+                            role = "decode",
+                            request_id,
+                            hashes_total = expected_remote,
+                            hashes_filled = filled.len(),
+                            elapsed_ms = pipeline_started.elapsed().as_millis() as u64,
+                            terminal = is_final_chunk
+                        );
+                        last_progress_emit = now;
+                    }
+                    if is_final_chunk {
                         break;
                     }
                 }
@@ -1118,20 +1228,91 @@ impl DecodeDisaggLeader {
 
         // 1. Alloc G2 mutables + RDMA pull.
         let dst = self.inner.allocate_g2_blocks(chunk_size)?;
+        let pull_started = Instant::now();
+        let pull_num_hashes = ordered_hashes.len();
+        let pull_num_dst = dst.len();
+        // Uniquely identifies this chunk within the request — the first
+        // slot index covered by this contiguous run.  Cheaper than passing
+        // a counter through pull_register_onboard_chunk and stable across
+        // retries (slot order is preserved).
+        let chunk_start_slot = indexed.first().expect("debug_asserted non-empty").0;
         crate::audit!(
             "worker_session_pull_call",
             role = "decode",
             request_id,
-            num_hashes = ordered_hashes.len(),
-            num_dst = dst.len()
+            num_hashes = pull_num_hashes,
+            num_dst = pull_num_dst,
+            chunk_start_slot = chunk_start_slot
         );
-        let filled = session.pull(ordered_hashes, dst).await?;
-        crate::audit!(
-            "worker_session_pull_returned",
-            role = "decode",
-            request_id,
-            num_filled = filled.len()
-        );
+        // CD audit (#1 + Bug C heartbeat): classify-and-emit on Err
+        // BEFORE propagating with `?`, AND race the await against a
+        // 5s heartbeat ticker so a *genuine hang* in `session.pull`
+        // surfaces as a stream of `pull_heartbeat` events instead of
+        // dead silence between `worker_session_pull_call` and
+        // `cleanup_failed_request`.
+        //
+        // Without the heartbeat we cannot distinguish:
+        //   (a) sync fast-fail (createXferReq returned Err)
+        //   (b) backend never resolved (NIXL never picked a transport)
+        //   (c) genuine async hang (await never resolves)
+        //
+        // The existing `pull_progress` event (in `run_remote_pipeline`)
+        // is per-chunk and only fires AFTER a chunk completes —
+        // sub-chunk hangs are silent there. This heartbeat is the
+        // missing intra-chunk signal.
+        //
+        // First tick is consumed synchronously so we don't emit a
+        // duplicate t=0 marker right after `worker_session_pull_call`.
+        let pull_fut = session.pull(ordered_hashes, dst);
+        tokio::pin!(pull_fut);
+        let mut heartbeat = tokio::time::interval(heartbeat_interval());
+        // `interval` ticks immediately on first poll — burn the first
+        // tick so the first emitted heartbeat is at ~5s, not ~0ms.
+        heartbeat.tick().await;
+        let filled = loop {
+            tokio::select! {
+                result = &mut pull_fut => {
+                    match result {
+                        Ok(filled) => {
+                            crate::audit!(
+                                "worker_session_pull_returned",
+                                role = "decode",
+                                request_id,
+                                num_filled = filled.len(),
+                                elapsed_ms = pull_started.elapsed().as_millis() as u64,
+                                chunk_start_slot = chunk_start_slot
+                            );
+                            break filled;
+                        }
+                        Err(err) => {
+                            let kind = classify_pull_error(&err);
+                            crate::audit!(
+                                "worker_session_pull_error",
+                                role = "decode",
+                                request_id,
+                                error_kind = kind,
+                                error_msg = %err,
+                                elapsed_ms = pull_started.elapsed().as_millis() as u64,
+                                num_hashes = pull_num_hashes,
+                                num_dst = pull_num_dst,
+                                chunk_start_slot = chunk_start_slot
+                            );
+                            return Err(err);
+                        }
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    crate::audit!(
+                        "pull_heartbeat",
+                        role = "decode",
+                        request_id,
+                        chunk_start_slot = chunk_start_slot,
+                        hashes_in_chunk = pull_num_hashes,
+                        elapsed_ms = pull_started.elapsed().as_millis() as u64
+                    );
+                }
+            }
+        };
         // Transport must return exactly `chunk_size` blocks; a short or
         // long result would silently truncate the zip below and copy
         // mismatched G2/G1 blocks.
@@ -1576,5 +1757,46 @@ mod tests {
         let budget = InflightBudget::new(64);
         assert!(budget.try_reserve(0));
         assert_eq!(budget.available(), 64);
+    }
+
+    /// Classifier substring mappings — these strings are stable
+    /// (downstream tooling matches on them); future edits to
+    /// `classify_pull_error` must keep these mappings.
+    #[test]
+    fn classify_pull_error_known_substrings() {
+        let cases = [
+            // XferReqCreate
+            ("createXferReq failed: no backend match", "XferReqCreate"),
+            ("create_xfer_req returned EINVAL", "XferReqCreate"),
+            ("hash deadbeef not in peer_available", "XferReqCreate"),
+            // BackendUnavailable
+            ("UCX_TLS=^cuda_ipc rejected the request", "BackendUnavailable"),
+            ("nixl agent not initialized", "BackendUnavailable"),
+            ("session detached during pull", "BackendUnavailable"),
+            // Timeout
+            ("pull timed out after 60s", "Timeout"),
+            ("deadline exceeded", "Timeout"),
+            // Other
+            ("some completely unrelated error", "Other"),
+        ];
+
+        for (msg, expected) in cases {
+            let err = anyhow::anyhow!("{msg}");
+            let got = classify_pull_error(&err);
+            assert_eq!(
+                got, expected,
+                "classify_pull_error({msg:?}) -> {got}, expected {expected}"
+            );
+        }
+    }
+
+    /// Classifier walks the `anyhow::Error` chain, not just the
+    /// outermost link. NIXL/UCX errors often arrive as nested
+    /// contexts; we must match anywhere in the chain.
+    #[test]
+    fn classify_pull_error_walks_chain() {
+        let inner = anyhow::anyhow!("create_xfer_req EINVAL");
+        let outer: anyhow::Error = inner.context("session.pull failed");
+        assert_eq!(classify_pull_error(&outer), PULL_ERROR_KIND_XFER_REQ_CREATE);
     }
 }
