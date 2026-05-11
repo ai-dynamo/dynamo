@@ -92,7 +92,10 @@ def get_max_layer_num(state_dict: dict[str, Tensor]) -> int:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=29501)
+    ap.add_argument("--port", type=int, required=True,
+                    help="TCP port for StatelessProcessGroup rendezvous. "
+                         "Must be dynamically allocated by the caller to avoid "
+                         "collisions between concurrent smoke-test runs.")
     ap.add_argument("--world-size", type=int, default=2,
                     help="Total ranks (trainer + inference workers). Default 2 = 1 trainer + 1 worker.")
     ap.add_argument("--model", default="Qwen/Qwen3-0.6B")

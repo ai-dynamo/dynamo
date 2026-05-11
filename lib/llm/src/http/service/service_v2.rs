@@ -318,37 +318,6 @@ impl HttpService {
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
 
-        // Spawn the RL admin listener as a background task (separate port).
-        if let Some(rl_router) = self.rl_router.clone() {
-            let rl_addr = format!("{}:{}", self.host, self.rl_port);
-            let rl_cancel = cancel_token.child_token();
-            tokio::spawn(async move {
-                match tokio::net::TcpListener::bind(&rl_addr).await {
-                    Ok(listener) => {
-                        tracing::info!(
-                            address = %rl_addr,
-                            "RL admin listener started on dedicated port"
-                        );
-                        if let Err(e) = axum::serve(listener, rl_router)
-                            .with_graceful_shutdown(async move {
-                                rl_cancel.cancelled_owned().await;
-                            })
-                            .await
-                        {
-                            tracing::error!("RL admin listener error: {e}");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            address = %rl_addr,
-                            error = %e,
-                            "Failed to bind RL admin listener"
-                        );
-                    }
-                }
-            });
-        }
-
         let router = self.router.clone();
         let observer = cancel_token.child_token();
 
@@ -382,6 +351,9 @@ impl HttpService {
             let server = axum_server::bind_rustls(addr, config)
                 .handle(handle.clone())
                 .serve(router.into_make_service());
+
+            // TLS bind succeeded — now safe to start the RL listener.
+            self.spawn_rl_listener_if_configured(&cancel_token);
 
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
@@ -423,6 +395,9 @@ impl HttpService {
                 }
             })?;
 
+            // Main port is bound — now safe to start the RL admin listener.
+            self.spawn_rl_listener_if_configured(&cancel_token);
+
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
@@ -442,6 +417,44 @@ impl HttpService {
         }
 
         Ok(())
+    }
+
+    /// Spawn the RL admin listener as a background task, if configured.
+    ///
+    /// Must be called only after the main HTTP/HTTPS bind has succeeded, so the
+    /// RL listener is never live while the main port is still in-flight or has
+    /// already failed to bind.
+    fn spawn_rl_listener_if_configured(&self, cancel_token: &CancellationToken) {
+        let Some(rl_router) = self.rl_router.clone() else {
+            return;
+        };
+        let rl_addr = format!("{}:{}", self.host, self.rl_port);
+        let rl_cancel = cancel_token.child_token();
+        tokio::spawn(async move {
+            match tokio::net::TcpListener::bind(&rl_addr).await {
+                Ok(listener) => {
+                    tracing::info!(
+                        address = %rl_addr,
+                        "RL admin listener started on dedicated port"
+                    );
+                    if let Err(e) = axum::serve(listener, rl_router)
+                        .with_graceful_shutdown(async move {
+                            rl_cancel.cancelled_owned().await;
+                        })
+                        .await
+                    {
+                        tracing::error!("RL admin listener error: {e}");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        address = %rl_addr,
+                        error = %e,
+                        "Failed to bind RL admin listener"
+                    );
+                }
+            }
+        });
     }
 
     /// Documentation of exposed HTTP endpoints
@@ -669,11 +682,12 @@ impl HttpServiceConfigBuilder {
                     }
                 }
                 None => {
-                    tracing::warn!(
-                        "RL admin routes requested (DYN_ENABLE_RL_ENDPOINTS=true) but \
-                             HttpServiceConfigBuilder.runtime is None — skipping mount."
-                    );
-                    (router, None)
+                    return Err(anyhow::anyhow!(
+                        "RL admin routes were requested (DYN_ENABLE_RL_ENDPOINTS=true \
+                         or enable_rl) but HttpServiceConfig.runtime is not set. \
+                         The caller must supply a DistributedRuntime via \
+                         HttpServiceConfigBuilder::runtime()."
+                    ));
                 }
             }
         } else {

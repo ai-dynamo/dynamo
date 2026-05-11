@@ -13,9 +13,10 @@
 #                 POST /v1/rl/engine update_weights_from_disk, POST /v1/rl/engine resume_generation
 #
 # Usage:
-#   cd /home/biswaranjanp/dev/rl/dynamo
+#   cd <dynamo-repo-root>
 #   source dynamo/bin/activate
-#   bash tests/rl/smoke_test.sh [--model <name>]
+#   export PRIME_RL_SRC=/path/to/prime-rl/src
+#   bash tests/rl/smoke_test.sh [<model>]
 
 set -euo pipefail
 
@@ -35,7 +36,8 @@ HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 NATS_PORT="${NATS_PORT:-4222}"
 # prime_rl source must be on PYTHONPATH so the spawned vLLM worker subprocess
 # can import prime_rl.inference.vllm.worker.filesystem.FileSystemWeightUpdateWorker.
-PRIME_RL_SRC="${PRIME_RL_SRC:-/home/biswaranjanp/dev/rl/prime-rl/src}"
+# Set PRIME_RL_SRC to the prime-rl src directory before running this script.
+: "${PRIME_RL_SRC:?Set PRIME_RL_SRC to the prime-rl src directory (e.g. export PRIME_RL_SRC=/path/to/prime-rl/src)}"
 PYTHON="${SMOKE_PYTHON:-python}"
 LOG_DIR="${TMPDIR:-/tmp}/dynamo-rl-smoke-$$"
 mkdir -p "$LOG_DIR"

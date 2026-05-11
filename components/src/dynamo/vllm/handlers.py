@@ -1137,6 +1137,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         is "update_weights_from_path" and the kwargs key is "weight_path".
         """
         body = body or {}
+        if not getattr(self, "_paused", False):
+            return {
+                "status": "error",
+                "message": (
+                    "Worker must be paused via pause_generation() before updating "
+                    "weights. Call pause_generation() first, then update, then "
+                    "resume_generation()."
+                ),
+            }
         path = body.get("model_path")
         if not path:
             return {"status": "error", "message": "Missing 'model_path' in body"}
@@ -1166,6 +1175,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                NCCLWeightUpdateWorker.update_weights_from_path)
         """
         body = body or {}
+        if not getattr(self, "_paused", False):
+            return {
+                "status": "error",
+                "message": (
+                    "Worker must be paused via pause_generation() before updating "
+                    "weights. Call pause_generation() first, then update, then "
+                    "resume_generation()."
+                ),
+            }
         version = body.get("weight_version", "unknown")
         rpc = body.get("engine_rpc", "update_weights_from_path")
         rpc_kwargs = {k: v for k, v in body.items() if k not in ("engine_rpc", "weight_version")}
@@ -1253,11 +1271,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 lora_id = lora_name_to_id(lora_name)
                 is_hot_swap = lora_name in self.loaded_loras
 
-                if is_hot_swap:
-                    old_id = self.loaded_loras[lora_name].id
+                # Save old info but do NOT pop yet
+                old_info = self.loaded_loras.get(lora_name) if is_hot_swap else None
+                if is_hot_swap and old_info is not None:
+                    old_id = old_info.id
                     try:
                         await self.engine_client.remove_lora(old_id)
-                        self.loaded_loras.pop(lora_name, None)
                     except Exception as e:
                         logger.error(
                             f"[RL] remove_lora({lora_name}, id={old_id}) failed during hot-swap: {e}"
@@ -1268,13 +1287,41 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             "lora_name": lora_name,
                         }
 
-                await self.engine_client.add_lora(
-                    LoRARequest(
-                        lora_name=lora_name,
-                        lora_int_id=lora_id,
-                        lora_path=lora_path,
+                try:
+                    await self.engine_client.add_lora(
+                        LoRARequest(
+                            lora_name=lora_name,
+                            lora_int_id=lora_id,
+                            lora_path=lora_path,
+                        )
                     )
-                )
+                except Exception as e:
+                    # add_lora failed — rollback by re-adding old adapter
+                    if is_hot_swap and old_info is not None:
+                        try:
+                            await self.engine_client.add_lora(
+                                LoRARequest(
+                                    lora_name=lora_name,
+                                    lora_int_id=old_info.id,
+                                    lora_path=old_info.path,
+                                )
+                            )
+                            logger.warning(
+                                f"[RL] add_lora({lora_name}) failed; rolled back to old adapter (id={old_info.id}): {e}"
+                            )
+                        except Exception as rollback_err:
+                            self.loaded_loras.pop(lora_name, None)
+                            logger.error(
+                                f"[RL] add_lora({lora_name}) failed AND rollback failed: {rollback_err}"
+                            )
+                    return {
+                        "status": "error",
+                        "message": f"Failed to add LoRA '{lora_name}': {e}",
+                        "lora_name": lora_name,
+                        "lora_id": lora_id,
+                    }
+
+                # Only now update loaded_loras (add_lora succeeded)
                 self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
 
                 if is_hot_swap:
@@ -1360,6 +1407,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "lora_name": lora_name,
                     }
                 lora_id = lora.id
+                lora_path = lora.path  # save for potential rollback
                 await self.engine_client.remove_lora(lora_id)
                 del self.loaded_loras[lora_name]
 
@@ -1371,14 +1419,25 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         )
                     except Exception as e:
                         logger.error(
-                            f"[RL] Failed to unregister LoRA '{lora_name}' MDC after engine removal: {e}"
+                            f"[RL] Failed to unregister LoRA '{lora_name}' MDC after engine removal: {e} — rolling back"
                         )
+                        # Rollback: re-add adapter to engine and restore loaded_loras
+                        try:
+                            await self.engine_client.add_lora(
+                                LoRARequest(
+                                    lora_name=lora_name,
+                                    lora_int_id=lora_id,
+                                    lora_path=lora_path,
+                                )
+                            )
+                            self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
+                        except Exception as rollback_err:
+                            logger.error(
+                                f"[RL] Rollback add_lora({lora_name}) also failed — adapter gone from engine but MDC may still route here: {rollback_err}"
+                            )
                         return {
                             "status": "error",
-                            "message": (
-                                f"LoRA '{lora_name}' removed from engine but discovery "
-                                f"unregister failed; frontend may still route here: {e}"
-                            ),
+                            "message": f"LoRA '{lora_name}' removal rolled back: discovery unregister failed ({e}). Retry unload_lora_adapter.",
                             "lora_name": lora_name,
                             "lora_id": lora_id,
                         }

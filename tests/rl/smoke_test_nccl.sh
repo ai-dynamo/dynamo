@@ -33,8 +33,9 @@
 #      still serves after the weight swap.
 #
 # Usage:
-#   cd /home/biswaranjanp/dev/rl/dynamo
+#   cd <dynamo-repo-root>
 #   source dynamo/bin/activate
+#   export PRIME_RL_SRC=/path/to/prime-rl/src
 #   bash tests/rl/smoke_test_nccl.sh [<model>]
 
 set -euo pipefail
@@ -54,7 +55,8 @@ HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 NATS_PORT="${NATS_PORT:-4222}"
 NCCL_HOST="${NCCL_HOST:-127.0.0.1}"
 NCCL_PORT="${NCCL_PORT:-29501}"
-PRIME_RL_SRC="${PRIME_RL_SRC:-/home/biswaranjanp/dev/rl/prime-rl/src}"
+# Set PRIME_RL_SRC to the prime-rl src directory before running this script.
+: "${PRIME_RL_SRC:?Set PRIME_RL_SRC to the prime-rl src directory (e.g. export PRIME_RL_SRC=/path/to/prime-rl/src)}"
 
 LOG_DIR="${TMPDIR:-/tmp}/dynamo-rl-smoke-nccl-$$"
 mkdir -p "$LOG_DIR"
