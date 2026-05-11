@@ -608,9 +608,9 @@ async fn tcp_listener(
                 // (protocol violation, version skew, corruption). Notify the
                 // requester so the generate call chain fails cleanly, then
                 // return Err so the connection task ends without panicking.
-                let msg = "malformed prologue: expected HeaderOnly ControlMessage".to_string();
-                let _ = connection.send(Err(msg.clone()));
-                return Err(error!("{msg}"));
+                let msg = "malformed prologue: expected HeaderOnly ControlMessage";
+                let _ = connection.send(Err(msg.to_string()));
+                return Err(error!(msg));
             }
         };
 
@@ -1606,7 +1606,7 @@ mod tests {
                 err.contains("malformed prologue"),
                 "expected malformed-prologue error, got: {err}"
             ),
-            Ok(_) => std::panic!("invalid prologue should produce an error, but got Ok"),
+            Ok(_) => panic!("invalid prologue should produce an error, but got Ok"),
         }
     }
 }

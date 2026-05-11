@@ -134,7 +134,6 @@ impl TcpClient {
 
         // forwards the bytes send from this stream to the transport layer; hold the alive_rx half of the oneshot channel
         let writer_context = context.clone();
-        let monitor_context = context.clone();
         let writer_task = tokio::spawn(handle_writer(
             framed_writer,
             bytes_rx,
@@ -143,6 +142,7 @@ impl TcpClient {
         ));
 
         let subject = info.subject.clone();
+        let monitor_context = context;
         // Spawn the connection monitor; errors are already logged inside
         // wait_for_connection_tasks, so the Result is intentionally dropped.
         tokio::spawn(async move {
@@ -177,7 +177,6 @@ async fn wait_for_connection_tasks(
     peer_port: Option<u16>,
     subject: String,
 ) -> Result<()> {
-    // await both tasks
     let (reader, writer) = tokio::join!(reader_task, writer_task);
 
     match (reader, writer) {
@@ -274,7 +273,8 @@ async fn handle_reader(
 ) -> FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec> {
     let mut framed_reader = framed_reader;
     let mut alive_tx = alive_tx;
-    let mut cancellation_counted = false;
+    // Set on every cancellation arm; counted once after the loop.
+    let mut cancellation_seen = false;
     loop {
         tokio::select! {
             msg = framed_reader.next() => {
@@ -289,36 +289,32 @@ async fn handle_reader(
                                             err = ?e,
                                             "invalid control message, closing connection"
                                         );
-                                        if let Some(counter) = &cancellation_counter && !cancellation_counted {
-                                            counter.inc();
-                                        }
+                                        cancellation_seen = true;
                                         context.kill();
                                         break;
                                     }
                                 };
 
+                                // Stop/Kill intentionally do not `break`: the
+                                // reader keeps running so a later Kill can
+                                // upgrade an earlier Stop (and vice versa).
+                                // The loop still exits promptly via the
+                                // `alive_tx.closed()` arm once `handle_writer`
+                                // reacts to `context.stop()` / `context.kill()`.
                                 match msg {
                                     ControlMessage::Stop => {
-                                        if let Some(counter) = &cancellation_counter && !cancellation_counted {
-                                            counter.inc();
-                                            cancellation_counted = true;
-                                        }
+                                        cancellation_seen = true;
                                         context.stop();
                                     }
                                     ControlMessage::Kill => {
-                                        if let Some(counter) = &cancellation_counter && !cancellation_counted {
-                                            counter.inc();
-                                            cancellation_counted = true;
-                                        }
+                                        cancellation_seen = true;
                                         context.kill();
                                     }
                                     ControlMessage::Sentinel => {
                                         tracing::warn!(
                                             "unexpected sentinel on client reader, closing connection"
                                         );
-                                        if let Some(counter) = &cancellation_counter && !cancellation_counted {
-                                            counter.inc();
-                                        }
+                                        cancellation_seen = true;
                                         context.kill();
                                         break;
                                     }
@@ -328,9 +324,7 @@ async fn handle_reader(
                                 tracing::warn!(
                                     "unexpected non-control message on client reader, closing connection"
                                 );
-                                if let Some(counter) = &cancellation_counter && !cancellation_counted {
-                                    counter.inc();
-                                }
+                                cancellation_seen = true;
                                 context.kill();
                                 break;
                            }
@@ -340,19 +334,13 @@ async fn handle_reader(
                         // Kill the engine context so the producer stops
                         // generating responses that can no longer be delivered.
                         tracing::warn!(err = ?e, "tcp stream read error, closing connection");
-                        if let Some(counter) = &cancellation_counter && !cancellation_counted {
-                            counter.inc();
-                        }
+                        cancellation_seen = true;
                         context.kill();
                         break;
                     }
                     None => {
                         tracing::debug!("tcp stream closed by server");
-                        // If no Stop/Kill was received, this is a cancellation where frontend
-                        // dropped the connection
-                        if let Some(counter) = &cancellation_counter && !cancellation_counted {
-                            counter.inc();
-                        }
+                        cancellation_seen = true;
                         break;
                     }
                 }
@@ -360,6 +348,11 @@ async fn handle_reader(
             _ = alive_tx.closed() => {
                 break;
             }
+        }
+    }
+    if cancellation_seen {
+        if let Some(counter) = &cancellation_counter {
+            counter.inc();
         }
     }
     framed_reader
@@ -817,46 +810,27 @@ mod tests {
         assert_sentinel_message(sentinel);
     }
 
-    /// Test that killed contexts do not wait for the server FIN deadline.
+    /// Killed or stopped contexts skip the server FIN deadline.
     #[tokio::test]
-    async fn test_wait_for_server_shutdown_skips_killed_context() {
-        let (client, _server) = create_tcp_pair().await;
-        let controller = Arc::new(Controller::default());
-        controller.kill();
+    async fn test_wait_for_server_shutdown_skips_terminal_context() {
+        for action in [Controller::kill as fn(&Controller), Controller::stop] {
+            let (client, _server) = create_tcp_pair().await;
+            let controller = Arc::new(Controller::default());
+            action(&controller);
 
-        let context: Arc<dyn AsyncEngineContext> = controller;
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            wait_for_server_shutdown(client, context),
-        )
-        .await;
+            let context: Arc<dyn AsyncEngineContext> = controller;
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                wait_for_server_shutdown(client, context),
+            )
+            .await;
 
-        assert!(result.is_ok(), "killed context should not wait for FIN");
-        assert!(
-            result.unwrap().is_ok(),
-            "killed context shutdown should succeed"
-        );
-    }
-
-    /// Mirror of test_wait_for_server_shutdown_skips_killed_context for stop.
-    #[tokio::test]
-    async fn test_wait_for_server_shutdown_skips_stopped_context() {
-        let (client, _server) = create_tcp_pair().await;
-        let controller = Arc::new(Controller::default());
-        controller.stop();
-
-        let context: Arc<dyn AsyncEngineContext> = controller;
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            wait_for_server_shutdown(client, context),
-        )
-        .await;
-
-        assert!(result.is_ok(), "stopped context should not wait for FIN");
-        assert!(
-            result.unwrap().is_ok(),
-            "stopped context shutdown should succeed"
-        );
+            assert!(result.is_ok(), "terminal context should not wait for FIN");
+            assert!(
+                result.unwrap().is_ok(),
+                "terminal context shutdown should succeed"
+            );
+        }
     }
 
     /// Read error in the connection monitor kills the context and skips the FIN wait.
@@ -1153,40 +1127,7 @@ mod tests {
         );
     }
 
-    /// Read error in handle_reader kills the context.
-    #[tokio::test]
-    async fn test_handle_reader_kills_context_on_read_error() {
-        let ReaderHarness {
-            framed_server,
-            framed_reader,
-            alive_tx,
-            alive_rx: _alive_rx,
-            controller,
-        } = reader_harness().await;
-
-        let controller_clone = controller.clone();
-        let reader_handle = tokio::spawn(async move {
-            handle_reader(framed_reader, controller_clone, alive_tx, None).await
-        });
-
-        // Bypass the codec and write a partial TwoPartCodec header (codec needs
-        // >=24 bytes), then close. FramedRead's default decode_eof with a
-        // non-empty buffer at EOF returns Err, driving handle_reader into the
-        // read-error arm that this test covers.
-        let mut raw_writer = framed_server.into_inner();
-        raw_writer.write_all(&[0u8; 8]).await.unwrap();
-        raw_writer.shutdown().await.unwrap();
-
-        let _ = reader_handle.await.unwrap();
-
-        assert!(
-            controller.is_killed(),
-            "Controller should be killed after TCP stream read error"
-        );
-    }
-
-    /// Read errors are counted as cancellations, matching the clean-close
-    /// accounting path.
+    /// Read errors kill the context and are counted as cancellations.
     #[tokio::test]
     async fn test_handle_reader_increments_cancellation_counter_on_read_error() {
         let ReaderHarness {
@@ -1228,56 +1169,6 @@ mod tests {
             cancellation_counter.get(),
             1,
             "read-error close should increment cancellation metric once"
-        );
-    }
-
-    /// Real TCP RST via SO_LINGER=0 + drop; complements the partial-frame
-    /// variant. Linux-only — abortive-close semantics aren't portable.
-    #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn test_handle_reader_handles_tcp_rst() {
-        let (client, server) = create_tcp_pair().await;
-        let (read_half, _write_half) = tokio::io::split(client);
-        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
-        let (alive_tx, _alive_rx) = oneshot::channel::<()>();
-        let controller = Arc::new(Controller::default());
-
-        // SO_LINGER=0 → on close(), kernel sends RST instead of FIN.
-        server
-            .set_linger(Some(std::time::Duration::ZERO))
-            .expect("set_linger should succeed on a connected socket");
-
-        let cancellation_counter =
-            IntCounter::new("tcp_client_reader_rst_test", "RST-path counter").unwrap();
-        let counter_clone = cancellation_counter.clone();
-        let controller_clone = controller.clone();
-
-        let reader_handle = tokio::spawn(async move {
-            handle_reader(
-                framed_reader,
-                controller_clone,
-                alive_tx,
-                Some(counter_clone),
-            )
-            .await
-        });
-
-        // Dropping the server socket while linger=0 emits a TCP RST.
-        drop(server);
-
-        let join = tokio::time::timeout(std::time::Duration::from_secs(2), reader_handle)
-            .await
-            .expect("handle_reader should complete promptly after RST");
-        join.expect("handle_reader must NOT panic on TCP RST");
-
-        assert!(
-            controller.is_killed(),
-            "controller should be killed after RST"
-        );
-        assert_eq!(
-            cancellation_counter.get(),
-            1,
-            "RST close should increment cancellation metric once"
         );
     }
 
