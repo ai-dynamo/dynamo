@@ -7,13 +7,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // protoc < 3.15 (system has 3.12) requires this for proto3 optional.
         .protoc_arg("--experimental_allow_proto3_optional")
         .compile_protos(
-            &[
-                "proto/sglang_scheduler.proto",
-                "proto/common.proto",
-            ],
+            &["proto/sglang/runtime/v1/sglang.proto"],
             &["proto"],
         )?;
-    println!("cargo:rerun-if-changed=proto/sglang_scheduler.proto");
-    println!("cargo:rerun-if-changed=proto/common.proto");
+    println!("cargo:rerun-if-changed=proto/sglang/runtime/v1/sglang.proto");
     Ok(())
 }

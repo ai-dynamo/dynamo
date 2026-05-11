@@ -1,33 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Tonic-generated stubs for SGLang's gRPC schema, vendored from
-//! `smg_grpc_proto-0.4.5` (the proto sgl-router uses today against upstream
-//! SGLang's `--grpc-mode` server). Two proto packages:
+//! Tonic-generated stubs for SGLang's native gRPC schema
+//! (`sglang.runtime.v1`, defined in upstream `proto/sglang/runtime/v1/sglang.proto`).
 //!
-//! - `sglang.grpc.scheduler` — `SglangScheduler` service + request/response types
-//! - `smg.grpc.common` — shared types (`GetTokenizer*`, `SubscribeKvEvents*`,
-//!   `KvEventBatch`, `KvCacheEvent`, `KvBlocks*`)
-//!
-//! Module hierarchy mirrors the proto package paths so cross-package
-//! references in tonic-generated code (e.g. `sglang.grpc.scheduler` referring
-//! to `smg.grpc.common.GetTokenizerChunk`) resolve via `super::super::super::smg::*`.
+//! Single proto package; everything lives under `sglang::runtime::v1`.
 
-/// Convenience re-export so callers can do `use crate::proto::scheduler::*`.
-pub use sglang::grpc::scheduler;
+/// Convenience re-export so callers can do `use crate::proto::v1::*`.
+pub use sglang::runtime::v1;
 
 pub mod sglang {
-    pub mod grpc {
-        pub mod scheduler {
-            tonic::include_proto!("sglang.grpc.scheduler");
-        }
-    }
-}
-
-pub mod smg {
-    pub mod grpc {
-        pub mod common {
-            tonic::include_proto!("smg.grpc.common");
+    pub mod runtime {
+        pub mod v1 {
+            tonic::include_proto!("sglang.runtime.v1");
         }
     }
 }

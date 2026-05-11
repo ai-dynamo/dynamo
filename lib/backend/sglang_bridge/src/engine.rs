@@ -50,10 +50,10 @@ use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
 use tonic::transport::{Channel, Endpoint};
 
-use crate::proto::scheduler::{
+use crate::proto::v1::{
     AbortRequest, DisaggregatedParams, GenerateRequest, GetModelInfoRequest, GetServerInfoRequest,
-    HealthCheckRequest, SamplingParams, TokenizedInput,
-    generate_response::Response as GenResponse, sglang_scheduler_client::SglangSchedulerClient,
+    HealthCheckRequest, SamplingParams,
+    sglang_service_client::SglangServiceClient,
 };
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -120,7 +120,7 @@ pub struct SglangBridge {
     /// Resolved on `start()` from SGLang's `GetServerInfo` (prefill workers only).
     bootstrap_host: OnceCell<String>,
     bootstrap_port: OnceCell<u16>,
-    client: OnceCell<SglangSchedulerClient<Channel>>,
+    client: OnceCell<SglangServiceClient<Channel>>,
 }
 
 impl SglangBridge {
@@ -198,36 +198,94 @@ impl SglangBridge {
 }
 
 fn build_sampling_params(req: &PreprocessedRequest) -> SamplingParams {
+    let (json_schema, regex) = build_structured_constraint(req);
     SamplingParams {
-        temperature: req.sampling_options.temperature.unwrap_or(0.0),
-        top_p: req.sampling_options.top_p.unwrap_or(0.0),
-        top_k: req.sampling_options.top_k.unwrap_or(0),
-        min_p: req.sampling_options.min_p.unwrap_or(0.0),
-        frequency_penalty: req.sampling_options.frequency_penalty.unwrap_or(0.0),
-        presence_penalty: req.sampling_options.presence_penalty.unwrap_or(0.0),
-        repetition_penalty: req.sampling_options.repetition_penalty.unwrap_or(1.0),
-        max_new_tokens: req.stop_conditions.max_tokens,
+        temperature: req.sampling_options.temperature,
+        top_p: req.sampling_options.top_p,
+        top_k: req.sampling_options.top_k,
+        min_p: req.sampling_options.min_p,
+        frequency_penalty: req.sampling_options.frequency_penalty,
+        presence_penalty: req.sampling_options.presence_penalty,
+        repetition_penalty: req.sampling_options.repetition_penalty,
+        max_new_tokens: req.stop_conditions.max_tokens.map(|v| v as i32),
+        min_new_tokens: req.stop_conditions.min_tokens.map(|v| v as i32),
         stop: req.stop_conditions.stop.clone().unwrap_or_default(),
         stop_token_ids: req
             .stop_conditions
             .stop_token_ids_hidden
             .clone()
-            .unwrap_or_default(),
-        skip_special_tokens: false,
-        spaces_between_special_tokens: false,
-        n: req.sampling_options.n.map(|v| v as u32).unwrap_or(1),
-        min_new_tokens: req.stop_conditions.min_tokens.unwrap_or(0),
-        ignore_eos: req.stop_conditions.ignore_eos.unwrap_or(false),
-        no_stop_trim: false,
-        stream_interval: None,
-        logit_bias: Default::default(),
-        custom_params: None,
-        constraint: None,
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| t as i32)
+            .collect(),
+        ignore_eos: req.stop_conditions.ignore_eos,
+        n: req.sampling_options.n.map(|v| v as i32),
+        json_schema,
+        regex,
     }
 }
 
+/// Map Dynamo's `GuidedDecodingOptions` onto the v1 SamplingParams structured
+/// generation fields. v1 has `json_schema: optional string` and
+/// `regex: optional string` as separate fields (no oneof, no EBNF). Returns
+/// `(json_schema, regex)` — caller wires both into SamplingParams.
+///
+/// Priority when multiple guided-decoding fields are set: json > regex >
+/// choice (collapsed to anchored regex alternation) > grammar (sent as regex
+/// fallback — v1 has no EBNF field; backend may reject if it's not regex).
+///
+/// `backend` and `whitespace_pattern` on `GuidedDecodingOptions` are dropped
+/// — v1 exposes neither; SGLang picks its grammar backend via server args.
+fn build_structured_constraint(req: &PreprocessedRequest) -> (Option<String>, Option<String>) {
+    let Some(g) = req.sampling_options.guided_decoding.as_ref() else {
+        return (None, None);
+    };
+    if let Some(schema) = &g.json {
+        match serde_json::to_string(schema) {
+            Ok(s) => return (Some(s), None),
+            Err(e) => {
+                tracing::warn!(error = %e, "guided_decoding.json serialize failed; dropping constraint");
+            }
+        }
+    }
+    if let Some(regex) = &g.regex {
+        return (None, Some(regex.clone()));
+    }
+    if let Some(choices) = &g.choice
+        && !choices.is_empty()
+    {
+        let alt: Vec<String> = choices.iter().map(|c| regex_escape(c)).collect();
+        let pattern = format!("^({})$", alt.join("|"));
+        return (None, Some(pattern));
+    }
+    if let Some(grammar) = &g.grammar {
+        // v1 has no EBNF field; surface grammar as regex on the wire and let
+        // the backend reject if it can't interpret it. Log so operators see.
+        tracing::warn!("guided_decoding.grammar set but v1 proto has no EBNF field; forwarding as regex");
+        return (None, Some(grammar.clone()));
+    }
+    (None, None)
+}
+
+/// Escape regex metacharacters. The `regex` crate has `regex::escape`, but
+/// pulling it in just for this is heavier than open-coding it.
+fn regex_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 fn parse_finish_reason(raw: &str) -> FinishReason {
-    // Legacy proto: GenerateComplete.finish_reason is an OpenAI-style string.
+    // v1 stores finish_reason in GenerateResponse.meta_info["finish_reason"].
+    // SGLang emits OpenAI-style strings.
     match raw {
         "stop" => FinishReason::Stop,
         "length" => FinishReason::Length,
@@ -237,37 +295,50 @@ fn parse_finish_reason(raw: &str) -> FinishReason {
     }
 }
 
-/// Pull `disaggregation_bootstrap_port` and `dist_init_addr` out of SGLang's
-/// `GetServerInfoResponse.server_args` Struct. SGLang ships ServerArgs as a
-/// `google.protobuf.Struct` over the wire so every numeric field arrives as
-/// `Kind::NumberValue(f64)` — we narrow back to i32 here.
-fn extract_bootstrap_from_server_args(
-    server_args: Option<&prost_types::Struct>,
-) -> (Option<u16>, Option<String>) {
-    use prost_types::value::Kind;
-    let Some(s) = server_args else {
+/// Pull `disaggregation_bootstrap_port` and `dist_init_addr` from the JSON
+/// blob in `GetServerInfoResponse.json_info`. v1 emits the full ServerArgs
+/// dict as a JSON string rather than a typed `google.protobuf.Struct`.
+fn extract_bootstrap_from_server_info(json_info: &str) -> (Option<u16>, Option<String>) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json_info) else {
+        tracing::warn!("GetServerInfo.json_info is not valid JSON");
         return (None, None);
     };
-    let port = s
-        .fields
+    // ServerArgs may be nested under "server_args" or at the top level —
+    // accept either layout for forward-compat.
+    let root = v.get("server_args").unwrap_or(&v);
+    let port = root
         .get("disaggregation_bootstrap_port")
-        .and_then(|v| v.kind.as_ref())
-        .and_then(|k| match k {
-            Kind::NumberValue(n) => Some(*n as u16),
-            _ => None,
-        });
-    let host = s
-        .fields
+        .and_then(|n| n.as_u64())
+        .map(|n| n as u16);
+    let host = root
         .get("dist_init_addr")
-        .and_then(|v| v.kind.as_ref())
-        .and_then(|k| match k {
-            Kind::StringValue(s) => Some(s.clone()),
-            _ => None,
-        })
+        .and_then(|s| s.as_str())
         // SGLang stores dist_init_addr as "host:port"; bootstrap uses the host
         // half only. Strip the trailing :port if present.
-        .map(|addr| addr.rsplit_once(':').map(|(h, _)| h.to_string()).unwrap_or(addr));
+        .map(|addr| {
+            addr.rsplit_once(':')
+                .map(|(h, _)| h.to_string())
+                .unwrap_or_else(|| addr.to_string())
+        });
     (port, host)
+}
+
+/// Pull `max_context_length` (or compatible) from the JSON blob in
+/// `GetModelInfoResponse.json_info`. v1 collapses the per-field model card
+/// into a JSON string.
+fn extract_context_length_from_model_info(json_info: &str) -> Option<u32> {
+    let v: serde_json::Value = serde_json::from_str(json_info).ok()?;
+    // SGLang's get_internal_model_info usually exposes max_context_length;
+    // some builds expose context_length only. Try both.
+    let n = v
+        .get("max_context_length")
+        .or_else(|| v.get("context_length"))
+        .and_then(|n| n.as_u64())?;
+    if n == 0 || n > u32::MAX as u64 {
+        None
+    } else {
+        Some(n as u32)
+    }
 }
 
 #[async_trait]
@@ -280,18 +351,34 @@ impl LLMEngine for SglangBridge {
             .connect()
             .await
             .map_err(|e| backend_error(format!("connect {}: {e}", self.grpc_endpoint)))?;
-        let mut client = SglangSchedulerClient::new(channel);
+        let mut client = SglangServiceClient::new(channel);
 
-        let health = client
-            .health_check(HealthCheckRequest {})
-            .await
-            .map_err(|e| backend_error(format!("HealthCheck: {e}")))?
-            .into_inner();
-        if !health.healthy {
-            return Err(backend_error(format!(
-                "SGLang reported unhealthy: {}",
-                health.message
-            )));
+        // The native gRPC server binds the listening socket as soon as the
+        // server task starts, but the scheduler subprocess takes 30-60s to
+        // load the model + warm up. HealthCheck returns healthy=false until
+        // the scheduler is reachable. Poll for up to ~120s.
+        let mut backoff = Duration::from_millis(500);
+        loop {
+            let health = client
+                .health_check(HealthCheckRequest {})
+                .await
+                .map_err(|e| backend_error(format!("HealthCheck: {e}")))?
+                .into_inner();
+            if health.healthy {
+                break;
+            }
+            if backoff > Duration::from_secs(120) {
+                return Err(backend_error(
+                    "SGLang HealthCheck returned healthy=false for 120s — \
+                     scheduler likely failed to load. Check SGLang logs.",
+                ));
+            }
+            tracing::debug!(
+                ?backoff,
+                "sglang_bridge: HealthCheck reports unhealthy, retrying"
+            );
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(5));
         }
 
         let info = client
@@ -300,15 +387,10 @@ impl LLMEngine for SglangBridge {
             .map_err(|e| backend_error(format!("GetModelInfo: {e}")))?
             .into_inner();
 
-        let context_length = if info.max_context_length > 0 {
-            Some(info.max_context_length as u32)
-        } else {
-            None
-        };
+        let context_length = extract_context_length_from_model_info(&info.json_info);
 
         // Prefill workers need bootstrap host/port to advertise to decode
-        // workers via the per-request bootstrap chunk. Pull from
-        // GetServerInfo.server_args once at startup.
+        // workers. Pull from GetServerInfo.json_info once at startup.
         if matches!(self.disaggregation_mode, DisaggMode::Prefill) {
             let server_info = client
                 .get_server_info(GetServerInfoRequest {})
@@ -316,10 +398,10 @@ impl LLMEngine for SglangBridge {
                 .map_err(|e| backend_error(format!("GetServerInfo: {e}")))?
                 .into_inner();
             let (port, host_from_args) =
-                extract_bootstrap_from_server_args(server_info.server_args.as_ref());
+                extract_bootstrap_from_server_info(&server_info.json_info);
             let port = port.ok_or_else(|| {
                 backend_error(
-                    "GetServerInfo.server_args.disaggregation_bootstrap_port missing — \
+                    "GetServerInfo.json_info.disaggregation_bootstrap_port missing — \
                      is SGLang launched with `--disaggregation-mode prefill`?",
                 )
             })?;
@@ -388,8 +470,8 @@ impl LLMEngine for SglangBridge {
         let Some(client) = self.client.get() else { return };
         let mut client = client.clone();
         let req = AbortRequest {
-            request_id: ctx.id().to_string(),
-            reason: "client cancelled".to_string(),
+            rid: ctx.id().to_string(),
+            abort_all: false,
         };
         if let Err(e) = client.abort(req).await {
             tracing::warn!(request_id = ctx.id(), err = %e, "sglang_bridge abort RPC failed");
@@ -425,14 +507,13 @@ impl SglangBridge {
             .clone();
 
         let prompt_len = request.token_ids.len() as u32;
-        let input_ids: Vec<u32> = request.token_ids.clone();
+        let input_ids: Vec<i32> = request.token_ids.iter().map(|&t| t as i32).collect();
         let sampling = build_sampling_params(&request);
 
         // Decode side: pull bootstrap_info forwarded from the prefill leg.
         // Forward the full 63-bit room — dynamo's PrefillRouter encodes
         // dp_rank into the upper bits via `compute_bootstrap_room`, so
         // truncating would clobber dp-aware rendezvous on the decode side.
-        // Proto wire is int64 (patched smg-grpc-proto), reinterpret as i64.
         let disagg = request.bootstrap_info.as_ref().map(|bi| DisaggregatedParams {
             bootstrap_host: bi.bootstrap_host.clone(),
             bootstrap_port: bi.bootstrap_port as i32,
@@ -440,26 +521,18 @@ impl SglangBridge {
         });
 
         let grpc_req = GenerateRequest {
-            request_id: ctx.id().to_string(),
-            tokenized: Some(TokenizedInput {
-                original_text: String::new(),
-                input_ids,
-            }),
-            mm_inputs: None,
+            input_ids,
             sampling_params: Some(sampling),
-            return_logprob: false,
-            logprob_start_len: -1,
-            top_logprobs_num: 0,
-            token_ids_logprob: vec![],
-            return_hidden_states: false,
+            stream: Some(true),
+            return_logprob: Some(false),
+            top_logprobs_num: None,
+            logprob_start_len: None,
+            rid: Some(ctx.id().to_string()),
+            lora_path: None,
+            routing_key: None,
+            routed_dp_rank: None,
+            trace_headers: Default::default(),
             disaggregated_params: disagg,
-            custom_logit_processor: String::new(),
-            timestamp: None,
-            log_metrics: false,
-            input_embeds: vec![],
-            lora_id: String::new(),
-            data_parallel_rank: -1,
-            stream: true,
         };
 
         let response = client
@@ -469,8 +542,9 @@ impl SglangBridge {
         let mut stream = response.into_inner();
 
         Ok(Box::pin(async_stream::stream! {
-            // GenerateStreamChunk.token_ids is the *incremental chunk* per
-            // proto comment — no slicing needed (vs Phase-1 cumulative shape).
+            // v1 GenerateResponse: output_ids (incremental chunk per stream),
+            // meta_info (string→string map; finish_reason is here), finished
+            // (bool — true on the terminal chunk). No oneof.
             let mut completion_tokens: u32 = 0;
             loop {
                 tokio::select! {
@@ -497,41 +571,42 @@ impl SglangBridge {
                             }
                         };
 
-                        match resp.response {
-                            Some(GenResponse::Chunk(stream_chunk)) => {
-                                completion_tokens = stream_chunk.completion_tokens;
-                                for tid in stream_chunk.token_ids {
-                                    yield Ok(chunk::token(tid));
-                                }
+                        // Non-terminal token chunks: yield each token.
+                        if !resp.finished {
+                            completion_tokens = completion_tokens.saturating_add(resp.output_ids.len() as u32);
+                            for tid in resp.output_ids {
+                                yield Ok(chunk::token(tid as u32));
                             }
-                            Some(GenResponse::Complete(complete)) => {
-                                let finish = parse_finish_reason(&complete.finish_reason);
-                                let mut terminal = match finish {
-                                    FinishReason::Length => LLMEngineOutput::length(),
-                                    FinishReason::Cancelled => LLMEngineOutput::cancelled(),
-                                    FinishReason::Error(msg) => LLMEngineOutput::error(msg),
-                                    _ => LLMEngineOutput::stop(),
-                                };
-                                terminal.token_ids = vec![];
-                                let total = complete.completion_tokens.max(completion_tokens);
-                                terminal = terminal.with_usage(usage(prompt_len, total));
-                                yield Ok(terminal);
-                                break;
-                            }
-                            Some(GenResponse::Error(err)) => {
-                                yield Ok(LLMEngineOutput::error(format!(
-                                    "sglang_bridge: {} ({})",
-                                    err.message, err.http_status_code
-                                )));
-                                break;
-                            }
-                            None => {
-                                yield Ok(LLMEngineOutput::error(
-                                    "sglang_bridge: empty oneof response".to_string()
-                                ));
-                                break;
+                            continue;
+                        }
+
+                        // Terminal chunk. SGLang sometimes emits the final
+                        // token(s) on the same message as finished=true; flush
+                        // them before the terminal.
+                        if !resp.output_ids.is_empty() {
+                            completion_tokens = completion_tokens.saturating_add(resp.output_ids.len() as u32);
+                            for tid in resp.output_ids {
+                                yield Ok(chunk::token(tid as u32));
                             }
                         }
+
+                        let raw_reason = resp.meta_info.get("finish_reason").map(String::as_str).unwrap_or("");
+                        let finish = parse_finish_reason(raw_reason);
+                        let total = resp
+                            .meta_info
+                            .get("completion_tokens")
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .unwrap_or(completion_tokens);
+                        let mut terminal = match finish {
+                            FinishReason::Length => LLMEngineOutput::length(),
+                            FinishReason::Cancelled => LLMEngineOutput::cancelled(),
+                            FinishReason::Error(msg) => LLMEngineOutput::error(msg),
+                            _ => LLMEngineOutput::stop(),
+                        };
+                        terminal.token_ids = vec![];
+                        terminal = terminal.with_usage(usage(prompt_len, total));
+                        yield Ok(terminal);
+                        break;
                     }
                 }
             }
@@ -581,7 +656,7 @@ impl SglangBridge {
             .unwrap_or_else(|| rand::thread_rng().gen_range(1..i64::MAX));
 
         let prompt_len = request.token_ids.len() as u32;
-        let input_ids: Vec<u32> = request.token_ids.clone();
+        let input_ids: Vec<i32> = request.token_ids.iter().map(|&t| t as i32).collect();
         let sampling = build_sampling_params(&request);
 
         let disagg = DisaggregatedParams {
@@ -591,26 +666,18 @@ impl SglangBridge {
         };
 
         let grpc_req = GenerateRequest {
-            request_id: ctx.id().to_string(),
-            tokenized: Some(TokenizedInput {
-                original_text: String::new(),
-                input_ids,
-            }),
-            mm_inputs: None,
+            input_ids,
             sampling_params: Some(sampling),
-            return_logprob: false,
-            logprob_start_len: -1,
-            top_logprobs_num: 0,
-            token_ids_logprob: vec![],
-            return_hidden_states: false,
+            stream: Some(true),
+            return_logprob: Some(false),
+            top_logprobs_num: None,
+            logprob_start_len: None,
+            rid: Some(ctx.id().to_string()),
+            lora_path: None,
+            routing_key: None,
+            routed_dp_rank: None,
+            trace_headers: Default::default(),
             disaggregated_params: Some(disagg),
-            custom_logit_processor: String::new(),
-            timestamp: None,
-            log_metrics: false,
-            input_embeds: vec![],
-            lora_id: String::new(),
-            data_parallel_rank: -1,
-            stream: true,
         };
 
         // First chunk: bootstrap info for the frontend to forward to decode.
@@ -672,24 +739,16 @@ impl SglangBridge {
                     }
                     maybe_chunk = stream.next() => {
                         match maybe_chunk {
-                            Some(Ok(resp)) => match resp.response {
-                                Some(GenResponse::Chunk(_)) => {
-                                    // Drop — decode worker reads from KV rendezvous.
-                                }
-                                Some(GenResponse::Complete(_)) => {
-                                    tracing::debug!(request_id = %request_id, "sglang_bridge prefill bg: SGLang Complete");
+                            Some(Ok(resp)) => {
+                                // v1: drop output_ids — decode worker reads
+                                // tokens from KV rendezvous. `finished=true`
+                                // on the terminal chunk signals SGLang is
+                                // done writing KV and we can release.
+                                if resp.finished {
+                                    tracing::debug!(request_id = %request_id, "sglang_bridge prefill bg: SGLang finished");
                                     return;
                                 }
-                                Some(GenResponse::Error(err)) => {
-                                    tracing::warn!(
-                                        request_id = %request_id,
-                                        err = ?err,
-                                        "sglang_bridge prefill bg: SGLang Error"
-                                    );
-                                    return;
-                                }
-                                None => return,
-                            },
+                            }
                             Some(Err(status)) => {
                                 tracing::warn!(request_id = %request_id, %status, "sglang_bridge prefill bg: gRPC stream error");
                                 return;
