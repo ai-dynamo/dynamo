@@ -326,7 +326,7 @@ jobs:
           fi
           TEST_TARGET="test_image"
           if [ "${{ inputs.target }}" == "planner" ]; then
-            TEST_TARGET="test_planner"
+            TEST_TARGET="test_distroless"
           fi
 
           docker buildx build \
