@@ -87,9 +87,25 @@ RUN git clone ${SGLANG_GIT_URL} sglang && \
     git checkout ${SGLANG_REF} && \
     cd python && \
     cp pyproject_xpu.toml pyproject.toml && \
-    pip3 install --no-build-isolation --extra-index-url https://download.pytorch.org/whl/xpu . && \
+    pip3 install --no-build-isolation --extra-index-url https://download.pytorch.org/whl/xpu ".[diffusion]" && \
     pip3 install "xgrammar==0.1.33" --no-deps && \
     pip3 install msgspec blake3 py-cpuinfo compressed_tensors gguf partial_json_parser einops tabulate
+
+# Multimodal + accelerate runtime deps that pyproject_xpu.toml does NOT pull in
+# via the `[diffusion]` extra above:
+#   - decord: dropped from pyproject_xpu.toml entirely (CUDA pyproject.toml
+#     ships decord2 by default for multimodal video decode).
+#   - accelerate: only declared in pyproject_xpu.toml's `[test]` extra, but
+#     diffusers needs it at runtime for enable_model_cpu_offload.
+# Use --no-deps so the resolver doesn't pull CUDA-bound transitive packages.
+RUN pip3 install --no-deps decord accelerate
+
+# pyproject_xpu.toml's [diffusion] extra pulls opencv-python (with X11/libGL
+# deps), but the container image has no libGL.so.1, so `import cv2` fails.
+# Swap to opencv-python-headless (same version) — matches the CUDA pyproject
+# default and avoids dragging X11 libs into the image.
+RUN pip3 uninstall -y opencv-python && \
+    pip3 install --no-deps "opencv-python-headless==4.10.0.84"
 
 # Source conda + oneAPI environment in bashrc for interactive shells
 RUN echo ". ${CONDA_DIR}/bin/activate sglang" >> /etc/bash.bashrc && \

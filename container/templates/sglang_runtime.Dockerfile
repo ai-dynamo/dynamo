@@ -95,8 +95,9 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 {% endif %}
 
 {% if device == "xpu" %}
-# Install accelerate for diffusion/video worker pipelines
-RUN pip install --no-deps "accelerate==1.13.0"
+# accelerate / decord / diffusers / imageio* / opencv-python-headless /
+# cache-dit / trimesh are installed in sglang_framework.Dockerfile (XPU branch)
+# because pyproject_xpu.toml leaves them out of the default deps.
 
 # Install gpu_memory_service wheel if enabled
 ARG ENABLE_GPU_MEMORY_SERVICE
