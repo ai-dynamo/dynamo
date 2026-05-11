@@ -17,6 +17,11 @@ from tests.fault_tolerance.etcd_ha.utils import (
     wait_for_processes_to_terminate,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.device import (
+    build_nixl_kv_transfer_config,
+    get_default_vllm_block_size,
+    get_gpu_memory_utilization,
+)
 from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
@@ -52,9 +57,11 @@ class DynamoWorkerProcess(ManagedProcess):
             FAULT_TOLERANCE_MODEL_NAME,
             "--enforce-eager",
             "--gpu-memory-utilization",
-            "0.45",
+            str(get_gpu_memory_utilization()),
             "--max-model-len",
             "8192",
+            "--block-size",
+            str(get_default_vllm_block_size()),
         ]
 
         # Set port based on worker type
@@ -85,12 +92,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    json.dumps(
-                        {
-                            "kv_connector": "NixlConnector",
-                            "kv_role": "kv_both",
-                        }
-                    ),
+                    json.dumps(build_nixl_kv_transfer_config()),
                 ]
             )
 
@@ -155,6 +157,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.nightly
@@ -226,6 +229,7 @@ def test_etcd_ha_failover_vllm_aggregated(request, predownload_models):
 
 
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
@@ -267,13 +271,17 @@ def test_etcd_ha_failover_vllm_disaggregated(
 
                 # Step 4: Start the prefill worker
                 with DynamoWorkerProcess(
-                    request, etcd_endpoints, mode=WorkerMode.PREFILL
+                    request,
+                    etcd_endpoints,
+                    mode=WorkerMode.PREFILL,
                 ):
                     logger.info("Prefill worker started successfully")
 
                     # Step 5: Start the decode worker
                     with DynamoWorkerProcess(
-                        request, etcd_endpoints, mode=WorkerMode.DECODE
+                        request,
+                        etcd_endpoints,
+                        mode=WorkerMode.DECODE,
                     ):
                         logger.info("Decode worker started successfully")
 
@@ -307,6 +315,7 @@ def test_etcd_ha_failover_vllm_disaggregated(
 
 
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
@@ -362,6 +371,7 @@ def test_etcd_non_ha_shutdown_vllm_aggregated(request, predownload_models):
 
 
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.e2e
 @pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
@@ -397,13 +407,17 @@ def test_etcd_non_ha_shutdown_vllm_disaggregated(
 
                 # Step 4: Start the prefill worker
                 with DynamoWorkerProcess(
-                    request, etcd_endpoints, mode=WorkerMode.PREFILL
+                    request,
+                    etcd_endpoints,
+                    mode=WorkerMode.PREFILL,
                 ) as prefill_worker:
                     logger.info("Prefill worker started successfully")
 
                     # Step 5: Start the decode worker
                     with DynamoWorkerProcess(
-                        request, etcd_endpoints, mode=WorkerMode.DECODE
+                        request,
+                        etcd_endpoints,
+                        mode=WorkerMode.DECODE,
                     ) as decode_worker:
                         logger.info("Decode worker started successfully")
 
