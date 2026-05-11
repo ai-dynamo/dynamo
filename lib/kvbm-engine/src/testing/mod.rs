@@ -3,6 +3,7 @@
 
 #![doc = include_str!("../../docs/testing.md")]
 
+pub mod asymmetric_tp_session;
 pub mod distributed;
 pub mod events;
 pub mod managers;

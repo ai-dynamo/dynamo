@@ -262,10 +262,23 @@ impl WorkerTransfers for SpmdParallelWorkers {
         let new_handles = build_handle_mappings(instance_id, &per_rank);
 
         // In Strict mode each LOCAL worker imports EVERY remote rank's
-        // metadata so its NIXL agent has registration info for any
-        // remote rank it may later read from. In Legacy mode preserve
-        // the same-rank zip.
-        let mut import_responses = Vec::new();
+        // metadata via `Worker::connect_remote` — that path both
+        // registers the NIXL metadata locally AND populates the
+        // per-worker `remote_handles_rank` map (AB-1c) that
+        // [`crate::worker::PhysicalWorker::execute_remote_pull_plan`]
+        // consults when dispatching shards. The legacy
+        // `worker.import_metadata` fan-out only did the NIXL half,
+        // leaving `remote_handles_rank` empty so any asymmetric pull
+        // bailed at the worker boundary.
+        //
+        // In Legacy mode preserve the same-rank zip via the
+        // (less-featureful) `import_metadata` path — legacy peers
+        // don't stamp descriptors, so `connect_remote`'s rank-aware
+        // bookkeeping has nothing to record and the legacy
+        // `execute_remote_onboard_for_instance` path reads from
+        // `SpmdParallelWorkers::remote_handles` instead.
+        let mut import_responses: Vec<ImportMetadataResponse> = Vec::new();
+        let mut connect_responses: Vec<ConnectRemoteResponse> = Vec::new();
         match strategy {
             ImportStrategy::Strict => {
                 for worker in &self.workers {
@@ -276,7 +289,15 @@ impl WorkerTransfers for SpmdParallelWorkers {
                             u.layouts.clone(),
                             u.parallelism.clone(),
                         )?;
-                        import_responses.push(worker.import_metadata(repacked)?);
+                        // Collect responses for downstream aggregation.
+                        // `PhysicalWorker` returns synchronously-ready,
+                        // but `VeloWorkerClient` returns an awaiter
+                        // wrapping a tracker-spawned unary RPC — that
+                        // future must be awaited before SPMD declares
+                        // the connect complete, otherwise the next
+                        // caller can race the still-in-flight import.
+                        connect_responses
+                            .push(worker.connect_remote(instance_id, vec![repacked])?);
                     }
                 }
             }
@@ -342,18 +363,29 @@ impl WorkerTransfers for SpmdParallelWorkers {
             }
         }
 
-        // If all responses are ready (synchronous), return immediately
-        if import_responses.iter().all(|r| !r.could_yield()) {
+        // Strict (connect_remote) responses and Legacy (import_metadata)
+        // responses are mutually exclusive — only one of the two branches
+        // populates its vec. If every collected response is
+        // synchronously-ready, return immediately.
+        let any_yieldable = import_responses.iter().any(|r| r.could_yield())
+            || connect_responses.iter().any(|r| r.could_yield());
+        if !any_yieldable {
             return Ok(ConnectRemoteResponse::ready());
         }
 
-        // Create an event to aggregate all import completions
+        // Aggregate via a velo event. At most one of the two vecs is
+        // non-empty (Strict vs Legacy are exclusive), so we spawn one
+        // task on the appropriate variant.
         let event = self.events.new_event()?;
         let awaiter = self.events.awaiter(event.handle())?;
 
-        // Spawn task to await all import responses and signal completion
-        self.runtime
-            .spawn(await_import_responses(import_responses, event));
+        if !connect_responses.is_empty() {
+            self.runtime
+                .spawn(await_connect_remote_responses(connect_responses, event));
+        } else {
+            self.runtime
+                .spawn(await_import_responses(import_responses, event));
+        }
 
         Ok(ConnectRemoteResponse::from_awaiter(awaiter))
     }
@@ -599,6 +631,35 @@ async fn await_import_responses(responses: Vec<ImportMetadataResponse>, event: :
         futures::future::join_all(responses.into_iter().map(|r| r.into_future())).await;
 
     // Check for any failures
+    let errors: Vec<_> = results.into_iter().filter_map(|r| r.err()).collect();
+
+    if errors.is_empty() {
+        let _ = event.trigger();
+    } else {
+        let error_msg = errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let _ = event.poison(error_msg);
+    }
+}
+
+/// Sibling of [`await_import_responses`] for the Strict-mode
+/// `worker.connect_remote(...)` fan-out. `PhysicalWorker` returns a
+/// `ConnectRemoteResponse::ready()` synchronously, but
+/// `VeloWorkerClient::connect_remote` returns
+/// `ConnectRemoteResponse::from_awaiter(...)` over a tracker-spawned
+/// unary RPC — discarding it would let SPMD return before the remote
+/// import completes, racing the next caller and tripping the
+/// per-manager `loaded_remotes` duplicate check.
+async fn await_connect_remote_responses(
+    responses: Vec<ConnectRemoteResponse>,
+    event: ::velo::Event,
+) {
+    let results: Vec<Result<()>> =
+        futures::future::join_all(responses.into_iter().map(|r| r.into_future())).await;
+
     let errors: Vec<_> = results.into_iter().filter_map(|r| r.err()).collect();
 
     if errors.is_empty() {
