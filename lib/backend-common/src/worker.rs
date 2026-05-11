@@ -165,8 +165,11 @@ enum LifecycleState {
     Init,
     /// `engine.start()` returned successfully; `engine.cleanup()` is owed.
     Running,
-    /// Cleanup done, never started, or start failed. `engine.cleanup()`
-    /// will not be called again.
+    /// `engine.start()` raised. The engine may have allocated partial
+    /// state (inner LLM, sockets, background tasks) before failing, so
+    /// `engine.cleanup()` is still owed exactly once.
+    StartFailed,
+    /// Cleanup done. `engine.cleanup()` will not be called again.
     Stopped,
 }
 
@@ -405,7 +408,11 @@ impl Worker {
                 Ok(cfg)
             }
             Err(e) => {
-                self.state = LifecycleState::Stopped;
+                // Engine.cleanup() still owed: start() may have built up
+                // partial state (inner LLM, sockets, background tasks)
+                // before raising, and the contract requires cleanup to be
+                // safe against that. cleanup_once() picks up StartFailed.
+                self.state = LifecycleState::StartFailed;
                 Err(e)
             }
         }
@@ -415,12 +422,13 @@ impl Worker {
     async fn cleanup_once(&mut self) {
         match self.state {
             LifecycleState::Init | LifecycleState::Stopped => {
-                // Pre-start shutdown, already cleaned up, or start failed —
-                // nothing engine-side to do.
+                // Pre-start shutdown, or cleanup already ran. Nothing
+                // engine-side to do — `engine.start()` either never ran
+                // or its allocations have already been released.
                 self.state = LifecycleState::Stopped;
                 return;
             }
-            LifecycleState::Running => {}
+            LifecycleState::Running | LifecycleState::StartFailed => {}
         }
         match self.engine.cleanup().await {
             Ok(()) => tracing::info!("Engine cleanup complete"),
@@ -1078,17 +1086,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_engine_init_to_stopped_on_failure() {
-        let (engine, cleanup_calls) = StateMockEngine::new(true);
+    async fn start_engine_init_to_start_failed_on_failure() {
+        let (engine, _) = StateMockEngine::new(true);
         let mut worker = worker_with(engine);
         let res = worker.start_engine(0).await;
         assert!(res.is_err(), "start should fail");
+        // start() may have allocated partial state before raising; the
+        // state machine keeps cleanup() owed by parking in StartFailed.
+        assert_eq!(worker.state, LifecycleState::StartFailed);
+    }
+
+    #[tokio::test]
+    async fn cleanup_once_runs_engine_cleanup_after_failed_start() {
+        // Regression: previously, cleanup_once short-circuited on
+        // `Stopped` after a failed start and engines were forced to
+        // wrap their own start() in try/except to release partial
+        // state. The state machine now owns the call.
+        let (engine, cleanup_calls) = StateMockEngine::new(true);
+        let mut worker = worker_with(engine);
+        let _ = worker.start_engine(0).await; // intentional failure
+
+        worker.cleanup_once().await;
+        assert_eq!(
+            cleanup_calls.load(Ordering::SeqCst),
+            1,
+            "engine.cleanup() must run exactly once after a failed start \
+             so engines don't have to re-implement the guard"
+        );
         assert_eq!(worker.state, LifecycleState::Stopped);
 
-        // cleanup_once is a no-op after a failed start: the state machine
-        // skips engine.cleanup() because the engine never became running.
+        // And still idempotent: a second call doesn't re-enter cleanup.
         worker.cleanup_once().await;
-        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
         assert_eq!(worker.state, LifecycleState::Stopped);
     }
 
