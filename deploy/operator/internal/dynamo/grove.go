@@ -88,7 +88,7 @@ func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client 
 
 	for serviceName, component := range dgd.Spec.Services {
 		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
-		resourceName := fmt.Sprintf("%s-0-%s", dgd.Name, strings.ToLower(serviceName))
+		resourceName := fmt.Sprintf("%s-0-%s", PCSNameForDGD(dgd.Name, dgd.Spec.Services), strings.ToLower(serviceName))
 
 		if usesPCSG {
 			ok, reason, serviceStatus := CheckPCSGReady(ctx, client, resourceName, dgd.Namespace, logger)

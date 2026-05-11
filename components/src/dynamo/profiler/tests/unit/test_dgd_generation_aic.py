@@ -414,8 +414,8 @@ class TestEnableVllmBenchmarkMode:
         cfg = {
             "spec": {
                 "services": {
-                    "TRTLLMPrefillWorker": {},
-                    "TRTLLMDecodeWorker": {},
+                    "prefill": {},
+                    "decode": {},
                     "Frontend": {},
                 }
             }

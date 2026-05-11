@@ -13,7 +13,7 @@ tests/parity/
 ├── common.py                       ← ParseResult, canonical-JSON diff, decode_arguments
 └── parser/
     ├── fixtures/                   ← static YAML, generated from Dynamo as oracle
-    │   └── <family>/PARSER.batch.yaml
+    │   └── <family>/PARSER.batch.yaml         (and per-top-level-case files like PARSER.batch.8.yaml; see Fixture file schema)
     ├── regenerate_fixtures.py      ← (re-)build fixtures by running Dynamo's parser
     │
     ├── dynamo.py                   ← M2 in-process wrapper (PyO3 binding)
@@ -204,7 +204,19 @@ in follow-up PRs.
 
 ## Fixture file schema
 
-Each `<family>/PARSER.batch.yaml`:
+Two file layouts coexist per family. The loader merges them:
+
+```
+<family>/PARSER.batch.yaml          ← legacy flat: holds top-level cases (1, 2, ..., 10)
+<family>/PARSER.batch.<n>.yaml      ← per-top-level-case: holds sub-cases <n>.a, <n>.b, ...
+```
+
+The per-case file is only created when a top-level case grows sub-cases.
+Once any sub-case `PARSER.batch.<n>.<sub>` is introduced, the bare
+`PARSER.batch.<n>` key migrates out of the flat file into the per-case
+file. Case-ID uniqueness across the two files is the merge invariant.
+
+Both file shapes use the same schema:
 
 ```yaml
 family: kimi_k2
@@ -222,15 +234,74 @@ cases:
       - name: ...
         arguments: {...}
       normal_text: ''
-  PARSER.batch.2: ...
+  PARSER.batch.8.a:                    # sub-case keys also valid
+    description: Narration before tool call only
+    ref: https://github.com/vllm-project/vllm/blob/<sha>/tests/tool_parsers/test_<family>_tool_parser.py#L<line>
+    model_text: |-
+      ...
+```
+
+The `ref` field is required on per-sub-case files
+(`PARSER.<mode>.<n>.yaml`) and takes one of three forms, distinguishing
+how strongly the fixture is tied to upstream:
+
+- **`ref: inspired-by <url>`** — there's an upstream test exercising
+  this same shape on this same family, but the fixture's `model_text`
+  is freshly authored (templated narration, consistent function/args
+  across families) rather than copied verbatim. The URL points back at
+  the upstream test for traceability. Most cases that have an upstream
+  analogue land here.
+- **`ref: ported-from <url>`** — the fixture's `model_text` is a
+  verbatim (or minimally-adapted) copy of the upstream test's input.
+  Rare; reserve for when the wire format is intricate enough that
+  byte-equivalence matters and we want the upstream link to be a
+  literal source-of-truth.
+- **`ref: dynamo`** — authored fresh in this repo, no upstream peer.
+  Most sub-case taxonomy fillers (`.b` post-only, `.d` between-calls)
+  land here because vLLM/SGLang don't test those shapes.
+
+The URL form (`inspired-by` / `ported-from`) names the impl in the URL
+itself: `vllm-project/vllm` → vLLM, `sgl-project/sglang` → SGLang.
+
+Every sub-case carries one of these three states; there's no "no
+provenance" state. The legacy flat `PARSER.<mode>.yaml` (cases without
+sub-cases) does NOT carry `ref` — those entries predate the convention.
+
+#### Embedded divergence comments
+
+Each per-sub-case fixture for which there's a registered cross-impl
+divergence (`KNOWN_DIVERGENCES` in `test_parity_parser.py`) carries a
+YAML comment block right after the case's `expected:` data showing what
+the diverging impl actually produces, marked `TODO(research)`:
+
+```yaml
+PARSER.batch.8.b:
+  ...
+  expected:
+    calls: [...]
+    normal_text: "Let me know if you need more."     # Dynamo's output
+  # TODO(research): vllm diverges — drops trailing normal_text...
+  # vllm produces:
+  #   calls: [{'name': 'get_weather', 'arguments': {'location': 'Dallas'}}]
+  #   normal_text: None
+```
+
+That way the divergence is visible at the fixture level without running
+the harness, and each one carries an explicit "decide whether to switch"
+prompt. Comments are written by `embed_divergence_comments.py` (run
+after the regenerator, since `yaml.dump` strips comments on rewrite):
+
+```bash
+PYTHONPATH=lib/bindings/python/src python3 -m tests.parity.parser.regenerate_fixtures --overwrite-if-exists
+PYTHONPATH=lib/bindings/python/src python3 -m tests.parity.parser.embed_divergence_comments
 ```
 
 Case keys are the full IDs from
 [`lib/parsers/PARSER_CASES.md`](../../lib/parsers/PARSER_CASES.md)
-(`PARSER.batch.1` … `PARSER.batch.10`). They match the
-`KNOWN_DIVERGENCES` keys and pytest parametrize IDs directly, so a
-single `grep PARSER.batch.5` finds the case across docs, fixtures,
-and Rust source comments.
+(`PARSER.batch.1` … `PARSER.batch.10`, plus sub-cases like
+`PARSER.batch.8.a`). They match the `KNOWN_DIVERGENCES` keys and pytest
+parametrize IDs directly, so a single `grep PARSER.batch.8.a` finds the
+case across docs, fixtures, and Rust source comments.
 
 `model_text` uses YAML's literal block scalar (`|-`) so multi-line
 wire formats (XML-style families, harmony) read as the actual text
