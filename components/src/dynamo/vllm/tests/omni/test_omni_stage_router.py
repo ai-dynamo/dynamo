@@ -227,10 +227,7 @@ async def test_generate_stage_error_stops_pipeline():
     with p1, p2:
         chunks = [c async for c in router.generate({"prompt": "x"}, None)]
 
-    assert chunks[0]["id"] == "req-1"
-    assert chunks[0]["model"] == "test-model"
-    assert chunks[0]["choices"][0]["delta"]["content"] == "Error: thinker exploded"
-    assert chunks[0]["choices"][0]["finish_reason"] == "error"
+    assert chunks == [{"error": "thinker exploded", "finished": True}]
     assert not stage1_called
 
 
@@ -292,11 +289,7 @@ async def test_generate_yields_error_when_no_shm_meta():
         with patch("dynamo.vllm.omni.stage_router.uuid.uuid4", return_value="r"):
             chunks = [c async for c in router.generate({"prompt": "x"}, context=None)]
 
-    assert chunks[0]["id"] == "r"
-    assert chunks[0]["choices"][0]["delta"]["content"] == (
-        "Error: No SHM output from final stage"
-    )
-    assert chunks[0]["choices"][0]["finish_reason"] == "error"
+    assert chunks == [{"error": "No SHM output from final stage", "finished": True}]
 
 
 # ── issue-007: router forwards raw request to stage 0 ────────────

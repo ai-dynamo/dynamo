@@ -21,7 +21,7 @@ from dynamo.llm import ModelInput, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
-from dynamo.vllm.omni.output_formatter import OutputFormatter, _error_chunk
+from dynamo.vllm.omni.output_formatter import OutputFormatter
 from dynamo.vllm.omni.stage_worker import _resolve_model_type
 from dynamo.vllm.omni.types import StageOutput
 from dynamo.vllm.omni.utils import shm_deserialize
@@ -101,20 +101,12 @@ class OmniStageRouter:
             stage_outputs.append(StageOutput.model_validate(raw_stage_output))
 
             if stage_outputs[-1].error:
-                yield _error_chunk(
-                    request_id,
-                    self.config.served_model_name or self.config.model,
-                    stage_outputs[-1].error,
-                )
+                yield {"error": stage_outputs[-1].error, "finished": True}
                 return
 
         final = stage_outputs[-1]
         if not final.shm_meta:
-            yield _error_chunk(
-                request_id,
-                self.config.served_model_name or self.config.model,
-                "No SHM output from final stage",
-            )
+            yield {"error": "No SHM output from final stage", "finished": True}
             return
 
         # Build formatting context from the original request

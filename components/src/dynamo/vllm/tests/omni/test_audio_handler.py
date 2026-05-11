@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# ruff: noqa: E402
 
 """Unit tests for AudioGenerationHandler."""
 
@@ -8,11 +7,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-pytest.importorskip("vllm_omni", reason="vLLM-Omni dependencies not available")
-
-from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
-from dynamo.common.utils.output_modalities import RequestType
-from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
+try:
+    from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
+    from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
+except ImportError:
+    pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 pytestmark = [
     pytest.mark.unit,
