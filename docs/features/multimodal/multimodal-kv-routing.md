@@ -34,23 +34,12 @@ Without MM-aware routing, the standard router treats image token blocks as opaqu
 
 ## Supported Model Families (Rust frontend path)
 
-The Rust frontend's MM-aware routing path supports the same VLM families that
-[lightseek `llm-multimodal`](https://github.com/lightseekorg/smg/tree/main/crates/multimodal)
-registers in `ImageProcessorRegistry::with_defaults()`.
-
-- Qwen3-VL
-- Qwen2.5-VL
-- Qwen2-VL
-- LLaVA-NeXT (v1.6+)
-- LLaVA-1.5
-- Phi-3-vision
-- Llama-4
-- Kimi-K2.5
-
-A model not in this list will silently fall back to text-prefix-only KV
-routing (image tokens aren't counted, blocks aren't MM-tagged) — the request
-still completes correctly, just without the prefix-cache benefit across
-images.
+The Rust frontend's MM-aware routing path supports whatever VLM families the
+lightseek `llm-multimodal` crate registers — see
+[`ImageProcessorRegistry::with_defaults()`](https://docs.rs/llm-multimodal/1.5.0/llm_multimodal/vision/image_processor/struct.ImageProcessorRegistry.html#method.with_defaults)
+for the up-to-date list. A model that crate doesn't recognize falls back to
+text-prefix-only KV routing (request still completes; just no prefix-cache
+benefit across images).
 
 The Python chat-processor variant doesn't share this constraint — it
 delegates to vLLM's own multimodal processor and works with any VLM vLLM
