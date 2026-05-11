@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
 try:
     from dynamo.vllm.omni.stage_worker import (
@@ -240,6 +241,46 @@ async def test_stage_connector_refs_with_processor():
     assert chunks[0]["stage_connector_refs"]["1"] == {"name": "ref1"}
 
 
+def test_process_stage_inputs_ignores_var_kwargs_for_dispatch():
+    """Source-output processors with **kwargs should not get a fourth positional arg."""
+    fetched_output = {"latents": [0.1, 0.2]}
+    processed_prompt = {"diffusion_input": True}
+    processor_calls = []
+
+    def mock_processor(source_outputs, original_prompt, requires_mm, **kwargs):
+        processor_calls.append(
+            {
+                "source_outputs": source_outputs,
+                "original_prompt": original_prompt,
+                "requires_mm": requires_mm,
+                "kwargs": kwargs,
+            }
+        )
+        return [processed_prompt]
+
+    worker = OmniStageWorker(
+        engine=_MockEngine(),
+        stage_config=_make_stage_config(
+            custom_process_input_func=None,
+            engine_input_source=[0],
+            requires_multimodal_data=False,
+        ),
+        connectors={},
+        stage_id=1,
+    )
+    worker._processor = mock_processor
+
+    prompt = worker._process_stage_inputs(
+        [_Proxy(engine_outputs=[fetched_output])],
+        {"prompt": "hi"},
+    )
+
+    assert len(processor_calls) == 1
+    assert processor_calls[0]["source_outputs"] == [fetched_output]
+    assert processor_calls[0]["kwargs"] == {}
+    assert prompt == [processed_prompt]
+
+
 @pytest.mark.asyncio
 async def test_stage_connector_refs_with_stage_list_processor():
     """Stage-list transition processors still receive proxies and sources."""
@@ -443,6 +484,15 @@ def test_prepare_connector_payload_promotes_request_multimodal_output():
     ]
 
 
+def test_prepare_connector_payload_preserves_empty_attr_positions():
+    output = SimpleNamespace(outputs=[SimpleNamespace(token_ids=[12])])
+
+    payload = _prepare_connector_payload(output)
+
+    assert payload["engine_inputs"] is output
+    assert payload["_dynamo_completion_output_attrs"] == [{}]
+
+
 def test_ensure_stage_connectors_adds_missing_shared_memory_edge(tmp_path):
     config_path = tmp_path / "glm_image.yaml"
     config_path.write_text(
@@ -461,9 +511,30 @@ stages:
 
     assert resolved_path != str(config_path)
     with open(resolved_path) as f:
-        resolved = f.read()
-    assert "connector_of_shared_memory" in resolved
-    assert "from_stage_0: connector_of_shared_memory" in resolved
+        resolved = yaml.safe_load(f)
+    assert "connector_of_shared_memory" in resolved["connectors"]
+    stage_1 = next(stage for stage in resolved["stages"] if stage["stage_id"] == 1)
+    assert stage_1["input_connectors"]["from_stage_0"] == ("connector_of_shared_memory")
+
+
+def test_ensure_stage_connectors_rejects_non_mapping_connectors(tmp_path):
+    config_path = tmp_path / "glm_image.yaml"
+    config_path.write_text(
+        """
+connectors:
+  - not-a-mapping
+stages:
+  - stage_id: 0
+  - stage_id: 1
+""".lstrip()
+    )
+    stage_configs = [
+        SimpleNamespace(stage_id=0, engine_input_source=[]),
+        SimpleNamespace(stage_id=1, engine_input_source=[0]),
+    ]
+
+    with pytest.raises(ValueError, match="connector_of_shared_memory"):
+        _ensure_stage_connectors(str(config_path), stage_configs)
 
 
 def test_stage_config_to_dict_includes_engine_input_source():

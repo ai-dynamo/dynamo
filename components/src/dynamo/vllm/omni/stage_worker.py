@@ -9,6 +9,7 @@ import importlib
 import inspect
 import logging
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator
@@ -284,9 +285,19 @@ class OmniStageWorker:
             raise RuntimeError(f"Stage {self.stage_id}: no processor configured")
 
         signature = inspect.signature(self._processor)
-        parameter_names = list(signature.parameters)
+        positional_params = [
+            parameter
+            for parameter in signature.parameters.values()
+            if parameter.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+        ]
+        parameter_names = [parameter.name for parameter in positional_params]
 
         if parameter_names[:2] == ["stage_list", "engine_input_source"]:
+            logger.debug(
+                "Stage %d: processor dispatch branch=stage_list parameters=%s",
+                self.stage_id,
+                parameter_names,
+            )
             return self._processor(
                 stage_list,
                 self._engine_input_source,
@@ -299,14 +310,32 @@ class OmniStageWorker:
             for stage_input in stage_list
             for output in (stage_input.engine_outputs or [])
         ]
-        if len(parameter_names) >= 4:
+        if _accepts_source_outputs_processor(parameter_names):
+            logger.debug(
+                "Stage %d: processor dispatch branch=source_outputs parameters=%s",
+                self.stage_id,
+                parameter_names,
+            )
+            if len(parameter_names) >= 4:
+                return self._processor(
+                    source_outputs,
+                    original_prompt,
+                    self._requires_mm,
+                    None,
+                )
             return self._processor(
                 source_outputs,
                 original_prompt,
                 self._requires_mm,
-                None,
             )
-        return self._processor(source_outputs, original_prompt, self._requires_mm)
+
+        raise TypeError(
+            f"Stage {self.stage_id}: unsupported processor signature for "
+            f"{self._processor!r}; expected stage-list parameters "
+            "('stage_list', 'engine_input_source', ...) or source-output "
+            "parameters ('source_outputs', 'original_prompt', ...), got "
+            f"{parameter_names}"
+        )
 
     def _fetch_stage_inputs(
         self, stage_connector_refs: dict[int, Any], request_id: str
@@ -510,7 +539,10 @@ def _ensure_stage_connectors(stage_configs_path: str, stage_configs: list[Any]) 
 
     connectors = deploy_config.setdefault("connectors", {})
     if not isinstance(connectors, dict):
-        return stage_configs_path
+        raise ValueError(
+            f"'connectors' in {stage_configs_path} must be a mapping to "
+            f"synthesize {connector_name}; got {type(connectors).__name__}"
+        )
     connectors.setdefault(
         connector_name,
         {
@@ -519,13 +551,12 @@ def _ensure_stage_connectors(stage_configs_path: str, stage_configs: list[Any]) 
         },
     )
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", prefix="dynamo_omni_stage_", suffix=".yaml", delete=False
-    ) as tmp:
+    tmp_dir = tempfile.mkdtemp(prefix=f"dynamo_omni_stage_{os.getpid()}_")
+    tmp_path = os.path.join(tmp_dir, "stage_config.yaml")
+    with open(tmp_path, "w") as tmp:
         yaml.safe_dump(deploy_config, tmp, sort_keys=False)
-        tmp_path = tmp.name
 
-    atexit.register(_cleanup_temp_stage_config, tmp_path)
+    atexit.register(_cleanup_temp_stage_config, tmp_dir)
     logger.info(
         "Synthesized default SharedMemoryConnector edges in %s from %s",
         tmp_path,
@@ -536,7 +567,10 @@ def _ensure_stage_connectors(stage_configs_path: str, stage_configs: list[Any]) 
 
 def _cleanup_temp_stage_config(path: str) -> None:
     try:
-        os.unlink(path)
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            os.unlink(path)
     except OSError:
         pass
 
@@ -545,7 +579,7 @@ def _prepare_connector_payload(engine_inputs: Any) -> Any:
     """Preserve dynamic CompletionOutput attrs that Omni's msgpack codec drops."""
     _promote_request_multimodal_output(engine_inputs)
     output_attrs = _collect_completion_output_attrs(engine_inputs)
-    if not output_attrs:
+    if len(output_attrs) == 0:
         return engine_inputs
     return {
         "engine_inputs": engine_inputs,
@@ -564,7 +598,7 @@ def _collect_completion_output_attrs(engine_inputs: Any) -> list[dict[str, Any]]
         if multimodal_output:
             attrs["multimodal_output"] = multimodal_output
         output_attrs.append(attrs)
-    return output_attrs if any(output_attrs) else []
+    return output_attrs
 
 
 def _promote_request_multimodal_output(engine_inputs: Any) -> None:
@@ -579,7 +613,7 @@ def _promote_request_multimodal_output(engine_inputs: Any) -> None:
 
     completion = outputs[0]
     if not getattr(completion, "multimodal_output", None):
-        setattr(completion, "multimodal_output", request_multimodal_output)
+        completion.multimodal_output = request_multimodal_output
 
 
 def _restore_completion_output_attrs(
@@ -587,13 +621,15 @@ def _restore_completion_output_attrs(
 ) -> None:
     if not isinstance(output_attrs, list):
         return
-    for output, attrs in zip(_iter_completion_outputs(engine_inputs), output_attrs):
+    for output, attrs in zip(
+        _iter_completion_outputs(engine_inputs), output_attrs, strict=False
+    ):
         if not isinstance(attrs, dict):
             continue
         if "cumulative_token_ids" in attrs:
-            setattr(output, "cumulative_token_ids", list(attrs["cumulative_token_ids"]))
+            output.cumulative_token_ids = list(attrs["cumulative_token_ids"])
         if "multimodal_output" in attrs:
-            setattr(output, "multimodal_output", attrs["multimodal_output"])
+            output.multimodal_output = attrs["multimodal_output"]
 
 
 def _ensure_cumulative_token_ids(engine_inputs: Any) -> None:
@@ -611,6 +647,14 @@ def _iter_completion_outputs(engine_inputs: Any):
     if not outputs:
         return []
     return list(outputs)
+
+
+def _accepts_source_outputs_processor(parameter_names: list[str]) -> bool:
+    if len(parameter_names) < 3:
+        return False
+    return parameter_names[:2] == ["source_outputs", "original_prompt"] and (
+        parameter_names[2] in {"requires_mm", "requires_multimodal_data"}
+    )
 
 
 def _create_engine(model: str, stage_config: Any, stage_type: str) -> StageEngine:

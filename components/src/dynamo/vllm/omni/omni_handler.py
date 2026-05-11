@@ -258,10 +258,10 @@ class OmniHandler(BaseOmniHandler):
         if text_prompt is None:
             raise ValueError("No user message found in chat completion request")
 
-        if any(
-            str(modality).lower() == "image"
-            for modality in (self.config.output_modalities or [])
-        ):
+        output_modalities = {
+            str(modality).lower() for modality in (self.config.output_modalities or [])
+        }
+        if "image" in output_modalities:
             width, height = image_generation_size_from_request(request)
             prompt = build_image_generation_prompt(
                 text_prompt,
