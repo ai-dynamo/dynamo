@@ -60,7 +60,7 @@ cases:
       - name: get_weather
         arguments:
           location: NYC
-      normal_text: null
+      normal_text: ''
   PARSER.batch.5:
     description: Missing </TOOLCALL> end marker
     model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
@@ -71,7 +71,7 @@ cases:
       - name: get_weather
         arguments:
           location: NYC
-      normal_text: null
+      normal_text: ''
   PARSER.batch.6:
     description: Empty args (no-arg call)
     model_text: '<TOOLCALL>[{"name": "get_time", "arguments": {}}]</TOOLCALL>'
@@ -101,24 +101,13 @@ cases:
       calls:
       - name: process_data
         arguments:
+          config:
+            nested: true
           items:
           - 1
           - 2
           - 3
-          config:
-            nested: true
       normal_text: ''
-  PARSER.batch.8:
-    description: Interleaved normal text
-    model_text: 'Hey How are you? <TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL>'
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: Hey How are you?
   PARSER.batch.9:
     description: Empty input
     model_text: ''

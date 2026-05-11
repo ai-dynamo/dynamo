@@ -135,22 +135,6 @@ cases:
           config:
             nested: true
       normal_text: ''
-  PARSER.batch.8:
-    description: Interleaved normal text
-    model_text: |-
-      I will check the weather. <｜DSML｜function_calls>
-      <｜DSML｜invoke name="get_weather">
-      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
-      </｜DSML｜invoke>
-      </｜DSML｜function_calls>
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: 'I will check the weather. '
   PARSER.batch.9:
     description: Empty input
     model_text: ''

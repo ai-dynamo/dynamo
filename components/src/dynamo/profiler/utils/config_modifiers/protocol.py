@@ -662,7 +662,7 @@ class BaseConfigModifier:
 
         In agg mode, the default config template may use a generic worker
         service name (e.g. ``TRTLLMWorker``) that does not match the disagg
-        naming convention (``TRTLLMDecodeWorker``).  We first try the standard
+        naming convention (``prefill`` / ``decode``).  We first try the standard
         DECODE lookup, then fall back to any non-Frontend/Planner service.
         """
         svc_name = cls._resolve_service_name(cfg, SubComponentType.DECODE)
