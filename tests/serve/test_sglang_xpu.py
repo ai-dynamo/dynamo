@@ -1,0 +1,556 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import dataclasses
+import logging
+import os
+from dataclasses import dataclass, field
+from typing import Optional
+
+import pytest
+
+from tests.serve.common import (
+    SERVE_TEST_DIR,
+    WORKSPACE_DIR,
+    params_with_model_mark,
+    run_serve_deployment,
+)
+from tests.serve.lora_utils import MinioLoraConfig
+from tests.utils.constants import DefaultPort
+from tests.utils.engine_process import EngineConfig
+from tests.utils.payload_builder import (
+    anthropic_messages_payload_default,
+    anthropic_messages_stream_payload_default,
+    chat_payload,
+    chat_payload_default,
+    completion_payload_default,
+    embedding_payload,
+    embedding_payload_default,
+    guided_decoding_chat_payload_default,
+    metric_payload_default,
+    responses_payload_default,
+    responses_stream_payload_default,
+)
+from tests.utils.payloads import (
+    ImageGenerationPayload,
+    LoraTestChatPayload,
+    VideoGenerationPayload,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _is_cuda13() -> bool:
+    v = os.environ.get("CUDA_VERSION", "")
+    return v.startswith("13")
+
+
+@dataclass
+class SGLangConfig(EngineConfig):
+    """Configuration for SGLang test scenarios"""
+
+    stragglers: list[str] = field(default_factory=lambda: ["SGLANG:EngineCore"])
+
+
+sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
+    WORKSPACE_DIR, "examples/backends/sglang"
+)
+REMOTE_VIDEO_TEST_URI = (
+    "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
+)
+
+# SGLang test configurations
+# NOTE: pytest.mark.xpu_1 tests take ~167s (2m 47s) total to run sequentially (with models pre-cached)
+# TODO: Now that these tests use dynamic ports and each config has a profiled_vram_gib marker,
+# optimize the runtime by bin-packing multiple engine deployments in parallel on the same GPU.
+# A future collector/launcher can sum profiled_vram_gib values to decide how many tests fit
+# concurrently without exceeding available VRAM.
+sglang_configs = {
+    "aggregated": SGLangConfig(
+        # Uses backend agg.sh (with metrics enabled) for testing standard
+        # aggregated deployment with metrics collection
+        name="aggregated",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.xpu_1,
+            pytest.mark.profiled_vram_gib(
+                3.7
+            ),  # actual peak at recommended token count
+            pytest.mark.requested_sglang_kv_tokens(
+                96
+            ),  # KV cache cap (2x safety over min=48)
+            pytest.mark.timeout(195),  # profiled 33s on RTX 6000 Ada
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload_default(max_tokens=48),
+            chat_payload(
+                "Name one color in a short sentence.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=16,
+                extra_body={"n": 2},
+                expected_num_choices=2,
+            ),
+            completion_payload_default(max_tokens=48),
+            responses_payload_default(max_tokens=48),
+            responses_stream_payload_default(max_tokens=48),
+            guided_decoding_chat_payload_default(),
+            metric_payload_default(min_num_requests=6, backend="sglang"),
+        ],
+    ),
+    "aggregated_unified": SGLangConfig(
+        name="aggregated_unified",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        script_args=["--unified"],
+        marks=[
+            pytest.mark.xpu_1,
+            pytest.mark.profiled_vram_gib(3.7),
+            pytest.mark.requested_sglang_kv_tokens(96),
+            pytest.mark.timeout(195),
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload_default(max_tokens=48),
+            completion_payload_default(max_tokens=48),
+            guided_decoding_chat_payload_default(max_tokens=48),
+        ],
+    ),
+    "kv_events": SGLangConfig(
+        name="kv_events",
+        directory=sglang_dir,
+        script_name="agg_router.sh",
+        marks=[
+            pytest.mark.xpu_2,
+            pytest.mark.pre_merge,
+        ],  # TODO(xpu_2): profile max_vram, timeout, add markers (separate PR)
+        model="Qwen/Qwen3-0.6B",
+        env={
+            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
+        },
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload_default(
+                expected_log=[
+                    r"ZMQ listener .* received batch with \d+ events \(engine_seq=\d+(?:, [^)]*)?\)",
+                    r"Event processor for worker_id \d+ processing event: Stored\(",
+                    r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
+                ]
+            )
+        ],
+    ),
+    "template_verification": SGLangConfig(
+        # Tests custom jinja template preprocessing by verifying the template
+        # marker 'CUSTOM_TEMPLATE_ACTIVE|' is applied to user messages.
+        # The backend (launch/template_verifier.*) checks for this marker
+        # and returns "Successfully Applied Chat Template" if found.
+        # Uses SERVE_TEST_DIR (not sglang_dir) because template_verifier.sh/.py
+        # are test-specific mock scripts in tests/serve/launch/
+        name="template_verification",
+        directory=SERVE_TEST_DIR,  # special directory for test-specific scripts
+        script_name="template_verifier.sh",
+        marks=[
+            pytest.mark.xpu_1,
+            pytest.mark.profiled_vram_gib(0.0),  # no GPU model load
+            pytest.mark.timeout(120),  # profiled 12s on RTX 6000 Ada
+            pytest.mark.pre_merge,
+            pytest.mark.nightly,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload_default(
+                expected_response=["Successfully Applied Chat Template"]
+            )
+        ],
+    ),
+    "multimodal_agg_qwen": SGLangConfig(
+        # Tests single-process aggregated multimodal inference using DecodeWorkerHandler
+        # with in-process vision encoding (no separate encode worker)
+        name="multimodal_agg_qwen",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.skip(
+                reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2602"
+            ),
+            pytest.mark.xpu_1,
+            pytest.mark.profiled_vram_gib(
+                19.1
+            ),  # actual peak at recommended token count
+            pytest.mark.requested_sglang_kv_tokens(
+                768
+            ),  # KV cache cap (2x safety over min=384)
+            pytest.mark.timeout(182),  # profiled 30s on RTX 6000 Ada
+            pytest.mark.pre_merge,
+            pytest.mark.nightly,
+        ],
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
+        script_args=[
+            "--model-path",
+            "Qwen/Qwen2.5-VL-7B-Instruct",
+            "--chat-template",
+            "qwen2-vl",
+        ],
+        delayed_start=0,
+        timeout=360,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["image"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    "video_agg_qwen": SGLangConfig(
+        # Tests aggregated video inference using DecodeWorkerHandler
+        # with in-process vision encoding (no separate encode worker).
+        # Reuses agg_vision.sh because image and video share the same aggregated
+        # multimodal SGLang request path.
+        #
+        # VRAM is bounded via requested_sglang_kv_tokens (deterministic, parallel-safe)
+        # rather than --mem-fraction-static (fraction of GPU, not portable across GPU
+        # sizes and breaks the VRAM-aware scheduler).
+        name="video_agg_qwen",
+        directory=sglang_dir,
+        script_name="agg_vision.sh",
+        marks=[
+            pytest.mark.skip(
+                reason="XPU UR_RESULT_ERROR_DEVICE_LOST during decode"
+            ),
+            pytest.mark.xpu_1,
+            # Bisected with tests/utils/profile_pytest.py: minimum = 4368
+            # tokens, 2x safety = 8736. Peak 20.5 GiB at 8736 tokens. Without
+            # the cap, sglang's default 65% fraction allocates ~278k tokens
+            # and peaks at ~35 GiB (won't fit L4).
+            pytest.mark.profiled_vram_gib(20.5),
+            pytest.mark.requested_sglang_kv_tokens(8736),
+            pytest.mark.timeout(360),
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen2-VL-7B-Instruct",
+        script_args=[
+            "--model-path",
+            "Qwen/Qwen2-VL-7B-Instruct",
+        ],
+        timeout=360,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["guitar", "tablet", "draw"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    "embedding_agg": SGLangConfig(
+        name="embedding_agg",
+        directory=sglang_dir,
+        script_name="agg_embed.sh",
+        marks=[
+            pytest.mark.xpu_1,
+            pytest.mark.profiled_vram_gib(
+                9.8
+            ),  # actual peak at recommended token count
+            pytest.mark.requested_sglang_kv_tokens(
+                128
+            ),  # KV cache cap (2x safety over min=64)
+            # Qwen3-Embedding-4B (~8 GB bf16) cold-loads + warms up in 130-150s
+            # on L4 CI before the first request; the 24s "profiled" figure is
+            # the steady-state run only. 147s left no headroom for startup and
+            # blew up 100% of recent amd64 runs in `_check_url`. 300s aligns
+            # with sibling 4B-class agg configs in this file.
+            pytest.mark.timeout(300),  # profiled 24s on RTX 6000 Ada
+            pytest.mark.pre_merge,
+            pytest.mark.nightly,
+        ],
+        model="Qwen/Qwen3-Embedding-4B",
+        delayed_start=0,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            # Test default payload with multiple inputs
+            embedding_payload_default(
+                repeat_count=2,
+                expected_response=["Generated 2 embeddings with dimension"],
+            ),
+            # Test single string input
+            embedding_payload(
+                input_text="Hello, world!",
+                repeat_count=1,
+                expected_response=["Generated 1 embeddings with dimension"],
+            ),
+            # Test multiple string inputs
+            embedding_payload(
+                input_text=[
+                    "The quick brown fox jumps over the lazy dog.",
+                    "Machine learning is transforming technology.",
+                    "Natural language processing enables computers to understand text.",
+                ],
+                repeat_count=1,
+                expected_response=["Generated 3 embeddings with dimension"],
+            ),
+        ],
+    ),
+    "completions_only": SGLangConfig(
+        name="completions_only",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.xpu_1,
+            pytest.mark.profiled_vram_gib(
+                14.7
+            ),  # actual peak at recommended token count
+            pytest.mark.requested_sglang_kv_tokens(
+                64
+            ),  # KV cache cap (2x safety over min=32)
+            pytest.mark.timeout(341),  # profiled 57s on RTX 6000 Ada
+            pytest.mark.post_merge,
+        ],
+        model="deepseek-ai/deepseek-llm-7b-base",
+        script_args=[
+            "--model-path",
+            "deepseek-ai/deepseek-llm-7b-base",
+            "--dyn-endpoint-types",
+            "completions",
+        ],
+        request_payloads=[
+            completion_payload_default(max_tokens=32),
+        ],
+    ),
+    # ── Diffusion pre_merge smoke tests ─────────────────────────────────
+    "diffusion_t2i_z_image_turbo": SGLangConfig(
+        name="diffusion_t2i_z_image_turbo",
+        directory=sglang_dir,
+        script_name="image_diffusion.sh",
+        script_args=["--model-path", "Tongyi-MAI/Z-Image-Turbo"],
+        marks=[
+            pytest.mark.xpu_1,
+            pytest.mark.profiled_vram_gib(19.3),
+            pytest.mark.timeout(240),
+            pytest.mark.nightly,
+        ],
+        model="Tongyi-MAI/Z-Image-Turbo",
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            ImageGenerationPayload(
+                body={
+                    "prompt": "A red apple on a white table",
+                    "size": "512x512",
+                    "response_format": "url",
+                    "nvext": {"num_inference_steps": 4},
+                },
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
+    "diffusion_t2v_wan_1_3b": SGLangConfig(
+        name="diffusion_t2v_wan_1_3b",
+        directory=sglang_dir,
+        script_name="text-to-video-diffusion.sh",
+        script_args=[
+            "--wan-size",
+            "1b",
+            "--num-inference-steps",
+            "3",
+            "--num-frames",
+            "9",
+            "--height",
+            "256",
+            "--width",
+            "256",
+        ],
+        marks=[
+            pytest.mark.xpu_1,
+            pytest.mark.profiled_vram_gib(17.6),
+            pytest.mark.timeout(180),
+            pytest.mark.nightly,
+        ],
+        model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            VideoGenerationPayload(
+                body={
+                    "prompt": "A dog running on a beach",
+                    "size": "256x256",
+                    "response_format": "url",
+                    "nvext": {
+                        "num_inference_steps": 3,
+                        "num_frames": 9,
+                    },
+                },
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
+    "anthropic_messages": SGLangConfig(
+        name="anthropic_messages",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.xpu_1,
+            pytest.mark.post_merge,
+            pytest.mark.timeout(240),
+            pytest.mark.skip(reason="DYN-2261"),
+            # TODO: profile once DYN-2261 is fixed (uses agg.sh, profiler works)
+        ],
+        model="Qwen/Qwen3-0.6B",
+        env={"DYN_ENABLE_ANTHROPIC_API": "1"},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            anthropic_messages_payload_default(),
+            anthropic_messages_stream_payload_default(),
+        ],
+    ),
+}
+
+
+@pytest.fixture(params=params_with_model_mark(sglang_configs))
+def sglang_config_test(request):
+    """Fixture that provides different SGLang test configurations"""
+    return sglang_configs[request.param]
+
+
+@pytest.mark.e2e
+@pytest.mark.sglang
+# Use 2 system ports because some `sglang_configs` validate metrics on multiple ports.
+# This test iterates over all configs via `sglang_config_test`.
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_sglang_deployment(
+    sglang_config_test,
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    num_system_ports,
+    predownload_models,
+):
+    """Test SGLang deployment scenarios using common helpers"""
+    assert (
+        num_system_ports >= 2
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    config = dataclasses.replace(
+        sglang_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+# ── LoRA Tests ──────────────────────────────────────────────────────────────
+
+lora_dir = os.path.join(sglang_dir, "launch/lora")
+
+
+def lora_chat_payload(
+    lora_name: str,
+    s3_uri: str,
+    system_port: int = DefaultPort.SYSTEM1.value,
+    repeat_count: int = 2,
+    expected_response: Optional[list] = None,
+    expected_log: Optional[list] = None,
+    max_tokens: int = 100,
+    temperature: float = 0.0,
+) -> LoraTestChatPayload:
+    """Create a LoRA-enabled chat payload for testing"""
+    return LoraTestChatPayload(
+        body={
+            "model": lora_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "What is deep learning? Answer in one sentence.",
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        },
+        lora_name=lora_name,
+        s3_uri=s3_uri,
+        system_port=system_port,
+        repeat_count=repeat_count,
+        expected_response=expected_response
+        or ["learning", "neural", "network", "AI", "model"],
+        expected_log=expected_log or [],
+    )
+
+
+@pytest.mark.sglang
+@pytest.mark.e2e
+@pytest.mark.xpu_1
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.profiled_vram_gib(4.7)
+@pytest.mark.requested_sglang_kv_tokens(2848)
+@pytest.mark.timeout(158)
+@pytest.mark.pre_merge
+def test_sglang_lora_aggregated(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    minio_lora_service,
+    dynamo_dynamic_ports,
+):
+    """
+    Test LoRA inference with aggregated SGLang deployment.
+
+    This test:
+    1. Uses MinIO fixture to provide S3-compatible storage with uploaded LoRA
+    2. Starts SGLang with LoRA support enabled
+    3. Loads the LoRA adapter via system API
+    4. Runs inference with the LoRA model
+    """
+    minio_config: MinioLoraConfig = minio_lora_service
+
+    lora_payload = lora_chat_payload(
+        lora_name=minio_config.lora_name,
+        s3_uri=minio_config.get_s3_uri(),
+        system_port=DefaultPort.SYSTEM1.value,
+        repeat_count=2,
+    )
+
+    config = SGLangConfig(
+        name="test_sglang_lora_aggregated",
+        directory=sglang_dir,
+        script_name="lora/agg_lora.sh",
+        marks=[],
+        model="Qwen/Qwen3-0.6B",
+        timeout=158,
+        env=minio_config.get_env_vars(),
+        request_payloads=[lora_payload],
+    )
+
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(
+        config,
+        request,
+        ports=dynamo_dynamic_ports,
+        extra_env=minio_config.get_env_vars(),
+    )

@@ -359,9 +359,10 @@ def download_models(model_list=None, ignore_weights=False):
         )
 
         try:
+            dl_kwargs: dict = {}
             if ignore_weights:
                 # Weight file patterns to exclude (based on hub.rs implementation)
-                weight_patterns = [
+                dl_kwargs["ignore_patterns"] = [
                     "*.bin",
                     "*.safetensors",
                     "*.h5",
@@ -369,16 +370,29 @@ def download_models(model_list=None, ignore_weights=False):
                     "*.ckpt.index",
                 ]
 
-                # Download everything except weight files
-                snapshot_download(
-                    repo_id=model_id,
-                    ignore_patterns=weight_patterns,
-                )
-            else:
-                # Download the full model snapshot (includes all files)
-                snapshot_download(
-                    repo_id=model_id,
-                )
+            try:
+                snapshot_download(repo_id=model_id, **dl_kwargs)
+            except (ValueError, TypeError) as xet_err:
+                if "deprecated" in str(xet_err) or "unexpected keyword" in str(
+                    xet_err
+                ):
+                    # hf_xet API mismatch with huggingface_hub — retry with XET
+                    # disabled so snapshot_download falls back to plain HTTP.
+                    logging.warning(
+                        f"hf_xet incompatibility for {model_id}, "
+                        f"retrying with HF_HUB_DISABLE_XET=1: {xet_err}"
+                    )
+                    orig_xet = os.environ.get("HF_HUB_DISABLE_XET")
+                    os.environ["HF_HUB_DISABLE_XET"] = "1"
+                    try:
+                        snapshot_download(repo_id=model_id, **dl_kwargs)
+                    finally:
+                        if orig_xet is None:
+                            os.environ.pop("HF_HUB_DISABLE_XET", None)
+                        else:
+                            os.environ["HF_HUB_DISABLE_XET"] = orig_xet
+                else:
+                    raise
             logging.info(f"Successfully pre-downloaded: {model_id}")
 
         except Exception as exc:
