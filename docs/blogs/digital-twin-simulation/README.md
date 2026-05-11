@@ -67,8 +67,12 @@ cluster. The twin can ask whether a different topology, transfer path, batching
 policy, or backend configuration changes the best Router, Planner, or KVBM
 choice, then send only the strongest candidates to real-cluster validation.
 
-[placeholder: add simulated-time vs wall-time table and speedup figure for
-representative simulated workloads]
+As a scale reference, on an Apple M4 MacBook Air, the single-threaded Rust
+offline replay simulated the full 23,608-request Mooncake trace with four
+round-robin workers and 512-token trace and engine blocks in 1.80 seconds of
+wall time. The simulated serving window was 60.1 minutes, about 2,000x faster
+than real time. The replay loop is single-threaded by design; the intended
+scaling path is to run many independent replays in parallel.
 
 That gives Dynamo a practical loop for research, engineering scoping, and
 customer-facing sizing.
