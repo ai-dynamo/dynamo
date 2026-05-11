@@ -68,9 +68,9 @@ policy, or backend configuration changes the best Router, Planner, or KVBM
 choice, then send only the strongest candidates to real-cluster validation.
 
 As a scale reference, on an Apple M4 MacBook Air, the single-threaded Rust
-offline replay simulated the full 23,608-request Mooncake trace with four
-round-robin workers and 512-token trace and engine blocks in 1.80 seconds of
-wall time. The simulated serving window was 60.1 minutes, about 2,000x faster
+offline replay simulated the full 23,608-request Mooncake trace with eight
+round-robin workers and 512-token trace and engine blocks in 2.41 seconds of
+wall time. The simulated serving window was 60.1 minutes, about 1,500x faster
 than real time. The replay loop is single-threaded by design; the intended
 scaling path is to run many independent replays in parallel.
 
