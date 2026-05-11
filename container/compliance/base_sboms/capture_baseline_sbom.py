@@ -18,7 +18,7 @@ Compliance model (one level deep):
 
 Usage:
 
-  capture_base_sboms.py \\
+  capture_baseline_sbom.py \\
     --from vllm/vllm-openai:v0.12.0 \\
     --baseline nvcr.io/nvidia/cuda-dl-base:25.06-cuda12.9-devel-ubuntu24.04
 
@@ -445,7 +445,7 @@ def capture(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="capture_base_sboms",
+        prog="capture_baseline_sbom",
         description="Capture a baseline SBOM and verify a from-image is built on it.",
     )
     parser.add_argument(

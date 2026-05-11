@@ -15,7 +15,7 @@ runs three structural checks against the live registry:
      to a different upstream while keeping the from_image tag stable.
 
 Any one failing surfaces as build-blocking output with the action to
-take: rerun capture_base_sboms.py for the affected entry, and update
+take: rerun capture_baseline_sbom.py for the affected entry, and update
 manifest.json with the new digests.
 
 Resolution uses `docker buildx imagetools inspect --raw <ref>` and
@@ -43,7 +43,7 @@ from pathlib import Path
 # live in the same dir, so the bare module import works whether the
 # script is invoked as `python3 .../check_drift.py` or via `-m`.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from capture_base_sboms import (  # noqa: E402
+from capture_baseline_sbom import (  # noqa: E402
     resolve_index_digest,
     resolve_platform_layers,
 )
@@ -87,7 +87,7 @@ def check_entry(entry: dict) -> list[str]:
             f"{from_ref}: FROM-IMAGE DRIFT\n"
             f"      recorded: {entry['from_digest']}\n"
             f"      current : {from_current}\n"
-            f"      action  : rerun capture_base_sboms.py "
+            f"      action  : rerun capture_baseline_sbom.py "
             f"--from {from_ref} --baseline {baseline_ref}"
         )
 
@@ -105,7 +105,7 @@ def check_entry(entry: dict) -> list[str]:
             f"{baseline_ref}: BASELINE DRIFT (underneath {from_ref})\n"
             f"      recorded: {entry['baseline_digest']}\n"
             f"      current : {baseline_current}\n"
-            f"      action  : rerun capture_base_sboms.py "
+            f"      action  : rerun capture_baseline_sbom.py "
             f"--from {from_ref} --baseline {baseline_ref}"
         )
 
