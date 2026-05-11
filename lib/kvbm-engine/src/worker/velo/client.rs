@@ -61,7 +61,7 @@ impl WorkerTransfers for VeloWorkerClient {
         self.messenger.tracker().spawn_on(
             async move {
                 let result = velo
-                    .unary("kvbm.worker.local_transfer")?
+                    .unary(handler_names::LOCAL_TRANSFER)?
                     .raw_payload(bytes)
                     .instance(remote_instance)
                     .send()
@@ -112,7 +112,7 @@ impl WorkerTransfers for VeloWorkerClient {
             async move {
                 // Use unary instead of am_sync for explicit response handling
                 let result = velo
-                    .unary("kvbm.worker.remote_onboard")?
+                    .unary(handler_names::REMOTE_ONBOARD)?
                     .raw_payload(bytes)
                     .instance(remote_instance)
                     .send()
@@ -163,7 +163,7 @@ impl WorkerTransfers for VeloWorkerClient {
             async move {
                 // Use unary instead of am_sync for explicit response handling
                 let result = velo
-                    .unary("kvbm.worker.remote_offload")?
+                    .unary(handler_names::REMOTE_OFFLOAD)?
                     .raw_payload(bytes)
                     .instance(remote_instance)
                     .send()
@@ -207,7 +207,7 @@ impl WorkerTransfers for VeloWorkerClient {
         self.messenger.tracker().spawn_on(
             async move {
                 let result = velo
-                    .unary("kvbm.worker.connect_remote")?
+                    .unary(handler_names::CONNECT_REMOTE)?
                     .raw_payload(bytes)
                     .instance(remote_instance)
                     .send()
@@ -262,7 +262,54 @@ impl WorkerTransfers for VeloWorkerClient {
         self.messenger.tracker().spawn_on(
             async move {
                 let result = velo
-                    .unary("kvbm.worker.remote_onboard_for_instance")?
+                    .unary(handler_names::REMOTE_ONBOARD_FOR_INSTANCE)?
+                    .raw_payload(bytes)
+                    .instance(remote_instance)
+                    .send()
+                    .await;
+
+                match result {
+                    Ok(_) => event.trigger(),
+                    Err(e) => event.poison(e.to_string()),
+                }
+            },
+            self.messenger.runtime(),
+        );
+
+        Ok(TransferCompleteNotification::from_awaiter(awaiter))
+    }
+
+    fn execute_remote_onboard_for_instance_rank(
+        &self,
+        instance_id: InstanceId,
+        remote_rank: usize,
+        remote_logical_type: LogicalLayoutHandle,
+        src_block_ids: Vec<BlockId>,
+        dst: LogicalLayoutHandle,
+        dst_block_ids: Arc<[BlockId]>,
+        options: TransferOptions,
+    ) -> Result<TransferCompleteNotification> {
+        let message = ExecuteRemoteOnboardForInstanceRankMessage {
+            instance_id,
+            remote_rank,
+            remote_logical_type,
+            src_block_ids,
+            dst,
+            dst_block_ids: dst_block_ids.to_vec(),
+            options: SerializableTransferOptions::from(options),
+        };
+        let bytes = Bytes::from(serde_json::to_vec(&message)?);
+
+        let event = self.messenger.events().new_event()?;
+        let awaiter = self.messenger.events().awaiter(event.handle())?;
+
+        let velo = self.messenger.clone();
+        let remote_instance = self.remote;
+
+        self.messenger.tracker().spawn_on(
+            async move {
+                let result = velo
+                    .unary(handler_names::REMOTE_ONBOARD_FOR_INSTANCE_RANK)?
                     .raw_payload(bytes)
                     .instance(remote_instance)
                     .send()
@@ -297,7 +344,7 @@ impl Worker for VeloWorkerClient {
         // Use unary (not typed_unary) to avoid JSON serialization of bincode data
         let unary_result = self
             .messenger
-            .unary("kvbm.worker.export_metadata")?
+            .unary(handler_names::EXPORT_METADATA)?
             .instance(self.remote)
             .send();
 
@@ -314,7 +361,7 @@ impl Worker for VeloWorkerClient {
         // Use raw_payload to avoid JSON serialization of bincode data
         let unary_result = self
             .messenger
-            .unary("kvbm.worker.import_metadata")?
+            .unary(handler_names::IMPORT_METADATA)?
             .raw_payload(Bytes::from(metadata.as_bytes().to_vec()))
             .instance(self.remote)
             .send();
@@ -442,7 +489,7 @@ impl ObjectBlockOps for VeloWorkerClient {
 
         Box::pin(async move {
             let result = velo
-                .unary("kvbm.worker.object_has_blocks")
+                .unary(handler_names::OBJECT_HAS_BLOCKS)
                 .ok()
                 .map(|u| u.raw_payload(bytes).instance(remote).send());
 
@@ -483,7 +530,7 @@ impl ObjectBlockOps for VeloWorkerClient {
 
         Box::pin(async move {
             let result = velo
-                .unary("kvbm.worker.object_put_blocks")
+                .unary(handler_names::OBJECT_PUT_BLOCKS)
                 .ok()
                 .map(|u| u.raw_payload(bytes).instance(remote).send());
 
@@ -525,7 +572,7 @@ impl ObjectBlockOps for VeloWorkerClient {
 
         Box::pin(async move {
             let result = velo
-                .unary("kvbm.worker.object_get_blocks")
+                .unary(handler_names::OBJECT_GET_BLOCKS)
                 .ok()
                 .map(|u| u.raw_payload(bytes).instance(remote).send());
 

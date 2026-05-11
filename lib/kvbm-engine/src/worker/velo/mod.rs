@@ -39,6 +39,28 @@ mod service;
 pub use client::VeloWorkerClient;
 pub use service::{VeloWorkerService, VeloWorkerServiceBuilder};
 
+/// Canonical handler names for the Velo RPCs this worker exposes.
+///
+/// Centralising these as constants keeps the client (`client.rs`) and
+/// service (`service.rs`) in lock-step — a rename or addition lands in
+/// exactly one place and the compiler enforces both sides see the same
+/// string. Adding a new RPC: add a const here, register a handler in
+/// `service.rs`, and use the const at the call site in `client.rs`.
+pub(crate) mod handler_names {
+    pub const LOCAL_TRANSFER: &str = "kvbm.worker.local_transfer";
+    pub const REMOTE_ONBOARD: &str = "kvbm.worker.remote_onboard";
+    pub const REMOTE_OFFLOAD: &str = "kvbm.worker.remote_offload";
+    pub const IMPORT_METADATA: &str = "kvbm.worker.import_metadata";
+    pub const EXPORT_METADATA: &str = "kvbm.worker.export_metadata";
+    pub const CONNECT_REMOTE: &str = "kvbm.worker.connect_remote";
+    pub const REMOTE_ONBOARD_FOR_INSTANCE: &str = "kvbm.worker.remote_onboard_for_instance";
+    pub const REMOTE_ONBOARD_FOR_INSTANCE_RANK: &str =
+        "kvbm.worker.remote_onboard_for_instance_rank";
+    pub const OBJECT_HAS_BLOCKS: &str = "kvbm.worker.object_has_blocks";
+    pub const OBJECT_PUT_BLOCKS: &str = "kvbm.worker.object_put_blocks";
+    pub const OBJECT_GET_BLOCKS: &str = "kvbm.worker.object_get_blocks";
+}
+
 use super::DirectWorker;
 use super::*;
 use kvbm_common::KvbmTransferRoute;
@@ -148,6 +170,20 @@ struct ConnectRemoteMessage {
 #[derive(Serialize, Deserialize)]
 struct ExecuteRemoteOnboardForInstanceMessage {
     instance_id: InstanceId,
+    remote_logical_type: LogicalLayoutHandle,
+    src_block_ids: Vec<BlockId>,
+    dst: LogicalLayoutHandle,
+    dst_block_ids: Vec<BlockId>,
+    options: SerializableTransferOptions,
+}
+
+/// Rank-aware variant for AB-1c. Targets a specific remote rank under
+/// `instance_id` so the worker can resolve via its
+/// `remote_handles_rank` map and serve asymmetric-TP pulls.
+#[derive(Serialize, Deserialize)]
+struct ExecuteRemoteOnboardForInstanceRankMessage {
+    instance_id: InstanceId,
+    remote_rank: usize,
     remote_logical_type: LogicalLayoutHandle,
     src_block_ids: Vec<BlockId>,
     dst: LogicalLayoutHandle,

@@ -94,18 +94,30 @@ pub struct PhysicalWorker {
     #[builder(default, setter(strip_option))]
     g3_handle: Option<LayoutHandle>,
 
-    /// Remote handle mappings for peer-to-peer transfers.
+    /// Remote handle mappings for peer-to-peer transfers (legacy, no rank).
     /// Key: (InstanceId, LogicalLayoutHandle) → remote LayoutHandle
     ///
-    /// Populated by `connect_remote` when this worker imports metadata from
-    /// a peer instance. Used by `execute_remote_onboard_for_instance` to
-    /// resolve logical handles to physical handles for RDMA transfers.
+    /// Populated by `connect_remote` for every peer regardless of whether
+    /// a [`ParallelismDescriptor`] was stamped. Used by the legacy
+    /// `execute_remote_onboard_for_instance` path (one-remote-per-instance,
+    /// suitable for symmetric same-rank dispatch).
     ///
-    /// Note: This is per-instance mapping (no rank), suitable for single-worker
-    /// scenarios. For multi-worker asymmetric TP, use CoordinatedWorker's
-    /// rank-aware remote_handles instead.
+    /// For cross-leader asymmetric TP, see `remote_handles_rank` below.
     #[builder(default = "RwLock::new(HashMap::new())")]
     remote_handles: RwLock<HashMap<(InstanceId, LogicalLayoutHandle), LayoutHandle>>,
+
+    /// Rank-aware remote handle mappings for cross-parallelism dispatch (AB-1c).
+    /// Key: (InstanceId, REMOTE rank, LogicalLayoutHandle) → remote LayoutHandle
+    ///
+    /// Populated by `connect_remote` whenever the inbound metadata carries
+    /// a stamped [`ParallelismDescriptor`] — the descriptor's `rank` field
+    /// is the source of truth. Looked up by
+    /// `execute_remote_onboard_for_instance_rank` (AB-1c) so the worker can
+    /// target a specific remote rank under asymmetric TP. Coexists with
+    /// `remote_handles` so the legacy per-instance path stays available
+    /// for callers that haven't yet adopted rank-aware dispatch.
+    #[builder(default = "RwLock::new(HashMap::new())")]
+    remote_handles_rank: RwLock<HashMap<(InstanceId, usize, LogicalLayoutHandle), LayoutHandle>>,
 
     // =========================================================================
     // Object Storage State
@@ -669,11 +681,26 @@ impl WorkerTransfers for PhysicalWorker {
         // Unpack to extract logical type info
         let unpacked = meta.unpack()?;
 
-        // Store mappings
+        // Store mappings in the legacy per-instance map (one entry per
+        // (instance, tier) — wins-last under repeated imports for the
+        // same instance).
         {
             let mut handles = self.remote_handles.write().unwrap();
             for descriptor in &unpacked.layouts {
                 handles.insert((instance_id, descriptor.logical_type), descriptor.handle);
+            }
+        }
+
+        // Also populate the rank-aware map when the inbound metadata
+        // carries a stamped ParallelismDescriptor. This is what
+        // execute_remote_onboard_for_instance_rank (AB-1c) reads.
+        if let Some(parallelism) = unpacked.parallelism.as_ref() {
+            let mut by_rank = self.remote_handles_rank.write().unwrap();
+            for descriptor in &unpacked.layouts {
+                by_rank.insert(
+                    (instance_id, parallelism.rank, descriptor.logical_type),
+                    descriptor.handle,
+                );
             }
         }
 
@@ -712,6 +739,43 @@ impl WorkerTransfers for PhysicalWorker {
                     "No remote {:?} handle for instance {}",
                     remote_logical_type,
                     instance_id
+                )
+            })?;
+
+        let descriptor = RemoteDescriptor::Layout {
+            handle: *remote_handle,
+            block_ids: src_block_ids,
+        };
+
+        self.execute_remote_onboard(
+            descriptor,
+            dst,
+            dst_block_ids,
+            self.annotate_options(options, Self::local_route(remote_logical_type, dst)),
+        )
+    }
+
+    fn execute_remote_onboard_for_instance_rank(
+        &self,
+        instance_id: InstanceId,
+        remote_rank: usize,
+        remote_logical_type: LogicalLayoutHandle,
+        src_block_ids: Vec<BlockId>,
+        dst: LogicalLayoutHandle,
+        dst_block_ids: Arc<[BlockId]>,
+        options: TransferOptions,
+    ) -> Result<TransferCompleteNotification> {
+        let handles = self.remote_handles_rank.read().unwrap();
+        let remote_handle = handles
+            .get(&(instance_id, remote_rank, remote_logical_type))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "execute_remote_onboard_for_instance_rank: no remote {:?} handle for \
+                     (instance={}, rank={}); peer must have stamped a ParallelismDescriptor \
+                     and connect_remote must have completed",
+                    remote_logical_type,
+                    instance_id,
+                    remote_rank,
                 )
             })?;
 
