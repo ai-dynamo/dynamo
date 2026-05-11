@@ -628,6 +628,8 @@ def _test_remote_indexer_decisions(
                 kv_python_router=kv_router,
                 model_name=model_name,
                 token_ids=token_ids,
+                initial_wait=1.0,
+                max_retries=8,
                 stop_conditions={
                     "ignore_eos": True,
                     "max_tokens": 2,
@@ -698,13 +700,60 @@ def _test_python_router_bindings(
     # Create KvRouterConfig with default settings
     kv_router_config = KvRouterConfig()
 
-    # Create KvRouter Python object
-    with min_initial_workers_env(num_workers):
-        kv_router = KvRouter(
-            endpoint=endpoint,
-            block_size=block_size,
-            kv_router_config=kv_router_config,
-        )
+    # Run KvRouter in a thread with worker liveness polling (same pattern
+    # as _test_router_decisions) to avoid infinite FFI block if a worker dies.
+    import threading
+
+    kv_router = None
+    kv_router_error = None
+
+    def _create_router():
+        nonlocal kv_router, kv_router_error
+        try:
+            kv_router = KvRouter(
+                endpoint=endpoint,
+                block_size=block_size,
+                kv_router_config=kv_router_config,
+            )
+        except Exception as exc:
+            kv_router_error = exc
+
+    # Set the env var in the main thread so it is always restored,
+    # even if the daemon thread is abandoned on timeout.
+    _prev_min_workers = os.environ.get(MIN_INITIAL_WORKERS_ENV)
+    os.environ[MIN_INITIAL_WORKERS_ENV] = str(num_workers)
+    try:
+        router_thread = threading.Thread(target=_create_router, daemon=True)
+        router_thread.start()
+
+        import time as _time
+
+        _router_start = _time.monotonic()
+        _ROUTER_INIT_TIMEOUT = 120  # seconds
+
+        while router_thread.is_alive():
+            router_thread.join(timeout=2)
+            elapsed = _time.monotonic() - _router_start
+            if elapsed > _ROUTER_INIT_TIMEOUT:
+                raise RuntimeError(
+                    f"KvRouter initialization timed out after {elapsed:.0f}s "
+                    f"waiting for {num_workers} workers to register."
+                )
+            if hasattr(engine_workers, "worker_processes"):
+                for idx, wp in enumerate(engine_workers.worker_processes):
+                    if wp.proc and wp.proc.poll() is not None:
+                        raise RuntimeError(
+                            f"Worker {idx} exited with code {wp.proc.returncode} "
+                            f"while waiting for KvRouter to find {num_workers} workers."
+                        )
+    finally:
+        if _prev_min_workers is None:
+            os.environ.pop(MIN_INITIAL_WORKERS_ENV, None)
+        else:
+            os.environ[MIN_INITIAL_WORKERS_ENV] = _prev_min_workers
+
+    if kv_router_error is not None:
+        raise kv_router_error
 
     logger.info("Created KvRouter Python object")
 
@@ -730,6 +779,8 @@ def _test_python_router_bindings(
             kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids,
+            initial_wait=1.0,
+            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,  # Don't stop on EOS token
                 "max_tokens": 20,  # Generate exactly 20 tokens
@@ -750,6 +801,8 @@ def _test_python_router_bindings(
             kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids[:50],  # Use fewer tokens for second test,
+            initial_wait=1.0,
+            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,  # Don't stop on EOS token
                 "max_tokens": 10,  # Generate exactly 10 tokens for the second test
@@ -771,6 +824,8 @@ def _test_python_router_bindings(
             kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids[:30],  # Use fewer tokens for third test,
+            initial_wait=1.0,
+            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,  # Don't stop on EOS token
                 "max_tokens": 5,  # Generate exactly 5 tokens for the third test
@@ -1531,6 +1586,8 @@ def _test_router_indexers_sync(
                             kv_python_router=router,
                             model_name=model_name,
                             token_ids=request_tokens,
+                            initial_wait=1.0,
+                            max_retries=8,
                             stop_conditions={
                                 "ignore_eos": True,  # Don't stop on EOS token
                                 "max_tokens": 10,  # Generate exactly 10 tokens
@@ -2327,13 +2384,70 @@ def _test_router_decisions(
             if router_aic_config is not None
             else None
         )
-        with min_initial_workers_env(expected_num_instances):
-            kv_router = KvRouter(
-                endpoint=endpoint,
-                block_size=block_size,
-                kv_router_config=kv_router_config,
-                aic_perf_config=aic_perf_config,
-            )
+
+        # KvRouter() is a blocking Rust FFI call that waits for
+        # min_initial_workers to register.  If a worker crashes during engine
+        # init (e.g. ZMQ port conflict, GPU OOM) the call blocks forever
+        # because pytest signal-based timeout cannot interrupt Rust FFI.
+        #
+        # Run KvRouter() in a daemon thread; the main thread polls worker
+        # liveness every 2 seconds and raises immediately if a worker dies.
+        import threading
+
+        kv_router = None
+        kv_router_error = None
+
+        def _create_router():
+            nonlocal kv_router, kv_router_error
+            try:
+                kv_router = KvRouter(
+                    endpoint=endpoint,
+                    block_size=block_size,
+                    kv_router_config=kv_router_config,
+                    aic_perf_config=aic_perf_config,
+                )
+            except Exception as exc:
+                kv_router_error = exc
+
+        # Set the env var in the main thread so it is always restored,
+        # even if the daemon thread is abandoned on timeout.
+        _prev_min_workers = os.environ.get(MIN_INITIAL_WORKERS_ENV)
+        os.environ[MIN_INITIAL_WORKERS_ENV] = str(expected_num_instances)
+        try:
+            router_thread = threading.Thread(target=_create_router, daemon=True)
+            router_thread.start()
+
+            import time as _time
+
+            _router_start = _time.monotonic()
+            _ROUTER_INIT_TIMEOUT = 120  # seconds
+
+            while router_thread.is_alive():
+                router_thread.join(timeout=2)
+                elapsed = _time.monotonic() - _router_start
+                if elapsed > _ROUTER_INIT_TIMEOUT:
+                    raise RuntimeError(
+                        f"KvRouter initialization timed out after {elapsed:.0f}s "
+                        f"waiting for {expected_num_instances} workers to register. "
+                        f"A worker may have crashed during startup (e.g. port "
+                        f"conflict, GPU OOM) without fully exiting."
+                    )
+                if hasattr(engine_workers, "worker_processes"):
+                    for idx, wp in enumerate(engine_workers.worker_processes):
+                        if wp.proc and wp.proc.poll() is not None:
+                            raise RuntimeError(
+                                f"Worker {idx} exited with code {wp.proc.returncode} "
+                                f"while waiting for KvRouter to find "
+                                f"{expected_num_instances} workers."
+                            )
+        finally:
+            if _prev_min_workers is None:
+                os.environ.pop(MIN_INITIAL_WORKERS_ENV, None)
+            else:
+                os.environ[MIN_INITIAL_WORKERS_ENV] = _prev_min_workers
+
+        if kv_router_error is not None:
+            raise kv_router_error
 
         # Wait for workers to be ready and get their instance IDs
         worker_ids = await wait_for_workers_ready(
@@ -2414,6 +2528,8 @@ def _test_router_decisions(
                 kv_python_router=kv_router,
                 model_name=model_name,
                 token_ids=token_ids,
+                initial_wait=1.0,
+                max_retries=8,
                 stop_conditions={
                     "ignore_eos": True,
                     "max_tokens": 2,
