@@ -376,11 +376,21 @@ def collect_components(search_paths: list[Path]) -> list[Component]:
     return deduped
 
 
-def generate(search_paths: list[Path], output_dir: Path) -> list[Component]:
-    """Read METADATA from each search path, write NOTICES-Python.txt + python-deps.csv."""
+def generate(
+    search_paths: list[Path],
+    output_dir: Path,
+    subtract: set[tuple[str, str]] | None = None,
+) -> list[Component]:
+    """Read METADATA from each search path, write NOTICES-Python.txt + python-deps.csv.
+
+    When `subtract` is provided, components matching (name, version) are
+    filtered before writing — used to drop baseline-owned components.
+    """
     from . import common
 
     components = collect_components(search_paths)
+    if subtract:
+        components = common.subtract_baseline(components, subtract)
     common.write_notices(ECOSYSTEM, components, output_dir)
     common.write_deps_csv(ECOSYSTEM, components, output_dir)
     return components

@@ -30,6 +30,12 @@ def collect_components(yaml_path: Path, image_filter: str | None = None) -> list
 
 
 def generate(
-    yaml_path: Path, output_dir: Path, image_filter: str | None = None
+    yaml_path: Path,
+    output_dir: Path,
+    image_filter: str | None = None,
+    subtract: set[tuple[str, str]] | None = None,
 ) -> list[Component]:
+    del subtract  # accepted for orchestrator-API parity; native components
+    # are first-party from-source builds (CRIU, ucx, etc.) — never present
+    # in upstream baselines, so subtraction is a no-op by definition.
     raise NotImplementedError("Native generator not yet implemented")

@@ -100,10 +100,15 @@ COPY --from=builder /sbom-go.cdx.json /tmp/sbom-go.cdx.json
 # survives), ships no Python or Rust at runtime, and has no native sources of
 # its own. Base-image components (ca-certificates etc.) are NGC's responsibility
 # and tracked separately via the base-SBOM corpus.
+#
+# BASELINE_SBOM_FILE (optional, empty default): the slim CycloneDX SBOM
+# under /opt/compliance/base_sboms/ to subtract before writing NOTICES.
+ARG BASELINE_SBOM_FILE=""
 RUN python3 -m compliance.generators \
     --ecosystem go \
     --go-sbom /tmp/sbom-go.cdx.json \
     --output-dir /legal \
+    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
     -v
 RUN find /legal -name '*-deps.csv' -print0 | \
     xargs -0 -n1 -I {} python3 -m compliance.policy.validate \

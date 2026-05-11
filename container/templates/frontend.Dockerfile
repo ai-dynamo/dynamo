@@ -144,11 +144,15 @@ ENV PYTHONPATH=/opt
 # the rendered NOTICES-Go.txt accurately reflects EPP's Go module set.
 COPY --from=epp /sbom-go.cdx.json /tmp/sbom-go-epp.cdx.json
 
+# BASELINE_SBOM_FILE (optional, empty default): the slim CycloneDX SBOM
+# under /opt/compliance/base_sboms/ to subtract before writing NOTICES.
+ARG BASELINE_SBOM_FILE=""
 RUN python3 -m compliance.generators \
     --ecosystem python,rust,dpkg,go \
     --venv ${VIRTUAL_ENV} \
     --go-sbom /tmp/sbom-go-epp.cdx.json \
     --output-dir /legal \
+    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
     -v
 RUN find /legal -name '*-deps.csv' -print0 | \
     xargs -0 -n1 -I {} python3 -m compliance.policy.validate \

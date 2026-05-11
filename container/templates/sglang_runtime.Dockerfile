@@ -137,10 +137,15 @@ COPY --chown=root:0 container/compliance /opt/compliance
 ENV PYTHONPATH=/opt
 # Invoked ecosystems (rust today; python/dpkg are stubs that warn-but-don't-fail).
 # Excluded: go (no Go binaries), native (native_packages.yaml not yet on this branch).
+#
+# BASELINE_SBOM_FILE (optional, empty default): the slim CycloneDX SBOM
+# under /opt/compliance/base_sboms/ to subtract before writing NOTICES.
+ARG BASELINE_SBOM_FILE=""
 RUN python3 -m compliance.generators \
     --ecosystem python,rust,dpkg \
     --site-packages "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
     --output-dir /legal \
+    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
     -v
 RUN find /legal -name '*-deps.csv' -print0 | \
     xargs -0 -n1 -I {} python3 -m compliance.policy.validate \

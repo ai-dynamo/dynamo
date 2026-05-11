@@ -188,10 +188,17 @@ ENV PYTHONPATH=/opt
 # Excluded for dynamo-runtime:
 #   - go     : no Go binaries shipped (operator/snapshot/EPP only)
 #   - native : native_packages.yaml not yet on this branch
+#
+# BASELINE_SBOM_FILE (optional): the slim CycloneDX SBOM under
+# /opt/compliance/base_sboms/ to subtract before writing NOTICES. Empty
+# default = no subtraction. CI populates this from manifest.json once
+# the (from_image, baseline) pair for this template is captured.
+ARG BASELINE_SBOM_FILE=""
 RUN python3 -m compliance.generators \
     --ecosystem python,rust,dpkg \
     --venv ${VIRTUAL_ENV} \
     --output-dir /legal \
+    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
     -v
 # Validate every *-deps.csv against licenses.toml. Non-zero exit fails the
 # build, which fails the workflow — uniform enforcement on PR / post-merge /

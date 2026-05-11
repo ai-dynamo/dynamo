@@ -227,10 +227,14 @@ COPY --from=builder /sbom-go.cdx.json /tmp/sbom-go.cdx.json
 # /legal/cuda-checkpoint/LICENSE in agent_pre — the native generator
 # is a stub awaiting native_packages.yaml. Once native lands, this
 # becomes --ecosystem go,dpkg,native.
+# BASELINE_SBOM_FILE (optional, empty default): the slim CycloneDX SBOM
+# under /opt/compliance/base_sboms/ to subtract before writing NOTICES.
+ARG BASELINE_SBOM_FILE=""
 RUN python3 -m compliance.generators \
     --ecosystem go,dpkg \
     --go-sbom /tmp/sbom-go.cdx.json \
     --output-dir /legal \
+    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
     -v
 RUN find /legal -name '*-deps.csv' -print0 | \
     xargs -0 -n1 -I {} python3 -m compliance.policy.validate \

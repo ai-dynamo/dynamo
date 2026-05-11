@@ -107,6 +107,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Image name to filter native_packages entries (required for native)",
     )
     parser.add_argument(
+        "--subtract-sbom",
+        type=Path,
+        default=None,
+        help=(
+            "Path to a baseline CycloneDX SBOM (typically a file from "
+            "container/compliance/base_sboms/). Components matching its "
+            "(name, version) set are filtered from generator output so "
+            "NOTICES attributes only what's installed above the baseline. "
+            "Pass this from the runtime's licenses stage; omit it for "
+            "from-image == baseline cases (no subtraction needed)."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
     args = parser.parse_args(argv)
@@ -123,6 +136,12 @@ def main(argv: list[str] | None = None) -> int:
         search_paths.append(args.venv)
     search_paths.extend(args.site_packages)
 
+    # Load the baseline subtraction set once, share across ecosystems.
+    subtract: set[tuple[str, str]] | None = None
+    if args.subtract_sbom is not None:
+        from . import common
+        subtract = common.load_subtract_keys(args.subtract_sbom)
+
     failures: list[str] = []
     for eco in args.ecosystem:
         eco_out = args.output_dir / eco
@@ -134,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     continue
                 from . import rust as gen
-                gen.generate(search_paths, eco_out)
+                gen.generate(search_paths, eco_out, subtract=subtract)
             elif eco == "python":
                 if not search_paths:
                     failures.append(
@@ -142,22 +161,27 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     continue
                 from . import python as gen  # type: ignore[no-redef]
-                gen.generate(search_paths, eco_out)
+                gen.generate(search_paths, eco_out, subtract=subtract)
             elif eco == "dpkg":
                 from . import dpkg as gen  # type: ignore[no-redef]
-                gen.generate(eco_out)
+                gen.generate(eco_out, subtract=subtract)
             elif eco == "go":
                 if not args.go_sbom:
                     failures.append("go: at least one --go-sbom is required")
                     continue
                 from . import go as gen  # type: ignore[no-redef]
-                gen.generate(args.go_sbom, eco_out)
+                gen.generate(args.go_sbom, eco_out, subtract=subtract)
             elif eco == "native":
                 if args.native_yaml is None or args.native_image is None:
                     failures.append("native: --native-yaml and --native-image are required")
                     continue
                 from . import native as gen  # type: ignore[no-redef]
-                gen.generate(args.native_yaml, eco_out, image_filter=args.native_image)
+                gen.generate(
+                    args.native_yaml,
+                    eco_out,
+                    image_filter=args.native_image,
+                    subtract=subtract,
+                )
             else:  # pragma: no cover - guarded by argparse type
                 failures.append(f"unknown ecosystem {eco}")
                 continue

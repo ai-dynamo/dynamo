@@ -454,10 +454,16 @@ USER root
 RUN mkdir -p /legal /sboms
 COPY --chown=root:0 container/compliance /opt/compliance
 ENV PYTHONPATH=/opt
+# BASELINE_SBOM_FILE (optional, empty default): the slim CycloneDX SBOM
+# under /opt/compliance/base_sboms/ to subtract before writing NOTICES.
+# CI populates this from manifest.json once the (from_image, baseline)
+# pair for this template is captured.
+ARG BASELINE_SBOM_FILE=""
 RUN python3 -m compliance.generators \
     --ecosystem python,rust,dpkg \
     --venv ${VIRTUAL_ENV} \
     --output-dir /legal \
+    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
     -v
 RUN find /legal -name '*-deps.csv' -print0 | \
     xargs -0 -n1 -I {} python3 -m compliance.policy.validate \

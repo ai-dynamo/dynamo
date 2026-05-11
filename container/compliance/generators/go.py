@@ -145,11 +145,21 @@ def collect_components(sbom_paths: list[Path]) -> list[Component]:
     return deduped
 
 
-def generate(sbom_paths: list[Path], output_dir: Path) -> list[Component]:
-    """Read one or more Go SBOMs, write NOTICES-Go.txt + go-deps.csv."""
+def generate(
+    sbom_paths: list[Path],
+    output_dir: Path,
+    subtract: set[tuple[str, str]] | None = None,
+) -> list[Component]:
+    """Read one or more Go SBOMs, write NOTICES-Go.txt + go-deps.csv.
+
+    When `subtract` is provided, components matching (name, version) are
+    filtered before writing — used to drop baseline-owned components.
+    """
     from . import common
 
     components = collect_components(sbom_paths)
+    if subtract:
+        components = common.subtract_baseline(components, subtract)
     common.write_notices(ECOSYSTEM, components, output_dir)
     common.write_deps_csv(ECOSYSTEM, components, output_dir)
     return components

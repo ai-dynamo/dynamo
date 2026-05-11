@@ -6,7 +6,11 @@ from __future__ import annotations
 
 import csv
 import dataclasses
+import json
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # SPDX-expression sentinel that means "we don't know what license this is".
 # Policy validation treats UNKNOWN as a deny by default (configurable via
@@ -93,6 +97,57 @@ def write_deps_csv(
                 [c.ecosystem, c.name, c.version, c.spdx, c.source_url or ""]
             )
     return csv_path
+
+
+def load_subtract_keys(sbom_path: Path) -> set[tuple[str, str]]:
+    """Load a baseline CycloneDX SBOM and return its (name, version) set.
+
+    Used by the licenses stage to subtract baseline components from
+    generator output so NOTICES attributes only what's above the baseline.
+    Components without name+version are skipped silently (syft sometimes
+    emits operating-system entries with no version).
+    """
+    if not sbom_path.is_file():
+        raise FileNotFoundError(sbom_path)
+    doc = json.loads(sbom_path.read_text(encoding="utf-8"))
+    keys: set[tuple[str, str]] = set()
+    for c in doc.get("components", []) or []:
+        name = c.get("name")
+        version = c.get("version")
+        if name and version is not None:
+            keys.add((name, str(version)))
+    logger.info(
+        "Loaded %d (name, version) keys for subtraction from %s",
+        len(keys),
+        sbom_path.name,
+    )
+    return keys
+
+
+def subtract_baseline(
+    components: list[Component], baseline_keys: set[tuple[str, str]]
+) -> list[Component]:
+    """Drop components whose (name, version) appears in baseline_keys.
+
+    Logs the count of dropped components so build logs make the
+    subtraction visible — auditors and engineers can see exactly how
+    many components NGC/baseline-owners are owning.
+    """
+    if not baseline_keys:
+        return components
+    kept: list[Component] = []
+    dropped = 0
+    for c in components:
+        if (c.name, c.version) in baseline_keys:
+            dropped += 1
+            continue
+        kept.append(c)
+    logger.info(
+        "Subtracted %d baseline components; %d remain for NOTICES",
+        dropped,
+        len(kept),
+    )
+    return kept
 
 
 def dedupe_by_name_version(components: list[Component]) -> list[Component]:
