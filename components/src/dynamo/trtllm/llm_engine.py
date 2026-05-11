@@ -183,19 +183,7 @@ class TrtllmLLMEngine(LLMEngine):
         )
 
         self._engine = TensorRTLLMEngine(self.engine_args, self.disaggregation_mode)
-        try:
-            await self._engine.initialize()
-        except Exception:
-            # Initialize failed — Worker won't call cleanup() on a failed
-            # start(), so tear the engine down here to avoid leaking it.
-            try:
-                await self._engine.cleanup()
-            except Exception:
-                logger.warning(
-                    "engine cleanup after start failure raised", exc_info=True
-                )
-            self._engine = None
-            raise
+        await self._engine.initialize()
 
         return EngineConfig(
             model=self.model_name,
