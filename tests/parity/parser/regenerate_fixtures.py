@@ -122,9 +122,30 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '<|tool_calls_section_begin|><|tool_call_begin|>functions.process_data:0<|tool_call_argument_begin|>{"items":[1,2,3],"config":{"nested":true}}<|tool_call_end|><|tool_calls_section_end|>',
         "tools": [_PROCESS_DATA_NESTED],
     },
-    ("kimi_k2", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
-        "text": 'I\'ll help you with that. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|> Let me check.',
+    # PARSER.batch.8 sub-case pilot. Once any sub-case is introduced, the bare
+    # `PARSER.batch.8` is retired — the four positional shapes below replace
+    # it. The flat-file `PARSER.batch.8` entry should be removed from
+    # kimi_k2/PARSER.batch.yaml after the regenerator runs.
+    ("kimi_k2", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_kimi_k2_tool_parser.py#L272",
+        "text": 'I\'ll check the weather. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("kimi_k2", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_kimi_k2_tool_parser.py#L435",
+        "text": '<|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("kimi_k2", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "text": 'I\'ll check the weather. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("kimi_k2", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": 'First check Dallas. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|> Then check NYC. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:1<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>',
         "tools": [_GET_WEATHER_LOC],
     },
     ("kimi_k2", "PARSER.batch.9"): {
@@ -173,9 +194,24 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n<parameter=unit>\nfahrenheit\n</parameter>\n</function>\n</tool_call>",
         "tools": [_GET_WEATHER_LOC_UNIT],
     },
-    ("qwen3_coder", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
-        "text": "I'll help you check the weather. <tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call> Let me get that information for you.",
+    ("qwen3_coder", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "text": "I will check the weather. <tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call>",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("qwen3_coder", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call> Let me know if you need more.",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("qwen3_coder", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "text": "I will check the weather. <tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call> Let me know if you need more.",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("qwen3_coder", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": "I will check the weather. <tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call> Then check LA weather. <tool_call>\n<function=get_weather>\n<parameter=location>\nLA\n</parameter>\n</function>\n</tool_call>",
         "tools": [_GET_WEATHER_LOC],
     },
     ("qwen3_coder", "PARSER.batch.9"): {
@@ -224,9 +260,25 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value><arg_key>unit</arg_key><arg_value>fahrenheit</arg_value></tool_call>",
         "tools": [_GET_WEATHER_LOC_UNIT],
     },
-    ("glm47", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
-        "text": "I'll check the weather. <tool_call>get_weather<arg_key>location</arg_key><arg_value>Paris</arg_value></tool_call>",
+    ("glm47", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_glm47_moe_tool_parser.py#L94",
+        "text": "I will check the weather. <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("glm47", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call> Let me know if you need more.",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("glm47", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "text": "I will check the weather. <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call> Let me know if you need more.",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("glm47", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": "I will check the weather. <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call> Then check LA weather. <tool_call>get_weather<arg_key>location</arg_key><arg_value>LA</arg_value></tool_call>",
         "tools": [_GET_WEATHER_LOC],
     },
     ("glm47", "PARSER.batch.9"): {
@@ -275,9 +327,24 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>process_data<｜tool▁sep｜>{"items":[1,2,3],"config":{"nested":true}}<｜tool▁call▁end｜><｜tool▁calls▁end｜>',
         "tools": [_PROCESS_DATA_NESTED],
     },
-    ("deepseek_v3_1", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
-        "text": 'The following tool call retrieves weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>',
+    ("deepseek_v3_1", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "text": 'I will check the weather. <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3_1", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3_1", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "text": 'I will check the weather. <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3_1", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": 'I will check the weather. <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜> Then check LA weather. <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"LA"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>',
         "tools": [_GET_WEATHER_LOC],
     },
     ("deepseek_v3_1", "PARSER.batch.9"): {
@@ -326,9 +393,25 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '<|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC","unit":"fahrenheit"}<|call|>',
         "tools": [_GET_WEATHER_LOC_UNIT],
     },
-    ("harmony", "PARSER.batch.8"): {
-        "description": "Interleaved analysis-channel text + tool call",
-        "text": '<|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|>',
+    ("harmony", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "text": 'I will check the weather. <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("harmony", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": '<|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("harmony", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_openai_tool_parser.py#L220",
+        "text": 'I will check the weather. <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("harmony", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": 'I will check the weather. <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|> Then check LA weather. <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"LA"}<|call|>',
         "tools": [_GET_WEATHER_LOC],
     },
     ("harmony", "PARSER.batch.9"): {
@@ -377,9 +460,25 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '<minimax:tool_call>\n<invoke name="get_weather">\n<parameter name="location">NYC</parameter>\n<parameter name="unit">fahrenheit</parameter>\n</invoke>\n</minimax:tool_call>',
         "tools": [_GET_WEATHER_LOC_UNIT],
     },
-    ("minimax_m2", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
-        "text": 'I\'ll help you check the weather. <minimax:tool_call>\n<invoke name="get_weather">\n<parameter name="location">Tokyo</parameter>\n</invoke>\n</minimax:tool_call>',
+    ("minimax_m2", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_minimax_m2_tool_parser.py#L126",
+        "text": 'I will check the weather. <minimax:tool_call>\n<invoke name="get_weather">\n<parameter name="location">NYC</parameter>\n</invoke>\n</minimax:tool_call>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("minimax_m2", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": '<minimax:tool_call>\n<invoke name="get_weather">\n<parameter name="location">NYC</parameter>\n</invoke>\n</minimax:tool_call> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("minimax_m2", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "text": 'I will check the weather. <minimax:tool_call>\n<invoke name="get_weather">\n<parameter name="location">NYC</parameter>\n</invoke>\n</minimax:tool_call> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("minimax_m2", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": 'I will check the weather. <minimax:tool_call>\n<invoke name="get_weather">\n<parameter name="location">NYC</parameter>\n</invoke>\n</minimax:tool_call> Then check LA weather. <minimax:tool_call>\n<invoke name="get_weather">\n<parameter name="location">LA</parameter>\n</invoke>\n</minimax:tool_call>',
         "tools": [_GET_WEATHER_LOC],
     },
     ("minimax_m2", "PARSER.batch.9"): {
@@ -428,9 +527,24 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '<TOOLCALL>[{"name": "process_data", "arguments": {"items": [1,2,3], "config": {"nested": true}}}]</TOOLCALL>',
         "tools": [_PROCESS_DATA_NESTED],
     },
-    ("nemotron_deci", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
-        "text": 'Hey How are you? <TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL>',
+    ("nemotron_deci", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "text": 'I will check the weather. <TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("nemotron_deci", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("nemotron_deci", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "text": 'I will check the weather. <TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("nemotron_deci", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": 'I will check the weather. <TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL> Then check LA weather. <TOOLCALL>[{"name": "get_weather", "arguments": {"location": "LA"}}]</TOOLCALL>',
         "tools": [_GET_WEATHER_LOC],
     },
     ("nemotron_deci", "PARSER.batch.9"): {
@@ -481,9 +595,24 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '[process_data(items=[1, 2, 3], config={"nested": True})]',
         "tools": [_PROCESS_DATA_NESTED],
     },
-    ("pythonic", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
-        "text": 'Hey yo ! [get_weather(location="NYC")] Hey yo',
+    ("pythonic", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "text": 'I will check the weather. [get_weather(location="NYC")]',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("pythonic", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": '[get_weather(location="NYC")] Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("pythonic", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "text": 'I will check the weather. [get_weather(location="NYC")] Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("pythonic", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": 'I will check the weather. [get_weather(location="NYC")] Then check LA weather. [get_weather(location="LA")]',
         "tools": [_GET_WEATHER_LOC],
     },
     ("pythonic", "PARSER.batch.9"): {
@@ -534,9 +663,25 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": "<|tool_call>call:process_data{items:[1,2,3],config:{nested:true}}<tool_call|>",
         "tools": [_PROCESS_DATA_NESTED],
     },
-    ("gemma4", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
-        "text": 'I will check that. <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|> Done.',
+    ("gemma4", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L194",
+        "text": 'I will check the weather. <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("gemma4", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": '<|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("gemma4", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "text": 'I will check the weather. <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("gemma4", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": 'I will check the weather. <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|> Then check LA weather. <|tool_call>call:get_weather{location:<|"|>LA<|"|>}<tool_call|>',
         "tools": [_GET_WEATHER_LOC],
     },
     ("gemma4", "PARSER.batch.9"): {
@@ -588,9 +733,25 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>process_data\n```json\n{"items": [1, 2, 3], "config": {"nested": true}}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>',
         "tools": [_PROCESS_DATA_NESTED],
     },
-    ("deepseek_v3", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
-        "text": 'The following tool call retrieves weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{"location": "New York"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>',
+    ("deepseek_v3", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "text": 'I will check the weather. <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{"location": "NYC"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": '<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{"location": "NYC"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L282",
+        "text": 'I will check the weather. <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{"location": "NYC"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": 'I will check the weather. <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{"location": "NYC"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜> Then check LA weather. <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{"location": "LA"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>',
         "tools": [_GET_WEATHER_LOC],
     },
     ("deepseek_v3", "PARSER.batch.9"): {
@@ -647,9 +808,24 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="process_data">\n<｜DSML｜parameter name="items" string="false">[1, 2, 3]</｜DSML｜parameter>\n<｜DSML｜parameter name="config" string="false">{"nested": true}</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
         "tools": [_PROCESS_DATA_NESTED],
     },
-    ("deepseek_v4", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
+    ("deepseek_v4", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
         "text": 'I will check the weather. <｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v4", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v4", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "text": 'I will check the weather. <｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v4", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": 'I will check the weather. <｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls> Then check LA weather. <｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">LA</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
         "tools": [_GET_WEATHER_LOC],
     },
     ("deepseek_v4", "PARSER.batch.9"): {
@@ -698,9 +874,25 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '<tool_call>{"name": "process_data", "arguments": {"items": [1, 2, 3], "config": {"nested": true}}}</tool_call>',
         "tools": [_PROCESS_DATA_NESTED],
     },
-    ("hermes", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
-        "text": 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call> Done.',
+    ("hermes", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_hermes_tool_parser.py#L221",
+        "text": 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("hermes", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("hermes", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "text": 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("hermes", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call> Then check LA weather. <tool_call>{"name": "get_weather", "arguments": {"location": "LA"}}</tool_call>',
         "tools": [_GET_WEATHER_LOC],
     },
     ("hermes", "PARSER.batch.9"): {
@@ -749,9 +941,24 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '<tool_call>{"name": "process_data", "arguments": {"items": [1, 2, 3], "config": {"nested": true}}}</tool_call>',
         "tools": [_PROCESS_DATA_NESTED],
     },
-    ("qwen25", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
-        "text": 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call> Done.',
+    ("qwen25", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "text": 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("qwen25", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("qwen25", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "text": 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("qwen25", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call> Then check LA weather. <tool_call>{"name": "get_weather", "arguments": {"location": "LA"}}</tool_call>',
         "tools": [_GET_WEATHER_LOC],
     },
     ("qwen25", "PARSER.batch.9"): {
@@ -800,9 +1007,25 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '[TOOL_CALLS][{"name": "process_data", "arguments": {"items": [1, 2, 3], "config": {"nested": true}}}][/TOOL_CALLS]',
         "tools": [_PROCESS_DATA_NESTED],
     },
-    ("mistral", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
-        "text": 'I will check the weather. [TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS] Done.',
+    ("mistral", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "text": 'I will check the weather. [TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("mistral", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS] Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("mistral", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_mistral_tool_parser.py#L1858",
+        "text": 'I will check the weather. [TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS] Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("mistral", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": 'I will check the weather. [TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS] Then check LA weather. [TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "LA"}}][/TOOL_CALLS]',
         "tools": [_GET_WEATHER_LOC],
     },
     ("mistral", "PARSER.batch.9"): {
@@ -851,9 +1074,24 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '<tool_calls>[{"name": "process_data", "arguments": {"items": [1, 2, 3], "config": {"nested": true}}}]</tool_calls>',
         "tools": [_PROCESS_DATA_NESTED],
     },
-    ("jamba", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
-        "text": 'I will check the weather. <tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls> Done.',
+    ("jamba", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "text": 'I will check the weather. <tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("jamba", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("jamba", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "text": 'I will check the weather. <tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("jamba", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": 'I will check the weather. <tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls> Then check LA weather. <tool_calls>[{"name": "get_weather", "arguments": {"location": "LA"}}]</tool_calls>',
         "tools": [_GET_WEATHER_LOC],
     },
     ("jamba", "PARSER.batch.9"): {
@@ -902,9 +1140,25 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '<|python_tag|>{"name": "process_data", "arguments": {"items": [1, 2, 3], "config": {"nested": true}}}',
         "tools": [_PROCESS_DATA_NESTED],
     },
-    ("llama3_json", "PARSER.batch.8"): {
-        "description": "Interleaved normal text (text after wrapper)",
-        "text": '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}} Done.',
+    ("llama3_json", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "text": 'I will check the weather. <|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}}',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("llama3_json", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}} Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("llama3_json", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_llama3_json_tool_parser.py#L128",
+        "text": 'I will check the weather. <|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}} Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("llama3_json", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": 'I will check the weather. <|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}} Then check LA weather. <|python_tag|>{"name": "get_weather", "arguments": {"location": "LA"}}',
         "tools": [_GET_WEATHER_LOC],
     },
     ("llama3_json", "PARSER.batch.9"): {
@@ -953,9 +1207,25 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": 'functools[{"name": "process_data", "arguments": {"items": [1, 2, 3], "config": {"nested": true}}}]',
         "tools": [_PROCESS_DATA_NESTED],
     },
-    ("phi4", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
-        "text": 'I will check the weather. functools[{"name": "get_weather", "arguments": {"location": "NYC"}}] Done.',
+    ("phi4", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "text": 'I will check the weather. functools[{"name": "get_weather", "arguments": {"location": "NYC"}}]',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("phi4", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}] Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("phi4", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L282",
+        "text": 'I will check the weather. functools[{"name": "get_weather", "arguments": {"location": "NYC"}}] Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("phi4", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": 'I will check the weather. functools[{"name": "get_weather", "arguments": {"location": "NYC"}}] Then check LA weather. functools[{"name": "get_weather", "arguments": {"location": "LA"}}]',
         "tools": [_GET_WEATHER_LOC],
     },
     ("phi4", "PARSER.batch.9"): {
@@ -1004,9 +1274,24 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n<parameter=unit>\nfahrenheit\n</parameter>\n</function>\n</tool_call>",
         "tools": [_GET_WEATHER_LOC_UNIT],
     },
-    ("nemotron_nano", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
-        "text": "I'll help you check the weather. <tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call> Let me get that information for you.",
+    ("nemotron_nano", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "text": "I will check the weather. <tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call>",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("nemotron_nano", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": "<tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call> Let me know if you need more.",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("nemotron_nano", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "text": "I will check the weather. <tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call> Let me know if you need more.",
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("nemotron_nano", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": "I will check the weather. <tool_call>\n<function=get_weather>\n<parameter=location>\nNYC\n</parameter>\n</function>\n</tool_call> Then check LA weather. <tool_call>\n<function=get_weather>\n<parameter=location>\nLA\n</parameter>\n</function>\n</tool_call>",
         "tools": [_GET_WEATHER_LOC],
     },
     ("nemotron_nano", "PARSER.batch.9"): {
@@ -1055,9 +1340,25 @@ INPUTS: dict[tuple[str, str], dict[str, Any] | None] = {
         "text": '<｜DSML｜function_calls>\n<｜DSML｜invoke name="process_data">\n<｜DSML｜parameter name="items" string="false">[1, 2, 3]</｜DSML｜parameter>\n<｜DSML｜parameter name="config" string="false">{"nested": true}</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>',
         "tools": [_PROCESS_DATA_NESTED],
     },
-    ("deepseek_v3_2", "PARSER.batch.8"): {
-        "description": "Interleaved normal text",
+    ("deepseek_v3_2", "PARSER.batch.8.a"): {
+        "description": "Narration before tool call only",
+        "ref": "inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_deepseekv32_tool_parser.py#L158",
         "text": 'I will check the weather. <｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3_2", "PARSER.batch.8.b"): {
+        "description": "Narration after tool call only",
+        "text": '<｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3_2", "PARSER.batch.8.c"): {
+        "description": "Narration both before and after (sandwich)",
+        "text": 'I will check the weather. <｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls> Let me know if you need more.',
+        "tools": [_GET_WEATHER_LOC],
+    },
+    ("deepseek_v3_2", "PARSER.batch.8.d"): {
+        "description": "Narration between multiple tool calls",
+        "text": 'I will check the weather. <｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls> Then check LA weather. <｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">LA</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>',
         "tools": [_GET_WEATHER_LOC],
     },
     ("deepseek_v3_2", "PARSER.batch.9"): {
@@ -1088,85 +1389,136 @@ async def _run_one(family: str, text: str, tools: list[dict] | None) -> dict[str
     return {"calls": calls, "normal_text": raw.get("normal_text") or ""}
 
 
-def _load_existing(family: str, mode: str) -> dict[str, dict[str, Any]]:
-    """Read the on-disk cases dict for `(family, mode)`, or empty if absent.
+def _file_stem_for(case_id: str) -> str:
+    """Map a case ID to the YAML file stem it belongs in.
 
-    Keys on disk are full case IDs (`PARSER.batch.5`); strip the prefix
-    so internal bookkeeping stays keyed by the case number (`"5"`)."""
-    fp = FIXTURES_ROOT / family / f"PARSER.{mode}.yaml"
+    `PARSER.batch.5`   → `PARSER.batch`        (legacy flat file: cases 1..10)
+    `PARSER.batch.8.a` → `PARSER.batch.8`      (per-top-level-case file: 8.a, 8.b, ...)
+
+    Once any sub-case `PARSER.<mode>.<n>.<sub>` is introduced, the bare
+    `PARSER.<mode>.<n>` key is retired — its sub-cases live in the per-case
+    file together. The loader's two-layout merge keeps it conflict-free.
+    """
+    parts = case_id.split(".")
+    if len(parts) >= 4:  # has sub-case → per-case file
+        return ".".join(parts[:3])  # e.g. "PARSER.batch.8"
+    return ".".join(parts[:2])  # e.g. "PARSER.batch"
+
+
+def _case_sort_key(case_id: str) -> tuple[int, str]:
+    """Sort key for case IDs that may carry a sub-letter."""
+    parts = case_id.split(".")
+    return (int(parts[2]), parts[3] if len(parts) > 3 else "")
+
+
+def _load_existing(family: str, file_stem: str) -> dict[str, dict[str, Any]]:
+    """Read the on-disk cases dict for `<family>/<file_stem>.yaml`, or {} if absent.
+
+    Keyed by the full case ID (`PARSER.batch.5`, `PARSER.batch.8.a`) so callers
+    don't have to re-stitch the prefix.
+    """
+    fp = FIXTURES_ROOT / family / f"{file_stem}.yaml"
     if not fp.exists():
         return {}
     raw = yaml.safe_load(fp.read_text(encoding="utf-8")).get("cases", {}) or {}
-    return {k.rsplit(".", 1)[1]: v for k, v in raw.items()}
+    return dict(raw)
 
 
 def _write_family_fixtures(
-    family: str, mode: str, cases: dict[str, dict[str, Any]]
+    family: str, file_stem: str, mode: str, cases: dict[str, dict[str, Any]]
 ) -> None:
-    """Write one file per (family, mode) holding all cases for that mode.
+    """Write `<family>/<file_stem>.yaml` holding `cases` (full-case-ID-keyed).
 
-    On-disk keys are the full case ID (e.g. `PARSER.batch.5`) so they
-    match the IDs used in PARSER_CASES.md and `KNOWN_DIVERGENCES`. A
-    single `grep PARSER.batch.5` then finds the case across docs,
-    fixtures, and Rust source comments."""
+    Sort respects sub-case suffixes (`PARSER.batch.8.a` < `8.b`). The `mode`
+    field in the YAML header is the parser mode (`batch`/`stream`), not the
+    file stem — so `PARSER.batch.8.yaml` has `mode: batch`.
+    """
     family_dir = FIXTURES_ROOT / family
     family_dir.mkdir(parents=True, exist_ok=True)
-    ordered = {f"PARSER.{mode}.{n}": cases[n] for n in sorted(cases, key=int)}
+    ordered = {cid: cases[cid] for cid in sorted(cases, key=_case_sort_key)}
     out = {"family": family, "mode": mode, "cases": ordered}
     header = (
         "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n"
         "# SPDX-License-Identifier: Apache-2.0\n\n"
     )
-    (family_dir / f"PARSER.{mode}.yaml").write_text(
+    (family_dir / f"{file_stem}.yaml").write_text(
         header + yaml.dump(out, sort_keys=False, allow_unicode=True, width=120),
         encoding="utf-8",
     )
 
 
 async def main(overwrite_if_exists: bool = False) -> None:
-    # Group inputs by (family, mode) so we can merge with existing per file.
-    inputs_by_pair: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+    # Group inputs by destination (family, file_stem) so we merge per file.
+    # mode is recoverable from case_id; we track it for the YAML header.
+    inputs_by_file: dict[tuple[str, str], tuple[str, dict[str, dict[str, Any]]]] = {}
+    # Track which (family, "PARSER.<mode>.<n>") top-level case IDs have been
+    # split into sub-cases via INPUTS. The bare top-level case is retired
+    # whenever any sub-case exists for the same (family, mode, n).
+    retired_bare_ids: set[tuple[str, str]] = set()
     for (family, case_id), entry in INPUTS.items():
         if entry is None:
             continue
-        # case_id is e.g. "PARSER.batch.5" — split into mode and number.
-        _, mode, num = case_id.split(".", 2)
-        inputs_by_pair.setdefault((family, mode), {})[num] = entry
+        mode = case_id.split(".")[1]  # PARSER.batch.8.a → "batch"
+        file_stem = _file_stem_for(case_id)  #                  → "PARSER.batch.8"
+        slot = inputs_by_file.setdefault((family, file_stem), (mode, {}))
+        slot[1][case_id] = entry
+        # If this is a sub-case, mark the corresponding bare top-level for retirement.
+        parts = case_id.split(".")
+        if len(parts) >= 4:
+            retired_bare_ids.add((family, ".".join(parts[:3])))
 
-    n_written = n_skipped = n_orphan_kept = 0
-    for (family, mode), entries in inputs_by_pair.items():
-        existing = _load_existing(family, mode)
+    n_written = n_skipped = n_orphan_kept = n_retired = 0
+    for (family, file_stem), (mode, entries) in inputs_by_file.items():
+        existing = _load_existing(family, file_stem)
         merged: dict[str, dict[str, Any]] = {}
 
         # 1. Process every case the user listed in INPUTS.
-        for num, entry in entries.items():
-            if num in existing and not overwrite_if_exists:
-                merged[num] = existing[num]
+        for case_id, entry in entries.items():
+            if case_id in existing and not overwrite_if_exists:
+                merged[case_id] = existing[case_id]
                 n_skipped += 1
                 continue
             expected = await _run_one(family, entry["text"], entry["tools"])
-            merged[num] = {
-                "description": entry["description"],
-                "model_text": entry["text"],
-                "tools": entry["tools"],
-                "expected": expected,
-            }
+            merged_case: dict[str, Any] = {"description": entry["description"]}
+            # `ref` is required on per-sub-case files only (PARSER.batch.<n>.yaml).
+            # URL pointing at the upstream test the fixture was sourced from —
+            # the URL itself names the impl (`vllm-project/vllm`,
+            # `sgl-project/sglang`, ...). For sub-cases authored fresh in this
+            # repo, the literal `"dynamo"` records that we made it up rather
+            # than mirrored an upstream test. The legacy flat `PARSER.batch.yaml`
+            # (cases without sub-cases) does NOT carry `ref` — those entries
+            # predate the convention.
+            if len(case_id.split(".")) >= 4:
+                merged_case["ref"] = entry.get("ref", "dynamo")
+            merged_case["model_text"] = entry["text"]
+            merged_case["tools"] = entry["tools"]
+            merged_case["expected"] = expected
+            merged[case_id] = merged_case
             n_written += 1
 
         # 2. Preserve any on-disk cases that aren't in INPUTS today, so a
         #    contributor's INPUTS edit can't accidentally delete other
-        #    contributors' fixture cases.
-        for num, case in existing.items():
-            if num not in merged:
-                merged[num] = case
-                n_orphan_kept += 1
+        #    contributors' fixture cases — EXCEPT a bare `PARSER.<mode>.<n>`
+        #    that's been superseded by sub-cases (`<n>.<sub>`) elsewhere in
+        #    INPUTS. That bare ID gets dropped from the flat file so the
+        #    retired top-level doesn't end up running alongside its
+        #    replacement sub-cases after regeneration.
+        for case_id, case in existing.items():
+            if case_id in merged:
+                continue
+            if (family, case_id) in retired_bare_ids:
+                n_retired += 1
+                continue
+            merged[case_id] = case
+            n_orphan_kept += 1
 
-        _write_family_fixtures(family, mode, merged)
-        print(f"  wrote {family}/PARSER.{mode}.yaml with {len(merged)} cases")
+        _write_family_fixtures(family, file_stem, mode, merged)
+        print(f"  wrote {family}/{file_stem}.yaml with {len(merged)} cases")
 
     print(
         f"\n{n_written} written, {n_skipped} skipped (already on disk), "
-        f"{n_orphan_kept} preserved (on disk but not in INPUTS).\n"
+        f"{n_orphan_kept} preserved (on disk but not in INPUTS), "
+        f"{n_retired} bare-IDs retired (replaced by sub-cases).\n"
         f"Pass --overwrite-if-exists to refresh the {n_skipped} skipped case(s)."
     )
 

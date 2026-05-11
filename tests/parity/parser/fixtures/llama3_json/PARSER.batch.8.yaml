@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: llama3_json
+mode: batch
+cases:
+  PARSER.batch.8.a:
+    description: Narration before tool call only
+    ref: dynamo
+    model_text: 'I will check the weather. <|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}}'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: I will check the weather.
+    # TODO(research): vllm diverges — TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string
+    # vllm produces:
+    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
+    #   normal_text: None
+  PARSER.batch.8.b:
+    description: Narration after tool call only
+    ref: dynamo
+    model_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}} Let me know if you need more.'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
+  PARSER.batch.8.c:
+    description: Narration both before and after (sandwich)
+    ref: inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_llama3_json_tool_parser.py#L128
+    model_text: 'I will check the weather. <|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}} Let me
+      know if you need more.'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: I will check the weather.
+    # TODO(research): vllm diverges — TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string
+    # vllm produces:
+    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
+    #   normal_text: None
+  PARSER.batch.8.d:
+    description: Narration between multiple tool calls
+    ref: dynamo
+    model_text: 'I will check the weather. <|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}} Then check
+      LA weather. <|python_tag|>{"name": "get_weather", "arguments": {"location": "LA"}}'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_weather
+        arguments:
+          location: LA
+      normal_text: I will check the weather.
+    # TODO(research): vllm diverges — TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string
+    # vllm produces:
+    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}, {'name': 'get_weather', 'arguments': {'location': 'LA'}}]
+    #   normal_text: None

@@ -147,27 +147,9 @@ cases:
       calls:
       - name: get_weather
         arguments:
-          location: NYC
           unit: fahrenheit
-      normal_text: ''
-  PARSER.batch.8:
-    description: Interleaved normal text
-    model_text: |-
-      I'll help you check the weather. <tool_call>
-      <function=get_weather>
-      <parameter=location>
-      NYC
-      </parameter>
-      </function>
-      </tool_call> Let me get that information for you.
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
           location: NYC
-      normal_text: "I'll help you check the weather. "
+      normal_text: ''
   PARSER.batch.9:
     description: Empty input
     model_text: ''

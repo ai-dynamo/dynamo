@@ -136,21 +136,6 @@ cases:
           config:
             nested: true
       normal_text: ''
-  PARSER.batch.8:
-    description: Interleaved normal text
-    model_text: |-
-      The following tool call retrieves weather information: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-      ```json
-      {"location": "New York"}
-      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: New York
-      normal_text: 'The following tool call retrieves weather information: '
   PARSER.batch.9:
     description: Empty input
     model_text: ''

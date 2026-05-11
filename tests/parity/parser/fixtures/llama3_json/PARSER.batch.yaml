@@ -96,17 +96,6 @@ cases:
           config:
             nested: true
       normal_text: ''
-  PARSER.batch.8:
-    description: Interleaved normal text (text after wrapper)
-    model_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}} Done.'
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
   PARSER.batch.9:
     description: Empty input
     model_text: ''
