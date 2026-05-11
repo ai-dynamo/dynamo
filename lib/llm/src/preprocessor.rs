@@ -226,9 +226,8 @@ fn is_cache_buster_query_key(key: &str) -> bool {
 /// request 20 minutes in. Text-only deployments skip the force, leaving
 /// the LazyLock dormant.
 #[cfg(feature = "lightseek-mm")]
-static DIM_FETCH_MEDIA_FETCHER: std::sync::LazyLock<
-    crate::preprocessor::media::MediaFetcher,
-> = std::sync::LazyLock::new(crate::preprocessor::media::MediaFetcher::from_env);
+static DIM_FETCH_MEDIA_FETCHER: std::sync::LazyLock<crate::preprocessor::media::MediaFetcher> =
+    std::sync::LazyLock::new(crate::preprocessor::media::MediaFetcher::from_env);
 
 #[cfg(feature = "lightseek-mm")]
 static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
