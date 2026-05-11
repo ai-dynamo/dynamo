@@ -26,14 +26,17 @@ default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 kv-indexer = ["dep:clap", "dep:tracing-subscriber"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
+mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]
 nvtx = ["dynamo-runtime/nvtx"]
 
 [dependencies]
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { path = "../../parsers" }
+dynamo-backend-common = { path = "../../backend-common" }
 
 anyhow = { version = "1" }
+async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 dashmap = { version = "6.1" }
 futures = { version = "0.3" }

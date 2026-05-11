@@ -376,6 +376,7 @@ class TestVllmRendererApi:
             "resumable",
             "external_req_id",
             "reasoning_ended",
+            "reasoning_parser_kwargs",
         )
         # vllm-omni monkey-patches EngineCoreRequest with an extra field
         # (only installed on amd64, not arm64)

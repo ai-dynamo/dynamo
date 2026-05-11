@@ -26,11 +26,15 @@ def worker_warmup() -> bool:
 
 
 class PreprocessError(Exception):
-    """Raised by preprocess workers for user-facing errors (e.g., n!=1)."""
+    """Raised by preprocess workers for user-facing errors (e.g., n!=1).
 
-    def __init__(self, error_dict: dict[str, Any]):
-        self.error_dict = error_dict
-        super().__init__(str(error_dict))
+    Carries a plain message because the worker→main-process boundary
+    pickles the exception; the main process re-raises a Dynamo-typed
+    exception so PyO3 can route it through the proper backend-error path.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message)
 
 
 # Content part types that carry media URLs, mapped to the key used in the

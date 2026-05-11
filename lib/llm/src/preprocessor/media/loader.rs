@@ -16,7 +16,11 @@ use dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart;
 
 use super::common::EncodedMediaData;
 use super::decoders::{Decoder, MediaDecoder};
-use super::rdma::{RdmaMediaDataDescriptor, get_nixl_agent};
+use super::rdma::{DataType, RdmaMediaDataDescriptor, get_nixl_agent};
+use lru::LruCache;
+use parking_lot::Mutex;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -255,6 +259,70 @@ impl Resolve for BlocklistResolver {
     }
 }
 
+/// Byte-budgeted LRU of decoded + NIXL-registered media descriptors.
+///
+/// Capacity is denominated in bytes (raw decoded payload, derived from
+/// `tensor_info.shape * dtype`). Insertion evicts oldest entries until the
+/// running total fits the budget; entries larger than the whole budget are
+/// inserted and immediately evicted (i.e. effectively not cached).
+struct LoaderCache {
+    lru: LruCache<u64, RdmaMediaDataDescriptor>,
+    bytes_used: u64,
+    budget_bytes: u64,
+}
+
+impl LoaderCache {
+    fn new(budget_bytes: u64) -> Self {
+        // `unbounded` capacity — eviction is driven by the byte budget.
+        Self {
+            lru: LruCache::unbounded(),
+            bytes_used: 0,
+            budget_bytes,
+        }
+    }
+
+    fn get(&mut self, key: &u64) -> Option<RdmaMediaDataDescriptor> {
+        self.lru.get(key).cloned()
+    }
+
+    fn put(&mut self, key: u64, val: RdmaMediaDataDescriptor) {
+        let val_bytes = descriptor_bytes(&val);
+        // Re-insert path: drop the old entry's bytes from the running total
+        // before adding the new one.
+        if let Some(old) = self.lru.pop(&key) {
+            self.bytes_used = self.bytes_used.saturating_sub(descriptor_bytes(&old));
+        }
+        self.lru.put(key, val);
+        self.bytes_used = self.bytes_used.saturating_add(val_bytes);
+        while self.bytes_used > self.budget_bytes && !self.lru.is_empty() {
+            if let Some((_, old)) = self.lru.pop_lru() {
+                self.bytes_used = self.bytes_used.saturating_sub(descriptor_bytes(&old));
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.lru.len()
+    }
+}
+
+/// Raw decoded byte size of a descriptor — what the NIXL registration holds.
+/// Per-entry bookkeeping (struct fields, NIXL metadata string) is negligible
+/// compared to a single decoded image.
+fn descriptor_bytes(d: &RdmaMediaDataDescriptor) -> u64 {
+    let elem = match d.tensor_info.dtype {
+        DataType::UINT8 => 1u64,
+    };
+    d.tensor_info
+        .shape
+        .iter()
+        .try_fold(1u64, |acc, &x| acc.checked_mul(x as u64))
+        .unwrap_or(u64::MAX)
+        .saturating_mul(elem)
+}
+
 pub struct MediaLoader {
     #[allow(dead_code)]
     media_decoder: MediaDecoder,
@@ -263,9 +331,34 @@ pub struct MediaLoader {
     #[allow(dead_code)]
     media_fetcher: MediaFetcher,
     nixl_agent: NixlAgent,
+    /// Optional byte-budgeted LRU cache of decoded + NIXL-registered media,
+    /// keyed by URL hash. Each cache entry is shared via Arc; the underlying
+    /// NIXL registration is kept alive as long as any clone (in cache or
+    /// in-flight) holds it. Eviction just drops the cache's reference.
+    /// `None` when caching is disabled (budget = 0).
+    cache: Option<Arc<Mutex<LoaderCache>>>,
 }
 
 impl MediaLoader {
+    /// Read the cache budget (in bytes) from `DYN_MULTIMODAL_LOADER_CACHE_GB`.
+    /// Value parses as a float number of gibibytes (1 GiB = 1024^3 bytes).
+    /// Default `0` (disabled) — opt-in only.
+    fn cache_budget_bytes_from_env() -> u64 {
+        let gb = std::env::var("DYN_MULTIMODAL_LOADER_CACHE_GB")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(0.0);
+        (gb * (1024.0 * 1024.0 * 1024.0)) as u64
+    }
+
+    /// Hash a URL/datauri string into a stable u64 cache key.
+    fn cache_key(url: &str) -> u64 {
+        let mut h = DefaultHasher::new();
+        url.hash(&mut h);
+        h.finish()
+    }
+
     pub fn new(media_decoder: MediaDecoder, media_fetcher: Option<MediaFetcher>) -> Result<Self> {
         // Fall back to env-aware defaults so `DYN_MM_ALLOW_INTERNAL=1` is
         // honored even when the caller doesn't pass an explicit fetcher.
@@ -301,12 +394,52 @@ impl MediaLoader {
 
         let nixl_agent = get_nixl_agent()?;
 
+        let cache = match Self::cache_budget_bytes_from_env() {
+            0 => {
+                tracing::debug!(
+                    "[mm-cache] frontend media cache disabled (DYN_MULTIMODAL_LOADER_CACHE_GB=0)"
+                );
+                None
+            }
+            budget => {
+                tracing::info!(
+                    budget_bytes = budget,
+                    "[mm-cache] frontend media cache enabled (DYN_MULTIMODAL_LOADER_CACHE_GB)"
+                );
+                Some(Arc::new(Mutex::new(LoaderCache::new(budget))))
+            }
+        };
+
         Ok(Self {
             media_decoder,
             http_client,
             media_fetcher,
             nixl_agent,
+            cache,
         })
+    }
+
+    /// Test-only constructor that lets a unit test build a `MediaLoader` with
+    /// an explicit byte budget (bypassing the env-var read in `new`).
+    /// Pass 0 to disable.
+    #[cfg(test)]
+    pub fn with_cache_budget_bytes(
+        media_decoder: MediaDecoder,
+        media_fetcher: Option<MediaFetcher>,
+        budget_bytes: u64,
+    ) -> Result<Self> {
+        let mut loader = Self::new(media_decoder, media_fetcher)?;
+        loader.cache = if budget_bytes == 0 {
+            None
+        } else {
+            Some(Arc::new(Mutex::new(LoaderCache::new(budget_bytes))))
+        };
+        Ok(loader)
+    }
+
+    /// Number of entries currently held in the cache (test/observability helper).
+    pub fn cache_len(&self) -> usize {
+        self.cache.as_ref().map(|c| c.lock().len()).unwrap_or(0)
     }
 
     pub async fn fetch_and_decode_media_part(
@@ -314,6 +447,27 @@ impl MediaLoader {
         oai_content_part: &ChatCompletionRequestUserMessageContentPart,
         media_io_kwargs: Option<&MediaDecoder>,
     ) -> Result<RdmaMediaDataDescriptor> {
+        // Image-only fast path: cache lookup keyed by URL/datauri string.
+        // Video/audio aren't cached yet (their lifetime/content semantics
+        // are different — easy to add later if profiling justifies it).
+        // The cache stores the post-decode + NIXL-registered descriptor;
+        // a hit short-circuits both the network fetch and the image decode.
+        if let (Some(cache), ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part)) =
+            (self.cache.as_ref(), oai_content_part)
+        {
+            // media_io_kwargs is per-request and could change the decode
+            // output (resize, normalisation). When it's set we skip the
+            // cache to stay correct; in practice it's None on the common
+            // path so the hit rate is unaffected.
+            if media_io_kwargs.is_none() {
+                let key = Self::cache_key(image_part.image_url.url.as_str());
+                if let Some(hit) = cache.lock().get(&key) {
+                    tracing::debug!(url_hash = key, "[mm-cache] hit");
+                    return Ok(hit);
+                }
+            }
+        }
+
         // fetch the media, decode and NIXL-register
         let decoded = match oai_content_part {
             ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
@@ -365,6 +519,23 @@ impl MediaLoader {
         };
 
         let rdma_descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
+
+        // Insert into the cache on the way out. We only cache image inputs
+        // (matched in the lookup above) and only when no per-request decoder
+        // override is in effect. The descriptor is `Clone` and shares the
+        // underlying NIXL registration via `Arc`, so the cached entry stays
+        // alive across in-flight requests; eviction just drops the cache's
+        // own reference.
+        if let (Some(cache), ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part)) =
+            (self.cache.as_ref(), oai_content_part)
+            && media_io_kwargs.is_none()
+        {
+            let key = Self::cache_key(image_part.image_url.url.as_str());
+            let bytes = descriptor_bytes(&rdma_descriptor);
+            cache.lock().put(key, rdma_descriptor.clone());
+            tracing::debug!(url_hash = key, bytes, "[mm-cache] insert");
+        }
+
         Ok(rdma_descriptor)
     }
 }
@@ -459,11 +630,282 @@ mod tests {
             "Source storage should be registered with NIXL"
         );
     }
+
+    /// With the cache enabled, a second fetch of the same URL must be served
+    /// from the cache: the upstream server should see exactly one GET, and
+    /// the loader's `cache_len()` should reflect the inserted entry.
+    #[tokio::test]
+    async fn test_cache_hit_skips_second_fetch() {
+        let test_image_bytes =
+            include_bytes!("../../../tests/data/media/llm-optimize-deploy-graphic.png");
+
+        let mut server = mockito::Server::new_async().await;
+        // Expect EXACTLY one GET; if the cache misses on the second call this
+        // assertion will fail because mockito will see a second hit.
+        let mock = server
+            .mock("GET", "/cache-image.png")
+            .with_status(200)
+            .with_header("content-type", "image/png")
+            .with_body(&test_image_bytes[..])
+            .expect(1)
+            .create_async()
+            .await;
+
+        let media_decoder = MediaDecoder {
+            image: Some(ImageDecoder::default()),
+            #[cfg(feature = "media-ffmpeg")]
+            video: None,
+        };
+        let fetcher = MediaFetcher {
+            allow_direct_ip: true,
+            allow_direct_port: true,
+            allow_private_ips: true,
+            ..Default::default()
+        };
+
+        // Budget = 100 MB — comfortably fits one ~9 MB decoded image (1125x1999x4
+        // RGBA = 8.57 MB). We're not exercising eviction here, just the hit path.
+        let loader = match MediaLoader::with_cache_budget_bytes(
+            media_decoder,
+            Some(fetcher),
+            100 * 1024 * 1024,
+        ) {
+            Ok(l) => l,
+            Err(e) => {
+                println!("test_cache_hit_skips_second_fetch ... ignored ({})", e);
+                return;
+            }
+        };
+
+        assert_eq!(loader.cache_len(), 0, "cache should start empty");
+
+        let url_string = format!("{}/cache-image.png", server.url());
+        let image_url = ImageUrl::from(url_string);
+        let content_part = ChatCompletionRequestUserMessageContentPart::ImageUrl(
+            ChatCompletionRequestMessageContentPartImage { image_url },
+        );
+
+        // First call — populates cache.
+        let first = match loader
+            .fetch_and_decode_media_part(&content_part, None)
+            .await
+        {
+            Ok(d) => d,
+            Err(e) if e.to_string().contains("NIXL agent is not available") => {
+                println!("test_cache_hit_skips_second_fetch ... ignored (NIXL not available)");
+                return;
+            }
+            Err(e) => panic!("first fetch failed: {}", e),
+        };
+        assert_eq!(loader.cache_len(), 1, "cache should hold one entry");
+
+        // Second call — must be served from cache (no second mock hit).
+        let second = loader
+            .fetch_and_decode_media_part(&content_part, None)
+            .await
+            .expect("second fetch should hit cache");
+
+        // Both descriptors should reference the same NIXL-registered storage
+        // (cloned `Arc` under the hood — same pointer).
+        match (&first.source_storage, &second.source_storage) {
+            (Some(a), Some(b)) => assert!(
+                Arc::ptr_eq(a, b),
+                "cache hit should return the same Arc'd source_storage"
+            ),
+            _ => panic!("source_storage missing from one of the descriptors"),
+        }
+
+        // Mockito asserts exactly-one GET — fails the test if we hit twice.
+        mock.assert_async().await;
+    }
+
+    /// Cache byte budget is enforced: with a budget that fits exactly two
+    /// decoded images, inserting a third evicts the least-recently-used
+    /// entry, and re-fetching the evicted entry triggers a real network call
+    /// (proving the entry actually left the cache rather than silently
+    /// lingering).
+    #[tokio::test]
+    async fn test_cache_budget_lru_eviction() {
+        let test_image_bytes =
+            include_bytes!("../../../tests/data/media/llm-optimize-deploy-graphic.png");
+
+        let mut server = mockito::Server::new_async().await;
+        // /a.png expects 2 hits: (i) cold insert, (ii) re-fetch after C
+        // evicts A. /b.png expects 1: cold insert + a re-fetch served from
+        // cache. /c.png expects 1: cold insert (it stays in cache too).
+        let mock_a = server
+            .mock("GET", "/a.png")
+            .with_status(200)
+            .with_header("content-type", "image/png")
+            .with_body(&test_image_bytes[..])
+            .expect(2)
+            .create_async()
+            .await;
+        let mock_b = server
+            .mock("GET", "/b.png")
+            .with_status(200)
+            .with_header("content-type", "image/png")
+            .with_body(&test_image_bytes[..])
+            .expect(1)
+            .create_async()
+            .await;
+        let mock_c = server
+            .mock("GET", "/c.png")
+            .with_status(200)
+            .with_header("content-type", "image/png")
+            .with_body(&test_image_bytes[..])
+            .expect(1)
+            .create_async()
+            .await;
+
+        let media_decoder = MediaDecoder {
+            image: Some(ImageDecoder::default()),
+            #[cfg(feature = "media-ffmpeg")]
+            video: None,
+        };
+        let fetcher = MediaFetcher {
+            allow_direct_ip: true,
+            allow_direct_port: true,
+            allow_private_ips: true,
+            ..Default::default()
+        };
+
+        // Single decoded image is ~8.57 MB (1125x1999x4 RGBA). Budget = 18 MB
+        // accommodates exactly 2 entries; inserting a 3rd forces an eviction.
+        let loader = match MediaLoader::with_cache_budget_bytes(
+            media_decoder,
+            Some(fetcher),
+            18 * 1024 * 1024,
+        ) {
+            Ok(l) => l,
+            Err(e) => {
+                println!("test_cache_budget_lru_eviction ... ignored ({})", e);
+                return;
+            }
+        };
+
+        let make_part = |path: &str| {
+            let image_url = ImageUrl::from(format!("{}{}", server.url(), path));
+            ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                ChatCompletionRequestMessageContentPartImage { image_url },
+            )
+        };
+
+        let part_a = make_part("/a.png");
+        let part_b = make_part("/b.png");
+        let part_c = make_part("/c.png");
+
+        // Cold-fetch A and B (cache: [B, A], B is MRU).
+        for (label, part) in [("a", &part_a), ("b", &part_b)] {
+            match loader.fetch_and_decode_media_part(part, None).await {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("NIXL agent is not available") => {
+                    println!(
+                        "test_cache_budget_lru_eviction ... ignored (NIXL not available, fetch={})",
+                        label
+                    );
+                    return;
+                }
+                Err(e) => panic!("fetch {} failed: {}", label, e),
+            }
+        }
+        assert_eq!(loader.cache_len(), 2);
+
+        // Touch B to make it the LRU front; A becomes the eviction target
+        // when the next insert lands. mock_b expects 1 total hit, so this
+        // must be served from cache.
+        loader
+            .fetch_and_decode_media_part(&part_b, None)
+            .await
+            .expect("b re-fetch should hit cache");
+
+        // Cold-fetch C → cache is full, evict A (LRU), now cache = {C, B}.
+        loader
+            .fetch_and_decode_media_part(&part_c, None)
+            .await
+            .expect("c cold fetch should succeed");
+        assert_eq!(loader.cache_len(), 2);
+
+        // Re-fetching A should miss the cache (A was evicted), triggering a
+        // second network GET — matched by mock_a.expect(2).
+        loader
+            .fetch_and_decode_media_part(&part_a, None)
+            .await
+            .expect("a re-fetch after eviction should succeed");
+        assert_eq!(loader.cache_len(), 2);
+
+        mock_a.assert_async().await;
+        mock_b.assert_async().await;
+        mock_c.assert_async().await;
+    }
 }
 
 #[cfg(test)]
 mod tests_non_nixl {
     use super::*;
+
+    #[test]
+    fn test_cache_key_is_stable_per_url() {
+        // Same URL → same key, every time. Different URLs → different keys.
+        let u1 = "http://images.example.com/a.png";
+        let u2 = "http://images.example.com/b.png";
+
+        assert_eq!(MediaLoader::cache_key(u1), MediaLoader::cache_key(u1));
+        assert_ne!(MediaLoader::cache_key(u1), MediaLoader::cache_key(u2));
+
+        // Datauri strings produce stable keys too — these get long, the hash
+        // collapses them to a u64 deterministically.
+        let datauri = "data:image/png;base64,iVBORw0KGgoAAAA...".to_string();
+        assert_eq!(
+            MediaLoader::cache_key(&datauri),
+            MediaLoader::cache_key(&datauri)
+        );
+    }
+
+    #[test]
+    fn test_cache_budget_from_env_default_zero() {
+        const VAR: &str = "DYN_MULTIMODAL_LOADER_CACHE_GB";
+        const GIB: u64 = 1024 * 1024 * 1024;
+        // Save and restore so other tests in the same process aren't affected.
+        let prev = std::env::var(VAR).ok();
+        // SAFETY: env mutation is fine within this single-threaded test;
+        // we restore on exit below.
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+        assert_eq!(MediaLoader::cache_budget_bytes_from_env(), 0);
+
+        unsafe {
+            std::env::set_var(VAR, "1");
+        }
+        assert_eq!(MediaLoader::cache_budget_bytes_from_env(), GIB);
+
+        // Fractional GB are honoured (lets users set, e.g., 0.5 for 512 MiB).
+        unsafe {
+            std::env::set_var(VAR, "0.5");
+        }
+        assert_eq!(MediaLoader::cache_budget_bytes_from_env(), GIB / 2);
+
+        unsafe {
+            std::env::set_var(VAR, "not-a-number");
+        }
+        assert_eq!(
+            MediaLoader::cache_budget_bytes_from_env(),
+            0,
+            "non-numeric value should fall back to 0"
+        );
+
+        // Negative values are rejected (treated as 0).
+        unsafe {
+            std::env::set_var(VAR, "-1");
+        }
+        assert_eq!(MediaLoader::cache_budget_bytes_from_env(), 0);
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var(VAR, v) },
+            None => unsafe { std::env::remove_var(VAR) },
+        }
+    }
 
     #[test]
     fn test_direct_ip_blocked() {

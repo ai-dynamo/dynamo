@@ -128,23 +128,28 @@ Example:
 
 ```json
 {"timestamp": 0, "input_length": 6755, "output_length": 500, "hash_ids": [0, 1, 2, 3]}
+{"timestamp": 0, "input_length": 4096, "output_length": 128, "hash_ids": [9, 10, 11, 12]}
 ```
 
-Replay also supports multi-turn sessions. Use the same `session_id` on all turns in a session. The
-first turn uses `timestamp` or `created_time`; later turns may use either:
+Rows without `session_id` are independent timestamped requests. Use this shape for wall-clock
+request traces, including agent-converted traces where parallel LLM calls should remain parallel.
 
-- `delay` or `delay_ms` directly
-- or an absolute later `timestamp`, in which case replay infers the inter-turn delay from the
-  previous turn timestamp
+Replay also supports multi-turn sessions. Use the same `session_id` on all turns in a session.
+Multi-turn sessions are closed-loop: turn `n+1` waits until turn `n` completes plus either the
+explicit `delay` / `delay_ms` or the timestamp delta inferred from consecutive rows in the same
+session.
 
 Example:
 
 ```json
 {"session_id":"session-a","timestamp":1000,"input_length":2048,"output_length":128,"hash_ids":[1,2,3,4]}
-{"session_id":"session-a","delay":250,"input_length":2560,"output_length":128,"hash_ids":[1,2,3,4,5]}
+{"session_id":"session-a","delay_ms":50,"input_length":2560,"output_length":128,"hash_ids":[1,2,3,4,5]}
 {"session_id":"session-b","timestamp":1010,"input_length":1024,"output_length":64,"hash_ids":[9,10]}
-{"session_id":"session-b","delay_ms":50,"input_length":1536,"output_length":64,"hash_ids":[9,10,11]}
+{"session_id":"session-b","timestamp":1060,"input_length":1536,"output_length":64,"hash_ids":[9,10,11]}
 ```
+
+The second `session-a` row waits for the first turn to complete plus 50 ms. The second `session-b`
+row also waits for the first turn to complete plus the inferred 50 ms timestamp delta.
 
 Replay uses two different block-size concepts for trace files:
 
@@ -293,7 +298,10 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --extra-engine-args '{"block_size":64}'
 ```
 
-This is the right mode when you want deterministic replay of the original arrival pattern.
+This is the right mode when you want deterministic replay of the original request-arrival pattern.
+For wall-clock request traces, omit `session_id` so each row is scheduled independently by timestamp.
+Rows that share a `session_id` are replayed as a closed-loop session, where each later turn waits for
+the previous turn to complete.
 
 ### Closed-Loop Concurrency Replay
 

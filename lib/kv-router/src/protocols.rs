@@ -5,7 +5,7 @@ use std::future::Future;
 use std::ops::Range;
 use std::time::Duration;
 
-use dynamo_tokens::{SequenceHash, Token};
+use dynamo_tokens::{SequenceHash, Token, compute_hash_v2};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
@@ -20,14 +20,9 @@ pub const KV_EVENT_SUBJECT: &str = "kv-events";
 /// Seed for XXH3 hashing, consistent with indexer.rs
 pub const XXH3_SEED: u64 = 1337;
 
-/// Compute hash of data using XXH3 with the standard seed.
-pub fn compute_hash(data: &[u8]) -> u64 {
-    xxh3::xxh3_64_with_seed(data, XXH3_SEED)
-}
-
 /// Compute the hash of a local block.
 pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
-    LocalBlockHash(compute_hash(data))
+    LocalBlockHash(compute_hash_v2(data, XXH3_SEED))
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -129,6 +124,34 @@ pub fn compute_block_hash_for_seq(
     hashes
 }
 
+/// Compute the next rolling sequence hash from a parent sequence hash and the
+/// current block hash.
+pub fn compute_next_seq_hash(
+    parent_seq_hash: SequenceHash,
+    current_block_hash: LocalBlockHash,
+) -> SequenceHash {
+    let combined = [parent_seq_hash, current_block_hash.0];
+    #[cfg(target_endian = "little")]
+    {
+        // SAFETY: `u64` is plain-old-data, and on little-endian targets its in-memory
+        // representation matches the `to_le_bytes()` sequence used by the portable path.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                combined.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(&combined),
+            )
+        };
+        compute_hash_v2(bytes, XXH3_SEED)
+    }
+    #[cfg(not(target_endian = "little"))]
+    {
+        let mut bytes = [0_u8; std::mem::size_of::<u64>() * 2];
+        bytes[..8].copy_from_slice(&parent_seq_hash.to_le_bytes());
+        bytes[8..].copy_from_slice(&current_block_hash.0.to_le_bytes());
+        compute_hash_v2(&bytes, XXH3_SEED)
+    }
+}
+
 /// Compute rolling sequence hashes for a vector of block hashes.
 ///
 /// - The first block's sequence hash equals its block hash
@@ -143,29 +166,7 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
 
     for i in 1..block_hashes.len() {
         let parent_seq_hash = sequence_hashes[i - 1];
-        let current_block_hash = block_hashes[i].0;
-
-        let combined = [parent_seq_hash, current_block_hash];
-        #[cfg(target_endian = "little")]
-        let seq_hash = {
-            // SAFETY: `u64` is plain-old-data, and on little-endian targets its in-memory
-            // representation matches the `to_le_bytes()` sequence used by the previous code.
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    combined.as_ptr().cast::<u8>(),
-                    std::mem::size_of_val(&combined),
-                )
-            };
-            compute_hash(bytes)
-        };
-        #[cfg(not(target_endian = "little"))]
-        let seq_hash = {
-            let mut bytes = [0_u8; std::mem::size_of::<u64>() * 2];
-            bytes[..8].copy_from_slice(&parent_seq_hash.to_le_bytes());
-            bytes[8..].copy_from_slice(&current_block_hash.to_le_bytes());
-            compute_hash(&bytes)
-        };
-        sequence_hashes.push(seq_hash);
+        sequence_hashes.push(compute_next_seq_hash(parent_seq_hash, block_hashes[i]));
     }
 
     sequence_hashes
@@ -240,6 +241,17 @@ impl StorageTier {
         medium
             .and_then(Self::from_kv_medium)
             .unwrap_or(Self::Device)
+    }
+
+    /// Canonical wire-format medium string. `None` for the default GPU tier so
+    /// existing consumers that omit the field continue to round-trip.
+    pub fn to_kv_medium(self) -> Option<&'static str> {
+        match self {
+            Self::Device => None,
+            Self::HostPinned => Some("CPU_PINNED"),
+            Self::Disk => Some("DISK"),
+            Self::External => Some("EXTERNAL"),
+        }
     }
 
     pub fn is_gpu(self) -> bool {
@@ -803,8 +815,6 @@ pub struct OverlapScores {
     pub scores: FxHashMap<WorkerWithDpRank, u32>,
     /// List of frequencies that the blocks have been accessed. Entries with value 0 are omitted.
     pub frequencies: Vec<usize>,
-    /// Map of worker to their tree size (number of blocks in the tree for that worker).
-    pub tree_sizes: FxHashMap<WorkerWithDpRank, usize>,
 }
 
 impl Default for OverlapScores {
@@ -823,7 +833,6 @@ impl OverlapScores {
         Self {
             scores: FxHashMap::default(),
             frequencies: Vec::with_capacity(32),
-            tree_sizes: FxHashMap::default(),
         }
     }
 
@@ -1048,6 +1057,21 @@ mod tests {
         let hashes =
             compute_block_hash_for_seq(&sequence, kv_block_size, BlockHashOptions::default());
         assert_eq!(hashes.len(), 2);
+    }
+
+    #[test]
+    fn test_compute_next_seq_hash_matches_rolling_hash() {
+        let block_hashes = [LocalBlockHash(11), LocalBlockHash(22), LocalBlockHash(33)];
+        let seq_hashes = compute_seq_hash_for_block(&block_hashes);
+
+        assert_eq!(
+            seq_hashes[1],
+            compute_next_seq_hash(seq_hashes[0], block_hashes[1])
+        );
+        assert_eq!(
+            seq_hashes[2],
+            compute_next_seq_hash(seq_hashes[1], block_hashes[2])
+        );
     }
 
     #[test]

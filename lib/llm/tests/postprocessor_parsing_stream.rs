@@ -342,6 +342,149 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
     }
 }
 
+/// Regression for DeepSeek V4 tool-continuation turns.
+///
+/// The V4 formatter seeds `<think>` into the prompt after a merged tool result,
+/// so the completion starts inside a reasoning block and does not emit an
+/// opening `<think>`. `postprocessor_parsing_stream` must preserve the
+/// prompt-injected reasoning signal even when the original request's last
+/// message is `role=tool`.
+#[tokio::test]
+async fn postprocessor_parsing_stream_deepseek_v4_tool_continuation_keeps_injected_reasoning() {
+    let preprocessor = build_preprocessor(Some("deepseek_v4"), None);
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "messages": [
+            {"role": "user", "content": "Create and run a hello-world script."},
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "run_python",
+                        "arguments": "{\"path\":\"/tmp/hello.py\"}"
+                    }
+                }]
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "Hello, world!"
+            }
+        ],
+        "model": "deepseek-ai/DeepSeek-V4-Pro",
+        "stream": true
+    }))
+    .unwrap();
+
+    let input_chunks = vec![
+        mock_content_chunk("The script ran successfully."),
+        mock_content_chunk("</think>"),
+        mock_content_chunk("Done. Output: `Hello, world!`"),
+        mock_final_chunk(),
+    ];
+
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+        }
+    }
+
+    assert_eq!(reasoning, "The script ran successfully.");
+    assert_eq!(content, "Done. Output: `Hello, world!`");
+    assert!(
+        !content.contains("</think>"),
+        "literal closing tag leaked into content: {content:?}"
+    );
+}
+
+/// Regression for Kimi K2.5 tool-continuation turns.
+///
+/// Kimi K2.5 direct answers after tool results should remain normal content.
+/// The `last_is_tool` guard from PR #8442 must still suppress forced
+/// prompt-injected reasoning for Kimi, even though DeepSeek V4 preserves it.
+#[tokio::test]
+async fn postprocessor_parsing_stream_kimi_k25_tool_continuation_suppresses_injected_reasoning() {
+    let preprocessor = build_preprocessor(Some("kimi_k25"), None);
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "messages": [
+            {"role": "user", "content": "Create and run a hello-world script."},
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "run_python",
+                        "arguments": "{\"path\":\"/tmp/hello.py\"}"
+                    }
+                }]
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "Hello, world!"
+            }
+        ],
+        "model": "moonshotai/Kimi-K2.5-Instruct",
+        "stream": true
+    }))
+    .unwrap();
+
+    let input_chunks = vec![
+        mock_content_chunk("Done. Output: `Hello, world!`"),
+        mock_final_chunk(),
+    ];
+
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+        }
+    }
+
+    assert_eq!(
+        reasoning, "",
+        "direct post-tool Kimi answer must not be mislabeled as reasoning_content",
+    );
+    assert_eq!(content, "Done. Output: `Hello, world!`");
+}
+
 /// Regression: MiniMax + tool_choice=required + SGLang guided decoding.
 ///
 /// The reasoning parser (minimax_append_think) synthesizes a `<think>` opener

@@ -462,7 +462,7 @@ def _stage_config_to_dict(stage_config: Any, stage_type: str) -> dict:
     runtime = getattr(stage_config, "runtime", None)
     if runtime is not None:
         rt = _to_plain(runtime)
-        rt["devices"] = "0"
+        rt.setdefault("devices", "0")
         result["runtime"] = rt
 
     return result

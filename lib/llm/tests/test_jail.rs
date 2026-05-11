@@ -945,9 +945,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_jailed_stream_partial_tool_call() {
-        // Tests handling of incomplete tool call when stream ends abruptly
+        // Tests handling of incomplete tool call when stream ends abruptly.
+        // After PR #8888, finalize() runs `try_tool_call_parse_aggregate_finalize`
+        // which enables EOF recovery — the parser balances the unclosed braces
+        // and surfaces the call (with whatever args were captured) instead of
+        // dropping it as plain text. Streaming early-exit still requires the
+        // end-token to actually arrive, so this only fires at stream end.
+        //
         // Input: "Starting function call. " + "<TOOLCALL>[{\"name\": \"incomplete_func\", \"arguments\": {" (no end marker)
-        // Expected output: 2 chunks [Content(), Content(partial)] - partial accumulated content released on stream end
+        // Expected output: 2 chunks [Content(), ToolCall(incomplete_func, {})]
         let chunks = vec![
             create_mock_response_chunk("Starting function call. ".to_string(), 0),
             create_mock_response_chunk("<TOOLCALL>".to_string(), 0),
@@ -965,26 +971,14 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Should handle partial tool call gracefully - releases accumulated content on stream end
         assert_eq!(
             results.len(),
             2,
-            "Should handle partial tool call and release content"
+            "Should emit prefix content + recovered tool call"
         );
 
-        // Verify exact output structure: [Content(), Content(accumulated partial)]
         test_utils::assert_content(&results[0], "Starting function call. ");
-        test_utils::assert_content(
-            &results[1],
-            "<TOOLCALL>[{\"name\": \"incomplete_func\", \"arguments\": {",
-        );
-
-        // Verify partial content is preserved as text since no valid tool call could be parsed
-        let reconstructed = test_utils::reconstruct_content(&results);
-        assert_eq!(
-            reconstructed,
-            "Starting function call. <TOOLCALL>[{\"name\": \"incomplete_func\", \"arguments\": {"
-        );
+        test_utils::assert_tool_call(&results[1], "incomplete_func", serde_json::json!({}));
     }
 
     #[tokio::test]

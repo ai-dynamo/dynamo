@@ -4,15 +4,17 @@ Production-ready deployments for **Qwen3-235B-A22B** (MoE model with 22B active 
 
 ## Available Configurations
 
-| Configuration | GPUs | Mode | Description |
-|--------------|------|------|-------------|
-| [**trtllm/agg**](trtllm/agg/) | 16x GPU | Aggregated | TP4, EP4, KV-aware routing |
-| [**trtllm/disagg**](trtllm/disagg/) | 16x GPU | Disaggregated | Prefill/decode separation |
+| Configuration | GPUs | Hardware | Mode | Description |
+|--------------|------|----------|------|-------------|
+| [**trtllm/agg/hopper**](trtllm/agg/hopper/) | 16x GPU | H100/H200 | Aggregated | TP4, EP4, KV-aware routing |
+| [**trtllm/agg/blackwell**](trtllm/agg/blackwell/) | 16x GPU | B100/B200 | Aggregated | TP4, EP4, KV-aware routing, DEEPGEMM |
+| [**trtllm/disagg/hopper**](trtllm/disagg/hopper/) | 16x GPU | H100/H200 | Disaggregated | Prefill/decode separation |
+| [**trtllm/disagg/blackwell**](trtllm/disagg/blackwell/) | 16x GPU | B100/B200 | Disaggregated | Prefill/decode separation, DEEPGEMM |
 
 ## Prerequisites
 
 1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
-2. **GPU cluster** with Blackwell GPUs (B100/B200; SM100+) — see [Hardware Requirements](#hardware-requirements)
+2. **GPU cluster** with H100/H200 (Hopper) or B100/B200 (Blackwell) GPUs — see [Hardware Requirements](#hardware-requirements)
 3. **HuggingFace token** with access to Qwen models
 
 ## Quick Start
@@ -31,9 +33,11 @@ kubectl create secret generic hf-token-secret \
 kubectl apply -f model-cache/ -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
 
-# Deploy (choose one configuration)
-kubectl apply -f trtllm/agg/deploy.yaml -n ${NAMESPACE}
-# OR: kubectl apply -f trtllm/disagg/deploy.yaml -n ${NAMESPACE}
+# Deploy — choose the variant matching your hardware:
+kubectl apply -f trtllm/agg/hopper/deploy.yaml -n ${NAMESPACE}       # H100/H200
+# OR: kubectl apply -f trtllm/agg/blackwell/deploy.yaml -n ${NAMESPACE}   # B100/B200
+# OR: kubectl apply -f trtllm/disagg/hopper/deploy.yaml -n ${NAMESPACE}   # H100/H200
+# OR: kubectl apply -f trtllm/disagg/blackwell/deploy.yaml -n ${NAMESPACE} # B100/B200
 ```
 
 ## Test the Deployment
@@ -62,16 +66,19 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Hardware Requirements
 
-This recipe uses `moe_config.backend: DEEPGEMM`, which requires **Blackwell GPUs (SM100+, e.g. B100/B200)**.
-DeepGEMM's FP8 grouped-GEMM kernels are designed for SM100/SM103 only and will crash on Hopper (SM90).
+This recipe has separate variants for Hopper and Blackwell because the two architectures require different MoE backend configurations with TRT-LLM 1.3.x:
 
-> **Note:** To run on Hopper (H100/H200, SM90), remove the `moe_config` block from the ConfigMaps in
-> `trtllm/agg/deploy.yaml` and `trtllm/disagg/deploy.yaml`. This falls back to the default MoE backend at a modest throughput reduction.
+- **Hopper (H100/H200, SM90)**: uses the default MoE backend — `trtllm/{agg,disagg}/hopper/`
+- **Blackwell (B100/B200, SM100+)**: requires `moe_config.backend: DEEPGEMM` — `trtllm/{agg,disagg}/blackwell/`
+
+The difference: the default CUTLASS MoE backend in TRT-LLM 1.3.x falls through to a Hopper-specific JIT path when running on SM100, causing a crash. DEEPGEMM is the required workaround on Blackwell for this version. DEEPGEMM in turn crashes on Hopper due to a scale-factor dtype mismatch. Hence two separate variants.
 
 | Configuration | GPUs | Min GPU VRAM (Total) |
 |--------------|------|----------------------|
-| Aggregated | 16x B100/B200 | ~1.3TB |
-| Disaggregated | 16x B100/B200 | ~1.3TB |
+| Aggregated (Hopper) | 16x H100/H200 | ~1.3TB |
+| Aggregated (Blackwell) | 16x B100/B200 | ~1.3TB |
+| Disaggregated (Hopper) | 16x H100/H200 | ~1.3TB |
+| Disaggregated (Blackwell) | 16x B100/B200 | ~1.3TB |
 
 ## Notes
 

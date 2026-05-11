@@ -267,10 +267,8 @@ type RollingUpdateContext struct {
 	NewWorkerHash string
 	// OldWorkerReplicas maps service name to the desired replica count for old workers.
 	// Used by the controller to patch old worker DCDs directly.
-	// Calculated as: max(0, desiredReplicas - newReadyReplicas)
 	OldWorkerReplicas map[string]int32
 	// NewWorkerReplicas maps service name to the desired replica count for new workers.
-	// Calculated as: min(desiredReplicas, newReadyReplicas + 1) to gradually scale up.
 	NewWorkerReplicas map[string]int32
 }
 
@@ -380,8 +378,8 @@ func generateSingleDCD(
 	}
 
 	// during a rolling update, the replica count is determined by the rollingUpdateCtx instead of the component spec
-	if rollingUpdateCtx.InProgress() && IsWorkerComponent(component.ComponentType) && rollingUpdateCtx.NewWorkerReplicas[componentName] != 0 {
-		deployment.Spec.Replicas = ptr.To(rollingUpdateCtx.NewWorkerReplicas[componentName])
+	if newReplicas, ok := rollingUpdateCtx.NewWorkerReplicas[componentName]; rollingUpdateCtx.InProgress() && IsWorkerComponent(component.ComponentType) && ok {
+		deployment.Spec.Replicas = ptr.To(newReplicas)
 	} else if component.Replicas != nil {
 		deployment.Spec.Replicas = component.Replicas
 	}
@@ -1126,6 +1124,11 @@ func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alp
 // Does NOT set runAsUser/runAsGroup/runAsNonRoot to maintain backward compatibility
 // with images that may expect to run as root.
 // User-provided security context values (via extraPodSpec) will override these defaults.
+//
+// Note: OpenShift's restricted-v2 SCC rejects pods with fsGroup outside the
+// namespace's allocated UID range. To run on OpenShift, bind a permissive SCC
+// (anyuid / anyuid-v2) to the workload service account, or have the user
+// supply an extraPodSpec.securityContext with an in-range value.
 func applyDefaultSecurityContext(podSpec *corev1.PodSpec) {
 	// Initialize SecurityContext if not present
 	if podSpec.SecurityContext == nil {
@@ -1241,6 +1244,16 @@ func GenerateBasePodSpec(
 	AddStandardEnvVars(&container, operatorConfig)
 
 	volumes := make([]corev1.Volume, 0, len(component.VolumeMounts)+1) // +1 for shared memory volume
+	// Track only the mounts declared via the top-level `component.VolumeMounts`
+	// API so we can propagate exactly these to the frontend sidecar. This scope
+	// deliberately excludes:
+	//   - mounts merged in via extraPodSpec.mainContainer.volumeMounts (an escape
+	//     hatch aimed at the worker; users who need those on the sidecar should
+	//     set them explicitly once a sidecar-level field exists),
+	//   - mounts added later by backend.UpdateContainer (e.g. TRT-LLM's /ssh-pk
+	//     MPI secret, which must not leak into the sidecar),
+	//   - the shared-memory /dev/shm mount (not needed by the frontend).
+	userMounts := make([]corev1.VolumeMount, 0, len(component.VolumeMounts))
 
 	for _, volumeMount := range component.VolumeMounts {
 		if volumeMount.Name == "" {
@@ -1269,10 +1282,12 @@ func GenerateBasePodSpec(
 			},
 		})
 
-		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+		mount := corev1.VolumeMount{
 			Name:      volumeMount.Name,
 			MountPath: mountPoint,
-		})
+		}
+		container.VolumeMounts = append(container.VolumeMounts, mount)
+		userMounts = append(userMounts, mount)
 	}
 	// Apply backend-specific container modifications
 	multinodeDeployer := deployerOverride
@@ -1329,7 +1344,7 @@ func GenerateBasePodSpec(
 
 	// Inject auto-generated frontend sidecar if configured
 	if component.FrontendSidecar != nil {
-		sidecar, err := generateFrontendSidecar(component.FrontendSidecar, componentContext, operatorConfig)
+		sidecar, err := generateFrontendSidecar(component.FrontendSidecar, componentContext, operatorConfig, userMounts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate frontend sidecar: %w", err)
 		}
@@ -1363,7 +1378,7 @@ func GenerateBasePodSpec(
 
 	// Clone main container into two engine containers (active + standby) for failover.
 	// Runs after GMS so the main container already has DRA claims and shared volume.
-	if isFailoverEnabled(component) {
+	if IsIntraPodFailoverEnabled(component) {
 		if err := buildFailoverPod(&podSpec, numberOfNodes, backendFramework); err != nil {
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)
 		}
@@ -1411,6 +1426,7 @@ func generateFrontendSidecar(
 	spec *v1alpha1.FrontendSidecarSpec,
 	parentContext ComponentContext,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
+	parentMounts []corev1.VolumeMount,
 ) (corev1.Container, error) {
 	frontendContext := ComponentContext{
 		numberOfNodes:                  1,
@@ -1447,6 +1463,23 @@ func generateFrontendSidecar(
 	}
 
 	AddStandardEnvVars(&container, operatorConfig)
+
+	// Mirror the worker's VolumeMounts so the sidecar can read files the worker
+	// registers in its ModelDeploymentCard (tokenizer, config, chat_template)
+	// when those live on a PVC. Skip any mount whose Name already exists on the
+	// sidecar's base container — protects against kubelet duplicate-mount errors
+	// if FrontendDefaults ever starts seeding mounts of its own.
+	existing := make(map[string]struct{}, len(container.VolumeMounts))
+	for _, m := range container.VolumeMounts {
+		existing[m.Name] = struct{}{}
+	}
+	for _, m := range parentMounts {
+		if _, ok := existing[m.Name]; ok {
+			continue
+		}
+		container.VolumeMounts = append(container.VolumeMounts, m)
+		existing[m.Name] = struct{}{}
+	}
 
 	return container, nil
 }
@@ -1567,9 +1600,11 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
 	}
 
-	if p.operatorConfig.Checkpoint.Enabled {
+	// GMS weight servers load weights fresh from disk and are not CRIU targets.
+	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS {
 		if err := checkpoint.InjectCheckpointIntoPodSpec(
 			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
+			p.operatorConfig.Checkpoint.EffectiveSeccompProfile(),
 		); err != nil {
 			return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", p.r.Name, err)
 		}
@@ -1646,7 +1681,9 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate annotations: %w", err)
 	}
-	checkpoint.ApplyRestorePodMetadata(labels, annotations, p.checkpointInfo)
+	if p.r.Role != RoleGMS {
+		checkpoint.ApplyRestorePodMetadata(labels, annotations, p.checkpointInfo)
+	}
 	annotations = applyRestartAnnotation(annotations, p.serviceName, p.restartState, p.existingRestartAnnotations)
 	clique.Annotations = annotations
 

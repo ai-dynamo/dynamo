@@ -5,10 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::sync::broadcast::{
-    Receiver,
-    error::{RecvError, TryRecvError},
-};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::recorder::{Recorder, RecorderOptions};
@@ -28,78 +25,43 @@ impl Default for JsonlSinkOptions {
     }
 }
 
-/// Spawn an async JSONL sink for records received from a typed telemetry bus.
-pub async fn spawn_jsonl_worker_with_shutdown<T>(
-    mut rx: Receiver<T>,
-    path: String,
-    options: JsonlSinkOptions,
-    shutdown: CancellationToken,
-) -> anyhow::Result<()>
+/// Channel-backed handle for a buffered JSONL sink. Wraps a `Recorder<T>`,
+/// which appends records to disk on its own background task. Drop cancels
+/// the recorder.
+pub struct JsonlWriter<T> {
+    tx: mpsc::Sender<T>,
+    // Holding the recorder keeps its background task alive; its Drop cancels.
+    _recorder: Recorder<T>,
+}
+
+impl<T> JsonlWriter<T>
 where
     T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
-    let recorder_shutdown = CancellationToken::new();
-    let recorder: Recorder<T> = Recorder::new_with_options(
-        recorder_shutdown.clone(),
-        &path,
-        RecorderOptions {
-            buffer_bytes: options.buffer_bytes.max(1),
-            flush_interval: Some(options.flush_interval.max(Duration::from_millis(1))),
-            append: true,
-            ..Default::default()
-        },
-    )
-    .await
-    .with_context(|| format!("opening jsonl telemetry sink at {path}"))?;
+    pub async fn new(path: String, options: JsonlSinkOptions) -> anyhow::Result<Self> {
+        let recorder_shutdown = CancellationToken::new();
+        let recorder: Recorder<T> = Recorder::new_with_options(
+            recorder_shutdown,
+            &path,
+            RecorderOptions {
+                buffer_bytes: options.buffer_bytes.max(1),
+                flush_interval: Some(options.flush_interval.max(Duration::from_millis(1))),
+                append: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .with_context(|| format!("opening jsonl sink at {path}"))?;
+        let tx = recorder.event_sender();
+        Ok(Self {
+            tx,
+            _recorder: recorder,
+        })
+    }
 
-    let tx = recorder.event_sender();
-    tokio::spawn(async move {
-        let _recorder = recorder;
-        loop {
-            tokio::select! {
-                biased;
-                _ = shutdown.cancelled() => {
-                    loop {
-                        match rx.try_recv() {
-                            Ok(rec) => {
-                                if tx.send(rec).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(TryRecvError::Lagged(n)) => {
-                                tracing::warn!(dropped = n, "telemetry bus lagged during shutdown; dropped records");
-                            }
-                            Err(TryRecvError::Empty | TryRecvError::Closed) => break,
-                        }
-                    }
-                    recorder_shutdown.cancel();
-                    return;
-                }
-                msg = rx.recv() => {
-                    match msg {
-                        Ok(rec) => {
-                            if tx.send(rec).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(RecvError::Lagged(n)) => {
-                            tracing::warn!(dropped = n, "telemetry bus lagged; dropped records")
-                        }
-                        Err(RecvError::Closed) => break,
-                    }
-                }
-            }
-        }
-        recorder_shutdown.cancel();
-    });
-
-    tracing::info!(
-        path,
-        buffer_bytes = options.buffer_bytes,
-        flush_interval_ms = options.flush_interval.as_millis(),
-        "async JSONL telemetry sink ready"
-    );
-    Ok(())
+    pub async fn send(&self, rec: T) -> Result<(), mpsc::error::SendError<T>> {
+        self.tx.send(rec).await
+    }
 }
 
 #[cfg(test)]
@@ -109,9 +71,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use tempfile::tempdir;
 
-    use crate::telemetry::bus::TelemetryBus;
-
-    use super::{JsonlSinkOptions, spawn_jsonl_worker_with_shutdown};
+    use super::{JsonlSinkOptions, JsonlWriter};
 
     #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
     struct TestRecord {
@@ -120,30 +80,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writes_jsonl_from_bus() {
+    async fn writes_record_to_jsonl_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("telemetry.jsonl");
-        let path_string = path.to_string_lossy().to_string();
-        let shutdown = tokio_util::sync::CancellationToken::new();
-        let bus = TelemetryBus::<TestRecord>::new();
-        bus.init(4);
 
-        spawn_jsonl_worker_with_shutdown(
-            bus.subscribe(),
-            path_string,
+        let writer: JsonlWriter<TestRecord> = JsonlWriter::new(
+            path.display().to_string(),
             JsonlSinkOptions {
                 buffer_bytes: 64,
                 flush_interval: Duration::from_millis(5),
             },
-            shutdown.clone(),
         )
         .await
         .unwrap();
 
-        bus.publish(TestRecord {
-            id: 1,
-            name: "record".to_string(),
-        });
+        writer
+            .send(TestRecord {
+                id: 1,
+                name: "record".to_string(),
+            })
+            .await
+            .unwrap();
 
         let mut content = String::new();
         for _ in 0..50 {
@@ -153,7 +110,6 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        shutdown.cancel();
 
         let line = content.lines().next().expect("jsonl line");
         let wrapper: serde_json::Value = serde_json::from_str(line).unwrap();

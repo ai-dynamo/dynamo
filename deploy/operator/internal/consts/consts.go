@@ -27,6 +27,8 @@ const (
 	DynamoNixlPort     = 19090
 	DynamoNixlPortName = "nixl"
 
+	DynamoFPMBasePort = 20380
+
 	MpiRunSshPort = 2222
 
 	// Default security context values

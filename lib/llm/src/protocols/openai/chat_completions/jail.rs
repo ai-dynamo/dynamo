@@ -12,6 +12,7 @@ use dynamo_parsers::tool_calling::json::try_tool_call_parse_basic_json;
 use dynamo_parsers::tool_calling::parsers::get_tool_parser_map;
 use dynamo_parsers::tool_calling::{
     detect_tool_call_start, find_tool_call_end_position, try_tool_call_parse_aggregate,
+    try_tool_call_parse_aggregate_finalize,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
@@ -250,6 +251,7 @@ impl ChoiceJailState {
                                 jailed_part,
                                 choice,
                                 self.emitted_tool_calls_count,
+                                false, // streaming early-exit, no EOF recovery
                             )
                             .await;
 
@@ -382,6 +384,7 @@ impl ChoiceJailState {
                         &jailed_owned,
                         choice,
                         self.emitted_tool_calls_count,
+                        false, // streaming unjail, no EOF recovery
                     )
                     .await;
                 unjailed_choice.logprobs = jail_logprobs;
@@ -445,6 +448,7 @@ impl ChoiceJailState {
                     &self.accumulated_content,
                     &dummy_choice,
                     self.emitted_tool_calls_count,
+                    true, // finalize: enable EOF recovery for missing-end-token / truncated-JSON
                 )
                 .await;
             // Attach the full accumulated logprobs to the final choice
@@ -914,95 +918,145 @@ impl JailedStream {
         }
     }
 
-    /// Parse tool calls from accumulated content and create choice
+    /// Parse tool calls from accumulated content and create choice.
+    ///
+    /// `is_finalize` selects the recovery-enabled aggregator (missing
+    /// outer end-token / truncated JSON). Streaming early-exit callers pass
+    /// `false`; the stream-end finalize path passes `true`.
     async fn create_tool_call_choice(
         &self,
         choice_index: u32,
         accumulated_content: &str,
         base_choice: &ChatChoiceStream,
         tool_call_offset: usize,
+        is_finalize: bool,
     ) -> ChatChoiceStream {
         match &self.jail_mode {
             JailMode::MarkerBased => {
                 // Traditional marker-based tool call parsing
                 let tools_slice = self.tool_definitions.as_deref();
-                let parse_result = try_tool_call_parse_aggregate(
-                    accumulated_content,
-                    self.tool_call_parser.as_deref(),
-                    tools_slice,
-                )
-                .await;
-                if let Ok((tool_calls, normal_text)) = parse_result
-                    && !tool_calls.is_empty()
-                {
-                    // If a named tool filter is set (tool_choice=named + parser path), reject
-                    // tool calls that don't match the required tool name.
-                    let tool_calls = if let Some(ref required_name) = self.named_tool_name {
-                        let filtered: Vec<_> = tool_calls
-                            .into_iter()
-                            .filter(|tc| tc.function.name == *required_name)
-                            .collect();
-                        if filtered.is_empty() {
-                            tracing::warn!(
-                                required = %required_name,
-                                "tool_choice=named: parser emitted no matching tool calls; dropping jail output"
+                let parse_result = if is_finalize {
+                    try_tool_call_parse_aggregate_finalize(
+                        accumulated_content,
+                        self.tool_call_parser.as_deref(),
+                        tools_slice,
+                    )
+                    .await
+                } else {
+                    try_tool_call_parse_aggregate(
+                        accumulated_content,
+                        self.tool_call_parser.as_deref(),
+                        tools_slice,
+                    )
+                    .await
+                };
+                match parse_result {
+                    Ok((tool_calls, normal_text)) if !tool_calls.is_empty() => {
+                        // If a named tool filter is set (tool_choice=named + parser path), reject
+                        // tool calls that don't match the required tool name.
+                        let tool_calls = if let Some(ref required_name) = self.named_tool_name {
+                            let filtered: Vec<_> = tool_calls
+                                .into_iter()
+                                .filter(|tc| tc.function.name == *required_name)
+                                .collect();
+                            if filtered.is_empty() {
+                                tracing::warn!(
+                                    required = %required_name,
+                                    "tool_choice=named: parser emitted no matching tool calls; dropping jail output"
+                                );
+                            }
+                            filtered
+                        } else {
+                            tool_calls
+                        };
+
+                        if tool_calls.is_empty() {
+                            // All parsed calls were filtered out — emit the parser's stripped
+                            // normal_text, not accumulated_content (which still contains the
+                            // raw tool-call markers).
+                            return create_choice_stream(
+                                choice_index,
+                                Some(Role::Assistant),
+                                normal_text.as_deref().unwrap_or(""),
+                                None,
+                                base_choice.finish_reason,
+                                base_choice.stop_reason.clone(),
+                                base_choice.logprobs.clone(),
                             );
                         }
-                        filtered
-                    } else {
-                        tool_calls
-                    };
 
-                    if tool_calls.is_empty() {
-                        // All parsed calls were for the wrong tool — return content choice
-                        return create_choice_stream(
+                        // Convert to streaming format
+                        let tool_call_chunks: Vec<ChatCompletionMessageToolCallChunk> = tool_calls
+                            .into_iter()
+                            .enumerate()
+                            .map(|(idx, tool_call)| ChatCompletionMessageToolCallChunk {
+                                index: (tool_call_offset + idx) as u32,
+                                id: Some(tool_call.id),
+                                r#type: Some(FunctionType::Function),
+                                function: Some(FunctionCallStream {
+                                    name: Some(tool_call.function.name),
+                                    arguments: Some(tool_call.function.arguments),
+                                }),
+                            })
+                            .collect();
+                        create_choice_stream(
                             choice_index,
                             Some(Role::Assistant),
-                            accumulated_content,
+                            normal_text.as_deref().unwrap_or(""),
+                            Some(tool_call_chunks),
+                            None,
+                            None,
+                            base_choice.logprobs.clone(),
+                        )
+                    }
+                    Ok((_, normal_text)) => {
+                        // Parser succeeded but extracted no structured tool calls. The parser
+                        // signals which sub-case via normal_text:
+                        //   - Some(""):  parser detected markers but couldn't form a complete
+                        //                call (e.g. kimi truncated mid-arg, or start token with
+                        //                no valid JSON). Drop the buffer — accumulated_content
+                        //                still has the raw markers and would leak.
+                        //   - otherwise: parser saw no markers (false positive entry, e.g.
+                        //                mistral on a stray `{` in prose, or default `<tool_call>`
+                        //                token when manual sequences are configured). Pass
+                        //                accumulated_content through verbatim — it's regular text
+                        //                and may carry leading/trailing whitespace the parser
+                        //                would have trimmed.
+                        let content = if normal_text.as_deref() == Some("") {
+                            ""
+                        } else {
+                            accumulated_content
+                        };
+                        create_choice_stream(
+                            choice_index,
+                            Some(Role::Assistant),
+                            content,
                             None,
                             base_choice.finish_reason,
                             base_choice.stop_reason.clone(),
                             base_choice.logprobs.clone(),
-                        );
+                        )
                     }
-
-                    // Convert to streaming format
-                    let tool_call_chunks: Vec<ChatCompletionMessageToolCallChunk> = tool_calls
-                        .into_iter()
-                        .enumerate()
-                        .map(|(idx, tool_call)| ChatCompletionMessageToolCallChunk {
-                            index: (tool_call_offset + idx) as u32,
-                            id: Some(tool_call.id),
-                            r#type: Some(FunctionType::Function),
-                            function: Some(FunctionCallStream {
-                                name: Some(tool_call.function.name),
-                                arguments: Some(tool_call.function.arguments),
-                            }),
-                        })
-                        .collect();
-                    // Create choice with tool calls
-                    let choice = create_choice_stream(
-                        choice_index,
-                        Some(Role::Assistant),
-                        normal_text.as_deref().unwrap_or(""),
-                        Some(tool_call_chunks),
-                        None,
-                        None,
-                        base_choice.logprobs.clone(),
-                    );
-                    return choice;
+                    Err(e) => {
+                        // Parser errored — emit empty content rather than the raw buffer.
+                        // accumulated_content may still contain tool-call markers, and
+                        // surfacing those to the user is the leak we're guarding against.
+                        // The warn! gives operators visibility into the failure.
+                        tracing::warn!(
+                            error = %e,
+                            "tool-call parser errored; dropping buffered content to avoid marker leak"
+                        );
+                        create_choice_stream(
+                            choice_index,
+                            Some(Role::Assistant),
+                            "",
+                            None,
+                            base_choice.finish_reason,
+                            base_choice.stop_reason.clone(),
+                            base_choice.logprobs.clone(),
+                        )
+                    }
                 }
-
-                // No tool calls found or parsing failed, return content choice
-                create_choice_stream(
-                    choice_index,
-                    Some(Role::Assistant),
-                    accumulated_content,
-                    None,
-                    base_choice.finish_reason,
-                    base_choice.stop_reason.clone(),
-                    base_choice.logprobs.clone(),
-                )
             }
             JailMode::Immediate { format } => {
                 // tool_choice=required/named path (SGLang/vLLM-style).

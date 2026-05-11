@@ -87,6 +87,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 "temperature": sampling_opts.get("temperature"),
                 "top_p": sampling_opts.get("top_p"),
                 "top_k": sampling_opts.get("top_k"),
+                "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 **self._get_guided_decoding_params(
                     sampling_opts.get("guided_decoding")

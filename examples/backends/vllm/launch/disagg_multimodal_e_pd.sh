@@ -5,6 +5,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Use TCP transport for multimodal workloads (base64 images can exceed NATS 1MB limit)
@@ -77,9 +78,9 @@ echo "Starting frontend..."
 python -m dynamo.frontend &
 
 EXTRA_ARGS=""
+PD_GPU_MEM_ARGS=""
 
 # GPU assignments (override via environment variables)
-# TODO: use build_vllm_gpu_mem_args to measure VRAM instead of hardcoded fractions
 # In single-GPU mode both workers share the same GPU.
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
@@ -94,8 +95,33 @@ else
     DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.9}
 fi
 
-# Start encode worker
-echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
+# PD worker memory args: when _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES is set,
+# build_vllm_gpu_mem_args returns "--kv-cache-memory-bytes N --gpu-memory-utilization 0.01",
+# which overrides $DYN_PD_GPU_MEM (the env knob becomes a no-op in that case).
+# Without the override env, $DYN_PD_GPU_MEM is the live cap.
+PD_GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+if [[ -z "$PD_GPU_MEM_ARGS" ]]; then
+    PD_GPU_MEM_ARGS="--gpu-memory-utilization $DYN_PD_GPU_MEM"
+fi
+
+# Start encode worker.
+#
+# NOTE: encoder VRAM is STATIC, set by the model — $DYN_ENCODE_GPU_MEM
+# (--gpu-memory-utilization) is effectively a no-op for non-Qwen-VL models.
+# dynamo's EncodeWorkerHandler only consumes engine_args.enforce_eager;
+# load_vision_model (components/src/dynamo/vllm/multimodal_utils/model.py)
+# branches on family:
+#   - Qwen-VL: vLLM mm_encoder_only=True path, hardcoded gpu_memory_utilization=0.2
+#     and kv_cache_memory_bytes=64MiB inside the function — only the vision tower
+#     loads (small).
+#   - Everything else (e.g. LLaVA-1.5-7b): AutoModel.from_pretrained(..., fp16)
+#     loads the FULL model weights, then .visual is extracted. The fraction here
+#     is ignored.
+# Verified empirically for LLaVA-1.5-7b on RTX 6000 Ada (48 GB):
+# GPU0 peak ~13.5 GB at DYN_ENCODE_GPU_MEM=0.05, 0.5, 0.9 (identical within jitter).
+# The static peak is bounded by the model's fp16 weights (~14 GB), independent
+# of GPU size. So sizing for this script: encoder needs ~14 GB free per worker GPU.
+echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utilization $DYN_ENCODE_GPU_MEM)..."
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
 python -m dynamo.vllm \
   --multimodal-encode-worker \
@@ -105,14 +131,14 @@ python -m dynamo.vllm \
   $EXTRA_ARGS &
 
 # Start PD worker (aggregated prefill+decode, routes to encoder for embeddings)
-echo "Starting PD worker on GPU $DYN_PD_WORKER_GPU (GPU mem: $DYN_PD_GPU_MEM)..."
+echo "Starting PD worker on GPU $DYN_PD_WORKER_GPU (${PD_GPU_MEM_ARGS})..."
 CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU \
 python -m dynamo.vllm \
   --route-to-encoder \
   --enable-multimodal \
   --enable-mm-embeds \
   --model "$MODEL_NAME" \
-  --gpu-memory-utilization "$DYN_PD_GPU_MEM" \
+  $PD_GPU_MEM_ARGS \
   $EXTRA_ARGS \
   "${EXTRA_PD_ARGS[@]}" &
 

@@ -15,18 +15,20 @@ Two top-level modules, each with its own parser registry:
 ```
 lib/parsers/
 ├── src/
-│   ├── tool_calling/        ← tool-call extraction (17 registered parsers)
+│   ├── tool_calling/        ← tool-call extraction (18 registered parsers)
 │   │   ├── parsers.rs         — registry + dispatch (detect_and_parse_tool_call)
 │   │   ├── config.rs          — per-parser ToolCallConfig
 │   │   ├── response.rs        — ToolCallResponse shape (wire type)
 │   │   ├── dsml/              — DeepSeek V3.2 / V4 DSML grammar
+│   │   ├── gemma4/            — Google Gemma 4 custom non-JSON grammar (`<|"|>`-delimited strings)
 │   │   ├── xml/               — hermes, glm47, kimi_k2, minimax_m2, qwen3_coder
 │   │   ├── json/              — deepseek_v3, deepseek_v3_1, nemotron_deci/nano, jamba, mistral, phi4, llama3_json
 │   │   ├── harmony/           — OpenAI gpt-oss (Harmony token stream, uses openai_harmony crate)
 │   │   └── pythonic/          — Python function-call syntax (some Llama variants)
-│   └── reasoning/           ← reasoning-content extraction (14 registered parsers)
+│   └── reasoning/           ← reasoning-content extraction (15 registered parsers)
 │       ├── mod.rs             — registry + dispatch
 │       ├── base_parser.rs     — BasicReasoningParser (<think> ... </think>)
+│       ├── gemma4_parser.rs   — Gemma 4 (`<|channel>thought\n...<channel|>`)
 │       ├── gpt_oss_parser.rs  — Harmony channel parsing
 │       ├── granite_parser.rs  — Granite-style
 │       └── minimax_append_think_parser.rs  — MiniMax inline-reasoning
@@ -78,6 +80,7 @@ When adding a new model, the right parser family is usually one of:
 | **JSON** | Start sentinel + bare JSON array of `{name, arguments}` | `json/base_json_parser.rs` | deepseek_v3, deepseek_v3_1, nemotron_deci/nano |
 | **Harmony** | OpenAI Harmony token stream with `<\|channel\|>`, `<\|message\|>`, `<\|call\|>` | `harmony/harmony_parser.rs` (wraps external `openai_harmony` crate) | gpt-oss-20B / 120B |
 | **Pythonic** | `[func_name(arg=value, ...)]` Python function-call syntax | `pythonic/pythonic_parser.rs` | some Llama variants |
+| **Gemma 4** | Custom: `<\|tool_call>call:name{key:<\|"\|>val<\|"\|>}<tool_call\|>`, bare keys, custom string delimiter | `gemma4/parser.rs` (recursive-descent into `serde_json::Value`) | Google Gemma 4 thinking models |
 
 Reasoning parsers:
 
@@ -87,6 +90,7 @@ Reasoning parsers:
 | **Append-think** | `<think>...</think>` left inline as text, with `<think>` prefix on first chunk | `reasoning/minimax_append_think_parser.rs` | MiniMax M2 |
 | **Harmony channel** | Hidden `analysis` channel | `reasoning/gpt_oss_parser.rs` (wraps external `openai_harmony`) | gpt-oss-20B / 120B |
 | **Granite** | Custom start/end tokens | `reasoning/granite_parser.rs` | IBM Granite |
+| **Gemma 4 channel** | `<\|channel>thought\n...<channel\|>` with role-label prefix stripped | `reasoning/gemma4_parser.rs` | Google Gemma 4 thinking models |
 
 ## Adding a new parser
 
@@ -103,14 +107,15 @@ Reasoning parsers:
    grammar truly diverges (append-think, Harmony channels). Most new models
    use plain `<think>...</think>` and can share.
 
-4. **Write tests.** Minimum viable set is in [`TEST_CASES.md`](./TEST_CASES.md) (T1–T20
-   taxonomy). At minimum: T1/T2/T3 for correctness, T5 for truncation
-   behavior, T8/T9 for streaming, T14 for interleaved text. `N/A` categories
+4. **Write tests.** Minimum viable set is in [`PARSER_CASES.md`](./PARSER_CASES.md) (`PARSER.*`
+   taxonomy). At minimum: `PARSER.1`/`PARSER.2`/`PARSER.3` for correctness,
+   `PARSER.5` for truncation behavior, `PARSER.8`/`PARSER.9` for streaming
+   with reasoning, and `PARSER.13` for interleaved text. `N/A` categories
    should be explicitly called out in a comment rather than silently skipped.
 
 ## Related docs
 
-- [`TEST_CASES.md`](./TEST_CASES.md) — corner-case taxonomy (T1–T20). What every
+- [`PARSER_CASES.md`](./PARSER_CASES.md) — corner-case taxonomy. What every
   parser should be tested against, what's N/A per family, what's a universal
   gap today.
 - `lib/llm/tests/data/` — captured streaming fixtures per (engine × model)

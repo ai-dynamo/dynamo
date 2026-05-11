@@ -15,7 +15,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.lora_utils import MinioLoraConfig
+from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
@@ -26,6 +26,7 @@ from tests.utils.payload_builder import (
     completion_payload_default,
     embedding_payload,
     embedding_payload_default,
+    guided_decoding_chat_payload_default,
     metric_payload_default,
     responses_payload_default,
     responses_stream_payload_default,
@@ -87,9 +88,18 @@ sglang_configs = {
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(),
+            chat_payload(
+                "Name one color in a short sentence.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=16,
+                extra_body={"n": 2},
+                expected_num_choices=2,
+            ),
             completion_payload_default(),
             responses_payload_default(),
             responses_stream_payload_default(),
+            guided_decoding_chat_payload_default(),
             metric_payload_default(min_num_requests=6, backend="sglang"),
         ],
     ),
@@ -104,6 +114,7 @@ sglang_configs = {
             pytest.mark.requested_sglang_kv_tokens(96),
             pytest.mark.timeout(195),
             pytest.mark.pre_merge,
+            pytest.mark.unified,
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
@@ -111,6 +122,7 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            guided_decoding_chat_payload_default(),
         ],
     ),
     "disaggregated": SGLangConfig(
@@ -223,9 +235,7 @@ sglang_configs = {
         ],
     ),
     # NOTE: Pack all workers on 1 GPU for lower CI resource requirements.
-    # NOTE: multimodal_epd.sh uses explicit --mem-fraction-static via DYN_ENCODE_GPU_MEM
-    # / DYN_WORKER_GPU_MEM env vars. The profiler override distributes proportionally
-    # but workers combined consistently use ~23.6 GiB regardless of fraction overrides.
+    # KV size is set by requested_sglang_kv_tokens; no fraction overrides.
     "multimodal_e_pd_qwen": SGLangConfig(
         # E/P/D architecture: Encode, Prefill, Decode workers all on GPU 0
         name="multimodal_e_pd_qwen",
@@ -233,18 +243,19 @@ sglang_configs = {
         script_name="multimodal_epd.sh",
         marks=[
             pytest.mark.gpu_1,
-            # No profiled_vram_gib: uses hard-coded --mem-fraction-static via
-            # DYN_ENCODE_GPU_MEM / DYN_WORKER_GPU_MEM, so VRAM scales with GPU size.
-            pytest.mark.timeout(210),  # profiled 35s on RTX 6000 Ada
+            # Bisected with tests/utils/profile_pytest.py: min=1104, 2x=2208.
+            # Keep this unprofiled for now so the GPU-parallel stage leaves it
+            # in the sequential stage; parallel E/P/D runs can trip UCX mm
+            # transport init on larger single-GPU runners.
+            # pytest.mark.profiled_vram_gib(11.1),
+            pytest.mark.requested_sglang_kv_tokens(2208),
+            pytest.mark.timeout(206),  # profiled 34s on RTX 6000 Ada
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=360,
-        env={
-            "DYN_ENCODE_GPU_MEM": "0.1",
-            "DYN_WORKER_GPU_MEM": "0.4",
-        },
+        env={},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload(
@@ -358,23 +369,78 @@ sglang_configs = {
         # with in-process vision encoding (no separate encode worker).
         # Reuses agg_vision.sh because image and video share the same aggregated
         # multimodal SGLang request path.
+        #
+        # VRAM is bounded via requested_sglang_kv_tokens (deterministic, parallel-safe)
+        # rather than --mem-fraction-static (fraction of GPU, not portable across GPU
+        # sizes and breaks the VRAM-aware scheduler).
         name="video_agg_qwen",
         directory=sglang_dir,
         script_name="agg_vision.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(13.3),  # same as multimodal_e_pd_qwen
+            # Bisected with tests/utils/profile_pytest.py: minimum = 4368
+            # tokens, 2x safety = 8736. Peak 20.5 GiB at 8736 tokens. Without
+            # the cap, sglang's default 65% fraction allocates ~278k tokens
+            # and peaks at ~35 GiB (won't fit L4).
+            pytest.mark.profiled_vram_gib(20.5),
+            pytest.mark.requested_sglang_kv_tokens(8736),
             pytest.mark.timeout(360),
-            pytest.mark.pre_merge,
+            pytest.mark.post_merge,
         ],
         model="Qwen/Qwen2-VL-7B-Instruct",
         script_args=[
             "--model-path",
             "Qwen/Qwen2-VL-7B-Instruct",
-            "--mem-fraction-static",
-            "0.8",
         ],
         timeout=360,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["guitar", "tablet", "draw"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    "video_e_pd_qwen": SGLangConfig(
+        # Tests E/PD video inference path using a separate encode worker
+        # and a multimodal PD worker on a single GPU for CI coverage.
+        name="video_e_pd_qwen",
+        directory=sglang_dir,
+        script_name="multimodal_epd.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            # No profiled_vram_gib: multimodal_epd.sh uses explicit
+            # --mem-fraction-static via DYN_ENCODE_GPU_MEM / DYN_WORKER_GPU_MEM.
+            # Expected to fail until SGLang release includes the upstream fix:
+            # https://github.com/sgl-project/sglang/pull/22431
+            pytest.mark.xfail(
+                reason="Known upstream SGLang issue for video_e_pd_qwen E/PD path; expected failure until next SGLang version bump includes sglang#22431."
+            ),
+            pytest.mark.timeout(360),
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=[
+            "--model",
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "--chat-template",
+            "qwen2-vl",
+            "--single-gpu",
+        ],
+        timeout=360,
+        env={
+            "DYN_ENCODE_GPU_MEM": "0.1",
+            "DYN_WORKER_GPU_MEM": "0.4",
+        },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload(
@@ -404,7 +470,12 @@ sglang_configs = {
             pytest.mark.requested_sglang_kv_tokens(
                 128
             ),  # KV cache cap (2x safety over min=64)
-            pytest.mark.timeout(147),  # profiled 24s on RTX 6000 Ada
+            # Qwen3-Embedding-4B (~8 GB bf16) cold-loads + warms up in 130-150s
+            # on L4 CI before the first request; the 24s "profiled" figure is
+            # the steady-state run only. 147s left no headroom for startup and
+            # blew up 100% of recent amd64 runs in `_check_url`. 300s aligns
+            # with sibling 4B-class agg configs in this file.
+            pytest.mark.timeout(300),  # profiled 24s on RTX 6000 Ada
             pytest.mark.pre_merge,
             pytest.mark.nightly,
         ],
@@ -470,8 +541,9 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(19.3),
+            pytest.mark.requested_sglang_vram_gib(19.3),
             pytest.mark.timeout(240),
-            pytest.mark.pre_merge,
+            pytest.mark.nightly,
         ],
         model="Tongyi-MAI/Z-Image-Turbo",
         env={},
@@ -509,8 +581,9 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(17.6),
+            pytest.mark.requested_sglang_vram_gib(17.6),
             pytest.mark.timeout(180),
-            pytest.mark.pre_merge,
+            pytest.mark.nightly,
         ],
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         env={},
@@ -641,6 +714,7 @@ def lora_chat_payload(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.model(DEFAULT_LORA_REPO)
 @pytest.mark.profiled_vram_gib(4.7)
 @pytest.mark.requested_sglang_kv_tokens(2848)
 @pytest.mark.timeout(158)
