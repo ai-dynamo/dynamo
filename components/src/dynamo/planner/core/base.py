@@ -109,11 +109,6 @@ class NativePlannerBase:
     require_prefill: bool = False
     require_decode: bool = False
 
-    # If a pending scaling target hasn't been observed in discovery after
-    # this many throughput-adjustment intervals, assume the request was
-    # dropped/rejected and clear it so scaling is no longer silenced.
-    _PENDING_EXPIRY_INTERVALS: int = 5
-
     def __init__(
         self, runtime: Optional[DistributedRuntime], config: PlannerConfig
     ) -> None:
@@ -175,19 +170,6 @@ class NativePlannerBase:
         # Runtime client caches
         self._prefill_client = None
         self._decode_client = None
-
-        # Pending scaling targets: when using GlobalPlannerConnector, the
-        # connector can't check DGD status to detect in-flight rollouts.
-        # We track the last desired count ourselves and treat the system as
-        # unstable until discovery matches, mirroring what
-        # KubernetesConnector.get_actual_worker_counts does via is_stable.
-        # We also stamp the time the target was set so a request that is
-        # rejected, aborted, or simply lost can't permanently silence scaling
-        # — see _PENDING_EXPIRY_INTERVALS below.
-        self._pending_desired_prefill: Optional[int] = None
-        self._pending_desired_decode: Optional[int] = None
-        self._pending_desired_prefill_ts: Optional[float] = None
-        self._pending_desired_decode_ts: Optional[float] = None
 
         # Shared metrics state
         self._last_metrics = Metrics()
@@ -459,8 +441,8 @@ class NativePlannerBase:
 
     async def _get_worker_counts_raw(self) -> tuple[int, int, bool]:
         """Returns (num_prefill, num_decode, is_stable) from connector or runtime."""
-        if hasattr(self, "connector") and isinstance(
-            self.connector, KubernetesConnector
+        if hasattr(self, "connector") and hasattr(
+            self.connector, "get_actual_worker_counts"
         ):
             (
                 prefill_count,
@@ -662,72 +644,14 @@ class NativePlannerBase:
 
     async def _collect_worker_counts(self) -> WorkerCounts:
         num_p, num_d, is_stable = await self._get_worker_counts_raw()
-
-        # When the connector can't check DGD status (e.g. GlobalPlannerConnector
-        # which always returns is_stable=True), use our own pending-desired
-        # tracking to detect in-flight scaling.  Clear the pending target once
-        # discovery catches up.  When a pending target exists and doesn't match
-        # discovery, report the *pending* count as expected so that
-        # _scaling_in_progress sees expected != actual and blocks new decisions.
         expected_p = num_p if is_stable else None
         expected_d = num_d if is_stable else None
-
-        expected_p = self._reconcile_pending("prefill", num_p, expected_p)
-        expected_d = self._reconcile_pending("decode", num_d, expected_d)
-
         return WorkerCounts(
             ready_num_prefill=num_p if self.require_prefill else None,
             ready_num_decode=num_d if self.require_decode else None,
             expected_num_prefill=expected_p if self.require_prefill else None,
             expected_num_decode=expected_d if self.require_decode else None,
         )
-
-    def _reconcile_pending(
-        self, axis: str, observed: int, baseline_expected: Optional[int]
-    ) -> Optional[int]:
-        """Clear/expire pending state for one axis and return the expected count.
-
-        Returns the pending target while the rollout is unresolved so
-        ``_scaling_in_progress`` keeps blocking new decisions, otherwise the
-        baseline (e.g. ``num_p`` when the connector reports stable).
-        """
-        if axis == "prefill":
-            pending = self._pending_desired_prefill
-            pending_ts = self._pending_desired_prefill_ts
-        else:
-            pending = self._pending_desired_decode
-            pending_ts = self._pending_desired_decode_ts
-
-        if pending is None:
-            return baseline_expected
-
-        if observed == pending:
-            logger.info(
-                f"Pending {axis} target {pending} reached; clearing pending state."
-            )
-            self._clear_pending(axis)
-            return baseline_expected
-
-        expiry = (
-            self._PENDING_EXPIRY_INTERVALS * self.config.throughput_adjustment_interval
-        )
-        if pending_ts is not None and (time.time() - pending_ts) > expiry:
-            logger.warning(
-                f"Pending {axis} target {pending} not reached after "
-                f"{expiry:.0f}s (observed={observed}); clearing to unblock scaling."
-            )
-            self._clear_pending(axis)
-            return baseline_expected
-
-        return pending
-
-    def _clear_pending(self, axis: str) -> None:
-        if axis == "prefill":
-            self._pending_desired_prefill = None
-            self._pending_desired_prefill_ts = None
-        else:
-            self._pending_desired_decode = None
-            self._pending_desired_decode_ts = None
 
     # ------------------------------------------------------------------
     # Gather tick input
@@ -781,21 +705,6 @@ class NativePlannerBase:
         if self.config.advisory or not targets:
             return
         await self.connector.set_component_replicas(targets, blocking=blocking)
-
-        # Track pending desired counts so _collect_worker_counts can detect
-        # in-flight scaling when the connector lacks DGD status awareness
-        # (e.g. GlobalPlannerConnector).  The timestamp drives expiry so a
-        # rejected/dropped request can't permanently silence scaling.
-        now = time.time()
-        for t in targets:
-            if t.sub_component_type == SubComponentType.PREFILL:
-                self._pending_desired_prefill = t.desired_replicas
-                self._pending_desired_prefill_ts = now
-                logger.info(f"Set pending prefill target to {t.desired_replicas}.")
-            elif t.sub_component_type == SubComponentType.DECODE:
-                self._pending_desired_decode = t.desired_replicas
-                self._pending_desired_decode_ts = now
-                logger.info(f"Set pending decode target to {t.desired_replicas}.")
 
     # ------------------------------------------------------------------
     # Periodic decision summary
