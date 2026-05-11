@@ -373,9 +373,7 @@ def download_models(model_list=None, ignore_weights=False):
             try:
                 snapshot_download(repo_id=model_id, **dl_kwargs)
             except (ValueError, TypeError) as xet_err:
-                if "deprecated" in str(xet_err) or "unexpected keyword" in str(
-                    xet_err
-                ):
+                if "deprecated" in str(xet_err) or "unexpected keyword" in str(xet_err):
                     # hf_xet API mismatch with huggingface_hub — retry with XET
                     # disabled so snapshot_download falls back to plain HTTP.
                     logging.warning(

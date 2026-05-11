@@ -232,9 +232,7 @@ sglang_configs = {
         directory=sglang_dir,
         script_name="agg_vision.sh",
         marks=[
-            pytest.mark.skip(
-                reason="XPU UR_RESULT_ERROR_DEVICE_LOST during decode"
-            ),
+            pytest.mark.skip(reason="XPU UR_RESULT_ERROR_DEVICE_LOST during decode"),
             pytest.mark.xpu_1,
             # Bisected with tests/utils/profile_pytest.py: minimum = 4368
             # tokens, 2x safety = 8736. Peak 20.5 GiB at 8736 tokens. Without
