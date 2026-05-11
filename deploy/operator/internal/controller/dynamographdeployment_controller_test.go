@@ -1756,6 +1756,23 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 		},
 		{
+			name: "sequential restart with empty services - returns completed",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+					Strategy: &v1alpha1.RestartStrategy{
+						Type: v1alpha1.RestartStrategyTypeSequential,
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseCompleted,
+			},
+		},
+		{
 			name: "parallel restart - new request with ready resources should NOT complete immediately (race condition fix)",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{

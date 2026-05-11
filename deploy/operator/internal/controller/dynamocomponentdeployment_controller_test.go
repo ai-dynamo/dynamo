@@ -707,6 +707,37 @@ func TestDynamoComponentDeploymentReconciler_getKubeAnnotations_DropsOperatorOri
 	require.Equal(t, "kubernetes", annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend])
 }
 
+func TestGetResourceAnnotations_PodTemplateOverridesPreservedAlpha(t *testing.T) {
+	dcd := betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dcd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName: "test-dcd",
+				Annotations: map[string]string{
+					KubeAnnotationDeploymentStrategy: "Recreate",
+					"legacy-only":                    "kept",
+				},
+			},
+		},
+	})
+	if dcd.Spec.PodTemplate == nil {
+		dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{}
+	}
+	dcd.Spec.PodTemplate.Annotations = map[string]string{
+		KubeAnnotationDeploymentStrategy:              "RollingUpdate",
+		KubeAnnotationDeploymentRollingUpdateMaxSurge: "50%",
+	}
+
+	annotations := getResourceAnnotations(dcd)
+
+	require.Equal(t, "RollingUpdate", annotations[KubeAnnotationDeploymentStrategy])
+	require.Equal(t, "50%", annotations[KubeAnnotationDeploymentRollingUpdateMaxSurge])
+	require.Equal(t, "kept", annotations["legacy-only"])
+}
+
 type mockDockerSecretRetriever struct {
 	GetSecretsFunc func(namespace, imageName string) ([]string, error)
 }

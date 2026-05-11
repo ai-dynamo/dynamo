@@ -710,8 +710,8 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteDeployments(
 func getResourceAnnotations(dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) map[string]string {
 	resourceAnnotations := map[string]string{}
 	if dynamoComponentDeployment != nil {
-		maps.Copy(resourceAnnotations, dynamo.GetPodTemplateAnnotations(&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec))
 		maps.Copy(resourceAnnotations, dynamo.GetDCDPreservedAlphaAnnotations(dynamoComponentDeployment))
+		maps.Copy(resourceAnnotations, dynamo.GetPodTemplateAnnotations(&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec))
 	}
 
 	return resourceAnnotations

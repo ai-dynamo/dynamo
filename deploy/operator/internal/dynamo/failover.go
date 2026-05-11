@@ -250,11 +250,11 @@ func gmsPermFixInitContainer(rank int32, image string) corev1.Container {
 	}
 }
 
-// removeGPUFromLimits strips nvidia.com/gpu from the container's resource
+// removeGPUFromLimits strips scalar GPU resources from the container's resource
 // limits and requests because DRA handles GPU allocation for GMS pods.
 func removeGPUFromLimits(c *corev1.Container) {
-	delete(c.Resources.Limits, "nvidia.com/gpu")
-	delete(c.Resources.Requests, "nvidia.com/gpu")
+	dra.RemoveGPUResources(c.Resources.Limits)
+	dra.RemoveGPUResources(c.Resources.Requests)
 }
 
 // addGPUToleration ensures pods without explicit GPU limits still get

@@ -51,8 +51,8 @@ func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 
 	// Replace GPU resources with the shared DRA claim. The resource name can be
 	// nvidia.com/gpu or a MIG shape such as nvidia.com/mig-3g.20gb.
-	deleteGPUResources(podSpec.Containers[0].Resources.Limits)
-	deleteGPUResources(podSpec.Containers[0].Resources.Requests)
+	RemoveGPUResources(podSpec.Containers[0].Resources.Limits)
+	RemoveGPUResources(podSpec.Containers[0].Resources.Requests)
 	podSpec.Containers[0].Resources.Claims = append(podSpec.Containers[0].Resources.Claims, corev1.ResourceClaim{
 		Name: ClaimName,
 	})
@@ -97,7 +97,8 @@ func ExtractGPUCountFromResourceRequirements(resources corev1.ResourceRequiremen
 	return 0
 }
 
-func deleteGPUResources(resources corev1.ResourceList) {
+// RemoveGPUResources deletes all scalar GPU resource entries from a resource list.
+func RemoveGPUResources(resources corev1.ResourceList) {
 	for _, name := range gpuResourceNames(resources) {
 		delete(resources, name)
 	}
