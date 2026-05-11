@@ -566,10 +566,21 @@ fn check_label_compatibility(
     // duplicate labels (modulo Outer), so a one-direction set check is
     // sufficient — but we still verify each side's effective size
     // independently against the slice's per-side range.
+    //
+    // Exception: the Block axis is driven by `block_pairs`, never by
+    // an axis_slice (validate_axis_slices forbids slicing it), and the
+    // per-pair bounds checks at the top of plan_copy already validate
+    // each src/dst block id against its own side's Block size. Two
+    // leaders running the same model can legitimately have different
+    // num_blocks (per-leader block-id space), so comparing raw Block
+    // sizes here is wrong — block_pairs is the source of truth.
     for (&d, &s) in src_dims.iter().zip(src.dim_layout().sizes().iter()) {
         let dst_size = dst.dim_layout().size_of(d).ok_or_else(|| {
             anyhow::anyhow!("plan_copy: src has label {d} but dst does not (dst dims {dst_dims:?})")
         })?;
+        if d == KvDim::Block {
+            continue;
+        }
         let (src_eff, dst_eff) = match selection.axis_slice(d) {
             Some(slice) => (slice.src_local.len(), slice.dst_local.len()),
             None => (s, dst_size),
@@ -1391,6 +1402,20 @@ mod tests {
             .with(KvDim::Layer, 1)
             .with(KvDim::Block, 99); // 99 >= num_blocks (8)
         assert!(layout.addr_of(&coord).is_err());
+    }
+
+    /// Cross-leader pull pattern: src has 16 blocks, dst has 8 blocks,
+    /// otherwise identical. `block_pairs` maps src=15 → dst=0.
+    /// `plan_copy` must accept this because Block iteration is driven
+    /// by `block_pairs` (each pair OOB-checked at the top of plan_copy),
+    /// not by the per-axis size comparison in check_label_compatibility.
+    #[test]
+    fn plan_copy_accepts_block_size_mismatch_driven_by_block_pairs() {
+        let layout_src = nhd_per_layer(2, 16, 2, 16, 8, 128, 2, vec![0x1000_0000, 0x1100_0000]);
+        let layout_dst = nhd_per_layer(2, 8, 2, 16, 8, 128, 2, vec![0x2000_0000, 0x2100_0000]);
+        let selection = TransferSelection::full(vec![(15, 0)]);
+        plan_copy(&layout_src, &layout_dst, &selection, &CopyPolicy::default())
+            .expect("Block-size mismatch must not bail when block_pairs is in-range");
     }
 
     /// `plan_copy` rejects block_pair ids that exceed the Block axis
