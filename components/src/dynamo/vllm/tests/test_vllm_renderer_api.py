@@ -377,14 +377,14 @@ class TestVllmRendererApi:
             "external_req_id",
             "reasoning_ended",
         )
-        reasoning_request_fields = base_request_fields + ("reasoning_parser_kwargs",)
+        reasoning_request_fields = (*base_request_fields, "reasoning_parser_kwargs")
         # vllm-omni monkey-patches EngineCoreRequest with an extra field
         # (only installed on amd64, not arm64)
-        omni_fields = reasoning_request_fields + ("additional_information",)
+        omni_fields = (*reasoning_request_fields, "additional_information")
         valid_request_fields = (
             base_request_fields,
             reasoning_request_fields,
-            base_request_fields + ("additional_information",),
+            (*base_request_fields, "additional_information"),
             omni_fields,
         )
         actual_request_fields = EngineCoreRequest.__struct_fields__
