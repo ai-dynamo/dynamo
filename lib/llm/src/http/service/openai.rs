@@ -2652,10 +2652,10 @@ pub(super) fn rl_router(
     let namespace = std::env::var("DYN_NAMESPACE").unwrap_or_else(|_| "dynamo".into());
 
     let mut config = dynamo_rl::RlClientConfig::new(drt, namespace);
-    if let Ok(timeout) = std::env::var("DYN_RL_DEFAULT_TIMEOUT_SECS") {
-        if let Ok(secs) = timeout.parse::<f64>() {
-            config.default_request_timeout = std::time::Duration::from_secs_f64(secs);
-        }
+    if let Ok(timeout) = std::env::var("DYN_RL_DEFAULT_TIMEOUT_SECS")
+        && let Ok(secs) = timeout.parse::<f64>()
+    {
+        config.default_request_timeout = std::time::Duration::from_secs_f64(secs);
     }
 
     let client = dynamo_rl::RlClient::new(config)?;
