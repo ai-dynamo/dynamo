@@ -6,6 +6,19 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::protocols::tensor;
+use dynamo_kv_router::protocols::{KvTransferEnforcement, KvTransferPreferredWeight};
+
+// Namespace topology-generated taints so they cannot collide with caller-provided taints.
+pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
+
+/// Canonical worker-taint form for topology metadata.
+///
+/// A topology domain/value pair such as `zone=us-east-1a` becomes
+/// `dynamo.topology/zone=us-east-1a`.
+pub fn topology_taint(domain: &str, value: &str) -> String {
+    format!("{TOPOLOGY_TAINT_PREFIX}{domain}={value}")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct DisaggregatedEndpoint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,6 +95,24 @@ pub struct ModelRuntimeConfig {
     /// ```
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stable_routing_id: Option<String>,
+
+    /// Topology domain labels for this worker (e.g. {"zone": "us-east-1a", "rack": "rack1"}).
+    /// Workers publish these as metadata and as additive canonical taints with the
+    /// `dynamo.topology/<domain>=<value>` format.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub topology_domains: HashMap<String, String>,
+
+    /// Topology domain used for KV-cache transfer routing (e.g. "zone").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_transfer_domain: Option<String>,
+
+    /// KV transfer topology enforcement mode selected by DGD (`required` or `preferred`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_transfer_enforcement: Option<KvTransferEnforcement>,
+
+    /// Preferred-taint weight used when `kv_transfer_enforcement` is `preferred`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_transfer_preferred_weight: Option<KvTransferPreferredWeight>,
 }
 
 const fn default_data_parallel_start_rank() -> u32 {
@@ -122,6 +153,10 @@ impl Default for ModelRuntimeConfig {
             enable_eagle: false,
             taints: HashSet::new(),
             stable_routing_id: None,
+            topology_domains: HashMap::new(),
+            kv_transfer_domain: None,
+            kv_transfer_enforcement: None,
+            kv_transfer_preferred_weight: None,
         }
     }
 }
@@ -150,6 +185,26 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
     fn stable_routing_id(&self) -> Option<&str> {
         self.stable_routing_id.as_deref()
     }
+
+    fn topology_domains(&self) -> Option<&HashMap<String, String>> {
+        if self.topology_domains.is_empty() {
+            None
+        } else {
+            Some(&self.topology_domains)
+        }
+    }
+
+    fn kv_transfer_domain(&self) -> Option<&str> {
+        self.kv_transfer_domain.as_deref()
+    }
+
+    fn kv_transfer_enforcement(&self) -> Option<KvTransferEnforcement> {
+        self.kv_transfer_enforcement
+    }
+
+    fn kv_transfer_preferred_weight(&self) -> Option<KvTransferPreferredWeight> {
+        self.kv_transfer_preferred_weight
+    }
 }
 
 impl ModelRuntimeConfig {
@@ -169,6 +224,28 @@ impl ModelRuntimeConfig {
         } else {
             Ok(None)
         }
+    }
+
+    /// Add canonical topology taints derived from `topology_domains`.
+    ///
+    /// Existing caller-provided taints are preserved; generated topology taints are unioned into
+    /// the same set so `RoutingConstraints` can match them through the standard worker taints path.
+    pub fn add_topology_taints(&mut self) -> &mut Self {
+        let topology_taints: Vec<_> = self
+            .topology_domains
+            .iter()
+            .filter_map(|(domain, value)| {
+                let domain = domain.trim();
+                let value = value.trim();
+                if domain.is_empty() || value.is_empty() {
+                    None
+                } else {
+                    Some(topology_taint(domain, value))
+                }
+            })
+            .collect();
+        self.taints.extend(topology_taints);
+        self
     }
 
     /// Populate `stable_routing_id` from the `DYN_STABLE_ROUTING_ID` environment variable.
@@ -198,6 +275,7 @@ impl ModelRuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_kv_router::WorkerConfigLike;
 
     // Env-touching tests use `temp_env` (snapshot + restore around the closure) and
     // `#[serial_test::serial]` (serialize against every other env-touching test in the
@@ -261,5 +339,234 @@ mod tests {
         let cfg = ModelRuntimeConfig::default();
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(!json.contains("stable_routing_id"));
+    }
+
+    #[test]
+    fn test_serde_round_trip_with_topology_domains() {
+        let mut config = ModelRuntimeConfig::default();
+        config
+            .topology_domains
+            .insert("zone".to_string(), "us-east-1a".to_string());
+        config
+            .topology_domains
+            .insert("rack".to_string(), "rack1".to_string());
+
+        let serialized = serde_json::to_string(&config).unwrap();
+        let deserialized: ModelRuntimeConfig = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(deserialized.topology_domains.len(), 2);
+        assert_eq!(deserialized.topology_domains["zone"], "us-east-1a");
+        assert_eq!(deserialized.topology_domains["rack"], "rack1");
+    }
+
+    #[test]
+    fn test_serde_empty_topology_domains_omitted() {
+        let config = ModelRuntimeConfig::default();
+        let serialized = serde_json::to_string(&config).unwrap();
+
+        // Empty topology_domains should not appear in serialized output
+        assert!(
+            !serialized.contains("topology_domains"),
+            "empty topology_domains should be skipped during serialization, got: {serialized}"
+        );
+    }
+
+    #[test]
+    fn test_serde_backward_compat_deserialize_without_topology_domains() {
+        // Simulate a config serialized before topology_domains existed
+        let json = r#"{
+            "total_kv_blocks": 100,
+            "max_num_seqs": 32,
+            "max_num_batched_tokens": null,
+            "tool_call_parser": null,
+            "reasoning_parser": null
+        }"#;
+
+        let config: ModelRuntimeConfig = serde_json::from_str(json).unwrap();
+        assert!(config.topology_domains.is_empty());
+    }
+
+    #[test]
+    fn test_worker_config_like_topology_domains_with_data() {
+        let mut config = ModelRuntimeConfig::default();
+        config
+            .topology_domains
+            .insert("zone".to_string(), "us-east-1a".to_string());
+
+        let domains = config.topology_domains();
+        assert!(domains.is_some());
+        let domains = domains.unwrap();
+        assert_eq!(domains.len(), 1);
+        assert_eq!(domains["zone"], "us-east-1a");
+    }
+
+    #[test]
+    fn test_worker_config_like_topology_domains_empty_returns_none() {
+        let config = ModelRuntimeConfig::default();
+        assert!(config.topology_domains.is_empty());
+        assert!(config.topology_domains().is_none());
+    }
+
+    #[test]
+    fn test_serde_round_trip_preserves_all_fields() {
+        let mut config = ModelRuntimeConfig {
+            total_kv_blocks: Some(500),
+            max_num_seqs: Some(64),
+            max_num_batched_tokens: Some(8192),
+            tool_call_parser: Some("hermes".to_string()),
+            reasoning_parser: None,
+            exclude_tools_when_tool_choice_none: false,
+            data_parallel_start_rank: 2,
+            data_parallel_size: 4,
+            enable_local_indexer: false,
+            runtime_data: HashMap::new(),
+            tensor_model_config: None,
+            disaggregated_endpoint: Some(DisaggregatedEndpoint {
+                bootstrap_host: Some("10.0.0.1".to_string()),
+                bootstrap_port: Some(8080),
+            }),
+            enable_eagle: true,
+            taints: HashSet::from(["caller/taint=value".to_string()]),
+            stable_routing_id: Some("worker-7".to_string()),
+            topology_domains: HashMap::new(),
+            kv_transfer_domain: Some("zone".to_string()),
+            kv_transfer_enforcement: Some(KvTransferEnforcement::Preferred),
+            kv_transfer_preferred_weight: Some(KvTransferPreferredWeight::try_from(0.85).unwrap()),
+        };
+        config
+            .topology_domains
+            .insert("zone".to_string(), "us-west-2b".to_string());
+        config.add_topology_taints();
+
+        let serialized = serde_json::to_string(&config).unwrap();
+        let deserialized: ModelRuntimeConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(config, deserialized);
+        assert!(
+            deserialized
+                .taints
+                .contains("dynamo.topology/zone=us-west-2b")
+        );
+    }
+
+    #[test]
+    fn test_serde_kv_transfer_fields_omitted_when_none() {
+        let config = ModelRuntimeConfig::default();
+        let serialized = serde_json::to_string(&config).unwrap();
+
+        assert!(
+            !serialized.contains("kv_transfer_domain"),
+            "None kv_transfer_domain should be skipped, got: {serialized}"
+        );
+        assert!(
+            !serialized.contains("kv_transfer_enforcement"),
+            "None kv_transfer_enforcement should be skipped, got: {serialized}"
+        );
+        assert!(
+            !serialized.contains("kv_transfer_preferred_weight"),
+            "None kv_transfer_preferred_weight should be skipped, got: {serialized}"
+        );
+    }
+
+    #[test]
+    fn test_serde_round_trip_with_kv_transfer_enforcement() {
+        let mut config = ModelRuntimeConfig::default();
+        config.kv_transfer_domain = Some("zone".to_string());
+        config.kv_transfer_enforcement = Some(KvTransferEnforcement::Preferred);
+        config.kv_transfer_preferred_weight =
+            Some(KvTransferPreferredWeight::try_from(0.85).unwrap());
+
+        let serialized = serde_json::to_string(&config).unwrap();
+        let deserialized: ModelRuntimeConfig = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(deserialized.kv_transfer_domain.as_deref(), Some("zone"));
+        assert_eq!(
+            deserialized.kv_transfer_enforcement,
+            Some(KvTransferEnforcement::Preferred)
+        );
+        assert_eq!(
+            deserialized
+                .kv_transfer_preferred_weight
+                .map(KvTransferPreferredWeight::get),
+            Some(0.85)
+        );
+    }
+
+    #[test]
+    fn test_serde_rejects_invalid_kv_transfer_enforcement() {
+        let json = r#"{"kv_transfer_enforcement":"fallback"}"#;
+        assert!(serde_json::from_str::<ModelRuntimeConfig>(json).is_err());
+    }
+
+    #[test]
+    fn test_serde_rejects_out_of_range_kv_transfer_preferred_weight() {
+        let json = r#"{"kv_transfer_preferred_weight":1.1}"#;
+        assert!(serde_json::from_str::<ModelRuntimeConfig>(json).is_err());
+    }
+
+    #[test]
+    fn test_worker_config_like_kv_transfer_domain() {
+        let mut config = ModelRuntimeConfig::default();
+        assert!(config.kv_transfer_domain().is_none());
+
+        config.kv_transfer_domain = Some("zone".to_string());
+        assert_eq!(config.kv_transfer_domain(), Some("zone"));
+    }
+
+    #[test]
+    fn test_worker_config_like_kv_transfer_enforcement() {
+        let mut config = ModelRuntimeConfig::default();
+        assert!(config.kv_transfer_enforcement().is_none());
+        assert!(config.kv_transfer_preferred_weight().is_none());
+
+        config.kv_transfer_enforcement = Some(KvTransferEnforcement::Required);
+        config.kv_transfer_preferred_weight =
+            Some(KvTransferPreferredWeight::try_from(0.5).unwrap());
+        assert_eq!(
+            config.kv_transfer_enforcement(),
+            Some(KvTransferEnforcement::Required)
+        );
+        assert_eq!(
+            config
+                .kv_transfer_preferred_weight()
+                .map(KvTransferPreferredWeight::get),
+            Some(0.5)
+        );
+    }
+
+    #[test]
+    fn test_serde_backward_compat_without_kv_transfer_fields() {
+        let json = r#"{
+            "total_kv_blocks": 100,
+            "max_num_seqs": 32
+        }"#;
+
+        let config: ModelRuntimeConfig = serde_json::from_str(json).unwrap();
+        assert!(config.kv_transfer_domain.is_none());
+        assert!(config.kv_transfer_enforcement.is_none());
+        assert!(config.kv_transfer_preferred_weight.is_none());
+    }
+
+    #[test]
+    fn test_topology_taint_uses_canonical_format() {
+        assert_eq!(
+            topology_taint("zone", "us-east-1a"),
+            "dynamo.topology/zone=us-east-1a"
+        );
+    }
+
+    #[test]
+    fn test_add_topology_taints_preserves_caller_supplied_taints() {
+        let mut config = ModelRuntimeConfig {
+            taints: HashSet::from(["caller/taint=value".to_string()]),
+            ..Default::default()
+        };
+        config
+            .topology_domains
+            .insert("zone".to_string(), "us-east-1a".to_string());
+
+        config.add_topology_taints();
+
+        assert!(config.taints.contains("caller/taint=value"));
+        assert!(config.taints.contains("dynamo.topology/zone=us-east-1a"));
     }
 }
