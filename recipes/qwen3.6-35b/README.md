@@ -1,0 +1,211 @@
+# Qwen3.6-35B-A3B-FP8 — 3-way `vllm serve` vs Dynamo benchmark
+
+K8s recipe for benchmarking
+[`Qwen/Qwen3.6-35B-A3B-FP8`](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8)
+across three configs on the same single-GPU hardware target:
+
+| Config         | Stack         | Multimodal | Frontend-decoding | Embedding cache |
+|----------------|---------------|------------|-------------------|-----------------|
+| `vllm-serve`   | vanilla vLLM  | n/a        | n/a               | n/a             |
+| `dynamo-fd`    | Dynamo + vLLM | on         | on                | off             |
+| `dynamo-fd-ec` | Dynamo + vLLM | on         | on                | 8 GiB           |
+
+All three configs share one hardware target (H100 or GB200) chosen at
+deploy time via `--hw {h100,gb200}`. See **Hardware targets** below.
+
+## Hardware targets
+
+`hw/h100.env` and `hw/gb200.env` are sibling to the three config
+directories and shared across all three. Each file exports three vars
+the YAML templates substitute via `envsubst`:
+
+- `VLLM_IMAGE` — `nvcr.io/nvidia/ai-dynamo/vllm-runtime:<tag>` (multi-arch
+  manifest, same tag works on amd64 / arm64).
+- `HW_NODE_SELECTOR` — JSON-flow nodeSelector (currently
+  `{"kubernetes.io/hostname":"…"}` for both targets).
+- `HW_TOLERATIONS` — JSON-flow toleration array. H100 has `[]`; GB200
+  carries the `kubernetes.io/arch=arm64:NoSchedule` toleration.
+
+**Before first use**: edit `hw/h100.env` and `hw/gb200.env` and replace
+the `<FILL-IN-…-HOSTNAME>` placeholders with kubernetes.io/hostname
+values from your cluster:
+
+```bash
+# H100
+kubectl get nodes -L nvidia.com/gpu.product | awk '/H100/'
+# GB200
+kubectl get nodes -L kubernetes.io/arch -L nvidia.com/gpu.product \
+  | awk '/arm64/ && /GB200/'
+```
+
+Then pick a target with `--hw h100` or `--hw gb200`:
+
+```bash
+./vllm-serve/run-benchmark.sh   -n "$NAMESPACE" --hw gb200
+./dynamo-fd/run-benchmark.sh    -n "$NAMESPACE" --hw gb200
+./dynamo-fd-ec/run-benchmark.sh -n "$NAMESPACE" --hw gb200
+```
+
+Or run all three sequentially + cleanup between configs:
+
+```bash
+./run-all.sh -n "$NAMESPACE" --hw gb200
+```
+
+Adding a new hardware target later is a one-file change in `hw/`.
+
+The wrapper requires `envsubst` (Ubuntu: `apt install gettext-base`;
+macOS: `brew install gettext`).
+
+## Pre-requisites
+
+1. Kubectl context pointing at a cluster with the right GPUs.
+2. A namespace you have write access to (`$NAMESPACE` below).
+3. A `shared-model-cache` PVC in that namespace (RWX). If your cluster
+   pre-provisions it (common on platform-managed AWS / FSx clusters),
+   you don't need to do anything. Otherwise uncomment the PVC
+   definition in `model-cache/model-cache.yaml` and pick an RWX
+   storage class — see that file for guidance.
+4. **HuggingFace token: not required for this recipe.**
+   `Qwen/Qwen3.6-35B-A3B-FP8` is public (`gated: false`), so neither the
+   download Job nor `vllm serve` needs a token. The `hf-token-secret`
+   references in `model-download.yaml` and `deploy.yaml` are commented
+   out. To swap in a gated model, uncomment those blocks and create:
+   ```bash
+   kubectl -n "$NAMESPACE" create secret generic hf-token-secret \
+     --from-literal=HF_TOKEN="$HF_TOKEN"
+   ```
+
+We use **`ebs`** by default. Swap `storageClassName: ebs` →
+`dgxc-enterprise-file` in `model-cache/model-cache.yaml` for RWX/Retain.
+
+## Naming & ownership
+
+All resources carry a `qwen36-` prefix (per-model) and these labels:
+
+```yaml
+labels:
+  app.kubernetes.io/name: qwen3.6-35b
+  app.kubernetes.io/managed-by: dynamo-recipe
+```
+
+So in a shared namespace you can find this recipe's resources via:
+
+```bash
+kubectl -n "$NAMESPACE" get pvc,deploy,job,pod \
+  -l app.kubernetes.io/name=qwen3.6-35b
+```
+
+## Storage: shared-model-cache
+
+The recipe expects a single PVC named `shared-model-cache` (RWX) in
+the target namespace — typically backed by FSx Lustre on AWS or any
+RWX storage class on your cluster. It's mounted at three locations:
+
+| Mount in pod | subPath | What lives there |
+|--------------|---------|------------------|
+| `/home/dynamo/.cache/huggingface` | — (root) | Shared HF Hub cache (anything else in the namespace re-uses it) |
+| `/home/dynamo/.cache/vllm`        | `qwen36-bench/vllm-cache` | vllm cudagraph compilation cache |
+| `/perf-cache`                     | `qwen36-bench/perf-cache` | Generated dataset + aiperf artifacts |
+
+The per-recipe subPath prefix `qwen36-bench/` keeps this recipe's
+private state from colliding with future recipes (e.g.
+`qwen3vl30b-bench/`).
+
+The HF cache is mounted at the root so any model already cached in
+the namespace is reused. The Qwen3.6-35B-A3B-FP8 download lands in
+the standard `hub/models--Qwen--Qwen3.6-35B-A3B-FP8/` directory.
+
+### Why not EBS?
+
+EBS PVCs are RWO and AZ-pinned: the volume gets created in whichever AZ
+the first-consumer pod is scheduled into. On 2026-05-10 we discovered
+the EBS provisioner picked `us-east-1a` (where the model-download pod's
+CPU node lived) while every H100 GPU node is in `us-east-1e`. The
+vllm-serve pod was therefore permanently unschedulable. FSx Lustre is
+cross-AZ + RWX, so this stops biting.
+
+### Deploying on a cluster without `shared-model-cache`
+
+Uncomment the PVC definitions in `model-cache/model-cache.yaml`. Use
+`dgxc-enterprise-file` (FSx, RWX, Retain) as the storage class — NOT
+`ebs` (RWO, Delete, AZ-pinned).
+
+## aiperf install
+
+We install aiperf from source pinned to a recent `main` SHA that
+includes [PR 824](https://github.com/ai-dynamo/aiperf/pull/824)
+(`feat(dataset): add session_id to single-turn for causal ordering`).
+Our sliding-window dataset writes one row per `(user, turn)` with
+`session_id=user_<N>`; PR 824 is what makes aiperf's `single_turn`
+mode honor that ordering so prefix-cache hits across turns are real.
+
+The pin lives in `vllm-serve/agg-h100/perf.yaml` (`AIPERF_GIT_REF`
+env var). Bump when you want newer aiperf fixes.
+
+## Directory layout
+
+```text
+qwen3.6-35b/
+├── README.md
+├── run-all.sh                  # Sequential 3-config orchestrator
+├── compare.py                  # 3-way comparison (throughput, TTFT, ITL)
+├── hw/                         # Shared across all three configs
+│   ├── h100.env
+│   └── gb200.env
+├── model-cache/
+│   ├── model-cache.yaml
+│   └── model-download.yaml
+├── data-gen/
+│   └── generate-datasets-job.yaml
+├── vllm-serve/
+│   ├── deploy.yaml             # Templated (image, nodeSelector, tolerations)
+│   ├── perf.yaml               # Templated
+│   └── run-benchmark.sh
+├── dynamo-fd/
+│   ├── deploy.yaml             # DynamoGraphDeployment, frontend-decoding ON
+│   ├── perf.yaml
+│   └── run-benchmark.sh
+└── dynamo-fd-ec/
+    ├── deploy.yaml             # DynamoGraphDeployment, FD + embedding cache
+    ├── perf.yaml
+    └── run-benchmark.sh
+```
+
+## Quick start
+
+```bash
+export NAMESPACE=<your-namespace>
+export HW=gb200   # or h100
+
+# Run all three configs sequentially (prep + deploy + bench + retrieve + clean
+# per config). Artifacts land under
+# ~/workspace/dynamo-tmp/logs/<MM-DD>/qwen36-fp8-${HW}/{vllm-serve,dynamo-fd,dynamo-fd-ec}/.
+./run-all.sh -n ${NAMESPACE} --hw ${HW}
+
+# 3-way comparison:
+python3 compare.py ~/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen36-fp8-${HW}/
+```
+
+Or step-by-step for a single config:
+
+```bash
+./vllm-serve/run-benchmark.sh   -n ${NAMESPACE} --hw ${HW}
+./dynamo-fd/run-benchmark.sh    -n ${NAMESPACE} --hw ${HW}
+./dynamo-fd-ec/run-benchmark.sh -n ${NAMESPACE} --hw ${HW}
+```
+
+Each `run-benchmark.sh` accepts `--step {pvc|download|dataset|deploy|bench|retrieve|clean}` for granular control.
+
+## Notes
+
+- Dataset is sliding-window with `window=5`, `turns=8`, `users=30`,
+  `image_size=2400x1080`, `user_text_tokens=8000`. Yields 240 requests
+  (`users × turns`) over 12 unique images per user
+  (`window + turns - 1`). Base64-inlined.
+- Each jsonl row carries `session_id=user_<N>`. With aiperf PR 824, the
+  `single_turn` dataset type honors session ordering so the 8 turns of
+  any one user are sent in causal order, letting prefix-cache hits land.
+- The vllm command in `deploy.yaml` uses `--mm-processor-cache-gb 30`
+  and `--max-model-len 32768` to handle the 5-image multimodal context
+  (mirrors the 397B sweep yaml's settings adapted for 1 GPU).

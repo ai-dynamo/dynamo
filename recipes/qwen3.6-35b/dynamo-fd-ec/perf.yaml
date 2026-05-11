@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# aiperf benchmark pod targeting the Dynamo Frontend Service created by
+# the agg-h100-fd-ec DGD. Identical to vllm-serve/agg-h100/perf.yaml
+# except FRONTEND, ARTIFACT_BASE_DIR, and pod/labels.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qwen36-fd-ec-bench
+  labels:
+    app.kubernetes.io/name: qwen3.6-35b
+    app.kubernetes.io/component: dynamo-fd-ec-benchmark
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  restartPolicy: Never
+  # Hostname pin + toleration come from hw/${HW}.env — same value as
+  # the DGD's Frontend + VllmWorker, so all three (bench, Frontend,
+  # Worker) land on one node.
+  nodeSelector: ${HW_NODE_SELECTOR}
+  tolerations: ${HW_TOLERATIONS}
+  # Belt-and-suspenders podAffinity to the Frontend (no-op given the
+  # hostname pin, kept for clarity). Label key reference: the dynamo
+  # operator auto-stamps every DGD pod with
+  # `nvidia.com/dynamo-component-type: <componentType>` and
+  # `nvidia.com/dynamo-graph-deployment-name: <metadata.name>`. DO NOT
+  # match on `app.kubernetes.io/name` — the operator overwrites that
+  # to `<dgd-name>-0-<service>`, not the DGD's metadata.labels value.
+  affinity:
+    podAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              nvidia.com/dynamo-graph-deployment-name: qwen36-dynamo-fd-ec
+              nvidia.com/dynamo-component-type: frontend
+          topologyKey: kubernetes.io/hostname
+  containers:
+    - name: benchmark
+      image: python:3.11
+      command:
+        - /bin/bash
+        - -lc
+        - |
+          set -euo pipefail
+          ulimit -n 1048576
+          ulimit -u 65536
+
+          apt update && apt install -y --no-install-recommends curl jq git
+
+          # Pin to a recent aiperf main SHA that includes PR 824
+          # (session_id for single-turn) + PR 903 (HF image-byte-dict fix).
+          pip install --no-cache-dir "aiperf @ git+https://github.com/ai-dynamo/aiperf.git@${AIPERF_GIT_REF}"
+          python -c "import aiperf, sys; print('aiperf', aiperf.__version__ if hasattr(aiperf,'__version__') else 'sha-pinned', 'OK')"
+
+          echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models ..."
+          until curl -s "http://${FRONTEND}:8000/v1/models" \
+              | jq -e --arg m "${MODEL_NAME}" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+            echo "[$(date '+%H:%M:%S')] not ready, sleeping 10s"
+            sleep 10
+          done
+          echo "Model '${MODEL_NAME}' is ready."
+
+          INPUT_FILE="${DATASET_DIR}/30u_8t_5w_8000word_base64.jsonl"
+          if [[ ! -f "${INPUT_FILE}" ]]; then
+            echo "Dataset not found: ${INPUT_FILE}" >&2
+            exit 1
+          fi
+
+          RUN_DIR="${ARTIFACT_BASE_DIR}/agg-h100-fd-ec"
+          mkdir -p "${RUN_DIR}"
+          echo "Running benchmark; artifacts → ${RUN_DIR}"
+
+          aiperf profile \
+            --model "${MODEL_NAME}" \
+            --input-file "${INPUT_FILE}" \
+            --custom-dataset-type single_turn \
+            --url "http://${FRONTEND}:8000" \
+            --streaming \
+            --ui-type none \
+            --request-count "${REQUEST_COUNT}" \
+            --concurrency "${CONCURRENCY}" \
+            --request-rate-mode constant \
+            --warmup-request-count "${WARMUP_REQUEST_COUNT}" \
+            --artifact-dir "${RUN_DIR}" \
+            --extra-inputs "max_tokens:${MAX_TOKENS}" \
+            --extra-inputs "min_tokens:${MAX_TOKENS}" \
+            --extra-inputs "ignore_eos:true"
+
+          # Drop the multi-GB inputs.json by default (KEEP_INPUTS_JSON=1
+          # overrides). Same rationale as vllm-serve/agg-h100/perf.yaml.
+          if [[ "${KEEP_INPUTS_JSON:-}" != "1" ]]; then
+            rm -fv "${RUN_DIR}/inputs.json" || true
+          else
+            echo "KEEP_INPUTS_JSON=1 → retaining $(du -sh ${RUN_DIR}/inputs.json 2>/dev/null | cut -f1) inputs.json"
+          fi
+
+          echo "Run complete. Artifacts in ${RUN_DIR}"
+          sleep 3600
+      env:
+        - name: MODEL_NAME
+          value: Qwen/Qwen3.6-35B-A3B-FP8
+        # DGD creates a `<dgd-name>-frontend` Service automatically.
+        - name: FRONTEND
+          value: qwen36-dynamo-fd-ec-frontend
+        # Pin matches vllm-serve perf.yaml (PR 824 + PR 903).
+        - name: AIPERF_GIT_REF
+          value: "79de74ece808"
+        - name: MAX_TOKENS
+          value: "1024"
+        - name: REQUEST_COUNT
+          value: "240"  # 30 users × 8 turns
+        - name: CONCURRENCY
+          value: "30"
+        - name: WARMUP_REQUEST_COUNT
+          value: "2"
+        - name: DATASET_DIR
+          value: /perf-cache/datasets
+        - name: ARTIFACT_BASE_DIR
+          value: /perf-cache/artifacts/qwen36_fp8
+        - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+          value: "1800"
+        - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+          value: "1800"
+      resources:
+        requests:
+          cpu: "8"
+          memory: 16Gi
+        limits:
+          cpu: "16"
+          memory: 32Gi
+      volumeMounts:
+        - name: shared-model-cache
+          mountPath: /perf-cache
+          subPath: qwen36-bench/perf-cache
+  volumes:
+    - name: shared-model-cache
+      persistentVolumeClaim:
+        claimName: shared-model-cache
