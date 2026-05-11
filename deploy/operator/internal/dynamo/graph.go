@@ -369,7 +369,12 @@ func generateSingleDCD(
 	// only label worker DCDs with their hash for cleanup during rolling updates
 	if IsWorkerComponent(string(component.ComponentType)) {
 		labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
-		ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec).Labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
+		podTemplate := ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec)
+		podTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
+		if parentDGD.HasEPPComponent() {
+			labels[commonconsts.KubeLabelDynamoComponentClass] = commonconsts.ComponentClassWorker
+			podTemplate.Labels[commonconsts.KubeLabelDynamoComponentClass] = commonconsts.ComponentClassWorker
+		}
 	}
 
 	propagateDGDAnnotations(parentDGD.GetAnnotations(), &deployment.Spec.DynamoComponentDeploymentSharedSpec)
@@ -2139,6 +2144,9 @@ func generateLabels(
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = string(component.ComponentType)
 	}
+	if dynamoDeployment.HasEPPComponent() && IsWorkerComponent(string(component.ComponentType)) {
+		labels[commonconsts.KubeLabelDynamoComponentClass] = commonconsts.ComponentClassWorker
+	}
 	if subComponentType := getDGDComponentAlphaSubComponentType(dynamoDeployment, componentName); subComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoSubComponentType] = subComponentType
 	}
@@ -2168,6 +2176,9 @@ func generateLabels(
 	labels[commonconsts.KubeLabelDynamoComponent] = componentName
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = string(component.ComponentType)
+	}
+	if dynamoDeployment.HasEPPComponent() && IsWorkerComponent(string(component.ComponentType)) {
+		labels[commonconsts.KubeLabelDynamoComponentClass] = commonconsts.ComponentClassWorker
 	}
 	if subComponentType := getDGDComponentAlphaSubComponentType(dynamoDeployment, componentName); subComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoSubComponentType] = subComponentType

@@ -44,6 +44,10 @@ func GenerateInferencePool(
 		return nil, fmt.Errorf("component %q not found", componentName)
 	}
 	dynamoNamespace := dgd.GetDynamoNamespaceForComponent(component)
+	selectorLabels := map[gaiev1.LabelKey]gaiev1.LabelValue{
+		consts.KubeLabelDynamoComponentClass: consts.ComponentClassWorker,
+		consts.KubeLabelDynamoNamespace:      gaiev1.LabelValue(dynamoNamespace),
+	}
 
 	// Build InferencePool using typed API
 	pool := &gaiev1.InferencePool{
@@ -61,10 +65,7 @@ func GenerateInferencePool(
 				{Number: consts.DynamoServicePort}, // Frontend port
 			},
 			Selector: gaiev1.LabelSelector{
-				MatchLabels: map[gaiev1.LabelKey]gaiev1.LabelValue{
-					consts.KubeLabelDynamoComponentType: consts.ComponentTypeWorker,
-					consts.KubeLabelDynamoNamespace:     gaiev1.LabelValue(dynamoNamespace),
-				},
+				MatchLabels: selectorLabels,
 			},
 			EndpointPickerRef: gaiev1.EndpointPickerRef{
 				Kind: "Service",

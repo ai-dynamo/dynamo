@@ -218,10 +218,6 @@ func TestComputeBetaDGDWorkersSpecHash_StableOnExcludedFields(t *testing.T) {
 		{"serviceName", func(d *v1alpha1.DynamoGraphDeployment) {
 			d.Spec.Services["worker"].ServiceName = "changed"
 		}},
-		{"componentType", func(d *v1alpha1.DynamoGraphDeployment) {
-			// Change to another worker type — still included in hash but componentType is stripped
-			d.Spec.Services["worker"].ComponentType = commonconsts.ComponentTypePrefill
-		}},
 		{"dynamoNamespace", func(d *v1alpha1.DynamoGraphDeployment) {
 			d.Spec.Services["worker"].DynamoNamespace = ptr.To("changed")
 		}},

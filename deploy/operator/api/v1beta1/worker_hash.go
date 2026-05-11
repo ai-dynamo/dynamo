@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"sort"
 
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -34,13 +35,11 @@ const dgdWorkerHashInputVersion = "dgd-worker-rollout-v2"
 type dgdWorkerHashInput struct {
 	Version          string                              `json:"version"`
 	BackendFramework string                              `json:"backendFramework,omitempty"`
-	Env              []corev1.EnvVar                     `json:"env,omitempty"`
-	Annotations      map[string]string                   `json:"annotations,omitempty"`
-	Labels           map[string]string                   `json:"labels,omitempty"`
 	Workers          map[string]workerComponentHashInput `json:"workers,omitempty"`
 }
 
 type workerComponentHashInput struct {
+	ComponentType         ComponentType           `json:"type,omitempty"`
 	GlobalDynamoNamespace bool                    `json:"globalDynamoNamespace,omitempty"`
 	PodTemplate           *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 	Multinode             *MultinodeSpec          `json:"multinode,omitempty"`
@@ -61,8 +60,7 @@ type workerComponentHashInput struct {
 // generated worker pods. This avoids tying rollout decisions to the wire shape
 // of whichever CRD version the API server returns.
 //
-// Excluded fields (do not affect the pod template):
-//   - ComponentType: identity field
+// Excluded fields (do not affect worker pod contents):
 //   - Replicas: scaling, not pod template
 //   - ScalingAdapter: scaling configuration, not pod template
 //   - ModelRef: headless service creation, not pod template
@@ -87,15 +85,12 @@ func ComputeDGDWorkersSpecHash(dgd *DynamoGraphDeployment) (string, error) {
 	hashInput := dgdWorkerHashInput{
 		Version:          dgdWorkerHashInputVersion,
 		BackendFramework: dgd.Spec.BackendFramework,
-		Env:              dgd.Spec.Env,
-		Annotations:      dgd.Spec.Annotations,
-		Labels:           dgd.Spec.Labels,
 		Workers:          make(map[string]workerComponentHashInput, len(workerNames)),
 	}
 	for _, name := range workerNames {
 		spec := dgd.GetComponentByName(name)
 		if spec != nil {
-			hashInput.Workers[name] = workerHashInputForSpec(spec)
+			hashInput.Workers[name] = workerHashInputForSpec(spec, dgd)
 		}
 	}
 
@@ -114,9 +109,11 @@ func isWorkerComponent(componentType ComponentType) bool {
 		componentType == ComponentTypeDecode
 }
 
-func workerHashInputForSpec(spec *DynamoComponentDeploymentSharedSpec) workerComponentHashInput {
+func workerHashInputForSpec(spec *DynamoComponentDeploymentSharedSpec, dgd *DynamoGraphDeployment) workerComponentHashInput {
 	stripped := stripNonPodTemplateFields(spec)
+	applyDGDSpecDefaultsToWorkerHashInput(&stripped, spec.ComponentType, dgd)
 	return workerComponentHashInput{
+		ComponentType:         spec.ComponentType,
 		GlobalDynamoNamespace: stripped.GlobalDynamoNamespace,
 		PodTemplate:           stripped.PodTemplate,
 		Multinode:             stripped.Multinode,
@@ -147,4 +144,92 @@ func stripNonPodTemplateFields(spec *DynamoComponentDeploymentSharedSpec) Dynamo
 	}
 
 	return stripped
+}
+
+func applyDGDSpecDefaultsToWorkerHashInput(
+	component *DynamoComponentDeploymentSharedSpec,
+	componentType ComponentType,
+	dgd *DynamoGraphDeployment,
+) {
+	if component == nil || dgd == nil {
+		return
+	}
+
+	if len(dgd.Spec.Annotations) > 0 {
+		podTemplate := ensureWorkerHashPodTemplate(component)
+		podTemplate.Annotations = mergeLowPriorityWorkerHashMetadata(podTemplate.Annotations, dgd.Spec.Annotations)
+	}
+	if len(dgd.Spec.Labels) > 0 {
+		podTemplate := ensureWorkerHashPodTemplate(component)
+		podTemplate.Labels = mergeLowPriorityWorkerHashMetadata(podTemplate.Labels, dgd.Spec.Labels)
+	}
+	if dgd.HasEPPComponent() && isWorkerComponent(componentType) {
+		podTemplate := ensureWorkerHashPodTemplate(component)
+		if podTemplate.Labels == nil {
+			podTemplate.Labels = map[string]string{}
+		}
+		podTemplate.Labels[commonconsts.KubeLabelDynamoComponentClass] = commonconsts.ComponentClassWorker
+	}
+	if len(dgd.Spec.Env) > 0 {
+		podTemplate := ensureWorkerHashPodTemplate(component)
+		main := ensureWorkerHashMainContainer(podTemplate)
+		main.Env = mergeWorkerHashEnvs(dgd.Spec.Env, main.Env)
+	}
+	if component.PodTemplate != nil && reflect.DeepEqual(*component.PodTemplate, corev1.PodTemplateSpec{}) {
+		component.PodTemplate = nil
+	}
+}
+
+func ensureWorkerHashPodTemplate(component *DynamoComponentDeploymentSharedSpec) *corev1.PodTemplateSpec {
+	if component.PodTemplate == nil {
+		component.PodTemplate = &corev1.PodTemplateSpec{}
+	}
+	return component.PodTemplate
+}
+
+func ensureWorkerHashMainContainer(podTemplate *corev1.PodTemplateSpec) *corev1.Container {
+	for i := range podTemplate.Spec.Containers {
+		if podTemplate.Spec.Containers[i].Name == commonconsts.MainContainerName {
+			return &podTemplate.Spec.Containers[i]
+		}
+	}
+	podTemplate.Spec.Containers = append([]corev1.Container{{Name: commonconsts.MainContainerName}}, podTemplate.Spec.Containers...)
+	return &podTemplate.Spec.Containers[0]
+}
+
+func mergeLowPriorityWorkerHashMetadata(dst, src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = map[string]string{}
+	}
+	for k, v := range src {
+		if _, exists := dst[k]; !exists {
+			dst[k] = v
+		}
+	}
+	return dst
+}
+
+func mergeWorkerHashEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
+	envMap := make(map[string]corev1.EnvVar)
+	for _, env := range common {
+		envMap[env.Name] = env
+	}
+	for _, env := range specific {
+		envMap[env.Name] = env
+	}
+
+	names := make([]string, 0, len(envMap))
+	for name := range envMap {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	merged := make([]corev1.EnvVar, 0, len(names))
+	for _, name := range names {
+		merged = append(merged, envMap[name])
+	}
+	return merged
 }

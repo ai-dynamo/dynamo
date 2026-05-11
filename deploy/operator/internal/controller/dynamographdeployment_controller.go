@@ -255,7 +255,10 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			r.Recorder.Event(dynamoDeployment, corev1.EventTypeWarning, "RollingUpdateNotSupported",
 				"Worker spec changed but custom rolling updates are not supported for Grove/multinode deployments")
 
-			// Update the hash to prevent repeated warnings
+			// Update the hash to prevent repeated warnings. If the unsupported
+			// path is processing a v2-only worker change, preserve the migrated
+			// v2-only state instead of resurrecting the downgrade-compatible v1
+			// annotation for pod contents it no longer represents.
 			hashes, err := r.desiredWorkerHashes(dynamoDeployment)
 			if err != nil {
 				logger.Error(err, "Failed to compute worker hash for unsupported pathway")
@@ -264,7 +267,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 				message = Message(err.Error())
 				return ctrl.Result{}, err
 			}
-			r.setCurrentWorkerHashes(dynamoDeployment, hashes)
+			r.setCurrentWorkerHashes(dynamoDeployment, r.workerHashesForUnsupportedPathway(dynamoDeployment, hashes))
 			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
 				logger.Error(updateErr, "Failed to update worker hash for unsupported pathway")
 			}

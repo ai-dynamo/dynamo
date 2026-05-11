@@ -58,6 +58,7 @@ const (
 	// matching current-worker-hash does not imply legacy selectors.
 	KubeLabelDynamoComponentType    = "nvidia.com/dynamo-component-type"
 	KubeLabelDynamoSubComponentType = "nvidia.com/dynamo-sub-component-type"
+	KubeLabelDynamoComponentClass   = "nvidia.com/dynamo-component-class"
 	KubeLabelDynamoBaseModel        = "nvidia.com/dynamo-base-model"
 	KubeLabelDynamoBaseModelHash    = "nvidia.com/dynamo-base-model-hash"
 	KubeAnnotationDynamoBaseModel   = "nvidia.com/dynamo-base-model"
@@ -90,13 +91,15 @@ const (
 
 	GlobalDynamoNamespace = "dynamo"
 
-	ComponentTypePlanner      = "planner"
-	ComponentTypeFrontend     = "frontend"
-	ComponentTypeWorker       = "worker"
-	ComponentTypePrefill      = "prefill"
-	ComponentTypeDecode       = "decode"
-	ComponentTypeEPP          = "epp"
-	ComponentTypeDefault      = "default"
+	ComponentTypePlanner  = "planner"
+	ComponentTypeFrontend = "frontend"
+	ComponentTypeWorker   = "worker"
+	ComponentTypePrefill  = "prefill"
+	ComponentTypeDecode   = "decode"
+	ComponentTypeEPP      = "epp"
+	ComponentTypeDefault  = "default"
+
+	ComponentClassWorker      = "worker"
 	PlannerServiceAccountName = "planner-serviceaccount"
 	EPPServiceAccountName     = "epp-serviceaccount"
 	EPPClusterRoleName        = "epp-cluster-role"

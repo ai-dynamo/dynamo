@@ -113,6 +113,14 @@ func workerHashesForCompletedGeneration(newWorkerHash string, desired workerGene
 	return desired
 }
 
+func (r *DynamoGraphDeploymentReconciler) workerHashesForUnsupportedPathway(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	desired workerGenerationHashes,
+) workerGenerationHashes {
+	newWorkerHash := r.activeWorkerHashForDCDGeneration(dgd, desired)
+	return workerHashesForCompletedGeneration(newWorkerHash, desired)
+}
+
 // shouldTriggerRollingUpdate compares desired worker hashes with the active
 // generation recorded on the DGD.
 //
