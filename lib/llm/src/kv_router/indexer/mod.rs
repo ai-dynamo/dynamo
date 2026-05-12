@@ -44,6 +44,42 @@ pub enum SideIndexer {
 }
 
 impl SideIndexer {
+    fn new_predict_on_route(
+        component: &Component,
+        kv_router_config: &KvRouterConfig,
+        block_size: u32,
+    ) -> Option<Self> {
+        let ttl_secs = kv_router_config.router_predicted_ttl_secs?;
+        let prune_config = Some(PruneConfig {
+            ttl: Duration::from_secs_f64(ttl_secs),
+        });
+        let metrics = KvIndexerMetrics::from_component(component);
+        tracing::info!(
+            ttl_secs,
+            "Starting predict-on-route side indexer (short-TTL approximate)"
+        );
+        if kv_router_config.router_event_threads > 1 {
+            return Some(Self::Concurrent(Arc::new(
+                ThreadPoolIndexer::new_with_metrics_and_pruning(
+                    ConcurrentRadixTreeCompressed::new(),
+                    kv_router_config.router_event_threads as usize,
+                    block_size,
+                    Some(metrics),
+                    prune_config,
+                ),
+            )));
+        }
+
+        let cancellation_token = component.drt().primary_token();
+        Some(Self::KvIndexer(KvIndexer::new_with_frequency(
+            cancellation_token,
+            None,
+            block_size,
+            metrics,
+            prune_config,
+        )))
+    }
+
     async fn find_matches(
         &self,
         sequence: Vec<LocalBlockHash>,
@@ -158,7 +194,7 @@ impl Indexer {
             );
             let remote =
                 RemoteIndexer::new(component, model_name, kv_router_config.use_kv_events).await?;
-            let approx = build_approx_indexer(component, kv_router_config, block_size);
+            let approx = SideIndexer::new_predict_on_route(component, kv_router_config, block_size);
             return Ok(Self::Remote {
                 primary: Arc::new(remote),
                 approx,
@@ -201,7 +237,7 @@ impl Indexer {
             });
         }
 
-        let approx = build_approx_indexer(component, kv_router_config, block_size);
+        let approx = SideIndexer::new_predict_on_route(component, kv_router_config, block_size);
 
         if kv_router_config.router_event_threads > 1 {
             let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
@@ -603,42 +639,6 @@ impl Indexer {
             Self::Remote { .. } | Self::None => Vec::new(),
         }
     }
-}
-
-fn build_approx_indexer(
-    component: &Component,
-    kv_router_config: &KvRouterConfig,
-    block_size: u32,
-) -> Option<SideIndexer> {
-    let ttl_secs = kv_router_config.router_predicted_ttl_secs?;
-    let prune_config = Some(PruneConfig {
-        ttl: Duration::from_secs_f64(ttl_secs),
-    });
-    let metrics = KvIndexerMetrics::from_component(component);
-    tracing::info!(
-        ttl_secs,
-        "Starting predict-on-route side indexer (short-TTL approximate)"
-    );
-    if kv_router_config.router_event_threads > 1 {
-        return Some(SideIndexer::Concurrent(Arc::new(
-            ThreadPoolIndexer::new_with_metrics_and_pruning(
-                ConcurrentRadixTreeCompressed::new(),
-                kv_router_config.router_event_threads as usize,
-                block_size,
-                Some(metrics),
-                prune_config,
-            ),
-        )));
-    }
-
-    let cancellation_token = component.drt().primary_token();
-    Some(SideIndexer::KvIndexer(KvIndexer::new_with_frequency(
-        cancellation_token,
-        None,
-        block_size,
-        metrics,
-        prune_config,
-    )))
 }
 
 /// Merge a side-indexer's `OverlapScores` into the primary's `MatchDetails`
