@@ -68,7 +68,7 @@ spec:
             - "128"
             - --router-mode
             - kv
-            - --kv-overlap-score-weight
+            - --router-kv-overlap-score-credit
             - "0.0"
             - --router-temperature
             - "0.0"

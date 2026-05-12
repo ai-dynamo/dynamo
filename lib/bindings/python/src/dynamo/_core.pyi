@@ -1275,7 +1275,7 @@ class KvRouterConfig:
 
     def __init__(
         self,
-        overlap_score_weight: float = 1.0,
+        overlap_score_weight: Optional[float] = None,
         host_cache_hit_weight: float = 0.75,
         disk_cache_hit_weight: float = 0.25,
         router_temperature: float = 0.0,
@@ -1298,15 +1298,20 @@ class KvRouterConfig:
         shared_cache_multiplier: float = 0.0,
         shared_cache_type: str = "none",
         router_predicted_ttl_secs: Optional[float] = None,
+        *,
+        overlap_score_credit: float = 1.0,
+        prefill_load_scale: float = 1.0,
     ) -> None:
         """
         Create a KV router configuration.
 
         Args:
-            overlap_score_weight: Weight for overlap score in worker selection (default: 1.0)
-            host_cache_hit_weight: Weight for host-cache hits in worker selection (default: 0.75)
-            disk_cache_hit_weight: Weight for disk-cache hits in worker selection (default: 0.25)
-            router_temperature: Temperature for worker sampling via softmax (default: 0.0)
+            overlap_score_weight: Deprecated positional/keyword alias for prefill_load_scale. When present, it takes precedence over prefill_load_scale; a value of 0 also sets overlap_score_credit to 0.
+            overlap_score_credit: Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 (default: 1.0). Use prefill_load_scale above 1.0 to weigh TTFT/prompt-side load more heavily.
+            prefill_load_scale: Scale for adjusted prompt-side prefill load after cache-hit credits (default: 1.0)
+            host_cache_hit_weight: Credit multiplier for host-pinned cache hits (default: 0.75)
+            disk_cache_hit_weight: Credit multiplier for disk/external cache hits (default: 0.25)
+            router_temperature: Temperature for normalized worker sampling via softmax (default: 0.0)
             use_kv_events: Whether to use KV events from workers (default: True)
             durable_kv_events: **Deprecated.** Enable durable KV events using NATS JetStream (default: False).
                 This option will be removed in a future release. The event-plane subscriber
@@ -1337,14 +1342,10 @@ class KvRouterConfig:
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
                 "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
-            use_remote_indexer: Query a remote KV indexer served from a worker component
-                instead of maintaining a local radix tree (default: False).
-            serve_indexer: Serve this router's local indexer from the worker component
-                for other routers/frontends in the same namespace (default: False).
-            shared_cache_multiplier: Multiplier for shared-cache hits when scoring workers
-                (default: 0.0).
-            shared_cache_type: External shared KV cache type. "none" disables shared-cache
-                scoring; "hicache" queries HiCache state (default: "none").
+            use_remote_indexer: Query a remote KV indexer served from the worker component (default: False).
+            serve_indexer: Serve this router's local indexer from the worker component (default: False).
+            shared_cache_multiplier: Credit multiplier for shared cache hits beyond the device prefix (default: 0.0).
+            shared_cache_type: External shared KV cache type, "none" or "hicache" (default: "none").
             router_predicted_ttl_secs: Enables predict-on-route when set. This TTL
                 applies to entries in the local side indexer and requires
                 use_kv_events=True. Set to None to disable. Independent of
@@ -1361,14 +1362,26 @@ class KvRouterConfig:
     def copy(self) -> "KvRouterConfig": ...
 
     @property
+    def overlap_score_credit(self) -> float: ...
+
+    @overlap_score_credit.setter
+    def overlap_score_credit(self, value: float) -> None: ...
+    @property
     def overlap_score_weight(self) -> float: ...
 
     @overlap_score_weight.setter
     def overlap_score_weight(self, value: float) -> None: ...
+    @property
+    def prefill_load_scale(self) -> float: ...
+    @prefill_load_scale.setter
+    def prefill_load_scale(self, value: float) -> None: ...
 
     def with_overrides(
         self,
         overlap_score_weight: Optional[float] = None,
+        *,
+        overlap_score_credit: Optional[float] = None,
+        prefill_load_scale: Optional[float] = None,
     ) -> "KvRouterConfig": ...
 
 class ReasoningConfig:
