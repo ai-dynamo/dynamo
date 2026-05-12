@@ -21,7 +21,32 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use super::{NumaNode, get_device_numa_node};
+use super::{NumaNode, current_affinity_cpulist, get_device_numa_node};
+
+/// Build one diagnostic line describing where the worker thread actually is
+/// relative to where it is supposed to be. Used on every "moved / wrong node"
+/// path so the log by itself reveals whether pinning was ever applied.
+fn log_numa_probe(reason: &str, expected: NumaNode) {
+    let current_node = get_current_cpu_numa_node();
+    let current_cpu = unsafe { libc::sched_getcpu() };
+    let affinity = current_affinity_cpulist();
+    let target_cpus: String = match super::topology::get_numa_topology() {
+        Ok(topo) => match topo.cpus_for_node(expected.0) {
+            Some(cpus) => format!("{:?}", cpus),
+            None => "<node not in topology>".to_string(),
+        },
+        Err(_) => "<topology unavailable>".to_string(),
+    };
+    tracing::warn!(
+        "NUMA probe [{}]: expected_node={}, current_node={}, current_cpu={}, affinity_mask=[{}], target_node_cpus={}",
+        reason,
+        expected.0,
+        current_node,
+        current_cpu,
+        affinity,
+        target_cpus
+    );
+}
 
 /// Wrapper for raw pointer that can be sent between threads.
 ///
@@ -88,31 +113,33 @@ impl NumaWorker {
         // First thing: pin this thread to the target NUMA node
         tracing::trace!("Pinning worker thread to node {}", node.0);
         if let Err(e) = super::pin_thread_to_numa_node(node) {
-            tracing::error!("Failed to pin worker thread to node {}: {}", node.0, e);
-            tracing::error!("Worker will continue but allocations may be suboptimal");
+            tracing::error!(
+                "Failed to pin worker thread to node {}: {} — worker will continue but allocations may be misplaced on the wrong socket",
+                node.0,
+                e
+            );
+            log_numa_probe("pin_failed", node);
         } else {
-            tracing::trace!("Successfully pinned worker thread to node {}", node.0);
-
             // `pin_thread_to_numa_node` uses `sched_setaffinity` to set the CPU affinity mask
             // but doesn't immediately migrate the thread. The scheduler will migrate at
             // the next opportunity (timer tick, yield, etc).
-            // We yield once to give the scheduler a chance to migrate before we verify.
-            // This is primarily for accurate logging - allocations will happen on the right CPU
-            // regardless since the affinity mask prevents running on wrong CPUs.
             thread::yield_now();
             thread::sleep(Duration::from_millis(1));
 
-            // Verify we're on the right node
             let current_node = super::get_current_cpu_numa_node();
-            tracing::trace!("Current node after pinning: {}", current_node.0);
+            tracing::debug!(
+                "NUMA worker pinned: expected_node={}, current_node={}, affinity_mask=[{}]",
+                node.0,
+                current_node,
+                current_affinity_cpulist()
+            );
             if current_node != node {
                 tracing::warn!(
                     "Worker thread on node {} after pinning (expected {})",
-                    current_node.0,
+                    current_node,
                     node.0
                 );
-            } else {
-                tracing::trace!("NUMA worker thread for node {} started and pinned", node.0);
+                log_numa_probe("post_pin_mismatch", node);
             }
         }
 
@@ -171,8 +198,9 @@ impl NumaWorker {
             tracing::warn!(
                 "Worker thread moved! Expected NUMA node {}, currently on node {}",
                 node.0,
-                node_before.0
+                node_before
             );
+            log_numa_probe("worker_moved_before_alloc", node);
         }
 
         // Get or create CUDA context for this GPU
@@ -191,8 +219,9 @@ impl NumaWorker {
                 tracing::warn!(
                     "Thread moved after CUDA context bind! Expected node {}, now on node {}",
                     node.0,
-                    node_after_ctx.0
+                    node_after_ctx
                 );
+                log_numa_probe("moved_after_cuda_bind", node);
             }
 
             // Allocate CUDA pinned memory
@@ -213,8 +242,9 @@ impl NumaWorker {
                 tracing::error!(
                     "Thread on wrong node before first-touch! Expected {}, on node {} - memory will be misplaced!",
                     node.0,
-                    node_before_touch.0
+                    node_before_touch
                 );
+                log_numa_probe("wrong_node_before_first_touch", node);
             }
 
             // Touch one byte per page to trigger first-touch policy efficiently

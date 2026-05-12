@@ -224,12 +224,30 @@ pub fn pin_thread_to_numa_node(node: NumaNode) -> Result<(), String> {
     let topology =
         topology::get_numa_topology().map_err(|e| format!("Can not get NUMA topology: {}", e))?;
 
-    let cpus = topology
-        .cpus_for_node(node.0)
-        .ok_or_else(|| format!("No CPUs found for NUMA node {}", node.0))?;
+    let cpus = topology.cpus_for_node(node.0).ok_or_else(|| {
+        format!(
+            "NUMA node {} not found in topology; {}",
+            node.0,
+            topology.summary_string()
+        )
+    })?;
 
     if cpus.is_empty() {
-        return Err(format!("No CPUs found for NUMA node {}", node.0));
+        return Err(format!(
+            "NUMA node {} exists but is memory-only (no CPUs); cannot pin a thread to a CPU-less node. {}",
+            node.0,
+            topology.summary_string()
+        ));
+    }
+
+    // Check against CPU_SETSIZE up front so the error tells the caller
+    // which CPU exceeded the mask rather than an opaque EINVAL from the syscall.
+    let cpu_setsize = libc::CPU_SETSIZE as usize;
+    if let Some(&too_high) = cpus.iter().find(|&&c| c >= cpu_setsize) {
+        return Err(format!(
+            "NUMA node {} contains CPU {} which exceeds CPU_SETSIZE ({}); cpus={:?}",
+            node.0, too_high, cpu_setsize, cpus
+        ));
     }
 
     unsafe {
@@ -247,11 +265,69 @@ pub fn pin_thread_to_numa_node(node: NumaNode) -> Result<(), String> {
 
         if result != 0 {
             let err = std::io::Error::last_os_error();
-            return Err(format!("Failed to set CPU affinity: {}", err));
+            return Err(format!(
+                "sched_setaffinity failed: {} (tried {} CPUs for node {}: first={:?})",
+                err,
+                cpus.len(),
+                node.0,
+                cpus.iter().take(8).collect::<Vec<_>>()
+            ));
         }
     }
 
     Ok(())
+}
+
+/// Return the current thread's CPU affinity mask as a compact Linux cpulist
+/// string (e.g. `"0-15,128-143"`). Returns a `<...>` placeholder if the
+/// `sched_getaffinity` syscall fails — the function never panics or returns
+/// `Err`, so it is always safe to drop into a log line.
+pub fn current_affinity_cpulist() -> String {
+    unsafe {
+        let mut set: libc::cpu_set_t = mem::zeroed();
+        let rc = libc::sched_getaffinity(
+            0, // current thread
+            mem::size_of::<libc::cpu_set_t>(),
+            &mut set,
+        );
+        if rc != 0 {
+            return format!("<sched_getaffinity failed: {}>", std::io::Error::last_os_error());
+        }
+        let mut cpus: Vec<usize> = Vec::new();
+        for cpu in 0..(libc::CPU_SETSIZE as usize) {
+            if libc::CPU_ISSET(cpu, &set) {
+                cpus.push(cpu);
+            }
+        }
+        cpulist_compress(&cpus)
+    }
+}
+
+/// Compress a sorted CPU list into Linux cpulist format (`"0-3,8,12-15"`).
+fn cpulist_compress(cpus: &[usize]) -> String {
+    if cpus.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut i = 0;
+    while i < cpus.len() {
+        let start = cpus[i];
+        let mut end = start;
+        while i + 1 < cpus.len() && cpus[i + 1] == end + 1 {
+            end = cpus[i + 1];
+            i += 1;
+        }
+        if !out.is_empty() {
+            out.push(',');
+        }
+        if start == end {
+            out.push_str(&start.to_string());
+        } else {
+            out.push_str(&format!("{start}-{end}"));
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Get PCI bus address for a CUDA device via the CUDA driver API.
