@@ -328,7 +328,7 @@ sglang_configs = {
         # tests/serve/multimodal_profiles/vllm.py (Qwen3.5-0.8B "b64_frontend_decoding").
         name="multimodal_agg_fd_qwen",
         directory=sglang_dir,
-        script_name="agg_vision_fd.sh",
+        script_name="agg_vision.sh",
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(4.7),  # parity with vLLM Qwen3.5-0.8B
@@ -351,6 +351,7 @@ sglang_configs = {
             # asserts page_size == 1. The launch script defaults to 16.
             "--page-size",
             "1",
+            "--frontend-decoding",
         ],
         delayed_start=0,
         timeout=360,
