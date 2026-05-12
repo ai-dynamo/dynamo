@@ -27,6 +27,8 @@ const (
 	DynamoNixlPort     = 19090
 	DynamoNixlPortName = "nixl"
 
+	DynamoFPMBasePort = 20380
+
 	MpiRunSshPort = 2222
 
 	// Default security context values
@@ -69,6 +71,10 @@ const (
 	DynamoNamespaceWorkerSuffixEnvVar = "DYN_NAMESPACE_WORKER_SUFFIX"
 	DynamoComponentEnvVar             = "DYN_COMPONENT"
 	DynamoDiscoveryBackendEnvVar      = "DYN_DISCOVERY_BACKEND"
+
+	// DynamoOperatorAllowGMSSnapshotEnvVar enables the temporary internal
+	// GMS + Snapshot admission gate when set to "1".
+	DynamoOperatorAllowGMSSnapshotEnvVar = "DYN_OPERATOR_ALLOW_GMS_SNAPSHOT"
 
 	GlobalDynamoNamespace = "dynamo"
 
@@ -123,6 +129,13 @@ const (
 	GroveRoleSuffixWorker = "wkr"
 	GroveRoleSuffixGMS    = "gms"
 
+	// MaxCombinedGroveResourceNameLength is the maximum allowed combined length for Grove
+	// resource names (PCS name + PCSG config name + PCLQ template name).
+	// This constraint comes from Grove's PodCliqueSet webhook validation.
+	// Pod names follow: <pcs-name>-<pcs-index>-<pcsg-name>-<pcsg-index>-<pclq-name>-<random>
+	// The hyphens, indices, and random suffix consume additional characters beyond this limit.
+	MaxCombinedGroveResourceNameLength = 45
+
 	KubeLabelDynamoFailoverEngineGroupMember = "nvidia.com/dynamo-failover-engine-group-member"
 
 	DiscoveryBackendKubernetes   = "kubernetes" // label value for KubeLabelDynamoDiscoveryBackend
@@ -135,6 +148,7 @@ const (
 	// Used consistently across controllers, webhooks, and metrics
 	ResourceTypeDynamoGraphDeployment               = "DynamoGraphDeployment"
 	ResourceTypeDynamoComponentDeployment           = "DynamoComponentDeployment"
+	ResourceTypeDynamoCheckpoint                    = "DynamoCheckpoint"
 	ResourceTypeDynamoModel                         = "DynamoModel"
 	ResourceTypeDynamoGraphDeploymentRequest        = "DynamoGraphDeploymentRequest"
 	ResourceTypeDynamoGraphDeploymentScalingAdapter = "DynamoGraphDeploymentScalingAdapter"

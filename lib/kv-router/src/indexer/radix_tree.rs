@@ -229,14 +229,6 @@ impl RadixTree {
                 scores.scores.insert(*worker, 1);
                 last_matched_hashes.insert(*worker, current_hash);
             }
-            for worker in scores.scores.keys() {
-                let tree_size = self
-                    .lookup
-                    .get(worker)
-                    .expect("worker in scores must exist in lookup table")
-                    .len();
-                scores.tree_sizes.insert(*worker, tree_size);
-            }
             return details;
         }
 
@@ -318,16 +310,6 @@ impl RadixTree {
         }
 
         tracing::trace!("RadixTree::find_matches: final scores={:?}", scores.scores);
-
-        // Populate tree sizes for all workers that have scores.
-        for worker in scores.scores.keys() {
-            let tree_size = self
-                .lookup
-                .get(worker)
-                .expect("worker in scores must exist in lookup table")
-                .len();
-            scores.tree_sizes.insert(*worker, tree_size);
-        }
 
         details
     }
@@ -615,6 +597,11 @@ impl RadixTree {
 
     pub fn current_size(&self) -> usize {
         self.lookup.values().map(|m| m.len()).sum()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tree_size_for_worker(&self, worker: WorkerWithDpRank) -> Option<usize> {
+        self.lookup.get(&worker).map(|blocks| blocks.len())
     }
 }
 

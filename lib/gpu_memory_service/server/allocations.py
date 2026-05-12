@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 from uuid import uuid4
 
+import torch
 from gpu_memory_service.common.cuda_utils import (
     align_to_granularity,
     cuda_ensure_initialized,
@@ -49,7 +50,7 @@ class GMSAllocationManager:
         device: int = 0,
         *,
         allocation_retry_interval: float = 0.5,
-        allocation_retry_timeout: Optional[float] = None,
+        allocation_retry_timeout: Optional[float] = 60.0,
     ):
         if allocation_retry_interval <= 0:
             raise ValueError(
@@ -124,10 +125,25 @@ class GMSAllocationManager:
                         f"tag={tag}, waited_sec={waited:.3f}"
                     )
 
+            # Visibility while retrying. Logged every iteration with elapsed
+            # time + free GPU memory, so a stuck retry loop is observable
+            # rather than silent.
+            try:
+                free_b, total_b = torch.cuda.mem_get_info(self._device)
+            except RuntimeError:
+                logger.debug(
+                    "torch.cuda.mem_get_info(%d) failed", self._device, exc_info=True
+                )
+                free_b, total_b = -1, -1
+            elapsed = time.monotonic() - started_at
             logger.warning(
-                "cuMemCreate OOM for aligned_size=%d bytes, tag=%s; retrying in %.3fs",
+                "cuMemCreate OOM for aligned_size=%d bytes, tag=%s, "
+                "elapsed=%.2fs free=%d total=%d; retrying in %.3fs",
                 aligned_size,
                 tag,
+                elapsed,
+                free_b,
+                total_b,
                 self._allocation_retry_interval,
             )
             await asyncio.sleep(self._allocation_retry_interval)

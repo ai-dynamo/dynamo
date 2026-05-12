@@ -590,7 +590,7 @@ def _test_remote_indexer_decisions(
             (serving_routers[0], A + C + D, worker_a_id, dp_rank_a, 0.1),
             (serving_routers[-1], A + C + E, worker_b_id, dp_rank_b, 2.0),
             (consumer_router, A + C + D + F, None, None, 2.0),
-            (consumer_router, A + C + G, None, None, 2.0),
+            (consumer_router, A + C + E + G, None, None, 2.0),
         ]
 
         responses: list[dict[str, Optional[int]]] = []
@@ -619,8 +619,6 @@ def _test_remote_indexer_decisions(
                 kv_python_router=kv_router,
                 model_name=model_name,
                 token_ids=token_ids,
-                initial_wait=1.0,
-                max_retries=8,
                 stop_conditions={
                     "ignore_eos": True,
                     "max_tokens": 2,
@@ -647,13 +645,13 @@ def _test_remote_indexer_decisions(
 
         req5 = responses[4]
         assert req5["prefill_worker_id"] == worker_b_id, (
-            f"Request 5: expected prefill_worker_id={worker_b_id} (tiebreak by smaller tree), "
+            f"Request 5: expected prefill_worker_id={worker_b_id} (longest prefix match), "
             f"got {req5['prefill_worker_id']}"
         )
         if test_dp_rank:
             assert req5["prefill_dp_rank"] == dp_rank_b, (
                 f"Request 5: expected prefill_dp_rank={dp_rank_b} "
-                f"(tiebreak by smaller tree), got {req5['prefill_dp_rank']}"
+                f"(longest prefix match), got {req5['prefill_dp_rank']}"
             )
 
         await wait_for_worker_ids(consumer_endpoint, expected_num_instances)
@@ -723,8 +721,6 @@ def _test_python_router_bindings(
             kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids,
-            initial_wait=1.0,
-            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,  # Don't stop on EOS token
                 "max_tokens": 20,  # Generate exactly 20 tokens
@@ -745,8 +741,6 @@ def _test_python_router_bindings(
             kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids[:50],  # Use fewer tokens for second test,
-            initial_wait=1.0,
-            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,  # Don't stop on EOS token
                 "max_tokens": 10,  # Generate exactly 10 tokens for the second test
@@ -768,8 +762,6 @@ def _test_python_router_bindings(
             kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids[:30],  # Use fewer tokens for third test,
-            initial_wait=1.0,
-            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,  # Don't stop on EOS token
                 "max_tokens": 5,  # Generate exactly 5 tokens for the third test
@@ -1504,8 +1496,6 @@ def _test_router_indexers_sync(
                             kv_python_router=router,
                             model_name=model_name,
                             token_ids=request_tokens,
-                            initial_wait=1.0,
-                            max_retries=8,
                             stop_conditions={
                                 "ignore_eos": True,  # Don't stop on EOS token
                                 "max_tokens": 10,  # Generate exactly 10 tokens
@@ -2233,7 +2223,7 @@ def _test_router_decisions(
     standalone_indexer_url: Optional[str] = None,
     router_aic_config: Optional[dict[str, Any]] = None,
 ):
-    """Validate cross-worker routing decisions based on longest prefix match and tree-size tiebreaking.
+    """Validate cross-worker routing decisions based on longest prefix match.
 
     Assumes engine workers are already initialized.
     Seeds two routing targets (worker a and worker b) with different prefix trees,
@@ -2244,7 +2234,7 @@ def _test_router_decisions(
     2. [A, C, D]    → force worker a        (branch under A on worker a)
     3. [A, C, E]    → force worker b        (seed worker b's tree)
     4. [A, C, D, F] → router picks          (worker a wins: prefix [A,C,D]=3 vs worker b [A,C]=2)
-    5. [A, C, G]    → router picks          (tie on [A,C], worker b wins by smaller tree: 3 vs 5)
+    5. [A, C, E, G] → router picks          (worker b wins: prefix [A,C,E]=3 vs worker a [A,C]=2)
 
     Args:
         engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
@@ -2259,7 +2249,7 @@ def _test_router_decisions(
         router_aic_config: Optional AIC router perf-model config for direct KvRouter tests.
 
     Raises:
-        AssertionError: If routing decisions don't match expected prefix/tiebreak logic
+        AssertionError: If routing decisions don't match expected prefix logic
     """
 
     # Create KvRouterConfig with lower snapshot threshold for testing
@@ -2351,7 +2341,12 @@ def _test_router_decisions(
                 None,
                 2.0,
             ),  # req4: router picks (worker a should win)
-            (A + C + G, None, None, 2.0),  # req5: router picks (worker b should win)
+            (
+                A + C + E + G,
+                None,
+                None,
+                2.0,
+            ),  # req5: router picks (worker b should win)
         ]
 
         response_worker_ids: list[dict[str, Optional[int]]] = []
@@ -2370,8 +2365,6 @@ def _test_router_decisions(
                 kv_python_router=kv_router,
                 model_name=model_name,
                 token_ids=token_ids,
-                initial_wait=1.0,
-                max_retries=8,
                 stop_conditions={
                     "ignore_eos": True,
                     "max_tokens": 2,
@@ -2425,10 +2418,10 @@ def _test_router_decisions(
             req4["prefill_dp_rank"] == dp_rank_a
         ), f"Request 4: expected prefill_dp_rank={dp_rank_a}, got {req4['prefill_dp_rank']}"
 
-    # Verify request 5 routed to worker b (tiebreak by smaller tree)
+    # Verify request 5 routed to worker b (longest prefix match)
     req5 = response_worker_ids[4]
     assert req5["prefill_worker_id"] == worker_b_id, (
-        f"Request 5: expected prefill_worker_id={worker_b_id} (tiebreak by smaller tree), "
+        f"Request 5: expected prefill_worker_id={worker_b_id} (longest prefix match), "
         f"got {req5['prefill_worker_id']}"
     )
     if test_dp_rank:

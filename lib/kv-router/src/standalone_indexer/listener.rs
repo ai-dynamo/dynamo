@@ -2,15 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use rmp_serde as rmps;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::protocols::{WorkerId, WorkerWithDpRank};
 use crate::recovery::{CursorObservation, CursorState};
-use crate::zmq_wire::{KvEventBatch, convert_event};
+use crate::zmq_wire::{ZmqEventNormalizer, decode_event_batch};
 
 use super::indexer::Indexer;
 use super::registry::ListenerRecord;
@@ -29,16 +28,131 @@ fn cursor_from_watermark(watermark: u64) -> CursorState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReplayRecoveryFailureReason {
+    Empty,
+    StartedAfterRequested,
+    NonContiguous,
+    EndedBeforeTarget,
+}
+
+impl ReplayRecoveryFailureReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::StartedAfterRequested => "started_after_requested",
+            Self::NonContiguous => "non_contiguous",
+            Self::EndedBeforeTarget => "ended_before_target",
+        }
+    }
+}
+
+struct ReplayRecoveryProgress {
+    start_seq: u64,
+    end_seq: u64,
+    first_replayed: Option<u64>,
+    last_replayed: Option<u64>,
+    expected_next: u64,
+    replayed: u64,
+    non_contiguous: bool,
+}
+
+impl ReplayRecoveryProgress {
+    fn new(start_seq: u64, end_seq: u64) -> Self {
+        Self {
+            start_seq,
+            end_seq,
+            first_replayed: None,
+            last_replayed: None,
+            expected_next: start_seq,
+            replayed: 0,
+            non_contiguous: false,
+        }
+    }
+
+    fn record_batch(&mut self, seq: u64) {
+        if self.first_replayed.is_none() {
+            self.first_replayed = Some(seq);
+        }
+        if seq != self.expected_next {
+            self.non_contiguous = true;
+        }
+        self.expected_next = seq.saturating_add(1);
+        self.last_replayed = Some(seq);
+        self.replayed += 1;
+    }
+
+    fn failure_reason(&self) -> Option<ReplayRecoveryFailureReason> {
+        if self.start_seq >= self.end_seq {
+            return None;
+        }
+        if self.replayed == 0 {
+            return Some(ReplayRecoveryFailureReason::Empty);
+        }
+        if self
+            .first_replayed
+            .is_some_and(|first| first > self.start_seq)
+        {
+            return Some(ReplayRecoveryFailureReason::StartedAfterRequested);
+        }
+        if self.non_contiguous {
+            return Some(ReplayRecoveryFailureReason::NonContiguous);
+        }
+        if self
+            .last_replayed
+            .is_some_and(|last| last < self.end_seq - 1)
+        {
+            return Some(ReplayRecoveryFailureReason::EndedBeforeTarget);
+        }
+        None
+    }
+
+    fn replayed(&self) -> u64 {
+        self.replayed
+    }
+
+    fn warn_if_incomplete(&self, worker_id: WorkerId, dp_rank: u32) {
+        let Some(reason) = self.failure_reason() else {
+            return;
+        };
+
+        let reason = reason.as_str();
+        let start_seq = self.start_seq;
+        let end_seq = self.end_seq;
+        let replayed = self.replayed;
+        let first_replayed_display = self
+            .first_replayed
+            .map(|seq| seq.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        let last_replayed_display = self
+            .last_replayed
+            .map(|seq| seq.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        tracing::warn!(
+            worker_id,
+            dp_rank,
+            requested_start = start_seq,
+            requested_end = end_seq,
+            first_replayed = ?self.first_replayed,
+            last_replayed = ?self.last_replayed,
+            replayed,
+            reason,
+            "Replay incomplete: requested=[{start_seq},{end_seq}), first={}, last={}, replayed={replayed}, reason={reason}",
+            first_replayed_display,
+            last_replayed_display,
+        );
+    }
+}
+
 struct ListenerLoop {
     worker_id: WorkerId,
     dp_rank: u32,
-    block_size: u32,
     indexer: Indexer,
     cancel: CancellationToken,
     live_socket: SharedSocket,
     replay_socket: Option<SharedSocket>,
     watermark: Arc<AtomicU64>,
-    warning_count: Arc<AtomicU32>,
+    normalizer: ZmqEventNormalizer,
     messages_processed: u64,
 }
 
@@ -57,13 +171,12 @@ impl ListenerLoop {
         Self {
             worker_id,
             dp_rank,
-            block_size,
             indexer,
             cancel,
             live_socket,
             replay_socket,
             watermark,
-            warning_count: Arc::new(AtomicU32::new(0)),
+            normalizer: ZmqEventNormalizer::new(block_size),
             messages_processed: 0,
         }
     }
@@ -93,9 +206,7 @@ impl ListenerLoop {
 
         let worker_id = self.worker_id;
         let dp_rank = self.dp_rank;
-        let block_size = self.block_size;
         let indexer = &self.indexer;
-        let warning_count = &self.warning_count;
         let watermark = &self.watermark;
 
         let req_frames = vec![Vec::new(), start_seq.to_be_bytes().to_vec()];
@@ -104,7 +215,7 @@ impl ListenerLoop {
             return 0;
         }
 
-        let mut replayed = 0u64;
+        let mut replay_progress = ReplayRecoveryProgress::new(start_seq, end_seq);
         loop {
             let msg = tokio::select! {
                 _ = self.cancel.cancelled() => break,
@@ -145,7 +256,7 @@ impl ListenerLoop {
             }
             let seq = u64::from_be_bytes(seq_bytes[..8].try_into().expect("length checked above"));
 
-            let Ok(batch) = rmps::from_slice::<KvEventBatch>(payload) else {
+            let Ok(batch) = decode_event_batch(payload) else {
                 tracing::warn!(worker_id, dp_rank, seq, "Failed to decode replayed batch");
                 continue;
             };
@@ -154,27 +265,25 @@ impl ListenerLoop {
                 .data_parallel_rank
                 .map_or(dp_rank, |rank| rank.cast_unsigned());
             for raw_event in batch.events {
-                let Some(placement_event) = convert_event(
+                let Some(placement_event) = self.normalizer.normalize(
                     raw_event,
                     seq,
-                    block_size,
                     WorkerWithDpRank::new(worker_id, effective_dp_rank),
-                    warning_count,
                 ) else {
                     continue;
                 };
-                if !placement_event.placement.is_local_gpu() {
-                    continue;
-                }
                 let router_event = placement_event
                     .into_router_event()
                     .expect("local worker placement must convert to router event");
-                indexer.apply_event(router_event).await;
+                indexer.apply_event_routed(router_event).await;
             }
             watermark.store(seq, Ordering::Release);
-            replayed += 1;
+            replay_progress.record_batch(seq);
         }
 
+        replay_progress.warn_if_incomplete(worker_id, dp_rank);
+
+        let replayed = replay_progress.replayed();
         tracing::info!(worker_id, dp_rank, replayed, "Replay complete");
         replayed
     }
@@ -209,7 +318,7 @@ impl ListenerLoop {
     }
 
     async fn apply_live_batch(&mut self, seq: u64, payload: &[u8]) {
-        let batch = match rmps::from_slice::<KvEventBatch>(payload) {
+        let batch = match decode_event_batch(payload) {
             Ok(batch) => batch,
             Err(error) => {
                 tracing::warn!(
@@ -225,22 +334,17 @@ impl ListenerLoop {
             .data_parallel_rank
             .map_or(self.dp_rank, |rank| rank.cast_unsigned());
         for raw_event in batch.events {
-            let Some(placement_event) = convert_event(
+            let Some(placement_event) = self.normalizer.normalize(
                 raw_event,
                 seq,
-                self.block_size,
                 WorkerWithDpRank::new(self.worker_id, effective_dp_rank),
-                &self.warning_count,
             ) else {
                 continue;
             };
-            if !placement_event.placement.is_local_gpu() {
-                continue;
-            }
             let router_event = placement_event
                 .into_router_event()
                 .expect("local worker placement must convert to router event");
-            self.indexer.apply_event(router_event).await;
+            self.indexer.apply_event_routed(router_event).await;
             self.messages_processed += 1;
         }
         self.watermark.store(seq, Ordering::Release);

@@ -2724,9 +2724,15 @@ func TestPropagateTopologyCondition(t *testing.T) {
 }
 
 func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
+	// Register Grove types with the scheme so fake client can handle them
+	if err := grovev1alpha1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add grovev1alpha1 to scheme: %v", err)
+	}
+
 	tests := []struct {
 		name         string
 		obj          client.Object
+		existingPCS  *grovev1alpha1.PodCliqueSet // PCS object that exists in the cluster
 		wantRequests int
 		wantName     string
 		wantNs       string
@@ -2747,9 +2753,63 @@ func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
 					},
 				},
 			},
+			existingPCS: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "dynamo-recipe",
+					Namespace: "mwieczorek-dsv32-trtllm-agg",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoGraphDeploymentName: "dynamo-recipe",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: v1alpha1.GroupVersion.String(),
+							Kind:       "DynamoGraphDeployment",
+							Name:       "dynamo-recipe",
+							Controller: ptr.To(true),
+						},
+					},
+				},
+			},
 			wantRequests: 1,
 			wantName:     "dynamo-recipe",
 			wantNs:       "mwieczorek-dsv32-trtllm-agg",
+		},
+		{
+			name: "PCSG with truncated PCS name resolves to original DGD name",
+			obj: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "truncated-pcs-0-worker",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: grovev1alpha1.SchemeGroupVersion.String(),
+							Kind:       "PodCliqueSet",
+							Name:       "truncated-pcs",
+							Controller: ptr.To(true),
+						},
+					},
+				},
+			},
+			existingPCS: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "truncated-pcs",
+					Namespace: "default",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoGraphDeploymentName: "my-very-long-original-dgd-name",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: v1alpha1.GroupVersion.String(),
+							Kind:       "DynamoGraphDeployment",
+							Name:       "my-very-long-original-dgd-name",
+							Controller: ptr.To(true),
+						},
+					},
+				},
+			},
+			wantRequests: 1,
+			wantName:     "my-very-long-original-dgd-name",
+			wantNs:       "default",
 		},
 		{
 			name: "PCSG with no ownerRef returns no requests",
@@ -2806,7 +2866,15 @@ func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
-			r := &DynamoGraphDeploymentReconciler{}
+
+			// Build fake client with existing PCS if provided
+			builder := fake.NewClientBuilder().WithScheme(scheme.Scheme)
+			if tt.existingPCS != nil {
+				builder = builder.WithObjects(tt.existingPCS)
+			}
+			r := &DynamoGraphDeploymentReconciler{
+				Client: builder.Build(),
+			}
 			reqs := r.mapPodCliqueScalingGroupToRequests(context.Background(), tt.obj)
 
 			g.Expect(reqs).To(gomega.HaveLen(tt.wantRequests))

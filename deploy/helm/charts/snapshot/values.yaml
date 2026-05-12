@@ -17,6 +17,17 @@
 # in a single namespace. Install this chart in each namespace where you want
 # to enable checkpoint/restore functionality for DynamoGraphDeployments.
 
+# Container runtime backend. Leave socketPath empty to use the conventional
+# path for the chosen type.
+runtime:
+  type: containerd  # containerd | crio
+  socketPath: ""
+
+# Gates the OCP RBAC template and the DS required-scc annotation. Keep false
+# on vanilla Kubernetes (it references an OCP-only built-in SCC).
+openshift:
+  enabled: false
+
 # Storage configuration for checkpoints
 storage:
   # Storage type stays snapshot-owned for future backend expansion.
@@ -93,9 +104,10 @@ daemonset:
   # Affinity rules
   affinity: {}
 
-# Seccomp profile configuration
+# CRIU can't checkpoint io_uring; this gates the block-iouring ConfigMap and
+# the initContainer that writes the profile. Set to false on RHCOS 9.6+, which
+# already blocks io_uring at the kernel.
 seccomp:
-  # Deploy seccomp profile for blocking io_uring (required for CRIU)
   deploy: true
 
 # Service account configuration

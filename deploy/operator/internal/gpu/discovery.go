@@ -31,6 +31,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
+	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -179,6 +180,7 @@ type GPUDiscoveryCache struct {
 
 type GPUDiscovery struct {
 	Scraper ScrapeMetricsFunc
+	group   singleflight.Group
 }
 
 func NewGPUDiscovery(scraper ScrapeMetricsFunc) *GPUDiscovery {
@@ -266,12 +268,52 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //   - *GPUInfo for the selected node
 //   - error if no GPU data can be retrieved
 func (g *GPUDiscovery) DiscoverGPUsFromDCGMFiltered(ctx context.Context, k8sClient client.Reader, cache *GPUDiscoveryCache, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
+	logger := log.FromContext(ctx)
 	if cache != nil {
 		if cached, ok := cache.Get(filterSKU); ok {
+			logger.V(1).Info("GPU discovery cache hit", "gpuSku", filterSKU)
 			return cached, nil
 		}
 	}
 
+	resultCh := g.group.DoChan(string(filterSKU), func() (any, error) {
+		if cache != nil {
+			if cached, ok := cache.Get(filterSKU); ok {
+				logger.V(1).Info("GPU discovery cache hit after waiting for in-flight request", "gpuSku", filterSKU)
+				return cached, nil
+			}
+		}
+
+		logger.V(1).Info("GPU discovery cache miss; scraping DCGM exporter pods", "gpuSku", filterSKU)
+		info, err := g.discoverGPUsFromDCGMFilteredUncached(ctx, k8sClient, filterSKU)
+		if err != nil {
+			return nil, err
+		}
+		if cache != nil {
+			cache.Set(filterSKU, info, 60*time.Second)
+		}
+		return info, nil
+	})
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		if result.Shared {
+			logger.V(1).Info("GPU discovery shared in-flight result", "gpuSku", filterSKU)
+		}
+		info, ok := result.Val.(*GPUInfo)
+		if !ok || info == nil {
+			return nil, fmt.Errorf("unexpected GPU discovery result type %T", result.Val)
+		}
+		return info, nil
+	}
+}
+
+func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context, k8sClient client.Reader, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
 	// List DCGM exporter pods
 	dcgmPods, err := listDCGMExporterPods(ctx, k8sClient)
 	if err != nil && !strings.Contains(err.Error(), "no DCGM exporter pods found") {
@@ -375,9 +417,6 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGMFiltered(ctx context.Context, k8sClie
 	bestNode.RDMAEnabled = rdmaDetected
 	bestNode.RDMAType = rdmaType
 
-	if cache != nil {
-		cache.Set(filterSKU, bestNode, 60*time.Second)
-	}
 	return bestNode, nil
 }
 func buildDCGMEndpoint(podIP string) string {
