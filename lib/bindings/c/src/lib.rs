@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use dynamo_kv_router::{
-    config::{KvRouterConfig, RouterConfigOverride},
+    config::{
+        KvRouterConfig, RouterConfigOverride, apply_deprecated_overlap_score_weight_override,
+    },
     protocols::*,
 };
 use dynamo_llm::kv_router::publisher::KvEventPublisher;
@@ -478,7 +480,7 @@ impl RouterHandles {
     }
 
     /// Query optimal decode worker for a request.
-    /// For disaggregated mode, set `is_disaggregated` to true to use overlap_score_weight=0
+    /// For disaggregated mode, set `is_disaggregated` to true to use overlap_score_credit=0
     /// (since KV cache is being transferred from prefill, not reused).
     ///
     /// When `allowed_worker_ids` is Some, only workers in that set are considered.
@@ -498,11 +500,11 @@ impl RouterHandles {
             self.decode_router.register_workers(ids);
         }
 
-        // For decode phase in disaggregated mode, use overlap_score_weight=0
+        // For decode phase in disaggregated mode, use overlap_score_credit=0
         // This matches prefill_router.rs
         let config_override = if is_disaggregated {
             Some(RouterConfigOverride {
-                overlap_score_weight: Some(0.0),
+                overlap_score_credit: Some(0.0),
                 assume_kv_reuse: Some(false),
                 track_prefill_tokens: Some(false),
                 ..Default::default()
@@ -563,8 +565,25 @@ fn kv_router_config_from_env() -> KvRouterConfig {
             })
     }
 
-    if let Some(v) = env_f64("DYN_OVERLAP_SCORE_WEIGHT") {
-        cfg.overlap_score_weight = v;
+    if let Some(v) = env_f64("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT") {
+        cfg.overlap_score_credit = v;
+    }
+    if let Some(v) = env_f64("DYN_ROUTER_PREFILL_LOAD_SCALE") {
+        cfg.prefill_load_scale = v;
+    }
+    for key in [
+        "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
+        "DYN_OVERLAP_SCORE_WEIGHT",
+    ] {
+        if let Some(v) = env_f64(key) {
+            tracing::warn!("{key} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE");
+            apply_deprecated_overlap_score_weight_override(
+                v,
+                &mut cfg.overlap_score_credit,
+                &mut cfg.prefill_load_scale,
+            );
+            break;
+        }
     }
     if let Some(v) = env_f64("DYN_ROUTER_TEMPERATURE") {
         cfg.router_temperature = v;
@@ -589,7 +608,8 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     }
 
     tracing::info!(
-        overlap_score_weight = cfg.overlap_score_weight,
+        overlap_score_credit = cfg.overlap_score_credit,
+        prefill_load_scale = cfg.prefill_load_scale,
         router_temperature = cfg.router_temperature,
         use_kv_events = cfg.use_kv_events,
         router_replica_sync = cfg.router_replica_sync,
@@ -865,7 +885,7 @@ pub unsafe extern "C" fn add_request(
         tokio::time::timeout(timeout_duration, async {
             let worker = WorkerWithDpRank::new(worker_id, dp_rank);
             let router_config_override = RouterConfigOverride {
-                overlap_score_weight: Some(0.0),
+                overlap_score_credit: Some(0.0),
                 assume_kv_reuse: Some(false),
                 track_prefill_tokens: Some(false),
                 ..Default::default()
@@ -1252,7 +1272,7 @@ pub unsafe extern "C" fn route_prefill_request(
 /// Route a request to select the best **decode** worker only.
 ///
 /// This is used in both aggregated and disaggregated modes.
-/// - When `is_disaggregated` is true, the decode router uses `overlap_score_weight=0`
+/// - When `is_disaggregated` is true, the decode router uses `overlap_score_credit=0`
 ///   (KV cache is being transferred from prefill, not reused locally).
 /// - When `is_disaggregated` is false, normal KV-aware scoring is used.
 ///

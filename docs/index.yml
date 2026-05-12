@@ -76,6 +76,8 @@ navigation:
             path: kubernetes/installation-guide.md
           - page: Model Deployment Guide
             path: kubernetes/model-deployment-guide.md
+          - page: Model Caching
+            path: kubernetes/model-caching.md
           - page: DGDR Reference
             path: kubernetes/dgdr.md
           - page: Dynamo Operator
