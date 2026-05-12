@@ -73,7 +73,7 @@ def get_model_from_deployment(
                 ):
                     model = deployment_spec["TRTLLMWorker"].model
                 else:
-                    model = deployment_spec["TRTLLMDecodeWorker"].model
+                    model = deployment_spec["decode"].model
             if model:
                 return model
         except (KeyError, AttributeError) as e:

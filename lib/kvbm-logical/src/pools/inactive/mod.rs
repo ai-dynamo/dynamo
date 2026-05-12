@@ -28,6 +28,11 @@ pub(crate) trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
     /// Find blocks matching the given hashes in order, stopping on first miss.
     fn find_matches(&mut self, hashes: &[SequenceHash], touch: bool) -> Vec<Block<T, Registered>>;
 
+    /// Find a single block matching the given hash.
+    fn find_match(&mut self, hash: SequenceHash, touch: bool) -> Option<Block<T, Registered>> {
+        self.find_matches(&[hash], touch).into_iter().next()
+    }
+
     /// Scan for blocks matching any of the given hashes (full scan, doesn't stop on miss).
     /// Unlike find_matches, continues scanning even when a hash is not found.
     /// Acquires/removes found blocks from pool (caller owns until dropped).
@@ -134,8 +139,20 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
         hashes: &[SequenceHash],
         touch: bool,
     ) -> Vec<Arc<dyn RegisteredBlock<T>>> {
+        let Some((&first_hash, remaining_hashes)) = hashes.split_first() else {
+            return Vec::new();
+        };
+
         let mut inner = self.inner.write();
-        let matched_blocks = inner.backend.find_matches(hashes, touch);
+        let Some(first_block) = inner.backend.find_match(first_hash, touch) else {
+            return Vec::new();
+        };
+
+        let mut matched_blocks = Vec::with_capacity(hashes.len());
+        matched_blocks.push(first_block);
+        if !remaining_hashes.is_empty() {
+            matched_blocks.extend(inner.backend.find_matches(remaining_hashes, touch));
+        }
 
         let count = matched_blocks.len();
         if let Some(ref m) = self.metrics {

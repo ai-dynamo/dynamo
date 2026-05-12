@@ -75,7 +75,7 @@ PLANNER_PROFILE_DATA_DIR = (
 ROUTER_AIC_CONFIG = {
     "aic_backend": "vllm",
     "aic_system": "h200_sxm",
-    "aic_backend_version": "0.12.0",
+    "aic_backend_version": "0.14.0",
     "aic_tp_size": 1,
     "aic_model_path": "Qwen/Qwen3-32B",
 }
@@ -1192,6 +1192,10 @@ def test_kv_router_bindings(
     ],
     indirect=["request_plane", "durable_kv_events"],
 )
+# Known flake (nats_core, file variants): Router and Standalone indexer occasionally
+# disagree on event count by 3-4 events (e.g. "Router 1 has 105 events, Standalone A
+# has 102 events"). Race in event-sync convergence — needs root-cause investigation,
+# not a retry.
 @pytest.mark.timeout(300)
 def test_indexers_sync(
     request,

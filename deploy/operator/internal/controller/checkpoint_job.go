@@ -54,7 +54,7 @@ func buildCheckpointWorkerDefaultEnv(
 
 func buildCheckpointJob(
 	ctx context.Context,
-	reader ctrlclient.Reader,
+	kubeClient ctrlclient.Client,
 	config *configv1alpha1.OperatorConfiguration,
 	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
 	jobName string,
@@ -100,21 +100,36 @@ func buildCheckpointJob(
 	dynamo.AddStandardEnvVars(mainContainer, config)
 
 	checkpoint.EnsurePodInfoMount(mainContainer)
-	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
+	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, dynamo.ToBetaSharedMemorySize(ckpt.Spec.Job.SharedMemory))
 	// NewCheckpointJob handles control volume + readiness probe from the
 	// snapshot contract.
+
+	if err := checkpoint.EnsureStoragePVC(ctx, kubeClient, ckpt.Namespace, config.Checkpoint.Storage); err != nil {
+		return nil, err
+	}
+	if storage, ok, err := checkpoint.StorageFromConfig(config.Checkpoint.Storage); err != nil {
+		return nil, err
+	} else if ok {
+		snapshotprotocol.InjectCheckpointVolume(&podTemplate.Spec, storage.PVCName)
+		snapshotprotocol.InjectCheckpointVolumeMount(mainContainer, storage.BasePath)
+		if podTemplate.Annotations == nil {
+			podTemplate.Annotations = map[string]string{}
+		}
+		snapshotprotocol.ApplyCheckpointStorageMetadata(podTemplate.Annotations, storage)
+	}
 
 	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
 		claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
 		if err := dra.ApplyClaim(&podTemplate.Spec, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS checkpoint: %w", err)
 		}
-		storage, err := snapshotprotocol.DiscoverAndResolveStorage(
+		storage, err := checkpoint.ResolveStorage(
 			ctx,
-			reader,
+			kubeClient,
 			ckpt.Namespace,
 			hash,
 			ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation],
+			config.Checkpoint.Storage,
 		)
 		if err != nil {
 			return nil, err
@@ -149,7 +164,7 @@ func buildCheckpointJob(
 		Namespace:             ckpt.Namespace,
 		CheckpointID:          hash,
 		ArtifactVersion:       snapshotprotocol.ArtifactVersion(ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation]),
-		SeccompProfile:        snapshotprotocol.DefaultSeccompLocalhostProfile,
+		SeccompProfile:        config.Checkpoint.EffectiveSeccompProfile(),
 		Name:                  jobName,
 		ActiveDeadlineSeconds: activeDeadlineSeconds,
 		TTLSecondsAfterFinish: &ttlSecondsAfterFinish,

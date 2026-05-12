@@ -10,7 +10,10 @@ import pytest
 
 try:
     from dynamo.vllm.omni.args import OmniConfig  # noqa: F401
-except ImportError:
+except Exception:
+    # vllm_omni's import chain can raise NotImplementedError (and other
+    # non-ImportError types) on platforms it doesn't support — e.g. a
+    # CPU-only runner where vllm._C can't load libcuda.so.1.
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 from tests.serve.common import (
@@ -191,6 +194,10 @@ vllm_omni_configs = {
             ),
         ],
     ),
+    # Known flake (post-merge): URL check fails after 600s with "StageDiffusionProc
+    # died during handshake (exit code 143)" — the diffusion child process is
+    # SIGTERM'd before the handshake completes. Bumping the timeout will not fix this;
+    # needs investigation of why StageDiffusionProc is dying.
     "omni_t2v": VLLMOmniConfig(
         name="omni_t2v",
         directory=vllm_dir,

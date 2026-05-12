@@ -92,7 +92,7 @@ COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/fl
 COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch_tensorrt ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt
 COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch_tensorrt-${TORCH_TENSORRT_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt-${TORCH_TENSORRT_VER}.dist-info
 
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install flashinfer-python==${FLASHINFER_PYTHON_VER}
 
@@ -109,7 +109,7 @@ COPY --from=trtllm_wheel / /trtllm_wheel/
 COPY --from=trtllm_wheel_image /app/tensorrt_llm /trtllm_wheel_image/
 
 # Cache uv downloads; uv handles its own locking for this cache.
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install "cuda-python==13.0.2"
 
@@ -122,7 +122,7 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
     rm -f /usr/share/keyrings/cuda-archive-keyring.gpg && \
     rm -f /etc/apt/trusted.gpg.d/cuda*.gpg
 
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         # Download and run install_tensorrt.sh from TensorRT-LLM GitHub before installing the wheel

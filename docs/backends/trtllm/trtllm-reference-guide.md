@@ -70,6 +70,17 @@ See the instructions here: [Running KVBM in TensorRT-LLM](../../components/kvbm/
 
 TensorRT-LLM exposes Prometheus metrics for monitoring inference performance. For detailed metrics reference, collection setup, and Grafana integration, see the [Observability Guide](./trtllm-observability.md).
 
+## Disabling Python Cyclic GC for high concurrency benchmarks
+
+Dynamo with TensorRT-LLM exposes `DYN_TRTLLM_SERVER_DISABLE_GC` to match the behavior of `TRTLLM_SERVER_DISABLE_GC` in `trtllm-serve`. When set, the TensorRT-LLM worker disables Python's cyclic garbage collector at startup so that generational GC pauses do not land on the request hot path. Reference-counted deallocation still runs normally — only the cycle collector is turned off.
+
+```bash
+export DYN_TRTLLM_SERVER_DISABLE_GC=1
+```
+
+This is most useful for high-concurrency benchmarks, where it boosts throughput and stabilizes TTFT/ITL measurements by removing GC-induced tail-latency spikes.
+
+
 ## Known Issues and Mitigations
 
 For known issues, workarounds, and mitigations, see the [Known Issues and Mitigations](./trtllm-known-issues.md) page.
