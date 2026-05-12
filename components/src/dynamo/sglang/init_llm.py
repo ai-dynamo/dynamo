@@ -28,31 +28,12 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     """Perform warmup request for prefill engine to reduce initial TTFT.
 
     Raises on failure so the caller can prevent the worker from registering
-    with a broken engine (silent request drops).
+    with a broken engine (silent request drops). Shared with the unified
+    backend (`dynamo.sglang.llm_engine`) via `_disagg.warmup_prefill_engine`.
     """
-    logging.info("Start of prefill disaggregation warmup ...")
-    from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
+    from dynamo.sglang._disagg import warmup_prefill_engine
 
-    sampling_params = {
-        "temperature": 0.0,
-        "max_new_tokens": 8,
-        "ignore_eos": True,
-    }
-
-    async def _do_warmup():
-        results = await engine.async_generate(
-            input_ids=[0, 1, 2, 3],
-            sampling_params=sampling_params,
-            stream=True,
-            bootstrap_host=FAKE_BOOTSTRAP_HOST,
-            bootstrap_port=server_args.disaggregation_bootstrap_port,
-            bootstrap_room=999999,
-        )
-        async for _ in results:
-            pass
-
-    await asyncio.wait_for(_do_warmup(), timeout=1800)
-    logging.info("Prefill warmup completed")
+    await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
 
 
 async def init_decode(

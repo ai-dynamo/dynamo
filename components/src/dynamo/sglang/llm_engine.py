@@ -32,16 +32,11 @@ from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import ModelInput
-from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_scheduler_info
+from dynamo.sglang._compat import get_scheduler_info
+from dynamo.sglang._disagg import compute_bootstrap_address, warmup_prefill_engine
 from dynamo.sglang.args import parse_args
 
 logger = logging.getLogger(__name__)
-
-# Mirrors `_warmup_prefill_engine` in init_llm.py — must finish before the
-# prefill worker starts serving so the first real request doesn't pay the
-# JIT/CUDA-graph compile cost. SGLang's FAKE_BOOTSTRAP_HOST drives the
-# warmup through the disagg path without needing a real decode peer.
-_PREFILL_WARMUP_TIMEOUT_S = 1800.0
 
 # Bound on prefill drain during graceful shutdown. After this, force-cancel
 # any still-running consume tasks. Matches TRT-LLM's drain timeout.
@@ -121,14 +116,16 @@ class SglangLLMEngine(LLMEngine):
         self._input_param_manager = InputParamManager(tokenizer)
 
         if self.serving_mode == DisaggregationMode.PREFILL:
-            # Cache bootstrap host/port; warm the engine to avoid first-
-            # request JIT/cuda-graph compile latency.
-            (
-                self._bootstrap_host,
-                self._bootstrap_port,
-            ) = self._resolve_bootstrap_info()
+            self._bootstrap_host, self._bootstrap_port = compute_bootstrap_address(
+                self.engine
+            )
+            if self._bootstrap_host is None or self._bootstrap_port is None:
+                raise RuntimeError(
+                    "prefill worker could not resolve bootstrap host/port; "
+                    "SGLang server_args.disaggregation_bootstrap_port is unset"
+                )
             if _warmup_enabled():
-                await self._warmup_prefill()
+                await warmup_prefill_engine(self.engine, self._bootstrap_port)
             else:
                 logger.info(
                     "Skipping SGLang prefill warmup (%s set)",
@@ -192,7 +189,7 @@ class SglangLLMEngine(LLMEngine):
             yield {
                 "token_ids": [],
                 "index": 0,
-                "disaggregated_params": dict(bootstrap_kwargs),  # type: ignore[typeddict-unknown-key]
+                "disaggregated_params": dict(bootstrap_kwargs),
             }
             # Bootstrap path (router-populated bootstrap_info): drain
             # inline so cancellation propagates to engine.abort().
@@ -276,7 +273,10 @@ class SglangLLMEngine(LLMEngine):
 
                 yield out
         finally:
-            # pop before close(); ordering matters for late abort()
+            # Pop the guard from the lookup map BEFORE closing it. A late
+            # abort() racing on a different task would otherwise observe a
+            # half-closed guard; popping first sends that abort() down the
+            # engine-direct path instead.
             if abort_guard is not None and rid is not None:
                 self._active_aborts.pop(rid, None)
                 await abort_guard.close()
@@ -296,12 +296,7 @@ class SglangLLMEngine(LLMEngine):
         logger.debug("abort requested for %s", rid)
 
     async def drain(self) -> None:
-        """Await background prefill consume tasks before cleanup.
-
-        On the Completed path these tasks are still draining in-flight
-        NIXL KV transfers for already-routed decode requests; cancelling
-        them in cleanup() abandons the transfer mid-flight (#7319).
-        """
+        """Await background prefill consume tasks before cleanup (#7319)."""
         pending = [t for t in self._prefill_consume_tasks if not t.done()]
         if not pending:
             return
@@ -455,63 +450,6 @@ class SglangLLMEngine(LLMEngine):
                 rid,
                 exc_info=True,
             )
-
-    def _resolve_bootstrap_info(self) -> tuple[str, int]:
-        """Mirrors `BaseWorkerHandler._get_bootstrap_info` — returns the
-        `(host, port)` tuple this prefill worker advertises to decode
-        peers. Source of truth is the SGLang engine's ServerArgs.
-
-        TODO: dedup with `dynamo.sglang.register._get_bootstrap_info_for_config`.
-        """
-        assert self.engine is not None
-        inner_tm = self.engine.tokenizer_manager
-        bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
-
-        if inner_tm.server_args.dist_init_addr:
-            dist_init = NetworkAddress.parse(inner_tm.server_args.dist_init_addr)
-            bootstrap_host = (
-                NetworkAddress(dist_init.resolved().host, bootstrap_port)
-                .to_host_port_str()
-                .rsplit(":", 1)[0]
-            )
-        else:
-            bootstrap_host = (
-                NetworkAddress(get_local_ip_auto(), bootstrap_port)
-                .to_host_port_str()
-                .rsplit(":", 1)[0]
-            )
-        return bootstrap_host, bootstrap_port
-
-    async def _warmup_prefill(self) -> None:
-        """Warm the engine through the disagg path so the first real
-        request doesn't pay JIT/CUDA-graph compile cost. Uses
-        FAKE_BOOTSTRAP_HOST so no decode peer is required. Startup
-        fails on warmup error — an unwarmed prefill silently drops
-        requests in production."""
-        assert self.engine is not None
-        from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
-
-        sampling_params = {
-            "temperature": 0.0,
-            "max_new_tokens": 8,
-            "ignore_eos": True,
-        }
-
-        async def _do_warmup() -> None:
-            results = await self.engine.async_generate(
-                input_ids=[0, 1, 2, 3],
-                sampling_params=sampling_params,
-                stream=True,
-                bootstrap_host=FAKE_BOOTSTRAP_HOST,
-                bootstrap_port=self._bootstrap_port,
-                bootstrap_room=999999,
-            )
-            async for _ in results:
-                pass
-
-        logger.info("SGLang prefill warmup starting...")
-        await asyncio.wait_for(_do_warmup(), timeout=_PREFILL_WARMUP_TIMEOUT_S)
-        logger.info("SGLang prefill warmup complete")
 
     def _build_sampling_params(self, request: GenerateRequest) -> dict:
         if not self._use_sglang_tokenizer:

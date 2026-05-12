@@ -14,7 +14,7 @@ from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from dynamo._core import Endpoint
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
-from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_scheduler_info
+from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang.args import DynamoConfig
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
@@ -74,49 +74,11 @@ async def _register_model_with_runtime_config(
 def _get_bootstrap_info_for_config(
     engine: sgl.Engine,
 ) -> tuple[Optional[str], Optional[int]]:
-    """Extract bootstrap host and port from SGLang engine for config registration.
+    """Thin wrapper for the shared `_disagg.compute_bootstrap_address`,
+    kept for source-compat with this module's callers."""
+    from dynamo.sglang._disagg import compute_bootstrap_address
 
-    Args:
-        engine: The SGLang engine instance.
-
-    Returns:
-        Tuple of (bootstrap_host, bootstrap_port), or (None, None) if not available.
-    """
-    try:
-        inner_tm = engine.tokenizer_manager
-        bootstrap_port = getattr(
-            inner_tm.server_args, "disaggregation_bootstrap_port", None
-        )
-
-        if bootstrap_port is None:
-            return None, None
-
-        if inner_tm.server_args.dist_init_addr:
-            dist_init = NetworkAddress.parse(inner_tm.server_args.dist_init_addr)
-            resolved = dist_init.resolved()
-            bootstrap_host = (
-                NetworkAddress(resolved.host, bootstrap_port)
-                .to_host_port_str()
-                .rsplit(":", 1)[0]
-            )
-            logging.info(
-                f"Resolved bootstrap host '{dist_init.host}' -> '{resolved.host}' "
-                f"({'IPv6' if resolved.is_ipv6 else 'IPv4'})"
-            )
-        else:
-            # get_local_ip_auto() tries IPv4 first, then IPv6. For explicit control,
-            # set SGLANG_HOST_IP env var (use bracketed format for IPv6: [addr])
-            local_ip = get_local_ip_auto()
-            local_addr = NetworkAddress(local_ip, bootstrap_port)
-            bootstrap_host = local_addr.to_host_port_str().rsplit(":", 1)[0]
-            logging.info(
-                f"Using auto-detected local IP: {local_ip} "
-                f"({'IPv6' if local_addr.is_ipv6 else 'IPv4'})"
-            )
-        return bootstrap_host, bootstrap_port
-    except Exception as e:
-        logging.warning(f"Failed to get bootstrap info: {e}")
-        return None, None
+    return compute_bootstrap_address(engine)
 
 
 def _parse_hicache_storage_extra_config(

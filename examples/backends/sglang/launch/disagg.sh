@@ -11,26 +11,16 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_sglang_gpu_mem_args
 source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
-# Parse command line arguments BEFORE installing the kill-process-group
-# EXIT trap — `--help` and unknown-option early exits would otherwise
-# kill the caller's process group before any worker is even launched.
+# Strip --unified via the shared helper, then parse the remaining flags.
+# All of this runs BEFORE installing the kill-process-group EXIT trap so
+# an early exit (--help / unknown option) doesn't tear down the caller.
+pick_worker_module dynamo.sglang dynamo.sglang.unified_main "$@"
+set -- "${REMAINING_ARGS[@]}"
+
 ENABLE_OTEL=false
-USE_UNIFIED=false
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --enable-otel)
-            ENABLE_OTEL=true
-            shift
-            ;;
-        --unified)
-            # Run the workers via the unified entry point
-            # (`python -m dynamo.sglang.unified_main`) so disagg goes
-            # through dynamo.common.backend / dynamo_backend_common
-            # instead of the legacy main.py / init_prefill init_decode
-            # dispatch.
-            USE_UNIFIED=true
-            shift
-            ;;
+        --enable-otel) ENABLE_OTEL=true; shift ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
@@ -42,21 +32,11 @@ while [[ $# -gt 0 ]]; do
             echo "Note: System metrics are enabled by default on ports 8081 (prefill), 8082 (decode)"
             exit 0
             ;;
-        *)
-            echo "Unknown option: $1"
-            echo "Use --help for usage information"
-            exit 1
-            ;;
+        *) echo "Unknown option: $1"; echo "Use --help for usage information"; exit 1 ;;
     esac
 done
 
 trap 'echo Cleaning up...; kill 0' EXIT
-
-if [ "$USE_UNIFIED" = true ]; then
-    WORKER_MODULE="dynamo.sglang.unified_main"
-else
-    WORKER_MODULE="dynamo.sglang"
-fi
 
 # Enable tracing if requested
 TRACE_ARGS=()
