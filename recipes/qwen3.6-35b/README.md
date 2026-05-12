@@ -77,15 +77,12 @@ qwen3.6-35b/
 ├── data-gen/
 │   └── generate-datasets-job.yaml
 ├── vllm-serve/
-│   ├── config.env              # Config-axis metadata (kind, names)
 │   ├── deploy.yaml             # Templated (image, nodeSelector, tolerations)
 │   └── perf.yaml               # Templated
 ├── dynamo-fd/
-│   ├── config.env
 │   ├── deploy.yaml             # DynamoGraphDeployment, frontend-decoding ON
 │   └── perf.yaml
 └── dynamo-fd-ec/
-    ├── config.env
     ├── deploy.yaml             # DynamoGraphDeployment, FD + embedding cache
     └── perf.yaml
 ```
@@ -137,20 +134,9 @@ The HF cache is mounted at the root so any model already cached in
 the namespace is reused. The Qwen3.6-35B-A3B-FP8 download lands in
 the standard `hub/models--Qwen--Qwen3.6-35B-A3B-FP8/` directory.
 
-### Why not EBS?
-
-EBS PVCs are RWO and AZ-pinned: the volume gets created in whichever AZ
-the first-consumer pod is scheduled into. On 2026-05-10 we discovered
-the EBS provisioner picked `us-east-1a` (where the model-download pod's
-CPU node lived) while every H100 GPU node is in `us-east-1e`. The
-vllm-serve pod was therefore permanently unschedulable. FSx Lustre is
-cross-AZ + RWX, so this stops biting.
-
-### Deploying on a cluster without `shared-model-cache`
-
-Uncomment the PVC definitions in `model-cache/model-cache.yaml`. Use
-`dgxc-enterprise-file` (FSx, RWX, Retain) as the storage class — NOT
-`ebs` (RWO, Delete, AZ-pinned).
+If your cluster doesn't pre-provision `shared-model-cache`, uncomment
+the PVC block in `model-cache/model-cache.yaml` and pick an RWX storage
+class (e.g. `dgxc-enterprise-file` on dgxc, FSx Lustre on AWS).
 
 ## aiperf install
 

@@ -5,9 +5,9 @@
 # Unified driver for the Qwen3.6-35B-A3B-FP8 3-way benchmark.
 # Idempotent — re-running steps that already completed is a no-op.
 #
-# Two orthogonal axes, each expressed as an env file:
-#   --hw <name>      → sources hw/<name>.env       (VLLM_IMAGE, HW_NODE_SELECTOR, HW_TOLERATIONS)
-#   --config <name>  → sources <name>/config.env   (CONFIG_NAME, DEPLOY_KIND, DEPLOY_NAME, BENCH_POD)
+# Two axes:
+#   --hw <name>      → sources hw/<name>.env (VLLM_IMAGE, HW_NODE_SELECTOR, HW_TOLERATIONS)
+#   --config <name>  → resolves to DEPLOY_KIND, DEPLOY_NAME, BENCH_POD inline (see CONFIGS table below)
 #
 # Usage:
 #   ./run-benchmark.sh -n <namespace> --hw h100 --config vllm-serve
@@ -39,16 +39,35 @@ if [[ -z "$NAMESPACE" ]]; then
 fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-if [[ -z "$CONFIG" ]]; then
-  echo "ERROR: --config <name> required" >&2
-  # Enumerate dirs that ship a config.env (the canonical "this is a config dir" marker).
-  available=""
-  for f in "$HERE"/*/config.env; do
-    [[ -f "$f" ]] && available+="$(basename "$(dirname "$f")") "
-  done
-  echo "Available: ${available% }" >&2
-  exit 2
-fi
+# Per-config metadata. Keep this list in sync with the sibling config dirs.
+#   DEPLOY_KIND branches deploy() + clean():
+#     deployment → kubectl rollout status + delete Deployment+Service
+#     dgd        → kubectl wait on operator-stamped DGD pod labels + delete DGD
+case "$CONFIG" in
+  vllm-serve)
+    DEPLOY_KIND="deployment"
+    DEPLOY_NAME="qwen36-vllm-serve"
+    BENCH_POD="qwen36-bench"
+    ;;
+  dynamo-fd)
+    DEPLOY_KIND="dgd"
+    DEPLOY_NAME="qwen36-dynamo-fd"
+    BENCH_POD="qwen36-fd-bench"
+    ;;
+  dynamo-fd-ec)
+    DEPLOY_KIND="dgd"
+    DEPLOY_NAME="qwen36-dynamo-fd-ec"
+    BENCH_POD="qwen36-fd-ec-bench"
+    ;;
+  "")
+    echo "ERROR: --config <name> required" >&2
+    echo "Available: vllm-serve dynamo-fd dynamo-fd-ec" >&2
+    exit 2 ;;
+  *)
+    echo "ERROR: unknown config: $CONFIG" >&2
+    echo "Available: vllm-serve dynamo-fd dynamo-fd-ec" >&2
+    exit 2 ;;
+esac
 
 HW_ENV="$HERE/hw/${HW}.env"
 if [[ ! -f "$HW_ENV" ]]; then
@@ -56,13 +75,7 @@ if [[ ! -f "$HW_ENV" ]]; then
   echo "Available: $(ls "$HERE/hw/" 2>/dev/null | tr '\n' ' ')" >&2
   exit 2
 fi
-
 CONFIG_DIR="$HERE/${CONFIG}"
-CONFIG_ENV="$CONFIG_DIR/config.env"
-if [[ ! -f "$CONFIG_ENV" ]]; then
-  echo "ERROR: config env file not found: $CONFIG_ENV" >&2
-  exit 2
-fi
 
 if ! command -v envsubst >/dev/null 2>&1; then
   echo "ERROR: envsubst missing. Install gettext-base (apt) or gettext (brew)." >&2
@@ -70,7 +83,7 @@ if ! command -v envsubst >/dev/null 2>&1; then
 fi
 
 # shellcheck disable=SC1090
-set -a; . "$HW_ENV"; . "$CONFIG_ENV"; set +a
+set -a; . "$HW_ENV"; set +a
 echo "[hw]     $HW → image=$VLLM_IMAGE node=$HW_NODE_SELECTOR"
 echo "[config] $CONFIG → kind=$DEPLOY_KIND deploy=$DEPLOY_NAME bench-pod=$BENCH_POD"
 
@@ -143,7 +156,7 @@ bench() {
 }
 
 retrieve() {
-  local dest="$HOME/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen36-fp8-${HW}/${CONFIG_NAME}"
+  local dest="$HOME/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen36-fp8-${HW}/${CONFIG}"
   mkdir -p "$dest"
   $K exec "$BENCH_POD" -- \
       tar c --exclude='inputs.json' -C /perf-cache artifacts \
