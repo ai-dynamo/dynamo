@@ -150,6 +150,30 @@ data:
         profile: {{ .Values.checkpoint.seccomp.profile | quote }}
         {{- end }}
       {{- end }}
+      {{- with .Values.checkpoint.storage }}
+      {{- if .type }}
+      {{- $pvc := .pvc | default dict }}
+      storage:
+        type: {{ .type | quote }}
+        {{- if eq .type "pvc" }}
+        pvc:
+          pvcName: {{ required "checkpoint.storage.pvc.pvcName is required when checkpoint.storage.type=pvc" $pvc.pvcName | quote }}
+          basePath: {{ required "checkpoint.storage.pvc.basePath is required when checkpoint.storage.type=pvc" $pvc.basePath | quote }}
+          {{- if $pvc.create }}
+          create: true
+          {{- end }}
+          {{- if $pvc.size }}
+          size: {{ $pvc.size | quote }}
+          {{- end }}
+          {{- if $pvc.storageClassName }}
+          storageClassName: {{ $pvc.storageClassName | quote }}
+          {{- end }}
+          {{- if $pvc.accessMode }}
+          accessMode: {{ $pvc.accessMode | quote }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
     {{- end }}
     {{- if and .Values.discoveryBackend (ne (.Values.discoveryBackend | toString) "kubernetes") }}
     discovery:

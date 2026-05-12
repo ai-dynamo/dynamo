@@ -352,7 +352,7 @@ If GPU discovery is disabled, provide hardware config manually in the DGDR:
 spec:
   hardware:
     numGpusPerNode: 8
-    gpuSku: "H100-SXM5-80GB"
+    gpuSku: h100_sxm
     vramMb: 81920
 ```
 

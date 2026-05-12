@@ -75,13 +75,6 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	}
 	hubOrigin := restoredHubSpec != nil
 	scrubDGDInternalAnnotations(&dst.ObjectMeta)
-	if hash, ok := getAnnFromObj(&src.ObjectMeta, annCurrentWorkerHash); ok && hash != "" {
-		legacyHash, err := ComputeDGDWorkersSpecHash(src)
-		if err != nil {
-			return fmt.Errorf("compute v1alpha1 DGD worker hash: %w", err)
-		}
-		setAnnOnObj(&dst.ObjectMeta, AnnotationDGDLegacyWorkerHash, legacyHash)
-	}
 
 	ctx := DynamoGraphDeploymentConversionContext{
 		IncludeOriginSplits: !hubOrigin,
@@ -519,7 +512,6 @@ func scrubDGDInternalAnnotations(obj metav1.Object) {
 	for _, key := range []string{
 		annDGDSpec,
 		annDGDStatus,
-		AnnotationDGDLegacyWorkerHash,
 	} {
 		delAnnFromObj(obj, key)
 	}
