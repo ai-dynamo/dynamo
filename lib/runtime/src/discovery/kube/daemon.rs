@@ -274,11 +274,20 @@ impl DiscoveryDaemon {
             observed_crs.insert(cr_name.clone());
             let generation = arc_cr.metadata.generation.unwrap_or(0);
             let uid = arc_cr.metadata.uid.clone();
+            let resource_version = arc_cr
+                .metadata
+                .resource_version
+                .as_deref()
+                .unwrap_or("unknown");
 
             if arc_cr.spec.data.is_null() {
                 tracing::debug!(
-                    "DynamoWorkerMetadata CR '{}' has null spec.data; reusing last valid metadata if available",
-                    cr_name
+                    cr_name = %cr_name,
+                    uid = %uid.as_deref().unwrap_or("unknown"),
+                    resource_version = %resource_version,
+                    generation,
+                    managed_fields = %managed_fields_summary(arc_cr.as_ref()),
+                    "DynamoWorkerMetadata CR has null spec.data; reusing last valid metadata if available"
                 );
                 invalid_crs.insert(cr_name.clone(), uid);
                 continue;
@@ -297,9 +306,13 @@ impl DiscoveryDaemon {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "Failed to deserialize metadata from CR '{}': {}",
-                        cr_name,
-                        e
+                        cr_name = %cr_name,
+                        uid = %uid.as_deref().unwrap_or("unknown"),
+                        resource_version = %resource_version,
+                        generation,
+                        managed_fields = %managed_fields_summary(arc_cr.as_ref()),
+                        error = %e,
+                        "Failed to deserialize metadata from DynamoWorkerMetadata CR"
                     );
                     invalid_crs.insert(cr_name.clone(), uid);
                 }
@@ -383,9 +396,42 @@ fn cached_metadata_for_invalid_cr<'a>(
     }
 }
 
+fn managed_fields_summary(cr: &DynamoWorkerMetadata) -> String {
+    let Some(managed_fields) = cr.metadata.managed_fields.as_ref() else {
+        return "none".to_string();
+    };
+
+    if managed_fields.is_empty() {
+        return "none".to_string();
+    }
+
+    managed_fields
+        .iter()
+        .map(|entry| {
+            let manager = entry.manager.as_deref().unwrap_or("unknown");
+            let operation = entry.operation.as_deref().unwrap_or("unknown");
+            let api_version = entry.api_version.as_deref().unwrap_or("unknown");
+            let subresource = entry
+                .subresource
+                .as_deref()
+                .filter(|subresource| !subresource.is_empty())
+                .unwrap_or("-");
+            let time = entry
+                .time
+                .as_ref()
+                .map(|time| time.0.to_rfc3339())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            format!("{manager}/{operation}/{api_version}/subresource={subresource}/time={time}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ManagedFieldsEntry;
 
     fn cached_cr(uid: &str) -> CachedCrMetadata {
         CachedCrMetadata {
@@ -412,5 +458,23 @@ mod tests {
         cache.insert("worker-a".to_string(), cached_cr("uid-1"));
 
         assert!(cached_metadata_for_invalid_cr("worker-a", Some("uid-2"), &cache).is_none());
+    }
+
+    #[test]
+    fn managed_fields_summary_names_field_managers() {
+        let mut cr = DynamoWorkerMetadata::new(
+            "worker-a",
+            super::super::crd::DynamoWorkerMetadataSpec::new(serde_json::Value::Null),
+        );
+        cr.metadata.managed_fields = Some(vec![ManagedFieldsEntry {
+            manager: Some("dynamo-worker".to_string()),
+            operation: Some("Apply".to_string()),
+            api_version: Some("nvidia.com/v1alpha1".to_string()),
+            ..Default::default()
+        }]);
+
+        let summary = managed_fields_summary(&cr);
+
+        assert!(summary.contains("dynamo-worker/Apply/nvidia.com/v1alpha1"));
     }
 }
