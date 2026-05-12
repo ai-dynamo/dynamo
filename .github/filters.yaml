@@ -81,6 +81,7 @@ core:
   - 'container/templates/args.Dockerfile'
   - 'container/templates/dynamo_*'
   - 'container/templates/wheel_builder.Dockerfile'
+  - 'container/templates/compliance.Dockerfile'
   - '.dockerignore'
   - 'container/deps/*'
   - 'container/compliance/**'
@@ -180,6 +181,7 @@ frontend:
   - 'components/src/dynamo/common/**'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
+  - 'container/templates/compliance.Dockerfile'
   - '!**/*.md'
   - '!**/*.rst'
 
