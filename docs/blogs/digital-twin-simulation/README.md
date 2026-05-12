@@ -399,14 +399,16 @@ Router discovery examples:
   account for downstream decode pressure.
 
 Here we focus the in-depth discovery example on the Planner, a core, novel, and
-under-exposed Dynamo component.
-
-Planner exposes a family of stateful decisions: when to scale, how aggressively,
-and which optimization target to chase. Their effects compound across minutes of
-traffic, many workers, delayed capacity changes, routing feedback, and engine
-queues. A toy test misses those interactions, while a live Kubernetes-scale
-experiment can be expensive just to evaluate one policy change. The twin lets us
-study those dynamics before paying for the full-scale experiment.
+under-exposed Dynamo component. Autoscaling is a natural twin use case for two
+reasons. First, the interesting behavior is *macro*: it emerges from minutes of
+traffic, delayed worker startup, capacity churn, and feedback between scale
+decisions, queues, and routing — none of which a small unit test can exercise
+faithfully. Second, evaluating it the other way — in a full Kubernetes setup —
+is expensive per policy change, both in GPU-hours and in engineer time. The
+twin lets us aggressively sweep those effects before standing up the full
+environment: compare static vs dynamic setups, tune Planner parameters, and
+quantify how much worker startup time matters before deciding whether faster
+startup, predictive scaling, or pre-warmed capacity is worth the engineering.
 
 The three experiments below reuse the Mooncake FAST25 `toolagent_trace`
 introduced above, but switch the simulated engine profile to Qwen3-32B at TP=2
@@ -436,11 +438,15 @@ instantaneous engine startup isolates the responsiveness-vs-flap tradeoff.
 
 ![Planner experiment 2 — load adjustment interval](images/planner_exp_2.png)
 
-TTFT and ITL plateau between 1 and 10 seconds, while the scaling-event count
-drops from 764 to 116 over the same range — short intervals burn decisions
-without buying latency. Past ~30 s the planner can no longer keep up with
-traffic bursts: p90 TTFT degrades to 49 s at 60 s interval and 249 s at
-300 s. The sweet spot for this trace is around 5–10 s — short enough to
+p90 TTFT is essentially flat between 1 s and 10 s intervals (~3.1–3.6 s),
+while the total number of scaling events drops from **1,529 to 233** over
+the same range — short intervals burn an order of magnitude more decisions
+without buying any latency. Past ~30 s the planner can no longer keep up
+with traffic bursts: p90 TTFT degrades to 47 s at 60 s interval and 249 s
+at 300 s. p90 ITL behaves the same way (well-controlled at short intervals,
+divergent past 30 s). Cumulative GPU-hours stays in a tight band (~3.2–4.0)
+across the whole sweep — the planner doesn't burn extra GPUs at short
+intervals, it just flaps. The sweet spot is **5–10 s**: short enough to
 track load, long enough to avoid pointless flapping.
 
 **Cold-start time and the SLA cliff.** On a real cluster, scale-up is not
@@ -450,12 +456,14 @@ how the planner copes.
 
 ![Planner experiment 3 — engine cold-start time](images/planner_exp_3.png)
 
-For Qwen3-32B at TP=2, the planner holds SLA up to roughly a 200-second
-startup delay. Beyond that, p90 TTFT rises sharply, and at 300 s the system
-runs perpetually backlogged (242 s p90 TTFT). GPU-hours stays nearly flat
-across the sweep — the planner does not over-provision to compensate for
-slow scale-up; it simply falls behind. The scaling-event count drops
-monotonically (42 → 9) as long-startup runs commit to fewer, longer-lived
+For Qwen3-32B at TP=2 the planner holds SLA cleanly up to ~180 s of
+startup delay; the curve bends sharply at the **~200 s cliff** marked on
+the figure, and at 300 s the system runs perpetually backlogged (242 s
+p90 TTFT). Two secondary observations matter: cumulative GPU-hours stays
+nearly flat (~4.1–4.6) across the sweep — the planner does not
+over-provision to compensate for slow scale-up; it simply falls behind. And
+the total scaling-event count drops monotonically from 84 (startup=0 s) to
+18 (startup=300 s) as long-startup runs commit to fewer, longer-lived
 decisions. This is the kind of curve that motivates predictive scaling and
 pre-warmed reserves rather than purely reactive load tracking.
 
