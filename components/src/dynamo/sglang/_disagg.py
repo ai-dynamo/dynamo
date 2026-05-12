@@ -40,10 +40,9 @@ def compute_bootstrap_address(
     Caller decides whether `None` is fatal — legacy `register.py` treats
     it as soft-skip; the unified path treats it as a fatal misconfig.
     """
-    # Deferred to function body: `NetworkAddress` lives on the
-    # sglang-version-gated `_compat` chain, and pre-commit test collection
-    # imports `_disagg` before sglang is actually installed.
-    from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto
+    # Deferred to function body so pre-commit test collection can import
+    # `_disagg` without sglang installed.
+    from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
 
     try:
         inner_tm = engine.tokenizer_manager
