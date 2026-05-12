@@ -2406,6 +2406,126 @@ name = "libprotoc32t64"
 allow = ["GPL-2.0-only", "GPL-3.0-only"]
 reason = "Protobuf compiler; same dual-licensing posture as libprotobuf32t64"
 
+# --- planner image (python:3.12-slim = Debian 13) dpkg additions ---
+# These are core Debian system packages from the bookworm-based slim image.
+# DEP-5 multi-license SPDX expressions include GPL clauses for build scripts
+# / documentation; the shipped binaries are MIT/BSD. Mere aggregation.
+
+[[exceptions]]
+type = "dpkg"
+name = "debian-archive-keyring"
+allow = ["GPL-2.0-or-later"]
+reason = "Debian archive keyring data files; mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libapt-pkg7.0"
+allow = ["GPL-2.0-or-later"]
+reason = "Debian apt library; multi-licensed BSD+MIT+GPL — mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "liblastlog2-2"
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "shadow utils data lib; multi-licensed BSD/MIT/CC0/GPL/LGPL — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "login"
+allow = ["GPL-2.0-only", "GPL-3.0-or-later", "LGPL-2.0-or-later", "LGPL-2.1-or-later"]
+reason = "shadow utils login CLI; mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "login.defs"
+allow = ["GPL-2.0-or-later"]
+reason = "shadow utils config; mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "libnghttp3-9"
+allow = ["GPL-3.0-or-later"]
+reason = "nghttp3 (HTTP/3); MIT for shipped binary, GPL-3 clause is for build-time aux files — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libngtcp2-16"
+allow = ["GPL-3.0-or-later"]
+reason = "ngtcp2 (QUIC); MIT for shipped binary, GPL-3 for build-time aux — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libngtcp2-crypto-gnutls8"
+allow = ["GPL-3.0-or-later"]
+reason = "ngtcp2 GnuTLS crypto backend; MIT for shipped binary, GPL-3 for build-time aux — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "sqv"
+allow = ["LGPL-2.0-only"]
+reason = "Sequoia-PGP simple signature verifier; standalone CLI tool invoked as a separate process by apt for keyring verification — mere aggregation, not linked into our binaries"
+
+# --- vllm-dev / trtllm-dev / sglang-dev image additions (MIT Kerberos, ICU) ---
+# Dev-target images install -dev packages that include build-time helpers
+# under GPL while the library binaries themselves are MIT/BSD. Mere
+# aggregation; system components.
+
+[[exceptions]]
+type = "dpkg"
+name = "comerr-dev"
+allow = ["GPL-2.0-only", "LGPL-2.0-only"]
+reason = "MIT Kerberos com_err library; binary is MIT/BSD/ISC/Apache, GPL/LGPL clauses are build aux — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "icu-devtools"
+allow = ["GPL-3.0-only"]
+reason = "ICU dev tools (CLI invoked at build time); binary is MIT (ICU), GPL-3 clause is for build-time aux — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libicu-dev"
+allow = ["GPL-3.0-only"]
+reason = "ICU library headers; binary is MIT (ICU), GPL-3 clause is for build-time aux — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "krb5-multidev"
+allow = ["GPL-2.0-only"]
+reason = "MIT Kerberos developer files; binary is MIT — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libgssrpc4t64"
+allow = ["GPL-2.0-only"]
+reason = "MIT Kerberos GSS-RPC library; binary is MIT — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libkadm5clnt-mit12"
+allow = ["GPL-2.0-only"]
+reason = "MIT Kerberos kadm5 client; binary is MIT — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libkadm5srv-mit12"
+allow = ["GPL-2.0-only"]
+reason = "MIT Kerberos kadm5 server; binary is MIT — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libkdb5-10t64"
+allow = ["GPL-2.0-only"]
+reason = "MIT Kerberos KDB; binary is MIT — mere aggregation"
+
+# --- Rust [[exceptions]] ---
+
+[[exceptions]]
+type = "rust"
+name = "inferno"
+allow = ["CDDL-1.0"]
+reason = "Transitive dev-only dependency via criterion (benchmark framework). criterion is in [dev-dependencies] of sgl-model-gateway and is not linked into the shipped gateway binary. cargo-cyclonedx surfaces it in the SBOM regardless; this exception covers attribution without claiming the CDDL-1.0 code is in the runtime."
+
 # --- Native [[exceptions]] for from-source components ---
 
 [[exceptions]]

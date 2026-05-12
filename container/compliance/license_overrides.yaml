@@ -90,6 +90,63 @@ overrides:
     license: LicenseRef-NVIDIA-Proprietary
     source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
 
+  # --- NVIDIA -cu12 wheel variants (sglang v0.5.11 cuda12.9 image installs these
+  # alongside dynamo's own CUDA-12 wheels; mirrors the unsuffixed entries above)
+  - ecosystem: python
+    name: nvidia-cublas-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cuda-cupti-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cuda-nvrtc-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cuda-runtime-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cufft-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cufile-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-curand-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cusolver-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cusparse-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cusparselt-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA cuSPARSELt License Agreement — https://docs.nvidia.com/cuda/cusparselt/license.html"
+
+  - ecosystem: python
+    name: nvidia-nvjitlink-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
   - ecosystem: python
     name: nvidia-nvshmem-cu13
     license: LicenseRef-NVIDIA-Proprietary
@@ -136,6 +193,7 @@ overrides:
   - { ecosystem: dpkg, name: cuda-nvcc-12-9,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: cuda-nvdisasm-12-9,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: cuda-nvml-dev-12-9,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvprof-12-9,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA — cuda-nvprof proper, not GPL profiler tooling" }
   - { ecosystem: dpkg, name: cuda-nvprune-12-9,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: cuda-nvrtc-12-9,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: cuda-nvrtc-dev-12-9,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
@@ -339,3 +397,59 @@ overrides:
   # Placeholder PyPI upload; license confirmed MIT in package metadata.
   # TODO: file upstream issue at sgl-project/sglang to remove from runtime image.
   - { ecosystem: python, name: my-test-package,                 license: "MIT",          source: "PyPI my-test-package — Jaye Heffernan, placeholder; declared MIT in package metadata" }
+
+  # --- sglang v0.5.11 — additional Python deps pulled in by dynamo's
+  # wheel install on top of the sglang runtime image (not present in the
+  # upstream sglang image alone; surfaced by the CI build's licenses stage)
+  - { ecosystem: python, name: cache_dit,                       license: "Apache-2.0",   source: "vipshop/cache-dit — https://github.com/vipshop/cache-dit (Apache-2.0 badge in README)" }
+  - { ecosystem: python, name: deep_ep,                         license: "MIT",          source: "DeepSeek DeepEP — https://github.com/deepseek-ai/DeepEP (MIT)" }
+  - { ecosystem: python, name: tiktoken,                        license: "MIT",          source: "OpenAI tiktoken — https://github.com/openai/tiktoken/blob/main/LICENSE" }
+  - { ecosystem: python, name: torch_memory_saver,              license: "Apache-2.0",   source: "sgl-project torch_memory_saver — Apache-2.0" }
+  - { ecosystem: python, name: torchcodec,                      license: "BSD-3-Clause", source: "PyTorch torchcodec — https://github.com/pytorch/torchcodec/blob/main/LICENSE" }
+  - { ecosystem: python, name: xatlas,                          license: "MIT",          source: "xatlas (jpcy/xatlas wrapper) — https://github.com/mworchel/xatlas-python (MIT)" }
+
+  # --- planner image: plotly/kaleido chart-export sub-deps ---
+  - { ecosystem: python, name: choreographer,                   license: "MIT",          source: "plotly/choreographer — PyPI metadata declares MIT" }
+  - { ecosystem: python, name: kaleido,                         license: "MIT",          source: "plotly/Kaleido — https://github.com/plotly/Kaleido (MIT)" }
+  - { ecosystem: python, name: logistro,                        license: "MIT",          source: "PyPI logistro — MIT" }
+
+  # --- Additional Python deps surfaced by vllm-dev / trtllm-dev / sglang-dev builds ---
+  - { ecosystem: python, name: deep_gemm,                       license: "MIT",          source: "DeepSeek DeepGEMM — https://github.com/deepseek-ai/DeepGEMM (MIT)" }
+  - { ecosystem: python, name: nvidia-cudnn-frontend,           license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA cuDNN Frontend — bundled under NVIDIA cuDNN SLA" }
+  - { ecosystem: python, name: onnx,                            license: "Apache-2.0",   source: "ONNX — https://github.com/onnx/onnx (Apache-2.0)" }
+  - { ecosystem: python, name: setuptools,                      license: "MIT",          source: "setuptools — pypa/setuptools (MIT)" }
+  - { ecosystem: python, name: tensorrt,                        license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA TensorRT SLA — https://docs.nvidia.com/deeplearning/tensorrt/sla/index.html" }
+  - { ecosystem: python, name: tensorrt_cu13,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA TensorRT SLA" }
+  - { ecosystem: python, name: tensorrt_cu13_bindings,          license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA TensorRT SLA" }
+  - { ecosystem: python, name: tensorrt_cu13_libs,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA TensorRT SLA" }
+  - { ecosystem: python, name: torch_c_dlpack_ext,              license: "Apache-2.0",   source: "PyPI torch-c-dlpack-ext — metadata declares Apache-2.0" }
+  - { ecosystem: python, name: torchtitan,                      license: "BSD-3-Clause", source: "PyTorch torchtitan — https://github.com/pytorch/torchtitan (BSD-3-Clause)" }
+  - { ecosystem: python, name: xdsl,                            license: "Apache-2.0",   source: "xdsl — https://github.com/xdslproject/xdsl (Apache-2.0 WITH LLVM-exception; treated as Apache-2.0 for policy)" }
+
+  # --- Additional NVIDIA dpkg meta-packages ---
+  - { ecosystem: dpkg, name: cuda-command-line-tools-12-9,      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-command-line-tools-13-0,      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+
+  # --- sglang Rust ecosystem additions ---
+  # sgl-model-gateway is sglang's Rust serving gateway crate, packaged inside
+  # the runtime image's wheel set (we install it via pip install ai_dynamo*).
+  # It carries no License field in Cargo.toml; per the sglang root LICENSE the
+  # workspace is Apache-2.0.
+  - { ecosystem: rust, name: sgl-model-gateway,                 license: "Apache-2.0",   source: "sgl-project/sglang root LICENSE — Apache-2.0" }
+
+  # --- sglang dpkg additions: X11/font/tk stack ---
+  # The upstream sglang image installs the X11/font stack to support
+  # matplotlib/tk-based visualization tools. Debian/Ubuntu DEP-5 declarations
+  # for these are either UNKNOWN (parser misreads multi-section copyright)
+  # or report GPL-2.0-or-later for build-only scripts. Override to the
+  # actual upstream license of the shipped binary.
+  - { ecosystem: dpkg, name: blt,                license: "BSD-3-Clause", source: "BLT Tcl/Tk extension — BSD-3-Clause (upstream)" }
+  - { ecosystem: dpkg, name: tk8.6-blt2.5,       license: "BSD-3-Clause", source: "BLT Tcl/Tk extension — BSD-3-Clause (upstream)" }
+  - { ecosystem: dpkg, name: fontconfig-config,  license: "MIT",          source: "Fontconfig — HPND-equivalent MIT-style permissive (https://gitlab.freedesktop.org/fontconfig/fontconfig)" }
+  - { ecosystem: dpkg, name: libfontconfig1,     license: "MIT",          source: "Fontconfig — HPND-equivalent MIT-style permissive" }
+  - { ecosystem: dpkg, name: libxft2,            license: "MIT",          source: "X.org libXft — MIT-style X11 license" }
+  - { ecosystem: dpkg, name: libxrender1,        license: "MIT",          source: "X.org libXrender — MIT-style X11 license" }
+  - { ecosystem: dpkg, name: libxss1,            license: "MIT",          source: "X.org libXScrnSaver — MIT-style X11 license" }
+  - { ecosystem: dpkg, name: libcares2,          license: "MIT",          source: "c-ares — MIT (https://c-ares.org); DEP-5 GPL-2 line refers to packaging scripts, not the shipped library" }
+  - { ecosystem: dpkg, name: libpciaccess0,      license: "MIT",          source: "X.org libpciaccess — MIT-style X11 license; DEP-5 GPL-2 line refers to debian/ build scripts not in the .deb" }
+  - { ecosystem: dpkg, name: x11-common,         license: "MIT",          source: "X.org common files — MIT-style; DEP-5 GPL-2 line refers to debian/ build scripts not in the .deb" }
