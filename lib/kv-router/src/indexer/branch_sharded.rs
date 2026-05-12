@@ -321,7 +321,7 @@ impl<T: AnchorCapableSyncIndexer> BranchShardedIndexer<T> {
         });
     }
 
-    fn dispatch_read(
+    async fn dispatch_read(
         &self,
         node: Arc<RoutingNode>,
         sequence: Vec<LocalBlockHash>,
@@ -341,13 +341,16 @@ impl<T: AnchorCapableSyncIndexer> BranchShardedIndexer<T> {
             return Ok(scores);
         };
         let suffix = if anchor.anchor_depth <= sequence.len() {
-            &sequence[anchor.anchor_depth..]
+            sequence[anchor.anchor_depth..].to_vec()
         } else {
-            &[]
+            Vec::new()
         };
-        let mut shard_scores = self.shards[shard_idx]
-            .backend()
-            .find_matches_from_anchor(anchor, suffix)?;
+        let shard = Arc::clone(&self.shards[shard_idx]);
+        let mut shard_scores = tokio::task::spawn_blocking(move || {
+            shard.backend().find_matches_from_anchor(anchor, &suffix)
+        })
+        .await
+        .map_err(|_| KvRouterError::IndexerOffline)??;
         for (worker, shard_score) in shard_scores.scores.drain() {
             if !active.contains(&worker) {
                 continue;
@@ -360,33 +363,42 @@ impl<T: AnchorCapableSyncIndexer> BranchShardedIndexer<T> {
 
     fn ensure_worker_anchor(&self, shard_idx: usize, worker: WorkerWithDpRank, anchor: AnchorRef) {
         let key = (shard_idx, worker, anchor.anchor_id.0);
-        if self.installed_worker_anchors.insert(key) {
-            let task = AnchorTask {
-                anchor_id: anchor.anchor_id,
-                anchor_local_hash: anchor.anchor_local_hash,
-                anchor_depth: anchor.anchor_depth,
-            };
-            // Anchor installs are deduped per worker queue, not globally. Each
-            // dependent worker carries its own Anchor-before-Stored FIFO edge,
-            // while backend anchor application is idempotent by anchor_id.
-            match self.shards[shard_idx].enqueue_anchor(worker, task) {
-                Ok(()) => {
-                    #[cfg(feature = "bench")]
-                    self.metrics
-                        .counters
-                        .anchor_installs
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-                Err(error) => {
-                    tracing::warn!(?error, shard_idx, ?worker, "Failed to enqueue anchor");
-                }
-            }
-        } else {
+        if self.installed_worker_anchors.contains(&key) {
             #[cfg(feature = "bench")]
             self.metrics
                 .counters
                 .anchor_reuses
                 .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+
+        let task = AnchorTask {
+            anchor_id: anchor.anchor_id,
+            anchor_local_hash: anchor.anchor_local_hash,
+            anchor_depth: anchor.anchor_depth,
+        };
+        // Anchor installs are deduped per worker queue, not globally. Each
+        // dependent worker carries its own Anchor-before-Stored FIFO edge,
+        // while backend anchor application is idempotent by anchor_id.
+        match self.shards[shard_idx].enqueue_anchor(worker, task) {
+            Ok(()) => {
+                if self.installed_worker_anchors.insert(key) {
+                    #[cfg(feature = "bench")]
+                    self.metrics
+                        .counters
+                        .anchor_installs
+                        .fetch_add(1, Ordering::Relaxed);
+                } else {
+                    #[cfg(feature = "bench")]
+                    self.metrics
+                        .counters
+                        .anchor_reuses
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(?error, shard_idx, ?worker, "Failed to enqueue anchor");
+            }
         }
     }
 
@@ -662,7 +674,9 @@ impl<T: AnchorCapableSyncIndexer> KvIndexerInterface for BranchShardedIndexer<T>
                 let routing_ns = t_routing.elapsed().as_nanos() as u64;
                 #[cfg(feature = "bench")]
                 let t_shard = Instant::now();
-                let result = self.dispatch_read(node, sequence, router_scores, active);
+                let result = self
+                    .dispatch_read(node, sequence, router_scores, active)
+                    .await;
                 #[cfg(feature = "bench")]
                 {
                     self.metrics.timing.calls.fetch_add(1, Ordering::Relaxed);
