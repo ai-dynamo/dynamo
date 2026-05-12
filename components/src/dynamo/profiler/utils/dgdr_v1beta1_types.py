@@ -62,6 +62,7 @@ class GPUSKUType(str, Enum):
     H100PCIe = "h100_pcie"
     A100SXM = "a100_sxm"
     A100PCIe = "a100_pcie"
+    A30 = "a30"
     L40S = "l40s"
     L40 = "l40"
     L4 = "l4"
@@ -77,6 +78,10 @@ class BackendType(str, Enum):
     Sglang = "sglang"
     Trtllm = "trtllm"
     Vllm = "vllm"
+
+class OptimizationType(str, Enum):
+    Latency = "latency"
+    Throughput = "throughput"
 
 
 class WorkloadSpec(BaseModel):
@@ -99,6 +104,7 @@ class SLASpec(BaseModel):
     ttft: Optional[float] = Field(default=2000, description="TTFT is the Time To First Token target in milliseconds.")
     itl: Optional[float] = Field(default=30, description="ITL is the Inter-Token Latency target in milliseconds.")
     e2eLatency: Optional[float] = Field(default=None, description="E2ELatency is the target end-to-end request latency in milliseconds. Alternative to specifying TTFT + ITL.")
+    optimizationType: Optional[OptimizationType] = Field(default=None, description="OptimizationType is the optimization target for SLA profiling. Valid values: latency, throughput.")
 
     @model_validator(mode="after")
     def _validate_sla_options(self) -> "SLASpec":
@@ -167,7 +173,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
 
     model: str = Field(description="Model specifies the model to deploy (e.g., \"Qwen/Qwen3-0.6B\", \"meta-llama/Llama-3-70b\"). Can be a HuggingFace ID or a private model name.")
     backend: BackendType = Field(default="auto", description="Backend specifies the inference backend to use for profiling and deployment.")
-    image: Optional[str] = Field(default=None, description="Image is the container image reference for the profiling job (frontend image). Example: \"nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0\".")
+    image: Optional[str] = Field(default=None, description="Image is the container image reference for the profiling job (frontend image). Example: \"nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1\".")
     modelCache: Optional[ModelCacheSpec] = Field(default=None, description="ModelCache provides optional PVC configuration for pre-downloaded model weights. When provided, weights are loaded from the PVC instead of downloading from HuggingFace.")
     hardware: Optional[HardwareSpec] = Field(default=None, description="Hardware describes the hardware resources available for profiling and deployment. Typically auto-filled by the operator from cluster discovery.")
     workload: Optional[WorkloadSpec] = Field(default=None, description="Workload defines the expected workload characteristics for SLA-based profiling.")
