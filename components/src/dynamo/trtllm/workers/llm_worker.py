@@ -45,6 +45,8 @@ from dynamo.common.utils.prometheus import (
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.llm import (
     KvEventPublisher,
+    MediaDecoder,
+    MediaFetcher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
@@ -62,18 +64,6 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerFactory,
 )
 from dynamo.trtllm.utils.trtllm_utils import deep_update
-
-# Optional imports for Rust frontend media decoding support
-MediaDecoder: type | None = None
-MediaFetcher: type | None = None
-try:
-    from dynamo.llm import MediaDecoder, MediaFetcher
-
-    MEDIA_DECODER_AVAILABLE = True
-except ImportError:
-    MediaDecoder = None
-    MediaFetcher = None
-    MEDIA_DECODER_AVAILABLE = False
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
@@ -617,12 +607,6 @@ async def init_llm_worker(
         media_decoder = None
         media_fetcher = None
         if config.frontend_decoding:
-            if not MEDIA_DECODER_AVAILABLE:
-                raise RuntimeError(
-                    "--frontend-decoding requires MediaDecoder support. "
-                    "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
-                )
-            assert MediaDecoder is not None and MediaFetcher is not None
             media_decoder = MediaDecoder()
             media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
             media_fetcher = MediaFetcher()
