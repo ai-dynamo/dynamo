@@ -45,10 +45,11 @@ export HW=gb200   # or h100
 # per config). Artifacts land under
 # ~/workspace/dynamo-tmp/logs/<MM-DD>/qwen36-fp8-${HW}/{vllm-serve,dynamo-fd,dynamo-fd-ec}/.
 ./run-all-benchmarks.sh -n ${NAMESPACE} --hw ${HW}
-
-# 3-way comparison:
-python3 compare.py ~/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen36-fp8-${HW}/
 ```
+
+Each config's `profile_export_aiperf.json` is retrieved into the matching
+sub-directory; throughput / TTFT / ITL numbers can be read directly from
+that file.
 
 Or step-by-step for a single config:
 
@@ -67,7 +68,6 @@ qwen3.6-35b/
 ├── README.md
 ├── run-benchmark.sh            # Unified driver — branches on --config/--hw
 ├── run-all-benchmarks.sh       # Sequential 3-config orchestrator
-├── compare.py                  # 3-way comparison (throughput, TTFT, ITL)
 ├── hw/                         # Hardware axis (shared across all configs)
 │   ├── h100.env
 │   └── gb200.env

@@ -68,7 +68,10 @@ See the recipe README for the full deploy, dataset generation, and `aiperf` invo
 cd recipes/qwen3.6-35b
 HW=h100   # or gb200
 ./run-all-benchmarks.sh -n <namespace> --hw "${HW}"
-python3 compare.py ~/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen36-fp8-"${HW}"/
 ```
+
+Each config's `profile_export_aiperf.json` lands under
+`~/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen36-fp8-${HW}/{vllm-serve,dynamo-fd,dynamo-fd-ec}/`
+and holds the headline metrics.
 
 Full instructions and prerequisites live in [`recipes/qwen3.6-35b/README.md`](../../recipes/qwen3.6-35b/README.md).

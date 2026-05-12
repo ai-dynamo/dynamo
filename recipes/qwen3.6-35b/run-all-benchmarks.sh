@@ -69,4 +69,4 @@ done
 echo "" | tee -a "$RUN_LOG"
 echo "[run-all] all three configs done." | tee -a "$RUN_LOG"
 echo "[run-all] results: $SUMMARY_DIR/{vllm-serve,dynamo-fd,dynamo-fd-ec}/" | tee -a "$RUN_LOG"
-echo "[run-all] next: python3 $HERE/compare.py $SUMMARY_DIR" | tee -a "$RUN_LOG"
+echo "[run-all] each config's profile_export_aiperf.json holds the headline metrics." | tee -a "$RUN_LOG"
