@@ -107,6 +107,15 @@ def _deb_src_enabled():
     source` needs them. Toggle on, `apt-get update`, do the work,
     restore the originals so the runtime image's apt state is unchanged
     after the sources stage exits.
+
+    Two on-disk formats coexist:
+      - Legacy `*.list` files (one `deb …` directive per line). Ubuntu
+        pre-noble images, cuda-dl-base's NVIDIA repo files, etc.
+      - Deb822 `*.sources` files (paragraph format with `Types:`,
+        `URIs:`, `Suites:`, `Components:`). Ubuntu 24.04's default
+        `/etc/apt/sources.list.d/ubuntu.sources`.
+
+    Dispatch on filename suffix; the two formats need different rewrites.
     """
     sources_paths: list[Path] = [Path("/etc/apt/sources.list")]
     sources_paths.extend(Path("/etc/apt/sources.list.d").glob("*.list"))
@@ -119,11 +128,10 @@ def _deb_src_enabled():
             data = p.read_bytes()
             backups[p] = data
             text = data.decode("utf-8", errors="replace")
-            new = "\n".join(
-                # Uncomment `# deb-src` lines AND mirror `deb` → `deb-src`
-                # for lines we haven't already enabled.
-                _maybe_enable_src(line) for line in text.splitlines()
-            )
+            if p.suffix == ".sources":
+                new = _rewrite_deb822(text)
+            else:
+                new = "\n".join(_maybe_enable_src(line) for line in text.splitlines())
             p.write_text(new, encoding="utf-8")
         subprocess.run(["apt-get", "update"], check=True)
         yield
@@ -133,7 +141,7 @@ def _deb_src_enabled():
 
 
 def _maybe_enable_src(line: str) -> str:
-    """Toggle a single sources.list line so deb-src is enabled.
+    """Toggle a single legacy `*.list` line so deb-src is enabled.
 
     Cases:
       `# deb-src https://...`  →  uncomment
@@ -150,6 +158,38 @@ def _maybe_enable_src(line: str) -> str:
         src_variant = line.replace("deb ", "deb-src ", 1) if "deb " in line else line.replace("deb\t", "deb-src\t", 1)
         return f"{line}\n{src_variant}"
     return line
+
+
+def _rewrite_deb822(text: str) -> str:
+    """Add `deb-src` to every `Types:` field in a deb822 sources file.
+
+    Ubuntu 24.04 ships its apt config as deb822 paragraphs:
+
+        Types: deb
+        URIs: http://archive.ubuntu.com/ubuntu
+        Suites: noble noble-updates noble-backports
+        Components: main restricted universe multiverse
+
+    `apt-get source` needs `Types: deb deb-src` (or a separate `deb-src`
+    paragraph) to find source packages. We append `deb-src` to the
+    existing Types: line so a single paragraph covers both — minimal
+    edit, no paragraph duplication. Idempotent: re-running on
+    already-rewritten content leaves it unchanged.
+    """
+    out_lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        # Field names are case-insensitive per deb822 spec.
+        if stripped[:6].lower() == "types:":
+            indent = line[: len(line) - len(stripped)]
+            _, _, value = stripped.partition(":")
+            tokens = value.split()
+            if "deb" in tokens and "deb-src" not in tokens:
+                tokens.append("deb-src")
+                out_lines.append(f"{indent}Types: {' '.join(tokens)}")
+                continue
+        out_lines.append(line)
+    return "\n".join(out_lines)
 
 
 def collect_dpkg_sources(baseline_sbom: Path | None, output_dir: Path) -> int:
