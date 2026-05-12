@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 title: "Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
 subtitle: "Schwinn Saereesitthipitak, Dan Feigin, Vikram Sharma Mailthody — May 2026"
-description: "Fast startup for AI inference workloads on Kubernetes via checkpoint/restore, with early prototype start times under 6 seconds."
+description: "Kubernetes-native checkpoint/restore architecture for fast startup of inference workloads, with early single-GPU results."
 keywords: checkpoint/restore, CRIU, cuda-checkpoint, LLM inference, Kubernetes, GPU memory service, GMS, fast startup, autoscaling, cold start, Dynamo
 last-updated: May 7, 2026
 ---
