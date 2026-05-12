@@ -41,9 +41,9 @@ Use the fixture-backed tests in `lib/bench/tests` when you want a realistic repl
 
 Current coverage uses the checked-in 1000-line Mooncake trace fixture:
 
-- [active_sequences_trace.rs](../../../lib/bench/tests/active_sequences_trace.rs)
-- [mooncake_trace.rs](../../../lib/bench/tests/mooncake_trace.rs)
-- [mooncake_trace_1000.jsonl](../../../lib/bench/testdata/mooncake_trace_1000.jsonl)
+- [active_sequences_trace.rs](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/tests/active_sequences_trace.rs)
+- [mooncake_trace.rs](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/tests/mooncake_trace.rs)
+- [mooncake_trace_1000.jsonl](https://github.com/ai-dynamo/dynamo/blob/main/lib/bench/testdata/mooncake_trace_1000.jsonl)
 
 These tests are useful for catching regressions such as:
 
@@ -66,10 +66,10 @@ Use the Python tests in `tests/router` when you need the full request plane and 
 
 Current entry points include:
 
-- [test_router_e2e_with_mockers.py](../../../tests/router/test_router_e2e_with_mockers.py)
-- [test_router_e2e_with_vllm.py](../../../tests/router/test_router_e2e_with_vllm.py)
-- [test_router_e2e_with_trtllm.py](../../../tests/router/test_router_e2e_with_trtllm.py)
-- [test_router_e2e_with_sglang.py](../../../tests/router/test_router_e2e_with_sglang.py)
+- [test_router_e2e_with_mockers.py](https://github.com/ai-dynamo/dynamo/blob/main/tests/router/test_router_e2e_with_mockers.py)
+- [test_router_e2e_with_vllm.py](https://github.com/ai-dynamo/dynamo/blob/main/tests/router/test_router_e2e_with_vllm.py)
+- [test_router_e2e_with_trtllm.py](https://github.com/ai-dynamo/dynamo/blob/main/tests/router/test_router_e2e_with_trtllm.py)
+- [test_router_e2e_with_sglang.py](https://github.com/ai-dynamo/dynamo/blob/main/tests/router/test_router_e2e_with_sglang.py)
 
 Use this layer for changes involving:
 

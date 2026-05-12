@@ -264,3 +264,30 @@ jobs:
             echo "   - A clickable GitHub URL to jump directly to the problem line"
             exit 1
           fi
+
+  cross-tree-link-check:
+    name: Check for cross-tree docs links
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Detect docs/ changes
+        id: filter
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
+        with:
+          filters: |
+            docs:
+              - 'docs/**'
+              - '.github/workflows/check_cross_tree_links.py'
+              - '.github/workflows/docs-link-check.yml'
+
+      - name: Set up Python
+        if: steps.filter.outputs.docs == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check for cross-tree links
+        if: steps.filter.outputs.docs == 'true'
+        run: python3 .github/workflows/check_cross_tree_links.py

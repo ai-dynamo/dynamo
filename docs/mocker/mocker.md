@@ -366,7 +366,7 @@ kubectl apply -f examples/backends/mocker/deploy/disagg.yaml
 
 ## Architecture
 
-The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines. The scheduler (vLLM-style and SGLang-style variants) and KV block manager live inside the engine core. Multi-engine behavior — KV transfer/offloading simulation, KV router simulation, planner simulation — is added by the replay harness on top of multiple engine cores; see [Mocker Trace Replay](../benchmarks/mocker-trace-replay.md) for the component-level diagram and for offline replay internals under [`lib/mocker/src/replay/offline/`](../../lib/mocker/src/replay/offline/README.md).
+The mocker is organized into several cooperating components that mirror the internal architecture of production LLM inference engines. The scheduler (vLLM-style and SGLang-style variants) and KV block manager live inside the engine core. Multi-engine behavior — KV transfer/offloading simulation, KV router simulation, planner simulation — is added by the replay harness on top of multiple engine cores; see [Mocker Trace Replay](../benchmarks/mocker-trace-replay.md) for the component-level diagram and the [Offline Replay README](https://github.com/ai-dynamo/dynamo/blob/main/lib/mocker/src/replay/offline/README.md) for offline replay internals.
 
 ### Scheduler
 
@@ -388,7 +388,7 @@ When resources become constrained, the mocker simulates the engine's real recove
 
 ### KV Block Manager
 
-The mocker's KV block manager is now built on [`kvbm-logical::BlockManager<G1>`](../../lib/kvbm-logical/), the same logical block manager the real Dynamo runtime uses. The mocker wraps it in [`lib/mocker/src/kv_manager/kvbm_backend.rs`](../../lib/mocker/src/kv_manager/kvbm_backend.rs) and translates its own `MoveBlock` protocol onto kvbm-logical's RAII lifecycle (`allocate → stage → register → drop`).
+The mocker's KV block manager is now built on [KV Block Manager](https://github.com/ai-dynamo/dynamo/tree/main/lib/kvbm-logical) (the `kvbm-logical::BlockManager<G1>` crate), the same logical block manager the real Dynamo runtime uses. The [Dynamo Mocker](https://github.com/ai-dynamo/dynamo/blob/main/lib/mocker/src/kv_manager/kvbm_backend.rs) wraps it and translates its own `MoveBlock` protocol onto kvbm-logical's RAII lifecycle (`allocate → stage → register → drop`).
 
 Blocks still conceptually live in one of two pools:
 
@@ -417,7 +417,7 @@ Three `Use` outcomes are tracked for KV-event emission: `ActiveHit` (bump refcou
 
 ### Eviction Backends
 
-The kvbm-logical inactive pool selects eviction victims via one of three backends, exposed as `MockerEvictionBackend` in [`lib/mocker/src/common/protocols.rs`](../../lib/mocker/src/common/protocols.rs):
+The kvbm-logical inactive pool selects eviction victims via one of three backends, exposed as `MockerEvictionBackend` in the [Dynamo Mocker](https://github.com/ai-dynamo/dynamo/blob/main/lib/mocker/src/common/protocols.rs):
 
 - **`Lineage`** (default) — parent-chain aware: evicts leaf blocks first, preserving shared prefix chains. Subsumes the preemption-priority behavior the old hand-rolled `LRUEvictor::push_front` used to provide.
 - **`Lru`** — plain recency-based LRU.
@@ -493,9 +493,9 @@ The mocker is particularly useful for:
 | Document | Description |
 |----------|-------------|
 | [Benchmarking Dynamo Deployments](../benchmarks/benchmarking.md) | Run AIPerf against a mocker-backed deployment to measure latency, TTFT, throughput, and scaling behavior |
-| [Aggregated Mocker Deployment Example](../../examples/backends/mocker/deploy/agg.yaml) | Deploy a mocker-backed aggregated DynamoGraphDeployment on Kubernetes |
-| [Disaggregated Mocker Deployment Example](../../examples/backends/mocker/deploy/disagg.yaml) | Deploy separate prefill and decode mocker workers for disaggregated-serving benchmarks |
-| [Global Planner Mocker Example](../../examples/global_planner/global-planner-mocker-test.yaml) | Advanced multi-pool mocker setup for planner and global-router experiments |
+| [Aggregated Mocker Deployment Example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/mocker/deploy/agg.yaml) | Deploy a mocker-backed aggregated DynamoGraphDeployment on Kubernetes |
+| [Disaggregated Mocker Deployment Example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/mocker/deploy/disagg.yaml) | Deploy separate prefill and decode mocker workers for disaggregated-serving benchmarks |
+| [Global Planner Mocker Example](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-mocker-test.yaml) | Advanced multi-pool mocker setup for planner and global-router experiments |
 
 ## Feature Gaps (WIP)
 
