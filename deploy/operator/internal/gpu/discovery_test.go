@@ -24,7 +24,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	dto "github.com/prometheus/client_model/go"
@@ -107,6 +110,37 @@ func TestDiscoverGPUs_MultipleNodesHomogeneous(t *testing.T) {
 	assert.Equal(t, 8, gpuInfo.GPUsPerNode)
 	assert.Equal(t, "H100-SXM5-80GB", gpuInfo.Model)
 	assert.Equal(t, 81920, gpuInfo.VRAMPerGPU)
+}
+
+func TestDiscoverGPUsFiltered_HomogeneousCountsAllNodes(t *testing.T) {
+	ctx := context.Background()
+
+	node1 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "h100-node-1",
+			Labels: map[string]string{
+				LabelGPUCount:   "8",
+				LabelGPUProduct: "H100-SXM5-80GB",
+				LabelGPUMemory:  "81920",
+			},
+		},
+	}
+	node2 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "h100-node-2",
+			Labels: map[string]string{
+				LabelGPUCount:   "8",
+				LabelGPUProduct: "H100-SXM5-80GB",
+				LabelGPUMemory:  "81920",
+			},
+		},
+	}
+	k8sClient := newFakeClient(node1, node2)
+
+	info, err := DiscoverGPUs(ctx, k8sClient)
+	require.NoError(t, err)
+	assert.Equal(t, 8, info.GPUsPerNode)
+	assert.Equal(t, 2, info.NodesWithGPUs)
 }
 
 func TestDiscoverGPUs_MultipleNodesHeterogeneous_HigherGPUCountWins(t *testing.T) {
@@ -393,6 +427,21 @@ func TestInferHardwareSystem(t *testing.T) {
 			name:     "A100 default PCIe",
 			input:    "A100",
 			expected: nvidiacomv1beta1.GPUSKUTypeA100PCIe,
+		},
+		{
+			name:     "A30",
+			input:    "NVIDIA A30",
+			expected: nvidiacomv1beta1.GPUSKUTypeA30,
+		},
+		{
+			name:     "A30 with capacity suffix",
+			input:    "NVIDIA A30-24GB",
+			expected: nvidiacomv1beta1.GPUSKUTypeA30,
+		},
+		{
+			name:     "RTX A3000 should not match A30",
+			input:    "NVIDIA RTX A3000",
+			expected: "",
 		},
 
 		// --- Ada ---
@@ -883,6 +932,98 @@ func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
 	require.Equal(t, 1, callCount)
 
 	require.Equal(t, info1, info2)
+}
+
+func TestDiscoverGPUsFromDCGM_SharesConcurrentScrape(t *testing.T) {
+	ctx := context.Background()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dcgm-exporter-1",
+			Namespace: "gpu-operator",
+			Labels: map[string]string{
+				LabelApp: LabelValueNvidiaDCGMExporter,
+			},
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.0.0.1",
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	k8sClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pod).
+		Build()
+
+	var callCount atomic.Int32
+	scrapeStarted := make(chan struct{})
+	releaseScrape := make(chan struct{})
+
+	mockScraper := func(ctx context.Context, endpoint string) (*GPUInfo, error) {
+		if callCount.Add(1) == 1 {
+			close(scrapeStarted)
+		}
+		<-releaseScrape
+		return &GPUInfo{
+			NodeName:    "node-a",
+			GPUsPerNode: 4,
+			Model:       "A100",
+			VRAMPerGPU:  40960,
+			MIGEnabled:  false,
+			MIGProfiles: map[string]int{},
+		}, nil
+	}
+
+	discovery := NewGPUDiscovery(mockScraper)
+	cache := NewGPUDiscoveryCache()
+
+	const callers = 16
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var attempted atomic.Int32
+	errs := make(chan error, callers)
+	infos := make(chan *GPUInfo, callers)
+
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			attempted.Add(1)
+			info, err := discovery.DiscoverGPUsFromDCGM(ctx, k8sClient, cache)
+			if err != nil {
+				errs <- err
+				return
+			}
+			infos <- info
+		}()
+	}
+
+	close(start)
+	select {
+	case <-scrapeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first scrape to start")
+	}
+	require.Eventually(t, func() bool { return attempted.Load() == callers }, time.Second, 5*time.Millisecond)
+	close(releaseScrape)
+	wg.Wait()
+	close(errs)
+	close(infos)
+
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.Len(t, infos, callers)
+	require.Equal(t, int32(1), callCount.Load())
+	for info := range infos {
+		require.NotNil(t, info)
+		assert.Equal(t, "a100_pcie", string(info.System))
+	}
 }
 
 func TestDiscoverGPUsFromDCGMFiltered_MixedSKU(t *testing.T) {

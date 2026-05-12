@@ -30,6 +30,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
+	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -87,6 +88,7 @@ const (
 	tokenH200   = "H200"
 	tokenH100   = "H100"
 	tokenA100   = "A100"
+	tokenA30    = "A30"
 	tokenL40S   = "L40S"
 	tokenL40    = "L40"
 	tokenL4     = "L4"
@@ -132,6 +134,7 @@ var gpuRules = []gpuRule{
 
 	// Ampere
 	{token: tokenA100, sxmSKU: nvidiacomv1beta1.GPUSKUTypeA100SXM, pcieSKU: nvidiacomv1beta1.GPUSKUTypeA100PCIe},
+	{token: tokenA30, singleSKU: nvidiacomv1beta1.GPUSKUTypeA30},
 
 	// Ada
 	{token: tokenL40S, singleSKU: nvidiacomv1beta1.GPUSKUTypeL40S},
@@ -184,6 +187,7 @@ type GPUDiscoveryCache struct {
 
 type GPUDiscovery struct {
 	Scraper ScrapeMetricsFunc
+	group   singleflight.Group
 }
 
 type metricsDiscoverySource struct {
@@ -315,38 +319,60 @@ func (g *GPUDiscovery) discoverFromMetricsSources(ctx context.Context, k8sClient
 		return nil, fmt.Errorf("metrics discovery is not configured")
 	}
 
-	var sourceErrors []string
-	for _, source := range prometheusDiscoverySources {
-		pods, listErr := source.listPods(ctx, k8sClient)
-		if listErr != nil && !strings.Contains(listErr.Error(), source.missingPodsError) {
-			return nil, fmt.Errorf("%s: %w", source.listErrorPrefix, listErr)
-		}
-		if len(pods) == 0 {
-			continue
-		}
-
-		info, discoverErr := g.discoverPrometheusPods(ctx, k8sClient, pods, source.buildEndpoints, filterSKU, source.source)
-		if discoverErr == nil {
-			if cache != nil {
-				cache.Set(filterSKU, info, 60*time.Second)
+	resultCh := g.group.DoChan(string(filterSKU), func() (any, error) {
+		if cache != nil {
+			if cached, ok := cache.Get(filterSKU); ok {
+				return cached, nil
 			}
-			return info, nil
 		}
-		sourceErrors = append(sourceErrors, fmt.Sprintf("%s discovery failed: %v", source.source, discoverErr))
-	}
 
-	if len(sourceErrors) > 0 {
-		return nil, fmt.Errorf("%s", strings.Join(sourceErrors, "; "))
-	}
+		var sourceErrors []string
+		for _, source := range prometheusDiscoverySources {
+			pods, listErr := source.listPods(ctx, k8sClient)
+			if listErr != nil && !strings.Contains(listErr.Error(), source.missingPodsError) {
+				return nil, fmt.Errorf("%s: %w", source.listErrorPrefix, listErr)
+			}
+			if len(pods) == 0 {
+				continue
+			}
 
-	gpuPods, gpuErr := listGPUOperatorRunningPods(ctx, k8sClient)
-	if len(gpuPods) > 0 {
-		return nil, fmt.Errorf("no GPU metrics exporters found: DCGM is not enabled in the GPU Operator and no Intel XPU exporter pods found")
+			info, discoverErr := g.discoverPrometheusPods(ctx, k8sClient, pods, source.buildEndpoints, filterSKU, source.source)
+			if discoverErr == nil {
+				if cache != nil {
+					cache.Set(filterSKU, info, 60*time.Second)
+				}
+				return info, nil
+			}
+			sourceErrors = append(sourceErrors, fmt.Sprintf("%s discovery failed: %v", source.source, discoverErr))
+		}
+
+		if len(sourceErrors) > 0 {
+			return nil, fmt.Errorf("%s", strings.Join(sourceErrors, "; "))
+		}
+
+		gpuPods, gpuErr := listGPUOperatorRunningPods(ctx, k8sClient)
+		if len(gpuPods) > 0 {
+			return nil, fmt.Errorf("no GPU metrics exporters found: DCGM is not enabled in the GPU Operator and no Intel XPU exporter pods found")
+		}
+		if gpuErr != nil && !strings.Contains(gpuErr.Error(), "gpu operator is not installed") {
+			return nil, gpuErr
+		}
+		return nil, fmt.Errorf("no GPU metrics exporters found: no DCGM exporter pods found and no Intel XPU exporter pods found")
+	})
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		info, ok := result.Val.(*GPUInfo)
+		if !ok || info == nil {
+			return nil, fmt.Errorf("unexpected GPU discovery result type %T", result.Val)
+		}
+		return info, nil
 	}
-	if gpuErr != nil && !strings.Contains(gpuErr.Error(), "gpu operator is not installed") {
-		return nil, gpuErr
-	}
-	return nil, fmt.Errorf("no GPU metrics exporters found: no DCGM exporter pods found and no Intel XPU exporter pods found")
 }
 
 func (g *GPUDiscovery) discoverPrometheusPods(
@@ -810,6 +836,9 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 
 	for _, rule := range gpuRules {
 		if strings.Contains(normalized, rule.token) {
+			if rule.token == tokenA30 && strings.Contains(normalized, "A300") {
+				continue
+			}
 			if rule.singleSKU != "" {
 				return rule.singleSKU
 			}
