@@ -183,37 +183,6 @@ fn find_subseq<T: PartialEq>(haystack: &[T], needle: &[T]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// HTTP/HTTPS query-parameter keys that identify cache-busters or signed-URL
-/// metadata rather than image content. Stripped before hashing so the same
-/// image reached through different signed URLs collides on the same routing
-/// `mm_hash`. Match is case-insensitive.
-///
-/// Conservative list — only adds keys that are widely documented as
-/// cache-bust or presign metadata. Content-shaping params (`width`,
-/// `quality`, `format`, …) are deliberately *not* in this set: a 256-wide
-/// thumbnail must not collide on the same hash as the 1024-wide render.
-#[cfg(feature = "lightseek-mm")]
-fn is_cache_buster_query_key(key: &str) -> bool {
-    let lc = key.to_ascii_lowercase();
-    matches!(
-        lc.as_str(),
-        // Generic cache-busters / version selectors.
-        "v" | "version" | "cb" | "cache_bust" | "_" | "t" | "ts" | "timestamp"
-        // Generic signed-URL pieces.
-        | "sig" | "signature" | "token" | "expires" | "expiry" | "exp"
-        // AWS S3 / CloudFront presigned (case-folded form of `X-Amz-…`).
-        | "x-amz-signature" | "x-amz-date" | "x-amz-expires"
-        | "x-amz-algorithm" | "x-amz-credential" | "x-amz-signedheaders"
-        | "x-amz-security-token" | "x-amz-user-agent"
-        // GCS signed URLs.
-        | "x-goog-signature" | "x-goog-date" | "x-goog-expires"
-        | "x-goog-algorithm" | "x-goog-credential" | "x-goog-signedheaders"
-        // Azure SAS tokens (`se`, `sp`, etc. are short by spec).
-        | "se" | "sp" | "sr" | "sv" | "st" | "tn" | "srt" | "ss" | "skoid"
-        | "sktid" | "skt" | "ske" | "sks" | "skv" | "spr"
-    )
-}
-
 /// Shared SSRF-aware `MediaFetcher` + `reqwest::Client` for the dim-fetch
 /// path used by MM-aware routing. Inherits the same policy contract as the
 /// frontend-decode path (`MediaLoader`): blocklist DNS resolver, redirect
@@ -1125,55 +1094,22 @@ impl OpenAIPreprocessor {
         Some(out)
     }
 
-    /// xxh3-64 of the URL after normalizing cache-buster / signed-URL query
-    /// parameters for HTTP/HTTPS. Used as the routing `mm_hash` in the
-    /// URL-passthrough path. Goal: the same image reached through different
-    /// signed URLs (rotating `?sig=…`, `?v=…`, AWS/GCS/Azure presign params)
-    /// collides on the same routing key, so the warm request lands on the
-    /// worker that already cached the image's KV blocks.
+    /// xxh3-64 of the raw URL bytes. Used as the routing `mm_hash` in the
+    /// URL-passthrough path: two requests with byte-identical URLs route to
+    /// the same worker, anything else routes independently.
     ///
-    /// Stripping is HTTP-only: `s3://`, `gs://`, `file://` and `data:` URIs
-    /// hash as-is because their query parameters carry object identity (or
-    /// the URI itself is content-addressed). Content-shaping HTTP params
-    /// (e.g. `?width=`, `?quality=`) are preserved — they identify a
-    /// different rendered image.
-    ///
-    /// Frontend-decoding mode replaces this with content-addressed hashing
-    /// over decoded RGB bytes, which gives cross-URL cache reuse even for
-    /// query parameters this list doesn't know about.
+    /// We deliberately do NOT strip cache-buster / signed-URL query
+    /// parameters — a query string like `?v=2` could mean either "new
+    /// cache-busted fetch of the same image" or "version 2 of a different
+    /// image", and the URL alone doesn't tell us which. Keeping the hash
+    /// URL-identical avoids the heuristic and the false-positive collisions
+    /// that come with it. Workloads with rotating signed URLs (S3, GCS,
+    /// Azure SAS) should use `--frontend-decoding`: that path hashes the
+    /// decoded RGB bytes instead, so cross-URL cache reuse is restored
+    /// without depending on URL conventions.
     #[cfg(feature = "lightseek-mm")]
     fn hash_image_url(url: &str) -> u64 {
-        let canonical = Self::normalize_image_url(url);
-        xxhash_rust::xxh3::xxh3_64(canonical.as_bytes())
-    }
-
-    /// Returns the URL with HTTP/HTTPS cache-buster + signed-URL query
-    /// parameters removed. Other schemes pass through unchanged.
-    ///
-    /// Parse failure is treated as "pass through" — the routing path stays
-    /// correct (just byte-identical match) and downstream paths that
-    /// actually fetch the URL will surface the parse error.
-    #[cfg(feature = "lightseek-mm")]
-    fn normalize_image_url(url: &str) -> String {
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return url.to_string();
-        }
-        let Ok(mut parsed) = url::Url::parse(url) else {
-            return url.to_string();
-        };
-        let preserved: Vec<(String, String)> = parsed
-            .query_pairs()
-            .filter(|(k, _)| !is_cache_buster_query_key(k))
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect();
-        parsed.set_query(None);
-        if !preserved.is_empty() {
-            let mut qmut = parsed.query_pairs_mut();
-            for (k, v) in &preserved {
-                qmut.append_pair(k, v);
-            }
-        }
-        parsed.into()
+        xxhash_rust::xxh3::xxh3_64(url.as_bytes())
     }
 
     /// Header-only image dim fetch. For HTTP/HTTPS we issue a Range request
@@ -3145,33 +3081,32 @@ mod tests {
         }
     }
 
-    /// HTTP cache-buster keys (`v`, `t`, `cache`, `_`, `ts`, `sig`, `signature`)
-    /// Different query strings must produce different hashes — what looks
-    /// like a cache-buster (`?v=1` vs `?v=2`) may also be a content selector
-    /// (e.g. version → different image). Hash the full URL and let the URL
-    /// be the identity.
-    /// Cache-buster query parameters (`?v=`, `?sig=`, AWS/GCS/Azure presign
-    /// fields) must be stripped before hashing so the same image reached
-    /// through different signed URLs lands on the same routing key.
+    /// Different query strings must produce different hashes. `?v=1` and
+    /// `?v=2` may look like cache-busters, but they could equally be a
+    /// content selector ("version 2 of the image"). The URL alone doesn't
+    /// tell us which, so we keep the hash URL-identical and let the URL be
+    /// the identity. For signed-URL workloads where rotation actually
+    /// hides a stable object, `--frontend-decoding` hashes the decoded
+    /// bytes instead.
     #[cfg(feature = "lightseek-mm")]
     #[test]
-    fn hash_image_url_strips_cache_busters_for_http() {
+    fn hash_image_url_distinguishes_query_strings() {
         let base = "https://cdn.example.com/img.jpg";
         let v1 = OpenAIPreprocessor::hash_image_url(&format!("{base}?v=1"));
-        let v2 = OpenAIPreprocessor::hash_image_url(&format!("{base}?v=2&sig=abc"));
+        let v2 = OpenAIPreprocessor::hash_image_url(&format!("{base}?v=2"));
         let no_q = OpenAIPreprocessor::hash_image_url(base);
-        assert_eq!(v1, v2, "cache-busters must be stripped before hashing");
-        assert_eq!(
-            v1, no_q,
-            "stripping cache-busters yields the same hash as the bare URL"
-        );
+        assert_ne!(v1, v2, "different query values must hash differently");
+        assert_ne!(v1, no_q, "presence of a query string must change the hash");
     }
 
-    /// AWS S3 / GCS presigned URLs rotate every few minutes; without
-    /// stripping, the same object hashes differently each request.
+    /// Rotating S3 / GCS / Azure SAS signatures change the URL and
+    /// therefore the hash. This is a known limitation of URL-passthrough
+    /// routing for signed-URL workloads — `--frontend-decoding` is the
+    /// recommended mode there because it hashes the decoded image bytes
+    /// regardless of how the URL was signed.
     #[cfg(feature = "lightseek-mm")]
     #[test]
-    fn hash_image_url_strips_presigned_params() {
+    fn hash_image_url_distinguishes_rotating_signatures() {
         let base = "https://bucket.s3.amazonaws.com/img.jpg";
         let a = OpenAIPreprocessor::hash_image_url(&format!(
             "{base}?X-Amz-Signature=AAA&X-Amz-Date=20260101T000000Z&X-Amz-Expires=600"
@@ -3179,28 +3114,26 @@ mod tests {
         let b = OpenAIPreprocessor::hash_image_url(&format!(
             "{base}?X-Amz-Signature=BBB&X-Amz-Date=20260101T010000Z&X-Amz-Expires=900"
         ));
-        assert_eq!(
+        assert_ne!(
             a, b,
-            "rotating S3 presign params must collide on the same hash"
+            "rotating presign params produce a different URL and must hash differently"
         );
     }
 
-    /// Content-shaping query params (image dimensions, format, quality) are
-    /// NOT cache-busters — `?width=256` and `?width=1024` produce different
-    /// rendered images and must hash differently.
+    /// Identical URLs must hash to the same value (the basic identity
+    /// guarantee that makes URL-passthrough routing useful at all).
     #[cfg(feature = "lightseek-mm")]
     #[test]
-    fn hash_image_url_preserves_content_params() {
-        let base = "https://cdn.example.com/img.jpg";
-        let small = OpenAIPreprocessor::hash_image_url(&format!("{base}?width=256"));
-        let large = OpenAIPreprocessor::hash_image_url(&format!("{base}?width=1024"));
-        assert_ne!(
-            small, large,
-            "content-shaping params identify a different rendered image"
+    fn hash_image_url_is_deterministic_for_identical_urls() {
+        let url = "https://cdn.example.com/img.jpg?width=256";
+        assert_eq!(
+            OpenAIPreprocessor::hash_image_url(url),
+            OpenAIPreprocessor::hash_image_url(url),
         );
     }
 
-    /// data: URIs are content-addressed; hashing the entire URI gives content equality.
+    /// data: URIs hash the entire URI string. Same payload → same hash;
+    /// different payload → different hash.
     #[cfg(feature = "lightseek-mm")]
     #[test]
     fn hash_image_url_data_uri_content_addressed() {
@@ -3217,8 +3150,7 @@ mod tests {
         );
     }
 
-    /// Non-HTTP / non-data schemes (s3://, gs://, file://) hash as-is — no
-    /// cache-buster stripping (their query strings are object-identifying).
+    /// Non-HTTP / non-data schemes (s3://, gs://, file://) hash as-is.
     #[cfg(feature = "lightseek-mm")]
     #[test]
     fn hash_image_url_other_schemes_passthrough() {
@@ -3226,7 +3158,7 @@ mod tests {
         let s3b = OpenAIPreprocessor::hash_image_url("s3://bucket/key?v=2");
         assert_ne!(
             s3a, s3b,
-            "s3:// query params identify objects and must not be stripped"
+            "s3:// query params identify objects and must not collide"
         );
     }
 }

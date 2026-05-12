@@ -52,7 +52,7 @@ supports.
 ```text
 Frontend (Rust + lightseek llm-multimodal + KV router) → Backend Workers
         │
-        ├─ Hash image (xxh3_64 of normalized URL, or of decoded bytes for data: URIs)
+        ├─ Hash image (xxh3_64 of the raw URL — full-URL identity; use --frontend-decoding for content-addressed hashing)
         ├─ Resolve image-token id (config.json / processor_config.json / vocab probe)
         ├─ Read (W, H) from a Range: 0-65535 header fetch (or in-memory data: bytes)
         ├─ lightseek::count_tokens(W, H) → expanded image-token count N

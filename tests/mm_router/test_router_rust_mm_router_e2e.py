@@ -383,11 +383,12 @@ def _make_image_handler(image_map: dict[str, bytes]) -> type:
 
     class _ImageHandler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
-            # Strip query string — our `hash_normalized_url` drops common
-            # cache-busters (v, t, sig, signature, cache, _, ts) before
-            # hashing, so callers can append signed-URL params and still
-            # hit cache. The test below hits both `/img.png?v=1` and
-            # `/img.png?v=2` — the server should serve the same bytes.
+            # Strip query string so the server resolves to the same bytes
+            # regardless of any signed-URL params the caller appended.
+            # The frontend's routing hash uses the full URL (different
+            # query strings → different `mm_hash`), but the backend's
+            # image fetch still serves the same bytes either way — which
+            # is what we want for the distinct-query-strings test below.
             path = self.path.split("?", 1)[0]
             data = image_map.get(path)
             if data is None:
@@ -491,38 +492,42 @@ def test_router_rust_mm_repeated_http_image_overlap(
 
 
 @pytest.mark.timeout(300)
-def test_router_rust_mm_http_url_cache_buster_normalization(
+def test_router_rust_mm_http_url_distinct_query_strings_dont_collide(
     start_router_rust_mm_services, predownload_models, http_image_server
 ):
-    """The frontend strips signed-URL cache-busters (`?v=`, `?sig=`, etc.)
-    before hashing, so the same image accessed via different signed URLs
-    must produce the same `mm_hash` and therefore hit the same KV cache.
-    Test: warm with `?v=1`, repeat with `?v=2` — second request must
-    show cache-hit overlap, not be treated as a fresh image."""
+    """URL-passthrough routing hashes the full URL — distinct query strings
+    on the same image path produce distinct `mm_hash` values. We do NOT
+    normalize cache-buster / signed-URL params because the URL alone can't
+    tell us whether `?v=2` means "cache-busted same image" or "version 2 of
+    a different image". Workloads with rotating signed URLs over a stable
+    object should use `--frontend-decoding`, which hashes the decoded RGB
+    bytes (see `test_router_rust_mm_frontend_decode_e2e.py`).
+
+    Test: warm with `?v=1`, repeat with `?v=2` — second request must NOT
+    show MM-block overlap beyond the text-prefix baseline (i.e. the system
+    treats them as different images at the routing layer)."""
     frontend_port, router_proc = start_router_rust_mm_services
     base_url = http_image_server["B"]
     payload_v1 = _build_payload([f"{base_url}?v=1&sig=abc"])
     payload_v2 = _build_payload([f"{base_url}?v=2&sig=def"])
 
     overlap_1, total_1, _ = _send(
-        frontend_port, router_proc, payload_v1, "cache_buster_req1"
+        frontend_port, router_proc, payload_v1, "distinct_url_req1"
     )
-    overlap_2, total_2, data_2 = _send(
-        frontend_port, router_proc, payload_v2, "cache_buster_req2"
+    overlap_2, total_2, _ = _send(
+        frontend_port, router_proc, payload_v2, "distinct_url_req2"
     )
 
-    assert overlap_2 > overlap_1 + 1, (
-        f"expected URL normalization to fold cache-buster query params, so "
-        f"`?v=2&sig=def` should hit the cache built by `?v=1&sig=abc`. Got "
-        f"req1={overlap_1}/{total_1}, req2={overlap_2}/{total_2}. If equal to 1, "
-        f"hash_normalized_url isn't stripping the buster keys."
+    # Both requests share the prompt's text prefix tokens but the image
+    # blocks must differ — the second request's overlap should not exceed
+    # the first by more than 1 block (the typical text-prefix baseline).
+    assert overlap_2 <= overlap_1 + 1, (
+        f"expected `?v=1` and `?v=2` to route as different images, but "
+        f"req2 overlap jumped well above req1's text-prefix baseline. Got "
+        f"req1={overlap_1}/{total_1}, req2={overlap_2}/{total_2}. If req2 is "
+        f"much larger, the frontend is normalizing cache-busters (regression "
+        f"to the strip-list behavior)."
     )
-    cached_2 = (data_2.get("usage", {}).get("prompt_tokens_details") or {}).get(
-        "cached_tokens"
-    )
-    assert (
-        cached_2 is not None and cached_2 > 0
-    ), f"expected cached_tokens > 0 after URL-buster normalization, got {cached_2}"
 
 
 @pytest.mark.timeout(300)
