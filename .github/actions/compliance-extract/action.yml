@@ -140,7 +140,11 @@ runs:
       id: suffix
       shell: bash
       run: |
-        ARCH=$(echo "${{ inputs.platform }}" | sed 's|^linux/||')
+        # shared-build-image.yml passes the platform input through as the
+        # raw multi-platform string (e.g. "linux/amd64,linux/arm64") since
+        # one shared BuildKit invocation builds all arches. Normalize for
+        # use in artifact names: GitHub upload-artifact rejects '/' and ','.
+        ARCH=$(echo "${{ inputs.platform }}" | sed 's|linux/||g; s|,|-|g')
         if [ -n "${{ inputs.cuda_version }}" ]; then
           SUFFIX="${{ inputs.cuda_version }}-${ARCH}"
         else

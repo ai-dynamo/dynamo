@@ -8,6 +8,15 @@
 ##############################################
 FROM ${EPP_IMAGE} AS epp
 
+# Compliance pipeline needs EPP's CycloneDX Go SBOM (/sbom-go.cdx.json),
+# which is only emitted in the upstream EPP image's amd64 builder. The
+# SBOM is architecture-independent JSON, so pin a dedicated amd64 stage
+# and have compliance.Dockerfile's licenses stage COPY from THIS stage
+# instead of `epp`. The arm64 sub-build of multi-arch frontends would
+# otherwise fail with "/sbom-go.cdx.json: not found" because the arm64
+# EPP view doesn't carry that file.
+FROM --platform=linux/amd64 ${EPP_IMAGE} AS epp_sbom
+
 FROM ${FRONTEND_IMAGE} AS frontend_pre
 
 ARG PYTHON_VERSION

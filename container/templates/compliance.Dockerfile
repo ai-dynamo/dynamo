@@ -59,12 +59,13 @@ RUN mkdir -p /legal /sboms
 COPY --chown=root:0 container/compliance /opt/compliance
 ENV PYTHONPATH=/opt
 {% if target == "frontend" %}
-# Approach A: EPP self-describes. The EPP image (already pulled via
-# FROM ${EPP_IMAGE} AS epp at the top of frontend.Dockerfile) carries a
-# CycloneDX SBOM at /sbom-go.cdx.json -- emitted by cyclonedx-gomod in
-# EPP's go-builder stage. Consume it here so NOTICES-Go.txt accurately
-# reflects EPP's Go module set.
-COPY --from=epp /sbom-go.cdx.json /tmp/sbom-go-epp.cdx.json
+# Approach A: EPP self-describes. frontend.Dockerfile pulls a dedicated
+# amd64-pinned EPP stage `epp_sbom` whose only purpose is to expose the
+# CycloneDX SBOM (emitted by cyclonedx-gomod in EPP's amd64 go-builder).
+# The arm64 EPP view doesn't carry /sbom-go.cdx.json so we MUST pull
+# from the amd64-pinned stage regardless of TARGETPLATFORM. The SBOM
+# itself is architecture-independent JSON, so this is safe.
+COPY --from=epp_sbom /sbom-go.cdx.json /tmp/sbom-go-epp.cdx.json
 {% endif %}
 
 # BASELINE_SBOM_FILE: the slim CycloneDX SBOM under
