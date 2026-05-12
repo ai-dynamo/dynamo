@@ -171,6 +171,48 @@ FROM scratch AS legal
 COPY --from=licenses /legal/ /
 
 
+#######################################
+########## Compliance: sources ########
+#######################################
+#
+# Collects source archives for frontend's third-party deps on top of the
+# nvidia/base/ubuntu baseline. Gated on ENABLE_SOURCE_ARCHIVAL.
+#
+# Go source for the EPP binary is not collected here — the EPP image is
+# a separate build that exposes only its CycloneDX SBOM (/sbom-go.cdx.json),
+# not a `go mod vendor` tree. If OSRB asks for EPP Go source, EPP's
+# Dockerfile needs a parallel sources_collect; tracked separately.
+
+FROM frontend_pre AS sources_collect
+
+USER root
+RUN mkdir -p /sources /opt/compliance /opt/native-sources /opt/dynamo-vendor-full
+COPY --chown=root:0 container/compliance /opt/compliance
+ENV PYTHONPATH=/opt
+COPY --from=wheel_builder /tmp/native-sources/ /opt/native-sources/
+COPY --from=wheel_builder /tmp/dynamo-vendor-full/ /opt/dynamo-vendor-full/
+
+ARG ENABLE_SOURCE_ARCHIVAL=false
+ARG BASELINE_SBOM_FILE="{{ context.dynamo.frontend_baseline_sbom | default('') }}"
+RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+        python3 -m compliance.collect_sources \
+            --ecosystem dpkg --ecosystem rust --ecosystem native \
+            --output-zip /sources.zip \
+            --sources-root /sources \
+            --native-source-dir /opt/native-sources \
+            --rust-venv ${VIRTUAL_ENV} \
+            --rust-vendor-full /opt/dynamo-vendor-full \
+            ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
+            -v ; \
+    else \
+        : > /sources.zip ; \
+    fi
+
+
+FROM scratch AS sources_archive
+COPY --from=sources_collect /sources.zip /sources.zip
+
+
 FROM frontend_pre AS frontend
 COPY --from=licenses /legal /legal
 ENTRYPOINT ["/epp"]

@@ -118,6 +118,45 @@ FROM scratch AS legal
 COPY --from=licenses /legal/ /
 
 
+#######################################
+########## Compliance: sources ########
+#######################################
+#
+# Collects source archives for planner's third-party deps on top of the
+# nvidia/distroless/python baseline. Gated on ENABLE_SOURCE_ARCHIVAL.
+# Runs in planner_builder (not the final distroless planner stage) because
+# distroless has no shell or apt — source collection needs both.
+
+FROM planner_builder AS sources_collect
+
+USER root
+RUN mkdir -p /sources /opt/compliance /opt/native-sources /opt/dynamo-vendor-full
+COPY --chown=root:0 container/compliance /opt/compliance
+ENV PYTHONPATH=/opt
+COPY --from=wheel_builder /tmp/native-sources/ /opt/native-sources/
+COPY --from=wheel_builder /tmp/dynamo-vendor-full/ /opt/dynamo-vendor-full/
+
+ARG ENABLE_SOURCE_ARCHIVAL=false
+ARG BASELINE_SBOM_FILE="{{ context.dynamo.planner_baseline_sbom | default('') }}"
+RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+        python3 -m compliance.collect_sources \
+            --ecosystem dpkg --ecosystem rust --ecosystem native \
+            --output-zip /sources.zip \
+            --sources-root /sources \
+            --native-source-dir /opt/native-sources \
+            --rust-venv ${VIRTUAL_ENV} \
+            --rust-vendor-full /opt/dynamo-vendor-full \
+            ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
+            -v ; \
+    else \
+        : > /sources.zip ; \
+    fi
+
+
+FROM scratch AS sources_archive
+COPY --from=sources_collect /sources.zip /sources.zip
+
+
 FROM ${PLANNER_RUNTIME_IMAGE}:${PLANNER_RUNTIME_IMAGE_TAG} AS planner
 
 COPY --from=planner_builder /etc/group /etc/passwd /etc/

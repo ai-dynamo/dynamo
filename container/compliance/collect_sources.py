@@ -269,16 +269,19 @@ def collect_dpkg_sources(baseline_sbom: Path | None, output_dir: Path) -> int:
 _FIRST_PARTY_RUST_PREFIXES = ("dynamo-", "kvbm-", "nixl-")
 
 
-def _shipped_rust_crates(venv_root: Path) -> set[tuple[str, str]]:
+def _shipped_rust_crates(site_packages_dirs: list[Path]) -> set[tuple[str, str]]:
     """Walk every installed wheel's embedded CycloneDX SBOM and return the
     set of (name, version) tuples for Rust crates that ship in this image.
 
-    Mirrors the path generators/rust.py uses to discover wheel-bundled SBOMs:
-    <venv>/lib/python*/site-packages/*.dist-info/sboms/*.cyclonedx.json.
+    Mirrors generators/rust.py's discovery path. Accepts a list of
+    site-packages directories rather than a venv root because runtimes that
+    `pip install --break-system-packages` (sglang) ship packages under
+    `/usr/lib/python3/dist-packages` instead of the `lib/python*/site-packages`
+    layout a venv produces.
     """
     crates: set[tuple[str, str]] = set()
     sbom_paths: list[Path] = []
-    for site in venv_root.glob("lib/python*/site-packages"):
+    for site in site_packages_dirs:
         sbom_paths.extend(site.glob("*.dist-info/sboms/*.cyclonedx.json"))
     for sbom in sbom_paths:
         try:
@@ -295,16 +298,16 @@ def _shipped_rust_crates(venv_root: Path) -> set[tuple[str, str]]:
             if name and version:
                 crates.add((name, str(version)))
     logger.info(
-        "Found %d distinct Rust crates across %d wheel SBOMs in %s",
+        "Found %d distinct Rust crates across %d wheel SBOMs under %s",
         len(crates),
         len(sbom_paths),
-        venv_root,
+        ", ".join(str(d) for d in site_packages_dirs),
     )
     return crates
 
 
 def collect_rust_sources(
-    venv_root: Path, vendor_full: Path, output_dir: Path
+    site_packages_dirs: list[Path], vendor_full: Path, output_dir: Path
 ) -> int:
     """Copy third-party Rust crate sources into output_dir.
 
@@ -330,7 +333,7 @@ def collect_rust_sources(
         )
         return 0
 
-    crates = _shipped_rust_crates(venv_root)
+    crates = _shipped_rust_crates(site_packages_dirs)
     copied = 0
     skipped_first_party = 0
     missing_in_vendor: list[str] = []
@@ -596,8 +599,21 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("/opt/dynamo/venv"),
         help=(
             "Runtime venv whose installed wheels carry CycloneDX SBOMs. "
-            "Walked for embedded *.dist-info/sboms/*.cyclonedx.json files "
-            "to discover the third-party crate set we ship."
+            "Globbed for lib/python*/site-packages/*.dist-info/sboms/*.cyclonedx.json "
+            "to discover the third-party crate set we ship. Mutually "
+            "exclusive with --rust-site-packages."
+        ),
+    )
+    parser.add_argument(
+        "--rust-site-packages",
+        type=Path,
+        default=None,
+        help=(
+            "Direct path to a site-packages (or dist-packages) directory. "
+            "Use this when packages are installed system-wide via "
+            "`pip install --break-system-packages` (sglang's pattern) "
+            "rather than into a venv with the standard lib/python*/site-packages "
+            "layout. Overrides --rust-venv when set."
         ),
     )
     parser.add_argument(
@@ -649,8 +665,12 @@ def main(argv: list[str] | None = None) -> int:
     if "dpkg" in ecosystems:
         counts["dpkg"] = collect_dpkg_sources(base_sbom, args.sources_root / "dpkg")
     if "rust" in ecosystems:
+        if args.rust_site_packages is not None:
+            site_dirs = [args.rust_site_packages]
+        else:
+            site_dirs = list(args.rust_venv.glob("lib/python*/site-packages"))
         counts["rust"] = collect_rust_sources(
-            args.rust_venv, args.rust_vendor_full, args.sources_root / "rust"
+            site_dirs, args.rust_vendor_full, args.sources_root / "rust"
         )
     if "go" in ecosystems:
         counts["go"] = collect_go_sources(
