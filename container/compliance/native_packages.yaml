@@ -76,7 +76,10 @@ packages:
   #     image already ships libfabric1@1.17.0-3build2; the make_efa
   #     build is redundant and appears to be dead config.)
   - name: libfabric
-    version: 1.22.0
+    # AWS fork: shipped by EFA installer 1.47.0 as libfabric1-aws_2.4.0amzn1.0
+    # (Ubuntu 24.04 DEB). The `amzn1.0` suffix indicates an AWS patch set on
+    # top of upstream libfabric 2.4.0; preserved here for OSRB traceability.
+    version: 2.4.0amzn1.0
     license: BSD-2-Clause
     source: https://github.com/ofiwg/libfabric
     images:
@@ -84,7 +87,8 @@ packages:
       - trtllm-runtime-efa
 
   - name: aws-ofi-nccl
-    version: 1.16.3-aws
+    # Shipped by EFA installer 1.47.0 as libnccl-ofi_1.18.0-1 (Ubuntu 24.04 DEB).
+    version: 1.18.0
     license: Apache-2.0
     source: https://github.com/aws/aws-ofi-nccl
     images:
