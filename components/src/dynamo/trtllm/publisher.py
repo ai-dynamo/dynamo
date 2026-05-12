@@ -107,6 +107,20 @@ def _to_signed_i64(value: int | None) -> int | None:
     return value
 
 
+# Mapping between TRT-LLM's KV cache level integers and the storage_tier
+# strings accepted by dynamo.llm.KvEventPublisher. TRT-LLM uses cache_level=0
+# for the primary (GPU) pool and 1 for the secondary (host) pool; the router
+# protocol uses "device" / "host_pinned" respectively.
+_CACHE_LEVEL_TO_TIER = {
+    0: "device",
+    1: "host_pinned",
+}
+
+
+def _cache_level_to_tier(cache_level: int) -> str:
+    return _CACHE_LEVEL_TO_TIER.get(int(cache_level), "device")
+
+
 class ZmqKvEventPublisher:
     """
     Pure Python ZMQ PUBLISHER for TensorRT-LLM KV events.
@@ -426,6 +440,15 @@ class Publisher:
         # A set to store the block hash of partial block (i.e. block containing less than kv_block_size tokens) hashes.
         # It is used to prevent sending remove event to kv router since partial blocks are not stored.
         self.partial_block_hashes: set[int] = set()
+        # Per-block metadata cache (block_hash -> dict) so that `updated`
+        # events (which only carry a hash + tier transition) can be turned
+        # back into a tier-tagged store event for the router. Cleared on
+        # `removed` events. Capacity is bounded by the engine's KV pool
+        # plus secondary pool, so this dict cannot grow unbounded in steady
+        # state -- but we still cap it defensively to avoid leaks if the
+        # remove side ever drifts.
+        self._block_metadata: Dict[int, dict] = {}
+        self._block_metadata_max = 1 << 20  # ~1M block hashes (~80 MB)
         self.error_queue: Queue = Queue()
         self._stop_event = threading.Event()
         # Track the last engine event_id per attention-DP rank. TRT-LLM emits
@@ -820,10 +843,12 @@ class Publisher:
             # request handling under load).
             self.processing_initial_created_events = False
             parent_hash = _to_signed_i64(data["parent_hash"])
-            token_ids: list[int] = []
-            num_block_tokens: list[int] = []
-            block_hashes: list[int] = []
-            block_mm_infos: list[dict | None] = []
+            # Group blocks by cache_level (0 = primary GPU, 1 = secondary
+            # host pool) so we can emit one BlockStored event per tier with
+            # the correct storage_tier tag for the router's tiered indexer.
+            # In steady state a single `stored` event almost always has
+            # uniform cache_level, but we don't rely on that.
+            per_tier: dict[int, dict] = {}
             kv_block_size = self.kv_block_size
             partial_block_hashes = self.partial_block_hashes
             for block in data["blocks"]:
@@ -843,11 +868,24 @@ class Publisher:
                 if token_num_in_block < kv_block_size:
                     partial_block_hashes.add(block_hash)
                     break
-                num_block_tokens.append(token_num_in_block)
-                block_hashes.append(block_hash)
-                token_ids.extend(int(t["token_id"]) for t in block_tokens)
+
+                cache_level = int(block.get("cache_level", 0))
+                bucket = per_tier.setdefault(
+                    cache_level,
+                    {
+                        "token_ids": [],
+                        "num_block_tokens": [],
+                        "block_hashes": [],
+                        "block_mm_infos": [],
+                    },
+                )
+                bucket["num_block_tokens"].append(token_num_in_block)
+                bucket["block_hashes"].append(block_hash)
+                token_id_list = [int(t["token_id"]) for t in block_tokens]
+                bucket["token_ids"].extend(token_id_list)
 
                 mm_keys = block.get("mm_keys")
+                mm_info: dict | None = None
                 if mm_keys:
                     mm_hashes = [
                         int(mk["hash"][:16], 16)
@@ -855,65 +893,114 @@ class Publisher:
                         if mk.get("type") == "mm_key" and mk.get("hash")
                     ]
                     if mm_hashes:
-                        block_mm_infos.append(
-                            {
-                                "mm_objects": [
-                                    {"mm_hash": h, "offsets": []} for h in mm_hashes
-                                ]
-                            }
-                        )
-                    else:
-                        block_mm_infos.append(None)
-                else:
-                    block_mm_infos.append(None)
+                        mm_info = {
+                            "mm_objects": [
+                                {"mm_hash": h, "offsets": []} for h in mm_hashes
+                            ]
+                        }
+                bucket["block_mm_infos"].append(mm_info)
+
+                # Cache per-block metadata so a subsequent `updated` event
+                # (cache_level transition) can re-emit a BlockStored event at
+                # the new tier without seeing the original token IDs again.
+                if len(self._block_metadata) >= self._block_metadata_max:
+                    # Defensive cap; drop an arbitrary entry. In steady
+                    # state remove events keep this map bounded.
+                    self._block_metadata.pop(next(iter(self._block_metadata)))
+                self._block_metadata[block_hash] = {
+                    "token_ids": token_id_list,
+                    "num_block_tokens": token_num_in_block,
+                    "parent_hash": parent_hash,
+                    "block_mm_info": mm_info,
+                    "cache_level": cache_level,
+                }
 
             lora_name = data.get("lora_name")
 
-            logger.debug(
-                "Publishing stored KV event: engine_event_id=%s "
-                "attention_dp_rank=%s blocks=%s tokens=%s lora_name=%s "
-                "has_parent=%s",
-                event_id,
-                attention_dp_rank,
-                len(block_hashes),
-                len(token_ids),
-                lora_name,
-                parent_hash is not None,
-            )
-            # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
-            # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
-            if self.zmq_kv_event_publisher:
-                # Consolidator enabled: publish to ZMQ only
-                self.zmq_kv_event_publisher.publish_stored(
-                    token_ids,
-                    num_block_tokens,
-                    block_hashes,
-                    parent_hash,
-                    block_mm_infos,
+            # Get attention_dp_rank from event (TRT-LLM includes this in KVCacheEvent)
+            # Default to 0 for backwards compatibility with older TRT-LLM versions.
+            attention_dp_rank = event.get("attention_dp_rank", 0)
+
+            for cache_level, bucket in per_tier.items():
+                tier_tag = _cache_level_to_tier(cache_level)
+                logger.debug(
+                    "Publishing stored KV event: engine_event_id=%s "
+                    "attention_dp_rank=%s tier=%s blocks=%s tokens=%s "
+                    "lora_name=%s has_parent=%s",
+                    event_id,
                     attention_dp_rank,
+                    tier_tag,
+                    len(bucket["block_hashes"]),
+                    len(bucket["token_ids"]),
                     lora_name,
+                    parent_hash is not None,
                 )
-            elif self.kv_event_publishers:
-                # No consolidator: publish to NATS (router subscribes directly)
-                # Route to correct publisher based on attention_dp_rank
-                publisher = self.kv_event_publishers.get(attention_dp_rank)
-                if publisher:
-                    publisher.publish_stored(
-                        token_ids,
-                        num_block_tokens,
-                        block_hashes,
-                        parent_hash,
-                        block_mm_infos,
-                        lora_name=lora_name,
-                    )
-                else:
-                    logging.warning(
-                        f"No publisher for attention_dp_rank={attention_dp_rank}, "
-                        f"available ranks: {list(self.kv_event_publishers.keys())}"
-                    )
+                self._dispatch_stored(
+                    token_ids=bucket["token_ids"],
+                    num_block_tokens=bucket["num_block_tokens"],
+                    block_hashes=bucket["block_hashes"],
+                    parent_hash=parent_hash,
+                    block_mm_infos=bucket["block_mm_infos"],
+                    lora_name=lora_name,
+                    attention_dp_rank=attention_dp_rank,
+                    storage_tier=tier_tag,
+                )
+        elif data["type"] == "updated":
+            # cacheLevel transition: a block migrated between primary GPU
+            # and secondary host pool. We translate this into a Remove at
+            # the old tier + a Store at the new tier so the router's
+            # tiered prefix index stays in sync. Without this, all blocks
+            # stay tagged "device" forever and the remote-G2 planner
+            # (which looks for `host_pinned` hits on non-target workers)
+            # never fires.
+            self.processing_initial_created_events = False
+            block_hash = _to_signed_i64(data.get("block_hash"))
+            cache_level_diff = data.get("cache_level")
+            attention_dp_rank = event.get("attention_dp_rank", 0)
+            if (
+                block_hash is None
+                or cache_level_diff is None
+                or "old_value" not in cache_level_diff
+                or "new_value" not in cache_level_diff
+            ):
+                return  # no tier transition payload -> nothing to do
+            old_level = int(cache_level_diff["old_value"])
+            new_level = int(cache_level_diff["new_value"])
+            if old_level == new_level:
+                return
+            meta = self._block_metadata.get(block_hash)
+            if meta is None:
+                # We never saw the original BlockStored (e.g. event predates
+                # this Python process or the metadata cache evicted it).
+                # Without token_ids we can't reconstruct the radix-tree
+                # entry at the new tier; log and skip rather than corrupt
+                # the index with a tier-less remove.
+                logging.debug(
+                    f"updated event for unknown block_hash {block_hash}; skipping tier transition"
+                )
+                return
+            # Step 1: remove at the OLD tier.
+            self._dispatch_removed(
+                block_hashes=[block_hash],
+                attention_dp_rank=attention_dp_rank,
+                storage_tier=_cache_level_to_tier(old_level),
+            )
+            # Step 2: re-store at the NEW tier.
+            self._dispatch_stored(
+                token_ids=meta["token_ids"],
+                num_block_tokens=[meta["num_block_tokens"]],
+                block_hashes=[block_hash],
+                parent_hash=meta["parent_hash"],
+                block_mm_infos=[meta["block_mm_info"]],
+                lora_name=None,  # lora_name is event-scoped, not block-scoped
+                attention_dp_rank=attention_dp_rank,
+                storage_tier=_cache_level_to_tier(new_level),
+            )
+            meta["cache_level"] = new_level
         elif data["type"] == "removed":
             self.processing_initial_created_events = False
             removed_block_hashes: list[int] = []
+            removed_by_tier: dict[str, list[int]] = {}
             skipped_partial_blocks = 0
             for block_hash in data["block_hashes"]:
                 block_hash = _to_signed_i64(block_hash)
@@ -924,38 +1011,117 @@ class Publisher:
                     skipped_partial_blocks += 1
                     continue
                 removed_block_hashes.append(block_hash)
+                # Look up the last known cache_level so we can target the
+                # remove at the right tier. Falls back to device for
+                # blocks we've never tracked (preserves prior behavior).
+                meta = self._block_metadata.pop(block_hash, None)
+                tier_tag = _cache_level_to_tier(
+                    meta["cache_level"] if meta is not None else 0
+                )
+                removed_by_tier.setdefault(tier_tag, []).append(block_hash)
 
+            attention_dp_rank = event.get("attention_dp_rank", 0)
             logger.debug(
                 "Publishing removed KV event: engine_event_id=%s "
-                "attention_dp_rank=%s blocks=%s skipped_partial_blocks=%s",
+                "attention_dp_rank=%s blocks=%s skipped_partial_blocks=%s by_tier=%s",
                 event_id,
                 attention_dp_rank,
                 len(removed_block_hashes),
                 skipped_partial_blocks,
+                {tier: len(hashes) for tier, hashes in removed_by_tier.items()},
             )
-            if not removed_block_hashes:
-                return
-
-            # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
-            # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
-            if self.zmq_kv_event_publisher:
-                # Consolidator enabled: publish to ZMQ only
-                self.zmq_kv_event_publisher.publish_removed(
-                    removed_block_hashes, attention_dp_rank
+            for tier_tag, hashes in removed_by_tier.items():
+                self._dispatch_removed(
+                    block_hashes=hashes,
+                    attention_dp_rank=attention_dp_rank,
+                    storage_tier=tier_tag,
                 )
-            elif self.kv_event_publishers:
-                # No consolidator: publish to NATS (router subscribes directly)
-                # Route to correct publisher based on attention_dp_rank
-                publisher = self.kv_event_publishers.get(attention_dp_rank)
-                if publisher:
-                    publisher.publish_removed(removed_block_hashes)
-                else:
-                    logging.warning(
-                        f"No publisher for attention_dp_rank={attention_dp_rank}, "
-                        f"available ranks: {list(self.kv_event_publishers.keys())}"
-                    )
         elif data["type"] == "created" and self.processing_initial_created_events:
             self.update_max_window_size(event)
+
+    def _dispatch_stored(
+        self,
+        token_ids: list[int],
+        num_block_tokens: list[int],
+        block_hashes: list[int],
+        parent_hash: Optional[int],
+        block_mm_infos: list[dict | None],
+        lora_name: Optional[str],
+        attention_dp_rank: int,
+        storage_tier: str,
+    ) -> None:
+        """Route a BlockStored event to ZMQ (consolidator) or NATS (direct).
+
+        `storage_tier` is "device", "host_pinned", "disk", or "external".
+        Only the NATS direct path is tier-aware today; the ZMQ path remains
+        on the vLLM-compatible schema (always device) until the consolidator
+        learns to carry the tier field.
+        """
+        if not block_hashes:
+            return
+        if self.zmq_kv_event_publisher:
+            if storage_tier != "device":
+                logging.warning(
+                    "Dropping non-device BlockStored event under ZMQ "
+                    "consolidator path (schema does not yet carry tier). "
+                    f"tier={storage_tier} hashes={block_hashes}"
+                )
+                return
+            self.zmq_kv_event_publisher.publish_stored(
+                token_ids,
+                num_block_tokens,
+                block_hashes,
+                parent_hash,
+                block_mm_infos,
+                attention_dp_rank,
+                lora_name,
+            )
+        elif self.kv_event_publishers:
+            publisher = self.kv_event_publishers.get(attention_dp_rank)
+            if publisher is None:
+                logging.warning(
+                    f"No publisher for attention_dp_rank={attention_dp_rank}, "
+                    f"available ranks: {list(self.kv_event_publishers.keys())}"
+                )
+                return
+            publisher.publish_stored(
+                token_ids,
+                num_block_tokens,
+                block_hashes,
+                parent_hash,
+                block_mm_infos,
+                lora_name=lora_name,
+                storage_tier=storage_tier,
+            )
+
+    def _dispatch_removed(
+        self,
+        block_hashes: list[int],
+        attention_dp_rank: int,
+        storage_tier: str,
+    ) -> None:
+        if not block_hashes:
+            return
+        if self.zmq_kv_event_publisher:
+            if storage_tier != "device":
+                logging.warning(
+                    "Dropping non-device BlockRemoved event under ZMQ "
+                    "consolidator path (schema does not yet carry tier). "
+                    f"tier={storage_tier} hashes={block_hashes}"
+                )
+                return
+            self.zmq_kv_event_publisher.publish_removed(
+                block_hashes, attention_dp_rank
+            )
+        elif self.kv_event_publishers:
+            publisher = self.kv_event_publishers.get(attention_dp_rank)
+            if publisher is None:
+                logging.warning(
+                    f"No publisher for attention_dp_rank={attention_dp_rank}, "
+                    f"available ranks: {list(self.kv_event_publishers.keys())}"
+                )
+                return
+            publisher.publish_removed(block_hashes, storage_tier=storage_tier)
 
     def start(self) -> None:
         # Each ManagedThread owns its own asyncio loop now, so we no longer
