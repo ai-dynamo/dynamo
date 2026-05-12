@@ -64,7 +64,6 @@ impl DeltaGenerator {
     }
 
     /// Returns the request tracker. Tracking is always enabled. For sharing with PreprocessedRequest.
-    /// The Option is
     pub fn tracker(&self) -> Arc<RequestTracker> {
         self.tracker.clone()
     }
