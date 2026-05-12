@@ -3,10 +3,16 @@
 # SPDX-License-Identifier: Apache-2.0
 title: "Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
 subtitle: "Schwinn Saereesitthipitak, Dan Feigin, Vikram Sharma Mailthody — May 2026"
-description: "Dynamo Snapshot leverages CRIU, cuda-checkpoint, and a GPU Memory Service (GMS) to bring inference worker startup down to 6 seconds or less."
+description: "Fast startup for AI inference workloads on Kubernetes via checkpoint/restore, with early prototype start times under 6 seconds."
 keywords: checkpoint/restore, CRIU, cuda-checkpoint, LLM inference, Kubernetes, GPU memory service, GMS, fast startup, autoscaling, cold start, Dynamo
 last-updated: May 7, 2026
 ---
+
+> **Status at a glance:**
+> - **Available (experimental):** Single-GPU PVC Snapshot flow for vLLM and SGLang.
+> - **Gated on CUDA driver:** Snapshot + GMS integration.
+> - **Prototype only:** Sharded-SSD weight restore via GMS.
+> - **In progress:** TensorRT-LLM backend support; P2P / GDS / ModelExpress weight restore via GMS; robust multi-GPU and multi-node restore.
 
 ## The Cold-Start Problem
 The primary objective in optimizing LLM inference is maximizing tokens per second — because every second a GPU isn't producing tokens directly translates to lost revenue.
@@ -25,7 +31,7 @@ Driving cold-start time down means chasing every contributor across the stack an
 
 The well-known alternative is *process-level* checkpoint/restore, which reduces the optimization surface to the checkpoint image size and storage bandwidth. Operating at the OS process level also keeps these optimizations *generic*, so they transfer across workloads.
 
-In this post, we introduce **Dynamo Snapshot**, our solution for checkpoint/restore of AI inference workloads on Kubernetes, along with the design choices and optimizations that get us to start times of **6 seconds or less**.
+In this post, we introduce **Dynamo Snapshot**, our approach to checkpoint/restore for AI inference workloads on Kubernetes, along with the design choices and optimizations behind early prototype start times of **6 seconds or less** for single-GPU workloads. This is the first post in a series on fast startup in Dynamo, and some pieces described here are still being upstreamed or productized (see [Availability and Roadmap](#availability-and-roadmap) below).
 
 ## CRIU and cuda-checkpoint
 A running inference worker's checkpointable state has two components:
@@ -158,13 +164,18 @@ On the same setup, we saw a massive improvement in CRIU restore time, and it is 
 
 At this point CRIU is no longer the bottleneck on its own, but the wall-clock time is still dominated by moving the model weights from PVC, through host memory, onto the GPU. That part is fundamentally serial: cuda-checkpoint cannot start copying weights to the GPU until CRIU has materialized them in host memory, and both halves are constrained by NFS bandwidth on one end and a single sequential `cudaMemcpy` on the other. The weights also dominate checkpoint size by a wide margin, which puts a hard ceiling on how fast restore can ever get if the weights stay inside the CRIU image.
 
+> **Note:** The above CRIU optimizations are not yet shipped as part of Dynamo Snapshot, and will be available once they have been upstreamed.
+
 ## Optimization #3: GPU Memory Service
+
+> **Note:** GMS is available standalone, but its integration with Snapshot is not yet enabled due to driver issues that will be resolved in an upcoming CUDA driver release.
+
 The idea behind the **GPU Memory Service (GMS)** is to take the weights out of the CRIU image entirely, and let weight restoration happen on its own path. This makes restore faster for three reasons that compound. First, the CRIU artifact shrinks dramatically once weights are no longer part of process memory, so CRIU restore itself completes in seconds. Second, weight restoration runs *concurrently* with CRIU rather than serially after it, so total restore time is bounded by the slower of the two paths instead of their sum. Third, the weights no longer have to follow the path of NFS → host memory → single sequential `cudaMemcpy`, and can instead use whatever channel is fastest for the cluster — sharded local SSDs, GPUDirect Storage, or peer-GPU RDMA from a node that already has the weights resident.
 
 The subtle constraint lies in preserving execution correctness. The restored worker must observe its weight tensors at precisely the same virtual addresses as before, since these addresses are embedded within CUDA graphs captured during initialization. Consequently, any external restoration mechanism must materialize the weight bytes directly at those original virtual addresses, without introducing a copy at resume time. This requirement mirrors the KV-cache virtualization strategy discussed in Optimization #1, except this time we actually *care* about the contents of the tensors post-restore.
 
 ### Parallelizing Weight Restore
-GMS is a per-GPU sidecar process (deployed as a separate container/pod) that owns physical GPU memory on behalf of inference workers, built on top of the CUDA Virtual Memory Management API. At a high level, it lets the worker hand off ownership of its weight allocations to a separate process that outlives any individual worker, so that when the worker is checkpointed, the weights are not part of its checkpointed state — and when it is restored, it can reattach to the same physical memory on the new node without copying.
+GMS is a per-GPU sidecar process (deployed as a separate container/pod) that owns physical GPU memory on behalf of inference workers, built on top of the CUDA Virtual Memory Management API. At a high level, it lets the worker hand off ownership of its weight allocations to a separate process that outlives any individual worker, so that when the worker is checkpointed, the weights are not part of its checkpointed state — and when it is restored, it can reattach to the same weights at the same virtual addresses without copying anything through the CRIU image. On a same-node restore the underlying physical pages literally persist; on a cross-node restore the new node's GMS is independently populated with the same weight bytes, and the worker maps them at the same virtual addresses it had before.
 
 The payoff is that the path that gets weights onto the GPU is now **completely decoupled** from CRIU and cuda-checkpoint. CRIU can stream process state (which is now much smaller) from the snapshot PVC at NFS bandwidth, and *in parallel*, an entirely separate `gms-loader` sidecar populates GMS with the weights for that model. The two paths converge only at the moment the worker resumes, when it reattaches to the now-populated GMS and continues serving.
 
@@ -196,12 +207,17 @@ For this setup, parallelizing the container restoration in CRIU and the weights 
 
 ![Snapshot restore time with GMS, weights sharded across 8 local SSDs — under 6 seconds for all model sizes including Qwen2.5 72B.](./figures/gms_sharded_ssd_restore_bench.svg)
 
-## Looking Forward
-<!-- TODO: need @athreesh's input on phrasing of these roadmap bullets, especially the unreleased CUDA driver patch one. -->
-Not everything in this blog post is generally available in Dynamo yet:
+## Availability and Roadmap
 
-- **Support for Other Frameworks:** Dynamo Snapshot currently works for vLLM and SGLang. TensorRT-LLM support is work in progress.
-- **CRIU optimizations:** We are currently in the process of upstreaming the AIO and parallel memfd optimizations to CRIU.
-- **GMS + Snapshot Integration:** This requires an unreleased CUDA driver patch to be able to work with GPU migration (checkpoint on one GPU, restore on another) that is necessary for this to be practical. The patch will be part of an upcoming CUDA driver release.
-- **GDS/P2P transfer via MX integration with GMS:** Currently we only have the PVC-source fallback for weight restoration. We are working on integrating GPUDirect Storage and peer-to-peer GPU transfer into `gms-loader`, enabling direct SSD→GPU weight loading and GPU→GPU weight transfer for autoscaling.
-- **Multi-GPU support:** Single-node multi-GPU is still experimental (currently vLLM-only, with limitations) and may fail on certain hardware/driver configurations. We are actively working on robust multi-GPU and multi-node checkpoint/restore support.
+**Experimental, usable today.** The PVC-based Snapshot flow works end-to-end on supported Kubernetes setups for vLLM and SGLang workloads. Single-GPU is the configuration we have validated most thoroughly; single-node multi-GPU is supported in vLLM only and is known to fail on some hardware and driver combinations.
+
+**Built, awaiting driver support.** The integrated Snapshot + GMS flow (the path that takes weights out of the CRIU image entirely) is implemented internally, but generally enabling it requires an unreleased CUDA driver patch that supports cross-GPU restore. The patch is expected in an upcoming CUDA driver release; until then, the standalone GMS prototypes are how we exercise this path.
+
+**Working prototypes.** The standalone GMS restore paths run today as prototypes. The sub-6s sharded-SSD restore numbers in particular were measured with restore pinned to the same node as checkpoint, which is a constraint of the current implementation rather than a property of the design; lifting it depends on the production weight transfer backends discussed below.
+
+**Roadmap.**
+
+- **TensorRT-LLM support.** vLLM and SGLang are supported today; TensorRT-LLM is in progress.
+- **CRIU optimizations.** The AIO and parallel memfd optimizations currently live in an internal CRIU fork and are being upstreamed, and will be shipped with Dynamo Snapshot once merged.
+- **Production weight transfer backends.** We are integrating [ModelExpress](https://github.com/ai-dynamo/modelexpress) (MX) with GMS to expose GPUDirect Storage and peer-to-peer RDMA as restore sources, enabling direct SSD→GPU loading and GPU→GPU transfer between nodes that already have weights resident.
+- **Robust multi-GPU and multi-node restore.** Beyond the experimental single-node multi-GPU support, we are actively working on multi-node checkpoint/restore.
