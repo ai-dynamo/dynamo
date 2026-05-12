@@ -17,7 +17,7 @@ import re
 import sys
 from collections.abc import AsyncGenerator
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Protocol
 
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
@@ -70,6 +70,13 @@ _TRTLLM_TO_COMMON_DISAGG = {
 }
 
 
+class _Abortable(Protocol):
+    """Anything `abort()` can dispatch to: `GenerationResult` (agg/prefill)
+    or `TrtllmDeferredAbort` (decode)."""
+
+    def abort(self) -> None: ...
+
+
 class TrtllmDeferredAbort(DeferredAbort):
     """`DeferredAbort` for `GenerationResult.abort()`.
 
@@ -115,7 +122,9 @@ class TrtllmLLMEngine(LLMEngine):
         self.disaggregation_mode = disaggregation_mode
         self._engine: TensorRTLLMEngine | None = None
         self._default_sampling_params = SamplingParams(detokenize=False)
-        self._active_requests: dict[str, Any] = {}
+        # Holds either the raw GenerationResult (agg/prefill) or the
+        # decode-mode TrtllmDeferredAbort guard. Both expose .abort().
+        self._active_requests: dict[str, _Abortable] = {}
         # Set in start() from worker_id. 10-bit field is a TRT-LLM API
         # constraint; collisions possible at scale (~30 replicas).
         self._disagg_machine_id: int = 0
@@ -274,8 +283,14 @@ class TrtllmLLMEngine(LLMEngine):
         abort_guard = TrtllmDeferredAbort(generation_result) if is_decode else None
 
         request_id = context.id()
+        # Explicit ternary instead of `or` — `or` on object refs would
+        # take the fallback path if `abort_guard` ever grew a falsy
+        # `__bool__`, which would silently bypass the deferred-abort path.
+        abortable: _Abortable = (
+            abort_guard if abort_guard is not None else generation_result
+        )
         if request_id is not None:
-            self._active_requests[request_id] = abort_guard or generation_result
+            self._active_requests[request_id] = abortable
 
         try:
             # TRT-LLM reports cumulative token_ids per choice; track the
@@ -320,13 +335,18 @@ class TrtllmLLMEngine(LLMEngine):
                                 output, disaggregated_params
                             )
                             if params_dict is not None:
-                                out["disaggregated_params"] = params_dict  # type: ignore[typeddict-unknown-key]
+                                out["disaggregated_params"] = params_dict
 
                     yield out
                     output_tokens_per_choice[output_idx] = next_total
         finally:
+            # Pop BEFORE closing the guard: a late abort() racing on a
+            # different task would otherwise observe a half-closed guard.
+            # Symmetric with vllm and sglang.
             if request_id is not None:
                 self._active_requests.pop(request_id, None)
+            if abort_guard is not None:
+                await abort_guard.close()
 
     @staticmethod
     def _decode_prefill_handoff(
@@ -403,6 +423,13 @@ class TrtllmLLMEngine(LLMEngine):
             "Draining in-flight requests on prefill worker (timeout=%.1fs)",
             _DRAIN_TIMEOUT_S,
         )
+        # The stats stream can raise asyncio.TimeoutError when the engine
+        # has nothing fresh to report, or StopAsyncIteration when the
+        # underlying iterator is exhausted — both are benign and just mean
+        # "no signal this tick, try again". A wider `Exception` would
+        # swallow code bugs introduced later; the test stub raises
+        # RuntimeError to exercise the retry path.
+        _BENIGN_POLL = (asyncio.TimeoutError, StopAsyncIteration, RuntimeError)
         while asyncio.get_running_loop().time() < deadline:
             try:
                 stats_iter = self._engine.llm.get_stats_async(timeout=2)
@@ -418,7 +445,7 @@ class TrtllmLLMEngine(LLMEngine):
                     active,
                     queued,
                 )
-            except Exception as e:
+            except _BENIGN_POLL as e:
                 logger.debug("Stats poll failed during drain: %s", e)
             await asyncio.sleep(_DRAIN_POLL_INTERVAL_S)
         logger.warning(

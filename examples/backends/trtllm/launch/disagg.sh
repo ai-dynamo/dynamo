@@ -19,22 +19,16 @@ export MODALITY=${MODALITY:-"text"}
 # If you want to use multimodal, set MODALITY to "multimodal"
 #export MODALITY=${MODALITY:-"multimodal"}
 
+# Strip --unified via the shared helper, then parse the remaining flags.
+# All of this runs BEFORE installing the kill-process-group EXIT trap so
+# an early exit (--help / unknown option) doesn't tear down the caller.
+pick_worker_module dynamo.trtllm dynamo.trtllm.unified_main "$@"
+set -- "${REMAINING_ARGS[@]}"
+
 ENABLE_OTEL=false
-USE_UNIFIED=false
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --enable-otel)
-            ENABLE_OTEL=true
-            shift
-            ;;
-        --unified)
-            # Run the workers via the unified entry point
-            # (`python -m dynamo.trtllm.unified_main`) so disagg goes
-            # through dynamo.common.backend / dynamo_backend_common
-            # instead of the legacy main.py / WorkerFactory dispatch.
-            USE_UNIFIED=true
-            shift
-            ;;
+        --enable-otel) ENABLE_OTEL=true; shift ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
@@ -42,26 +36,13 @@ while [[ $# -gt 0 ]]; do
             echo "  --unified            Use the unified backend entry point"
             echo "                       (python -m dynamo.trtllm.unified_main)"
             echo "  -h, --help           Show this help message"
-            echo ""
             exit 0
             ;;
-        *)
-            echo "Unknown option: $1"
-            echo "Use --help for usage information"
-            exit 1
-            ;;
+        *) echo "Unknown option: $1"; echo "Use --help for usage information"; exit 1 ;;
     esac
 done
 
-# EXIT trap installed AFTER parsing — `--help` and unknown-option exits
-# would otherwise kill the caller's process group.
 trap 'echo Cleaning up...; kill 0' EXIT
-
-if [ "$USE_UNIFIED" = true ]; then
-    WORKER_MODULE="dynamo.trtllm.unified_main"
-else
-    WORKER_MODULE="dynamo.trtllm"
-fi
 
 # Enable tracing if requested
 TRACE_ARGS=()
