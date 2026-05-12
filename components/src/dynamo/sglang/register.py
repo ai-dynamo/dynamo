@@ -15,23 +15,16 @@ from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
 
 from dynamo._core import Endpoint
 from dynamo.common.utils.output_modalities import get_output_modalities
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.llm import (
+    MediaDecoder,
+    MediaFetcher,
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    register_model,
+)
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang.args import DynamoConfig
-
-# Optional imports for frontend decoding support. The Rust bindings expose
-# MediaDecoder/MediaFetcher only when the lib/llm "media" feature is compiled
-# in; fall back gracefully on builds without them.
-MediaDecoder: type | None = None
-MediaFetcher: type | None = None
-try:
-    from dynamo.llm import MediaDecoder, MediaFetcher
-
-    MEDIA_DECODER_AVAILABLE = True
-except ImportError:
-    MediaDecoder = None
-    MediaFetcher = None
-    MEDIA_DECODER_AVAILABLE = False
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 
@@ -41,13 +34,6 @@ def _build_media_decoder_and_fetcher():
 
     Mirrors the vLLM backend pattern (components/src/dynamo/vllm/main.py).
     """
-    if not MEDIA_DECODER_AVAILABLE:
-        raise RuntimeError(
-            "--frontend-decoding requires MediaDecoder support. "
-            "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
-        )
-    assert MediaDecoder is not None and MediaFetcher is not None
-
     media_decoder = MediaDecoder()
     media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
 

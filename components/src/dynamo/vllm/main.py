@@ -29,6 +29,8 @@ from dynamo.common.utils.prometheus import (
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import (
     KvEventPublisher,
+    MediaDecoder,
+    MediaFetcher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
@@ -46,18 +48,6 @@ from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
-
-# Optional imports for frontend decoding support
-MediaDecoder: type | None = None
-MediaFetcher: type | None = None
-try:
-    from dynamo.llm import MediaDecoder, MediaFetcher
-
-    MEDIA_DECODER_AVAILABLE = True
-except ImportError:
-    MediaDecoder = None
-    MediaFetcher = None
-    MEDIA_DECODER_AVAILABLE = False
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -671,12 +661,6 @@ async def register_vllm_model(
     media_decoder = None
     media_fetcher = None
     if config.frontend_decoding:
-        if not MEDIA_DECODER_AVAILABLE:
-            raise RuntimeError(
-                "--frontend-decoding requires MediaDecoder support. "
-                "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
-            )
-        assert MediaDecoder is not None and MediaFetcher is not None
         media_decoder = MediaDecoder()
         media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
         # media_decoder.enable_video({})

@@ -8,6 +8,9 @@ from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
+from dynamo.common.configuration.groups.frontend_decoding_args import (
+    add_frontend_decoding_arg,
+)
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 from dynamo.common.constants import EmbeddingTransferMode
 
@@ -109,19 +112,9 @@ class DynamoSGLangArgGroup(ArgGroup):
             help="Enable RL training support. Registers the call_tokenizer_manager engine route for generic tokenizer_manager passthrough.",
         )
 
-        add_negatable_bool_argument(
-            g,
-            flag_name="--frontend-decoding",
-            env_var="DYN_SGL_FRONTEND_DECODING",
-            default=False,
-            help=(
-                "Enable frontend decoding of multimodal images. "
-                "When enabled, images are decoded in the Rust frontend and transferred "
-                "to the backend via NIXL RDMA. Applies to the aggregated multimodal "
-                "path (default decode worker). Incompatible with --multimodal-encode-worker, "
-                "--multimodal-worker, and --multimodal-prefill-worker."
-            ),
-        )
+        # Topology constraint: rejecting --frontend-decoding combined with the
+        # EPD multimodal flags happens in DynamoSGLangConfig.validate() below.
+        add_frontend_decoding_arg(g, env_prefix="SGL")
 
 
 class DynamoSGLangConfig(ConfigBase):
