@@ -27,11 +27,10 @@ impl NvCreateCompletionRequest {
     // put this method on the request
     // inspect the request to extract options
     pub fn response_generator(&self, request_id: String) -> DeltaGenerator {
-        let enable_logprobs = self.inner.logprobs.unwrap_or(0) > 0;
         let options = DeltaGeneratorOptions::new(
             self.inner.stream_options.as_ref(),
             self.return_tokens_as_token_ids,
-            enable_logprobs,
+            self.inner.logprobs.is_some(),
             self.nvext(),
         );
         DeltaGenerator::new(self.inner.model.clone(), options, request_id)
