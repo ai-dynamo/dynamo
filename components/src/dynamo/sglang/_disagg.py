@@ -25,8 +25,6 @@ from typing import Optional
 
 import sglang as sgl
 
-from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto
-
 # Matches the prior in-tree value. Long enough for the slowest cold-start
 # we've seen (TP8 70B with FlashInfer JIT).
 _PREFILL_WARMUP_TIMEOUT_S = 1800.0
@@ -42,6 +40,11 @@ def compute_bootstrap_address(
     Caller decides whether `None` is fatal — legacy `register.py` treats
     it as soft-skip; the unified path treats it as a fatal misconfig.
     """
+    # Deferred to function body: `NetworkAddress` lives on the
+    # sglang-version-gated `_compat` chain, and pre-commit test collection
+    # imports `_disagg` before sglang is actually installed.
+    from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto
+
     try:
         inner_tm = engine.tokenizer_manager
         bootstrap_port = getattr(
