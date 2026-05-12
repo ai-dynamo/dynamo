@@ -22,6 +22,7 @@ except ImportError:
         ToolParserManager,
     )
 
+
 from tests.parity.common import ParseResult, decode_arguments
 
 
@@ -94,11 +95,32 @@ def parse(
     # request. Some parsers (e.g. hermes-style schema-aware ones) coerce or
     # cache the schemas at __init__ from the `tools=` kwarg; passing only
     # `request.tools` skips that path.
-    wrapped_tools = (
-        [t if "function" in t else {"type": "function", "function": t} for t in tools]
-        if tools
-        else None
-    )
+    #
+    # MUST be duck-typed objects (not plain dicts): vLLM's schema-aware
+    # parsers (e.g. qwen3coder_tool_parser._get_arguments_config) gate on
+    # `hasattr(config, "type") and hasattr(config.function, "name")`, which
+    # dicts fail (`hasattr(dict, "type")` is False — dicts use `["type"]`).
+    # Passing dicts silently degrades the schema-driven type-coercion path
+    # to the raw-string fallback, producing spurious "vLLM emits raw strings"
+    # divergences in `PARSER.batch.7.*` that production code (which receives
+    # Pydantic `ChatCompletionToolsParam` instances from FastAPI) does not hit.
+    #
+    # SimpleNamespace (not the real Pydantic model) keeps this wrapper from
+    # depending on vLLM's internal protocol module path. Empirically equivalent
+    # to passing real `ChatCompletionToolsParam` for every parser wired here
+    # in vLLM 0.19.0 — the parsers that consult the schema all use the same
+    # attribute-style access (`tool.function.name`, `tool.function.parameters`).
+    def _wrap(t: dict[str, Any]) -> Any:
+        inner = t["function"] if "function" in t else t
+        return SimpleNamespace(
+            type="function",
+            function=SimpleNamespace(
+                name=inner["name"],
+                parameters=inner.get("parameters"),
+            ),
+        )
+
+    wrapped_tools = [_wrap(t) for t in tools] if tools else None
     try:
         parser_cls = ToolParserManager.get_tool_parser(key)
         # vLLM's ToolParser constructor checks `if not self.model_tokenizer:` and raises
