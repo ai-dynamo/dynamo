@@ -293,9 +293,11 @@ impl HttpService {
     }
 
     /// Like [`spawn`], but uses a caller-provided pre-bound listener. Closes the TOCTOU
-    /// port-allocation gap for tests that need to know the bound port up front; only
-    /// supported in non-TLS mode (TLS uses `axum_server::bind_rustls`, which owns its
-    /// own bind).
+    /// port-allocation gap for tests that need to know the bound port up front. Not
+    /// supported in TLS mode: TLS uses `axum_server::bind_rustls`, which owns its own
+    /// bind, so a pre-bound listener cannot be threaded through and dropping it before
+    /// `bind_rustls` would just re-open the same race. Returns an error if invoked on a
+    /// service built with `enable_tls(true)`.
     ///
     /// [`spawn`]: HttpService::spawn
     pub async fn spawn_with_listener(
@@ -308,7 +310,8 @@ impl HttpService {
     }
 
     /// Like [`run`], but serves on a caller-provided pre-bound listener instead of
-    /// binding `{host}:{port}` internally. See [`spawn_with_listener`].
+    /// binding `{host}:{port}` internally. See [`spawn_with_listener`] for the TLS
+    /// restriction.
     ///
     /// [`run`]: HttpService::run
     /// [`spawn_with_listener`]: HttpService::spawn_with_listener
@@ -336,9 +339,11 @@ impl HttpService {
 
         if self.enable_tls {
             if listener.is_some() {
-                tracing::warn!(
-                    "Pre-bound listener provided in TLS mode; ignoring and binding via axum_server::bind_rustls"
-                );
+                return Err(anyhow::anyhow!(
+                    "Pre-bound listener is not supported in TLS mode; \
+                     axum_server::bind_rustls owns its own bind. \
+                     Use run()/spawn() (which bind internally) when enable_tls is set."
+                ));
             }
             let addr: SocketAddr = address
                 .parse()
