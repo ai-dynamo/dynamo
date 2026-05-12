@@ -1734,20 +1734,20 @@ func GeneratePodSpecForComponent(
 		operatorConfig = &configv1alpha1.OperatorConfiguration{}
 	}
 
-	// Inject KV-cache transfer topology env vars for frontend components.
+	// Inject KV transfer policy env vars for frontend components.
 	// The router reads these to enforce topology-aware decode worker selection.
-	if dynamoDeployment.Spec.KvCacheTransferTopology != nil &&
+	if dynamoDeployment.Spec.KvTransferPolicy != nil &&
 		component.ComponentType == commonconsts.ComponentTypeFrontend {
-		kvt := dynamoDeployment.Spec.KvCacheTransferTopology
-		mismatchPolicy := string(kvt.MismatchPolicy)
-		if mismatchPolicy == "" {
-			mismatchPolicy = string(v1alpha1.MismatchPolicyFail)
+		kvt := dynamoDeployment.Spec.KvTransferPolicy
+		noMatchPolicy := string(kvt.NoMatchPolicy)
+		if noMatchPolicy == "" {
+			noMatchPolicy = string(v1alpha1.NoMatchPolicyFail)
 		}
-		topologyEnvs := []corev1.EnvVar{
-			{Name: commonconsts.EnvRouterKvTransferTopologyLevel, Value: string(kvt.Level)},
-			{Name: commonconsts.EnvRouterKvTransferMismatchPolicy, Value: mismatchPolicy},
+		policyEnvs := []corev1.EnvVar{
+			{Name: commonconsts.EnvRouterKvTransferDomain, Value: string(kvt.Domain)},
+			{Name: commonconsts.EnvRouterKvTransferNoMatchPolicy, Value: noMatchPolicy},
 		}
-		component.Envs = MergeEnvs(topologyEnvs, component.Envs)
+		component.Envs = MergeEnvs(policyEnvs, component.Envs)
 	}
 
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)

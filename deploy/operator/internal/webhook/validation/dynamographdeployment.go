@@ -103,8 +103,8 @@ func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admissio
 		return nil, err
 	}
 
-	// Validate KV-cache transfer topology
-	if err := v.validateKvCacheTransferTopology(); err != nil {
+	// Validate KV transfer policy
+	if err := v.validateKvTransferPolicy(); err != nil {
 		return nil, err
 	}
 
@@ -911,36 +911,36 @@ func (v *DynamoGraphDeploymentValidator) validateNoRestartDuringRollingUpdate(ol
 	return nil
 }
 
-// validateKvCacheTransferTopology validates the spec.kvCacheTransferTopology
-// configuration when set. In this phase only the `label` path is supported
+// validateKvTransferPolicy validates the spec.kvTransferPolicy configuration
+// when set. In this phase only the `labelKey` path is supported
 // (clusterTopologyName is added in a future PR).
-func (v *DynamoGraphDeploymentValidator) validateKvCacheTransferTopology() error {
-	kvt := v.deployment.Spec.KvCacheTransferTopology
+func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy() error {
+	kvt := v.deployment.Spec.KvTransferPolicy
 	if kvt == nil {
 		return nil
 	}
 
 	var errs []error
 
-	// label is required (only supported path in this phase)
-	if kvt.Label == "" {
-		errs = append(errs, fmt.Errorf("spec.kvCacheTransferTopology.label is required"))
+	// labelKey is required (only supported path in this phase)
+	if kvt.LabelKey == "" {
+		errs = append(errs, fmt.Errorf("spec.kvTransferPolicy.labelKey is required"))
 	}
 
-	// level is required and must be a valid topology domain format
-	if kvt.Level == "" {
-		errs = append(errs, fmt.Errorf("spec.kvCacheTransferTopology.level is required"))
-	} else if !nvidiacomv1alpha1.IsValidTopologyDomainFormat(kvt.Level) {
-		errs = append(errs, fmt.Errorf("spec.kvCacheTransferTopology.level %q is not a valid topology domain; "+
-			"must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", kvt.Level))
+	// domain is required and must be a valid topology domain format
+	if kvt.Domain == "" {
+		errs = append(errs, fmt.Errorf("spec.kvTransferPolicy.domain is required"))
+	} else if !nvidiacomv1alpha1.IsValidTopologyDomainFormat(kvt.Domain) {
+		errs = append(errs, fmt.Errorf("spec.kvTransferPolicy.domain %q is not a valid topology domain; "+
+			"must match ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$", kvt.Domain))
 	}
 
-	// mismatchPolicy must be a valid enum value when explicitly set
-	if kvt.MismatchPolicy != "" &&
-		kvt.MismatchPolicy != nvidiacomv1alpha1.MismatchPolicyFail &&
-		kvt.MismatchPolicy != nvidiacomv1alpha1.MismatchPolicyFallback {
-		errs = append(errs, fmt.Errorf("spec.kvCacheTransferTopology.mismatchPolicy %q is invalid; "+
-			"must be \"fail\" or \"fallback\"", kvt.MismatchPolicy))
+	// noMatchPolicy must be a valid enum value when explicitly set
+	if kvt.NoMatchPolicy != "" &&
+		kvt.NoMatchPolicy != nvidiacomv1alpha1.NoMatchPolicyFail &&
+		kvt.NoMatchPolicy != nvidiacomv1alpha1.NoMatchPolicyFallback {
+		errs = append(errs, fmt.Errorf("spec.kvTransferPolicy.noMatchPolicy %q is invalid; "+
+			"must be \"fail\" or \"fallback\"", kvt.NoMatchPolicy))
 	}
 
 	return errors.Join(errs...)
