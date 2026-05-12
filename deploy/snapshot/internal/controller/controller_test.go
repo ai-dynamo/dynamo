@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,12 +88,21 @@ func makePod(name, namespace, nodeName string, phase corev1.PodPhase, ready bool
 			Status: corev1.ConditionTrue,
 		})
 	}
+	// The snapshot contract requires the target-containers annotation on
+	// every checkpoint/restore pod; stamp it here so individual cases do
+	// not have to repeat themselves.
+	merged := map[string]string{
+		snapshotprotocol.TargetContainersAnnotation: "main",
+	}
+	for k, v := range annotations {
+		merged[k] = v
+	}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   namespace,
 			Labels:      labels,
-			Annotations: annotations,
+			Annotations: merged,
 		},
 		Spec: corev1.PodSpec{
 			NodeName: nodeName,
@@ -105,6 +115,177 @@ func makePod(name, namespace, nodeName string, phase corev1.PodPhase, ready bool
 			Conditions: conditions,
 		},
 	}
+}
+
+func TestCheckpointLocationsFromPod(t *testing.T) {
+	pod := makePod(
+		"test-pod",
+		"default",
+		testNodeName,
+		corev1.PodRunning,
+		true,
+		nil,
+		map[string]string{
+			snapshotprotocol.CheckpointArtifactVersionAnnotation: "2",
+		},
+	)
+
+	t.Run("agent mount uses the agent-visible path", func(t *testing.T) {
+		w := makeTestController(t)
+		w.config.Storage.BasePath = "/checkpoints"
+
+		locations, err := w.checkpointLocationsFromPod(pod, "abc123", 0)
+		if err != nil {
+			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
+		}
+
+		expected := "/checkpoints/abc123/versions/2"
+		if locations.HostPath != expected {
+			t.Fatalf("HostPath = %q, want %q", locations.HostPath, expected)
+		}
+		if locations.ContainerPath != expected {
+			t.Fatalf("ContainerPath = %q, want %q", locations.ContainerPath, expected)
+		}
+	})
+
+	t.Run("pod mount uses the target container root from host proc", func(t *testing.T) {
+		w := makeTestController(t)
+		w.config.Storage.BasePath = "/checkpoints"
+		w.config.Storage.AccessMode = types.StorageAccessModePodMount
+
+		locations, err := w.checkpointLocationsFromPod(pod, "abc123", 1234)
+		if err != nil {
+			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
+		}
+
+		expectedContainerPath := "/checkpoints/abc123/versions/2"
+		expectedHostPath := filepath.Join(snapshotruntime.HostProcPath, "1234", "root", "checkpoints/abc123/versions/2")
+		if locations.HostPath != expectedHostPath {
+			t.Fatalf("HostPath = %q, want %q", locations.HostPath, expectedHostPath)
+		}
+		if locations.ContainerPath != expectedContainerPath {
+			t.Fatalf("ContainerPath = %q, want %q", locations.ContainerPath, expectedContainerPath)
+		}
+	})
+
+	t.Run("pod storage annotation overrides agent base path", func(t *testing.T) {
+		annotatedPod := pod.DeepCopy()
+		annotatedPod.Annotations[snapshotprotocol.CheckpointStorageBasePathAnnotation] = "/pod-checkpoints/"
+
+		w := makeTestController(t)
+		w.config.Storage.BasePath = "/agent-checkpoints"
+
+		locations, err := w.checkpointLocationsFromPod(annotatedPod, "abc123", 0)
+		if err != nil {
+			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
+		}
+
+		expected := "/pod-checkpoints/abc123/versions/2"
+		if locations.HostPath != expected {
+			t.Fatalf("HostPath = %q, want %q", locations.HostPath, expected)
+		}
+		if locations.ContainerPath != expected {
+			t.Fatalf("ContainerPath = %q, want %q", locations.ContainerPath, expected)
+		}
+	})
+
+	t.Run("blank pod storage annotation falls back to agent base path", func(t *testing.T) {
+		annotatedPod := pod.DeepCopy()
+		annotatedPod.Annotations[snapshotprotocol.CheckpointStorageBasePathAnnotation] = "   "
+
+		w := makeTestController(t)
+		w.config.Storage.BasePath = "/agent-checkpoints"
+
+		locations, err := w.checkpointLocationsFromPod(annotatedPod, "abc123", 0)
+		if err != nil {
+			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
+		}
+
+		expected := "/agent-checkpoints/abc123/versions/2"
+		if locations.HostPath != expected {
+			t.Fatalf("HostPath = %q, want %q", locations.HostPath, expected)
+		}
+		if locations.ContainerPath != expected {
+			t.Fatalf("ContainerPath = %q, want %q", locations.ContainerPath, expected)
+		}
+	})
+
+	t.Run("missing base path returns an error", func(t *testing.T) {
+		w := makeTestController(t)
+		w.config.Storage.BasePath = ""
+
+		if _, err := w.checkpointLocationsFromPod(pod, "abc123", 0); err == nil {
+			t.Fatal("expected error for missing base path")
+		}
+	})
+
+	t.Run("non-clean base path returns an error", func(t *testing.T) {
+		annotatedPod := pod.DeepCopy()
+		annotatedPod.Annotations[snapshotprotocol.CheckpointStorageBasePathAnnotation] = "/checkpoints/../escape"
+
+		w := makeTestController(t)
+		w.config.Storage.BasePath = "/agent-checkpoints"
+		w.config.Storage.AccessMode = types.StorageAccessModePodMount
+
+		_, err := w.checkpointLocationsFromPod(annotatedPod, "abc123", 1234)
+		if err == nil {
+			t.Fatal("expected error for non-clean checkpoint location")
+		}
+		if !strings.Contains(err.Error(), "absolute, clean") {
+			t.Fatalf("expected clean-path validation error, got: %v", err)
+		}
+	})
+
+	t.Run("pod mount requires a host PID", func(t *testing.T) {
+		w := makeTestController(t)
+		w.config.Storage.BasePath = "/checkpoints"
+		w.config.Storage.AccessMode = types.StorageAccessModePodMount
+
+		if _, err := w.checkpointLocationsFromPod(pod, "abc123", 0); err == nil {
+			t.Fatal("expected error for missing host PID")
+		}
+	})
+}
+
+func TestRestoreCheckpointReady(t *testing.T) {
+	w := makeTestController(t)
+	log := testr.New(t)
+
+	t.Run("existing directory is ready", func(t *testing.T) {
+		dir := t.TempDir()
+		ready, err := w.restoreCheckpointReady(log, "default/test-pod", "abc123", dir)
+		if err != nil {
+			t.Fatalf("restoreCheckpointReady() error = %v", err)
+		}
+		if !ready {
+			t.Fatal("expected checkpoint directory to be ready")
+		}
+	})
+
+	t.Run("missing directory is not ready", func(t *testing.T) {
+		ready, err := w.restoreCheckpointReady(log, "default/test-pod", "abc123", filepath.Join(t.TempDir(), "missing"))
+		if err != nil {
+			t.Fatalf("restoreCheckpointReady() error = %v", err)
+		}
+		if ready {
+			t.Fatal("expected missing checkpoint directory to be not ready")
+		}
+	})
+
+	t.Run("file is rejected", func(t *testing.T) {
+		filePath := filepath.Join(t.TempDir(), "checkpoint")
+		if err := os.WriteFile(filePath, []byte("not a directory"), 0o600); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+
+		_, err := w.restoreCheckpointReady(log, "default/test-pod", "abc123", filePath)
+		if err == nil {
+			t.Fatal("expected file checkpoint location to be rejected")
+		}
+		if !strings.Contains(err.Error(), "not a directory") {
+			t.Fatalf("expected not-a-directory error, got: %v", err)
+		}
+	})
 }
 
 func TestReconcileCheckpointPod(t *testing.T) {
@@ -418,9 +599,12 @@ func TestReconcileRestorePod(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			labels := map[string]string{
-				snapshotprotocol.RestoreTargetLabel: "true",
-			}
+			// Restore pods are identified by snapshot-agent as
+			// (CheckpointIDLabel present, CheckpointSourceLabel absent),
+			// so the restore informer's label selector does the filtering.
+			// The hash-missing case deliberately omits the label to exercise
+			// the early-return branch in reconcileRestorePod.
+			labels := map[string]string{}
 			if tc.hash != "" {
 				labels[snapshotprotocol.CheckpointIDLabel] = tc.hash
 			}
@@ -429,8 +613,8 @@ func TestReconcileRestorePod(t *testing.T) {
 			var annotations map[string]string
 			if tc.annotationStatus != "" {
 				annotations = map[string]string{
-					snapshotprotocol.RestoreStatusAnnotation:      tc.annotationStatus,
-					snapshotprotocol.RestoreContainerIDAnnotation: tc.annotationContainerID,
+					snapshotprotocol.RestoreStatusAnnotationPrefix + "main":      tc.annotationStatus,
+					snapshotprotocol.RestoreContainerIDAnnotationPrefix + "main": tc.annotationContainerID,
 				}
 			}
 
@@ -451,7 +635,7 @@ func TestReconcileRestorePod(t *testing.T) {
 			ctx := context.Background()
 
 			if tc.preSeed {
-				w.inFlight["default/test-pod/"+testContainerID] = struct{}{}
+				w.inFlight["default/test-pod/main/"+testContainerID] = struct{}{}
 			}
 
 			w.reconcileRestorePod(ctx, pod)
@@ -470,6 +654,36 @@ func TestReconcileRestorePod(t *testing.T) {
 				time.Sleep(50 * time.Millisecond)
 			}
 		})
+	}
+}
+
+func TestReconcileRestorePodRejectsTargetNameThatCannotFitStatusAnnotation(t *testing.T) {
+	checkpointID := "abc123"
+	containerName := "restore-target-with-long-name-123456"
+	w := makeTestController(t)
+	dir := filepath.Join(w.config.Storage.BasePath, checkpointID, "versions", snapshotprotocol.DefaultCheckpointArtifactVersion)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("failed to create checkpoint dir: %v", err)
+	}
+
+	pod := makePod(
+		"test-pod",
+		"default",
+		testNodeName,
+		corev1.PodRunning,
+		false,
+		map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID},
+		map[string]string{snapshotprotocol.TargetContainersAnnotation: containerName},
+	)
+	pod.Spec.Containers[0].Name = containerName
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:        containerName,
+		ContainerID: "containerd://" + testContainerID,
+	}}
+
+	w.reconcileRestorePod(context.Background(), pod)
+	if len(w.inFlight) != 0 {
+		t.Fatalf("expected restore not to start for overlong annotation key, got inFlight=%v", w.inFlight)
 	}
 }
 
@@ -516,7 +730,7 @@ func TestRunCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testi
 		stopCh: make(chan struct{}),
 	}
 
-	err := w.runCheckpoint(context.Background(), pod, job, "abc123", filepath.Join(t.TempDir(), "abc123"), "default/test-pod", time.Now())
+	err := w.runCheckpoint(context.Background(), pod, job, "abc123", "main", "default/test-pod", time.Now())
 	if err == nil {
 		t.Fatal("expected terminal checkpoint status update to fail")
 	}

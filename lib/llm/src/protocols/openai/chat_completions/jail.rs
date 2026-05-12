@@ -12,6 +12,7 @@ use dynamo_parsers::tool_calling::json::try_tool_call_parse_basic_json;
 use dynamo_parsers::tool_calling::parsers::get_tool_parser_map;
 use dynamo_parsers::tool_calling::{
     detect_tool_call_start, find_tool_call_end_position, try_tool_call_parse_aggregate,
+    try_tool_call_parse_aggregate_finalize,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
@@ -122,7 +123,6 @@ fn create_choice_stream(
     content: &str,
     tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
     finish_reason: Option<FinishReason>,
-    stop_reason: Option<dynamo_protocols::types::StopReason>,
     logprobs: Option<ChatChoiceLogprobs>,
 ) -> ChatChoiceStream {
     #[allow(deprecated)]
@@ -139,7 +139,6 @@ fn create_choice_stream(
             reasoning_content: None,
         },
         finish_reason,
-        stop_reason,
         logprobs,
     }
 }
@@ -227,7 +226,6 @@ impl ChoiceJailState {
                             &prefix,
                             None,
                             choice.finish_reason,
-                            None,
                             choice.logprobs.clone(),
                         );
                         emissions.push(ChoiceEmission::PassThrough(prefix_choice));
@@ -250,6 +248,7 @@ impl ChoiceJailState {
                                 jailed_part,
                                 choice,
                                 self.emitted_tool_calls_count,
+                                false, // streaming early-exit, no EOF recovery
                             )
                             .await;
 
@@ -277,7 +276,6 @@ impl ChoiceJailState {
                                     trailing_part,
                                     None,
                                     choice.finish_reason,
-                                    None,
                                     choice.logprobs.clone(),
                                 );
                                 emissions.push(ChoiceEmission::Trailing(trailing_choice));
@@ -308,7 +306,6 @@ impl ChoiceJailState {
                             &prefix,
                             None,
                             choice.finish_reason,
-                            None,
                             choice.logprobs.clone(),
                         );
                         emissions.push(ChoiceEmission::PassThrough(prefix_choice));
@@ -350,7 +347,6 @@ impl ChoiceJailState {
                                 &content,
                                 None,
                                 choice.finish_reason,
-                                None,
                                 choice.logprobs.clone(),
                             );
                             emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
@@ -382,6 +378,7 @@ impl ChoiceJailState {
                         &jailed_owned,
                         choice,
                         self.emitted_tool_calls_count,
+                        false, // streaming unjail, no EOF recovery
                     )
                     .await;
                 unjailed_choice.logprobs = jail_logprobs;
@@ -412,7 +409,6 @@ impl ChoiceJailState {
                             &trailing_owned,
                             None,
                             choice.finish_reason,
-                            None,
                             choice.logprobs.clone(),
                         );
                         emissions.push(ChoiceEmission::Trailing(trailing_choice));
@@ -435,7 +431,6 @@ impl ChoiceJailState {
                 &self.accumulated_content,
                 None,
                 self.stream_finish_reason, // For the accumulated content, assign the original stream finish reason, otherwise it will get lost
-                None,
                 self.accumulated_logprobs.clone(),
             );
 
@@ -445,6 +440,7 @@ impl ChoiceJailState {
                     &self.accumulated_content,
                     &dummy_choice,
                     self.emitted_tool_calls_count,
+                    true, // finalize: enable EOF recovery for missing-end-token / truncated-JSON
                 )
                 .await;
             // Attach the full accumulated logprobs to the final choice
@@ -662,7 +658,6 @@ impl JailedStream {
                                     index: choice.index,
                                     delta: choice.delta.clone(),
                                     finish_reason: choice.finish_reason,
-                                    stop_reason: choice.stop_reason.clone(),
                                     logprobs: choice.logprobs.clone(),
                                 };
                                 all_emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
@@ -914,24 +909,38 @@ impl JailedStream {
         }
     }
 
-    /// Parse tool calls from accumulated content and create choice
+    /// Parse tool calls from accumulated content and create choice.
+    ///
+    /// `is_finalize` selects the recovery-enabled aggregator (missing
+    /// outer end-token / truncated JSON). Streaming early-exit callers pass
+    /// `false`; the stream-end finalize path passes `true`.
     async fn create_tool_call_choice(
         &self,
         choice_index: u32,
         accumulated_content: &str,
         base_choice: &ChatChoiceStream,
         tool_call_offset: usize,
+        is_finalize: bool,
     ) -> ChatChoiceStream {
         match &self.jail_mode {
             JailMode::MarkerBased => {
                 // Traditional marker-based tool call parsing
                 let tools_slice = self.tool_definitions.as_deref();
-                let parse_result = try_tool_call_parse_aggregate(
-                    accumulated_content,
-                    self.tool_call_parser.as_deref(),
-                    tools_slice,
-                )
-                .await;
+                let parse_result = if is_finalize {
+                    try_tool_call_parse_aggregate_finalize(
+                        accumulated_content,
+                        self.tool_call_parser.as_deref(),
+                        tools_slice,
+                    )
+                    .await
+                } else {
+                    try_tool_call_parse_aggregate(
+                        accumulated_content,
+                        self.tool_call_parser.as_deref(),
+                        tools_slice,
+                    )
+                    .await
+                };
                 match parse_result {
                     Ok((tool_calls, normal_text)) if !tool_calls.is_empty() => {
                         // If a named tool filter is set (tool_choice=named + parser path), reject
@@ -962,7 +971,6 @@ impl JailedStream {
                                 normal_text.as_deref().unwrap_or(""),
                                 None,
                                 base_choice.finish_reason,
-                                base_choice.stop_reason.clone(),
                                 base_choice.logprobs.clone(),
                             );
                         }
@@ -986,7 +994,6 @@ impl JailedStream {
                             Some(Role::Assistant),
                             normal_text.as_deref().unwrap_or(""),
                             Some(tool_call_chunks),
-                            None,
                             None,
                             base_choice.logprobs.clone(),
                         )
@@ -1015,7 +1022,6 @@ impl JailedStream {
                             content,
                             None,
                             base_choice.finish_reason,
-                            base_choice.stop_reason.clone(),
                             base_choice.logprobs.clone(),
                         )
                     }
@@ -1034,7 +1040,6 @@ impl JailedStream {
                             "",
                             None,
                             base_choice.finish_reason,
-                            base_choice.stop_reason.clone(),
                             base_choice.logprobs.clone(),
                         )
                     }
@@ -1153,7 +1158,6 @@ impl JailedStream {
                         "",
                         Some(tool_call_chunks),
                         base_choice.finish_reason,
-                        None,
                         base_choice.logprobs.clone(),
                     )
                 } else if filter_dropped_all {
@@ -1165,7 +1169,6 @@ impl JailedStream {
                         "",
                         None,
                         base_choice.finish_reason,
-                        base_choice.stop_reason.clone(),
                         base_choice.logprobs.clone(),
                     )
                 } else {
@@ -1176,7 +1179,6 @@ impl JailedStream {
                         accumulated_content,
                         None,
                         base_choice.finish_reason,
-                        base_choice.stop_reason.clone(),
                         base_choice.logprobs.clone(),
                     )
                 }
@@ -1550,7 +1552,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 
@@ -1619,6 +1620,7 @@ mod tests {
     }
 
     /// Helper: build a single-choice stream chunk with text content and logprobs
+    #[allow(deprecated)]
     fn text_chunk_with_logprobs(text: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
         let logprobs = ChatChoiceLogprobs {
             content: Some(
@@ -1650,7 +1652,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: Some(logprobs),
         };
 

@@ -10,7 +10,8 @@ use dynamo_kv_router::indexer::{
     METRIC_STATUS_OK, METRIC_STATUS_PARENT_NOT_FOUND, METRIC_WARNING_DUPLICATE_STORE,
 };
 use dynamo_kv_router::protocols::{
-    KvCacheEvent, KvCacheEventData, LocalBlockHash, RouterEvent, WorkerId, WorkerWithDpRank,
+    KvCacheEvent, KvCacheEventData, LocalBlockHash, RouterEvent, StorageTier, WorkerId,
+    WorkerWithDpRank,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -188,6 +189,20 @@ impl KvCacheEventSink for TestKvEventSink {
     fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
         self.event_tx
             .send(RouterEvent::new(self.worker_id, event))
+            .map_err(|_| anyhow!("router test event channel closed"))
+    }
+
+    fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> anyhow::Result<()> {
+        self.event_tx
+            .send(RouterEvent::with_storage_tier(
+                self.worker_id,
+                event,
+                storage_tier,
+            ))
             .map_err(|_| anyhow!("router test event channel closed"))
     }
 }

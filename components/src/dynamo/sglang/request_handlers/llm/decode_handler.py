@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any, AsyncGenerator, Dict, Optional
 
@@ -17,6 +18,26 @@ from dynamo.sglang._compat import filter_supported_async_generate_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+
+# Escape hatch: set to "1" (or any truthy value) to allow top_logprobs_num >= 1.
+# Default-off because SGLang's tokenizer manager detokenizes top-k tokens
+# per-position serially (O(N) per generated token), causing severe latency
+# degradation. Flip once upstream lands batched top-logprob detokenization:
+# https://github.com/sgl-project/sglang/pull/24447
+_ALLOW_TOP_LOGPROBS_ENV = "DYN_SGL_ALLOW_TOP_LOGPROBS"
+
+_TOP_LOGPROBS_UNSUPPORTED_MSG = (
+    "Dynamo's SGLang backend does not currently support logprobs >= 1 due to "
+    "an O(N) per-position detokenization in the upstream sglang tokenizer "
+    "manager. Use logprobs=0 for chosen-token logprobs, or set "
+    "DYN_SGL_ALLOW_TOP_LOGPROBS=1 to override at your own risk. "
+    "Track the upstream fix at https://github.com/sgl-project/sglang/pull/24447."
+)
+
+
+def _top_logprobs_allowed() -> bool:
+    """Return True if the DYN_SGL_ALLOW_TOP_LOGPROBS escape hatch is enabled."""
+    return os.environ.get(_ALLOW_TOP_LOGPROBS_ENV, "").lower() not in ("", "0", "false")
 
 
 def _extract_media_urls(mm_data: Dict[str, Any], media_key: str) -> list[str] | None:
@@ -38,6 +59,90 @@ def _extract_media_urls(mm_data: Dict[str, Any], media_key: str) -> list[str] | 
                 urls.append(url)
 
     return urls or None
+
+
+def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
+    nvext = request.get("nvext")
+    if not isinstance(nvext, dict):
+        return False
+    extra_fields = nvext.get("extra_fields")
+    if not isinstance(extra_fields, list):
+        return False
+    return field in extra_fields
+
+
+def _user_stop_token_ids(request: Dict[str, Any]) -> set[int]:
+    stop_conditions = request.get("stop_conditions")
+    if isinstance(stop_conditions, dict):
+        return {
+            token_id
+            for token_id in (stop_conditions.get("stop_token_ids") or [])
+            if isinstance(token_id, int) and not isinstance(token_id, bool)
+        }
+
+    stop = request.get("stop")
+    if isinstance(stop, list) and all(
+        isinstance(item, int) and not isinstance(item, bool) for item in stop
+    ):
+        return set(stop)
+
+    return {
+        token_id
+        for token_id in (request.get("stop_token_ids") or [])
+        if isinstance(token_id, int) and not isinstance(token_id, bool)
+    }
+
+
+def _openai_stop_sampling_params(request: Dict[str, Any]) -> Dict[str, Any]:
+    stop = request.get("stop")
+    if isinstance(stop, str):
+        return {"stop": stop}
+    if isinstance(stop, list):
+        if stop and all(
+            isinstance(item, int) and not isinstance(item, bool) for item in stop
+        ):
+            return {"stop_token_ids": stop}
+        if stop and all(isinstance(item, str) for item in stop):
+            return {"stop": stop}
+
+    stop_token_ids = [
+        token_id
+        for token_id in (request.get("stop_token_ids") or [])
+        if isinstance(token_id, int) and not isinstance(token_id, bool)
+    ]
+    if stop_token_ids:
+        return {"stop_token_ids": stop_token_ids}
+    return {}
+
+
+def _extract_sglang_stop_reason(
+    finish_reason: Dict[str, Any] | None,
+    user_stop_token_ids: set[int] | None = None,
+) -> Any | None:
+    """Extract SGLang's matched stop value for Dynamo's stop_reason field."""
+
+    if not finish_reason:
+        return None
+
+    matched = finish_reason.get("matched")
+    if isinstance(matched, bool):
+        return None
+    if isinstance(matched, str):
+        return matched
+    if isinstance(matched, int):
+        if user_stop_token_ids is not None and matched not in user_stop_token_ids:
+            return None
+        return matched
+    if isinstance(matched, list) and all(
+        isinstance(item, int) and not isinstance(item, bool) for item in matched
+    ):
+        if user_stop_token_ids is not None and any(
+            item not in user_stop_token_ids for item in matched
+        ):
+            return None
+        return matched
+
+    return None
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
@@ -143,6 +248,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "top_k": request.get("top_k"),
                 "n": request.get("n"),
                 "max_new_tokens": request.get("max_tokens"),
+                **_openai_stop_sampling_params(request),
                 **self._get_guided_decoding_params(request.get("guided_decoding")),
             }
 
@@ -181,54 +287,58 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if not output_options:
             return kwargs
 
-        logprobs_value = output_options.get("logprobs")
-        if logprobs_value is not None:
+        allow_top = _top_logprobs_allowed()
+
+        def _parse(name: str, value: Any) -> Optional[int]:
             try:
-                parsed = int(logprobs_value)
-                if parsed < 0:
-                    logging.warning(
-                        f"Invalid logprobs value: {logprobs_value} "
-                        "(must be non-negative), ignoring"
-                    )
-                else:
-                    kwargs["return_logprob"] = True
-                    kwargs["top_logprobs_num"] = parsed
+                parsed = int(value)
             except (ValueError, TypeError):
                 logging.warning(
-                    f"Invalid logprobs value: {logprobs_value} "
-                    "(must be integer), ignoring"
+                    f"Invalid {name} value: {value} (must be integer), ignoring"
                 )
+                return None
+            if parsed < 0:
+                logging.warning(
+                    f"Invalid {name} value: {value} (must be non-negative), ignoring"
+                )
+                return None
+            if parsed >= 1 and not allow_top:
+                raise ValueError(_TOP_LOGPROBS_UNSUPPORTED_MSG)
+            return parsed
+
+        logprobs_value = output_options.get("logprobs")
+        if logprobs_value is not None:
+            parsed = _parse("logprobs", logprobs_value)
+            if parsed is not None:
+                kwargs["return_logprob"] = True
+                kwargs["top_logprobs_num"] = parsed
 
         prompt_logprobs_value = output_options.get("prompt_logprobs")
         if prompt_logprobs_value is not None:
-            try:
-                parsed = int(prompt_logprobs_value)
-                if parsed < 0:
-                    logging.warning(
-                        f"Invalid prompt_logprobs value: {prompt_logprobs_value} "
-                        "(must be non-negative), ignoring"
-                    )
-                else:
-                    kwargs["return_logprob"] = True
-                    # SGLang has a single top_logprobs_num for both prompt
-                    # and output tokens, so take the max of the two.
-                    kwargs["top_logprobs_num"] = max(
-                        kwargs.get("top_logprobs_num", 0), parsed
-                    )
-                    # logprob_start_len=0 computes from prompt start;
-                    # omitting it (or -1) computes output tokens only.
-                    kwargs["logprob_start_len"] = 0
-            except (ValueError, TypeError):
-                logging.warning(
-                    f"Invalid prompt_logprobs value: {prompt_logprobs_value} "
-                    "(must be integer), ignoring"
+            parsed = _parse("prompt_logprobs", prompt_logprobs_value)
+            if parsed is not None:
+                kwargs["return_logprob"] = True
+                # SGLang has a single top_logprobs_num for both prompt
+                # and output tokens, so take the max of the two.
+                kwargs["top_logprobs_num"] = max(
+                    kwargs.get("top_logprobs_num", 0), parsed
                 )
+                # logprob_start_len=0 computes from prompt start;
+                # omitting it (or -1) computes output tokens only.
+                kwargs["logprob_start_len"] = 0
+
+        # Belt-and-suspenders: if return_logprob was requested and the gate is
+        # not open, pin top_logprobs_num=0 so no future code path can flip it on.
+        if kwargs.get("return_logprob") and not allow_top:
+            kwargs["top_logprobs_num"] = 0
 
         return kwargs
 
     @staticmethod
     def _extract_logprobs(
-        meta_info: Dict[str, Any], num_output_logprobs_so_far: int
+        meta_info: Dict[str, Any],
+        num_output_logprobs_so_far: int,
+        return_tokens_as_token_ids: bool = False,
     ) -> tuple:
         """Extract logprobs from SGLang meta_info for new tokens.
 
@@ -272,11 +382,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         continue
                     position_list = []
                     for rank_idx, entry in enumerate(position_entries):
+                        tok_id = entry[1]
+                        token_str = (
+                            f"token_id:{tok_id}"
+                            if return_tokens_as_token_ids
+                            else entry[2]
+                        )
                         position_list.append(
                             {
                                 "rank": rank_idx + 1,
-                                "token_id": entry[1],
-                                "token": entry[2],
+                                "token_id": tok_id,
+                                "token": token_str,
                                 "logprob": float(entry[0]),
                             }
                         )
@@ -306,6 +422,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         input_param = self._get_input_param(request)
         priority = (request.get("routing") or {}).get("priority")
         logprob_kwargs = self._build_logprob_kwargs(request)
+
+        output_options = request.get("output_options", {})
+        return_tokens_as_token_ids = bool(
+            output_options.get("return_tokens_as_token_ids")
+        )
+        user_stop_token_ids = _user_stop_token_ids(request)
 
         lora_path = self._resolve_lora(request)
         if lora_path:
@@ -351,10 +473,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
 
             if not self.use_sglang_tokenizer:
-                async for out in self._process_token_stream(decode, context):
+                async for out in self._process_token_stream(
+                    decode,
+                    context,
+                    return_tokens_as_token_ids,
+                    user_stop_token_ids=user_stop_token_ids,
+                ):
                     yield out
             else:
-                async for out in self._process_text_stream(decode, context):
+                async for out in self._process_text_stream(
+                    decode,
+                    context,
+                    request=request,
+                    user_stop_token_ids=user_stop_token_ids,
+                ):
                     yield out
         else:
             # Extract image/video URLs for multimodal requests. SGLang's mm_data_processor
@@ -385,16 +517,28 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **self._priority_kwargs(priority),
             )
             if not self.use_sglang_tokenizer:
-                async for out in self._process_token_stream(agg, context):
+                async for out in self._process_token_stream(
+                    agg,
+                    context,
+                    return_tokens_as_token_ids,
+                    user_stop_token_ids=user_stop_token_ids,
+                ):
                     yield out
             else:
-                async for out in self._process_text_stream(agg, context):
+                async for out in self._process_text_stream(
+                    agg,
+                    context,
+                    request=request,
+                    user_stop_token_ids=user_stop_token_ids,
+                ):
                     yield out
 
     async def _process_token_stream(
         self,
         stream_source: AsyncGenerator[Dict[str, Any], None],
         context: Context,
+        return_tokens_as_token_ids: bool = False,
+        user_stop_token_ids: set[int] | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -438,6 +582,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     out["finish_reason"] = normalize_finish_reason(
                         finish_reason["type"]
                     )
+                    stop_reason = _extract_sglang_stop_reason(
+                        finish_reason, user_stop_token_ids
+                    )
+                    if stop_reason is not None:
+                        out["stop_reason"] = stop_reason
 
                 # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
@@ -457,7 +606,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     top_logprobs,
                     next_logprobs_total,
                 ) = self._extract_logprobs(
-                    res["meta_info"], output_logprobs_per_choice.get(output_idx, 0)
+                    res["meta_info"],
+                    output_logprobs_per_choice.get(output_idx, 0),
+                    return_tokens_as_token_ids=return_tokens_as_token_ids,
                 )
                 output_logprobs_per_choice[output_idx] = next_logprobs_total
                 if log_probs is not None:
@@ -493,6 +644,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self,
         stream_source: AsyncGenerator[Dict[str, Any], None],
         context: Context,
+        request: Dict[str, Any] | None = None,
+        user_stop_token_ids: set[int] | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process text-based stream output in OpenAI format.
 
@@ -503,6 +656,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Yields:
             OpenAI-formatted chat completion chunk dicts.
         """
+        request = request or {}
         # SGLang text chunks are cumulative per choice. Keep independent text
         # offsets so interleaved n>1 choices do not compute deltas from each
         # other's previous text.
@@ -544,6 +698,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "delta": {"role": "assistant", "content": delta},
                     "finish_reason": finish_reason_type,
                 }
+                stop_reason = _extract_sglang_stop_reason(
+                    finish_reason, user_stop_token_ids
+                )
 
                 response = {
                     "id": res["meta_info"]["id"],
@@ -552,13 +709,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "model": self.config.server_args.served_model_name,
                     "object": "chat.completion.chunk",
                 }
+                response_nvext: dict[str, Any] = {}
+                if stop_reason is not None and _nvext_extra_field_requested(
+                    request, "stop_reason"
+                ):
+                    response_nvext["stop_reason"] = stop_reason
                 routed_experts = res["meta_info"].get("routed_experts")
                 if routed_experts is not None:
                     # Base64-encode tensor bytes to match sglang's output format.
                     routed_experts = pybase64.b64encode(
                         routed_experts.numpy().tobytes()
                     ).decode("utf-8")
-                    response["nvext"] = {"routed_experts": routed_experts}
+                    response_nvext["routed_experts"] = routed_experts
+                if response_nvext:
+                    response["nvext"] = response_nvext
                 if not context.is_stopped():
                     yield response
                 text_counts_per_choice[index] = next_count

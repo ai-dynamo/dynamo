@@ -292,7 +292,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {% if target not in ("dev", "local-dev") %}
 # Install dynamo, NIXL, and dynamo-specific dependencies
 ARG ENABLE_KVBM
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
@@ -316,7 +316,7 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
 # Install NIXL wheel only (pre-built C++ binary, not buildable from source).
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
     if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
@@ -327,7 +327,7 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
 {% if device == "cuda" %}
 # Install gpu_memory_service wheel if enabled (all targets)
 ARG ENABLE_GPU_MEMORY_SERVICE
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
@@ -348,12 +348,22 @@ RUN if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
-    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} && \
+    # Remove any cupy variant that may already be in the inherited venv
+    # (the framework base may install cupy-cuda12x, pyproject.toml also pins
+    # cupy-cuda12x). cupy's `_detect_duplicate_installation` ERRORS at import
+    # if both cu12 and cu13 variants are present, so we install exactly one
+    # variant matching the build target's CUDA major version. Discover the
+    # installed variants instead of hardcoding so future cupy versions
+    # (cupy-cuda14x, etc.) are covered without further edits.
+    (uv pip freeze 2>/dev/null | awk -F= '/^cupy-/{print $1}' | xargs -r uv pip uninstall 2>/dev/null || true) && \
     uv pip install \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.vllm.txt \
-        --requirement /tmp/requirements.benchmark.txt
+        --requirement /tmp/requirements.benchmark.txt \
+        cupy-cuda${CUDA_VERSION_MAJOR}x
 
 # Copy tests, deploy, lib, and the vllm/common/mocker component subtrees for CI.
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>

@@ -32,6 +32,15 @@ pub struct JsonParserConfig {
     /// `tool_call_end_tokens` are ignored.
     #[serde(default)]
     pub bare_json_mode: bool,
+
+    /// Allow recovery when the outer end-token is missing (max_tokens / EOS
+    /// truncation). Streaming jails MUST leave this `false` — otherwise the
+    /// parser claims "complete tool call" before the end-token has actually
+    /// arrived and `should_exit_jail_early` fires too aggressively. Finalize
+    /// / aggregate paths set it to `true` so a real but unterminated call
+    /// isn't silently dropped.
+    #[serde(default)]
+    pub allow_eof_recovery: bool,
 }
 
 impl Default for JsonParserConfig {
@@ -44,6 +53,7 @@ impl Default for JsonParserConfig {
             arguments_keys: vec!["arguments".to_string(), "parameters".to_string()],
             parser_type: JsonParserType::Basic,
             bare_json_mode: false,
+            allow_eof_recovery: false,
         }
     }
 }
@@ -62,6 +72,11 @@ pub struct XmlParserConfig {
     pub parameter_start_token: String,
     /// End token for parameter (e.g., `</parameter>`)
     pub parameter_end_token: String,
+
+    /// See [`JsonParserConfig::allow_eof_recovery`]. Streaming jails MUST
+    /// leave this `false`.
+    #[serde(default)]
+    pub allow_eof_recovery: bool,
 }
 
 impl Default for XmlParserConfig {
@@ -73,6 +88,7 @@ impl Default for XmlParserConfig {
             function_end_token: "</function>".to_string(),
             parameter_start_token: "<parameter=".to_string(),
             parameter_end_token: "</parameter>".to_string(),
+            allow_eof_recovery: false,
         }
     }
 }
@@ -125,6 +141,11 @@ pub struct Glm47ParserConfig {
     pub arg_value_start: String,
     /// End token for argument value (e.g., "</arg_value>")
     pub arg_value_end: String,
+
+    /// See [`JsonParserConfig::allow_eof_recovery`]. Streaming jails MUST
+    /// leave this `false`.
+    #[serde(default)]
+    pub allow_eof_recovery: bool,
 }
 
 impl Default for Glm47ParserConfig {
@@ -136,6 +157,7 @@ impl Default for Glm47ParserConfig {
             arg_key_end: "</arg_key>".to_string(),
             arg_value_start: "<arg_value>".to_string(),
             arg_value_end: "</arg_value>".to_string(),
+            allow_eof_recovery: false,
         }
     }
 }
@@ -203,6 +225,10 @@ pub enum ParserConfig {
     Dsml(DsmlParserConfig),
     KimiK2(KimiK2ParserConfig),
     Glm47(Glm47ParserConfig),
+    /// Gemma 4 uses a custom non-JSON grammar with bare keys, `<|"|>` string
+    /// delimiters, and fixed `<|tool_call>...<tool_call|>` markers. No
+    /// configuration is required at runtime — markers are not user-tunable.
+    Gemma4,
 }
 
 impl ParserConfig {
@@ -218,6 +244,7 @@ impl ParserConfig {
             ParserConfig::Dsml(config) => vec![config.block_start.clone()],
             ParserConfig::Glm47(config) => vec![config.tool_call_start.clone()],
             ParserConfig::KimiK2(config) => config.section_start_variants.clone(),
+            ParserConfig::Gemma4 => vec![crate::tool_calling::gemma4::TOOL_CALL_START.to_string()],
         }
     }
 
@@ -233,6 +260,7 @@ impl ParserConfig {
             ParserConfig::Dsml(config) => vec![config.block_end.clone()],
             ParserConfig::Glm47(config) => vec![config.tool_call_end.clone()],
             ParserConfig::KimiK2(config) => config.section_end_variants.clone(),
+            ParserConfig::Gemma4 => vec![crate::tool_calling::gemma4::TOOL_CALL_END.to_string()],
         }
     }
 }
@@ -427,6 +455,7 @@ impl ToolCallConfig {
                 function_end_token: "</invoke>".to_string(),
                 parameter_start_token: "<parameter name=".to_string(),
                 parameter_end_token: "</parameter>".to_string(),
+                allow_eof_recovery: false,
             }),
         }
     }
@@ -448,6 +477,20 @@ impl ToolCallConfig {
         // Reference: https://huggingface.co/moonshotai/Kimi-K2-Instruct/blob/main/docs/tool_call_guidance.md
         Self {
             parser_config: ParserConfig::KimiK2(KimiK2ParserConfig::default()),
+        }
+    }
+
+    /// Gemma 4 tool-call format (custom non-JSON grammar):
+    ///
+    /// ```text
+    /// <|tool_call>call:func_name{location:<|"|>Tokyo<|"|>,count:42}<tool_call|>
+    /// ```
+    ///
+    /// Bare unquoted keys, `<|"|>`-delimited strings, supports nested objects /
+    /// arrays. Multiple tool calls are concatenated without separators.
+    pub fn gemma4() -> Self {
+        Self {
+            parser_config: ParserConfig::Gemma4,
         }
     }
 }

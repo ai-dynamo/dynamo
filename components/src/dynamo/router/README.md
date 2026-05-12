@@ -29,7 +29,7 @@ python -m dynamo.router \
 - `--endpoint`: Full endpoint path for workers in the format `namespace.component.endpoint` (e.g., `dynamo.prefill.generate`)
 
 **Router Configuration:**
-All router options use the `--router-*` prefix (e.g., `--router-block-size`, `--router-kv-overlap-score-weight`, `--router-temperature`, `--router-kv-events` / `--no-router-kv-events`, `--router-replica-sync`, `--router-snapshot-threshold`, `--router-reset-states`, `--router-track-active-blocks` / `--no-router-track-active-blocks`, `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens`). Legacy names without the prefix (e.g., `--block-size`, `--kv-events`) are still accepted but deprecated. For detailed descriptions, see [Configuration and Tuning](/docs/components/router/router-configuration.md).
+All router options use the `--router-*` prefix (e.g., `--router-block-size`, `--router-kv-overlap-score-credit`, `--router-prefill-load-scale`, `--router-temperature`, `--router-kv-events` / `--no-router-kv-events`, `--router-replica-sync`, `--router-snapshot-threshold`, `--router-reset-states`, `--router-track-active-blocks` / `--no-router-track-active-blocks`, `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens`). `--load-aware` is a preset for KV active-load routing without cache-reuse signals. On the frontend, it implies `--router-mode kv`. Legacy names without the prefix (e.g., `--block-size`, `--kv-events`) are still accepted but deprecated. For detailed descriptions, see [Configuration and Tuning](/docs/components/router/router-configuration.md).
 
 ## Architecture
 
@@ -54,7 +54,7 @@ See [`examples/backends/vllm/launch/disagg_router.sh`](/examples/backends/vllm/l
 python -m dynamo.frontend \
     --router-mode kv \
     --http-port 8000 \
-    --kv-overlap-score-weight 0  # Pure load balancing for decode
+    --router-kv-overlap-score-credit 0  # Pure load balancing for decode
 
 # Start standalone router for prefill workers
 python -m dynamo.router \

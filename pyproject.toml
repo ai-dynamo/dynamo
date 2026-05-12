@@ -14,6 +14,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.2.0",
+    "aiohttp>=3.9.0,<4.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
     "prometheus_client>=0.23.1,<1.0",
@@ -50,7 +51,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu12]<=0.10.1",
-    "vllm[flashinfer,runai,otel]==0.20.0",
+    "vllm[flashinfer,runai,otel]==0.20.1",
     # vllm-omni is installed separately in container builds (see
     # container/deps/vllm/install_vllm.sh). Do not add it to ai-dynamo[vllm]:
     # pip/uv dependency resolution for omni can override the vLLM torch stack.
@@ -63,7 +64,7 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.10.post1",
+    "sglang[diffusion]==0.5.11",
     "nixl[cu12]>=1.0.0,<1.1.0",
     "cupy-cuda12x>=13.0.0",
 ]
@@ -149,7 +150,7 @@ known_first_party = ["dynamo", "deploy"]
 # failure. To mitigate 1) one can install 3rd party lib so that isort is aware of it,
 # 2) hardcode 3rd party lib here, 3) add "# isort: skip_file" to problematic files
 # as the last resort.
-known_third_party = ["vllm", "tensorrt_llm", "sglang", "aiconfigurator"]
+known_third_party = ["vllm", "tensorrt_llm", "sglang", "tokenspeed", "aiconfigurator"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -180,6 +181,9 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
     "error",
+    # chardet 6.x is pulled in transitively but requests 2.32.x only supports chardet <6;
+    # charset_normalizer is used at runtime so the warning is benign.
+    "ignore:.*doesn't match a supported version",
     # CUDA deprecation warnings from tensorrt_llm
     "ignore:.*cuda*:DeprecationWarning",
     # cuda.cudart/cuda.nvrtc deprecated in favor of cuda.bindings.* (cuda-python >=13)
@@ -194,6 +198,8 @@ filterwarnings = [
     "ignore:.*unclosed event loop.*:ResourceWarning",
     # unraisable exception warnings
     "ignore:.*Exception ignored in.*:pytest.PytestUnraisableExceptionWarning",
+    # CPython relaunches resource_tracker after engine subprocess teardown
+    "ignore:resource_tracker.*process died unexpectedly.*:UserWarning",
     # pynvml deprecation, temporary until upstream migrates to nvidia-ml-py
     "ignore:The pynvml package is deprecated.*:FutureWarning",
     # Dynamo's own KV events deprecation warning
@@ -218,6 +224,8 @@ filterwarnings = [
     "ignore:.*torch\\.jit\\.script_method.*is deprecated.*:DeprecationWarning",
     # torch.jit.script deprecation from modelopt.torch.quantization
     "ignore:`torch.jit.script` is deprecated:DeprecationWarning",
+    # nvidia-cutlass-dsl, transitive from flashinfer
+    "ignore:tcgen05\\..*is deprecated.*:DeprecationWarning",
     # nvidia-modelopt warning about transformers version (transitive dep from TRT-LLM)
     "ignore:transformers version .* is incompatible with nvidia-modelopt.*:UserWarning",
     # SGLang quantization warnings on CPU-only runners
@@ -226,6 +234,8 @@ filterwarnings = [
     # pandas 2.3 emits this from pd.concat on empty/all-NA frames; aiconfigurator hits it
     # during disagg pareto search and re-raises as RuntimeError, breaking planner tests.
     "ignore:The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.*:FutureWarning",
+    # pandas 2.3 emits this from aiconfigurator pareto filtering under filterwarnings=error.
+    "ignore:Downcasting behavior in `replace` is deprecated.*:FutureWarning",
 ]
 
 
@@ -247,10 +257,11 @@ markers = [
     "gpu_8: marks tests to run on 8GPUs",
     "xpu_1: marks tests to run on XPU",
     "xpu_2: marks tests to run on 2XPUs",
-    # These 5 (profiled_vram_gib and requested_*) are used for parallel pytest executions:
+    # These 6 (profiled_vram_gib and requested_*) are used for parallel pytest executions:
     "profiled_vram_gib(N): actual peak VRAM observed by nvidia-smi during profiling. Used for --max-vram-gib filtering and scheduler budget tracking",
     "requested_vllm_kv_cache_bytes(N): exact KV cache bytes for vLLM (skips memory profiling). Sets _PROFILE_PYTEST_KV_CACHE_BYTES. Most deterministic method for parallel execution",
     "requested_sglang_kv_tokens(N): max KV cache tokens for SGLang parallel execution. Sets _OVERRIDE_SGLANG_MAX_TOTAL_TOKENS to cap --max-total-tokens and prevent over-allocation",
+    "requested_sglang_vram_gib(N): max VRAM in GiB for SGLang parallel execution. Use for non-text workloads (video/image diffusion) where token-based control doesn't apply",
     "requested_trtllm_kv_tokens(N): max KV cache tokens for TensorRT-LLM parallel execution. Sets _PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS to cap KvCacheConfig.max_tokens via --override-engine-args",
     "requested_trtllm_vram_gib(N): max VRAM in GiB for TensorRT-LLM parallel execution. Sets _PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES to cap KvCacheConfig.max_gpu_total_bytes via --override-engine-args. Use for non-text workloads (video/image diffusion)",
     "e2e: marks tests as end-to-end tests",
@@ -279,6 +290,7 @@ markers = [
     "deploy: marks tests as deployment tests",
     "framework_only: marks standard framework deployment tests (vllm, sglang, trtllm)",
     "framework_with_gaie: marks tests for GAIE (Gateway API Inference Extension) deployment",
+    "unified: marks unified-backend e2e tests (LLMEngine ABC + Worker, DEP #8251)",
     # Built-in markers
     "skip: skip this test",
     "skipif: skip if condition is true",
@@ -289,6 +301,7 @@ markers = [
     "asyncio: asyncio test marker",
     # Third-party plugin markers
     "timeout: test timeout in seconds (pytest-timeout plugin)",
+    "flaky: rerun a flaky test on failure (pytest-rerunfailures plugin)",
 ]
 
 # Linting/formatting

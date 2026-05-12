@@ -451,3 +451,98 @@ def test_prefill_health_check_payload_is_disagg_compatible_alias():
     assert "request" not in payload
     assert payload["bootstrap_info"]["bootstrap_host"] == FAKE_BOOTSTRAP_HOST
     assert payload["stop_conditions"]["max_tokens"] == 1
+
+
+# ---------------------------------------------------------------------------
+# LoRA registration model_type gate
+# ---------------------------------------------------------------------------
+# Pins the serving_mode → model_type selection in LoraMixin.load_lora so a
+# refactor that flips prefill back to Chat|Completions cannot silently land:
+# it would re-introduce the disagg hang where the frontend routes
+# /v1/chat/completions directly to the prefill worker.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "serving_mode, endpoint_types, expected_model_type_str",
+    [
+        ("prefill", "chat,completions", "prefill"),
+        ("decode", "chat,completions", "chat,completions"),
+        ("agg", "chat,completions", "chat,completions"),
+        ("decode", "completions", "completions"),
+        ("agg", "chat", "chat"),
+    ],
+)
+async def test_lora_registration_model_type_gate(
+    monkeypatch, serving_mode, endpoint_types, expected_model_type_str
+):
+    """LoraMixin.load_lora must select model_type based on serving_mode.
+
+    PREFILL → ModelType.Prefill (so the prefill router activates and the frontend
+    does not route chat completions directly to prefill).
+    Otherwise → parse_endpoint_types(endpoint_types) (mirrors base-model
+    registration so --endpoint-types overrides are honored).
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from dynamo.common.constants import DisaggregationMode
+    from dynamo.sglang.request_handlers import handler_base
+    from dynamo.sglang.request_handlers.handler_base import LoraMixin
+
+    # Capture the kwargs passed to register_llm.
+    captured: dict = {}
+
+    async def fake_register_llm(**kw):
+        captured.update(kw)
+
+    # Fake LoRA manager that returns a successful download.
+    fake_lora_manager = MagicMock()
+    fake_lora_manager.download_lora = AsyncMock(
+        return_value={"status": "success", "local_path": "/tmp/fake_lora"}
+    )
+
+    monkeypatch.setattr(handler_base, "register_llm", fake_register_llm)
+    monkeypatch.setattr(handler_base, "get_lora_manager", lambda: fake_lora_manager)
+    monkeypatch.setattr(handler_base, "lora_name_to_id", lambda name: 12345)
+
+    # Fake SGLang engine — only the LoRA load path is exercised.
+    fake_load_result = SimpleNamespace(success=True, error_message=None)
+    fake_engine = MagicMock()
+    fake_engine.tokenizer_manager = MagicMock()
+    fake_engine.tokenizer_manager.load_lora_adapter = AsyncMock(
+        return_value=fake_load_result
+    )
+
+    # Exercise the mixin in isolation — avoids needing a concrete subclass
+    # with abstract methods, real publisher, runtime, etc. The mixin only
+    # touches engine, config, generate_endpoint, and its own LoRA tracking.
+    class _Host(LoraMixin):
+        pass
+
+    handler = _Host()
+    handler.engine = fake_engine
+    handler.generate_endpoint = MagicMock()
+
+    config = MagicMock()
+    config.serving_mode = DisaggregationMode(serving_mode)
+    config.server_args.model_path = "/models/base"
+    config.server_args.page_size = 16
+    config.dynamo_args.endpoint_types = endpoint_types
+    handler.config = config
+
+    handler._init_lora_tracking()
+
+    # Drain the async generator.
+    results = [
+        chunk
+        async for chunk in handler.load_lora(
+            {"lora_name": "test_lora", "source": {"uri": "s3://x/y"}}
+        )
+    ]
+
+    assert results and results[-1]["status"] == "success", results
+    assert captured, "register_llm was not invoked"
+    assert (
+        str(captured["model_type"]) == expected_model_type_str
+    ), f"model_type {captured['model_type']} != expected {expected_model_type_str}"
+    assert captured["lora_name"] == "test_lora"

@@ -9,12 +9,8 @@ from urllib.parse import urlparse
 import numpy as np
 
 import dynamo.nixl_connect as nixl_connect
-from dynamo.common.multimodal.http_client import get_http_client, get_http_semaphore
-from dynamo.common.multimodal.url_validator import (
-    UrlValidationPolicy,
-    fetch_with_revalidation,
-    validate_media_url,
-)
+from dynamo.common.http import fetch_bytes
+from dynamo.common.http.url_validator import UrlValidationPolicy, validate_media_url
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.runtime import run_async
@@ -100,13 +96,9 @@ class AudioLoader:
         # revalidated; vLLM's own fetcher honors redirects without re-checking.
         # data: and file:// never touch the network, so vLLM can handle them.
         if urlparse(normalized_url).scheme in ("http", "https"):
-            http_client = get_http_client(self._http_timeout)
-            async with get_http_semaphore():
-                response = await fetch_with_revalidation(
-                    http_client, normalized_url, self._url_policy
-                )
-                response.raise_for_status()
-                content = response.content
+            content = await fetch_bytes(
+                normalized_url, self._http_timeout, policy=self._url_policy
+            )
             return await asyncio.to_thread(media_io.load_bytes, content)
 
         connector = self._get_vllm_media_connector()

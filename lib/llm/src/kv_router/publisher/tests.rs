@@ -1075,21 +1075,27 @@ mod tests_startup_helpers {
         };
         let payload = rmps::to_vec(&batch).unwrap();
 
-        for _ in 0..5 {
-            send_multipart(
-                &pub_socket,
-                vec![Vec::new(), 12u64.to_be_bytes().to_vec(), payload.clone()],
-            )
-            .await
-            .unwrap();
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        }
-
-        let event = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv())
-            .await
-            .expect("timed out waiting for listener event")
-            .expect("listener channel closed")
-            .event;
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            let mut publish_interval =
+                tokio::time::interval(tokio::time::Duration::from_millis(50));
+            loop {
+                tokio::select! {
+                    event = rx.recv() => {
+                        return event.expect("listener channel closed").event;
+                    }
+                    _ = publish_interval.tick() => {
+                        send_multipart(
+                            &pub_socket,
+                            vec![Vec::new(), 12u64.to_be_bytes().to_vec(), payload.clone()],
+                        )
+                        .await
+                        .expect("failed to send ZMQ test event");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for listener event");
 
         let KvCacheEventData::Stored(KvCacheStoreData { blocks, .. }) = event.data else {
             panic!("expected KvCacheStoreData");

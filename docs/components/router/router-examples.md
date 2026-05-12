@@ -11,7 +11,14 @@ For quick start instructions, see the [Router README](README.md). This document 
 Instead of launching the KV Router via command line, you can create a `KvRouter` object directly in Python. This allows per-request routing configuration overrides.
 
 >[!Warning]
-> **Multiple Routers in Same Process**: If you need to run multiple `KvRouter` instances for fault tolerance or load distribution, you must launch them in **separate processes** (e.g., using `python -m dynamo.frontend` with different ports). Creating multiple `KvRouter` objects in the same Python process is not supported - they share the same cancellation token from the component's primary lease, so dropping one router will cancel all routers in that process. For in-process routing, use a single `KvRouter` instance.
+> **Multiple Routers from the Same Runtime**: Do not create multiple independently managed `KvRouter` instances from the same `DistributedRuntime`. Routers created from endpoints owned by the same runtime share that runtime's primary cancellation token, so dropping one router can cancel background work used by the others. For one in-process frontend, use a single `KvRouter`; for independent router lifetimes, use separate frontend processes or create each router from a separate `DistributedRuntime`.
+
+With the event loop available as `loop`, independent in-process router lifetimes require separate runtimes:
+
+```python
+router_a = KvRouter(DistributedRuntime(loop, "etcd", "tcp").endpoint("dynamo.backend.generate"), 16, KvRouterConfig())
+router_b = KvRouter(DistributedRuntime(loop, "etcd", "tcp").endpoint("dynamo.backend.generate"), 16, KvRouterConfig())
+```
 
 ### Methods
 
@@ -79,7 +86,7 @@ async def main():
             "top_p": 0.9,
         },
         router_config_override={
-            "overlap_score_weight": 2.0,    # Prioritize cache hits for this request
+            "overlap_score_credit": 1.0,    # Prioritize cache hits for this request
             "router_temperature": 0.5,       # Add routing randomness
         }
     )
@@ -120,7 +127,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: my-namespace
       componentType: frontend
       replicas: 1
       envs:
@@ -128,13 +134,15 @@ spec:
           value: kv
         - name: DYN_ROUTER_TEMPERATURE
           value: "0.5"  # Add some randomness to prevent worker saturation
-        - name: DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT
+        - name: DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT
+          value: "1.0"  # Prefer device-local KV cache reuse
+        - name: DYN_ROUTER_PREFILL_LOAD_SCALE
           value: "1.5"  # Prioritize TTFT over ITL
         - name: DYN_KV_CACHE_BLOCK_SIZE
           value: "16"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
 ```
 
 ### Alternative: Using Command Args in K8s
@@ -144,7 +152,7 @@ You can also pass CLI arguments directly in the container command:
 ```yaml
 extraPodSpec:
   mainContainer:
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
     command:
       - /bin/sh
       - -c

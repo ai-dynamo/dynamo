@@ -168,6 +168,14 @@ impl ActiveSequence {
         &self.plhs
     }
 
+    pub fn block_token_ids(&self) -> Vec<Vec<u32>> {
+        self.tokens
+            .blocks()
+            .iter()
+            .map(|block| block.tokens().to_vec())
+            .collect()
+    }
+
     /// Commit a successful allocation by advancing `num_allocated_tokens`.
     pub fn commit_allocation(&mut self, cumulative_tokens: usize) {
         self.num_allocated_tokens = cumulative_tokens;

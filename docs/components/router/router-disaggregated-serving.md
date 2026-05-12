@@ -21,7 +21,7 @@ Key characteristics of the prefill router:
 - **Falls back gracefully** to decode-only mode if prefill fails or no prefill workers are available.
 
 Key characteristics of the decode routing stage in disaggregated mode:
-- **Disables overlap scoring** (`overlap_score_weight=0`) because decode routing should not chase prefix reuse.
+- **Disables overlap scoring** (`overlap_score_credit=0`) because decode routing should not chase prefix reuse.
 - **Disables KV reuse assumption** (`assume_kv_reuse=false`) unless the backend can truly deduplicate transferred blocks.
 - **Disables prefill-token tracking** (`track_prefill_tokens=false`) so decode-side load reflects decode work rather than already-completed prompt work.
 

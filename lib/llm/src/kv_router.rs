@@ -197,6 +197,15 @@ fn tier_overlap_blocks_from_tiered_matches(
 ) -> TierOverlapBlocks {
     let mut tier_overlap_blocks = TierOverlapBlocks::default();
 
+    tier_overlap_blocks.device.extend(
+        tiered_matches
+            .device
+            .overlap_scores
+            .scores
+            .iter()
+            .map(|(worker, hits)| (*worker, *hits as usize)),
+    );
+
     if let Some(host_matches) = tiered_matches
         .lower_tier
         .get(&dynamo_kv_router::protocols::StorageTier::HostPinned)
@@ -359,9 +368,9 @@ where
                 .await?;
         } else {
             tracing::info!(
-                "Skipping KV event subscription (use_kv_events={}, overlap_score_weight={})",
+                "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={})",
                 kv_router_config.use_kv_events,
-                kv_router_config.overlap_score_weight,
+                kv_router_config.overlap_score_credit,
             );
         }
 
@@ -544,13 +553,6 @@ where
 
         let tier_overlap_blocks = tier_overlap_blocks_from_tiered_matches(&tiered_matches);
         let cache_hit_estimates = self.cache_hit_estimates_from_tiered_matches(&tiered_matches);
-        let tree_sizes: HashMap<_, _> = tiered_matches
-            .device
-            .overlap_scores
-            .tree_sizes
-            .iter()
-            .map(|(k, v)| (*k, *v))
-            .collect();
         let find_matches_elapsed = start.elapsed();
 
         // Capture shared cache info for metrics before moving into schedule().
@@ -568,7 +570,6 @@ where
                 tier_overlap_blocks,
                 cache_hit_estimates.effective_overlap_blocks,
                 cache_hit_estimates.cached_tokens,
-                tree_sizes,
                 router_config_override,
                 update_states,
                 lora_name,
@@ -1069,7 +1070,7 @@ mod tests {
         let (_tx, rx) = watch::channel(workers);
 
         let config = KvRouterConfig {
-            overlap_score_weight: 0.0,
+            overlap_score_credit: 0.0,
             router_temperature: 0.0,
             use_kv_events: false,
             router_track_active_blocks: false,

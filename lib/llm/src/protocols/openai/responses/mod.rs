@@ -731,6 +731,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             nvext: resp.nvext,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         })
     }
@@ -2102,7 +2103,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: None,
-                    stop_reason: None,
                     logprobs: None,
                 }],
                 created: now,
@@ -2163,7 +2163,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: None,
-                    stop_reason: None,
                     logprobs: None,
                 }],
                 created: now,
@@ -2571,7 +2570,6 @@ thinking
                         audio: None,
                     },
                     finish_reason: Some(FinishReason::Stop),
-                    stop_reason: None,
                     logprobs: None,
                 }],
                 created: 0,

@@ -65,6 +65,7 @@ class GPUSKUType(str, Enum):
     H100PCIe = "h100_pcie"
     A100SXM = "a100_sxm"
     A100PCIe = "a100_pcie"
+    A30 = "a30"
     L40S = "l40s"
     L40 = "l40"
     L4 = "l4"
@@ -252,7 +253,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
     )
     image: Optional[str] = Field(
         default=None,
-        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2".',
+        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1".',
     )
     modelCache: Optional[ModelCacheSpec] = Field(
         default=None,
