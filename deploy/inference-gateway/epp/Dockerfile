@@ -142,10 +142,20 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
 # stage. EPP itself is not customer-facing — the SBOM lives here purely as
 # a build artifact for frontend's compliance pipeline. cyclonedx-gomod is
 # pinned to v1.7.0 to keep the SBOM tool itself reproducible.
+#
+# -version: cyclonedx-gomod defaults to detecting the module version from
+# git, but the COPY-of-build-context above doesn't carry .git/, so the tool
+# fails with "no git repository found". Pass BUILD_REF explicitly (same
+# source the go build at line ~136 stamps into the binary). Fall back to
+# "0.0.0-dev" when BUILD_REF is empty (local builds without the CI arg).
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
     --mount=type=cache,target=/root/.cache/go-build,sharing=shared \
     GOBIN=/usr/local/bin go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.7.0 && \
-    cyclonedx-gomod app -licenses -json -main ./cmd/epp -output /sbom-go.cdx.json .
+    cyclonedx-gomod app -licenses -json \
+        -main ./cmd/epp \
+        -output /sbom-go.cdx.json \
+        -version "${BUILD_REF:-0.0.0-dev}" \
+        .
 
 # =============================================================================
 # Stage 3: Runtime
