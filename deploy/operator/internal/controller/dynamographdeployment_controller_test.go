@@ -870,7 +870,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_createsCheckpointS
 	}
 
 	ref := friendlyCheckpointName
-	dgd := &v1alpha1.DynamoGraphDeployment{
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
 			Namespace: "default",
@@ -887,7 +887,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_createsCheckpointS
 				},
 			},
 		},
-	}
+	})
 
 	if _, _, err := reconciler.reconcileCheckpoints(ctx, dgd); err != nil {
 		t.Fatalf("reconcileCheckpoints() error = %v", err)
