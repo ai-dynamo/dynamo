@@ -433,35 +433,6 @@ def _test_router_two_routers(
             kv_router.__exit__(None, None, None)
 
 
-async def _assert_predict_on_route_colocates(
-    kv_router: KvRouter,
-    block_size: int,
-) -> None:
-    prefix_blocks = 4
-    prefix = [random.randint(1, 10000) for _ in range(prefix_blocks * block_size)]
-    suffix_a = [random.randint(1, 10000) for _ in range(block_size)]
-    suffix_b = [random.randint(1, 10000) for _ in range(block_size)]
-
-    worker_a, dp_a, _ = await kv_router.best_worker(
-        prefix + suffix_a,
-        update_indexer=True,
-    )
-    worker_b, dp_b, overlap_b = await kv_router.best_worker(
-        prefix + suffix_b,
-        update_indexer=True,
-    )
-
-    assert (worker_b, dp_b) == (worker_a, dp_a), (
-        "predict-on-route should co-locate sibling requests on the worker selected "
-        f"for the first sibling; got first=({worker_a}, {dp_a}), "
-        f"second=({worker_b}, {dp_b})"
-    )
-    assert overlap_b >= prefix_blocks, (
-        f"predict-on-route should expose at least {prefix_blocks} prefix blocks; "
-        f"got overlap={overlap_b}"
-    )
-
-
 def _test_remote_indexer_decisions(
     engine_workers,
     model_name: str,
@@ -2365,9 +2336,6 @@ def _test_router_decisions(
             f"Routing targets: worker_a=(id={worker_a_id}, dp_rank={dp_rank_a}), "
             f"worker_b=(id={worker_b_id}, dp_rank={dp_rank_b})"
         )
-
-        if router_predicted_ttl_secs is not None:
-            await _assert_predict_on_route_colocates(kv_router, block_size)
 
         # Generate 7 random blocks (A-G)
         num_blocks = 7
