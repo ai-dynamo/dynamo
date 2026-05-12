@@ -1110,7 +1110,7 @@ impl KvRouter {
 
             if update_indexer {
                 let cfg = chooser.kv_router_config();
-                if !cfg.use_kv_events || cfg.router_predict_on_route {
+                if !cfg.use_kv_events || cfg.predict_on_route_enabled() {
                     let mut tokens_with_hashes =
                         TokensWithHashes::new(token_ids.clone(), chooser.block_size())
                             .with_is_eagle(chooser.is_eagle());

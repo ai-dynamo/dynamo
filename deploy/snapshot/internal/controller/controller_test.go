@@ -87,12 +87,21 @@ func makePod(name, namespace, nodeName string, phase corev1.PodPhase, ready bool
 			Status: corev1.ConditionTrue,
 		})
 	}
+	// The snapshot contract requires the target-containers annotation on
+	// every checkpoint/restore pod; stamp it here so individual cases do
+	// not have to repeat themselves.
+	merged := map[string]string{
+		snapshotprotocol.TargetContainersAnnotation: "main",
+	}
+	for k, v := range annotations {
+		merged[k] = v
+	}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   namespace,
 			Labels:      labels,
-			Annotations: annotations,
+			Annotations: merged,
 		},
 		Spec: corev1.PodSpec{
 			NodeName: nodeName,
@@ -418,9 +427,12 @@ func TestReconcileRestorePod(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			labels := map[string]string{
-				snapshotprotocol.RestoreTargetLabel: "true",
-			}
+			// Restore pods are identified by snapshot-agent as
+			// (CheckpointIDLabel present, CheckpointSourceLabel absent),
+			// so the restore informer's label selector does the filtering.
+			// The hash-missing case deliberately omits the label to exercise
+			// the early-return branch in reconcileRestorePod.
+			labels := map[string]string{}
 			if tc.hash != "" {
 				labels[snapshotprotocol.CheckpointIDLabel] = tc.hash
 			}
@@ -429,8 +441,8 @@ func TestReconcileRestorePod(t *testing.T) {
 			var annotations map[string]string
 			if tc.annotationStatus != "" {
 				annotations = map[string]string{
-					snapshotprotocol.RestoreStatusAnnotation:      tc.annotationStatus,
-					snapshotprotocol.RestoreContainerIDAnnotation: tc.annotationContainerID,
+					snapshotprotocol.RestoreStatusAnnotationPrefix + "main":      tc.annotationStatus,
+					snapshotprotocol.RestoreContainerIDAnnotationPrefix + "main": tc.annotationContainerID,
 				}
 			}
 
@@ -451,7 +463,7 @@ func TestReconcileRestorePod(t *testing.T) {
 			ctx := context.Background()
 
 			if tc.preSeed {
-				w.inFlight["default/test-pod/"+testContainerID] = struct{}{}
+				w.inFlight["default/test-pod/main/"+testContainerID] = struct{}{}
 			}
 
 			w.reconcileRestorePod(ctx, pod)
@@ -470,6 +482,36 @@ func TestReconcileRestorePod(t *testing.T) {
 				time.Sleep(50 * time.Millisecond)
 			}
 		})
+	}
+}
+
+func TestReconcileRestorePodRejectsTargetNameThatCannotFitStatusAnnotation(t *testing.T) {
+	checkpointID := "abc123"
+	containerName := "restore-target-with-long-name-123456"
+	w := makeTestController(t)
+	dir := filepath.Join(w.config.Storage.BasePath, checkpointID, "versions", snapshotprotocol.DefaultCheckpointArtifactVersion)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("failed to create checkpoint dir: %v", err)
+	}
+
+	pod := makePod(
+		"test-pod",
+		"default",
+		testNodeName,
+		corev1.PodRunning,
+		false,
+		map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID},
+		map[string]string{snapshotprotocol.TargetContainersAnnotation: containerName},
+	)
+	pod.Spec.Containers[0].Name = containerName
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:        containerName,
+		ContainerID: "containerd://" + testContainerID,
+	}}
+
+	w.reconcileRestorePod(context.Background(), pod)
+	if len(w.inFlight) != 0 {
+		t.Fatalf("expected restore not to start for overlong annotation key, got inFlight=%v", w.inFlight)
 	}
 }
 
@@ -516,7 +558,7 @@ func TestRunCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testi
 		stopCh: make(chan struct{}),
 	}
 
-	err := w.runCheckpoint(context.Background(), pod, job, "abc123", filepath.Join(t.TempDir(), "abc123"), "default/test-pod", time.Now())
+	err := w.runCheckpoint(context.Background(), pod, job, "abc123", "main", filepath.Join(t.TempDir(), "abc123"), "default/test-pod", time.Now())
 	if err == nil {
 		t.Fatal("expected terminal checkpoint status update to fail")
 	}

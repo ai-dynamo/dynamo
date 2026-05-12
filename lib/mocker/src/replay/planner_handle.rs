@@ -187,10 +187,11 @@ impl PlannerReplayHandle {
 
     /// Finalize the replay and return the report.
     pub fn finalize(self) -> TraceSimulationReport {
+        let wall_time_ms = self.started_at.elapsed().as_secs_f64() * 1000.0;
         let report = match self.runtime {
             RuntimeKind::Agg(rt) => rt.finalize_report(),
             RuntimeKind::Disagg(rt) => rt.finalize_report(),
         };
-        report.with_wall_time_ms(self.started_at.elapsed().as_secs_f64() * 1000.0)
+        report.with_wall_time_ms(wall_time_ms)
     }
 }

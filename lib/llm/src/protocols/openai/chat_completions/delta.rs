@@ -69,6 +69,7 @@ impl NvCreateChatCompletionRequest {
             enable_logprobs: self.inner.logprobs.unwrap_or(false)
                 || self.inner.top_logprobs.unwrap_or(0) > 0,
             response_fields,
+            return_tokens_as_token_ids: self.return_tokens_as_token_ids.unwrap_or(false),
             runtime_config: ModelRuntimeConfig::default(),
         };
 
@@ -87,6 +88,8 @@ pub struct DeltaGeneratorOptions {
     pub enable_logprobs: bool,
     /// Determines which nvext response fields may be emitted for this request.
     pub response_fields: NvExtResponseFieldSelection,
+    /// When true, logprob token fields use "token_id:<id>" format instead of decoded text.
+    pub return_tokens_as_token_ids: bool,
 
     pub runtime_config: ModelRuntimeConfig,
 }
@@ -198,16 +201,23 @@ impl DeltaGenerator {
             .map(|(_, lp)| lp as f32)
             .collect::<Vec<f32>>();
 
+        let return_as_ids = self.options.return_tokens_as_token_ids;
         let content = top_logprobs.map(|top_logprobs| {
             toks.iter()
                 .zip(tok_lps)
                 .zip(top_logprobs)
                 .map(|(((t, tid), lp), top_lps)| {
-                    let converted = convert_backend_top_logprobs(&top_lps, t, *tid, lp);
+                    let token_str = if return_as_ids {
+                        format!("token_id:{}", tid)
+                    } else {
+                        t.clone()
+                    };
+                    let converted =
+                        convert_backend_top_logprobs(&top_lps, t, *tid, lp, return_as_ids);
                     dynamo_protocols::types::ChatCompletionTokenLogprob {
-                        token: t.clone(),
+                        token: token_str.clone(),
                         logprob: lp,
-                        bytes: token_to_utf8_bytes(t),
+                        bytes: token_to_utf8_bytes(&token_str),
                         top_logprobs: converted,
                     }
                 })
@@ -227,18 +237,15 @@ impl DeltaGenerator {
     /// * `text` - The text content for the response.
     /// * `finish_reason` - The reason why the response finished (e.g., stop, length, etc.).
     /// * `logprobs` - Optional log probabilities of the generated tokens.
-    /// * `stop_reason` - Optional stop string or token that triggered the stop.
     ///
     /// # Returns
     /// * An [`dynamo_protocols::types::CreateChatCompletionStreamResponse`] instance representing the choice.
-    #[allow(deprecated)]
     pub fn create_choice(
         &mut self,
         index: u32,
         text: Option<String>,
         finish_reason: Option<dynamo_protocols::types::FinishReason>,
         logprobs: Option<dynamo_protocols::types::ChatChoiceLogprobs>,
-        stop_reason: Option<dynamo_protocols::types::StopReason>,
     ) -> NvCreateChatCompletionStreamResponse {
         let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
             content: text.map(dynamo_protocols::types::ChatCompletionMessageContent::Text),
@@ -257,7 +264,6 @@ impl DeltaGenerator {
             index,
             delta,
             finish_reason,
-            stop_reason,
             logprobs,
         };
 
@@ -391,16 +397,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             }
             None => None,
         };
+        let stop_reason = delta.stop_reason.clone();
 
         // Create the streaming response.
         let index = delta.index.unwrap_or(0);
-        let mut stream_response = self.create_choice(
-            index,
-            delta.text,
-            finish_reason,
-            logprobs,
-            delta.stop_reason,
-        );
+        let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
 
         // Record finish for timing/ITL accounting even when timing is not returned to the client.
         // Kept at call site because it's a side effect on the tracker — not a gating decision.
@@ -419,6 +420,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             delta.disaggregated_params.as_ref(),
             finish_reason.is_some(),
             delta.engine_data,
+            stop_reason,
         ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
             stream_response.nvext = Some(nvext_json);
@@ -495,6 +497,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -588,6 +591,7 @@ mod tests {
             ),
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -640,6 +644,24 @@ mod tests {
             .expect("choice generation");
 
         assert_eq!(response.inner.choices[0].index, 2);
+    }
+
+    #[test]
+    fn test_stop_reason_emits_in_nvext_when_requested() {
+        let request = create_test_request_with_extra_fields(vec!["stop_reason".to_string()]);
+        let mut generator = request.response_generator("req-stop-reason-nvext".to_string());
+        let mut output = final_backend_output();
+        output.stop_reason = Some(dynamo_protocols::types::StopReason::String(
+            "END".to_string(),
+        ));
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+
+        let response_json = serde_json::to_value(&response).expect("serialize response");
+        assert!(response_json["choices"][0].get("stop_reason").is_none());
+        assert_eq!(response_json["nvext"]["stop_reason"], "END");
     }
 
     #[test]

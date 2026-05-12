@@ -21,13 +21,14 @@ use std::path::Path;
 
 /// One row of a Mooncake replay trace.
 ///
-/// `timestamp` and `delay` are mutually exclusive in the typical convention
-/// (the first row in a session carries `timestamp`, subsequent rows carry
-/// `delay`), but neither is required by the schema -- both fields are skipped
-/// during serialization when `None`.
+/// `timestamp` is an absolute request arrival offset in milliseconds. Rows
+/// without a `session_id` are independent request arrivals. Rows that share a
+/// `session_id` are interpreted as closed-loop turns; later turns use `delay`
+/// or timestamp deltas relative to the previous row in that session.
 #[derive(Debug, Clone, Serialize)]
 pub struct MooncakeRow {
-    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub input_length: usize,
     pub output_length: usize,
     pub hash_ids: Vec<u64>,
@@ -77,6 +78,14 @@ impl RollingHashIdMapper {
     pub fn hash_token_blocks(&mut self, tokens: &[u32]) -> Vec<u64> {
         hash_token_blocks(self, tokens)
     }
+
+    /// Map precomputed sequence-aware block hashes into compact Mooncake IDs.
+    ///
+    /// This is useful for producers that record stable block hashes in the
+    /// serving path and only compact them during offline trace conversion.
+    pub fn ids_for_sequence_hashes(&mut self, sequence_hashes: &[u64]) -> Vec<u64> {
+        ids_for_sequence_hashes(self, sequence_hashes)
+    }
 }
 
 /// Token-block hashing helper for the Mooncake replay schema.
@@ -102,6 +111,23 @@ pub fn hash_token_blocks(mapper: &mut RollingHashIdMapper, tokens: &[u32]) -> Ve
         parent_hash = combined_hash;
     }
     hash_ids
+}
+
+/// Map stable sequence hashes to compact Mooncake IDs with a shared mapper.
+pub fn ids_for_sequence_hashes(
+    mapper: &mut RollingHashIdMapper,
+    sequence_hashes: &[u64],
+) -> Vec<u64> {
+    sequence_hashes
+        .iter()
+        .map(|sequence_hash| {
+            *mapper.hash_to_id.entry(*sequence_hash).or_insert_with(|| {
+                let next_id = mapper.next_id;
+                mapper.next_id += 1;
+                next_id
+            })
+        })
+        .collect()
 }
 
 /// Counters for what a [`MooncakeJsonlWriter`] has emitted.
@@ -280,9 +306,20 @@ mod tests {
     }
 
     #[test]
+    fn precomputed_sequence_hashes_map_to_stable_ids() {
+        let mut mapper = RollingHashIdMapper::new(64);
+
+        let first = mapper.ids_for_sequence_hashes(&[101, 202, 303]);
+        let second = mapper.ids_for_sequence_hashes(&[101, 202, 404]);
+
+        assert_eq!(first[..2], second[..2]);
+        assert_ne!(first[2], second[2]);
+    }
+
+    #[test]
     fn row_omits_timestamp_and_delay_when_absent() {
         let row = MooncakeRow {
-            session_id: "s".to_string(),
+            session_id: Some("s".to_string()),
             input_length: 4,
             output_length: 1,
             hash_ids: vec![0, 1],
@@ -298,7 +335,7 @@ mod tests {
     #[test]
     fn row_serializes_optional_fields_when_set() {
         let with_timestamp = MooncakeRow {
-            session_id: "s".to_string(),
+            session_id: Some("s".to_string()),
             input_length: 4,
             output_length: 1,
             hash_ids: vec![],
@@ -306,7 +343,7 @@ mod tests {
             delay: None,
         };
         let with_delay = MooncakeRow {
-            session_id: "s".to_string(),
+            session_id: Some("s".to_string()),
             input_length: 4,
             output_length: 1,
             hash_ids: vec![],
@@ -330,7 +367,7 @@ mod tests {
         let mut writer = MooncakeJsonlWriter::create(&output, Some(&sidecar)).unwrap();
         writer
             .write_row(&MooncakeRow {
-                session_id: "s".to_string(),
+                session_id: Some("s".to_string()),
                 input_length: 2,
                 output_length: 1,
                 hash_ids: vec![0],

@@ -756,6 +756,10 @@ class TestToolCallingProtocol:
         assert result.tool_calls == []
         assert result.content.strip()
 
+    # Known flake: model occasionally emits {"unit": "celcius"} (misspelled) which
+    # fails enum schema validation against ['celsius', 'fahrenheit']. Pure model-output
+    # garbage at temp=0/seed=0; reruns=2 catches most cases but the trailing 4-of-57
+    # are when both retries hit the same misspelling.
     @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
     def test_named_tool_choice_forces_specific_function(
         self, client: OpenAI, model: str

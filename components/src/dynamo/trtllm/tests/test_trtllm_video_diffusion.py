@@ -519,6 +519,8 @@ class TestDiffusionEngineGenerate:
         engine = DiffusionEngine(config=config)
         engine._initialized = True
         engine._pipeline = MagicMock()
+        engine._pipeline.default_generation_params = {}
+        engine._pipeline.extra_param_specs = {}
         engine._pipeline.infer.return_value = SimpleNamespace(
             video=torch.zeros((1, 4, 64, 64, 3), dtype=torch.uint8),
             image=None,
@@ -540,12 +542,15 @@ class TestDiffusionEngineGenerate:
 
         # DiffusionRequest is imported inside generate() via
         #   from tensorrt_llm._torch.visual_gen.executor import DiffusionRequest
-        # so we inject a fake module into sys.modules.
+        #   from tensorrt_llm.visual_gen.params import VisualGenParams
+        # so we inject fake modules into sys.modules.
         fake_executor = MagicMock(DiffusionRequest=FakeDiffusionRequest)
+        fake_params_module = MagicMock(VisualGenParams=MagicMock)
         with patch.dict(
             "sys.modules",
             {
                 "tensorrt_llm._torch.visual_gen.executor": fake_executor,
+                "tensorrt_llm.visual_gen.params": fake_params_module,
             },
         ):
             engine.generate(

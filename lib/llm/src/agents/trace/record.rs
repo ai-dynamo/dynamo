@@ -101,10 +101,10 @@ mod tests {
 
         emit_request_end(
             AgentContext {
-                workflow_type_id: "ms_agent".to_string(),
-                workflow_id: "run-non-finite".to_string(),
-                program_id: "run-non-finite:agent".to_string(),
-                parent_program_id: None,
+                session_type_id: "ms_agent".to_string(),
+                session_id: "run-non-finite".to_string(),
+                trajectory_id: "run-non-finite:agent".to_string(),
+                parent_trajectory_id: None,
             },
             AgentRequestMetrics {
                 request_id: "req-non-finite".to_string(),
@@ -123,10 +123,16 @@ mod tests {
                 kv_transfer_estimated_latency_ms: Some(f64::NEG_INFINITY),
                 queue_depth: None,
                 worker: None,
+                replay: None,
             },
         );
 
-        let record = rx.recv().await.expect("trace record should publish");
+        let record = loop {
+            let r = rx.recv().await.expect("trace record should publish");
+            if r.event_type == TraceEventType::RequestEnd {
+                break r;
+            }
+        };
         assert_eq!(record.event_time_unix_ms, 1000);
         let request = record.request.expect("request metrics should be present");
         assert_eq!(request.prefill_wait_time_ms, None);
@@ -149,15 +155,17 @@ mod tests {
             event_time_unix_ms: 2000,
             event_source: TraceEventSource::Harness,
             agent_context: AgentContext {
-                workflow_type_id: "ms_agent".to_string(),
-                workflow_id: "run-1".to_string(),
-                program_id: "run-1:agent".to_string(),
-                parent_program_id: None,
+                session_type_id: "ms_agent".to_string(),
+                session_id: "run-1".to_string(),
+                trajectory_id: "run-1:agent".to_string(),
+                parent_trajectory_id: None,
             },
             request: None,
             tool: Some(AgentToolEvent {
                 tool_call_id: "tool-123".to_string(),
                 tool_class: "web_search".to_string(),
+                started_at_unix_ms: None,
+                ended_at_unix_ms: None,
                 status: Some(AgentToolStatus::Succeeded),
                 duration_ms: Some(12.5),
                 output_tokens: Some(9),
@@ -167,7 +175,12 @@ mod tests {
             }),
         });
 
-        let record = rx.recv().await.expect("tool record should publish");
+        let record = loop {
+            let r = rx.recv().await.expect("tool record should publish");
+            if r.event_type == TraceEventType::ToolEnd {
+                break r;
+            }
+        };
         assert_eq!(record.schema, TraceSchema::V1);
         assert_eq!(record.event_type, TraceEventType::ToolEnd);
         assert_eq!(record.event_source, TraceEventSource::Harness);

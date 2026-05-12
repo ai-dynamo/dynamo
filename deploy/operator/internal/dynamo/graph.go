@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"regexp"
 	"sort"
@@ -1001,6 +1002,47 @@ func expandMultinodeGMSRoles(serviceName string, numberOfNodes int32, totalEngin
 	return roles
 }
 
+// PCSNameForDGD computes the PodCliqueSet name for a DGD, auto-truncating if
+// the DGD name is too long to fit within Grove's combined resource name limit.
+//
+// For short DGD names the PCS name equals the DGD name (backwards compatible).
+// For long names, the PCS name is truncated with a deterministic 4-char hash
+// suffix to guarantee uniqueness and reconcile-loop stability.
+func PCSNameForDGD(dgdName string, services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) string {
+	maxServiceBudget := 0
+	for serviceName, svc := range services {
+		lowerName := strings.ToLower(serviceName)
+		var budget int
+		if svc != nil && svc.GetNumberOfNodes() > 1 {
+			// Multinode: PCSG = lowerName, PCLQ = lowerName + "-" + "ldr"
+			budget = len(lowerName) + len(lowerName) + 1 + len(commonconsts.GroveRoleSuffixLeader)
+		} else {
+			// Single-node: PCLQ = lowerName (no PCSG)
+			budget = len(lowerName)
+		}
+		if budget > maxServiceBudget {
+			maxServiceBudget = budget
+		}
+	}
+
+	pcsBudget := commonconsts.MaxCombinedGroveResourceNameLength - maxServiceBudget
+	// Clamp to a minimum so we always produce a usable name
+	const minPCSNameLength = 8
+	if pcsBudget < minPCSNameLength {
+		pcsBudget = minPCSNameLength
+	}
+
+	if len(dgdName) <= pcsBudget {
+		return dgdName
+	}
+
+	// Truncate with a deterministic hash suffix for uniqueness
+	hash := fnv.New32a()
+	hash.Write([]byte(dgdName))
+	suffix := fmt.Sprintf("%04x", hash.Sum32()&0xFFFF)
+	return dgdName[:pcsBudget-5] + "-" + suffix
+}
+
 // Define BackendFramework enum for sglang, vllm, trtllm
 
 type BackendFramework string
@@ -1124,6 +1166,11 @@ func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alp
 // Does NOT set runAsUser/runAsGroup/runAsNonRoot to maintain backward compatibility
 // with images that may expect to run as root.
 // User-provided security context values (via extraPodSpec) will override these defaults.
+//
+// Note: OpenShift's restricted-v2 SCC rejects pods with fsGroup outside the
+// namespace's allocated UID range. To run on OpenShift, bind a permissive SCC
+// (anyuid / anyuid-v2) to the workload service account, or have the user
+// supply an extraPodSpec.securityContext with an in-range value.
 func applyDefaultSecurityContext(podSpec *corev1.PodSpec) {
 	// Initialize SecurityContext if not present
 	if podSpec.SecurityContext == nil {
@@ -1239,6 +1286,16 @@ func GenerateBasePodSpec(
 	AddStandardEnvVars(&container, operatorConfig)
 
 	volumes := make([]corev1.Volume, 0, len(component.VolumeMounts)+1) // +1 for shared memory volume
+	// Track only the mounts declared via the top-level `component.VolumeMounts`
+	// API so we can propagate exactly these to the frontend sidecar. This scope
+	// deliberately excludes:
+	//   - mounts merged in via extraPodSpec.mainContainer.volumeMounts (an escape
+	//     hatch aimed at the worker; users who need those on the sidecar should
+	//     set them explicitly once a sidecar-level field exists),
+	//   - mounts added later by backend.UpdateContainer (e.g. TRT-LLM's /ssh-pk
+	//     MPI secret, which must not leak into the sidecar),
+	//   - the shared-memory /dev/shm mount (not needed by the frontend).
+	userMounts := make([]corev1.VolumeMount, 0, len(component.VolumeMounts))
 
 	for _, volumeMount := range component.VolumeMounts {
 		if volumeMount.Name == "" {
@@ -1267,10 +1324,12 @@ func GenerateBasePodSpec(
 			},
 		})
 
-		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+		mount := corev1.VolumeMount{
 			Name:      volumeMount.Name,
 			MountPath: mountPoint,
-		})
+		}
+		container.VolumeMounts = append(container.VolumeMounts, mount)
+		userMounts = append(userMounts, mount)
 	}
 	// Apply backend-specific container modifications
 	multinodeDeployer := deployerOverride
@@ -1327,7 +1386,7 @@ func GenerateBasePodSpec(
 
 	// Inject auto-generated frontend sidecar if configured
 	if component.FrontendSidecar != nil {
-		sidecar, err := generateFrontendSidecar(component.FrontendSidecar, componentContext, operatorConfig)
+		sidecar, err := generateFrontendSidecar(component.FrontendSidecar, componentContext, operatorConfig, userMounts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate frontend sidecar: %w", err)
 		}
@@ -1361,7 +1420,7 @@ func GenerateBasePodSpec(
 
 	// Clone main container into two engine containers (active + standby) for failover.
 	// Runs after GMS so the main container already has DRA claims and shared volume.
-	if isFailoverEnabled(component) {
+	if IsIntraPodFailoverEnabled(component) {
 		if err := buildFailoverPod(&podSpec, numberOfNodes, backendFramework); err != nil {
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)
 		}
@@ -1409,6 +1468,7 @@ func generateFrontendSidecar(
 	spec *v1alpha1.FrontendSidecarSpec,
 	parentContext ComponentContext,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
+	parentMounts []corev1.VolumeMount,
 ) (corev1.Container, error) {
 	frontendContext := ComponentContext{
 		numberOfNodes:                  1,
@@ -1445,6 +1505,23 @@ func generateFrontendSidecar(
 	}
 
 	AddStandardEnvVars(&container, operatorConfig)
+
+	// Mirror the worker's VolumeMounts so the sidecar can read files the worker
+	// registers in its ModelDeploymentCard (tokenizer, config, chat_template)
+	// when those live on a PVC. Skip any mount whose Name already exists on the
+	// sidecar's base container — protects against kubelet duplicate-mount errors
+	// if FrontendDefaults ever starts seeding mounts of its own.
+	existing := make(map[string]struct{}, len(container.VolumeMounts))
+	for _, m := range container.VolumeMounts {
+		existing[m.Name] = struct{}{}
+	}
+	for _, m := range parentMounts {
+		if _, ok := existing[m.Name]; ok {
+			continue
+		}
+		container.VolumeMounts = append(container.VolumeMounts, m)
+		existing[m.Name] = struct{}{}
+	}
 
 	return container, nil
 }
@@ -1565,9 +1642,11 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
 	}
 
-	if p.operatorConfig.Checkpoint.Enabled {
+	// GMS weight servers load weights fresh from disk and are not CRIU targets.
+	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS {
 		if err := checkpoint.InjectCheckpointIntoPodSpec(
 			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
+			p.operatorConfig.Checkpoint.EffectiveSeccompProfile(),
 		); err != nil {
 			return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", p.r.Name, err)
 		}
@@ -1644,7 +1723,9 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate annotations: %w", err)
 	}
-	checkpoint.ApplyRestorePodMetadata(labels, annotations, p.checkpointInfo)
+	if p.r.Role != RoleGMS {
+		checkpoint.ApplyRestorePodMetadata(labels, annotations, p.checkpointInfo)
+	}
 	annotations = applyRestartAnnotation(annotations, p.serviceName, p.restartState, p.existingRestartAnnotations)
 	clique.Annotations = annotations
 
@@ -1683,9 +1764,13 @@ func GenerateGrovePodCliqueSet(
 	checkpointInfoByService map[string]*checkpoint.CheckpointInfo, // Optional checkpoint info per service
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	gangSet := &grovev1alpha1.PodCliqueSet{}
-	gangSet.Name = dynamoDeployment.Name
+	gangSet.Name = PCSNameForDGD(dynamoDeployment.Name, dynamoDeployment.Spec.Services)
 	gangSet.Namespace = dynamoDeployment.Namespace
 	gangSet.Labels = maps.Clone(dynamoDeployment.Spec.Labels)
+	if gangSet.Labels == nil {
+		gangSet.Labels = make(map[string]string)
+	}
+	gangSet.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	gangSet.Annotations = maps.Clone(dynamoDeployment.Spec.Annotations)
 	gangSet.Spec.Replicas = 1
 	gangSet.Spec.Template.HeadlessServiceConfig = &grovev1alpha1.HeadlessServiceConfig{

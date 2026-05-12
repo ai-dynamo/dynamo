@@ -263,22 +263,28 @@ async def test_init_llm_worker_engine_args_without_overrides(monkeypatch):
 async def test_init_llm_worker_engine_args_with_extra_engine_args(
     tmp_path, monkeypatch
 ):
-    """--extra-engine-args YAML overrides are reflected in engine_args passed to get_llm_engine."""
+    """--extra-engine-args YAML overrides are reflected in engine_args and MDC-visible config."""
     monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_SEQ_LEN", raising=False)
 
     yaml_file = tmp_path / "engine_config.yaml"
-    yaml_file.write_text("max_num_tokens: 32768\nmax_batch_size: 512\n")
+    yaml_file.write_text(
+        "max_seq_len: 32768\nmax_num_tokens: 32768\nmax_batch_size: 512\n"
+    )
 
     config = parse_args(
         [
             "--model",
             "fake-model",
+            "--max-seq-len",
+            "131072",
             "--extra-engine-args",
             str(yaml_file),
         ]
     )
     # CLI config should NOT reflect the YAML values
+    assert config.max_seq_len != 32768
     assert config.max_num_tokens != 32768
     assert config.max_batch_size != 512
 
@@ -300,6 +306,10 @@ async def test_init_llm_worker_engine_args_with_extra_engine_args(
             )
 
         engine_args = exc_info.value.engine_args
+        assert engine_args["max_seq_len"] == 32768, (
+            f"Expected max_seq_len=32768 from YAML override, "
+            f"got {engine_args['max_seq_len']}"
+        )
         assert engine_args["max_num_tokens"] == 32768, (
             f"Expected max_num_tokens=32768 from YAML override, "
             f"got {engine_args['max_num_tokens']}"
@@ -308,6 +318,11 @@ async def test_init_llm_worker_engine_args_with_extra_engine_args(
             f"Expected max_batch_size=512 from YAML override, "
             f"got {engine_args['max_batch_size']}"
         )
+        # MDC registration reads config.max_seq_len, so keep it in sync with
+        # the final engine args.
+        assert config.max_seq_len == 32768
+        assert config.max_num_tokens == 32768
+        assert config.max_batch_size == 512
 
 
 class MultimodalProcessorInstantiated(Exception):

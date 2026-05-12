@@ -238,9 +238,9 @@ pub struct KvRouterConfig {
     #[validate(range(min = 0.0))]
     pub router_queue_threshold: Option<f64>,
 
-    /// Number of event processing threads for the KV indexer.
-    /// When > 1, uses ConcurrentRadixTree with a thread pool instead of the
-    /// single-threaded RadixTree. Default: 4.
+    /// Number of KV indexer worker threads.
+    /// When > 1, uses ConcurrentRadixTree with a thread pool for event-driven
+    /// and approximate routing writes. Default: 4.
     #[validate(range(min = 1))]
     pub router_event_threads: u32,
 
@@ -272,28 +272,14 @@ pub struct KvRouterConfig {
     /// "none" (default): disabled. "hicache": query sglang workers for L3 cache state.
     pub shared_cache_type: SharedCacheType,
 
-    /// When `use_kv_events=true`, run a secondary approximate indexer alongside
-    /// the event-driven one. The side indexer is populated by routing decisions
-    /// with a short TTL (`router_predicted_ttl_secs`); `find_matches` queries
-    /// both indexers and returns the per-worker maximum overlap. This closes
-    /// the window between a routing decision and the engine's first "block
-    /// stored" event so sibling requests in a burst can still co-locate.
+    /// TTL in seconds applied to entries in the local predict-on-route side
+    /// indexer. `None` disables predict-on-route. A value enables a secondary
+    /// approximate indexer populated by routing decisions; `find_matches`
+    /// queries both the primary and side indexer and returns the per-worker
+    /// maximum overlap.
     #[serde(default)]
-    pub router_predict_on_route: bool,
-
-    /// TTL in seconds applied to entries in the predict-on-route side indexer.
-    /// Default `5.0`. Deliberately decoupled from `router_ttl_secs` (which
-    /// covers the primary indexer's pure-approximate mode) — predictions
-    /// here only need to live long enough to bridge the window before the
-    /// engine's first KV event, and entries the engine never confirms
-    /// (cancelled requests, prefill failures) should age out quickly.
-    #[serde(default = "default_predicted_ttl_secs")]
     #[validate(range(min = 0.0))]
-    pub router_predicted_ttl_secs: f64,
-}
-
-const fn default_predicted_ttl_secs() -> f64 {
-    5.0
+    pub router_predicted_ttl_secs: Option<f64>,
 }
 
 impl Default for KvRouterConfig {
@@ -322,8 +308,7 @@ impl Default for KvRouterConfig {
             serve_indexer: false,
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
-            router_predict_on_route: false,
-            router_predicted_ttl_secs: default_predicted_ttl_secs(),
+            router_predicted_ttl_secs: None,
         }
     }
 }
@@ -367,6 +352,14 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
             "serve_indexer requires overlap_score_weight > 0",
         ));
     }
+    if config.router_predicted_ttl_secs.is_some()
+        && !config.use_kv_events
+        && !config.use_remote_indexer
+    {
+        return Err(ValidationError::new(
+            "router_predicted_ttl_secs requires use_kv_events=true or use_remote_indexer=true",
+        ));
+    }
     Ok(())
 }
 
@@ -380,6 +373,10 @@ impl KvRouterConfig {
         }
 
         DEFAULT_RECHECK_INTERVAL
+    }
+
+    pub fn predict_on_route_enabled(&self) -> bool {
+        self.router_predicted_ttl_secs.is_some()
     }
 
     pub fn assume_kv_reuse(&self, config_override: Option<&RouterConfigOverride>) -> bool {
@@ -515,6 +512,29 @@ mod tests {
 
         assert!(too_small.validate().is_err());
         assert!(too_large.validate().is_err());
+    }
+
+    #[test]
+    fn test_kv_router_config_rejects_local_approx_with_predicted_ttl() {
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_predicted_ttl_secs: Some(5.0),
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_kv_router_config_allows_remote_approx_with_predicted_ttl() {
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            use_remote_indexer: true,
+            router_predicted_ttl_secs: Some(5.0),
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_ok());
     }
 
     #[test]

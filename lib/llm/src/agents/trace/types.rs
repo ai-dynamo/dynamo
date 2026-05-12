@@ -82,6 +82,15 @@ pub struct AgentRequestMetrics {
     pub queue_depth: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker: Option<WorkerInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay: Option<AgentReplayMetrics>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentReplayMetrics {
+    pub trace_block_size: usize,
+    pub input_length: usize,
+    pub input_sequence_hashes: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -100,6 +109,10 @@ pub struct WorkerInfo {
 pub struct AgentToolEvent {
     pub tool_call_id: String,
     pub tool_class: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at_unix_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at_unix_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<AgentToolStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]

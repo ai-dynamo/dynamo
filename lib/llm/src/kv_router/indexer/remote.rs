@@ -198,6 +198,10 @@ impl RemoteIndexer {
 
         Ok(())
     }
+
+    pub(super) fn use_kv_events(&self) -> bool {
+        self.use_kv_events
+    }
 }
 
 fn cached_instance_ids(client: &Client) -> HashSet<u64> {

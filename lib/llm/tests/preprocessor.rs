@@ -260,6 +260,7 @@ impl Request {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -550,10 +551,10 @@ pub mod openai_preprocessor_tests {
             NvExt::builder()
                 .agent_context(
                     AgentContext::builder()
-                        .workflow_type_id("deep_research:v1".to_string())
-                        .workflow_id("run-123".to_string())
-                        .program_id("run-123:researcher-0".to_string())
-                        .parent_program_id("run-123:orchestrator".to_string())
+                        .session_type_id("deep_research:v1".to_string())
+                        .session_id("run-123".to_string())
+                        .trajectory_id("run-123:researcher-0".to_string())
+                        .parent_trajectory_id("run-123:orchestrator".to_string())
                         .build()
                         .unwrap(),
                 )
@@ -570,11 +571,11 @@ pub mod openai_preprocessor_tests {
         let agent_context = preprocessed_request
             .agent_context
             .expect("agent_context should propagate");
-        assert_eq!(agent_context.workflow_type_id, "deep_research:v1");
-        assert_eq!(agent_context.workflow_id, "run-123");
-        assert_eq!(agent_context.program_id, "run-123:researcher-0");
+        assert_eq!(agent_context.session_type_id, "deep_research:v1");
+        assert_eq!(agent_context.session_id, "run-123");
+        assert_eq!(agent_context.trajectory_id, "run-123:researcher-0");
         assert_eq!(
-            agent_context.parent_program_id.as_deref(),
+            agent_context.parent_trajectory_id.as_deref(),
             Some("run-123:orchestrator")
         );
     }
@@ -700,6 +701,7 @@ mod context_length_validation {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }

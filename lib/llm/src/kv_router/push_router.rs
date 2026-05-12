@@ -543,10 +543,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         //     only cache-state signal, so record there, or
         //   - predict-on-route: Indexer dispatches the write to a side
         //     approximate indexer whose entries expire after a short TTL.
-        // In event-only mode (use_kv_events=true, predict_on_route=false) we
+        // In event-only mode with no predicted TTL we
         // skip recording — the engine's KV events are the source of truth.
         let cfg = self.chooser.kv_router_config();
-        let should_record = !is_query_only && (!cfg.use_kv_events || cfg.router_predict_on_route);
+        let should_record =
+            !is_query_only && (!cfg.use_kv_events || cfg.predict_on_route_enabled());
         if should_record {
             let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
             let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();

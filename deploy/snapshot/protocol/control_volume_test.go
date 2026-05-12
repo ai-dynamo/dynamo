@@ -21,8 +21,30 @@ func TestEnsureControlVolume(t *testing.T) {
 		if len(c.VolumeMounts) != 1 || c.VolumeMounts[0].Name != SnapshotControlVolumeName || c.VolumeMounts[0].MountPath != SnapshotControlMountPath {
 			t.Fatalf("expected one %s mount at %s, got %#v", SnapshotControlVolumeName, SnapshotControlMountPath, c.VolumeMounts)
 		}
+		if c.VolumeMounts[0].SubPath != "main" {
+			t.Fatalf("expected subPath=%q, got %q", "main", c.VolumeMounts[0].SubPath)
+		}
 		if len(c.Env) != 1 || c.Env[0].Name != SnapshotControlDirEnv || c.Env[0].Value != SnapshotControlMountPath {
 			t.Fatalf("expected env %s=%s, got %#v", SnapshotControlDirEnv, SnapshotControlMountPath, c.Env)
+		}
+	})
+
+	t.Run("per-container subPath isolates multi-container pods", func(t *testing.T) {
+		ps := &corev1.PodSpec{Containers: []corev1.Container{
+			{Name: "engine-0"},
+			{Name: "engine-1"},
+		}}
+		EnsureControlVolume(ps, &ps.Containers[0])
+		EnsureControlVolume(ps, &ps.Containers[1])
+
+		if len(ps.Volumes) != 1 {
+			t.Fatalf("expected single shared emptyDir, got %#v", ps.Volumes)
+		}
+		if got := ps.Containers[0].VolumeMounts[0].SubPath; got != "engine-0" {
+			t.Fatalf("engine-0 subPath=%q", got)
+		}
+		if got := ps.Containers[1].VolumeMounts[0].SubPath; got != "engine-1" {
+			t.Fatalf("engine-1 subPath=%q", got)
 		}
 	})
 

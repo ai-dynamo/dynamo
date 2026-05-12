@@ -15,8 +15,8 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RouterSchedulingPolicy,
-    SchedulingPolicy, SchedulingRequest, SequenceRequest, WorkerSelector,
+    ActiveSequencesMultiWorker, DefaultWorkerSelector, PrefillTokenDeltas, RadixTree,
+    RouterSchedulingPolicy, SchedulingPolicy, SchedulingRequest, SequenceRequest, WorkerSelector,
     scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
@@ -99,6 +99,10 @@ impl SyncReplayIndexer {
     }
 
     fn apply_event(&mut self, event: RouterEvent) -> Result<()> {
+        // TODO: support lower tier events in replay indexer
+        if !event.storage_tier.is_gpu() {
+            return Ok(());
+        }
         self.tree.apply_event(event).map_err(Into::into)
     }
 
@@ -159,12 +163,6 @@ impl PendingRequest {
             tier_overlap_blocks: TierOverlapBlocks::default(),
             effective_overlap_blocks,
             effective_cached_tokens,
-            tree_sizes: self
-                .overlaps
-                .tree_sizes
-                .iter()
-                .map(|(k, v)| (*k, *v))
-                .collect(),
             decode_blocks,
             prefill_tokens,
             track_prefill_tokens: self.track_prefill_tokens,
@@ -516,22 +514,34 @@ impl OfflineReplayRouter {
         request: PendingRequest,
         decay_now: Instant,
     ) -> Result<AdmitOutcome> {
-        let (decode_blocks, prefill_tokens) = self
-            .slots
-            .potential_blocks_and_tokens_with_prefill_tracking(
-                request.token_seq.as_deref(),
-                request.isl_tokens,
-                request
-                    .overlaps
-                    .scores
-                    .iter()
-                    .map(|(worker, overlap)| {
-                        (*worker, *overlap as usize * self.block_size as usize)
-                    })
-                    .collect(),
-                request.track_prefill_tokens,
-                decay_now,
-            );
+        let prefill_token_deltas =
+            if request.track_prefill_tokens {
+                let by_worker = request
+                .overlaps
+                .scores
+                .iter()
+                .map(|(worker, overlap)| {
+                    let cached_tokens = *overlap as usize * self.block_size as usize;
+                    let delta = request.isl_tokens.checked_sub(cached_tokens).unwrap_or_else(|| {
+                        tracing::error!(
+                            "prefill_tokens < 0 with ISL {} < cached_tokens {}, returning 0",
+                            request.isl_tokens,
+                            cached_tokens,
+                        );
+                        0
+                    });
+                    (*worker, delta)
+                })
+                .collect::<FxHashMap<_, _>>();
+                PrefillTokenDeltas::new(request.isl_tokens, by_worker)
+            } else {
+                PrefillTokenDeltas::none()
+            };
+        let (decode_blocks, prefill_tokens) = self.slots.potential_blocks_and_tokens_at(
+            request.token_seq.as_deref(),
+            &prefill_token_deltas,
+            decay_now,
+        );
         let scheduling_request =
             request.scheduling_request(self.block_size as usize, decode_blocks, prefill_tokens);
         let selection = self.selector.select_worker(
@@ -660,9 +670,13 @@ mod tests {
 
     use dynamo_kv_router::PrefillLoadEstimator;
     use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
+    use dynamo_kv_router::protocols::{
+        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+        KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerId,
+    };
     use uuid::Uuid;
 
-    use super::{OfflineReplayRouter, WorkerAdmission};
+    use super::{OfflineReplayRouter, SyncReplayIndexer, WorkerAdmission};
     use crate::common::protocols::{DirectRequest, MockEngineArgs};
     use crate::replay::ReplayPrefillLoadEstimator;
 
@@ -724,6 +738,46 @@ mod tests {
             dp_rank: 0,
             arrival_timestamp_ms: Some(0.0),
         }
+    }
+
+    fn store_event(
+        worker_id: WorkerId,
+        event_id: u64,
+        tokens_hash: u64,
+        storage_tier: StorageTier,
+    ) -> RouterEvent {
+        RouterEvent::with_storage_tier(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(event_id),
+                        tokens_hash: LocalBlockHash(tokens_hash),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            },
+            storage_tier,
+        )
+    }
+
+    #[test]
+    fn lower_tier_events_do_not_enter_offline_primary_index() {
+        let mut indexer = SyncReplayIndexer::new(64);
+
+        indexer
+            .apply_event(store_event(7, 1, 101, StorageTier::HostPinned))
+            .unwrap();
+        assert_eq!(indexer.debug_snapshot().total_cached_blocks, 0);
+
+        indexer
+            .apply_event(store_event(7, 2, 101, StorageTier::Device))
+            .unwrap();
+        assert_eq!(indexer.debug_snapshot().total_cached_blocks, 1);
     }
 
     #[test]

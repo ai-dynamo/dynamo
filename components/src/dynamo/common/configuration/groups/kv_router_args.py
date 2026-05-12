@@ -38,7 +38,6 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "serve_indexer",
     "shared_cache_multiplier",
     "shared_cache_type",
-    "router_predict_on_route",
     "router_predicted_ttl_secs",
 )
 
@@ -66,8 +65,7 @@ class KvRouterConfigBase(ConfigBase):
     serve_indexer: bool = False
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
-    router_predict_on_route: bool = False
-    router_predicted_ttl_secs: float = 5.0
+    router_predicted_ttl_secs: Optional[float] = None
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
@@ -241,7 +239,12 @@ class KvRouterArgGroup(ArgGroup):
                 "KV Router: Queue threshold fraction for prefill token capacity. "
                 "Requests are queued if all workers exceed this fraction of "
                 "max_num_batched_tokens. Must be >= 0. Use 0.0 for maximum "
-                "queueing sensitivity (queue as soon as any tokens are active)."
+                "queueing sensitivity (queue as soon as any tokens are active). "
+                "Note (SGLang backend): when --max-prefill-tokens is not set, MDC's "
+                "max_num_batched_tokens falls back to max_total_num_tokens (the KV "
+                "cache pool size), not the per-step prefill window, which inflates "
+                "the threshold's effective denominator. Set --max-prefill-tokens "
+                "explicitly for predictable semantics, or use a smaller threshold."
             ),
             arg_type=float,
         )
@@ -251,9 +254,9 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_EVENT_THREADS",
             default=4,
             help=(
-                "KV Router: Number of event processing threads. When > 1, uses a concurrent "
-                "radix tree with a thread pool for higher throughput. Ignored when "
-                "--no-router-kv-events is set."
+                "KV Router: Number of KV indexer worker threads. When > 1, uses a concurrent "
+                "radix tree with a thread pool for higher throughput, including "
+                "approximate routing when --no-router-kv-events is set."
             ),
             arg_type=int,
         )
@@ -308,30 +311,15 @@ class KvRouterArgGroup(ArgGroup):
             arg_type=str,
             choices=["none", "hicache"],
         )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--router-predict-on-route",
-            env_var="DYN_ROUTER_PREDICT_ON_ROUTE",
-            default=False,
-            dest="router_predict_on_route",
-            help=(
-                "KV Router: Speculatively record a request's blocks at routing time "
-                "so sibling requests arriving before the engine emits a KV event still "
-                "see the prefix. Only takes effect with --router-kv-events; in "
-                "approximate mode (--no-router-kv-events) the primary indexer already "
-                "records on routing decisions and this flag is ignored."
-            ),
-        )
         add_argument(
             g,
             flag_name="--router-predicted-ttl-secs",
             env_var="DYN_ROUTER_PREDICTED_TTL_SECS",
-            default=5.0,
+            default=None,
             help=(
-                "KV Router: TTL in seconds for entries in the --router-predict-on-route "
-                "side indexer (default: 5.0). Independent of --router-ttl-secs (which "
-                "covers the primary indexer's pure-approximate mode); kept short so "
-                "predictions the engine never confirms age out quickly."
+                "KV Router: Enable predict-on-route with this TTL in seconds for entries "
+                "in the local side indexer. Omit to disable. Independent of "
+                "--router-ttl-secs, which covers pure approximate mode."
             ),
             arg_type=float,
         )
