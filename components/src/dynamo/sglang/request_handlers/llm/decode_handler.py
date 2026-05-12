@@ -508,7 +508,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             video_data = _extract_media_urls(mm_data, "video_url")
 
             image_data: list[str] | list[PILImage] | None
-            if self._enable_frontend_decoding and self._image_loader is not None:
+            if self._enable_frontend_decoding:
+                # Invariant from __init__: _image_loader is non-None iff
+                # _enable_frontend_decoding is True. Assert narrows the
+                # Optional for the type checker without runtime branching.
+                assert self._image_loader is not None
                 image_items = mm_data.get("image_url") or []
                 if image_items:
                     image_data = await self._image_loader.load_image_batch(image_items)
