@@ -247,3 +247,82 @@ overrides:
   - { ecosystem: dpkg, name: libgc1,            license: "BSD-3-Clause",     source: "Boehm-GC upstream — http://www.hboehm.info/gc/license.txt (MIT-like, mapped to closest SPDX)" }
   - { ecosystem: dpkg, name: numactl,           license: "GPL-2.0-or-later", source: "Linux NUMA tools, GPL-2+" }
   - { ecosystem: dpkg, name: ubuntu-keyring,    license: "GPL-2.0-or-later", source: "Ubuntu keyring; copyright file references common-licenses/GPL-2" }
+
+  # --- Sglang cuda12.9 — dpkg additions on top of cuda:12.9.1-cudnn-devel ---
+  # X11 / libdrm / common system libs whose syft DEP-5 parse came back UNKNOWN.
+  - { ecosystem: dpkg, name: libdrm-amdgpu1,    license: "MIT",              source: "freedesktop libdrm — https://gitlab.freedesktop.org/mesa/drm/-/blob/main/LICENSE" }
+  - { ecosystem: dpkg, name: libdrm-common,     license: "MIT",              source: "freedesktop libdrm" }
+  - { ecosystem: dpkg, name: libdrm2,           license: "MIT",              source: "freedesktop libdrm" }
+  - { ecosystem: dpkg, name: libxau6,           license: "MIT",              source: "X.Org libXau — MIT/X11 style" }
+  - { ecosystem: dpkg, name: libxcb1,           license: "MIT",              source: "X.Org libxcb — MIT/X11 style" }
+  - { ecosystem: dpkg, name: libxdmcp6,         license: "MIT",              source: "X.Org libXdmcp — MIT/X11 style" }
+  - { ecosystem: dpkg, name: libxext6,          license: "MIT",              source: "X.Org libXext — MIT/X11 style" }
+  - { ecosystem: dpkg, name: libtcl8.6,         license: "TCL",              source: "Tcl/Tk Foundation TCL license — https://www.tcl-lang.org/software/tcltk/license.html" }
+  - { ecosystem: dpkg, name: libtk8.6,          license: "TCL",              source: "Tcl/Tk Foundation TCL license" }
+  - { ecosystem: dpkg, name: python3-gdbm,      license: "PSF-2.0",          source: "CPython stdlib (gdbm bindings) — PSF" }
+  - { ecosystem: dpkg, name: python3-lib2to3,   license: "PSF-2.0",          source: "CPython stdlib (lib2to3) — PSF" }
+  - { ecosystem: dpkg, name: python3-tk,        license: "PSF-2.0",          source: "CPython stdlib (tkinter bindings) — PSF" }
+
+  # --- Sglang cuda12.9 — Python wheel additions ---
+  # Wheel METADATA missing or non-parseable; verified upstream license per entry.
+  - { ecosystem: python, name: addict,                    license: "MIT",       source: "addict upstream — https://github.com/mewwts/addict/blob/master/LICENSE" }
+  - { ecosystem: python, name: annotated-types,           license: "MIT",       source: "annotated-types upstream — https://github.com/annotated-types/annotated-types/blob/main/LICENSE" }
+  - { ecosystem: python, name: blinker,                   license: "MIT",       source: "blinker upstream — https://github.com/pallets-eco/blinker/blob/main/LICENSE.rst" }
+  - { ecosystem: python, name: blobfile,                  license: "MIT",       source: "blobfile upstream — https://github.com/christopher-hesse/blobfile/blob/master/LICENSE" }
+  - { ecosystem: python, name: cache-dit,                 license: "Apache-2.0",  source: "cache-dit upstream — https://github.com/vipshop/cache-dit/blob/main/LICENSE" }
+  - { ecosystem: python, name: deep-ep,                   license: "MIT",       source: "deep-ep upstream — https://github.com/deepseek-ai/DeepEP/blob/main/LICENSE" }
+  - { ecosystem: python, name: gguf,                      license: "MIT",       source: "gguf (llama.cpp Python binding) — https://github.com/ggerganov/llama.cpp/blob/master/LICENSE" }
+  - { ecosystem: python, name: google-crc32c,             license: "Apache-2.0",  source: "google-crc32c upstream — https://github.com/googleapis/python-crc32c/blob/main/LICENSE" }
+  - { ecosystem: python, name: icdiff,                    license: "BSD-3-Clause",  source: "icdiff upstream — https://github.com/jeffkaufman/icdiff/blob/master/LICENSE" }
+  - { ecosystem: python, name: jinja2,                    license: "BSD-3-Clause",  source: "Jinja upstream — https://github.com/pallets/jinja/blob/main/LICENSE.rst" }
+  - { ecosystem: python, name: jiter,                     license: "MIT",       source: "jiter upstream — https://github.com/pydantic/jiter/blob/main/LICENSE" }
+  - { ecosystem: python, name: kiwisolver,                license: "BSD-3-Clause",  source: "kiwisolver upstream — https://github.com/nucleic/kiwi/blob/main/LICENSE" }
+  - { ecosystem: python, name: loguru,                    license: "MIT",       source: "loguru upstream — https://github.com/Delgan/loguru/blob/master/LICENSE" }
+  - { ecosystem: python, name: markdown-it-py,            license: "MIT",       source: "markdown-it-py upstream — https://github.com/executablebooks/markdown-it-py/blob/master/LICENSE" }
+  - { ecosystem: python, name: matplotlib,                license: "LicenseRef-Matplotlib",  source: "matplotlib upstream — BSD-style — https://matplotlib.org/stable/users/project/license.html" }
+  - { ecosystem: python, name: matplotlib-inline,         license: "BSD-3-Clause",  source: "matplotlib-inline upstream — https://github.com/ipython/matplotlib-inline/blob/main/LICENSE" }
+  - { ecosystem: python, name: mooncake-transfer-engine,  license: "Apache-2.0",  source: "Mooncake upstream — https://github.com/kvcache-ai/Mooncake/blob/main/LICENSE" }
+  - { ecosystem: python, name: ninja,                     license: "Apache-2.0",  source: "Ninja upstream — https://github.com/ninja-build/ninja/blob/master/COPYING" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl,        license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL — proprietary distribution wrapper around the BSD CUTLASS library" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl-libs-base, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL libs" }
+  - { ecosystem: python, name: openai-harmony,            license: "MIT",       source: "openai-harmony upstream — https://github.com/openai/harmony/blob/main/LICENSE" }
+  - { ecosystem: python, name: pandas,                    license: "BSD-3-Clause",  source: "pandas upstream — https://github.com/pandas-dev/pandas/blob/main/LICENSE" }
+  - { ecosystem: python, name: pathspec,                  license: "MPL-2.0",   source: "pathspec upstream — https://github.com/cpburnz/python-pathspec/blob/master/LICENSE" }
+  - { ecosystem: python, name: prompt-toolkit,            license: "BSD-3-Clause",  source: "prompt-toolkit upstream — https://github.com/prompt-toolkit/python-prompt-toolkit/blob/main/LICENSE" }
+  - { ecosystem: python, name: ptyprocess,                license: "ISC",       source: "ptyprocess upstream — https://github.com/pexpect/ptyprocess/blob/master/LICENSE" }
+  - { ecosystem: python, name: py-spy,                    license: "MIT",       source: "py-spy upstream — https://github.com/benfred/py-spy/blob/master/LICENSE" }
+  - { ecosystem: python, name: pycryptodomex,             license: "BSD-2-Clause",  source: "PyCryptodomex — BSD-2-Clause + Public Domain dual-licensed; tracked as BSD-2-Clause per Debian/Fedora packaging" }
+  - { ecosystem: python, name: pyparsing,                 license: "MIT",       source: "pyparsing upstream — https://github.com/pyparsing/pyparsing/blob/master/LICENSE" }
+  - { ecosystem: python, name: python-dateutil,           license: "Apache-2.0",  source: "python-dateutil upstream — dual-licensed Apache-2.0 OR BSD-3-Clause; we ship under Apache-2.0" }
+  - { ecosystem: python, name: quack-kernels,             license: "Apache-2.0",  source: "quack-kernels upstream (sglang CUTLASS kernels) — Apache-2.0" }
+  - { ecosystem: python, name: runai-model-streamer,      license: "Apache-2.0",  source: "Run:ai model streamer — https://github.com/run-ai/runai-model-streamer/blob/main/LICENSE" }
+  - { ecosystem: python, name: safetensors,               license: "Apache-2.0",  source: "HuggingFace safetensors — https://github.com/huggingface/safetensors/blob/main/LICENSE" }
+  - { ecosystem: python, name: scikit-image,              license: "BSD-3-Clause",  source: "scikit-image upstream — https://github.com/scikit-image/scikit-image/blob/main/LICENSE.txt" }
+  - { ecosystem: python, name: sentencepiece,             license: "Apache-2.0",  source: "Google SentencePiece — https://github.com/google/sentencepiece/blob/master/LICENSE" }
+  - { ecosystem: python, name: sglang,                    license: "Apache-2.0",  source: "SGLang upstream — https://github.com/sgl-project/sglang/blob/main/LICENSE" }
+  - { ecosystem: python, name: st-attn,                   license: "Apache-2.0",  source: "st-attn (sglang attention kernels) — Apache-2.0" }
+  - { ecosystem: python, name: tokenizers,                license: "Apache-2.0",  source: "HuggingFace tokenizers — https://github.com/huggingface/tokenizers/blob/main/LICENSE" }
+  - { ecosystem: python, name: torchaudio,                license: "BSD-2-Clause",  source: "Meta torchaudio — https://github.com/pytorch/audio/blob/main/LICENSE" }
+  - { ecosystem: python, name: triton,                    license: "MIT",       source: "OpenAI Triton — https://github.com/openai/triton/blob/main/LICENSE" }
+  - { ecosystem: python, name: vsa,                       license: "Apache-2.0",  source: "vsa (visual self-attention, sglang component) — Apache-2.0" }
+
+  # --- Sglang cuda12.9 — Go module additions (UNKNOWN from syft) ---
+  # All well-known projects; syft can't run go-license-detector against
+  # compiled binaries so license comes back UNKNOWN.
+  - { ecosystem: go, name: github.com/coreos/go-semver,     license: "Apache-2.0", source: "coreos/go-semver — https://github.com/coreos/go-semver/blob/main/LICENSE" }
+  - { ecosystem: go, name: github.com/coreos/go-systemd/v22, license: "Apache-2.0", source: "coreos/go-systemd — https://github.com/coreos/go-systemd/blob/main/LICENSE" }
+  - { ecosystem: go, name: github.com/gogo/protobuf,        license: "BSD-3-Clause", source: "gogo/protobuf — https://github.com/gogo/protobuf/blob/master/LICENSE" }
+  - { ecosystem: go, name: github.com/golang/protobuf,      license: "BSD-3-Clause", source: "golang/protobuf — https://github.com/golang/protobuf/blob/master/LICENSE" }
+  - { ecosystem: go, name: go.etcd.io/etcd/api/v3,          license: "Apache-2.0", source: "etcd-io/etcd — https://github.com/etcd-io/etcd/blob/main/LICENSE" }
+  - { ecosystem: go, name: go.etcd.io/etcd/client/pkg/v3,   license: "Apache-2.0", source: "etcd-io/etcd" }
+  - { ecosystem: go, name: go.etcd.io/etcd/client/v3,       license: "Apache-2.0", source: "etcd-io/etcd" }
+  - { ecosystem: go, name: go.uber.org/atomic,              license: "MIT",      source: "uber-go/atomic — https://github.com/uber-go/atomic/blob/master/LICENSE.txt" }
+  - { ecosystem: go, name: go.uber.org/multierr,            license: "MIT",      source: "uber-go/multierr — https://github.com/uber-go/multierr/blob/master/LICENSE.txt" }
+  - { ecosystem: go, name: go.uber.org/zap,                 license: "MIT",      source: "uber-go/zap — https://github.com/uber-go/zap/blob/master/LICENSE" }
+  - { ecosystem: go, name: golang.org/x/net,                license: "BSD-3-Clause", source: "golang.org/x — standard golang BSD-3-Clause" }
+  - { ecosystem: go, name: golang.org/x/sys,                license: "BSD-3-Clause", source: "golang.org/x — standard golang BSD-3-Clause" }
+  - { ecosystem: go, name: golang.org/x/text,               license: "BSD-3-Clause", source: "golang.org/x — standard golang BSD-3-Clause" }
+  - { ecosystem: go, name: google.golang.org/genproto/googleapis/api, license: "Apache-2.0", source: "googleapis/go-genproto — https://github.com/googleapis/go-genproto/blob/main/LICENSE" }
+  - { ecosystem: go, name: google.golang.org/genproto/googleapis/rpc, license: "Apache-2.0", source: "googleapis/go-genproto" }
+  - { ecosystem: go, name: google.golang.org/grpc,          license: "Apache-2.0", source: "grpc/grpc-go — https://github.com/grpc/grpc-go/blob/master/LICENSE" }
+  - { ecosystem: go, name: google.golang.org/protobuf,      license: "BSD-3-Clause", source: "protocolbuffers/protobuf-go — https://github.com/protocolbuffers/protobuf-go/blob/master/LICENSE" }

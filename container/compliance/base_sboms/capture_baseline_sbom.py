@@ -323,13 +323,13 @@ def _canonicalize_license_name(name: str) -> str | None:
     if key.startswith("expat ") or key == "expat":
         return "MIT"
 
-    # Last resort: surface as LicenseRef-<sanitized name>. Sanitization
-    # strips characters that break SPDX parsers (colons, commas, parens,
-    # slashes) and collapses runs of hyphens. Use the post-suffix-strip
-    # form so "Apache-2.0 License" and "Apache-2.0" converge.
-    sanitized = base.replace(" ", "-")
-    for ch in ":,()/":
-        sanitized = sanitized.replace(ch, "-")
+    # Last resort: surface as LicenseRef-<sanitized name>. SPDX grammar
+    # restricts LicenseRef ID body to [0-9A-Za-z.-], so we strip every
+    # other character that syft DEP-5 output drops in there (commas,
+    # parens, slashes, colons, tildes, plus signs — all surfaced from
+    # Ubuntu's copyright files). Anything not in the allowed set
+    # becomes a hyphen; runs of hyphens collapse to one.
+    sanitized = _re.sub(r"[^0-9A-Za-z.-]", "-", base)
     sanitized = _re.sub(r"-+", "-", sanitized).strip("-")
     if not sanitized:
         return None
