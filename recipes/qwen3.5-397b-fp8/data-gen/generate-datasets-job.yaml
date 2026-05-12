@@ -10,8 +10,9 @@
 #
 # Matches the dataset shape implied by PR 8235's sweep_397b.yaml
 # (8K ISL × 5 images per turn × 1K OSL × conc=30) but extended from 3 to
-# 8 turns so the EC effect has time to land (turn-1 is a cold-cache
-# baseline; turns 2-8 each reuse 4-of-5 images from the prior turn).
+# 8 turns so prefix-cache hits across same-user turns have time to land
+# (turn-1 is a cold-cache baseline; turns 2-8 each reuse 4-of-5 images
+# from the prior turn).
 apiVersion: batch/v1
 kind: Job
 metadata:

@@ -11,7 +11,7 @@
 #
 # Usage:
 #   ./run-benchmark.sh -n <namespace> --hw h100 --config vllm-serve
-#   ./run-benchmark.sh -n <namespace> --hw h100 --config dynamo-fd-ec --step deploy
+#   ./run-benchmark.sh -n <namespace> --hw h100 --config dynamo-fd --step deploy
 #
 # Steps: pvc | download | dataset | deploy | bench | retrieve | clean | all
 #   pvc/download/dataset are config-agnostic (idempotent prep).
@@ -91,8 +91,15 @@ APPLY_TPL() { envsubst "$TPL_VARS" <"$1" | $K apply -f -; }
 # ---------------- config-agnostic prep ----------------
 
 pvc() {
-  $K apply -f "$HERE/model-cache/model-cache.yaml"
-  $K get pvc
+  # We rely on a pre-provisioned `shared-model-cache` PVC in the
+  # namespace (RWX, ≥600 GiB — typically FSx Lustre on AWS). The recipe
+  # does not create one. Verify it exists and bail out loudly if not.
+  if ! $K get pvc shared-model-cache >/dev/null 2>&1; then
+    echo "ERROR: PVC 'shared-model-cache' not found in namespace $NAMESPACE." >&2
+    echo "       Provision an RWX PVC named 'shared-model-cache' (≥600 GiB) and re-run." >&2
+    exit 2
+  fi
+  $K get pvc shared-model-cache
 }
 
 download() {

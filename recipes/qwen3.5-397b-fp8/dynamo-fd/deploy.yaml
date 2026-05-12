@@ -1,37 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated Dynamo on a single 8×H100 node with **frontend-decoding ON**,
-# **embedding cache OFF** — isolates the frontend-decoding effect from
-# the EC effect when compared against:
-#   - vllm-serve/  : baseline (no Dynamo features)
-#   - dynamo-fd-ec : Dynamo + frontend-decoding + EC
+# Aggregated Dynamo on a single 8×H100 node with **frontend-decoding ON**.
+# Compared against vllm-serve/ to isolate the frontend-decoding effect.
 #
-# Mirrors the `dynamo-fd` config in PR 8235's
-# benchmarks/multimodal/sweep/experiments/embedding_cache/sweep_397b.yaml
+# Mirrors the `dynamo-fd` config in PR 8235's 397B sweep
 # (TP=8, expert-parallel, mm-encoder-tp data, max-model-len=32K). The
 # only deliberate divergence from PR 8235 is `--mm-processor-cache-gb 30`
-# instead of 60 — see comment block below.
+# (PR 8235 uses 60). Matching the processor cache to vllm-serve makes
+# frontend-decoding the only flag that differs between the two configs.
 #
-# Per-config flag diff (kept symmetric so only EC capacity differs):
-#                                              fd        fd-ec        vllm-serve
-#   --tensor-parallel-size                       8         8            8
-#   --enable-expert-parallel                    yes       yes          yes
-#   --mm-encoder-tp-mode                        data      data         data
-#   --mm-processor-cache-gb                      30        30           30
-#   --max-model-len                             32768     32768        32768
-#   --frontend-decoding                         yes       yes          n/a
-#   --multimodal-embedding-cache-capacity-gb     --        4            n/a
-#
-# PR 8235's 397B yaml uses 60 GB processor cache on fd and 30 GB on
-# fd-ec — different sizes. Vision-sweep skill guidance is to match the
-# processor cache across configs so the only flag that differs between
-# fd and fd-ec is the EC capacity. We follow vision-sweep.
+# Per-config flag diff:
+#                                              fd          vllm-serve
+#   --tensor-parallel-size                       8           8
+#   --enable-expert-parallel                    yes         yes
+#   --mm-encoder-tp-mode                        data        data
+#   --mm-processor-cache-gb                      30          30
+#   --max-model-len                             32768       32768
+#   --frontend-decoding                         yes         n/a
 #
 # Frontend + VllmWorker are both pinned to the same host via
-# hw/${HW}.env so the gang scheduler places them on one 8×H100 node.
-# That keeps the request-plane RPC and (future) NIXL embedding transfer
-# intra-node.
+# hw/${HW}.env so the gang scheduler places them on one 8×H100 node,
+# keeping the request-plane RPC intra-node.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -120,8 +110,6 @@ spec:
               value: "1"
             - name: DYN_REQUEST_PLANE
               value: tcp
-            # DYN_VLLM_EMBEDDING_TRANSFER_MODE / DYN_MULTIMODAL_EMBEDDING_CACHE_GB
-            # intentionally omitted — no embedding cache in this config.
             - name: DYN_MM_ALLOW_INTERNAL
               value: "1"
             # Relax NCCL watchdog — DeepGEMM JIT + cudagraph capture for

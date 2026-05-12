@@ -85,7 +85,6 @@ qwen3.5-397b-fp8/
 ├── hw/
 │   └── h100.env                # Hardware axis (8×H100, shared across both configs)
 ├── model-cache/
-│   ├── model-cache.yaml
 │   └── model-download.yaml
 ├── data-gen/
 │   └── generate-datasets-job.yaml
@@ -138,9 +137,11 @@ The HF cache is mounted at the root so any model already cached in
 the namespace is reused. The Qwen3.5-397B-A17B-FP8 download lands in
 the standard `hub/models--Qwen--Qwen3.5-397B-A17B-FP8/` directory.
 
-If your cluster doesn't pre-provision `shared-model-cache`, uncomment
-the PVC block in `model-cache/model-cache.yaml` and pick an RWX storage
-class (e.g. `dgxc-enterprise-file` on dgxc, FSx Lustre on AWS).
+If your cluster doesn't pre-provision `shared-model-cache`, create one
+yourself before running the recipe — RWX access mode, ≥600 GiB, pick
+an RWX storage class (e.g. `dgxc-enterprise-file` on dgxc, FSx Lustre
+on AWS). The recipe will not create it for you; `run-benchmark.sh`
+errors out if the PVC is missing.
 
 ## aiperf install
 

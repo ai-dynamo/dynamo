@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# aiperf benchmark pod for the dynamo-fd (frontend-decoding, no EC)
-# config. Identical to dynamo-fd-ec/perf.yaml except FRONTEND service
-# name, RUN_DIR run-label, and pod metadata.
+# aiperf benchmark pod for the dynamo-fd (frontend-decoding) config.
+# Identical to vllm-serve/perf.yaml except FRONTEND service name,
+# RUN_DIR run-label, and pod metadata.
 apiVersion: v1
 kind: Pod
 metadata:
