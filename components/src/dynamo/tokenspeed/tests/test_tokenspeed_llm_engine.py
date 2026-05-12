@@ -220,9 +220,7 @@ def test_completion_delta_output_preserves_later_token_delta():
 
 def test_kv_events_enabled_requires_enabled_non_null_publisher():
     assert kv_events_enabled('{"enable_kv_cache_events": true}')
-    assert kv_events_enabled(
-        '{"publisher": "zmq", "enable_kv_cache_events": true}'
-    )
+    assert kv_events_enabled('{"publisher": "zmq", "enable_kv_cache_events": true}')
     assert not kv_events_enabled(
         '{"publisher": "null", "enable_kv_cache_events": true}'
     )
@@ -242,8 +240,7 @@ def test_offset_zmq_endpoint_port_matches_tokenspeed():
     assert _offset_zmq_endpoint_port("tcp://*:5557", 0) == "tcp://*:5557"
     assert _offset_zmq_endpoint_port("tcp://*:5557", 2) == "tcp://*:5559"
     assert (
-        _offset_zmq_endpoint_port("inproc://kv-events", 2)
-        == "inproc://kv-events_dp2"
+        _offset_zmq_endpoint_port("inproc://kv-events", 2) == "inproc://kv-events_dp2"
     )
 
 
