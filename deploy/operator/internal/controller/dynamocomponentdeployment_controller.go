@@ -947,6 +947,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
 		}
 		checkpointInfo = info
+		if err := checkpoint.EnsureStoragePVC(ctx, r.Client, opt.dynamoComponentDeployment.Namespace, r.Config.Checkpoint.Storage); err != nil {
+			return nil, errors.Wrap(err, "failed to ensure checkpoint storage PVC")
+		}
 	}
 
 	podSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, commonconsts.MultinodeDeploymentTypeLWS, checkpointInfo)
@@ -955,12 +958,13 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		return nil, err
 	}
 	if r.Config.Checkpoint.Enabled {
-		if err := checkpoint.InjectCheckpointIntoPodSpec(
+		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
 			ctx,
 			r.Client,
 			opt.dynamoComponentDeployment.Namespace,
 			podSpec,
 			checkpointInfo,
+			r.Config.Checkpoint.Storage,
 			r.Config.Checkpoint.EffectiveSeccompProfile(),
 		); err != nil {
 			return nil, errors.Wrap(err, "failed to inject checkpoint config")
@@ -998,7 +1002,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	}
 	// Restore labels are operator-controlled state. Clear stale values after
 	// metadata merge and only reapply them when checkpoint material is ready.
-	checkpoint.ApplyRestorePodMetadata(podLabels, podAnnotations, checkpointInfo)
+	if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(podLabels, podAnnotations, checkpointInfo, r.Config.Checkpoint.Storage); err != nil {
+		return nil, errors.Wrap(err, "failed to apply checkpoint metadata")
+	}
 
 	// Propagate restart annotation to pod template to trigger rolling restart
 	// This is the same mechanism used by kubectl rollout restart

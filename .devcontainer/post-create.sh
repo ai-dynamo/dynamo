@@ -102,7 +102,7 @@ cat <<EOF
 
 Now build the project:
   cargo build --features dynamo-llm/block-manager
-  cd lib/bindings/python && maturin develop --uv && cd $WORKSPACE_DIR
+  cd lib/bindings/python && maturin develop --uv --features lightseek-mm && cd $WORKSPACE_DIR
   uv pip install --no-deps -e $WORKSPACE_DIR
 
 Optional:
