@@ -122,8 +122,9 @@ impl TransportManager {
     /// Vector of handles for the imported remote layouts
     ///
     /// # Errors
-    /// Returns an error if the remote worker was already loaded or if metadata
-    /// loading/reconstruction fails
+    /// Returns an error if metadata loading or layout reconstruction fails.
+    /// Duplicate imports for an already-loaded remote are idempotent — returns
+    /// the same handles without re-registering NIXL state.
     pub fn import_metadata(&self, metadata: SerializedLayout) -> Result<Vec<LayoutHandle>> {
         self.registry.write().unwrap().import_metadata(metadata)
     }
@@ -378,17 +379,17 @@ impl LayoutRegistry {
         // Unpack metadata
         let inner = metadata.unpack()?;
 
-        // Validate not already loaded
         let remote_key = (
             inner.worker_address.nixl_agent_name.clone(),
             inner.worker_address.worker_id,
         );
+
+        // Idempotent: if already loaded return the handles from the metadata.
+        // Mirrors the same fix in kvbm-physical's LayoutRegistry::import_metadata.
         if self.loaded_remotes.contains(&remote_key) {
-            bail!(
-                "Remote worker already loaded: {} (worker_id={})",
-                remote_key.0,
-                remote_key.1
-            );
+            let handles: Vec<LayoutHandle> =
+                inner.layouts.iter().map(|l| l.handle).collect();
+            return Ok(handles);
         }
 
         // Load NIXL metadata
@@ -588,7 +589,7 @@ mod tests {
 
     #[test]
     #[ignore] // Requires actual NIXL memory registration
-    fn test_import_duplicate_remote_fails() {
+    fn test_import_duplicate_remote_is_idempotent() {
         let source_agent = make_test_agent("source2");
         let mut source_manager = LayoutRegistry::new(source_agent.clone(), 10);
 
@@ -601,14 +602,14 @@ mod tests {
         let dest_agent = make_test_agent("dest2");
         let mut dest_manager = LayoutRegistry::new(dest_agent, 20);
 
-        // First import succeeds
+        // First import succeeds and returns the imported handles.
         let metadata_clone = SerializedLayout::from_bytes(metadata.as_bytes().clone());
-        dest_manager.import_metadata(metadata).unwrap();
+        let first = dest_manager.import_metadata(metadata).unwrap();
 
-        // Second import should fail
-        let result = dest_manager.import_metadata(metadata_clone);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("already loaded"));
+        // Second import for the same remote is idempotent: returns the same
+        // handles, does not re-register NIXL state, does not error.
+        let second = dest_manager.import_metadata(metadata_clone).unwrap();
+        assert_eq!(first, second);
     }
 
     #[test]

@@ -993,7 +993,7 @@ impl DecodeDisaggLeader {
                     .await
                 {
                     wrapper
-                        .cleanup_failed_request(&request_id_owned, err.to_string())
+                        .cleanup_failed_request(&request_id_owned, format!("{:#}", err))
                         .await;
                 }
             });
