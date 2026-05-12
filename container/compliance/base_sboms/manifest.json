@@ -30,6 +30,16 @@
       "from_image": "nvcr.io/nvidia/distroless/go",
       "from_tag": "v4.0.3",
       "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:7291df3657ecfcf05332af183b373994eb2cf328c7914944b09e6c437bf2edf8",
+      "baseline_image": "nvcr.io/nvidia/base/ubuntu",
+      "baseline_sbom": "ubuntu@7291df36.cdx.json",
+      "baseline_tag": "noble-20250619",
+      "from_digest": "sha256:7291df3657ecfcf05332af183b373994eb2cf328c7914944b09e6c437bf2edf8",
+      "from_image": "nvcr.io/nvidia/base/ubuntu",
+      "from_tag": "noble-20250619",
+      "platform": "linux/amd64"
     }
   ],
   "entry_schema": {
@@ -44,6 +54,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 4 MB per file.",
-  "generated_at": "2026-05-12T00:36:58+00:00",
+  "generated_at": "2026-05-12T00:37:33+00:00",
   "schema_version": 2
 }
