@@ -781,7 +781,7 @@ fn run_hrw_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
 
     // Register capacity for each worker (use a dummy LoRA to set capacity)
     for &worker in &workers {
-        state_tracker.handle_mdc_update(
+        state_tracker.handle_mdc_addition(
             worker,
             &LoraInfo {
                 name: format!("__capacity_init_{}", worker.worker_id),
@@ -815,7 +815,7 @@ fn run_hrw_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
 
             // Register the LoRA on state tracker when it first becomes active
             if load > 0 && !registered_loras.contains(&schedule.lora_name) {
-                state_tracker.handle_mdc_update(
+                state_tracker.handle_mdc_addition(
                     workers[0],
                     &LoraInfo {
                         name: schedule.lora_name.clone(),
@@ -1010,7 +1010,7 @@ fn run_mcf_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
         .collect();
 
     for &worker in &workers {
-        state_tracker.handle_mdc_update(
+        state_tracker.handle_mdc_addition(
             worker,
             &LoraInfo {
                 name: format!("__capacity_init_{}", worker.worker_id),
@@ -1038,7 +1038,7 @@ fn run_mcf_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
             }
 
             if load > 0 && !registered_loras.contains(&schedule.lora_name) {
-                state_tracker.handle_mdc_update(
+                state_tracker.handle_mdc_addition(
                     workers[0],
                     &LoraInfo {
                         name: schedule.lora_name.clone(),
@@ -1464,7 +1464,7 @@ fn test_simulation_worker_addition() {
 
         for i in 0..num_workers {
             let w = WorkerWithDpRank::new(i as u64, 0);
-            state_tracker.handle_mdc_update(
+            state_tracker.handle_mdc_addition(
                 w,
                 &LoraInfo {
                     name: format!("lora-{}", i % num_loras),
@@ -1488,7 +1488,7 @@ fn test_simulation_worker_addition() {
         }
 
         // Add a new worker
-        state_tracker.handle_mdc_update(
+        state_tracker.handle_mdc_addition(
             WorkerWithDpRank::new(num_workers as u64, 0),
             &LoraInfo {
                 name: "lora-0".to_string(),
@@ -1593,7 +1593,7 @@ fn test_simulation_worker_addition() {
 
         for i in 0..num_workers {
             let w = WorkerWithDpRank::new(i as u64, 0);
-            state_tracker.handle_mdc_update(
+            state_tracker.handle_mdc_addition(
                 w,
                 &LoraInfo {
                     name: format!("lora-{}", i % num_loras),
@@ -1617,7 +1617,7 @@ fn test_simulation_worker_addition() {
         }
 
         // Add a new worker
-        state_tracker.handle_mdc_update(
+        state_tracker.handle_mdc_addition(
             WorkerWithDpRank::new(num_workers as u64, 0),
             &LoraInfo {
                 name: "lora-0".to_string(),
@@ -1713,7 +1713,7 @@ fn test_simulation_worker_removal() {
 
         for i in 0..num_workers {
             let w = WorkerWithDpRank::new(i as u64, 0);
-            state_tracker.handle_mdc_update(
+            state_tracker.handle_mdc_addition(
                 w,
                 &LoraInfo {
                     name: format!("lora-{}", i % num_loras),
@@ -1848,7 +1848,7 @@ fn test_simulation_worker_removal() {
 
         for i in 0..num_workers {
             let w = WorkerWithDpRank::new(i as u64, 0);
-            state_tracker.handle_mdc_update(
+            state_tracker.handle_mdc_addition(
                 w,
                 &LoraInfo {
                     name: format!("lora-{}", i % num_loras),
