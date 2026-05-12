@@ -12,8 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -77,28 +76,30 @@ func (d *GroveMultinodeDeployer) GetHostNames(serviceName string, numberOfNodes 
 }
 
 // GetComponentReadinessAndServiceReplicaStatuses determines if all Grove components are ready
-// and returns the service replica statuses for each component.
+// and returns the replica statuses for each component.
 // - PodCliques: spec.replicas == status.readyReplicas
 // - PodCliqueScalingGroups: spec.replicas == status.availableReplicas
-func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client client.Client, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (bool, string, map[string]v1alpha1.ServiceReplicaStatus) {
+func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client client.Client, dgd *v1beta1.DynamoGraphDeployment) (bool, string, map[string]v1beta1.ComponentReplicaStatus) {
 	logger := log.FromContext(ctx)
 	var notReadyComponents []string
 
-	serviceStatuses := make(map[string]v1alpha1.ServiceReplicaStatus, len(dgd.Spec.Services))
+	componentStatuses := make(map[string]v1beta1.ComponentReplicaStatus, len(dgd.Spec.Components))
 
-	for serviceName, component := range dgd.Spec.Services {
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		componentName := component.ComponentName
 		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
-		resourceName := fmt.Sprintf("%s-0-%s", PCSNameForDGD(dgd.Name, dgd.Spec.Services), strings.ToLower(serviceName))
+		resourceName := fmt.Sprintf("%s-0-%s", PCSNameForDGD(dgd.Name, dgd.Spec.Components), strings.ToLower(componentName))
 
 		if usesPCSG {
-			ok, reason, serviceStatus := CheckPCSGReady(ctx, client, resourceName, dgd.Namespace, logger)
-			serviceStatuses[serviceName] = serviceStatus
+			ok, reason, componentStatus := CheckPCSGReady(ctx, client, resourceName, dgd.Namespace, logger)
+			componentStatuses[componentName] = componentStatus
 			if !ok {
 				notReadyComponents = append(notReadyComponents, fmt.Sprintf("pcsg/%s: %s", resourceName, reason))
 			}
 		} else {
-			ok, reason, serviceStatus := CheckPodCliqueReady(ctx, client, resourceName, dgd.Namespace, logger)
-			serviceStatuses[serviceName] = serviceStatus
+			ok, reason, componentStatus := CheckPodCliqueReady(ctx, client, resourceName, dgd.Namespace, logger)
+			componentStatuses[componentName] = componentStatus
 			if !ok {
 				notReadyComponents = append(notReadyComponents, fmt.Sprintf("podclique/%s: %s", resourceName, reason))
 			}
@@ -106,26 +107,26 @@ func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client 
 	}
 
 	if len(notReadyComponents) > 0 {
-		return false, strings.Join(notReadyComponents, "; "), serviceStatuses
+		return false, strings.Join(notReadyComponents, "; "), componentStatuses
 	}
 
-	return true, "", serviceStatuses
+	return true, "", componentStatuses
 }
 
 // CheckPodCliqueReady determines if a Grove PodClique is fully ready and available.
 // It checks various status fields to ensure all replicas are available and the PodClique
 // configuration has been fully applied. This is the PodClique equivalent of IsDeploymentReady
 // for standard Kubernetes Deployments.
-func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1alpha1.ServiceReplicaStatus) {
+func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1beta1.ComponentReplicaStatus) {
 	podClique := &grovev1alpha1.PodClique{}
 	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, podClique)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.V(2).Info("PodClique not found", "resourceName", resourceName)
-			return false, "resource not found", v1alpha1.ServiceReplicaStatus{}
+			return false, "resource not found", v1beta1.ComponentReplicaStatus{}
 		}
 		logger.V(1).Info("Failed to get PodClique", "error", err, "resourceName", resourceName)
-		return false, fmt.Sprintf("get error: %v", err), v1alpha1.ServiceReplicaStatus{}
+		return false, fmt.Sprintf("get error: %v", err), v1beta1.ComponentReplicaStatus{}
 	}
 
 	desiredReplicas := podClique.Spec.Replicas
@@ -145,9 +146,8 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 		"replicas", replicas,
 	)
 
-	serviceStatus := v1alpha1.ServiceReplicaStatus{
-		ComponentKind:   v1alpha1.ComponentKindPodClique,
-		ComponentName:   resourceName,
+	serviceStatus := v1beta1.ComponentReplicaStatus{
+		ComponentKind:   v1beta1.ComponentKindPodClique,
 		ComponentNames:  []string{resourceName},
 		Replicas:        podClique.Status.Replicas,
 		UpdatedReplicas: podClique.Status.UpdatedReplicas,
@@ -190,16 +190,16 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 // It checks various status fields to ensure all replicas are available and the PodClique
 // configuration has been fully applied. This is the PodCliqueScalingGroup equivalent of IsDeploymentReady
 // for standard Kubernetes Deployments.
-func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1alpha1.ServiceReplicaStatus) {
+func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1beta1.ComponentReplicaStatus) {
 	pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
 	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, pcsg)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.V(2).Info("PodCliqueScalingGroup not found", "resourceName", resourceName)
-			return false, "resource not found", v1alpha1.ServiceReplicaStatus{}
+			return false, "resource not found", v1beta1.ComponentReplicaStatus{}
 		}
 		logger.V(1).Info("Failed to get PodCliqueScalingGroup", "error", err, "resourceName", resourceName)
-		return false, fmt.Sprintf("get error: %v", err), v1alpha1.ServiceReplicaStatus{}
+		return false, fmt.Sprintf("get error: %v", err), v1beta1.ComponentReplicaStatus{}
 	}
 
 	desiredReplicas := pcsg.Spec.Replicas
@@ -219,9 +219,8 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 		"replicas", replicas,
 	)
 
-	serviceStatus := v1alpha1.ServiceReplicaStatus{
-		ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
-		ComponentName:     resourceName,
+	serviceStatus := v1beta1.ComponentReplicaStatus{
+		ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 		ComponentNames:    []string{resourceName},
 		Replicas:          pcsg.Status.Replicas,
 		UpdatedReplicas:   pcsg.Status.UpdatedReplicas,
@@ -263,7 +262,7 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 
 // specToGroveTopologyConstraint converts a deployment-level SpecTopologyConstraint
 // to a Grove TopologyConstraint, extracting only the PackDomain.
-func specToGroveTopologyConstraint(tc *v1alpha1.SpecTopologyConstraint) *grovev1alpha1.TopologyConstraint {
+func specToGroveTopologyConstraint(tc *v1beta1.SpecTopologyConstraint) *grovev1alpha1.TopologyConstraint {
 	if tc == nil || tc.PackDomain == "" {
 		return nil
 	}
@@ -274,7 +273,7 @@ func specToGroveTopologyConstraint(tc *v1alpha1.SpecTopologyConstraint) *grovev1
 
 // toGroveTopologyConstraint converts a service-level TopologyConstraint
 // to a Grove TopologyConstraint.
-func toGroveTopologyConstraint(tc *v1alpha1.TopologyConstraint) *grovev1alpha1.TopologyConstraint {
+func toGroveTopologyConstraint(tc *v1beta1.TopologyConstraint) *grovev1alpha1.TopologyConstraint {
 	if tc == nil || tc.PackDomain == "" {
 		return nil
 	}

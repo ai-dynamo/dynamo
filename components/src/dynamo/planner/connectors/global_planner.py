@@ -117,7 +117,10 @@ class GlobalPlannerConnector(PlannerConnector):
 
         Raises:
             EmptyTargetReplicasError: If target_replicas is empty
-            RuntimeError: If remote_client is not initialized or response indicates error
+            RuntimeError: If remote_client is not initialized or the response
+                indicates a hard error (e.g., authorization denied, K8s
+                exception). A REJECTED response is NOT raised — it is logged
+                as a warning and treated as a no-op for this tick.
         """
         if not target_replicas:
             raise EmptyTargetReplicasError()
