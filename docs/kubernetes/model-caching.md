@@ -158,7 +158,7 @@ Use this path when startup time or fleet-wide model rollout time matters more th
 1. A ModelExpress server runs in the cluster and stores metadata for available sources.
 2. vLLM workers use the ModelExpress loader (`--load-format mx` on newer ModelExpress images, or `mx-source` / `mx-target` on older split-loader images).
 3. If a compatible source is already serving the model, a new worker pulls model tensors from that source over NIXL/RDMA.
-4. If no source is available, the worker falls back to storage. When `MX_MODEL_URI` is set, ModelStreamer can stream safetensors from S3, GCS, Azure Blob Storage, or a local path.
+4. If no source is available, the worker falls back to storage. With a shared filesystem (RWX PVC, NFS, hostPath), the worker reads directly from the server's cache. Without a shared filesystem, set `MODEL_EXPRESS_NO_SHARED_STORAGE=1` so the client streams files from the server over gRPC; see [Streaming Without Shared Storage](#streaming-without-shared-storage) below. When `MX_MODEL_URI` is set, ModelStreamer can stream safetensors from S3, GCS, Azure Blob Storage, or a local path.
 5. The Kubernetes operator can inject `MODEL_EXPRESS_URL` into all Dynamo pods from the platform `modelExpressURL` setting.
 
 ### What To Configure
@@ -207,6 +207,41 @@ When `MODEL_EXPRESS_URL` is configured in the operator, it is automatically inje
 <Note>
 Use the load format supported by your runtime image. ModelExpress v0.3 and newer document the unified `mx` loader. Some Dynamo images still expose the older split `mx-source` and `mx-target` loader names; those require the same server URL but separate source and target roles.
 </Note>
+
+### Streaming Without Shared Storage
+
+If the ModelExpress server's cache is on a non-shared volume (e.g. a `ReadWriteOnce` PVC, a cross-namespace deployment, or any topology where worker pods cannot mount the same filesystem as the server), the default shared-storage mode fails: the server reports the model as downloaded and returns its own local path, the worker cannot read that path from inside its own pod, and the load silently falls back to a direct HuggingFace download -- defeating the point of running ModelExpress.
+
+Set `MODEL_EXPRESS_NO_SHARED_STORAGE=1` on every worker pod to switch the ModelExpress client into gRPC streaming mode. The server then sends model files to the client over the existing gRPC channel and the worker writes them to its own local cache.
+
+```yaml
+services:
+  VllmWorker:
+    extraPodSpec:
+      mainContainer:
+        image: <vllm-runtime-image-with-modelexpress>
+        command: ["python3", "-m", "dynamo.vllm"]
+        args:
+          - --model
+          - meta-llama/Llama-3.1-70B-Instruct
+          - --load-format
+          - mx
+        env:
+          - name: VLLM_PLUGINS
+            value: modelexpress
+          - name: MODEL_EXPRESS_NO_SHARED_STORAGE
+            value: "1"
+```
+
+`MODEL_EXPRESS_URL` is injected automatically by the operator (`dynamo-operator.modelExpressURL`); you do not need to set it explicitly here. No volume mount for the ModelExpress cache is required on worker pods in this mode.
+
+Use this path when:
+
+- The server runs with an RWO PVC, or in a different namespace from the workers.
+- The cluster has no RDMA / InfiniBand fabric available, so P2P over NIXL is not an option.
+- You want ModelExpress to act as a centralized download-and-cache server (one HuggingFace pull, fan out over gRPC to many workers) without standing up object storage and `MX_MODEL_URI`.
+
+Shared-filesystem mode is still faster when available, so prefer an RWX PVC mounted on both the server and the workers when the storage class supports it. See the [ModelExpress storage access modes documentation](https://github.com/ai-dynamo/modelexpress/blob/main/docs/DEPLOYMENT.md#storage-access-modes) for the full trade-off and tuning knobs (chunk size, etc.).
 
 ### ModelStreamer From Object Storage
 
@@ -261,6 +296,7 @@ Use Shadow Engine Failover only when you specifically need an active/shadow reco
 | Models already on shared storage (NFS) | PVC |
 | Models in S3, GCS, Azure Blob Storage, or local safetensors paths | ModelExpress + ModelStreamer |
 | Frequent model updates across fleet | ModelExpress P2P, optionally seeded by ModelStreamer |
+| ModelExpress server with non-shared storage (RWO PVC, cross-namespace) | ModelExpress with `MODEL_EXPRESS_NO_SHARED_STORAGE=1` |
 
 ## See Also
 
