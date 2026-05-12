@@ -87,6 +87,17 @@ on:
         required: false
         type: string
         default: ''
+      archive_sources:
+        description: |
+          Build with ENABLE_SOURCE_ARCHIVAL=true and extract /sources.zip
+          as a workflow artifact. Off by default — top-level callers
+          opt-in (post-merge-ci.yml sets true for push events on main /
+          release branches; PR / nightly / on-demand callers leave it
+          false). Source archives are GB-scale; gathering them
+          per-build would balloon ECR/artifact storage.
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -293,7 +304,7 @@ jobs:
           extra_build_args: |
             DYNAMO_COMMIT_SHA=${{ github.sha }}
             EPP_IMAGE=${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
-            ENABLE_SOURCE_ARCHIVAL=${{ (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') && 'true' || 'false' }}
+            ENABLE_SOURCE_ARCHIVAL=${{ inputs.archive_sources }}
             ${{ inputs.extra_build_args }}
       # Inline-compliance extraction: runs in the same job as the build, reusing
       # the warm BuildKit cache. Both --target legal and --target sboms are
@@ -309,10 +320,11 @@ jobs:
           cuda_version: ${{ matrix.cuda_version }}
           builder_name: ${{ inputs.builder_name }}
           artifact_name_prefix: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
-          # Source archival runs on post-merge to main + RC tags + release tags only.
-          # PR builds skip — storage cost too high per-build, and the source-of-
-          # truth is what merges to main, not what's in flight on a PR.
-          archive_sources: ${{ (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') && 'true' || 'false' }}
+          # Source archival is opt-in per top-level caller (see the
+          # `archive_sources` input above). PR / on-demand / nightly leave
+          # it false; post-merge-ci flips it on for push to main +
+          # release/*.*.* branches so RC promotions inherit the archive.
+          archive_sources: ${{ inputs.archive_sources }}
       - name: Refresh BuildKit builder
         if: ${{ inputs.target != 'dev' && inputs.target != 'frontend' }}
         uses: ./.github/actions/builder-refresher

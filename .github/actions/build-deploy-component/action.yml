@@ -40,6 +40,14 @@ inputs:
     description: 'Optional newline-separated list of fully-qualified extra image URIs to also tag and push'
     required: false
     default: ''
+  archive_sources:
+    description: |
+      When 'true', build with ENABLE_SOURCE_ARCHIVAL=true and extract
+      /sources/ as a workflow artifact. Off by default — top-level
+      callers opt-in (post-merge-ci.yml sets true for push to main /
+      release branches).
+    required: false
+    default: 'false'
 
 outputs:
   image_tag:
@@ -158,11 +166,10 @@ runs:
           BASELINE_SBOM_FILE="cuda-dl-base@8315e245.cdx.json"
         fi
 
-        # Source archival mirrors shared-build-image.yml's pattern: only
-        # gather sources on push / release / workflow_dispatch (the events
-        # whose images we'd OSRB-submit), skip on PRs to keep build time
-        # bounded.
-        ENABLE_SOURCE_ARCHIVAL="${{ (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') && 'true' || 'false' }}"
+        # Source archival is opt-in per top-level caller (see the
+        # `archive_sources` input above). Default off; post-merge-ci.yml
+        # flips it on for push to main + release/*.*.* branches.
+        ENABLE_SOURCE_ARCHIVAL="${{ inputs.archive_sources }}"
 
         docker buildx build --push \
             --platform ${{ steps.settings.outputs.build_platforms }} \
@@ -226,11 +233,11 @@ runs:
             --progress=plain \
             -f Dockerfile .
 
-    # /sources/ extraction: post-merge / RC / release only. PR builds skip
-    # to keep CI time bounded; the source archive is for OSRB submission at
-    # release boundaries, not per-PR.
-    - name: Extract /sources/ (post-merge / RC / release only)
-      if: ${{ (inputs.component == 'operator' || inputs.component == 'snapshot') && (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') }}
+    # /sources/ extraction: opt-in via archive_sources input. PR / on-demand
+    # / nightly leave it false; post-merge-ci.yml sets it true for push to
+    # main + release/*.*.* so RC promotions inherit the archive.
+    - name: Extract /sources/ (opt-in via archive_sources)
+      if: ${{ (inputs.component == 'operator' || inputs.component == 'snapshot') && inputs.archive_sources == 'true' }}
       shell: bash
       working-directory: ./deploy/${{ inputs.component }}
       env:

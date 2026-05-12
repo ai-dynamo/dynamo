@@ -62,6 +62,11 @@ jobs:
       cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'
+      # Source archival: continuous on push to main / release/*.*.* (the
+      # workflow's push trigger already restricts to those branches), off
+      # for the workflow_dispatch path which is a manual rerun and inherits
+      # the artifacts from the original push.
+      archive_sources: ${{ github.event_name == 'push' }}
     secrets: inherit
 
   # ============================================================================
@@ -90,6 +95,7 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-operator
+          archive_sources: ${{ github.event_name == 'push' }}
 
 # ============================================================================
 # Snapshot Agent
@@ -115,6 +121,7 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+          archive_sources: ${{ github.event_name == 'push' }}
 
   # ============================================================================
   # BUILD JOBS
@@ -135,6 +142,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-runtime-{0}', github.sha) || '' }}
+      archive_sources: ${{ github.event_name == 'push' }}
     secrets: inherit
 
   vllm-dev-build:
@@ -171,6 +179,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-efa-{0}', github.sha) || '' }}
+      archive_sources: ${{ github.event_name == 'push' }}
     secrets: inherit
 
   sglang-build:
@@ -188,6 +197,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-runtime-{0}', github.sha) || '' }}
+      archive_sources: ${{ github.event_name == 'push' }}
     secrets: inherit
 
   sglang-dev-build:
@@ -222,6 +232,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-efa-{0}', github.sha) || '' }}
+      archive_sources: ${{ github.event_name == 'push' }}
     secrets: inherit
 
   trtllm-build:
@@ -239,6 +250,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-runtime-{0}', github.sha) || '' }}
+      archive_sources: ${{ github.event_name == 'push' }}
     secrets: inherit
 
   trtllm-dev-build:
@@ -275,6 +287,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
+      archive_sources: ${{ github.event_name == 'push' }}
     secrets: inherit
 
   planner-build:
@@ -291,6 +304,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-dynamo-planner' || '' }}
         ${{ github.ref_name == 'main' && format('main-dynamo-planner-{0}', github.sha) || '' }}
+      archive_sources: ${{ github.event_name == 'push' }}
     secrets: inherit
 
   frontend-build:
@@ -308,6 +322,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-dynamo-frontend' || '' }}
         ${{ github.ref_name == 'main' && format('main-dynamo-frontend-{0}', github.sha) || '' }}
+      archive_sources: ${{ github.event_name == 'push' }}
     secrets: inherit
 
   # ============================================================================
