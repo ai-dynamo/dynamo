@@ -28,6 +28,13 @@ kv-indexer = ["dep:clap", "dep:tracing-subscriber"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
 mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]
 nvtx = ["dynamo-runtime/nvtx"]
+# Enable in-process MM-aware KV routing via the lightseek crate
+# (per-image token-count + placeholder expansion + block-level mm_hash).
+# Opt-in at the wheel build (`maturin build --features lightseek-mm`)
+# to keep the default wheel lean. Production containers and the MM
+# recipes pass this flag explicitly; the dev container's
+# `.devcontainer/post-create.sh` also enables it for local workflows.
+lightseek-mm = ["dynamo-llm/lightseek-mm"]
 
 [dependencies]
 dynamo-runtime = { path = "../../runtime" }
@@ -90,3 +97,10 @@ dynamo-llm = { path = "../../llm", default-features = false }
 inherits = "release"
 debug = true
 strip = false
+
+# Mirror of root Cargo.toml's patch: sub-workspaces don't inherit
+# [patch.crates-io] from the root, so re-declare here. Remove once
+# llm-multimodal >=1.6.0 is published on crates.io.
+[patch.crates-io]
+llm-multimodal = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
+llm-tokenizer = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
