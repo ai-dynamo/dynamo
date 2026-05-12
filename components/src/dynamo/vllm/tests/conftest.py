@@ -20,6 +20,15 @@ def pytest_ignore_collect(collection_path, config):
     if filename.startswith("test_vllm_"):
         if importlib.util.find_spec("vllm") is None:
             return True  # vllm not available, skip this file
+    # Omni tests import dynamo.vllm.omni.* which transitively imports
+    # vllm_omni at module load — that import raises on platforms vllm_omni
+    # doesn't support (e.g. CPU-only sample-runtime runners), and the
+    # exception type isn't always ImportError so each file's local
+    # try/except guard isn't enough.
+    parts = collection_path.parts
+    if "omni" in parts and filename.startswith("test_"):
+        if importlib.util.find_spec("vllm_omni") is None:
+            return True
     return None
 
 
