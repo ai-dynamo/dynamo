@@ -409,6 +409,14 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             self._config.max_gpu_budget,
             self._config.min_endpoint,
         )
+        # Open Question #2: prevent up-scaling decode beyond original demand
+        # when prefill is the binding constraint and budget slack remains.
+        # proportional_clamp_pair distributes the remaining budget
+        # proportionally and can over-allocate decode; the planner's
+        # migration-safety contract requires decode to never grow on a
+        # budget-driven path. min_endpoint stays the lower bound.
+        if new_d > num_d:
+            new_d = max(self._config.min_endpoint, num_d)
         if (new_p, new_d) != (num_p, num_d):
             old_total = num_p * p_gpu + num_d * d_gpu
             new_total = new_p * p_gpu + new_d * d_gpu
