@@ -10,9 +10,7 @@ error on the decode peer, or worse, garbage tokens.
 
 from __future__ import annotations
 
-import asyncio
 import importlib.util
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -90,15 +88,3 @@ def test_decode_handoff_rejects_empty_payload():
 
     with pytest.raises(ValueError, match="prefill_result"):
         TrtllmLLMEngine._decode_prefill_handoff({"disaggregated_params": {}})
-
-
-@pytest.mark.asyncio
-async def test_trtllm_deferred_abort_invokes_generation_result_abort():
-    from dynamo.trtllm.llm_engine import TrtllmDeferredAbort
-
-    generation_result = MagicMock()
-    guard = TrtllmDeferredAbort(generation_result)
-    guard.signal_first_token()
-    guard.abort()
-    await asyncio.sleep(0)
-    generation_result.abort.assert_called_once()
