@@ -20,6 +20,11 @@ pub struct HealthCheckConfig {
     pub canary_wait_time: Duration,
     /// Timeout for health check requests
     pub request_timeout: Duration,
+    /// Polling interval for the disagg activity notifier.
+    /// Must be strictly less than canary_wait_time to guarantee at
+    /// least one poll fires before the canary timer expires on an idle
+    /// but active(prefill/KV-transfer) worker.
+    pub activity_poll_interval: Duration,
 }
 
 impl Default for HealthCheckConfig {
@@ -29,6 +34,9 @@ impl Default for HealthCheckConfig {
             request_timeout: Duration::from_secs(
                 crate::config::DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS,
             ),
+            // Poll every 5 s so the activity notifier fires well before
+            // the default 60 s canary timeout on a busy prefill worker.
+            activity_poll_interval: Duration::from_secs(5),
         }
     }
 }
@@ -40,6 +48,8 @@ pub struct HealthCheckManager {
     /// Track per-endpoint health check tasks
     /// Maps: endpoint_subject -> task_handle
     endpoint_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    /// Track per-endpoint activity poller tasks (DIS-1971 disagg fix)
+    activity_poller_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
 }
 
 impl HealthCheckManager {
@@ -48,6 +58,7 @@ impl HealthCheckManager {
             drt,
             config,
             endpoint_tasks: Arc::new(Mutex::new(HashMap::new())),
+            activity_poller_tasks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -82,7 +93,8 @@ impl HealthCheckManager {
         let canary_wait = self.config.canary_wait_time;
         let endpoint_subject_clone = endpoint_subject.clone();
 
-        // Get the endpoint-specific notifier
+        // Get the endpoint-specific notifier (fires on client token stream
+        // activity — the primary canary reset path for agg workers).
         let notifier = self
             .drt
             .system_health()
@@ -90,12 +102,20 @@ impl HealthCheckManager {
             .get_endpoint_health_check_notifier(&endpoint_subject)
             .expect("Notifier should exist for registered endpoint");
 
+        // Get the optional activity notifier (fires on engine activity
+        // even when no client stream is active — the disagg prefill fix).
+        let activity_notifier = self
+            .drt
+            .system_health()
+            .lock()
+            .get_endpoint_activity_check_notifier(&endpoint_subject);
+
         let task = tokio::spawn(async move {
             let endpoint_subject = endpoint_subject_clone;
             info!("Health check task started for: {}", endpoint_subject);
 
             loop {
-                // Wait for either timeout or activity notification
+                // Wait for either timeout or activity notification from either source.
                 tokio::select! {
                     _ = tokio::time::sleep(canary_wait) => {
                         // Timeout - send health check for this specific endpoint
@@ -119,10 +139,28 @@ impl HealthCheckManager {
                     }
 
                     _ = notifier.notified() => {
-                        // Activity detected - reset timer for this endpoint only.
-                        // A notification means push_handler successfully streamed
-                        // a non-error response chunk, proving the engine is healthy.
+                        // Primary activity detected (client token stream).
+                        // Reset timer for this endpoint.
                         debug!("Activity detected for {}, resetting health check timer", endpoint_subject);
+                        manager.drt.system_health().lock().set_endpoint_health_status(
+                            &endpoint_subject,
+                            crate::config::HealthStatus::Ready,
+                        );
+                    }
+
+                    // DIS-1971 fix: also reset the canary timer when the engine
+                    // is doing disagg work (e.g. KV transfer on a prefill worker)
+                    // even if no client token stream is active. The activity poller
+                    // fires this notifier whenever trtllm_num_requests_running > 0.
+                    _ = async {
+                        if let Some(ref act_notifier) = activity_notifier {
+                            act_notifier.notified().await;
+                        } else {
+                            // Never fire if no activity notifier is registered.
+                            std::future::pending().await
+                        }
+                    } => {
+                        debug!("Engine activity detected for {} via activity poller, resetting health check timer", endpoint_subject);
                         manager.drt.system_health().lock().set_endpoint_health_status(
                             &endpoint_subject,
                             crate::config::HealthStatus::Ready,

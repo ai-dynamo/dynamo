@@ -45,6 +45,11 @@ pub struct SystemHealth {
     health_check_targets: Arc<std::sync::RwLock<HashMap<String, HealthCheckTarget>>>,
     /// Maps endpoint subject to its specific health check notifier
     health_check_notifiers: Arc<std::sync::RwLock<HashMap<String, Arc<tokio::sync::Notify>>>>,
+    /// Maps endpoint subject to its disagg-aware activity notifier.
+    /// Used to reset the canary timer when the engine is doing work
+    /// (e.g., KV transfer on a prefill worker in disagg mode) even
+    /// if no client token stream is active.
+    activity_check_notifiers: Arc<std::sync::RwLock<HashMap<String, Arc<tokio::sync::Notify>>>>,
     /// Channel for new endpoint registrations
     /// This solves the race condition where HealthCheckManager starts before endpoints are registered
     /// Using a channel ensures no registrations are lost.
@@ -85,6 +90,7 @@ impl SystemHealth {
             endpoint_health: Arc::new(std::sync::RwLock::new(endpoint_health)),
             health_check_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
             health_check_notifiers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            activity_check_notifiers: Arc::new(std::sync::RwLock::new(HashMap::new())),
             new_endpoint_tx: tx,
             new_endpoint_rx: Arc::new(parking_lot::Mutex::new(Some(rx))),
             use_endpoint_health_status,
@@ -296,5 +302,31 @@ impl SystemHealth {
     /// Get the liveness check path
     pub fn live_path(&self) -> &str {
         &self.live_path
+    }
+
+    /// Register a dedicated activity notifier for an endpoint.
+    /// This notifier is fired by a background poller when the engine
+    /// reports non-zero activity (e.g. trtllm_num_requests_running > 0),
+    /// allowing the canary timer to reset even when no client token
+    /// stream is active (disagg prefill worker doing KV transfer).
+    pub fn register_activity_notifier(
+        &self,
+        endpoint_subject: &str,
+        notifier: Arc<tokio::sync::Notify>,
+    ) {
+        let mut notifiers = self.activity_check_notifiers.write().unwrap();
+        notifiers
+            .entry(endpoint_subject.to_string())
+            .or_insert(notifier);
+    }
+
+    /// Get the endpoint-specific activity notifier.
+    /// Returns None if no activity notifier has been registered.
+    pub fn get_endpoint_activity_check_notifier(
+        &self,
+        endpoint_subject: &str,
+    ) -> Option<Arc<tokio::sync::Notify>> {
+        let notifiers = self.activity_check_notifiers.read().unwrap();
+        notifiers.get(endpoint_subject).cloned()
     }
 }
