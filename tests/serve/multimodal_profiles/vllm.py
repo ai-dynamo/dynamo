@@ -242,7 +242,11 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=22.0,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 env={"SINGLE_GPU": "true"},
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                # cached_tokens-asserting payload proves MM-aware routing
+                # engaged (2nd identical request hits the warm worker's KV
+                # cache); a silent regression to text-prefix-only routing
+                # would still return "green" but 0 cached tokens.
+                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
             ),
         },
         # Phi-3-vision uses --trust-remote-code for its custom processor.
@@ -346,7 +350,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 gpu_marker="gpu_2",
                 profiled_vram_gib=19.2,
                 requested_vllm_kv_cache_bytes=4_318_854_000,
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                # cached_tokens-asserting payload proves MM-aware routing
+                # engaged for LLaVA-1.5 (placeholder-template `<image>` path).
+                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
             ),
             "agg": TopologyConfig(
                 # nightly-only: 7B 1-GPU footprint is tight (vram=19.2 GiB).
@@ -451,7 +457,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 gpu_marker="gpu_2",
                 profiled_vram_gib=19.2,
                 requested_vllm_kv_cache_bytes=4_318_854_000,
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                # cached_tokens-asserting payload proves MM-aware routing
+                # engaged for LLaVA-NeXT (anyres multi-crop processor).
+                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
             ),
         },
     ),
