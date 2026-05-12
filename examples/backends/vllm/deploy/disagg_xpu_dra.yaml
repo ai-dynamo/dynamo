@@ -14,86 +14,90 @@ spec:
             deviceClassName: gpu.intel.com
             count: 1
 ---
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-disagg-xpu-dra
 spec:
-  services:
-    Frontend:
-      envFromSecret: hf-token-secret
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - envFrom:
+          - secretRef:
+              name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-    VllmDecodeWorker:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      subComponentType: decode
-      replicas: 1
-      resources:
-        requests:
-          custom:
-            # Increase this value for larger models
-            ephemeral-storage: "2Gi"
-      extraPodSpec:
-        resourceClaims:
-          - name: gpu
-            resourceClaimTemplateName: gpu-template
-        mainContainer:
+          name: main
+    replicas: 1
+    type: frontend
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - decode
+          - --block-size
+          - "64"
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: VLLM_TARGET_DEVICE
+            value: xpu
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
           resources:
             claims:
-              - name: gpu
-          env:
-            - name: VLLM_TARGET_DEVICE
-              value: xpu
+            - name: gpu
+            requests:
+              ephemeral-storage: 2Gi
           workingDir: /workspace/examples/backends/vllm
-          command:
-            - python3
-            - -m
-            - dynamo.vllm
-          args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --disaggregation-mode
-            - decode
-            - --block-size
-            - "64"
-    VllmPrefillWorker:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      subComponentType: prefill
-      replicas: 1
-      resources:
-        requests:
-          custom:
-            # Increase this value for larger models
-            ephemeral-storage: "2Gi"
-      extraPodSpec:
         resourceClaims:
-          - name: gpu
-            resourceClaimTemplateName: gpu-template
-        mainContainer:
+        - name: gpu
+          resourceClaimTemplateName: gpu-template
+    replicas: 1
+    type: decode
+  - name: VllmPrefillWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"xpu"}'
+          - --block-size
+          - "64"
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: VLLM_TARGET_DEVICE
+            value: xpu
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
           resources:
             claims:
-              - name: gpu
-          env:
-            - name: VLLM_TARGET_DEVICE
-              value: xpu
+            - name: gpu
+            requests:
+              ephemeral-storage: 2Gi
           workingDir: /workspace/examples/backends/vllm
-          command:
-            - python3
-            - -m
-            - dynamo.vllm
-          args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --disaggregation-mode
-            - prefill
-            - --kv-transfer-config
-            - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"xpu"}'
-            - --block-size
-            - "64"
+        resourceClaims:
+        - name: gpu
+          resourceClaimTemplateName: gpu-template
+    replicas: 1
+    type: prefill

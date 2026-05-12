@@ -5,46 +5,52 @@
 ## Instead of receiving KV events from workers, the router predicts cache state
 ## locally based on routing decisions with TTL-based expiration and pruning.
 ## Note: This mode does not require NATS or JetStream during dynamo platform deployment.
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-agg-router-kv-approx
 spec:
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - kv
+          - --no-kv-events
           command:
-            - python3
-          args:
-            - -m
-            - dynamo.frontend
-            - --router-mode
-            - kv
-            - --no-kv-events
-      envs:
-        - name: DYN_ROUTER_MODE
-          value: kv
-    VllmDecodeWorker:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      replicas: 2
-      resources:
-        limits:
-          gpu: "1"
-      extraPodSpec:
-        mainContainer:
+          - python3
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/examples/backends/vllm
+          name: main
+    replicas: 1
+    type: frontend
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --kv-events-config
+          - '{"enable_kv_cache_events": false}'
           command:
           - python3
           - -m
           - dynamo.vllm
-          args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --kv-events-config
-            - '{"enable_kv_cache_events": false}'
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 2
+    type: worker

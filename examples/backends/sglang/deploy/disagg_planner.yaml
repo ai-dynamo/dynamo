@@ -44,114 +44,120 @@ data:
       "max_kv_tokens": 32768
     }
 ---
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: sglang-disagg-planner
 spec:
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: my-registry/sglang-runtime:my-tag
-    Planner:
-      envFromSecret: hf-token-secret
-      componentType: planner
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          # Planner image selection:
-          #   Dynamo >= 1.1.0: use the dedicated planner image
-          #     <registry>/dynamo-planner:<version>
-          #     (backend runtime images no longer ship planner runtime deps
-          #     such as kubernetes_asyncio, pmdarima, prophet, aiconfigurator).
-          #   Dynamo <  1.1.0: use the backend runtime image
-          #     <registry>/sglang-runtime:<version>.
-          image: my-registry/dynamo-planner:my-tag
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: my-registry/sglang-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: Planner
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --config
+          - '{"environment": "kubernetes", "backend": "sglang", "throughput_adjustment_interval_seconds":
+            60, "profile_results_dir": "/workspace/profiling_results"}'
           command:
           - python3
           - -m
           - dynamo.planner
-          args:
-            - --config
-            - '{"environment": "kubernetes", "backend": "sglang", "throughput_adjustment_interval_seconds": 60, "profile_results_dir": "/workspace/profiling_results"}'
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: my-registry/dynamo-planner:my-tag
+          name: main
           volumeMounts:
-            - name: planner-profile-data
-              mountPath: /workspace/profiling_results
-              readOnly: true
+          - mountPath: /workspace/profiling_results
+            name: planner-profile-data
+            readOnly: true
         volumes:
-          - name: planner-profile-data
-            configMap:
-              name: planner-profile-data
-    decode:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      subComponentType: decode
-      replicas: 2
-      resources:
-        limits:
-          gpu: "1"
-      extraPodSpec:
-        mainContainer:
-          image: my-registry/sglang-runtime:my-tag
-          workingDir: /workspace/examples/backends/sglang
+        - configMap:
+            name: planner-profile-data
+          name: planner-profile-data
+    replicas: 1
+    type: planner
+  - name: decode
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - -m
+          - dynamo.sglang
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --page-size
+          - "16"
+          - --tp
+          - "1"
+          - --trust-remote-code
+          - --skip-tokenizer-init
+          - --disaggregation-mode
+          - decode
+          - --disaggregation-transfer-backend
+          - nixl
+          - --disaggregation-bootstrap-port
+          - "12345"
+          - --host
+          - 0.0.0.0
           command:
-            - python3
-          args:
-            - -m
-            - dynamo.sglang
-            - --model-path
-            - Qwen/Qwen3-0.6B
-            - --served-model-name
-            - Qwen/Qwen3-0.6B
-            - --page-size
-            - "16"
-            - --tp
-            - "1"
-            - --trust-remote-code
-            - --skip-tokenizer-init
-            - --disaggregation-mode
-            - decode
-            - --disaggregation-transfer-backend
-            - nixl
-            - --disaggregation-bootstrap-port
-            - "12345"
-            - --host
-            - "0.0.0.0"
-    prefill:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      subComponentType: prefill
-      replicas: 2
-      resources:
-        limits:
-          gpu: "1"
-      extraPodSpec:
-        mainContainer:
+          - python3
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
           image: my-registry/sglang-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
           workingDir: /workspace/examples/backends/sglang
+    replicas: 2
+    type: decode
+  - name: prefill
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - -m
+          - dynamo.sglang
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --page-size
+          - "16"
+          - --tp
+          - "1"
+          - --trust-remote-code
+          - --skip-tokenizer-init
+          - --disaggregation-mode
+          - prefill
+          - --disaggregation-transfer-backend
+          - nixl
+          - --disaggregation-bootstrap-port
+          - "12345"
+          - --host
+          - 0.0.0.0
           command:
-            - python3
-          args:
-            - -m
-            - dynamo.sglang
-            - --model-path
-            - Qwen/Qwen3-0.6B
-            - --served-model-name
-            - Qwen/Qwen3-0.6B
-            - --page-size
-            - "16"
-            - --tp
-            - "1"
-            - --trust-remote-code
-            - --skip-tokenizer-init
-            - --disaggregation-mode
-            - prefill
-            - --disaggregation-transfer-backend
-            - nixl
-            - --disaggregation-bootstrap-port
-            - "12345"
-            - --host
-            - "0.0.0.0"
+          - python3
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: my-registry/sglang-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/examples/backends/sglang
+    replicas: 2
+    type: prefill

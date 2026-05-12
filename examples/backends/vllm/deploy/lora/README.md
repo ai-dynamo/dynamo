@@ -158,7 +158,7 @@ Edit `agg_lora.yaml` to use your container image:
 ```bash
 # Using yq to update the image
 export FRAMEWORK_RUNTIME_IMAGE=your-registry/your-image:tag
-yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' agg_lora.yaml > agg_lora_updated.yaml
+yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' agg_lora.yaml > agg_lora_updated.yaml
 ```
 
 ### Deploy the LoRA-enabled vLLM Graph

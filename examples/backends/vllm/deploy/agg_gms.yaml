@@ -10,41 +10,48 @@
 #
 # Requires Kubernetes 1.32+ with DRA enabled and the NVIDIA GPU DRA driver installed.
 
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-agg-gms
 spec:
-  services:
-    Frontend:
-      envFromSecret: hf-token-secret
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - envFrom:
+          - secretRef:
+              name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-    VllmWorker:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      replicas: 1
-      resources:
-        limits:
-          gpu: "1"
-        requests:
-          custom:
-            ephemeral-storage: "2Gi"
-      gpuMemoryService:
-        enabled: true
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          workingDir: /workspace/examples/backends/vllm
+          name: main
+    replicas: 1
+    type: frontend
+  - experimental:
+      gpuMemoryService: {}
+    name: VllmWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --load-format
+          - gms
           command:
-            - python3
-            - -m
-            - dynamo.vllm
-          args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --load-format
-            - gms
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 1
+    type: worker

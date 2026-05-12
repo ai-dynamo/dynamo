@@ -32,42 +32,49 @@ High-performance deployment with separated prefill and decode workers.
 All templates use the **DynamoGraphDeployment** CRD:
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: <deployment-name>
 spec:
-  services:
-    <ServiceName>:
-      # Service configuration
+  components:
+    - name: <component-name>
+      type: <frontend|worker|prefill|decode|planner|epp>
+      # Component configuration
 ```
 
 ### Key Configuration Options
 
 **Resource Management:**
 ```yaml
-resources:
-  requests:
-    cpu: "10"
-    memory: "20Gi"
-    gpu: "1"
-  limits:
-    cpu: "10"
-    memory: "20Gi"
-    gpu: "1"
+podTemplate:
+  spec:
+    containers:
+      - name: main
+        resources:
+          requests:
+            cpu: "10"
+            memory: "20Gi"
+            nvidia.com/gpu: "1"
+          limits:
+            cpu: "10"
+            memory: "20Gi"
+            nvidia.com/gpu: "1"
 ```
 
 **Container Configuration:**
 ```yaml
-extraPodSpec:
-  mainContainer:
-    image: my-registry/sglang-runtime:my-tag
-    workingDir: /workspace/examples/backends/sglang
-    args:
-      - "python3"
-      - "-m"
-      - "dynamo.sglang"
-      # Model-specific arguments
+podTemplate:
+  spec:
+    containers:
+      - name: main
+        image: my-registry/sglang-runtime:my-tag
+        workingDir: /workspace/examples/backends/sglang
+        args:
+          - "python3"
+          - "-m"
+          - "dynamo.sglang"
+          # Model-specific arguments
 ```
 
 ## Prerequisites
@@ -77,7 +84,7 @@ Before using these templates, ensure you have:
 1. **Dynamo Kubernetes Platform installed** - See [Installing Dynamo Kubernetes Platform](../../../../docs/kubernetes/installation-guide.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for SGLang runtime images
-4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
+4. **HuggingFace token secret** (referenced from `podTemplate.spec.containers[].envFrom`)
 
 ## Usage
 
@@ -129,7 +136,7 @@ To use a custom dynamo frameworks image for SGLang, you can update the deploymen
 export DEPLOYMENT_FILE=agg.yaml
 export FRAMEWORK_RUNTIME_IMAGE=<sglang-image>
 
-yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE  > $DEPLOYMENT_FILE.generated
+yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' $DEPLOYMENT_FILE  > $DEPLOYMENT_FILE.generated
 kubectl apply -f $DEPLOYMENT_FILE.generated -n $NAMESPACE
 ```
 

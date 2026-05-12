@@ -117,20 +117,28 @@ metadata:
   name: vllm-disagg
   namespace: dynamo-system
 spec:
-  services:
-    Frontend:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
-    VllmDecodeWorker:
-​​      resources:
-        limits:
-          gpu: "3"
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
-          args:
-            - |
-            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
-            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
-            /sbin/ldconfig
-            python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
+  components:
+    - name: Frontend
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+    - name: VllmDecodeWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
+              resources:
+                limits:
+                  nvidia.com/gpu: "3"
+              args:
+                - |
+                  export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+                  export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+                  /sbin/ldconfig
+                  python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
 ```
 
 ## Deploy the model

@@ -60,42 +60,49 @@ Advanced disaggregated deployment with SLA-based automatic scaling.
 All templates use the **DynamoGraphDeployment** CRD:
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: <deployment-name>
 spec:
-  services:
-    <ServiceName>:
-      # Service configuration
+  components:
+    - name: <component-name>
+      type: <frontend|worker|prefill|decode|planner|epp>
+      # Component configuration
 ```
 
 ### Key Configuration Options
 
 **Resource Management:**
 ```yaml
-resources:
-  requests:
-    cpu: "10"
-    memory: "20Gi"
-    gpu: "1"
-  limits:
-    cpu: "10"
-    memory: "20Gi"
-    gpu: "1"
+podTemplate:
+  spec:
+    containers:
+      - name: main
+        resources:
+          requests:
+            cpu: "10"
+            memory: "20Gi"
+            nvidia.com/gpu: "1"
+          limits:
+            cpu: "10"
+            memory: "20Gi"
+            nvidia.com/gpu: "1"
 ```
 
 **Container Configuration:**
 ```yaml
-extraPodSpec:
-  mainContainer:
-    image: my-registry/tensorrtllm-runtime:my-tag
-    workingDir: /workspace/examples/backends/trtllm
-    args:
-      - "python3"
-      - "-m"
-      - "dynamo.trtllm"
-      # Model-specific arguments
+podTemplate:
+  spec:
+    containers:
+      - name: main
+        image: my-registry/tensorrtllm-runtime:my-tag
+        workingDir: /workspace/examples/backends/trtllm
+        args:
+          - "python3"
+          - "-m"
+          - "dynamo.trtllm"
+          # Model-specific arguments
 ```
 
 ## Prerequisites
@@ -105,7 +112,7 @@ Before using these templates, ensure you have:
 1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for TensorRT-LLM runtime images
-4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
+4. **HuggingFace token secret** (referenced from `podTemplate.spec.containers[].envFrom`)
 
 ### Container Images
 
@@ -183,7 +190,7 @@ To use a custom dynamo frameworks image for TensorRT-LLM, you can update the dep
 export DEPLOYMENT_FILE=agg.yaml
 export FRAMEWORK_RUNTIME_IMAGE=<trtllm-image>
 
-yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE  > $DEPLOYMENT_FILE.generated
+yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' $DEPLOYMENT_FILE  > $DEPLOYMENT_FILE.generated
 kubectl apply -f $DEPLOYMENT_FILE.generated -n $NAMESPACE
 ```
 
@@ -204,7 +211,7 @@ To change `DYN_LOG` level, edit the yaml file by adding:
 ```yaml
 ...
 spec:
-  envs:
+  env:
     - name: DYN_LOG
       value: "debug" # or other log levels
   ...

@@ -42,6 +42,7 @@ subjects:
     name: planner-serviceaccount
     namespace: ${K8S_NAMESPACE}
 ---
+
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -54,213 +55,226 @@ spec:
     requests:
       storage: 50Gi
 ---
-# ── Control plane: GlobalPlanner only ────────────────────────────────────────
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: gp-ctrl
 spec:
-  services:
-    GlobalPlanner:
-      componentType: planner
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: ${DYNAMO_IMAGE}
+  components:
+  - name: GlobalPlanner
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --max-total-gpus
+          - "${MAX_TOTAL_GPUS}"
           command:
-            - python3
-            - -m
-            - dynamo.global_planner
-          args:
-            - --max-total-gpus
-            - "${MAX_TOTAL_GPUS}"
+          - python3
+          - -m
+          - dynamo.global_planner
+          image: ${DYNAMO_IMAGE}
+          name: main
+    replicas: 1
+    type: planner
 ---
-# ── Model A: self-contained disagg serving DGD ──────────────────────────────
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: model-a
 spec:
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model-name
+          - ${MODEL_A}
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
           image: ${DYNAMO_IMAGE}
+          name: main
           workingDir: /workspace
+    replicas: 1
+    type: frontend
+  - name: Planner
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --config
+          - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"disagg","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft_ms":2000,"itl_ms":200,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"model_name":"${MODEL_A}","profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"}'
           command:
-            - python3
-            - -m
-            - dynamo.frontend
-          args:
-            - --model-name
-            - ${MODEL_A}
-
-    VllmPrefillWorker:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      subComponentType: prefill
-      replicas: 1
-      resources:
-        limits:
-          gpu: "1"
-      extraPodSpec:
-        volumes:
-          - name: hf-model-cache
-            persistentVolumeClaim:
-              claimName: hf-model-cache
-        mainContainer:
-          image: ${DYNAMO_VLLM_IMAGE}
-          workingDir: /workspace/examples/backends/vllm
-          command:
-            - python3
-            - -m
-            - dynamo.vllm
-          args:
-            - --model
-            - ${MODEL_A}
-            - --tensor-parallel-size
-            - "1"
-            - --is-prefill-worker
-          volumeMounts:
-            - name: hf-model-cache
-              mountPath: /home/dynamo/.cache/huggingface/hub
-
-    VllmDecodeWorker:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      subComponentType: decode
-      replicas: 1
-      resources:
-        limits:
-          gpu: "1"
-      extraPodSpec:
-        volumes:
-          - name: hf-model-cache
-            persistentVolumeClaim:
-              claimName: hf-model-cache
-        mainContainer:
-          image: ${DYNAMO_VLLM_IMAGE}
-          workingDir: /workspace/examples/backends/vllm
-          command:
-            - python3
-            - -m
-            - dynamo.vllm
-          args:
-            - --model
-            - ${MODEL_A}
-            - --tensor-parallel-size
-            - "1"
-          volumeMounts:
-            - name: hf-model-cache
-              mountPath: /home/dynamo/.cache/huggingface/hub
-
-    Planner:
-      componentType: planner
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
+          - python3
+          - -m
+          - dynamo.planner
           image: ${DYNAMO_IMAGE}
+          name: main
+    replicas: 1
+    type: planner
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - ${MODEL_A}
+          - --tensor-parallel-size
+          - "1"
           command:
-            - python3
-            - -m
-            - dynamo.planner
-          args:
-            - --config
-            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"disagg","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft_ms":2000,"itl_ms":200,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"model_name":"${MODEL_A}","profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"}'
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: ${DYNAMO_VLLM_IMAGE}
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - mountPath: /home/dynamo/.cache/huggingface/hub
+            name: hf-model-cache
+          workingDir: /workspace/examples/backends/vllm
+        volumes:
+        - name: hf-model-cache
+          persistentVolumeClaim:
+            claimName: hf-model-cache
+    replicas: 1
+    type: decode
+  - name: VllmPrefillWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - ${MODEL_A}
+          - --tensor-parallel-size
+          - "1"
+          - --is-prefill-worker
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: ${DYNAMO_VLLM_IMAGE}
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - mountPath: /home/dynamo/.cache/huggingface/hub
+            name: hf-model-cache
+          workingDir: /workspace/examples/backends/vllm
+        volumes:
+        - name: hf-model-cache
+          persistentVolumeClaim:
+            claimName: hf-model-cache
+    replicas: 1
+    type: prefill
 ---
-# ── Model B: self-contained disagg serving DGD ──────────────────────────────
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: model-b
 spec:
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model-name
+          - ${MODEL_B}
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
           image: ${DYNAMO_IMAGE}
+          name: main
           workingDir: /workspace
+    replicas: 1
+    type: frontend
+  - name: Planner
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --config
+          - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"disagg","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft_ms":2000,"itl_ms":200,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"model_name":"${MODEL_B}","profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"}'
           command:
-            - python3
-            - -m
-            - dynamo.frontend
-          args:
-            - --model-name
-            - ${MODEL_B}
-
-    VllmPrefillWorker:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      subComponentType: prefill
-      replicas: 1
-      resources:
-        limits:
-          gpu: "1"
-      extraPodSpec:
-        volumes:
-          - name: hf-model-cache
-            persistentVolumeClaim:
-              claimName: hf-model-cache
-        mainContainer:
-          image: ${DYNAMO_VLLM_IMAGE}
-          workingDir: /workspace/examples/backends/vllm
-          command:
-            - python3
-            - -m
-            - dynamo.vllm
-          args:
-            - --model
-            - ${MODEL_B}
-            - --tensor-parallel-size
-            - "1"
-            - --is-prefill-worker
-          volumeMounts:
-            - name: hf-model-cache
-              mountPath: /home/dynamo/.cache/huggingface/hub
-
-    VllmDecodeWorker:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      subComponentType: decode
-      replicas: 1
-      resources:
-        limits:
-          gpu: "1"
-      extraPodSpec:
-        volumes:
-          - name: hf-model-cache
-            persistentVolumeClaim:
-              claimName: hf-model-cache
-        mainContainer:
-          image: ${DYNAMO_VLLM_IMAGE}
-          workingDir: /workspace/examples/backends/vllm
-          command:
-            - python3
-            - -m
-            - dynamo.vllm
-          args:
-            - --model
-            - ${MODEL_B}
-            - --tensor-parallel-size
-            - "1"
-          volumeMounts:
-            - name: hf-model-cache
-              mountPath: /home/dynamo/.cache/huggingface/hub
-
-    Planner:
-      componentType: planner
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
+          - python3
+          - -m
+          - dynamo.planner
           image: ${DYNAMO_IMAGE}
+          name: main
+    replicas: 1
+    type: planner
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - ${MODEL_B}
+          - --tensor-parallel-size
+          - "1"
           command:
-            - python3
-            - -m
-            - dynamo.planner
-          args:
-            - --config
-            - '{"environment":"global-planner","global_planner_namespace":"${K8S_NAMESPACE}-gp-ctrl","backend":"vllm","mode":"disagg","enable_load_scaling":false,"enable_throughput_scaling":true,"throughput_metrics_source":"router","ttft_ms":2000,"itl_ms":200,"max_gpu_budget":-1,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"model_name":"${MODEL_B}","profile_results_dir":"/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"}'
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: ${DYNAMO_VLLM_IMAGE}
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - mountPath: /home/dynamo/.cache/huggingface/hub
+            name: hf-model-cache
+          workingDir: /workspace/examples/backends/vllm
+        volumes:
+        - name: hf-model-cache
+          persistentVolumeClaim:
+            claimName: hf-model-cache
+    replicas: 1
+    type: decode
+  - name: VllmPrefillWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - ${MODEL_B}
+          - --tensor-parallel-size
+          - "1"
+          - --is-prefill-worker
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: ${DYNAMO_VLLM_IMAGE}
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - mountPath: /home/dynamo/.cache/huggingface/hub
+            name: hf-model-cache
+          workingDir: /workspace/examples/backends/vllm
+        volumes:
+        - name: hf-model-cache
+          persistentVolumeClaim:
+            claimName: hf-model-cache
+    replicas: 1
+    type: prefill
