@@ -52,6 +52,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 )
@@ -836,6 +837,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 		condStatus = metav1.ConditionFalse
 		condReason = "DeploymentInProgress"
 		condMessage = fmt.Sprintf("DGD %s is in %s state", dgd.Name, string(dgd.Status.State))
+
+		for _, errMsg := range r.getDGDPodImagePullErrors(ctx, dgdr.Namespace, dgd.Name) {
+			r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonImagePullFailed, errMsg)
+		}
 	}
 
 	updateDeploymentInfo(dgdr, dgd)
@@ -1401,14 +1406,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 					},
 				},
 			},
-			{
-				Name:  "NATS_SERVER",
-				Value: fmt.Sprintf("nats://%s-nats:4222", dgdr.Namespace),
-			},
-			{
-				Name:  "ETCD_ENDPOINTS",
-				Value: fmt.Sprintf("%s-etcd:2379", dgdr.Namespace),
-			},
 			// DGDR metadata for setting ownerReferences
 			{
 				Name:  "DGDR_NAME",
@@ -1422,12 +1419,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 				Name:  "DGDR_UID",
 				Value: string(dgdr.UID),
 			},
-		}
-		if r.Config.Infrastructure.PrometheusEndpoint != "" {
-			profilerEnv = append(profilerEnv, corev1.EnvVar{
-				Name:  "PROMETHEUS_ENDPOINT",
-				Value: r.Config.Infrastructure.PrometheusEndpoint,
-			})
 		}
 
 		// Build volume mounts
@@ -1487,6 +1478,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			VolumeMounts: volumeMounts,
 			WorkingDir:   "/workspace",
 		}
+		dynamo.AddStandardEnvVars(&profilerContainer, r.Config)
 
 		// Generate sidecar script from template
 		tmpl, err := template.New("sidecar").Parse(sidecarScriptTemplate)
@@ -1862,6 +1854,44 @@ func (r *DynamoGraphDeploymentRequestReconciler) getProfilingJobErrorDetails(ctx
 	}
 
 	return ""
+}
+
+// getDGDPodImagePullErrors lists pods belonging to the given DGD and returns one
+// diagnostic string per container that is stuck in ErrImagePull or ImagePullBackOff.
+func (r *DynamoGraphDeploymentRequestReconciler) getDGDPodImagePullErrors(ctx context.Context, namespace, dgdName string) []string {
+	logger := log.FromContext(ctx)
+
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList,
+		client.InNamespace(namespace),
+		client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgdName},
+	); err != nil {
+		logger.Error(err, "Failed to list DGD pods for image-pull check")
+		return nil
+	}
+
+	var msgs []string
+	for _, pod := range podList.Items {
+		statuses := make([]corev1.ContainerStatus, 0, len(pod.Status.InitContainerStatuses)+len(pod.Status.ContainerStatuses))
+		statuses = append(statuses, pod.Status.InitContainerStatuses...)
+		statuses = append(statuses, pod.Status.ContainerStatuses...)
+
+		for _, cs := range statuses {
+			if cs.State.Waiting == nil {
+				continue
+			}
+			reason := cs.State.Waiting.Reason
+			if reason != "ErrImagePull" && reason != "ImagePullBackOff" {
+				continue
+			}
+			msg := fmt.Sprintf("pod %s container %s: %s", pod.Name, cs.Name, reason)
+			if cs.State.Waiting.Message != "" {
+				msg += ": " + cs.State.Waiting.Message
+			}
+			msgs = append(msgs, msg)
+		}
+	}
+	return msgs
 }
 
 // computeDGDName returns the Kubernetes name to use for the DGD that a DGDR owns.

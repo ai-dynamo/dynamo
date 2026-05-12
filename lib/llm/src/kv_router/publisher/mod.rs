@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
@@ -15,8 +14,6 @@ pub use dynamo_kv_router::zmq_wire::create_stored_blocks;
 #[cfg(test)]
 use dynamo_kv_router::zmq_wire::*;
 use dynamo_runtime::config::environment_names::nats as env_nats;
-use dynamo_runtime::metrics::MetricsHierarchy;
-use dynamo_runtime::metrics::prometheus_names::kv_publisher;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{
     component::Component,
@@ -25,6 +22,7 @@ use dynamo_runtime::{
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint,
+    metrics::KvPublisherMetrics,
 };
 
 mod batching;
@@ -64,66 +62,6 @@ fn create_kv_stream_name(component: &Component, subject: &str) -> String {
     ))
     .to_string()
     .replace("_", "-")
-}
-
-/// Metrics for the KV publisher, created via the MetricsHierarchy API.
-/// This provides automatic `dynamo_namespace`, `dynamo_component`, and other
-/// hierarchy labels for free.
-pub(super) struct KvPublisherMetrics {
-    /// Total number of raw events dropped by engines before reaching publisher
-    pub engines_dropped_events_total: prometheus::IntCounter,
-}
-
-static KV_PUBLISHER_METRICS: OnceLock<Arc<KvPublisherMetrics>> = OnceLock::new();
-
-impl KvPublisherMetrics {
-    /// Create from a Component, memoized in a static OnceLock.
-    /// Uses the MetricsHierarchy API which auto-prepends `dynamo_component_`,
-    /// injects hierarchy labels (including `worker_id`), and registers with the
-    /// DRT `MetricsRegistry`.
-    pub fn from_component(component: &Component) -> Arc<Self> {
-        KV_PUBLISHER_METRICS
-            .get_or_init(|| {
-                let metrics = component.metrics();
-                match metrics.create_intcounter(
-                    kv_publisher::ENGINES_DROPPED_EVENTS_TOTAL,
-                    "Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)",
-                    &[],
-                ) {
-                    Ok(engines_dropped_events_total) => {
-                        Arc::new(Self { engines_dropped_events_total })
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to create kv_publisher metrics from component: {}. Using unregistered metrics as fallback.", e);
-                        Arc::new(Self::new_unregistered())
-                    }
-                }
-            })
-            .clone()
-    }
-
-    /// Creates unregistered metrics for use when registration fails.
-    /// Increments still work in-process but are not exposed on `/metrics`.
-    pub fn new_unregistered() -> Self {
-        Self {
-            engines_dropped_events_total: prometheus::IntCounter::with_opts(
-                prometheus::Opts::new(
-                    kv_publisher::ENGINES_DROPPED_EVENTS_TOTAL,
-                    "Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)",
-                ),
-            )
-            .expect("failed to create engines_dropped_events_total counter"),
-        }
-    }
-
-    /// Increment the engines dropped events counter by the given amount.
-    pub fn increment_engines_dropped_events(&self, count: u64) {
-        self.engines_dropped_events_total.inc_by(count);
-    }
-}
-
-fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
-    KV_PUBLISHER_METRICS.get().cloned()
 }
 
 /// Configure the source of KV events.
@@ -236,7 +174,7 @@ impl KvEventPublisher {
         let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
         let worker_id = component.drt().connection_id();
 
-        KvPublisherMetrics::from_component(&component);
+        let _ = KvPublisherMetrics::from_component(&component);
 
         let component_name = component.name();
         tracing::info!(

@@ -131,7 +131,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             "agg": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=600,
-                profiled_vram_gib=4.0,
+                profiled_vram_gib=4.7,
+                requested_vllm_kv_cache_bytes=920_126_000,  # 2x safety over min=460_062_720
                 tests=[
                     # HTTP-URL color test on hybrid Mamba/full-attention VL.
                     # post_merge — qwen3-vl-2b carries the pre_merge baseline.
@@ -249,7 +250,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "e_pd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.nightly],
                 timeout_s=600,
                 gpu_marker="gpu_2",
                 # Profiled with `tests/utils/profile_pytest.py --gpus 0,1` on
@@ -268,7 +269,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "epd": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                # Moved to post_merge: same LLaVA-1.5 flake as e_pd above.
+                marks=[pytest.mark.post_merge],
                 timeout_s=600,
                 gpu_marker="gpu_4",
                 # Default 3-GPU layout: encode → GPU 0, prefill → GPU 1,

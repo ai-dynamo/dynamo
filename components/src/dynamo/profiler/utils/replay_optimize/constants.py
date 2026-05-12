@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 
 AIC_BACKEND_VERSIONS = {
-    "vllm": "0.12.0",
+    "vllm": "0.14.0",
     "sglang": "0.5.6.post2",
 }
 

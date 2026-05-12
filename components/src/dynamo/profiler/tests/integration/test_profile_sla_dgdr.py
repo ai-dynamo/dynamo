@@ -340,13 +340,13 @@ def _save_dummy_npz(output_dir: str):
 _DECODE_SVC_NAMES = {
     "sglang": "decode",
     "vllm": "VllmDecodeWorker",
-    "trtllm": "TRTLLMDecodeWorker",
+    "trtllm": "decode",
 }
 
 
 def _make_thorough_patches(backend: str = "trtllm"):
     """Build mock-patches for thorough mode, parameterised by backend."""
-    svc_name = _DECODE_SVC_NAMES.get(backend, "TRTLLMDecodeWorker")
+    svc_name = _DECODE_SVC_NAMES.get(backend, "decode")
     return [
         patch(
             "dynamo.profiler.thorough.DynamoDeploymentClient",

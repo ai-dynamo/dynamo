@@ -58,6 +58,7 @@ pub enum ConformanceFailure {
     NoChunksYielded,
     ChunkAfterTerminal,
     NoTerminalChunk,
+    StreamYieldedError(String),
     ConcurrentGenerateFailed(String),
     CancellationNotObserved { after: Duration },
     CancellationIgnored,
@@ -74,6 +75,7 @@ impl std::fmt::Display for ConformanceFailure {
             NoChunksYielded => write!(f, "generate() stream yielded no chunks"),
             ChunkAfterTerminal => write!(f, "chunk yielded after terminal chunk"),
             NoTerminalChunk => write!(f, "stream ended without a terminal chunk"),
+            StreamYieldedError(m) => write!(f, "engine stream yielded Err: {m}"),
             ConcurrentGenerateFailed(m) => {
                 write!(f, "concurrent generate() calls failed: {m}")
             }
@@ -158,10 +160,17 @@ async fn check_single_generate<E: LLMEngine>(
         .generate(request(model), ctx)
         .await
         .map_err(|e| GenerateFailed(e.to_string()))?;
-    let chunks: Vec<_> = stream.collect().await;
+    let items: Vec<_> = stream.collect().await;
 
-    if chunks.is_empty() {
+    if items.is_empty() {
         return Err(NoChunksYielded);
+    }
+    let mut chunks = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Ok(c) => chunks.push(c),
+            Err(e) => return Err(StreamYieldedError(e.to_string())),
+        }
     }
     let mut terminal_idx = None;
     for (i, c) in chunks.iter().enumerate() {
@@ -229,7 +238,7 @@ async fn check_cancellation<E: LLMEngine>(
     // regardless of engine speed — no timer race.
     ctx.stop_generating();
 
-    let chunks = tokio::time::timeout(deadline, async {
+    let items = tokio::time::timeout(deadline, async {
         let mut s = stream;
         let mut out = Vec::new();
         while let Some(c) = s.next().await {
@@ -240,9 +249,10 @@ async fn check_cancellation<E: LLMEngine>(
     .await
     .map_err(|_| CancellationNotObserved { after: deadline })?;
 
-    match chunks.last() {
-        Some(c) if matches!(c.finish_reason, Some(FinishReason::Cancelled)) => Ok(()),
-        Some(_) => Err(CancellationIgnored),
+    match items.last() {
+        Some(Ok(c)) if matches!(c.finish_reason, Some(FinishReason::Cancelled)) => Ok(()),
+        Some(Ok(_)) => Err(CancellationIgnored),
+        Some(Err(e)) => Err(StreamYieldedError(e.to_string())),
         None => Err(NoChunksYielded),
     }
 }

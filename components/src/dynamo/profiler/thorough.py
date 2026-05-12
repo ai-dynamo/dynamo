@@ -24,7 +24,7 @@ from aiconfigurator.generator.enumerate import enumerate_profiling_configs
 from aiconfigurator.sdk.picking import pick_autoscale, pick_default, pick_load_match
 from aiconfigurator.sdk.task import TaskConfig
 
-from deploy.utils.dynamo_deployment import DynamoDeploymentClient
+from deploy.utils.dynamo_deployment import DeploymentFailedError, DynamoDeploymentClient
 from dynamo.profiler.rapid import _generate_dgd_from_pick
 from dynamo.profiler.utils.aic_dataframe import (
     build_decode_row,
@@ -117,6 +117,17 @@ async def _benchmark_prefill_candidates(
             await client.wait_for_deployment_ready(timeout=ops.deployment_timeout)
         except TimeoutError:
             logger.error("Prefill %s with %d GPUs timed out", label, num_gpus)
+            await client.delete_deployment()
+            deployment_clients.remove(client)
+            continue
+        except DeploymentFailedError as e:
+            logger.error(
+                "Prefill %s with %d GPUs entered a terminal failure state, "
+                "skipping to next candidate: %s",
+                label,
+                num_gpus,
+                e,
+            )
             await client.delete_deployment()
             deployment_clients.remove(client)
             continue
@@ -219,6 +230,17 @@ async def _benchmark_decode_candidates(
             await client.wait_for_deployment_ready(timeout=ops.deployment_timeout)
         except TimeoutError:
             logger.error("Decode %s with %d GPUs timed out", label, num_gpus)
+            await client.delete_deployment()
+            deployment_clients.remove(client)
+            continue
+        except DeploymentFailedError as e:
+            logger.error(
+                "Decode %s with %d GPUs entered a terminal failure state, "
+                "skipping to next candidate: %s",
+                label,
+                num_gpus,
+                e,
+            )
             await client.delete_deployment()
             deployment_clients.remove(client)
             continue
@@ -349,7 +371,7 @@ async def run_thorough(
 
     # --- Stage 1: Enumeration ---
     model_cache = dgdr.modelCache or ModelCacheSpec()
-    prefill_candidates, decode_candidates = enumerate_profiling_configs(
+    enumerated = enumerate_profiling_configs(
         model_path=model,
         system=system,
         backend=backend,
@@ -362,6 +384,7 @@ async def run_thorough(
         k8s_pvc_mount_path=model_cache.pvcMountPath,
         k8s_model_path_in_pvc=model_cache.pvcModelPath,
     )
+    prefill_candidates, decode_candidates = enumerated[:2]
 
     logger.info(
         "Enumerated %d prefill candidates, %d decode candidates",

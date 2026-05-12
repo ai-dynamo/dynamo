@@ -65,6 +65,13 @@ _FAMILY_TO_VLLM_KEY = {
     "glm47": "glm47",
     "deepseek_v3_1": "deepseek_v31",
     "deepseek_v3": "deepseek_v3",
+    "deepseek_v3_2": "deepseek_v32",
+    "deepseek_v4": "deepseek_v4",
+    "hermes": "hermes",
+    "mistral": "mistral",
+    "jamba": "jamba",
+    "llama3_json": "llama3_json",
+    "phi4": "phi4_mini_json",
     "harmony": "openai",  # gpt-oss / harmony parser registered as "openai"
     "pythonic": "pythonic",
     "gemma4": "gemma4",

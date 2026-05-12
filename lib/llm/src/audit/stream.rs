@@ -221,7 +221,6 @@ pub fn final_response_to_one_chunk_stream(
             index: idx as u32,
             delta,
             finish_reason: ch.finish_reason,
-            stop_reason: ch.stop_reason.clone(),
             logprobs: ch.logprobs.clone(),
         };
         choices.push(choice);
@@ -278,7 +277,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 
@@ -319,7 +317,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: Some(FinishReason::Stop),
-            stop_reason: None,
             logprobs: None,
         };
 
@@ -461,7 +458,6 @@ mod tests {
                                 reasoning_content: None,
                             },
                             finish_reason: None,
-                            stop_reason: None,
                             logprobs: None,
                         }
                     }],
