@@ -373,19 +373,10 @@ impl Indexer {
             approx: Some(approx),
         } = self
         {
-            if !primary.use_kv_events() {
-                primary
-                    .record_hashed_routing_decision(
-                        worker,
-                        local_hashes.clone(),
-                        sequence_hashes.clone(),
-                    )
-                    .await
-                    .map_err(|error| {
-                        tracing::warn!(error = %error, "Remote indexer write failed");
-                        KvRouterError::IndexerDroppedRequest
-                    })?;
-            }
+            debug_assert!(
+                primary.use_kv_events(),
+                "remote side indexer requires an event-driven primary"
+            );
             return approx
                 .process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
                 .await;
