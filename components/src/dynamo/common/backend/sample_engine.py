@@ -156,7 +156,7 @@ class SampleLLMEngine(LLMEngine):
                 # the sample backend has no real KV transfer — but its
                 # presence exercises the wire format end-to-end.
                 if self.disaggregation_mode == DisaggregationMode.PREFILL:
-                    out["disaggregated_params"] = {  # type: ignore[typeddict-unknown-key]
+                    out["disaggregated_params"] = {
                         "sample_handle": uuid.uuid4().hex,
                         "completed_tokens": [token_id],
                     }

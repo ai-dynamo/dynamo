@@ -29,12 +29,18 @@ class GenerateRequest(TypedDict, total=False):
     ``token_ids`` is always present (set by the Rust preprocessor).
     The remaining groups are optional — engines should access them
     defensively with ``.get(key, {})``.
+
+    Disaggregated-serving keys (``prefill_result``, ``bootstrap_info``)
+    are set by the frontend's PrefillRouter on decode requests; engines
+    read them via ``dynamo.common.backend.disagg`` helpers.
     """
 
     token_ids: Required[list[int]]
     sampling_options: dict[str, Any]
     stop_conditions: dict[str, Any]
     output_options: dict[str, Any]
+    prefill_result: dict[str, Any]
+    bootstrap_info: dict[str, Any]
 
 
 class GenerateChunk(TypedDict, total=False):
@@ -43,12 +49,15 @@ class GenerateChunk(TypedDict, total=False):
     Every chunk must include ``token_ids`` and ``index``.
     Use ``index=0`` for single-choice responses. The final chunk must
     additionally include ``finish_reason`` and ``completion_usage``.
+    Prefill terminals carry ``disaggregated_params`` for the
+    PrefillRouter to forward to the decode peer.
     """
 
     token_ids: Required[list[int]]
     index: Required[int]
     finish_reason: str
     completion_usage: dict[str, int]
+    disaggregated_params: dict[str, Any]
 
 
 @dataclass
