@@ -40,6 +40,16 @@
       "from_image": "nvcr.io/nvidia/base/ubuntu",
       "from_tag": "noble-20250619",
       "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:1287141d283b8f06f45681b56a48a85791398c615888b1f96bfb9fc981392d98",
+      "baseline_image": "nvcr.io/nvidia/cuda",
+      "baseline_sbom": "cuda@1287141d.cdx.json",
+      "baseline_tag": "12.9.1-runtime-ubuntu24.04",
+      "from_digest": "sha256:1287141d283b8f06f45681b56a48a85791398c615888b1f96bfb9fc981392d98",
+      "from_image": "nvcr.io/nvidia/cuda",
+      "from_tag": "12.9.1-runtime-ubuntu24.04",
+      "platform": "linux/amd64"
     }
   ],
   "entry_schema": {
@@ -54,6 +64,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 4 MB per file.",
-  "generated_at": "2026-05-12T00:37:33+00:00",
+  "generated_at": "2026-05-12T00:40:18+00:00",
   "schema_version": 2
 }
