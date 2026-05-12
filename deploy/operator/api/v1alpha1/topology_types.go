@@ -63,8 +63,10 @@ type TopologyConstraint struct {
 }
 
 // TopologyDomain is a free-form topology level identifier.
-// Domain names are defined by the cluster admin in the ClusterTopology CR.
 // Common examples: "region", "zone", "datacenter", "block", "rack", "host", "numa".
+// When used with a ClusterTopology CR, domain names are defined in the CR's
+// hierarchy; when used with `kvTransferPolicy.labelKey` alone, the value is a
+// user-chosen logical name for the topology level.
 // Must match `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` (lowercase alphanumeric,
 // may contain hyphens but must not start or end with one).
 // +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
@@ -77,34 +79,39 @@ func IsValidTopologyDomainFormat(d TopologyDomain) bool {
 	return topologyDomainRegex.MatchString(string(d))
 }
 
-// NoMatchPolicy controls behavior when no decode workers exist in the same
-// topology domain as the prefill worker during KV-cache transfer routing.
+// NoMatchPolicy controls behavior when no decode workers share the same value
+// for the configured `domain` as the prefill worker during KV-cache transfer
+// routing.
 // +kubebuilder:validation:Enum=fail;fallback
 type NoMatchPolicy string
 
 const (
-	// NoMatchPolicyFail returns an error to the client when no same-domain
-	// decode workers are available.
+	// NoMatchPolicyFail returns an error to the client when no decode
+	// workers match the prefill worker's domain value.
 	NoMatchPolicyFail NoMatchPolicy = "fail"
 	// NoMatchPolicyFallback allows cross-domain KV transfer if no decode
-	// workers exist in the prefill worker's topology domain.
+	// workers share the prefill worker's domain value.
 	NoMatchPolicyFallback NoMatchPolicy = "fallback"
 )
 
 // KvTransferPolicy configures topology-aware routing for KV-cache transfers
 // between prefill and decode workers.
 type KvTransferPolicy struct {
-	// LabelKey is a raw pod label key (e.g. "topology.kubernetes.io/zone")
-	// used to identify the topology domain of each worker pod.
+	// LabelKey is a Kubernetes node label key (e.g.
+	// "topology.kubernetes.io/zone") whose value identifies the topology
+	// domain for each worker. The operator copies the node label onto worker
+	// pods so the runtime can publish it as worker metadata. The label
+	// should correspond to the topology level named in `domain`.
 	// +kubebuilder:validation:MinLength=1
 	LabelKey string `json:"labelKey"`
 
-	// Domain is the topology domain to enforce for KV-cache transfers
-	// (e.g. "zone", "rack").
+	// Domain is the logical name for the topology level to enforce
+	// (e.g. "zone", "rack"). The router uses this to match workers that
+	// share the same value for the label identified by `labelKey`.
 	Domain TopologyDomain `json:"domain"`
 
-	// NoMatchPolicy controls behavior when no same-domain decode workers
-	// exist. Defaults to "fail".
+	// NoMatchPolicy controls behavior when no decode workers share the same
+	// `domain` value as the prefill worker. Defaults to "fail".
 	// +optional
 	// +kubebuilder:default=fail
 	// +kubebuilder:validation:Enum=fail;fallback
