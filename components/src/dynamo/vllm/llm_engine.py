@@ -230,7 +230,12 @@ class VllmLLMEngine(LLMEngine):
     async def cleanup(self) -> None:
         try:
             if self.engine_client is not None:
-                self.engine_client.shutdown()
+                # AsyncLLM.shutdown() is an async method that must be awaited so
+                # that it drives the EngineCore subprocess to exit before we
+                # return.  Without await, the synchronous call returns
+                # immediately and the subprocess stays alive, causing the
+                # Python process to hang after Worker.run() completes.
+                await self.engine_client.shutdown()
         finally:
             self.engine_client = None
             if self._prometheus_temp_dir is not None:
