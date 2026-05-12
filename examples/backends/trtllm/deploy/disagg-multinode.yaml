@@ -132,11 +132,16 @@ spec:
             limits:
               nvidia.com/gpu: "4"
           volumeMounts:
+          - mountPath: /models
+            name: models
           - mountPath: /workspace/
             name: nvidia-config
             readOnly: true
           workingDir: /workspace/
         volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: models
         - configMap:
             name: nvidia-config
           name: nvidia-config
@@ -170,11 +175,16 @@ spec:
             limits:
               nvidia.com/gpu: "4"
           volumeMounts:
+          - mountPath: /models
+            name: models
           - mountPath: /workspace/
             name: nvidia-config
             readOnly: true
           workingDir: /workspace/
         volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: models
         - configMap:
             name: nvidia-config
           name: nvidia-config

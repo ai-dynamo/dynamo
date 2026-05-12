@@ -10,9 +10,7 @@ spec:
   - eppConfig:
       config:
         plugins:
-        - name: ""
-          parameters: null
-          type: disagg-profile-handler
+        - type: disagg-profile-handler
         - name: prefill-filter
           parameters:
             allowsNoLabel: false
@@ -28,13 +26,10 @@ spec:
             - decode
           type: label-filter
         - name: picker
-          parameters: null
           type: max-score-picker
         - name: dyn-prefill
-          parameters: null
           type: dyn-prefill-scorer
         - name: dyn-decode
-          parameters: null
           type: dyn-decode-scorer
         schedulingProfiles:
         - name: prefill

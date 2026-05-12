@@ -10,9 +10,7 @@ spec:
   - eppConfig:
       config:
         plugins:
-        - name: ""
-          parameters: null
-          type: disagg-profile-handler
+        - type: disagg-profile-handler
         - name: decode-filter
           parameters:
             allowsNoLabel: true
@@ -21,10 +19,8 @@ spec:
             - decode
           type: label-filter
         - name: picker
-          parameters: null
           type: max-score-picker
         - name: dyn-decode
-          parameters: null
           type: dyn-decode-scorer
         schedulingProfiles:
         - name: decode
