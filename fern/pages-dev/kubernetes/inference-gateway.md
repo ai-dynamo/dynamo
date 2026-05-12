@@ -252,15 +252,15 @@ To disable the EPP from listening for KV events (e.g., when prefix caching is of
 
 1. **EPP:** Set `DYN_USE_KV_EVENTS=false`. The router falls back to approximate mode (routing decisions are tracked locally with TTL decay instead of live KV events from workers).
 2. **Workers:** Pass `--no-enable-prefix-caching` to disable prefix caching entirely. Without prefix caching, no KV events are generated regardless of other flags.
-3. **Optionally** set `DYN_OVERLAP_SCORE_WEIGHT=0` on the EPP to skip prefix-overlap scoring altogether, making the router select workers based on load only.
+3. **Optionally** set `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT=0` on the EPP to skip prefix-overlap scoring altogether, making the router select workers based on load only.
 
 - Set `DYN_BUSY_THRESHOLD` to configure the upper bound on how "full" a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
 - Set `DYN_ENFORCE_DISAGG=true` (default: `false`) to control per-request behavior when prefill workers are unavailable:
   - **`true` (recommended for disaggregated serving):** Requests fail with an error if prefill workers are not available. Use this when disaggregated serving is required and aggregated fallback is not acceptable.
   - **`false` (default):** Requests gracefully fall back to aggregated mode (skip prefill, route directly to decode) when prefill workers are not available. When prefill workers appear later, subsequent requests automatically use disaggregated routing.
-- Set `DYN_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes. (default: 1)
-- Set `DYN_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
-- `DYN_ROUTER_TEMPERATURE` — Temperature for worker sampling via softmax (default: 0.0)
+- Set `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` to control the device-local prefix-overlap credit multiplier, from 0.0 to 1.0. Higher values bias toward reusing workers with similar cached prefixes. (default: 1)
+- Set `DYN_ROUTER_PREFILL_LOAD_SCALE` to scale adjusted prompt-side prefill load before decode blocks are added. (default: 1)
+- Set `DYN_ROUTER_TEMPERATURE` (default: `0.0`) to soften or sharpen normalized worker sampling. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
 - `DYN_ROUTER_REPLICA_SYNC` — Enable replica synchronization (default: false)
 - `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` — Track active blocks (default: true)
 - `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` — Track output blocks during generation (default: false)
