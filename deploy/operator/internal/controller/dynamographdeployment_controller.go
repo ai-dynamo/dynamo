@@ -1346,6 +1346,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 	logger := log.FromContext(ctx)
 	checkpointStatuses := make(map[string]nvidiacomv1alpha1.ServiceCheckpointStatus)
 	checkpointInfos := make(map[string]*checkpoint.CheckpointInfo)
+	storageEnsured := false
 
 	for serviceName, component := range dynamoDeployment.Spec.Services {
 		if component.Checkpoint == nil || !component.Checkpoint.Enabled {
@@ -1353,6 +1354,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 		}
 
 		logger.Info("Reconciling checkpoint for service", "service", serviceName)
+
+		if !storageEnsured {
+			if err := checkpoint.EnsureStoragePVC(ctx, r.Client, dynamoDeployment.Namespace, r.Config.Checkpoint.Storage); err != nil {
+				logger.Error(err, "Failed to ensure checkpoint storage PVC", "service", serviceName)
+				return nil, nil, fmt.Errorf("failed to ensure checkpoint storage PVC for service %s: %w", serviceName, err)
+			}
+			storageEnsured = true
+		}
 
 		// Resolve checkpoint for this service
 		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, component.Checkpoint)
