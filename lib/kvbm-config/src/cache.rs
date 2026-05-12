@@ -109,8 +109,7 @@ impl HostCacheConfig {
     /// (e.g. `DYN_KVBM_CPU_CACHE_GB=0`) enables bypass instead of allocating
     /// an empty G2 tier.
     pub fn has_positive_size(&self) -> bool {
-        self.cache_size_gb.is_some_and(|gb| gb > 0.0)
-            || self.num_blocks.is_some_and(|n| n > 0)
+        self.cache_size_gb.is_some_and(|gb| gb > 0.0) || self.num_blocks.is_some_and(|n| n > 0)
     }
 }
 
@@ -183,8 +182,7 @@ impl DiskCacheConfig {
     /// See [`HostCacheConfig::has_positive_size`] for the rationale on
     /// treating `Some(0)` / `Some(0.0)` as not configured.
     pub fn has_positive_size(&self) -> bool {
-        self.cache_size_gb.is_some_and(|gb| gb > 0.0)
-            || self.num_blocks.is_some_and(|n| n > 0)
+        self.cache_size_gb.is_some_and(|gb| gb > 0.0) || self.num_blocks.is_some_and(|n| n > 0)
     }
 }
 

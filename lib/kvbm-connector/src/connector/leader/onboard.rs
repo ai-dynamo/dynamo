@@ -33,8 +33,7 @@ fn select_onboard_block_ids(
     let num_computed_blocks = num_computed_tokens / block_size;
     let num_external_blocks = num_external_tokens / block_size;
     let floor_loss_tokens = num_external_tokens % block_size;
-    let num_external_blocks_ceil =
-        num_external_blocks + if floor_loss_tokens > 0 { 1 } else { 0 };
+    let num_external_blocks_ceil = num_external_blocks + if floor_loss_tokens > 0 { 1 } else { 0 };
 
     // Diagnostic: surface floor-division loss so we can tell whether
     // num_external_tokens is a multiple of block_size for this workload.
@@ -309,7 +308,11 @@ async fn execute_onboarding(
         staging_us = staging_complete.duration_since(start).as_micros() as u64,
         xfer_us = end_xfer.duration_since(start_xfer).as_micros() as u64,
         total_us = end_xfer.duration_since(start).as_micros() as u64,
-        src = if bypass_host { "kvbm_engine::G3" } else { "kvbm_engine::G2" },
+        src = if bypass_host {
+            "kvbm_engine::G3"
+        } else {
+            "kvbm_engine::G2"
+        },
         dst = "kvbm_engine::G1",
         "Onboard transfer complete"
     );

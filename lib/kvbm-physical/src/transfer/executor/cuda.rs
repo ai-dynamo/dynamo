@@ -118,7 +118,11 @@ pub fn execute_cuda_transfer(
         * log_dtype_width;
     tracing::info!(
         strategy = strategy_name,
-        selected_path = if use_whole_block { "whole_block" } else { "fc_lw" },
+        selected_path = if use_whole_block {
+            "whole_block"
+        } else {
+            "fc_lw"
+        },
         num_blocks = log_num_blocks,
         num_layers = log_num_layers,
         outer_dim = log_outer_dim,

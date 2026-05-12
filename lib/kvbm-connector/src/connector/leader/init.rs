@@ -506,9 +506,7 @@ impl ConnectorLeader {
                 .build();
 
             let g3_mgr = g3_manager_for_offload.clone().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Host-bypass mode requires a configured G3 (disk) cache; got none"
-                )
+                anyhow::anyhow!("Host-bypass mode requires a configured G3 (disk) cache; got none")
             })?;
             engine_builder = engine_builder
                 .with_g3_manager(g3_mgr)
