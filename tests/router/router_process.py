@@ -36,6 +36,8 @@ class FrontendRouterProcess(ManagedProcess):
         use_kv_events: bool = True,
         conditional_prefill_enabled: bool = False,
         conditional_prefill_max_new_tokens: int | None = None,
+        conditional_prefill_policy: str | None = None,
+        conditional_prefill_transfer_cost_blocks: int | None = None,
     ):
         command = [
             sys.executable,
@@ -88,6 +90,22 @@ class FrontendRouterProcess(ManagedProcess):
                 [
                     "--router-conditional-prefill-max-new-tokens",
                     str(conditional_prefill_max_new_tokens),
+                ]
+            )
+
+        if conditional_prefill_policy is not None:
+            command.extend(
+                [
+                    "--router-conditional-prefill-policy",
+                    conditional_prefill_policy,
+                ]
+            )
+
+        if conditional_prefill_transfer_cost_blocks is not None:
+            command.extend(
+                [
+                    "--router-conditional-prefill-transfer-cost-blocks",
+                    str(conditional_prefill_transfer_cost_blocks),
                 ]
             )
 
