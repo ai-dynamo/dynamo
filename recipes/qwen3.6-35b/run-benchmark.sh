@@ -88,7 +88,7 @@ if [[ ! -f "$HW_ENV" ]]; then
   echo "Available: $(ls "$HERE/hw/" 2>/dev/null | tr '\n' ' ')" >&2
   exit 2
 fi
-CONFIG_DIR="$HERE/${CONFIG}"
+DEPLOY_TPL="$HERE/deploy/${CONFIG}.yaml"
 
 if ! command -v envsubst >/dev/null 2>&1; then
   echo "ERROR: envsubst missing. Install gettext-base (apt) or gettext (brew)." >&2
@@ -143,7 +143,7 @@ dataset() {
     fi
     $K delete job qwen36-generate-datasets
   fi
-  $K apply -f "$HERE/data-gen/generate-datasets-job.yaml"
+  $K apply -f "$HERE/data-gen-job.yaml"
   $K wait --for=condition=Complete job/qwen36-generate-datasets --timeout=1800s
   $K logs job/qwen36-generate-datasets | tail -20
 }
@@ -151,7 +151,7 @@ dataset() {
 # ---------------- config-specific lifecycle ----------------
 
 deploy() {
-  APPLY_TPL "$CONFIG_DIR/deploy.yaml"
+  APPLY_TPL "$DEPLOY_TPL"
   case "$DEPLOY_KIND" in
     deployment)
       $K rollout status "deploy/$DEPLOY_NAME" --timeout=900s

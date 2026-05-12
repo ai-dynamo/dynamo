@@ -69,22 +69,21 @@ qwen3.6-35b/
 ├── run-benchmark.sh            # Unified driver — branches on --config/--hw
 ├── run-all-benchmarks.sh       # Sequential 3-config orchestrator
 ├── perf.yaml                   # Single shared aiperf bench Pod template
+├── data-gen-job.yaml           # Sliding-window jsonl generator Job
 ├── hw/                         # Per-cluster user state — edit hostname here
 │   ├── h100.env
 │   └── gb200.env
-├── model-cache/
+├── model-cache/                # Model-caching subsystem
 │   └── model-download.yaml
-├── data-gen/
-│   └── generate-datasets-job.yaml
-├── vllm-serve/
-│   └── deploy.yaml             # Plain Deployment + Service (baseline)
-├── dynamo-fd/
-│   └── deploy.yaml             # DynamoGraphDeployment, frontend-decoding ON
-└── dynamo-fd-ec/
-    └── deploy.yaml             # DynamoGraphDeployment, FD + embedding cache
+└── deploy/                     # 3 deploy targets — grouped because >1 sibling
+    ├── vllm-serve.yaml         # Plain Deployment + Service (baseline)
+    ├── dynamo-fd.yaml          # DynamoGraphDeployment, frontend-decoding ON
+    └── dynamo-fd-ec.yaml       # DynamoGraphDeployment, FD + embedding cache
 ```
 
-The three configs share one `perf.yaml` because the only deltas
+Layout rule: **singletons flatten to root** (`perf.yaml`, `data-gen-job.yaml`); **dirs hold ≥2 files** (`hw/`, `deploy/`); **`model-cache/` is the exception** — a role bucket kept for future model-caching siblings.
+
+The three deploy targets share one `perf.yaml` because the only deltas
 across them (pod name, frontend service, run-label) are exported as
 `${BENCH_POD}` / `${BENCH_FRONTEND}` / `${BENCH_RUN_LABEL}` by
 `run-benchmark.sh` and resolved via `envsubst` at apply time.
