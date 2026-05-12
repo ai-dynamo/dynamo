@@ -104,6 +104,7 @@ import (
 	"unsafe"
 
 	ctrl "sigs.k8s.io/controller-runtime"
+	fwkrh "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requesthandling"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 )
 
@@ -242,13 +243,13 @@ func SerializeEndpointsToJSON(endpoints []schedtypes.Endpoint) (string, error) {
 
 		if meta := ep.GetMetadata(); meta != nil {
 			entry.Pod = &endpointInfoJSON{
-				Name:      meta.NamespacedName.Name,
-				Namespace: meta.NamespacedName.Namespace,
-				PodName:   meta.PodName,
-				Address:   meta.Address,
-				Port:      meta.Port,
+				Name:        meta.NamespacedName.Name,
+				Namespace:   meta.NamespacedName.Namespace,
+				PodName:     meta.PodName,
+				Address:     meta.Address,
+				Port:        meta.Port,
 				MetricsHost: meta.MetricsHost,
-				Labels:    meta.Labels,
+				Labels:      meta.Labels,
 			}
 		}
 
@@ -309,12 +310,33 @@ func BuildOpenAIRequest(req *schedtypes.InferenceRequest) (map[string]any, error
 		return nil, fmt.Errorf("no messages or prompt provided")
 	}
 
-	if req != nil && strings.TrimSpace(req.TargetModel) != "" {
+	if strings.TrimSpace(req.TargetModel) != "" {
 		requestBody["model"] = req.TargetModel
 	} else {
 		requestBody["model"] = "default"
 	}
+
+	// Forward the caller's nvext block so the Rust router can lift
+	// nvext.agent_hints.priority into priority_jump.
+	if nvext := extractNvext(req.Body.Payload); nvext != nil {
+		requestBody["nvext"] = nvext
+	}
+
 	return requestBody, nil
+}
+
+// extractNvext returns the caller-supplied nvext object from the PayloadMap,
+// or nil when the payload is not a map or does not contain an nvext object.
+//
+// This is how routing hints — most notably nvext.agent_hints.priority — reach
+// the Rust router via the FFI JSON.
+func extractNvext(payload fwkrh.RequestPayload) map[string]any {
+	pm, ok := payload.(fwkrh.PayloadMap)
+	if !ok {
+		return nil
+	}
+	nvext, _ := pm["nvext"].(map[string]any)
+	return nvext
 }
 
 // CallAddRequest registers a request with the router's bookkeeping.
