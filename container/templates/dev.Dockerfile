@@ -279,6 +279,7 @@ COPY --from=dynamo_tools /usr/bin/ /usr/bin/
 COPY --from=dynamo_tools /usr/sbin/ /usr/sbin/
 COPY --from=dynamo_tools /usr/lib/ /usr/lib/
 COPY --from=dynamo_tools /usr/libexec/ /usr/libexec/
+COPY --from=dynamo_tools /usr/include/ /usr/include/
 COPY --from=dynamo_tools /lib/ /lib/
 COPY --from=dynamo_tools /usr/share/ /usr/share/
 COPY --from=dynamo_tools /etc/alternatives/ /etc/alternatives/
