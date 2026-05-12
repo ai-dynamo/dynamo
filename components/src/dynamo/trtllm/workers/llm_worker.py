@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from typing import Optional
 
 from prometheus_client import REGISTRY
@@ -58,6 +59,7 @@ from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.engine import Backend, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
+from dynamo.trtllm.machine_id_allocator import DisaggMachineIdAllocator
 from dynamo.trtllm.publisher import DYNAMO_COMPONENT_REGISTRY, get_publisher
 from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
@@ -67,6 +69,19 @@ from dynamo.trtllm.utils.trtllm_utils import deep_update
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
+
+_pools: dict[int, DisaggMachineIdAllocator] = {}
+_pool_lock = threading.Lock()
+
+
+def _get_disagg_machine_id(endpoint) -> int:
+    cid = int(endpoint.connection_id())
+    with _pool_lock:
+        if cid not in _pools:
+            _pools[cid] = DisaggMachineIdAllocator(
+                f"/var/run/dynamo/disagg_machine_id/{cid}"
+            )
+    return _pools[cid].allocate(cid)
 
 
 def build_kv_connector_config(config: Config):
@@ -601,7 +616,7 @@ async def init_llm_worker(
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
             additional_metrics=additional_metrics,
             max_seq_len=config.max_seq_len,
-            disagg_machine_id=int(endpoint.connection_id()) % 1021,
+            disagg_machine_id=_get_disagg_machine_id(endpoint),
         )
 
         media_decoder = None
