@@ -1362,8 +1362,9 @@ async def _zmq_replay_cycle(
     indexer_url: str,
     engine_workers,
     send_requests_to_router,
+    model_name: str,
 ):
-    """Pause indexer listeners → send gap requests → resume → send to trigger replay."""
+    """Pause indexer listeners, create gaps, then force each stream to reveal them."""
     await asyncio.sleep(1)
     worker_ids = list(engine_workers.worker_id_to_zmq_ports.keys())
     dp_size = getattr(engine_workers, "dp_size", None) or 1
@@ -1399,13 +1400,38 @@ async def _zmq_replay_cycle(
                         resp.status == 200
                     ), f"Resume {wid}:{dp_rank} failed: {await resp.text()}"
 
-    logger.info("Sending 5 requests after resume (triggers gap detection + replay)")
-    successful_post = await send_requests_to_router(
-        router, 5, f"{router_name} (post-resume)", endpoint
+    replay_targets = [
+        (wid, dp_rank) for wid in worker_ids for dp_rank in range(dp_size)
+    ]
+    logger.info(
+        "Sending %s targeted requests after resume (triggers gap detection + replay)",
+        len(replay_targets),
     )
-    assert (
-        successful_post == 5
-    ), f"Expected 5 requests post-resume, got {successful_post}"
+    post_resume_tasks = []
+    for wid, dp_rank in replay_targets:
+        request_tokens = [random.randint(1, 10000) for _ in range(30)]
+        post_resume_tasks.append(
+            asyncio.create_task(
+                send_request_via_python_kv_router(
+                    kv_python_router=router,
+                    model_name=model_name,
+                    token_ids=request_tokens,
+                    stop_conditions={
+                        "ignore_eos": True,
+                        "max_tokens": 10,
+                    },
+                    worker_id=wid,
+                    dp_rank=dp_rank,
+                )
+            )
+        )
+
+    post_resume_results = await asyncio.gather(*post_resume_tasks)
+    successful_post = sum(1 for result in post_resume_results if result)
+    assert successful_post == len(replay_targets), (
+        f"Expected {len(replay_targets)} targeted post-resume requests, "
+        f"got {successful_post}"
+    )
     await asyncio.sleep(2)
 
 
@@ -1571,6 +1597,7 @@ def _test_router_indexers_sync(
                 standalone_indexer_url,
                 engine_workers,
                 send_requests_to_router,
+                model_name,
             )
 
         # Wait for snapshot to be available before creating second router.
@@ -1677,6 +1704,7 @@ def _test_router_indexers_sync(
                 standalone_indexer_url,
                 engine_workers,
                 send_requests_to_router,
+                model_name,
             )
 
         # Wait for internal synchronization and ZMQ event propagation
