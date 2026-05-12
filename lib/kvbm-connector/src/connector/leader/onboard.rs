@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::time::Instant;
+
 use anyhow::Context;
 use futures::future::{BoxFuture, Either, Ready};
 
@@ -8,6 +10,7 @@ use kvbm_common::LogicalLayoutHandle;
 use kvbm_physical::TransferOptions;
 
 use super::*;
+use crate::G3;
 
 /// Future type returned by `FindMatchesResult::wait_for_completion()`.
 type StagingCompletion = Either<Ready<Result<()>>, BoxFuture<'static, Result<()>>>;
@@ -71,6 +74,31 @@ fn collect_g2_blocks_from_shards(
     Ok(collected)
 }
 
+/// Select the G1 block IDs that correspond to externally-matched (onboard) blocks.
+///
+/// When onboarding, the `block_ids` list contains ALL blocks for the request:
+///   [computed_blocks... | external_blocks... | new_blocks...]
+///
+/// The external (matched) blocks start right after the computed prefix and span
+/// `num_external_tokens / block_size` entries.
+///
+/// # Arguments
+/// * `block_ids` - All block IDs allocated for the request
+/// * `num_computed_tokens` - Tokens already present in G1 (prefix cache hit)
+/// * `num_external_tokens` - Tokens matched externally (to be onboarded)
+/// * `block_size` - Tokens per block
+fn select_onboard_block_ids(
+    block_ids: &[BlockId],
+    num_computed_tokens: usize,
+    num_external_tokens: usize,
+    block_size: usize,
+) -> Vec<BlockId> {
+    let num_computed_blocks = num_computed_tokens / block_size;
+    let num_external_blocks = num_external_tokens / block_size;
+    block_ids[num_computed_blocks..num_computed_blocks + num_external_blocks].to_vec()
+}
+
+
 impl ConnectorLeader {
     /// Prepare intra-pass onboarding by storing G2/G1 block pairs.
     ///
@@ -87,6 +115,18 @@ impl ConnectorLeader {
         block_ids: Vec<BlockId>,
         num_external_tokens: usize,
     ) -> Result<()> {
+        // Intra-pass onboarding currently only supports G2→G1 (the worker's
+        // CudaStream layer-by-layer load expects G2 sources). Host-bypass
+        // mode has no G2 to source from, so reject the combination loudly
+        // rather than silently producing wrong results. Use Inter mode if
+        // bypass is required.
+        if self.runtime.config().cache.bypass_host_cache() {
+            bail!(
+                "Intra-pass onboarding is not supported when host (G2) cache is bypassed. \
+                 Set DYN_KVBM_CPU_CACHE_GB to enable G2, or use Inter onboard mode \
+                 (the default) which supports the bypass + GDS direct G3→G1 path."
+            );
+        }
         let shared_slot = self.get_slot(request_id)?;
         let mut slot = shared_slot.lock();
 
@@ -96,15 +136,16 @@ impl ConnectorLeader {
             .expect("session should exist")
             .num_computed_tokens;
 
-        let num_computed_blocks = num_computed_tokens / block_size;
-        let num_external_blocks = num_external_tokens / block_size;
-
         // The g1 slice starts at `num_computed_blocks` (i.e. the effective
         // start used when computing matched_tokens; see `matched_span`) and
         // spans `num_external_blocks` entries. We take this slice up front so
         // we can own it without borrowing `block_ids` past `apply_new_blocks`.
-        let g1_block_ids =
-            block_ids[num_computed_blocks..num_computed_blocks + num_external_blocks].to_vec();
+        let g1_block_ids = select_onboard_block_ids(
+            &block_ids,
+            num_computed_tokens,
+            num_external_tokens,
+            block_size,
+        );
 
         // Record the block_ids - this assigns them to the token_block sequence hashes
         slot.apply_new_blocks(block_ids);
@@ -176,9 +217,16 @@ impl ConnectorLeader {
         let (staging_futs, onboard_blocks_ids) = {
             let mut slot = shared_slot.lock();
 
-            let num_external_blocks = num_external_tokens / self.block_size();
-            let onboard_start_block_idx = block_ids.len().saturating_sub(num_external_blocks);
-            let onboard_blocks_ids = block_ids[onboard_start_block_idx..].to_vec();
+            let num_computed_tokens = match slot.onboarding_state() {
+                Some(state) => state.num_computed_tokens,
+                None => 0,
+            };
+            let onboard_blocks_ids = select_onboard_block_ids(
+                &block_ids,
+                num_computed_tokens,
+                num_external_tokens,
+                self.block_size(),
+            );
 
             // record the block_ids
             // this will assign the block_ids to the token_block sequence hashes
@@ -206,6 +254,7 @@ impl ConnectorLeader {
         let request_id = request_id.to_string();
         let block_size = self.block_size();
 
+        let bypass_host = self.runtime.config().cache.bypass_host_cache();
         handle.spawn(async move {
             match execute_onboarding(
                 leader.clone(),
@@ -213,6 +262,7 @@ impl ConnectorLeader {
                 onboard_blocks_ids.clone(),
                 staging_futs,
                 block_size,
+                bypass_host,
             )
             .await
             {
@@ -277,53 +327,224 @@ async fn execute_onboarding(
     block_ids: Vec<BlockId>,
     staging_futs: Vec<StagingCompletion>,
     block_size: usize,
+    bypass_host: bool,
 ) -> Result<()> {
     let g1_block_ids = block_ids;
+    let start = Instant::now();
 
     // Wait for every shard's find_session to reach a terminal state.
     for fut in staging_futs {
         fut.await
             .context("Onboarding find_session operation failed")?;
     }
+    let staging_complete = Instant::now();
 
-    let g2_blocks = {
-        let mut slot = slot.lock();
-        let state = slot
+    // Pull source blocks from the find session. In host-bypass mode the
+    // Ready result carries G3 blocks (no staging happened); otherwise the
+    // AsyncSession has already staged into G2 across one or more shards.
+    //
+    // The ImmutableBlock<G2/G3> Drop impl returns the block to the inactive
+    // pool, so the source-blocks Vec must outlive `execute_local_transfer`
+    // below — otherwise the source blocks could be evicted and overwritten
+    // mid-transfer. Both branches bind their Vec at function scope.
+    //
+    // FIXME(kvbm-398 merge): multi-shard search + bypass_host is not yet
+    // implemented — bypass_host paths still assume a single legacy shard.
+    let _g2_source_hold: Vec<ImmutableBlock<G2>>;
+    let _g3_source_hold: Vec<ImmutableBlock<G3>>;
+    let (src_layout, src_block_ids) = {
+        let mut slot_guard = slot.lock();
+        let state = slot_guard
             .onboarding_state_mut()
             .expect("Onboarding state not found");
-        collect_g2_blocks_from_shards(state, block_size)?
+        if bypass_host {
+            if state.shards.len() != 1 {
+                bail!(
+                    "G2-bypass onboarding with multi-shard search is not yet supported \
+                     (shard_count={})",
+                    state.shards.len()
+                );
+            }
+            // Apply the same head-mask + tail-truncate as the G2 path so the
+            // G3 source list aligns with g1_block_ids, which was sliced from
+            // `matched_span`. Without this, a post-issue increase in
+            // num_computed_tokens (leading_skip > 0) or a partial shard
+            // (matched_count < num_queried_blocks) over-selects source blocks.
+            let (effective_start, final_end) = state.matched_span(block_size);
+            let desired = final_end.saturating_sub(effective_start);
+            let leading_skip = effective_start - state.shards[0].start_block;
+
+            let mut g3_blocks = state.shards[0]
+                .find_session
+                .take_g3_blocks()
+                .ok_or_else(|| anyhow!("No G3 blocks found (bypass mode)"))?;
+
+            if leading_skip > g3_blocks.len() {
+                bail!(
+                    "effective_start mask ({}) exceeds collected g3 blocks ({})",
+                    leading_skip,
+                    g3_blocks.len()
+                );
+            }
+            g3_blocks.drain(..leading_skip);
+
+            if g3_blocks.len() < desired {
+                bail!(
+                    "collected {} g3 blocks but span requested {}",
+                    g3_blocks.len(),
+                    desired
+                );
+            }
+            g3_blocks.truncate(desired);
+
+            let ids: Vec<BlockId> = g3_blocks.iter().map(|b| b.block_id()).collect();
+            _g3_source_hold = g3_blocks;
+            _g2_source_hold = Vec::new();
+            (LogicalLayoutHandle::G3, ids)
+        } else {
+            let g2_blocks = collect_g2_blocks_from_shards(state, block_size)?;
+            let ids: Vec<BlockId> = g2_blocks.iter().map(|b| b.block_id()).collect();
+            _g2_source_hold = g2_blocks;
+            _g3_source_hold = Vec::new();
+            (LogicalLayoutHandle::G2, ids)
+        }
     };
 
-    let g2_block_ids: Vec<BlockId> = g2_blocks.iter().map(|b| b.block_id()).collect();
+    let num_blocks = src_block_ids.len();
+    assert_eq!(num_blocks, g1_block_ids.len());
 
-    assert_eq!(g2_block_ids.len(), g1_block_ids.len());
-
-    // All blocks are now in G2
     let instance_leader = leader.instance_leader().expect("InstanceLeader not set");
     let parallel_worker = instance_leader
         .parallel_worker()
         .ok_or_else(|| anyhow::anyhow!("No parallel worker available for local transfer"))?;
 
-    // TODO: potential optimization would be to stream G2 blocks to G1 blocks as G2 blocks are ready.
-    // The current implementation awaits all G2 blocks to be ready before executing the transfer.
-    // The balance here is when do we acquire/allocate G1 blocks as they are a precious commodity vs.,
-    // when should we start onboarding. More analysis is needed here to determine the optimal strategy.
-    // let start_time = Instant::now();
+    // TODO: potential optimization would be to stream blocks to G1 as they
+    // become ready. The current implementation awaits all source blocks
+    // before issuing the transfer. The balance is when to acquire/allocate
+    // G1 blocks (a precious commodity) vs. when to start onboarding.
+    let start_xfer = Instant::now();
     parallel_worker
         .execute_local_transfer(
-            LogicalLayoutHandle::G2,
+            src_layout,
             LogicalLayoutHandle::G1,
-            Arc::from(g2_block_ids),
+            Arc::from(src_block_ids),
             Arc::from(g1_block_ids),
             TransferOptions::default(),
         )?
         .await?;
-    // let end_time = Instant::now();
-    // let duration = end_time.duration_since(start_time);
-    // tracing::info!(
-    //     "G2 to G1 transfer: blocks={}, duration={:?}"
-    //     g2_block_ids.len(),
-    //     duration,
-    // );
+    let end_xfer = Instant::now();
+
+    tracing::info!(
+        blocks = num_blocks,
+        staging_ms = staging_complete.duration_since(start).as_millis() as u64,
+        xfer_ms = end_xfer.duration_since(start_xfer).as_millis() as u64,
+        total_ms = end_xfer.duration_since(start).as_millis() as u64,
+        src = if bypass_host { "kvbm_engine::G3" } else { "kvbm_engine::G2" },
+        dst = "kvbm_engine::G1",
+        "Onboard transfer complete"
+    );
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BLOCK_SIZE: usize = 16; // tokens per block
+
+    /// Onboard blocks must come from after the computed prefix,
+    /// not from the end of the block list.
+    ///
+    /// Scenario: 10 blocks total, first 2 are computed (already in G1),
+    /// next 3 are external (to be onboarded from G2), remaining 5 are new.
+    ///
+    /// block_ids:  [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]
+    ///              ^^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^
+    ///              computed(2)  external(3)      new(5)
+    #[test]
+    fn test_select_onboard_blocks_after_computed_prefix() {
+        let block_ids: Vec<BlockId> = (100..110).collect(); // 10 blocks
+        let num_computed_tokens = 2 * BLOCK_SIZE; // 2 blocks already computed
+        let num_external_tokens = 3 * BLOCK_SIZE; // 3 blocks to onboard
+
+        let result = select_onboard_block_ids(
+            &block_ids,
+            num_computed_tokens,
+            num_external_tokens,
+            BLOCK_SIZE,
+        );
+
+        // Must select blocks [102, 103, 104] — the 3 blocks after the 2 computed ones
+        assert_eq!(result, vec![102, 103, 104]);
+    }
+
+    /// When nothing is computed, external blocks start at the beginning.
+    #[test]
+    fn test_select_onboard_blocks_no_computed_prefix() {
+        let block_ids: Vec<BlockId> = (100..108).collect(); // 8 blocks
+        let num_computed_tokens = 0;
+        let num_external_tokens = 5 * BLOCK_SIZE;
+
+        let result = select_onboard_block_ids(
+            &block_ids,
+            num_computed_tokens,
+            num_external_tokens,
+            BLOCK_SIZE,
+        );
+
+        assert_eq!(result, vec![100, 101, 102, 103, 104]);
+    }
+
+    /// When all blocks are external (full cache hit from G2).
+    #[test]
+    fn test_select_onboard_blocks_all_external() {
+        let block_ids: Vec<BlockId> = (100..106).collect(); // 6 blocks
+        let num_computed_tokens = 0;
+        let num_external_tokens = 6 * BLOCK_SIZE;
+
+        let result = select_onboard_block_ids(
+            &block_ids,
+            num_computed_tokens,
+            num_external_tokens,
+            BLOCK_SIZE,
+        );
+
+        assert_eq!(result, vec![100, 101, 102, 103, 104, 105]);
+    }
+
+    /// When all blocks are computed (nothing to onboard).
+    #[test]
+    fn test_select_onboard_blocks_nothing_external() {
+        let block_ids: Vec<BlockId> = (100..106).collect();
+        let num_computed_tokens = 6 * BLOCK_SIZE;
+        let num_external_tokens = 0;
+
+        let result = select_onboard_block_ids(
+            &block_ids,
+            num_computed_tokens,
+            num_external_tokens,
+            BLOCK_SIZE,
+        );
+
+        assert_eq!(result, Vec::<BlockId>::new());
+    }
+
+    /// Single external block after a large computed prefix.
+    #[test]
+    fn test_select_onboard_blocks_single_external_after_large_prefix() {
+        let block_ids: Vec<BlockId> = (100..120).collect(); // 20 blocks
+        let num_computed_tokens = 15 * BLOCK_SIZE;
+        let num_external_tokens = BLOCK_SIZE;
+
+        let result = select_onboard_block_ids(
+            &block_ids,
+            num_computed_tokens,
+            num_external_tokens,
+            BLOCK_SIZE,
+        );
+
+        // Block at index 15 (after 15 computed blocks)
+        assert_eq!(result, vec![115]);
+    }
 }

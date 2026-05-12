@@ -1240,6 +1240,8 @@ impl TestConnectorInstanceBuilder {
                     self.layout_config.num_blocks,
                     self.layout_config.page_size,
                     self.layout_config.dtype_width_bytes,
+                    None,
+                    None,
                 )
                 .context("Failed to register KV caches")?;
 

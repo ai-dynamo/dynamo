@@ -3,14 +3,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-KVBM (KV Block Manager) integration tests for vLLM.
+KVBM integration tests for models with sliding window attention (SWA).
+
+Validates core KVBM functionality with SWA models (e.g. Gemma 3) which
+alternate between local sliding window and global attention layers. This
+exercises different KV cache offload/onboard paths compared to models with
+uniform full attention.
 
 Each test runs twice — once for KVBM v1 (``kvbm.vllm_integration.connector``)
 and once for KVBM v2 (``kvbm.v2.vllm.connector`` with the NIXL UCX backend),
-selected via the indirect ``llm_server_kvbm`` fixture parametrize. If v1 and
-v2 diverge in expected behavior, split these back into separate files.
+selected via the indirect ``llm_server_kvbm`` fixture parametrize.
 
-These tests validate core KVBM functionality:
+Tests:
 1. Offload/Onboard: Request offloads to CPU, cache reset, re-request triggers onboarding
 2. Eviction: GPU cache fills, blocks evicted, later retrieved without corruption
 3. Determinism: Responses remain identical across offload/onboard/eviction cycles
@@ -29,8 +33,11 @@ from .common import (
     reset_cache,
 )
 
+# SWA model for these tests (Gemma 3 alternates local/global attention layers).
+SWA_MODEL = "google/gemma-3-1b-it"
+
 # Test configuration
-MIN_OFFLOAD_BLOCKS = 12  # Minimum blocks expected for Qwen3-0.6B with test prompts
+MIN_OFFLOAD_BLOCKS = 6  # SWA has fewer full-attention blocks than uniform models
 MAX_TOKENS = 15  # Max tokens to generate in test responses
 
 # Test markers
@@ -39,12 +46,8 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.gpu_1,
     pytest.mark.vllm,
-    pytest.mark.pre_merge,
+    pytest.mark.nightly,
 ]
-
-
-# Model used for test_kvbm tests (smaller model for faster CI)
-KVBM_TEST_MODEL = "Qwen/Qwen3-0.6B"
 
 
 # Fixtures
@@ -53,7 +56,7 @@ def tester(llm_server_kvbm):  # noqa: F811
     """Create tester bound to the KVBM-enabled server."""
     return DeterminismTester(
         base_url=llm_server_kvbm.base_url,
-        model_id=KVBM_TEST_MODEL,
+        model_id=SWA_MODEL,
         server_type=llm_server_kvbm.server_type,
     )
 
@@ -62,15 +65,15 @@ def tester(llm_server_kvbm):  # noqa: F811
 @pytest.mark.parametrize(
     "llm_server_kvbm",
     [
-        pytest.param({"model": KVBM_TEST_MODEL}, id="v1"),
-        pytest.param({"model": KVBM_TEST_MODEL, "v2": True}, id="v2"),
+        pytest.param({"model": SWA_MODEL}, id="v1"),
+        pytest.param({"model": SWA_MODEL, "v2": True}, id="v2"),
     ],
     indirect=True,
 )
-@pytest.mark.timeout(170)  # 4x measured (~41s), rounded up
-def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
+@pytest.mark.timeout(170)
+def test_swa_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     """
-    Test offload → cache reset → onboard cycle with determinism verification.
+    Test offload → cache reset → onboard cycle with SWA model.
 
     Validates that:
     - Initial request triggers offload to CPU cache
@@ -78,10 +81,9 @@ def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     - Repeated request triggers onboard from CPU to GPU
     - Responses are deterministic across the cycle
     """
-    print_test_header("OFFLOAD AND ONBOARD TEST")
+    print_test_header("SWA OFFLOAD AND ONBOARD TEST")
 
-    # Use subset of Aeldora story for offload/onboard test
-    prompt = AELDORA_STORY[:400]  # Use first ~400 chars for smaller cache footprint
+    prompt = AELDORA_STORY[:400]
 
     # Phase 1: Initial request triggers offload
     print_phase(1, "Initial request (expect offload to CPU)")
@@ -121,7 +123,7 @@ def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     assert_deterministic(
         response_1,
         response_2,
-        test_name="Offload/Onboard",
+        test_name="SWA Offload/Onboard",
         label1="Initial response",
         label2="After cache reset",
     )
@@ -133,30 +135,29 @@ def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     "llm_server_kvbm",
     [
         pytest.param(
-            {"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL}, id="v1"
+            {"cpu_blocks": 200, "gpu_blocks": 20, "model": SWA_MODEL}, id="v1"
         ),
         pytest.param(
-            {"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL, "v2": True},
+            {"cpu_blocks": 200, "gpu_blocks": 20, "model": SWA_MODEL, "v2": True},
             id="v2",
         ),
     ],
     indirect=True,
 )
-@pytest.mark.timeout(170)  # 4x measured (~42s), rounded up
-def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
+@pytest.mark.timeout(170)
+def test_swa_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
     """
-    Test GPU cache eviction mechanics.
+    Test GPU cache eviction mechanics with SWA model.
 
     Validates that:
     - Multiple requests fill GPU cache causing eviction
     - Evicted blocks can be retrieved from CPU cache via onboarding
     - Metrics correctly reflect offload and onboard operations
     """
-    print_test_header("GPU CACHE EVICTION TEST")
+    print_test_header("SWA GPU CACHE EVICTION TEST")
     print(f"GPU blocks: {llm_server_kvbm.gpu_cache_blocks}")
     print(f"CPU blocks: {llm_server_kvbm.cpu_cache_blocks}")
 
-    # Use full Aeldora story with variations for cache filling
     prompt_1 = AELDORA_STORY
     prompt_2 = (
         "Read the following entry from the ancient scrolls of Aeloria: " + AELDORA_STORY
@@ -216,30 +217,29 @@ def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
     "llm_server_kvbm",
     [
         pytest.param(
-            {"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL}, id="v1"
+            {"cpu_blocks": 200, "gpu_blocks": 20, "model": SWA_MODEL}, id="v1"
         ),
         pytest.param(
-            {"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL, "v2": True},
+            {"cpu_blocks": 200, "gpu_blocks": 20, "model": SWA_MODEL, "v2": True},
             id="v2",
         ),
     ],
     indirect=True,
 )
-@pytest.mark.timeout(160)  # 4x measured (~39s), rounded up
-def test_onboarding_determinism(tester, llm_server_kvbm):  # noqa: F811
+@pytest.mark.timeout(160)
+def test_swa_onboarding_determinism(tester, llm_server_kvbm):  # noqa: F811
     """
-    Test onboarding determinism under eviction scenario.
+    Test onboarding determinism under eviction scenario with SWA model.
 
     Validates that:
     - Multiple onboarding cycles produce deterministic results
     - Responses are consistent when blocks are onboarded multiple times
     - Tests onboarded vs onboarded (not initial vs onboarded)
     """
-    print_test_header("ONBOARDING DETERMINISM TEST")
+    print_test_header("SWA ONBOARDING DETERMINISM TEST")
     print(f"GPU blocks: {llm_server_kvbm.gpu_cache_blocks}")
     print(f"CPU blocks: {llm_server_kvbm.cpu_cache_blocks}")
 
-    # Use full Aeldora story with variations
     prompt_1 = AELDORA_STORY
     prompt_2 = (
         "Read the following entry from the ancient scrolls of Aeloria: " + AELDORA_STORY
@@ -291,7 +291,7 @@ def test_onboarding_determinism(tester, llm_server_kvbm):  # noqa: F811
     assert_deterministic(
         response_1_first_onboard,
         response_1_second_onboard,
-        test_name="Prompt 1 onboarding determinism",
+        test_name="SWA Prompt 1 onboarding determinism",
         label1="First onboard (Phase 3)",
         label2="Second onboard (Phase 5)",
     )
@@ -300,7 +300,7 @@ def test_onboarding_determinism(tester, llm_server_kvbm):  # noqa: F811
     assert_deterministic(
         response_2_first_onboard,
         response_2_second_onboard,
-        test_name="Prompt 2 onboarding determinism",
+        test_name="SWA Prompt 2 onboarding determinism",
         label1="First onboard (Phase 4)",
         label2="Second onboard (Phase 6)",
     )

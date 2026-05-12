@@ -120,7 +120,7 @@ Policy types: `pass_all`, `presence`, `presence_lfu`
 |---|---|---|---|---|
 | `offload.g1_to_g2.policies` | `Vec<PolicyType>` | `[]` | `KVBM_OFFLOAD_G1_TO_G2_POLICIES` | Empty = engine applies tier-specific defaults |
 | `offload.g1_to_g2.presence` | `PresenceFilterConfig` | `{}` | | Config for `presence` policy (currently no params) |
-| `offload.g1_to_g2.presence_lfu.min_lfu_count` | `u32` | `8` | | Min access count before offload |
+| `offload.g1_to_g2.presence_lfu.min_lfu_count` | `u32` | `1` | | Offload when count > this (default fires on 2nd hit) |
 | `offload.g1_to_g2.min_priority` | `i32` | `0` | `KVBM_OFFLOAD_G1_TO_G2_MIN_PRIORITY` | Prefix-contiguous offload priority threshold |
 | `offload.g1_to_g2.max_concurrent_transfers` | `Option<usize>` | None | `KVBM_OFFLOAD_G1_TO_G2_MAX_CONCURRENT_TRANSFERS` | None = engine default (4) |
 | `offload.g1_to_g2.max_batch_size` | `Option<usize>` | None | `KVBM_OFFLOAD_G1_TO_G2_MAX_BATCH_SIZE` | None = engine default (16) |
@@ -131,7 +131,7 @@ Policy types: `pass_all`, `presence`, `presence_lfu`
 |---|---|---|---|---|
 | `offload.g2_to_g3.policies` | `Vec<PolicyType>` | `[]` | `KVBM_OFFLOAD_G2_TO_G3_POLICIES` | Empty = engine applies tier-specific defaults |
 | `offload.g2_to_g3.presence` | `PresenceFilterConfig` | `{}` | | Config for `presence` policy |
-| `offload.g2_to_g3.presence_lfu.min_lfu_count` | `u32` | `8` | | Min access count before offload |
+| `offload.g2_to_g3.presence_lfu.min_lfu_count` | `u32` | `1` | | Offload when count > this (default fires on 2nd hit) |
 | `offload.g2_to_g3.min_priority` | `i32` | `0` | `KVBM_OFFLOAD_G2_TO_G3_MIN_PRIORITY` | Prefix-contiguous offload priority threshold |
 | `offload.g2_to_g3.max_concurrent_transfers` | `Option<usize>` | None | `KVBM_OFFLOAD_G2_TO_G3_MAX_CONCURRENT_TRANSFERS` | None = engine default |
 | `offload.g2_to_g3.max_batch_size` | `Option<usize>` | None | `KVBM_OFFLOAD_G2_TO_G3_MAX_BATCH_SIZE` | None = engine default |

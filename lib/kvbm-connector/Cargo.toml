@@ -52,6 +52,8 @@ tracing-subscriber = { workspace = true }
 insta = { version = "1.41", features = ["json", "redactions"] }
 rstest = "0.23"
 proptest = "1.5.0"
+tempfile = { workspace = true }
+libc = { workspace = true }
 
 [features]
 static-kernels = ["kvbm-physical/static-kernels"]

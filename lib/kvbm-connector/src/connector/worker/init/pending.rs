@@ -33,6 +33,7 @@ use crate::KvbmRuntime;
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_physical::TransferManager;
 use kvbm_physical::layout::{BlockDimension, LayoutConfig, PhysicalLayoutBuilder};
+use kvbm_physical::transfer::TransferCapabilities;
 
 /// Cached state from `register_kv_caches` for deferred initialization.
 ///
@@ -154,13 +155,32 @@ impl PendingWorkerState {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("NIXL agent not found"))?;
 
-        // 1. Build TransferManager and NixlAgent
-        tracing::info!("Building TransferManager with NIXL backend");
+        // 1. Build TransferManager and NixlAgent.
+        //
+        // When the cache config requests host bypass (DYN_KVBM_DISK_CACHE_GB
+        // set, DYN_KVBM_CPU_CACHE_GB unset), enable GDS so the strategy layer
+        // selects direct G1↔G3 transfers instead of trying to stage through a
+        // G2 tier that doesn't exist. `with_gds_if_supported()` probes the
+        // host once and falls back to allow_gds=false if the probe fails — in
+        // that case the first G1↔G3 transfer will error loudly, which is the
+        // correct signal that bypass mode isn't viable on this host.
+        let bypass_host = runtime.config().cache.bypass_host_cache();
+        let capabilities = if bypass_host {
+            TransferCapabilities::default().with_gds_if_supported()
+        } else {
+            TransferCapabilities::default()
+        };
+        tracing::info!(
+            bypass_host,
+            allow_gds = capabilities.allow_gds,
+            "Building TransferManager with NIXL backend"
+        );
         let transfer_manager = TransferManager::builder()
             .event_system(runtime.event_system())
             .cuda_device_id(self.cuda_device_id)
             .tokio_runtime(TokioRuntime::Handle(runtime.tokio()))
             .observability(runtime.observability().clone())
+            .capabilities(capabilities)
             .nixl_agent(nixl_agent.clone())
             .build()?;
 
@@ -212,8 +232,12 @@ impl PendingWorkerState {
         //
         // For ReplicatedData mode: only rank 0 gets G2/G3 layouts
         // For TensorParallel mode: all workers get G2/G3 layouts
+        // For host-bypass mode (DYN_KVBM_DISK_CACHE_GB set, DYN_KVBM_CPU_CACHE_GB
+        // unset): G2 is skipped on every rank — transfers go G1↔G3 directly via
+        // GDS. G3 still gets allocated normally.
         let skip_g2_g3 =
             config.parallelism == kvbm_config::ParallelismMode::ReplicatedData && config.rank > 0;
+        let bypass_host = runtime.config().cache.bypass_host_cache();
 
         let (g2_handle, g3_handle) = if skip_g2_g3 {
             tracing::info!(
@@ -227,41 +251,119 @@ impl PendingWorkerState {
                 host_block_count = config.host_block_count,
                 disk_block_count = ?config.disk_block_count,
                 parallelism = ?config.parallelism,
+                bypass_host,
                 "Creating G2/G3 layouts via configure_additional_layouts()"
             );
 
-            let mut host_layout = self.layout_config.clone();
-            host_layout.num_blocks = config.host_block_count;
-            let host_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
-                .with_config(host_layout)
-                .fully_contiguous()
-                .allocate_pinned(Some(self.cuda_device_id as u32))
-                .build()?;
+            let g2_handle = if bypass_host {
+                tracing::info!(
+                    "Skipping G2 layout allocation (host-bypass mode: G1↔G3 direct via GDS)"
+                );
+                None
+            } else {
+                let mut host_layout = self.layout_config.clone();
+                host_layout.num_blocks = config.host_block_count;
 
-            let g2_handle = transfer_manager.register_layout(host_layout)?;
-            created_layouts.push(LogicalLayoutHandle::G2);
+                let total_bytes = host_layout.required_bytes() as u64;
+                tracing::info!(
+                    host_block_count = config.host_block_count,
+                    bytes_per_block = host_layout.bytes_per_block(),
+                    total_gb = total_bytes / (1024 * 1024 * 1024),
+                    "Allocating pinned host memory for G2 layout"
+                );
+
+                let host_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
+                    .with_config(host_layout)
+                    .fully_contiguous()
+                    .allocate_pinned(Some(self.cuda_device_id as u32))
+                    .build()
+                    .map_err(|e| {
+                        tracing::error!(
+                            host_block_count = config.host_block_count,
+                            total_gb = total_bytes / (1024 * 1024 * 1024),
+                            error = %e,
+                            "Failed to allocate pinned host memory for G2 layout"
+                        );
+                        e
+                    })?;
+
+                let handle = transfer_manager.register_layout(host_layout)?;
+                created_layouts.push(LogicalLayoutHandle::G2);
+                Some(handle)
+            };
 
             // todo: we need to get a path from the the config and create a unique file based on the velo instance_id
             let g3_handle = if let Some(disk_blocks) = config.disk_block_count {
                 let mut disk_layout = self.layout_config.clone();
                 disk_layout.num_blocks = disk_blocks;
+
+                let disk_total_bytes = disk_layout.required_bytes() as u64;
+                tracing::info!(
+                    disk_block_count = disk_blocks,
+                    bytes_per_block = disk_layout.bytes_per_block(),
+                    total_gb = disk_total_bytes / (1024 * 1024 * 1024),
+                    "Allocating disk-backed memory for G3 layout"
+                );
+
+                let g3_path = PathBuf::from(format!(
+                    "/tmp/kvbm_g3_{}.bin",
+                    runtime.messenger().instance_id()
+                ));
+
+                // Register the path for unlink-on-signal before allocation, so that
+                // if `fallocate` is interrupted by SIGINT/SIGTERM after `open(O_CREAT)`
+                // has already created the file, the cleanup task still removes it.
+                // Clean shutdowns continue to be handled by `DiskStorage`'s Drop impl.
+                crate::connector::disk_cleanup::register(g3_path.clone());
+
                 let disk_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
                     .with_config(disk_layout)
                     .fully_contiguous()
-                    .allocate_disk(Some(PathBuf::from(format!(
-                        "/tmp/kvbm_g3_{}.bin",
-                        runtime.messenger().instance_id()
-                    ))))
-                    .build()?;
+                    .allocate_disk(Some(g3_path.clone()))
+                    .build()
+                    .map_err(|e| {
+                        tracing::error!(
+                            disk_block_count = disk_blocks,
+                            total_gb = disk_total_bytes / (1024 * 1024 * 1024),
+                            error = %e,
+                            "Failed to allocate disk-backed memory for G3 layout"
+                        );
+                        e
+                    })?;
 
                 let handle = transfer_manager.register_layout(disk_layout)?;
                 created_layouts.push(LogicalLayoutHandle::G3);
+
+                // Proactive unlink: remove the directory entry now that NIXL has
+                // registered the file. The `DiskStorage` fd inside the registered
+                // layout keeps the inode alive — POSIX/UCX continue using the fd —
+                // but the kernel reclaims the disk space on *any* process exit
+                // (Ctrl+C → vLLM IPC shutdown, SIGKILL, panic-abort, segfault).
+                // This is the primary cleanup path; `Drop` and the signal task
+                // are belt-and-suspenders for environments where this race
+                // (pre-registration crash) leaves a partial file behind.
+                match std::fs::remove_file(&g3_path) {
+                    Ok(()) => {
+                        crate::connector::disk_cleanup::deregister(&g3_path);
+                        tracing::info!(
+                            path = %g3_path.display(),
+                            "G3 cache file unlinked from filesystem (held by fd until process exit)"
+                        );
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => tracing::warn!(
+                        path = %g3_path.display(),
+                        error = %e,
+                        "failed to unlink G3 cache file after NIXL registration"
+                    ),
+                }
+
                 Some(handle)
             } else {
                 None
             };
 
-            (Some(g2_handle), g3_handle)
+            (g2_handle, g3_handle)
         };
 
         // 7. Build DirectWorker with all handles via builder pattern

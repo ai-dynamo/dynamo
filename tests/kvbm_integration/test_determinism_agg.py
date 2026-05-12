@@ -97,19 +97,17 @@ _KVBM_VERSIONS_UNDER_TEST = ("v1", "v2")
 # mode-specific regression is caught immediately.
 _KVBM_V2_ONBOARD_MODES = ("intra", "inter")
 
-# MLA execution is gated for phase 3 (see ACTIVE_PLAN.md). The MLA spec
-# stays in _MODEL_CONFIGS so the test surface is preserved; specs whose
-# model_config.use_mla is True are pytest-skipped unless KVBM_ENABLE_MLA
-# is set. A later phase will flip the gate on.
-_KVBM_ENABLE_MLA = os.environ.get("KVBM_ENABLE_MLA", "").lower() in (
+# MLA execution is enabled by default now that v2 supports the fused-latent
+# cache layout (see lib/kvbm-connector/src/vllm/layout.rs). The env var is
+# retained as an opt-out escape hatch — set KVBM_ENABLE_MLA=0 to skip all
+# MLA specs locally (e.g. when running on a GPU that can't fit DeepSeek-V2-Lite).
+_KVBM_ENABLE_MLA = os.environ.get("KVBM_ENABLE_MLA", "1").lower() in (
     "1",
     "true",
     "yes",
     "on",
 )
-_MLA_SKIP_REASON = (
-    "MLA gated; set KVBM_ENABLE_MLA=1 to enable (see ACTIVE_PLAN.md phase 3)"
-)
+_MLA_SKIP_REASON = "MLA disabled; unset or set KVBM_ENABLE_MLA=1 to enable"
 
 
 def _specs(cpu_blocks_env: str, cpu_blocks_default: str) -> List[KvbmServerSpec]:

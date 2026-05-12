@@ -42,6 +42,12 @@ impl ConnectorLeader {
         if matches!(slot.txn_state(), TransactionState::PreparingToOnboard(_)) {
             match slot.txn_take_preparing_to_onboard() {
                 Ok(onboarding_state) => {
+                    // Stamp MarkedForDeletion into the shared RequestSlot before
+                    // releasing the lock. Any Arc holder that locks this slot
+                    // afterwards will see the guard and reject new transactions
+                    // (all txn_start_* methods check is_marked_for_deletion()).
+                    // Matches the Offloading branch pattern below.
+                    let _ = slot.slot_mark_finished();
                     drop(slot);
                     self.remove_slot(request_id);
                     self.spawn_preparing_to_onboard_cleanup(request_id, onboarding_state);
@@ -59,6 +65,7 @@ impl ConnectorLeader {
                 }
             }
         }
+
 
         // Mark the slot for deletion
         let initial_status = slot.slot_mark_finished();
@@ -206,10 +213,10 @@ impl ConnectorLeader {
 
         let request_id_owned = request_id.to_string();
         self.runtime.tokio().spawn(async move {
-            cleanup_preparing_to_onboard(onboarding_state, instance_leader, request_id_owned)
-                .await;
+            cleanup_preparing_to_onboard(onboarding_state, instance_leader, request_id_owned).await;
         });
     }
+
 
     fn remove_slot(&self, request_id: &str) {
         let Some((_, shared_slot)) = self.slots.remove(request_id) else {

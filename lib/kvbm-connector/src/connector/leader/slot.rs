@@ -207,7 +207,11 @@ pub fn shard_is_terminal(shard: &OnboardingShard) -> bool {
 /// [`OnboardingState::all_shards_terminal`] first.
 pub fn shard_terminal_matched_count(shard: &OnboardingShard) -> usize {
     match &shard.find_session {
-        FindMatchesResult::Ready(r) => r.g2_count(),
+        // Ready results may carry G2 blocks, G3 blocks (host-bypass mode), or
+        // both; total_count covers all tiers so bypass-mode Ready hits aren't
+        // reported as zero. In non-bypass mode g3_count is 0 and total_count
+        // matches g2_count.
+        FindMatchesResult::Ready(r) => r.total_count(),
         FindMatchesResult::AsyncSession(s) => match s.status() {
             OnboardingStatus::Complete { matched_blocks } => matched_blocks,
             // Holding / Prepared are not currently produced on this path; treat the
@@ -471,9 +475,7 @@ impl SlotStateMachine {
     /// we need to extract the `OnboardingState` so the caller can drain the
     /// find sessions and release them — no worker callback will arrive,
     /// because the scheduler never committed the request.
-    fn txn_take_preparing_to_onboard(
-        &mut self,
-    ) -> Result<OnboardingState, StateTransitionError> {
+    fn txn_take_preparing_to_onboard(&mut self) -> Result<OnboardingState, StateTransitionError> {
         let current = std::mem::replace(&mut self.txn_state, TransactionState::Inactive);
 
         match current {

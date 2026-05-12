@@ -54,17 +54,24 @@ impl PyConnectorWorker {
     ///     num_device_blocks: Number of device blocks (from vLLM's cache config)
     ///     page_size: Block/page size for the KV cache
     ///     dtype_width_bytes: Data type width in bytes (e.g., 2 for fp16)
+    ///     outer_dim: Optional explicit outer_dim (1 for MLA, 2 for standard K/V).
+    ///                When provided, bypasses shape-based inference. Must be paired
+    ///                with `inner_dim`. Python should pass this when it knows the
+    ///                model is MLA (from `vllm_config.model_config.use_mla`).
+    ///     inner_dim: Optional explicit inner_dim (paired with `outer_dim`).
     ///
     /// Raises:
     ///     RuntimeError: If registration fails (e.g., UCX backend not available,
     ///                   tensors on different devices, or already registered).
-    #[pyo3(signature = (tensors, num_device_blocks, page_size, dtype_width_bytes))]
+    #[pyo3(signature = (tensors, num_device_blocks, page_size, dtype_width_bytes, outer_dim=None, inner_dim=None))]
     pub fn register_kv_caches(
         &self,
         tensors: Vec<Py<PyAny>>,
         num_device_blocks: usize,
         page_size: usize,
         dtype_width_bytes: usize,
+        outer_dim: Option<usize>,
+        inner_dim: Option<usize>,
     ) -> PyResult<()> {
         // Convert Python tensors to Rust TensorDescriptor
         let rust_tensors: Vec<Arc<dyn TensorDescriptor>> = tensors
@@ -81,6 +88,8 @@ impl PyConnectorWorker {
                 num_device_blocks,
                 page_size,
                 dtype_width_bytes,
+                outer_dim,
+                inner_dim,
             )
             .map_err(to_pyerr)
     }

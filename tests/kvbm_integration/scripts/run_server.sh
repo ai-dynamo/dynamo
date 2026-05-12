@@ -13,7 +13,7 @@
 #
 # spec-id matches KvbmServerSpec.id in the test module, e.g.:
 #   v1-DeepSeek-R1-Distill-Llama-8B
-#   v1-DeepSeek-V2-Lite          (gated; needs KVBM_ENABLE_MLA=1)
+#   v1-DeepSeek-V2-Lite          (MLA; enabled by default, KVBM_ENABLE_MLA=0 to skip)
 #   v1-Qwen3-0.6B                (only if KVBM_MODEL_ID=Qwen/Qwen3-0.6B)
 #   v2-Qwen3-0.6B-intra          (v2, intra onboard mode)
 #   v2-Qwen3-0.6B-inter          (v2, inter onboard mode)
@@ -25,7 +25,7 @@
 #   KVBM_CPU_BLOCKS              (override spec.cpu_blocks)
 #   KVBM_GPU_BLOCKS              (override spec.gpu_blocks)
 #   KVBM_SERVER_START_TIMEOUT    (server bring-up timeout, default 600s)
-#   KVBM_ENABLE_MLA              (required to launch any MLA spec)
+#   KVBM_ENABLE_MLA              (opt-out escape hatch; set to 0 to skip MLA specs)
 
 set -euo pipefail
 
@@ -78,15 +78,15 @@ if spec_id not in specs_by_id:
 
 spec = specs_by_id[spec_id]
 
-if spec.model_config.use_mla and os.environ.get("KVBM_ENABLE_MLA", "").lower() not in (
+if spec.model_config.use_mla and os.environ.get("KVBM_ENABLE_MLA", "1").lower() not in (
     "1",
     "true",
     "yes",
     "on",
 ):
     sys.stderr.write(
-        f"[server] {spec_id} is an MLA spec and is gated; set KVBM_ENABLE_MLA=1 "
-        f"to launch (see ACTIVE_PLAN.md phase 3)\n"
+        f"[server] {spec_id} is an MLA spec and MLA is disabled via KVBM_ENABLE_MLA=0; "
+        f"unset or set to 1 to launch\n"
     )
     sys.exit(7)
 

@@ -7,6 +7,7 @@
 //! Framework-specific leaders (vLLM, etc.) can build on top of these pieces
 //! while supplying their own scheduling semantics.
 
+pub mod disk_cleanup;
 pub mod leader;
 pub mod worker;
 

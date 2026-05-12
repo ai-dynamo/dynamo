@@ -305,6 +305,11 @@ impl ConnectorLeader {
             TransactionState::PreparingToOnboard(_)
         ));
 
+        // The reconcile-search refactor (kvbm-398) replaced the inline Ready /
+        // AsyncSession branching plus num_computed_tokens drift handling with
+        // `reconcile_state` (called above) + `compute_outcome` (below).
+        // Bypass-host G3-only Ready results are accounted for via
+        // `shard_terminal_matched_count`, which uses `total_count()`.
         let state = slot.onboarding_state().expect("state should exist");
         Ok(compute_outcome(state, block_size))
     }

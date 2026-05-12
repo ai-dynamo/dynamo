@@ -33,6 +33,40 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.model_executor.models.utils import extract_layer_index
 
+
+@dataclass
+class KvTensorLayout:
+    """Semantic description of the KV cache tensor layout.
+
+    Python derives this from VllmConfig (which has the model architecture)
+    so that Rust doesn't have to guess from raw tensor shapes.
+
+    For MLA models, outer_dim and inner_dim are set explicitly because Rust's
+    shape-based inference cannot distinguish the fused KV latent axis from the
+    block/page axis. For standard attention the fields are None, which tells
+    Rust to fall back to its own contiguity-based inference (already correct).
+
+    Mirrors the v1 helper in
+    lib/bindings/kvbm/python/kvbm/vllm_integration/connector_worker.py.
+    """
+
+    outer_dim: Optional[int]  # None = let Rust infer; 1 for MLA
+    inner_dim: Optional[int]  # None = let Rust infer; head_size for MLA
+
+    @classmethod
+    def from_vllm_config(
+        cls, shape: "torch.Size", use_mla: bool = False
+    ) -> "KvTensorLayout":
+        if use_mla:
+            # MLA tensors are 3D: [num_blocks, page_size, head_size].
+            # No outer_dim axis — K and V are fused into a single latent.
+            return cls(outer_dim=1, inner_dim=int(shape[-1]))
+        # Standard attention: Rust already infers outer_dim/inner_dim correctly
+        # from tensor shape. Don't guess here — the block dimension can be at
+        # position 0 or 1 depending on the attention backend.
+        return cls(outer_dim=None, inner_dim=None)
+
+
 # Import KvbmRuntime and ConnectorWorker from Rust bindings (requires v2 feature)
 if kvbm.v2.is_available():
     KvbmRuntime = kvbm.v2.KvbmRuntime
@@ -178,10 +212,17 @@ class SchedulerConnectorWorker:
                 "Hybrid models with different KV cache shapes are not supported yet."
             )
 
-        # Extract parameters
-        # For NHD layout: [2 (K/V), num_blocks, block_size, num_heads, head_size]
-        # For HND layout: [2 (K/V), num_blocks, num_heads, block_size, head_size]
-        num_device_blocks = max(shape[0], shape[1])
+        # Derive layout semantics from the vLLM model config so Rust doesn't
+        # have to guess the outer_dim/inner_dim from potentially-ambiguous
+        # tensor shapes (MLA caches are 3D without a K/V axis).
+        use_mla = getattr(self.vllm_config.model_config, "use_mla", False)
+        layout = KvTensorLayout.from_vllm_config(shape, use_mla)
+
+        # Extract parameters.
+        # Standard attention: [2 (K/V), num_blocks, ...] or [num_blocks, 2, ...]
+        #   — block dim is whichever of shape[0]/shape[1] is larger.
+        # MLA: [num_blocks, page_size, head_size] — block dim is always axis 0.
+        num_device_blocks = shape[0] if use_mla else max(shape[0], shape[1])
         page_size = self.vllm_config.cache_config.block_size
         dtype_width_bytes = self.kvbm_config.cache_dtype_bytes()
 
@@ -202,6 +243,8 @@ class SchedulerConnectorWorker:
             num_device_blocks,
             page_size,
             dtype_width_bytes,
+            outer_dim=layout.outer_dim,
+            inner_dim=layout.inner_dim,
         )
 
         # Store device block count and last layer name for later use

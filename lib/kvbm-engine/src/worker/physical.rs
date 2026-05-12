@@ -233,7 +233,7 @@ impl PhysicalWorker {
                 Some(KvbmTransferRoute::OnboardD2D)
             }
             (LogicalLayoutHandle::G3, LogicalLayoutHandle::G2) => {
-                Some(KvbmTransferRoute::OnboardD2D)
+                Some(KvbmTransferRoute::OnboardD2H)
             }
             (LogicalLayoutHandle::G1, LogicalLayoutHandle::G3) => {
                 Some(KvbmTransferRoute::OffloadD2D)
