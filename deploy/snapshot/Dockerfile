@@ -222,17 +222,20 @@ COPY --from=compliance . /opt/compliance
 ENV PYTHONPATH=/opt
 COPY --from=builder /sbom-go.cdx.json /tmp/sbom-go.cdx.json
 
-# go + dpkg cover the runtime image. native (CRIU + cuda-checkpoint) is
-# handled today by the manual COPY of /legal/CRIU/COPYING and
-# /legal/cuda-checkpoint/LICENSE in agent_pre — the native generator
-# is a stub awaiting native_packages.yaml. Once native lands, this
-# becomes --ecosystem go,dpkg,native.
+# go + dpkg cover the runtime image's apt + Go module set. native
+# enumerates from-source components (CRIU, cuda-checkpoint,
+# cuda-checkpoint-helper) — these were previously attributed by
+# manual `COPY /tmp/criu/COPYING /legal/CRIU/COPYING` lines in
+# agent_pre, which we keep so the native generator can read the
+# license text via license_text_path and inline it in NOTICES.
 # BASELINE_SBOM_FILE (optional, empty default): the slim CycloneDX SBOM
 # under /opt/compliance/base_sboms/ to subtract before writing NOTICES.
 ARG BASELINE_SBOM_FILE=""
 RUN python3 -m compliance.generators \
-    --ecosystem go,dpkg \
+    --ecosystem go,dpkg,native \
     --go-sbom /tmp/sbom-go.cdx.json \
+    --native-yaml /opt/compliance/native_packages.yaml \
+    --native-image snapshot-agent \
     --output-dir /legal \
     ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
     -v

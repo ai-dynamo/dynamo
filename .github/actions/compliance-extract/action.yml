@@ -88,42 +88,31 @@ runs:
     # site-packages from a prior install). License *policy* enforcement
     # already happened inside the licenses Dockerfile stage during build.
     #
-    # Graceful skip until container/compliance/base_sboms/ has real content
-    # — refresh.py seeds the corpus on a separate cron schedule.
+    # Baseline resolution: the rendered Dockerfile already has the per-
+    # framework/device baseline_sbom baked in as `ARG BASELINE_SBOM_FILE`
+    # (rendered from context.yaml). We parse it back out here so the
+    # verifier subtracts against the same file the runtime template used.
+    # Graceful skip if empty (xpu, cpu, dynamo cuda12.9 — no capture yet).
     - name: SBOM-diff verifier
       shell: bash
       run: |
-        MANIFEST=container/compliance/base_sboms/manifest.json
-        ENTRIES=$(python3 -c "
-        import json
-        m = json.load(open('${MANIFEST}'))
-        print(len(m.get('entries', []) or []))
-        ")
-        if [ "${ENTRIES}" = "0" ]; then
-          echo "::warning::base_sboms/ corpus is empty; skipping SBOM-diff verification."
-          exit 0
-        fi
-        BASE_SBOM=$(python3 -c "
-        import json, sys
-        m = json.load(open('${MANIFEST}'))
-        framework = sys.argv[1]
-        target = sys.argv[2]
-        cuda = sys.argv[3]
-        # TODO: refine match logic when refresh.py populates manifest.json with
-        # explicit (framework, target, cuda) keys. For now, use the first entry
-        # as a placeholder so CI passes.
-        for e in m.get('entries', []) or []:
-            print(e['sbom'])
-            break
-        " "${{ inputs.framework }}" "${{ inputs.target }}" "${{ inputs.cuda_version }}")
+        BASE_SBOM=$(grep -E '^ARG BASELINE_SBOM_FILE=' "${{ steps.render.outputs.rendered }}" \
+                    | head -1 \
+                    | sed -E 's/^ARG BASELINE_SBOM_FILE="?([^"]*)"?$/\1/')
         if [ -z "${BASE_SBOM}" ]; then
-          echo "::warning::no base-SBOM resolved for ${{ inputs.framework }}/${{ inputs.target }}/${{ inputs.cuda_version }}; skipping verification."
+          echo "::notice::no baseline_sbom configured for ${{ inputs.framework }}/${{ inputs.target }}/${{ inputs.cuda_version }}; skipping SBOM-diff verification."
           exit 0
         fi
+        BASE_SBOM_PATH="container/compliance/base_sboms/${BASE_SBOM}"
+        if [ ! -f "${BASE_SBOM_PATH}" ]; then
+          echo "::error::baseline SBOM file referenced by rendered Dockerfile not found: ${BASE_SBOM_PATH}"
+          exit 1
+        fi
+        echo "Verifying target SBOM against baseline: ${BASE_SBOM}"
         PYTHONPATH=container python3 -m compliance.verify_sbom_diff \
             --target-sboms-dir   /tmp/sboms \
             --target-notices-dir /tmp/legal \
-            --base-sbom container/compliance/base_sboms/${BASE_SBOM}
+            --base-sbom "${BASE_SBOM_PATH}"
 
     # /sources/ — reproducible tarball of source archives for everything we
     # ship on top of the FROM base. Bigger than legal/sboms (typically

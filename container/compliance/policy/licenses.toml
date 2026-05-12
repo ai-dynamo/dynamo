@@ -2402,3 +2402,11 @@ name = "libprotoc32t64"
 allow = ["GPL-2.0-only", "GPL-3.0-only"]
 reason = "Protobuf compiler; same dual-licensing posture as libprotobuf32t64"
 
+# --- Native [[exceptions]] for from-source components ---
+
+[[exceptions]]
+type = "native"
+name = "CRIU"
+allow = ["GPL-2.0-only"]
+reason = "CRIU runs as a separate process invoked by snapshot-agent; not linked into our binaries. Mere aggregation."
+

@@ -2,31 +2,123 @@
 # SPDX-License-Identifier: Apache-2.0
 """NOTICES-Native.txt generator.
 
-Reads container/compliance/native_packages.yaml — the hand-curated overlay
-for from-source components (CRIU, ucx, libfabric, ffmpeg, gdrcopy, NIXL
-when treated as native, etc.) and emits per-component sections.
+Reads container/compliance/native_packages.yaml — the hand-curated
+overlay for from-source components we build inside our Dockerfiles
+(CRIU, cuda-checkpoint, ucx, libfabric, gdrcopy, ffmpeg, ...). These
+don't show up via dpkg-query (we build them from upstream source, not
+apt-installed packages) and they're not Python wheels / Rust crates /
+Go modules, so the per-ecosystem generators miss them. This file makes
+them visible in /legal/native/NOTICES-Native.txt.
 
-The YAML is filtered by the `dockerfile` field on each entry, so each
-runtime image only sees the native components it actually contains.
+YAML schema:
 
-TODO: implement. Scope:
-  - load native_packages.yaml (PyYAML dependency)
-  - filter by --image / --dockerfile-path argument
-  - emit one section per artifact (binaries/libraries listed under each
-    package's `artifacts:` array)
+  packages:
+    - name: CRIU
+      version: criu-dev
+      license: GPL-2.0-only           # SPDX expression
+      source: https://github.com/checkpoint-restore/criu
+      license_text_path: /legal/CRIU/COPYING   # optional; inline the
+                                               # text in NOTICES
+      images:                          # which final images contain
+        - snapshot-agent               # this component. Used to
+                                       # filter via --native-image at
+                                       # generator time so each
+                                       # runtime only sees its own
+                                       # native deps.
+
+The `subtract` parameter from the orchestrator API is accepted but
+ignored — native components by definition come from our build process,
+not from any upstream baseline image, so they can never overlap with
+a baseline_sbom by (name, version).
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
-from .common import Component
+from .common import UNKNOWN, Component
+
+logger = logging.getLogger(__name__)
 
 ECOSYSTEM = "native"
 
 
-def collect_components(yaml_path: Path, image_filter: str | None = None) -> list[Component]:
-    raise NotImplementedError("Native generator not yet implemented")
+def collect_components(
+    yaml_path: Path, image_filter: str | None = None
+) -> list[Component]:
+    """Read native_packages.yaml, filter by image_filter, return Components.
+
+    image_filter selects entries whose `images` list contains it. None
+    means "return everything" (useful for inspection / tests).
+    """
+    if not yaml_path.is_file():
+        logger.warning("native_packages.yaml not found at %s", yaml_path)
+        return []
+
+    try:
+        import yaml
+    except ImportError:
+        logger.warning("PyYAML not installed; skipping native generator")
+        return []
+
+    data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+    packages = data.get("packages") or []
+
+    out: list[Component] = []
+    for pkg in packages:
+        name = pkg.get("name")
+        version = pkg.get("version")
+        if not name or not version:
+            logger.warning("skipping malformed native entry: %r", pkg)
+            continue
+
+        if image_filter is not None:
+            images = pkg.get("images") or []
+            if image_filter not in images:
+                continue
+
+        license_text: str | None = None
+        text_path_str = pkg.get("license_text_path")
+        if text_path_str:
+            text_path = Path(text_path_str)
+            if text_path.is_file():
+                try:
+                    license_text = text_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "could not read license text at %s: %s", text_path, exc
+                    )
+            else:
+                logger.warning(
+                    "native package %s declares license_text_path=%s but the "
+                    "file is not present in this stage's filesystem; falling "
+                    "back to SPDX-only attribution",
+                    name,
+                    text_path,
+                )
+
+        out.append(
+            Component(
+                ecosystem=ECOSYSTEM,
+                name=name,
+                version=str(version),
+                spdx=pkg.get("license") or UNKNOWN,
+                source_url=pkg.get("source"),
+                license_text=license_text,
+            )
+        )
+
+    logger.info(
+        "Native generator: %d components match image_filter=%r "
+        "(out of %d in YAML)",
+        len(out),
+        image_filter,
+        len(packages),
+    )
+    return out
 
 
 def generate(
@@ -35,7 +127,12 @@ def generate(
     image_filter: str | None = None,
     subtract: set[tuple[str, str]] | None = None,
 ) -> list[Component]:
-    del subtract  # accepted for orchestrator-API parity; native components
-    # are first-party from-source builds (CRIU, ucx, etc.) — never present
-    # in upstream baselines, so subtraction is a no-op by definition.
-    raise NotImplementedError("Native generator not yet implemented")
+    """Write NOTICES-Native.txt + native-deps.csv. `subtract` is a no-op."""
+    del subtract  # native components are first-party from-source builds —
+    # never present in upstream baselines, so subtraction is meaningless.
+    from . import common
+
+    components = collect_components(yaml_path, image_filter)
+    common.write_notices(ECOSYSTEM, components, output_dir)
+    common.write_deps_csv(ECOSYSTEM, components, output_dir)
+    return components
