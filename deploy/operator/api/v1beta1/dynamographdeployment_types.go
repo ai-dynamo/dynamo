@@ -69,12 +69,10 @@ type DynamoGraphDeploymentSpec struct {
 	// +optional
 	TopologyConstraint *SpecTopologyConstraint `json:"topologyConstraint,omitempty"`
 
-	// kvTransferPolicy constrains KV-cache transfers between prefill and
-	// decode workers to the same topology domain. When set, the frontend
+	// kvTransferPolicy configures topology-aware routing for KV-cache
+	// transfers between prefill and decode workers. When set, the frontend
 	// router receives domain and no-match-policy env vars, and workers
-	// publish their topology metadata. Only the `labelKey` path is supported
-	// in this release; `clusterTopologyName` support will be added in a
-	// future release.
+	// publish their topology metadata.
 	// +optional
 	KvTransferPolicy *KvTransferPolicy `json:"kvTransferPolicy,omitempty"`
 }

@@ -360,8 +360,8 @@ const (
 	NoMatchPolicyFallback NoMatchPolicy = "fallback"
 )
 
-// KvTransferPolicy constrains KV-cache transfers between prefill and decode
-// workers to the same topology domain. This is a graph-wide concern placed at
+// KvTransferPolicy configures topology-aware routing for KV-cache transfers
+// between prefill and decode workers. This is a graph-wide concern placed at
 // the DGD spec level because it affects both the frontend (router config) and
 // all workers (topology metadata injection).
 type KvTransferPolicy struct {
