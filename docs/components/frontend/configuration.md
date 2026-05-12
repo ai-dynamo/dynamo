@@ -29,9 +29,11 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
-| `--router-mode` | `DYN_ROUTER_MODE` | `round-robin` | Routing strategy: `round-robin`, `random`, `kv`, `direct` |
-| `--router-kv-overlap-score-weight` | `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT` | `1.0` | Weight for KV cache overlap in worker scoring. Higher = prefer cache reuse |
-| `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` | Softmax temperature for worker sampling. 0 = deterministic |
+| `--router-mode` | `DYN_ROUTER_MODE` | `round-robin` | Routing strategy: `round-robin`, `random`, `kv`, `direct`, `least-loaded`, `device-aware-weighted` |
+| `--load-aware` / `--no-load-aware` | `DYN_ROUTER_LOAD_AWARE` | `false` | Preset for KV load-aware routing without cache-reuse signals; implies `--router-mode kv` |
+| `--router-kv-overlap-score-credit` | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` | `1.0` | Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 |
+| `--router-prefill-load-scale` | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
+| `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` | Softmax temperature for normalized worker sampling. 0 = deterministic |
 | `--router-kv-events` / `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS` | `true` | Enable KV cache state events from workers. Disable for prediction-based routing |
 | `--router-ttl-secs` | `DYN_ROUTER_TTL_SECS` | `120.0` | Block TTL when KV events are disabled |
 | `--router-replica-sync` / `--no-router-replica-sync` | `DYN_ROUTER_REPLICA_SYNC` | `false` | Sync state across multiple router instances |
@@ -42,14 +44,14 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 | `--router-track-output-blocks` / `--no-router-track-output-blocks` | `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` | `false` | Track output blocks with fractional decay during generation |
 | `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `DYN_ROUTER_TRACK_PREFILL_TOKENS` | `true` | Track prompt-side prefill load in worker load accounting |
 | `--router-prefill-load-model` | `DYN_ROUTER_PREFILL_LOAD_MODEL` | `none` | Prompt-side load model: `none` for static load, `aic` for oldest-prefill decay using an AIC prediction |
-| `--router-event-threads` | `DYN_ROUTER_EVENT_THREADS` | `4` | Event processing threads. >1 enables concurrent radix tree |
+| `--router-event-threads` | `DYN_ROUTER_EVENT_THREADS` | `4` | KV indexer worker threads. >1 enables the concurrent radix tree, including with `--no-router-kv-events` |
 | `--router-queue-threshold` | `DYN_ROUTER_QUEUE_THRESHOLD` | `4.0` | Queue threshold fraction of prefill capacity. Enables priority scheduling |
 | `--router-queue-policy` | `DYN_ROUTER_QUEUE_POLICY` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
 | `--decode-fallback` / `--no-decode-fallback` | `DYN_DECODE_FALLBACK` | `false` | Fall back to aggregated mode when prefill workers unavailable |
 
 ## AIC Prefill Load Model
 
-These options are used only when `--router-mode kv` and `--router-prefill-load-model aic` are enabled.
+These options are used only when `--router-mode kv` is combined with `--router-prefill-load-model aic`.
 
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|

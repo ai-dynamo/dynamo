@@ -376,21 +376,26 @@ class TestVllmRendererApi:
             "resumable",
             "external_req_id",
             "reasoning_ended",
-            "reasoning_parser_kwargs",
         )
+        reasoning_request_fields = (*base_request_fields, "reasoning_parser_kwargs")
         # vllm-omni monkey-patches EngineCoreRequest with an extra field
         # (only installed on amd64, not arm64)
-        omni_fields = base_request_fields + ("additional_information",)
+        omni_fields = (*reasoning_request_fields, "additional_information")
+        valid_request_fields = (
+            base_request_fields,
+            reasoning_request_fields,
+            (*base_request_fields, "additional_information"),
+            omni_fields,
+        )
         actual_request_fields = EngineCoreRequest.__struct_fields__
-        assert actual_request_fields in (base_request_fields, omni_fields), (
+        assert actual_request_fields in valid_request_fields, (
             "EngineCoreRequest fields changed!\n"
-            f"Expected (base): {base_request_fields}\n"
-            f"Expected (omni): {omni_fields}\n"
+            f"Expected variants: {valid_request_fields}\n"
             f"Actual:          {actual_request_fields}\n"
             "Update request construction in components/src/dynamo/frontend/vllm_processor.py"
         )
 
-        expected_output_fields = (
+        base_output_fields = (
             "request_id",
             "new_token_ids",
             "new_logprobs",
@@ -405,11 +410,43 @@ class TestVllmRendererApi:
             "routed_experts",
             "num_nans_in_logits",
         )
+        cached_token_output_fields = (
+            "request_id",
+            "new_token_ids",
+            "new_logprobs",
+            "new_prompt_logprobs_tensors",
+            "pooling_output",
+            "finish_reason",
+            "stop_reason",
+            "events",
+            "kv_transfer_params",
+            "trace_headers",
+            "num_cached_tokens",
+            "num_external_computed_tokens",
+            "routed_experts",
+            "num_nans_in_logits",
+        )
+        # vllm-omni extends EngineCoreOutput with streaming segment metadata
+        # (only installed on amd64, not arm64).
+        omni_output_extra_fields = (
+            "is_segment_finished",
+            "new_prompt_len_snapshot",
+        )
+        omni_output_fields = base_output_fields + omni_output_extra_fields
+        omni_cached_token_output_fields = (
+            cached_token_output_fields + omni_output_extra_fields
+        )
+        valid_output_fields = (
+            base_output_fields,
+            cached_token_output_fields,
+            omni_output_fields,
+            omni_cached_token_output_fields,
+        )
         actual_output_fields = EngineCoreOutput.__struct_fields__
-        assert actual_output_fields == expected_output_fields, (
+        assert actual_output_fields in valid_output_fields, (
             "EngineCoreOutput fields changed!\n"
-            f"Expected: {expected_output_fields}\n"
-            f"Actual:   {actual_output_fields}\n"
+            f"Expected variants: {valid_output_fields}\n"
+            f"Actual:          {actual_output_fields}\n"
             "Update output mapping in components/src/dynamo/frontend/vllm_processor.py"
         )
 

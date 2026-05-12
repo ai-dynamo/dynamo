@@ -171,7 +171,7 @@ jobs:
           rm -rf docs-checkout/fern/pages-dev
           mkdir -p docs-checkout/fern/pages-dev
           rsync -a \
-            --exclude='blogs' \
+            --exclude='digest' \
             --exclude='index.yml' \
             source-checkout/docs/ docs-checkout/fern/pages-dev/
 
@@ -205,11 +205,12 @@ jobs:
             cp -r source-checkout/fern/components docs-checkout/fern/components
           fi
 
-          # Sync blogs/ directory
-          if [ -d source-checkout/docs/blogs ]; then
-            echo "Syncing blogs/ to docs-website branch..."
-            rm -rf docs-checkout/fern/blogs
-            cp -r source-checkout/docs/blogs docs-checkout/fern/blogs
+          # Sync digest/ directory
+          if [ -d source-checkout/docs/digest ]; then
+            echo "Syncing digest/ to docs-website branch..."
+            # Keep fern/blogs for older versioned docs that still reference ../blogs.
+            rm -rf docs-checkout/fern/digest
+            cp -r source-checkout/docs/digest docs-checkout/fern/digest
           fi
 
           # Sync main.css
@@ -222,11 +223,11 @@ jobs:
         run: |
           # In the source repo, index.yml uses paths relative to docs/ (e.g. getting-started/quickstart.md).
           # On docs-website, fern/versions/dev.yml needs ../pages-dev/ prefix for content
-          # and ../ prefix for blogs (which are a sibling of pages/, not inside it).
+          # and ../ prefix for digest (which is a sibling of pages/, not inside it).
           #
-          # Order matters: transform blogs/ first so the second sub() won't re-match them
+          # Order matters: transform digest/ first so the second sub() won't re-match it
           # (they'll start with ../ which doesn't match ^[a-zA-Z]).
-          yq -i '(.. | select(has("path")).path) |= sub("^blogs/", "../blogs/")' docs-checkout/fern/versions/dev.yml
+          yq -i '(.. | select(has("path")).path) |= sub("^digest/", "../digest/")' docs-checkout/fern/versions/dev.yml
           yq -i '(.. | select(has("path")).path) |= sub("^([a-zA-Z])", "../pages-dev/${1}")' docs-checkout/fern/versions/dev.yml
 
       - name: Convert GitHub callouts to Fern format
