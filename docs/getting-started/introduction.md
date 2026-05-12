@@ -78,7 +78,7 @@ The full list of supported ecosystem components:
 | :--- | :--- |
 | Inference engines | SGLang, TensorRT-LLM, vLLM |
 | Kubernetes | Inference gateway |
-| Memory management | Dynamo KV Block Manager, [LMCache](../integrations/lmcache-integration.md), [SGLang HiCache](../backends/sglang/sglang-hicache.md), [FlexKV](../integrations/flexkv-integration.md) |
+| Memory management | Dynamo KV Block Manager, [LMCache](../integrations/lmcache-integration.md), [SGLang HiCache](../integrations/sglang-hicache.md), [FlexKV](../integrations/flexkv-integration.md) |
 | Networking and storage | Mooncake, DOCA NetIO, GDS, POSIX, S3, 3FS ([supported via NIXL](../design-docs/kvbm-design.md)) |
 | Multi-HW | Intel XPU, AMD |
 
@@ -159,4 +159,4 @@ Explore the following resources to go deeper:
 - [Overall Architecture](../design-docs/architecture.md) -- Full technical design
 - [Support Matrix](../reference/support-matrix.md) -- Check hardware and engine compatibility
 
-**Further reading:** [Dynamo engineering blog](../blogs/README.md).
+**Further reading:** [Dynamo Digest](../digest/index.mdx).

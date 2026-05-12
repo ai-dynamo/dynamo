@@ -96,7 +96,7 @@ spec:
             - -m
             - dynamo.planner
             - --config
-            - '{"environment": "kubernetes", "backend": "trtllm", "throughput_adjustment_interval": 60, "profile_results_dir": "/workspace/profiling_results"}'
+            - '{"environment": "kubernetes", "backend": "trtllm", "throughput_adjustment_interval_seconds": 60, "profile_results_dir": "/workspace/profiling_results"}'
           volumeMounts:
             - name: planner-profile-data
               mountPath: /workspace/profiling_results
@@ -105,7 +105,7 @@ spec:
           - name: planner-profile-data
             configMap:
               name: planner-profile-data
-    TRTLLMDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -145,7 +145,7 @@ spec:
             - ./examples/backends/trtllm/engine_configs/qwen3/decode.yaml
             - --disaggregation-mode
             - decode
-    TRTLLMPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill

@@ -45,7 +45,6 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: None,
-                stop_reason: None,
                 logprobs: None,
             };
 
@@ -88,7 +87,6 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
                 logprobs: None,
             };
 
@@ -135,7 +133,6 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: None,
-                stop_reason: None,
                 logprobs: None,
             };
 
@@ -181,7 +178,6 @@ mod tests {
                             reasoning_content: None,
                         },
                         finish_reason: None,
-                        stop_reason: None,
                         logprobs: None,
                     }
                 })
@@ -229,7 +225,6 @@ mod tests {
                             reasoning_content: None,
                         },
                         finish_reason: Some(FinishReason::Stop),
-                        stop_reason: None,
                         logprobs: None,
                     }
                 })
@@ -2405,7 +2400,6 @@ mod parallel_jail_tests {
                         reasoning_content: None,
                     },
                     finish_reason: None,
-                    stop_reason: None,
                     logprobs: None,
                 }
             })

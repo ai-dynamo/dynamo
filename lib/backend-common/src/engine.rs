@@ -81,14 +81,23 @@ pub trait LLMEngine: Send + Sync + 'static {
     ///
     /// Called concurrently for multiple in-flight requests. The returned
     /// stream MUST poll `ctx.is_stopped()` between yields; on cancellation,
-    /// emit a terminal chunk with `FinishReason::Cancelled`.
+    /// emit a terminal `Ok(chunk)` with `FinishReason::Cancelled`.
     ///
-    /// Contract: exactly one terminal chunk (one with `finish_reason` set)
-    /// must be the last item yielded, and no chunks may follow it.
+    /// Stream item: `Result<LLMEngineOutput, DynamoError>`.
+    ///   * `Ok(chunk)` carries normal output. Exactly one terminal `Ok`
+    ///     chunk (one with `finish_reason` set) must be the last item
+    ///     yielded, and no items may follow it.
+    ///   * `Err(dynamo_err)` carries a typed mid-stream failure (e.g.
+    ///     `BackendError::InvalidArgument`). It is itself terminal — the
+    ///     framework forwards it as `Annotated::error` and stops polling
+    ///     the stream. Use this instead of yielding an `Ok` chunk with
+    ///     `FinishReason::Error` when you want the typed `BackendError`
+    ///     variant preserved end-to-end.
+    ///
     /// `completion_usage` on the terminal is optional but recommended —
     /// the frontend aggregates it when present. In debug builds, the
-    /// framework wraps the stream in a validator that panics on
-    /// contract violations.
+    /// framework wraps the stream in a validator that panics on contract
+    /// violations.
     ///
     /// The returned stream is `'static`: clone or move any state from
     /// `&self` or `request` into the stream body before constructing it.
@@ -100,7 +109,7 @@ pub trait LLMEngine: Send + Sync + 'static {
         &self,
         request: PreprocessedRequest,
         ctx: Arc<dyn AsyncEngineContext>,
-    ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError>;
+    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError>;
 
     /// Abort an in-flight request (optional, default no-op).
     ///
@@ -116,6 +125,21 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// `abort` only for out-of-band notifications (e.g. telling a remote
     /// scheduler to cancel compute early).
     async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {}
+
+    /// Drain in-flight engine work before shutdown (optional, default no-op).
+    ///
+    /// Called once during graceful shutdown after the discovery unregister
+    /// + grace-period sleep, but before [`cleanup`](LLMEngine::cleanup).
+    /// Use it for backend-side draining that must complete while the
+    /// distributed runtime (NATS / etcd) is still alive — e.g. waiting for
+    /// in-flight NIXL KV transfers on prefill workers (issue #7319), so
+    /// downstream decode workers don't observe a use-after-free on freed
+    /// GPU memory.
+    ///
+    /// Failures are logged and swallowed; shutdown proceeds regardless.
+    async fn drain(&self) -> Result<(), DynamoError> {
+        Ok(())
+    }
 
     /// Release all engine resources. Called once on shutdown.
     async fn cleanup(&self) -> Result<(), DynamoError>;
