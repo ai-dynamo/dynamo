@@ -676,9 +676,8 @@ class OrchestratorEngineAdapter:
 
     @staticmethod
     def _project_scale_to(outcome, worker_counts: WorkerCounts):
-        """Mirror ``test_g3_real_parity._outcome_scale_to`` — projects
-        the pipeline outcome onto ``PlannerEffects.scale_to`` with
-        PSM-equivalent "no change → None" detection."""
+        """Project the pipeline outcome onto ``PlannerEffects.scale_to``
+        with PSM-equivalent "no change → None" detection."""
         if outcome.execute_action != "apply" or outcome.final_proposal is None:
             return None
 

@@ -18,8 +18,8 @@ the thing that protects production cutover.
 Scope this file validates:
 
 - ``scale_to``: scaling-decision bit-parity. Already covered per-path in
-  ``test_g3_fixture_parity.py`` + ``test_g3_real_parity.py`` but
-  cross-asserted here.
+  ``test_g3_fixture_parity.py`` (PSM) + ``test_engine_adapter.py`` G3
+  parity (orchestrator), cross-asserted here.
 - ``next_tick.at_s``: scheduling-cadence parity. Not covered in other
   tests — if the adapter's cadence drifts, main-loop tick timing in
   production drifts with it.

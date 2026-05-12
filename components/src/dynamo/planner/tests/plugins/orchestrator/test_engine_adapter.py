@@ -9,10 +9,8 @@ Scope:
   initial_tick → tick → shutdown runs without error.
 - ``initial_tick`` matches PSM's scheduling semantics.
 - G3 parity: for each scenario, drive the adapter through all ticks and
-  compare ``scale_to`` to the golden fixture. This is the production
-  version of the ``test_g3_real_parity.py`` coverage — identical
-  validation but through the adapter's public API (no side-channel
-  prime_tick / observe_fpm exposure).
+  compare ``scale_to`` to the golden fixture — through the adapter's
+  public API (no side-channel prime_tick / observe_fpm exposure).
 """
 
 from __future__ import annotations
@@ -97,7 +95,7 @@ async def _run_scenario_through_adapter(scenario):
     config = scenario.make_config()
     caps = scenario.caps_factory()
 
-    # Build regressions via throwaway PSM (mirrors test_g3_real_parity).
+    # Build regressions via throwaway PSM.
     bootstrap_psm = PlannerStateMachine(config, caps)
     if scenario.bootstrap_fn is not None:
         scenario.bootstrap_fn(bootstrap_psm)

@@ -26,6 +26,7 @@ import pytest
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.core.state_machine import PlannerStateMachine
+from dynamo.planner.core.types import FpmObservations
 from dynamo.planner.plugins.builtins.budget_constrain import BuiltinBudgetConstrain
 from dynamo.planner.plugins.builtins.load_predictor import BuiltinLoadPredictor
 from dynamo.planner.plugins.builtins.load_propose import BuiltinLoadPropose
@@ -49,9 +50,31 @@ from dynamo.planner.plugins.types import (
 )
 from dynamo.planner.tests.plugins.g3_fixtures.dump_tool import _tick_for
 from dynamo.planner.tests.plugins.g3_fixtures.scenarios import find_scenario
-from dynamo.planner.tests.plugins.orchestrator.test_g3_real_parity import (
-    _observe_fpm_into_regressions,
-)
+
+
+def _observe_fpm_into_regressions(orch, obs: FpmObservations, mode: str) -> None:
+    """Feed an ``FpmObservations`` dict into whichever regression models
+    the orchestrator holds — mirrors PSM's ``_observe_fpm`` side effect.
+    Called by the test harness between ticks so regression-state tracking
+    is identical to PSM.
+    """
+    if mode == "agg":
+        if obs.decode:
+            agg = orch.get_regression("agg")
+            if agg is not None:
+                for fpm in obs.decode.values():
+                    agg.add_observation(fpm)
+        return
+    if obs.prefill:
+        p_reg = orch.get_regression("prefill")
+        if p_reg is not None:
+            for fpm in obs.prefill.values():
+                p_reg.add_observation(fpm)
+    if obs.decode:
+        d_reg = orch.get_regression("decode")
+        if d_reg is not None:
+            for fpm in obs.decode.values():
+                d_reg.add_observation(fpm)
 
 pytestmark = [
     pytest.mark.gpu_0,
