@@ -93,8 +93,6 @@ One of those components is the [Planner](../../components/planner/planner-guide.
 Dynamo's autoscaling component. It computes scaling targets from live metrics,
 profiles, and SLA goals.
 
-[placeholder: architecture Mermaid diagram polish or replacement with production graphic]
-
 ```mermaid
 flowchart TD
     subgraph SEC[Single Engine Core]
@@ -144,8 +142,6 @@ throughput, cache reuse, and feasibility against the selected objective or SLA.
 
 ### 1.2 A Request's Journey Through The Twin
 
-[placeholder: request lifecycle diagram if we decide to turn the numbered walkthrough into a figure]
-
 One request makes the DES model concrete:
 
 1. A load generator, such as Dynamo AIPerf, emits a request from a trace or
@@ -166,8 +162,6 @@ router decision affects the worker's queue, a Planner scaling decision delays
 capacity, and a KV movement decision can change when decode begins.
 
 ### 1.3 Replay Harness: Driving The Twin
-
-[placeholder: replay harness Mermaid diagram polish or replacement with production graphic]
 
 ```mermaid
 flowchart LR
@@ -382,7 +376,6 @@ search rounds and eight parallel optimizer evaluations.
 | Winning layout | `prefill_tp=2`, `decode_tp=1`, `prefill_workers=5`, `decode_workers=6` |
 | Router | `kv_router`, `overlap_score_weight=0.5` |
 | Key metrics | `output_throughput_tok_s=2406.46`, `prefix_cache_reused_ratio=0.5091`, `mean_ttft_ms=2268.87`, `mean_tpot_ms=32.97`, `mean_e2e_latency_ms=8135.19` |
-| Interpretation | This is a strong candidate for this workload and SLA, not a universal best layout. |
 
 The takeaway is not that one configuration is always best. It is that the twin
 can turn a large configuration space into a workload-specific deployment
@@ -410,9 +403,10 @@ under-exposed Dynamo component.
 
 Planner exposes a family of stateful decisions: when to scale, how aggressively,
 and which optimization target to chase. Their effects compound across minutes of
-traffic, and a misconfigured Planner can under-provision, miss SLA, or thrash
-workers. The twin lets us study those dynamics before paying for a full
-Kubernetes-scale experiment.
+traffic, many workers, delayed capacity changes, routing feedback, and engine
+queues. A toy test misses those interactions, while a live Kubernetes-scale
+experiment can be expensive just to evaluate one policy change. The twin lets us
+study those dynamics before paying for the full-scale experiment.
 
 The three experiments below reuse the Mooncake FAST25 `toolagent_trace`
 introduced above, but switch the simulated engine profile to Qwen3-32B at TP=2
@@ -476,17 +470,6 @@ how it can be explored cheaply. Other natural questions for the same loop:
 - Couple planner and router policies — e.g. shrink the worker pool when
   the router predicts a cache-affine traffic drop.
 
-[placeholder: KV/cache discovery experiment examples and owners]
-
-KV and cache discovery examples:
-
-- Tune offload thresholds.
-- Measure sensitivity to KV transfer bandwidth.
-- Evaluate future KVBM policies.
-- Study distributed cache and cross-machine movement strategies.
-- Compare move-vs-recompute decisions.
-- Couple cache-aware routing with cache-aware autoscaling.
-
 These are natural twin questions: hold the workload fixed, change one component
 policy, and measure the system-level effect before going to a real cluster.
 
@@ -531,6 +514,10 @@ split, router policy, and Planner setting last week may no longer be optimal
 today. A continuous twin-driven sweep keeps the live deployment tracking the
 current optimum instead of relying on a one-shot launch decision.
 
-[placeholder: external review for claims about real-cluster validation vs simulation]
+## Related Guides
 
-[placeholder: final links to relevant Dynamo docs, PRs, or prior posts]
+- [Mocker trace replay](https://docs.nvidia.com/dynamo/dev/benchmarks/mocker-trace-replay)
+- [Profiler guide](https://docs.nvidia.com/dynamo/dev/components/profiler/profiler-guide)
+- [Router guide](https://docs.nvidia.com/dynamo/dev/components/router/router-guide)
+- [Planner guide](https://docs.nvidia.com/dynamo/dev/components/planner/planner-guide)
+- [KVBM guide](https://docs.nvidia.com/dynamo/dev/components/kvbm/kvbm-guide)
