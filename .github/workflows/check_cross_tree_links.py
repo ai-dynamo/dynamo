@@ -20,7 +20,28 @@ import sys
 from pathlib import Path
 
 LINK_RE = re.compile(r"\[[^\]]+\]\(([^)#?]+)(?:[#?][^)]*)?\)")
+REF_DEF_RE = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*<?([^>\s#?]+)(?:[#?][^>\s]*)?>?")
 SKIP_PREFIXES = ("http://", "https://", "mailto:", "tel:", "#", "/")
+
+
+def _check_target(
+    target: str, md: Path, docs: Path, lineno: int, failures: list[str]
+) -> None:
+    """Append a CI annotation to ``failures`` if ``target`` resolves outside ``docs/``."""
+    if target.startswith(SKIP_PREFIXES):
+        return
+    resolved = (md.parent / target).resolve()
+    try:
+        resolved.relative_to(docs)
+    except ValueError:
+        rel = md.relative_to(docs.parent)
+        failures.append(
+            f"::error file={rel},line={lineno}::"
+            f"Link target outside docs/: {target!r}. "
+            f"The docs-website branch ships only fern/, so this URL 404s on "
+            f"docs.nvidia.com. Use a full GitHub URL instead: "
+            f"https://github.com/ai-dynamo/dynamo/blob/main/<repo-path>"
+        )
 
 
 def main() -> int:
@@ -43,20 +64,10 @@ def main() -> int:
             if in_fence:
                 continue
             for target in LINK_RE.findall(line):
-                if target.startswith(SKIP_PREFIXES):
-                    continue
-                resolved = (md.parent / target).resolve()
-                try:
-                    resolved.relative_to(docs)
-                except ValueError:
-                    rel = md.relative_to(docs.parent)
-                    failures.append(
-                        f"::error file={rel},line={lineno}::"
-                        f"Link target outside docs/: {target!r}. "
-                        f"The docs-website branch ships only fern/, so this URL 404s on "
-                        f"docs.nvidia.com. Use a full GitHub URL instead: "
-                        f"https://github.com/ai-dynamo/dynamo/blob/main/<repo-path>"
-                    )
+                _check_target(target, md, docs, lineno, failures)
+            ref_match = REF_DEF_RE.match(line)
+            if ref_match:
+                _check_target(ref_match.group(1), md, docs, lineno, failures)
 
     if failures:
         print("\n".join(failures))
