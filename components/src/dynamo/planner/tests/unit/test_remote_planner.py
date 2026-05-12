@@ -499,3 +499,47 @@ def test_connector_get_worker_info_falls_back_on_local_init_failure(connector_ru
     assert info.context_length is None
     assert info.max_kv_tokens is None
     assert info.component_name is not None
+
+
+def test_connector_get_actual_worker_counts_delegates_to_local_k8s(connector_runtime):
+    """get_actual_worker_counts should report real pool DGD status by
+    delegating to the pool-local KubernetesConnector. Without this, the
+    base planner falls through to a runtime path that always reports
+    is_stable=True, so _scaling_in_progress can't detect in-flight
+    rollouts under environment=global-planner.
+    """
+    c = GlobalPlannerConnector(connector_runtime, "ns", "gns", "GP", model_name="test")
+    fake_local = MagicMock()
+    fake_local.get_actual_worker_counts = MagicMock(return_value=(2, 3, False))
+    c._local_k8s_connector = fake_local
+    c._local_k8s_init_attempted = True
+
+    counts = c.get_actual_worker_counts(
+        prefill_component_name="VllmPrefillWorker",
+        decode_component_name="VllmDecodeWorker",
+    )
+    assert counts == (2, 3, False)
+    fake_local.get_actual_worker_counts.assert_called_once_with(
+        prefill_component_name="VllmPrefillWorker",
+        decode_component_name="VllmDecodeWorker",
+    )
+
+
+def test_connector_get_actual_worker_counts_out_of_cluster_fallback(connector_runtime):
+    """When no local KubernetesConnector is available (e.g. running outside
+    a cluster), get_actual_worker_counts must return (0, 0, True) rather
+    than raising — mirroring the capability-discovery fallback path so
+    out-of-cluster callers aren't blocked.
+    """
+    with patch(
+        "dynamo.planner.connectors.global_planner.KubernetesConnector",
+        side_effect=DeploymentValidationError(["forced test failure"]),
+    ):
+        c = GlobalPlannerConnector(
+            connector_runtime, "ns", "gns", "GP", model_name="test"
+        )
+        counts = c.get_actual_worker_counts(
+            prefill_component_name="p", decode_component_name="d"
+        )
+
+    assert counts == (0, 0, True)

@@ -13,8 +13,8 @@ use dynamo_kv_router::protocols::{
     KvCacheEvent, KvCacheEventData, RouterEvent, StorageTier, TokensWithHashes, WorkerWithDpRank,
 };
 use dynamo_kv_router::{
-    AnchorAwareBranchShardedIndexer, BranchShardedIndexer, ConcurrentRadixTree,
-    ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer,
+    BranchShardedIndexer, ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer,
+    ThreadPoolIndexer,
 };
 use dynamo_mocker::loadgen::Trace;
 use tokio::time::{Duration, Instant};
@@ -228,7 +228,7 @@ impl MooncakeIndexerConfig {
                         )
                     })
                     .collect();
-                Arc::new(AnchorAwareBranchShardedIndexer::new_with_options(
+                Arc::new(BranchShardedIndexer::new_with_options(
                     shards,
                     self.prefix_depth,
                     block_size,

@@ -99,25 +99,38 @@ For each candidate worker, the router computes a **logit** (lower wins):
 
 ```text
 # Without shared cache
-logit = overlap_weight * (prefill_tokens / block_size) + decode_blocks
+adjusted_prefill_blocks = max(
+    prefill_blocks
+    - overlap_score_credit * device_overlap_blocks
+    - host_cache_hit_weight * host_overlap_blocks
+    - disk_cache_hit_weight * disk_overlap_blocks,
+    0,
+)
+logit = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
 
 # With shared cache
-shared_beyond    = shared_cache_hits.hits_beyond(worker_device_overlap)
-reduction        = shared_cache_multiplier * shared_beyond * block_size
-adjusted_prefill = max(0, prefill_tokens - reduction)
-logit            = overlap_weight * (adjusted_prefill / block_size) + decode_blocks
+shared_beyond = shared_cache_hits.hits_beyond(device_overlap_blocks)
+adjusted_prefill_blocks = max(
+    prefill_blocks
+    - overlap_score_credit * device_overlap_blocks
+    - host_cache_hit_weight * host_overlap_blocks
+    - disk_cache_hit_weight * disk_overlap_blocks
+    - shared_cache_multiplier * shared_beyond,
+    0,
+)
+logit = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
 ```
 
 `hits_beyond(n)` counts shared-cache pages at positions `>= n` — "pages past my device prefix that I can still fetch from Mooncake instead of recomputing."
 
-**Worked example.** Request is 4 blocks, `shared_cache_multiplier = 0.5`, `block_size = 1`, `overlap_weight = 1.0`. Shared pool contains blocks 0–3.
+**Worked example.** Request is 4 blocks, `shared_cache_multiplier = 0.5`, `block_size = 1`, `overlap_score_credit = 1.0` (the maximum device-local overlap credit). Shared pool contains blocks 0–3.
 
-| Worker | Device overlap | `hits_beyond` | Reduction | Adjusted prefill | Logit          |
-| ------ | -------------- | ------------- | --------- | ---------------- | -------------- |
-| W0     | 2 (A, B)       | 2 (C, D)      | 1.0       | 3.0              | 3.0            |
-| W1     | 0              | 4 (A, B, C, D)| 2.0       | 2.0              | **2.0 — wins** |
+| Worker | Device overlap | `hits_beyond` | Device credit | Shared credit | Adjusted prefill | Logit          |
+| ------ | -------------- | ------------- | ------------- | ------------- | ---------------- | -------------- |
+| W0     | 2 (A, B)       | 2 (C, D)      | 2.0           | 1.0           | 1.0              | **1.0 — wins** |
+| W1     | 0              | 4 (A, B, C, D)| 0.0           | 2.0           | 2.0              | 2.0            |
 
-W1 wins despite zero local overlap, because the shared pool covers its whole prefix. The multiplier encodes the cost ratio of a Mooncake fetch relative to a fresh GPU compute — `0.5` means "fetching from shared is half as expensive as recomputing."
+W0 wins because it combines device-local reuse with shared-pool hits beyond that device prefix. The multiplier encodes the cost ratio of a Mooncake fetch relative to a fresh GPU compute — `0.5` means "fetching from shared is half as expensive as recomputing."
 
 ## Requirements
 
@@ -209,5 +222,5 @@ curl -s localhost:8000/metrics | grep shared_cache
 - [SGLang HiCache Design](https://docs.sglang.ai/advanced_features/hicache_design.html) and [Best Practices](https://docs.sglang.ai/advanced_features/hicache_best_practices.html)
 - [Mooncake](https://github.com/kvcache-ai/Mooncake) — the shared KV store used as the external tier
 - [SGLang PR #22894](https://github.com/sgl-project/sglang/pull/22894) — the tier-annotated events prerequisite
-- [KVBM Guide](../../components/kvbm/kvbm-guide.md) — Dynamo's own block manager, an alternative to HiCache
-- [KV Events for Custom Engines](../../integrations/kv-events-custom-engines.md) — the event protocol contract for backends other than SGLang
+- [KVBM Guide](../components/kvbm/kvbm-guide.md) — Dynamo's own block manager, an alternative to HiCache
+- [KV Events for Custom Engines](kv-events-custom-engines.md) — the event protocol contract for backends other than SGLang

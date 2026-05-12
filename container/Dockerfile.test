@@ -3,9 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standalone test image — layers test deps on top of a pre-built runtime image.
-# Usage: docker build -f container/Dockerfile.test --build-arg BASE_IMAGE=<runtime-image> .
+# Usage: docker build -f container/Dockerfile.test --target test_image --build-arg BASE_IMAGE=<runtime-image> .
+# For adding specific unique tests software, like in planner, add a target: docker build -f container/Dockerfile.test --target test_distroless --build-arg BASE_IMAGE=<runtime-image> .
 ARG BASE_IMAGE
-FROM ${BASE_IMAGE}
+
+FROM ${BASE_IMAGE} AS test_image
 
 # Install test dependencies on top of runtime image
 USER root
@@ -29,3 +31,28 @@ COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
 # Required: blocks dynamo.vllm/sglang from shadowing the installed packages.
 COPY --chmod=664 --chown=dynamo:0 conftest.py /workspace/conftest.py
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+
+FROM debian:bookworm-slim AS github_runner_tools
+
+RUN set -eux; \
+    tools="bash tail tar gzip cat grep env tr head mkdir chmod mv sleep"; \
+    mkdir -p /github-runner-tools/usr/local/bin /github-runner-tools/opt/dynamo/lib; \
+    for tool in ${tools}; do \
+        tool_path="$(command -v "${tool}")"; \
+        cp -L "${tool_path}" "/github-runner-tools/usr/local/bin/${tool}"; \
+        ldd "${tool_path}" \
+            | awk '/=> \// { print $3 } /^\// { print $1 }' \
+            | grep -Ev '/(ld-linux|libc\.so)' \
+            | while read -r lib_path; do \
+                cp -L "${lib_path}" "/github-runner-tools/opt/dynamo/lib/$(basename "${lib_path}")"; \
+            done; \
+    done
+
+FROM test_image AS test_distroless
+
+# The planner runtime is distroless, so add supporting software for GitHub Actions.
+USER root
+COPY --from=github_runner_tools /github-runner-tools/usr/local/bin/ /usr/local/bin/
+COPY --from=github_runner_tools /github-runner-tools/opt/dynamo/lib/ /opt/dynamo/lib/
+
+USER dynamo

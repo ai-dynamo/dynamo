@@ -36,7 +36,7 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3
           workingDir: /workspace/examples/backends/vllm
           env:
             - name: HF_HOME
@@ -54,7 +54,7 @@ spec:
         size: 200Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3
           workingDir: /workspace/examples/backends/vllm
           # DeepSeek-V4-Pro (1.6T params) is large; first launch loads weights
           # over TP=8 ranks plus FlashInfer autotune + cudagraph warmup. Allow

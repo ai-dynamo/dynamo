@@ -1,0 +1,226 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: XPU-CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      framework:
+        description: 'Framework name (vllm, sglang, dynamo)'
+        required: false
+        type: string
+        default: 'vllm'
+      target:
+        description: 'Target stage for Docker rendering'
+        required: false
+        type: string
+        default: 'runtime'
+      source_ref:
+        description: 'Git ref/SHA to checkout. Empty = current SHA.'
+        required: false
+        type: string
+        default: ''
+      pytest_markers:
+        description: 'Pytest marker expression for test selection'
+        required: false
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      framework:
+        description: 'Framework name (vllm, sglang, dynamo)'
+        required: false
+        type: string
+        default: 'vllm'
+      target:
+        description: 'Target stage for Docker rendering'
+        required: false
+        type: string
+        default: 'runtime'
+      source_ref:
+        description: 'Git ref/SHA to checkout. Empty = caller SHA.'
+        required: false
+        type: string
+        default: ''
+      pytest_markers:
+        description: 'Pytest marker expression for test selection'
+        required: false
+        type: string
+        default: ''
+
+env:
+  FRAMEWORK: ${{ inputs.framework || 'vllm' }}
+  TARGET: ${{ inputs.target || 'runtime' }}
+  DEVICE: xpu
+  PLATFORM: linux/amd64
+  SOURCE_REF: ${{ inputs.source_ref || github.sha }}
+
+jobs:
+
+  # ============================================================================
+  # BUILD XPU IMAGE
+  # ============================================================================
+
+  build-xpu:
+    runs-on: xpu
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: ${{ env.SOURCE_REF }}
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Install render dependencies
+        shell: bash
+        run: pip install jinja2 pyyaml
+
+      - name: Generate Dockerfile
+        shell: bash
+        run: |
+          echo "::group::Generating XPU Dockerfile"
+          python ./container/render.py \
+              --target=${{ env.TARGET }} \
+              --framework=${{ env.FRAMEWORK }} \
+              --device=${{ env.DEVICE }} \
+              --platform=${{ env.PLATFORM }} \
+              --show-result \
+              --output-short-filename
+          echo "::endgroup::"
+
+
+      - name: Build XPU image
+        id: build
+        shell: bash
+        run: |
+          set -x
+
+          IMAGE_NAME="dynamo-${{ env.FRAMEWORK }}-${{ env.TARGET }}-${{ env.DEVICE }}"
+          IMAGE_TAG="${IMAGE_NAME}:${{ env.SOURCE_REF }}"
+
+          echo "image_name=${IMAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+
+          docker build \
+            --progress=plain \
+            --tag "${IMAGE_TAG}" \
+            -f ./container/rendered.Dockerfile \
+            . 2>&1 | tee build-xpu.log
+
+          echo "### 🐳 XPU Image Built" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Image Tag | \`${IMAGE_TAG}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Framework | ${{ env.FRAMEWORK }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Device | ${{ env.DEVICE }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Build XPU test image
+        shell: bash
+        run: |
+          set -x
+
+          TEST_IMAGE_TAG="${{ steps.build.outputs.image_tag }}-test"
+
+          docker build \
+            --progress=plain \
+            --tag "${TEST_IMAGE_TAG}" \
+            -f container/Dockerfile.test \
+            --build-arg BASE_IMAGE=${{ steps.build.outputs.image_tag }} \
+            . 2>&1 | tee build-xpu-test.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xpu-build-log
+          path: |
+            build-xpu.log
+            build-xpu-test.log
+          retention-days: 7
+
+  # ============================================================================
+  # XPU TESTS
+  # ============================================================================
+
+  test-xpu:
+    needs: [build-xpu]
+    if: ${{ !cancelled() && needs.build-xpu.result == 'success' }}
+    runs-on: xpu
+    env:
+      FRAMEWORK: ${{ inputs.framework || 'vllm' }}
+      IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ inputs.source_ref || github.sha }}
+      TEST_IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ inputs.source_ref || github.sha }}-test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: ${{ env.SOURCE_REF }}
+
+      - name: Pre-cleanup Pytest Containers
+        shell: bash
+        run: |
+          echo "🧹 Removing any leftover pytest containers..."
+          CONTAINER_ID_PREFIX="test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}"
+          docker rm -f "${CONTAINER_ID_PREFIX}_pytest" 2>/dev/null || true
+
+      - name: Run Sanity Check on Runtime Image
+        shell: bash
+        run: |
+          echo "Running sanity check on image: ${{ env.IMAGE_TAG }}"
+          set +e
+          docker run --rm "${{ env.IMAGE_TAG }}" python /workspace/deploy/sanity_check.py --runtime-check --no-gpu-check
+          SANITY_CHECK_EXIT_CODE=$?
+          set -e
+          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+            exit ${SANITY_CHECK_EXIT_CODE}
+          else
+            echo "✅ Sanity check passed"
+          fi
+
+      - name: Run XPU tests
+        uses: ./.github/actions/pytest
+        with:
+          pytest_marks: ${{ inputs.pytest_markers }}
+          image_tag: ${{ env.TEST_IMAGE_TAG }}
+          test_suite_name: 'xpu-${{ env.FRAMEWORK }}'
+          test_type: 'e2e'
+          platform_arch: 'amd64'
+          device: 'xpu'
+          parallel_mode: 'none'
+          dind_as_sidecar: 'true'
+          start_minio: 'false'
+
+      - name: Cleanup Pytest Containers
+        if: always()
+        shell: bash
+        run: |
+          echo "🧹 Stopping and removing pytest containers..."
+          CONTAINER_ID_PREFIX="test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}"
+          docker rm -f "${CONTAINER_ID_PREFIX}_pytest" 2>/dev/null || true
+          echo "✓ Pytest container cleanup finished"
+
+  # ============================================================================
+  # CLEANUP (always runs)
+  # ============================================================================
+
+  cleanup-xpu:
+    needs: [build-xpu, test-xpu]
+    if: ${{ always() }}
+    runs-on: xpu
+    env:
+      IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ inputs.source_ref || github.sha }}
+      TEST_IMAGE_TAG: dynamo-${{ inputs.framework || 'vllm' }}-${{ inputs.target || 'runtime' }}-xpu:${{ inputs.source_ref || github.sha }}-test
+    steps:
+      - name: Cleanup Docker Images
+        shell: bash
+        run: |
+          echo "🧹 Cleaning up XPU docker images..."
+          docker image rm -f "${{ env.IMAGE_TAG }}" 2>/dev/null || true
+          docker image rm -f "${{ env.TEST_IMAGE_TAG }}" 2>/dev/null || true
+          docker image prune -f 2>/dev/null || true
+          echo "✓ XPU image cleanup finished"

@@ -76,6 +76,8 @@ navigation:
             path: kubernetes/installation-guide.md
           - page: Model Deployment Guide
             path: kubernetes/model-deployment-guide.md
+          - page: Model Caching
+            path: kubernetes/model-caching.md
           - page: DGDR Reference
             path: kubernetes/dgdr.md
           - page: Dynamo Operator
@@ -178,6 +180,8 @@ navigation:
             path: backends/trtllm/trtllm-diffusion.md
       - page: LoRA Adapters
         path: features/lora/README.md
+      - page: Fastokens Tokenizer
+        path: features/tokenizer/README.md
       - section: Agents
         slug: agents
         path: agents/README.md
@@ -251,8 +255,6 @@ navigation:
             path: backends/sglang/sglang-diffusion.md
           - page: Observability
             path: backends/sglang/sglang-observability.md
-          - page: HiCache
-            path: backends/sglang/sglang-hicache.md
           - page: Agentic Workloads
             path: backends/sglang/agents.md
       - section: TensorRT-LLM
@@ -336,6 +338,8 @@ navigation:
     contents:
       - page: LMCache
         path: integrations/lmcache-integration.md
+      - page: SGLang HiCache
+        path: integrations/sglang-hicache.md
       - page: FlexKV
         path: integrations/flexkv-integration.md
       - page: KV Events for Custom Engines
