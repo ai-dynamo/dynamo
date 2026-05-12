@@ -377,8 +377,7 @@ func generateSingleDCD(
 		}
 	}
 
-	propagateDGDAnnotations(parentDGD.GetAnnotations(), &deployment.Spec.DynamoComponentDeploymentSharedSpec)
-	propagateDGDSpecMetadata(parentDGD.Spec.Annotations, parentDGD.Spec.Labels, &deployment.Spec.DynamoComponentDeploymentSharedSpec)
+	applyDGDTemplateDefaults(&deployment.Spec.DynamoComponentDeploymentSharedSpec, parentDGD)
 
 	// Apply restart annotation if this component should be restarted.
 	if restartState.ShouldAnnotateComponent(componentName) {
@@ -395,11 +394,6 @@ func generateSingleDCD(
 		ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec).Spec.ServiceAccountName = commonconsts.PlannerServiceAccountName
 	}
 
-	if len(parentDGD.Spec.Env) > 0 {
-		podTemplate := ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec)
-		main := ensureMainContainer(podTemplate)
-		main.Env = MergeEnvs(parentDGD.Spec.Env, main.Env)
-	}
 	if err := applyDynDeploymentConfig(ctx, deployment, commonconsts.DynamoServicePort); err != nil {
 		return nil, err
 	}
@@ -1729,7 +1723,32 @@ func GeneratePodSpecForComponent(
 	checkpointInfo *checkpoint.CheckpointInfo,
 	deployerOverride MultinodeDeployer,
 ) (*corev1.PodSpec, error) {
+	if component == nil {
+		return nil, fmt.Errorf("component is nil")
+	}
+	if dynamoDeployment == nil {
+		return nil, fmt.Errorf("dynamoDeployment is nil")
+	}
 	component = component.DeepCopy()
+	applyDGDTemplateDefaults(component, dynamoDeployment)
+	if operatorConfig == nil {
+		operatorConfig = &configv1alpha1.OperatorConfiguration{}
+	}
+
+	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo, deployerOverride)
+	if err != nil {
+		return nil, err
+	}
+	return podSpec, nil
+}
+
+func applyDGDTemplateDefaults(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	dynamoDeployment *v1beta1.DynamoGraphDeployment,
+) {
+	if component == nil || dynamoDeployment == nil {
+		return
+	}
 	if len(dynamoDeployment.Spec.Env) > 0 {
 		podTemplate := ensurePodTemplate(component)
 		main := ensureMainContainer(podTemplate)
@@ -1738,12 +1757,6 @@ func GeneratePodSpecForComponent(
 
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
 	propagateDGDSpecMetadata(dynamoDeployment.Spec.Annotations, dynamoDeployment.Spec.Labels, component)
-
-	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo, deployerOverride)
-	if err != nil {
-		return nil, err
-	}
-	return podSpec, nil
 }
 
 // dgdPropagatedAnnotationKeys lists DGD metadata annotations that are propagated

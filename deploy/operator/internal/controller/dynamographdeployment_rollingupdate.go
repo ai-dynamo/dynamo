@@ -60,7 +60,7 @@ func (r *DynamoGraphDeploymentReconciler) desiredWorkerHashes(
 		return workerGenerationHashes{}, fmt.Errorf("failed to compute v1 worker hash: %w", err)
 	}
 
-	v2Hash, err := nvidiacomv1beta1.ComputeDGDWorkersSpecHash(dgd)
+	v2Hash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	if err != nil {
 		return workerGenerationHashes{}, fmt.Errorf("failed to compute v2 worker hash: %w", err)
 	}

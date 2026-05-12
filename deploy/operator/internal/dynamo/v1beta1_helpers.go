@@ -7,6 +7,7 @@ package dynamo
 
 import (
 	"encoding/json"
+	"maps"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -91,6 +92,57 @@ func GetMainContainerResources(component *v1beta1.DynamoComponentDeploymentShare
 		return main.Resources
 	}
 	return corev1.ResourceRequirements{}
+}
+
+// GetDCDKubeLabels returns the labels rendered onto Kubernetes workloads for a
+// DCD before controller-specific role labels are added.
+func GetDCDKubeLabels(dcd *v1beta1.DynamoComponentDeployment) map[string]string {
+	labels := map[string]string{}
+	if dcd == nil {
+		return labels
+	}
+
+	objectLabels := dcd.GetLabels()
+	maps.Copy(labels, objectLabels)
+	maps.Copy(labels, GetDCDPreservedAlphaLabels(dcd))
+	maps.Copy(labels, GetPodTemplateLabels(&dcd.Spec.DynamoComponentDeploymentSharedSpec))
+	AddBaseModelLabel(labels, dcd.Spec.ModelRef)
+	if subComponentType := GetDCDSubComponentType(dcd); subComponentType != "" {
+		labels[commonconsts.KubeLabelDynamoSubComponentType] = subComponentType
+	}
+	if componentName := GetDCDComponentName(dcd); componentName != "" {
+		labels[commonconsts.KubeLabelDynamoComponent] = componentName
+	}
+	if dynamoNamespace := GetDCDDynamoNamespace(dcd); dynamoNamespace != "" {
+		labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
+	}
+	for _, key := range []string{
+		commonconsts.KubeLabelDynamoComponent,
+		commonconsts.KubeLabelDynamoNamespace,
+		commonconsts.KubeLabelDynamoGraphDeploymentName,
+		commonconsts.KubeLabelDynamoWorkerHash,
+		commonconsts.KubeLabelDynamoComponentClass,
+	} {
+		if value := objectLabels[key]; value != "" {
+			labels[key] = value
+		}
+	}
+	return labels
+}
+
+// GetDCDKubeAnnotations returns the annotations rendered onto Kubernetes
+// workloads for a DCD.
+func GetDCDKubeAnnotations(dcd *v1beta1.DynamoComponentDeployment) map[string]string {
+	annotations := map[string]string{}
+	if dcd == nil {
+		return annotations
+	}
+
+	maps.Copy(annotations, GetDCDPreservedAlphaAnnotations(dcd))
+	maps.Copy(annotations, GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec))
+	AddBaseModelAnnotation(annotations, dcd.Spec.ModelRef)
+	delete(annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
+	return annotations
 }
 
 // GetGPUMemoryService returns the component GPU memory service config from the

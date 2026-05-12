@@ -863,7 +863,6 @@ func TestDynamoComponentDeploymentReconciler_BetaPrefillWorkloadComponentType(t 
 }
 
 func TestDynamoComponentDeploymentReconciler_getKubeAnnotations_DropsOperatorOriginVersion(t *testing.T) {
-	r := &DynamoComponentDeploymentReconciler{}
 	dcd := &v1beta1.DynamoComponentDeployment{
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -879,7 +878,7 @@ func TestDynamoComponentDeploymentReconciler_getKubeAnnotations_DropsOperatorOri
 		},
 	}
 
-	annotations := r.getKubeAnnotations(dcd)
+	annotations := dynamo.GetDCDKubeAnnotations(dcd)
 
 	require.NotContains(t, annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
 	require.Equal(t, "kubernetes", annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend])
