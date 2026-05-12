@@ -169,9 +169,9 @@ class TestRapidSupported:
         }
         assert worker_services, "Planner DGD should include worker services"
         for name, service in worker_services.items():
-            assert service.get("scalingAdapter", {}).get("enabled") is True, (
-                f"Planner worker {name} should enable DGDSA"
-            )
+            assert (
+                service.get("scalingAdapter", {}).get("enabled") is True
+            ), f"Planner worker {name} should enable DGDSA"
         assert "scalingAdapter" not in services["Planner"]
 
 

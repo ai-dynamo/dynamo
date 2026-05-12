@@ -541,9 +541,7 @@ class TestAssembleFinalConfig:
             }
         }
 
-        enable_planner_worker_scaling_adapters(
-            dgd_config, _make_planner(mode="decode")
-        )
+        enable_planner_worker_scaling_adapters(dgd_config, _make_planner(mode="decode"))
 
         assert dgd_config["spec"]["services"]["decode"]["scalingAdapter"] == {
             "enabled": True,
