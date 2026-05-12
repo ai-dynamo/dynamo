@@ -117,13 +117,11 @@ Forward Pass Metrics provide **per-iteration scheduler telemetry** pushed over Z
 
 ### Pipeline
 
-```
-SGLang Scheduler (child process)
-  SchedulerMetricsMixin._emit_fpm()
-  -> _FpmPublisherThread (ZMQ PUB, IPC per dp_rank)
-    -> FpmEventRelay (Rust, ZMQ SUB -> NATS event plane)
-      -> FpmEventSubscriber (Rust, planner)
-        -> Regression models (TTFT/ITL prediction)
+```mermaid
+flowchart LR
+    A["SGLang Scheduler<br/>(child process)"] -->|ZMQ PUB<br/>IPC per dp_rank| B["FpmEventRelay<br/>(Rust)"]
+    B -->|NATS<br/>event plane| C["FpmEventSubscriber<br/>(Rust)"]
+    C --> D["Planner<br/>regression models"]
 ```
 
 The transport is backend-agnostic: the same `FpmEventRelay` and `FpmEventSubscriber` are used by both SGLang and vLLM backends.
@@ -135,8 +133,6 @@ FPM requires the Dynamo adapter (`dynamo.sglang`) to inject the worker identity 
 The Planner subscribes to FPM via the NATS event plane. See the [Planner Guide](../../components/planner/planner-guide.md) for configuration (`load_adjustment_interval`, `max_num_fpm_samples`, `fpm_sample_bucket_size`).
 
 ### Schema
-
-FPM uses [msgspec](https://jcristharif.com/msgspec/) positional array encoding for zero-copy serialization. Field order must match exactly between the SGLang emitter and the Dynamo decoder.
 
 **ForwardPassMetrics** (top-level, one per iteration):
 
