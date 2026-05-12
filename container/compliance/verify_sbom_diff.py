@@ -68,8 +68,9 @@ def parse_target_csvs(sboms_dir: Path) -> set[PkgKey]:
             reader = csv.DictReader(f)
             for row in reader:
                 seen.add(PkgKey(row["ecosystem"], row["name"], row["version"]))
-    logger.info("Target: %d unique packages across %d ecosystems",
-                len(seen), len(csv_files))
+    logger.info(
+        "Target: %d unique packages across %d ecosystems", len(seen), len(csv_files)
+    )
     return seen
 
 
@@ -144,8 +145,9 @@ def parse_notices(notices_dir: Path) -> set[PkgKey]:
         for m in _NOTICE_HEADER_RE.finditer(text):
             name, version = m.group(1).strip(), m.group(2).strip()
             out.add(PkgKey(ecosystem, name, version))
-    logger.info("NOTICES: %d enumerated packages across %d files",
-                len(out), len(notices_files))
+    logger.info(
+        "NOTICES: %d enumerated packages across %d files", len(out), len(notices_files)
+    )
     return out
 
 
@@ -184,7 +186,9 @@ def render_report(report: DiffReport) -> str:
         f"  NOTICES entries: {len(report.notices)}",
         "",
     ]
-    missing = sorted(report.missing_from_notices, key=lambda p: (p.ecosystem, p.name, p.version))
+    missing = sorted(
+        report.missing_from_notices, key=lambda p: (p.ecosystem, p.name, p.version)
+    )
     stale = sorted(report.stale_notices, key=lambda p: (p.ecosystem, p.name, p.version))
 
     if missing:
@@ -208,7 +212,9 @@ def render_report(report: DiffReport) -> str:
         parts.append("")
 
     if not missing and not stale:
-        parts.append("OK: every added package is documented in NOTICES; no stale entries.")
+        parts.append(
+            "OK: every added package is documented in NOTICES; no stale entries."
+        )
     return "\n".join(parts)
 
 

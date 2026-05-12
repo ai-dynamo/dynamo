@@ -61,6 +61,7 @@ def load_yaml(path: Path) -> dict:
     if not path.is_file():
         return {}
     import yaml  # PyYAML
+
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
@@ -113,30 +114,50 @@ def linkage_for(row: dict, linkage_map: dict) -> str:
 # ---- Manifest writers ---------------------------------------------------
 
 
-def write_manifest_csv(rows: list[dict], base_keys: set[tuple[str, str, str]],
-                      linkage_map: dict, output_path: Path) -> None:
+def write_manifest_csv(
+    rows: list[dict],
+    base_keys: set[tuple[str, str, str]],
+    linkage_map: dict,
+    output_path: Path,
+) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f, lineterminator="\n")
-        writer.writerow([
-            "ecosystem", "name", "version", "spdx",
-            "linkage", "came_from_base", "source_url",
-        ])
-        for row in sorted(rows, key=lambda r: (r["ecosystem"], r["name"].lower(), r["version"])):
+        writer.writerow(
+            [
+                "ecosystem",
+                "name",
+                "version",
+                "spdx",
+                "linkage",
+                "came_from_base",
+                "source_url",
+            ]
+        )
+        for row in sorted(
+            rows, key=lambda r: (r["ecosystem"], r["name"].lower(), r["version"])
+        ):
             key = (row["ecosystem"], row["name"], row["version"])
-            writer.writerow([
-                row["ecosystem"],
-                row["name"],
-                row["version"],
-                row.get("spdx", ""),
-                linkage_for(row, linkage_map),
-                "yes" if key in base_keys else "no",
-                row.get("source_url", "") or "",
-            ])
+            writer.writerow(
+                [
+                    row["ecosystem"],
+                    row["name"],
+                    row["version"],
+                    row.get("spdx", ""),
+                    linkage_for(row, linkage_map),
+                    "yes" if key in base_keys else "no",
+                    row.get("source_url", "") or "",
+                ]
+            )
 
 
-def write_consolidated_cyclonedx(rows: list[dict], base_keys: set[tuple[str, str, str]],
-                                 image: str, version: str, output_path: Path) -> None:
+def write_consolidated_cyclonedx(
+    rows: list[dict],
+    base_keys: set[tuple[str, str, str]],
+    image: str,
+    version: str,
+    output_path: Path,
+) -> None:
     """Emit a single CycloneDX 1.6 BOM unioning every ecosystem's components.
 
     Components inherited from the base image are tagged with a custom
@@ -144,16 +165,20 @@ def write_consolidated_cyclonedx(rows: list[dict], base_keys: set[tuple[str, str
     them (they're attributed via the base's own OSRB submission).
     """
     purl_template = {
-        "rust":   "pkg:cargo/{name}@{version}",
+        "rust": "pkg:cargo/{name}@{version}",
         "python": "pkg:pypi/{name}@{version}",
-        "go":     "pkg:golang/{name}@{version}",
-        "dpkg":   "pkg:deb/ubuntu/{name}@{version}",
+        "go": "pkg:golang/{name}@{version}",
+        "dpkg": "pkg:deb/ubuntu/{name}@{version}",
         "native": "pkg:generic/{name}@{version}",
     }
     components: list[dict] = []
-    for row in sorted(rows, key=lambda r: (r["ecosystem"], r["name"].lower(), r["version"])):
+    for row in sorted(
+        rows, key=lambda r: (r["ecosystem"], r["name"].lower(), r["version"])
+    ):
         eco, name, ver = row["ecosystem"], row["name"], row["version"]
-        purl = purl_template.get(eco, "pkg:generic/{name}@{version}").format(name=name, version=ver)
+        purl = purl_template.get(eco, "pkg:generic/{name}@{version}").format(
+            name=name, version=ver
+        )
         c = {
             "type": "library",
             "bom-ref": purl,
@@ -206,7 +231,11 @@ def sources_archive_metadata(sources_archive: Path | None) -> dict:
     Recording the sha256 here lets OSRB verify the sources archive they
     downloaded separately matches this bundle.
     """
-    if sources_archive is None or not sources_archive.is_file() or sources_archive.stat().st_size == 0:
+    if (
+        sources_archive is None
+        or not sources_archive.is_file()
+        or sources_archive.stat().st_size == 0
+    ):
         return {"sources_archive": None, "sha256": None, "size_bytes": 0}
     digest = hashlib.sha256(sources_archive.read_bytes()).hexdigest()
     return {
@@ -227,8 +256,12 @@ def copy_modifications(modifications_dir: Path, output_dir: Path) -> int:
     return sum(1 for _ in target.rglob("*.patch") if _.is_file())
 
 
-def write_attribution_base(base_keys: set[tuple[str, str, str]], base_image: str,
-                           base_digest: str, output_path: Path) -> None:
+def write_attribution_base(
+    base_keys: set[tuple[str, str, str]],
+    base_image: str,
+    base_digest: str,
+    output_path: Path,
+) -> None:
     """Write a human-readable pointer file summarizing what was inherited.
 
     Reviewer-oriented: the per-package data is in manifest.csv; this file
@@ -238,6 +271,7 @@ def write_attribution_base(base_keys: set[tuple[str, str, str]], base_image: str
     image should show most inherited packages on the Python row).
     """
     from collections import Counter
+
     eco_counts = Counter(eco for (eco, _name, _ver) in base_keys)
 
     # Render ecosystems in a stable, predictable order; surface any
@@ -275,8 +309,15 @@ are the ones inherited from the base.)
     )
 
 
-def write_provenance(image: str, version: str, image_digest: str, base_image: str,
-                     base_digest: str, sources_meta: dict, output_path: Path) -> None:
+def write_provenance(
+    image: str,
+    version: str,
+    image_digest: str,
+    base_image: str,
+    base_digest: str,
+    sources_meta: dict,
+    output_path: Path,
+) -> None:
     out = {
         "image": image,
         "version": version,
@@ -286,7 +327,8 @@ def write_provenance(image: str, version: str, image_digest: str, base_image: st
         "build_timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "git_sha_dynamo": subprocess.run(
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=False
-        ).stdout.strip() or None,
+        ).stdout.strip()
+        or None,
         "sources": sources_meta,
     }
     output_path.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
@@ -353,7 +395,9 @@ def write_checksums(bundle_dir: Path) -> None:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         rel = path.relative_to(bundle_dir).as_posix()
         lines.append(f"{digest}  {rel}")
-    (bundle_dir / "CHECKSUMS.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (bundle_dir / "CHECKSUMS.sha256").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
 
 
 def pack_bundle(bundle_dir: Path, output_zip: Path) -> None:
@@ -366,7 +410,9 @@ def pack_bundle(bundle_dir: Path, output_zip: Path) -> None:
     """
     fixed_mtime = (1980, 1, 1, 0, 0, 0)
     paths = sorted(p for p in bundle_dir.rglob("*") if p.is_file())
-    with zipfile.ZipFile(output_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+    with zipfile.ZipFile(
+        output_zip, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
+    ) as zf:
         for path in paths:
             arcname = path.relative_to(bundle_dir.parent).as_posix()
             info = zipfile.ZipInfo(filename=arcname, date_time=fixed_mtime)
@@ -381,26 +427,52 @@ def pack_bundle(bundle_dir: Path, output_zip: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", required=True, help="Image name (e.g. dynamo-runtime)")
+    parser.add_argument(
+        "--image", required=True, help="Image name (e.g. dynamo-runtime)"
+    )
     parser.add_argument("--version", required=True, help="Image version tag")
-    parser.add_argument("--image-digest", default="", help="Resolved image digest (sha256:...)")
+    parser.add_argument(
+        "--image-digest", default="", help="Resolved image digest (sha256:...)"
+    )
     parser.add_argument("--legal-dir", type=Path, required=True)
     parser.add_argument("--sboms-dir", type=Path, required=True)
-    parser.add_argument("--sources-archive", type=Path, default=None,
-                        help="Path to the companion sources zip "
-                        "(sources-<image>-<version>-<arch>.zip). Not embedded "
-                        "in the OSRB bundle; only its sha256 + size are recorded "
-                        "in build-provenance.json for cross-verification.")
-    parser.add_argument("--base-sbom", type=Path, default=None,
-                        help="Path in container/compliance/base_sboms/<base>.cdx.json")
-    parser.add_argument("--base-image", default="", help="FROM base image string for provenance")
-    parser.add_argument("--base-image-digest", default="", help="Base image digest for provenance")
-    parser.add_argument("--linkage-map", type=Path,
-                        default=Path(__file__).resolve().parent / "linkage.yaml")
-    parser.add_argument("--modifications-dir", type=Path,
-                        default=Path(__file__).resolve().parent / "modifications")
-    parser.add_argument("--output", type=Path, required=True,
-                        help="Output zip path: osrb-<image>-<version>-<arch>.zip")
+    parser.add_argument(
+        "--sources-archive",
+        type=Path,
+        default=None,
+        help="Path to the companion sources zip "
+        "(sources-<image>-<version>-<arch>.zip). Not embedded "
+        "in the OSRB bundle; only its sha256 + size are recorded "
+        "in build-provenance.json for cross-verification.",
+    )
+    parser.add_argument(
+        "--base-sbom",
+        type=Path,
+        default=None,
+        help="Path in container/compliance/base_sboms/<base>.cdx.json",
+    )
+    parser.add_argument(
+        "--base-image", default="", help="FROM base image string for provenance"
+    )
+    parser.add_argument(
+        "--base-image-digest", default="", help="Base image digest for provenance"
+    )
+    parser.add_argument(
+        "--linkage-map",
+        type=Path,
+        default=Path(__file__).resolve().parent / "linkage.yaml",
+    )
+    parser.add_argument(
+        "--modifications-dir",
+        type=Path,
+        default=Path(__file__).resolve().parent / "modifications",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Output zip path: osrb-<image>-<version>-<arch>.zip",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -413,9 +485,12 @@ def main(argv: list[str] | None = None) -> int:
     base_keys = load_base_components(args.base_sbom)
     linkage_map = load_yaml(args.linkage_map)
 
-    logger.info("Loaded %d package rows; %d base components; %d linkage entries",
-                len(deps_rows), len(base_keys),
-                len(linkage_map.get("ecosystem_defaults", {}) or {}))
+    logger.info(
+        "Loaded %d package rows; %d base components; %d linkage entries",
+        len(deps_rows),
+        len(base_keys),
+        len(linkage_map.get("ecosystem_defaults", {}) or {}),
+    )
 
     bundle_root = args.output.parent / args.output.stem
     if bundle_root.exists():
@@ -425,16 +500,30 @@ def main(argv: list[str] | None = None) -> int:
     sources_meta = sources_archive_metadata(args.sources_archive)
 
     write_manifest_csv(deps_rows, base_keys, linkage_map, bundle_root / "manifest.csv")
-    write_consolidated_cyclonedx(deps_rows, base_keys, args.image, args.version,
-                                 bundle_root / "manifest.cdx.json")
+    write_consolidated_cyclonedx(
+        deps_rows,
+        base_keys,
+        args.image,
+        args.version,
+        bundle_root / "manifest.cdx.json",
+    )
     licenses_n = copy_license_texts(args.legal_dir, bundle_root)
     mods_n = copy_modifications(args.modifications_dir, bundle_root)
-    write_attribution_base(base_keys, args.base_image, args.base_image_digest,
-                           bundle_root / "attribution-base.txt")
-    write_provenance(args.image, args.version, args.image_digest,
-                     args.base_image, args.base_image_digest,
-                     sources_meta,
-                     bundle_root / "build-provenance.json")
+    write_attribution_base(
+        base_keys,
+        args.base_image,
+        args.base_image_digest,
+        bundle_root / "attribution-base.txt",
+    )
+    write_provenance(
+        args.image,
+        args.version,
+        args.image_digest,
+        args.base_image,
+        args.base_image_digest,
+        sources_meta,
+        bundle_root / "build-provenance.json",
+    )
     write_readme(args.image, args.version, bundle_root / "README.md")
     write_checksums(bundle_root)
     pack_bundle(bundle_root, args.output)
@@ -442,7 +531,9 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.info(
         "Wrote %s (licenses: %d files, mods: %d patches, sources_archive sha256: %s)",
-        args.output, licenses_n, mods_n,
+        args.output,
+        licenses_n,
+        mods_n,
         sources_meta.get("sha256", "n/a")[:16] if sources_meta.get("sha256") else "n/a",
     )
     return 0

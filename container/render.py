@@ -179,7 +179,7 @@ def _make_jinja_env(script_dir):
     )
 
 
-def _render_context(args):
+def _render_context(args, context=None):
     # device_key is the lookup key into context.yaml's per-device dict
     # (e.g. "cuda12.9", "xpu"). Computed here so it's available to every
     # included template — `{% set device_key = ... %}` inside an
@@ -187,6 +187,12 @@ def _render_context(args):
     # default scoping rules.
     device_key = (
         args.device + args.cuda_version if args.device == "cuda" else args.device
+    )
+    # Compliance Jinja vars consumed by templates/compliance.Dockerfile.
+    # Computed here (not in the template) so the per-target lookup
+    # against context.yaml stays in Python and the template stays declarative.
+    compliance_base_stage, compliance_baseline_sbom = _resolve_compliance_inputs(
+        args.framework, args.target, device_key, context
     )
     return dict(
         framework=args.framework,
@@ -196,13 +202,40 @@ def _render_context(args):
         platform=args.platform,
         cuda_version=args.cuda_version,
         make_efa=args.make_efa,
+        compliance_base_stage=compliance_base_stage,
+        compliance_baseline_sbom=compliance_baseline_sbom,
+    )
+
+
+def _resolve_compliance_inputs(framework, target, device_key, context):
+    """Return (base_stage, baseline_sbom_filename) for templates/compliance.Dockerfile.
+
+    The shared compliance template needs to know:
+      - which earlier stage to FROM (runtime_pre / frontend_pre / planner_builder)
+      - which baseline SBOM file to subtract (may be empty if not captured)
+    Both depend on `target` + `framework` + `device_key`, so the lookup
+    lives here rather than being repeated as Jinja expressions per template.
+    """
+    if context is None:
+        return "runtime_pre", ""
+    if target == "frontend":
+        return "frontend_pre", context.get("dynamo", {}).get(
+            "frontend_baseline_sbom", ""
+        )
+    if target == "planner":
+        return "planner_builder", context.get("dynamo", {}).get(
+            "planner_baseline_sbom", ""
+        )
+    # runtime / dev / local-dev / wheel_builder / base / framework
+    return "runtime_pre", (
+        context.get(framework, {}).get(device_key, {}).get("baseline_sbom", "")
     )
 
 
 def render(args, context, script_dir):
     env = _make_jinja_env(script_dir)
     template = env.get_template("Dockerfile.template")
-    rendered = template.render(context=context, **_render_context(args))
+    rendered = template.render(context=context, **_render_context(args, context))
     # Replace all instances of 3+ newlines with 2 newlines
     cleaned = re.sub(r"\n{3,}", "\n\n", rendered)
 

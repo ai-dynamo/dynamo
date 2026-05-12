@@ -73,7 +73,9 @@ def _enumerate_installed_dpkgs() -> set[str]:
     """Return the set of installed dpkg package names."""
     result = subprocess.run(
         ["dpkg-query", "-W", "-f=${Package}\\n"],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     )
     return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
@@ -155,7 +157,11 @@ def _maybe_enable_src(line: str) -> str:
         return line[:idx] + line[idx + 1 :].lstrip()
     if stripped.startswith("deb ") or stripped.startswith("deb\t"):
         # emit original AND a deb-src variant on the next line
-        src_variant = line.replace("deb ", "deb-src ", 1) if "deb " in line else line.replace("deb\t", "deb-src\t", 1)
+        src_variant = (
+            line.replace("deb ", "deb-src ", 1)
+            if "deb " in line
+            else line.replace("deb\t", "deb-src\t", 1)
+        )
         return f"{line}\n{src_variant}"
     return line
 
@@ -337,7 +343,7 @@ def collect_rust_sources(
     copied = 0
     skipped_first_party = 0
     missing_in_vendor: list[str] = []
-    for (name, version) in sorted(crates):
+    for name, version in sorted(crates):
         if name.startswith(_FIRST_PARTY_RUST_PREFIXES):
             skipped_first_party += 1
             continue
@@ -415,7 +421,11 @@ def collect_go_sources(go_vendor_dir: Path, output_dir: Path) -> int:
     # Approximate count of remaining modules: every leaf directory
     # under output_dir is one module's source tree. Cheap to compute,
     # useful for logs.
-    module_dirs = [d for d in output_dir.rglob("*") if d.is_dir() and any(c.suffix == ".go" for c in d.iterdir() if c.is_file())]
+    module_dirs = [
+        d
+        for d in output_dir.rglob("*")
+        if d.is_dir() and any(c.suffix == ".go" for c in d.iterdir() if c.is_file())
+    ]
     logger.info(
         "Go sources collected: ~%d module dirs (pruned %d first-party prefixes from %s)",
         len(module_dirs),
@@ -447,7 +457,9 @@ def collect_native_sources(workspace_native_dir: Path, output_dir: Path) -> int:
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     if not workspace_native_dir.is_dir():
-        logger.warning("No native source directory at %s; skipping.", workspace_native_dir)
+        logger.warning(
+            "No native source directory at %s; skipping.", workspace_native_dir
+        )
         return 0
     copied = 0
     skipped_first_party = 0
@@ -539,7 +551,9 @@ def pack_sources_zip(sources_root: Path, zip_path: Path) -> None:
         raise FileNotFoundError(f"sources root missing: {sources_root}")
     fixed_mtime = (1980, 1, 1, 0, 0, 0)
     paths = sorted(p for p in sources_root.rglob("*") if p.is_file())
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+    with zipfile.ZipFile(
+        zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6
+    ) as zf:
         for path in paths:
             arcname = path.relative_to(sources_root.parent).as_posix()
             info = zipfile.ZipInfo(filename=arcname, date_time=fixed_mtime)
@@ -547,8 +561,12 @@ def pack_sources_zip(sources_root: Path, zip_path: Path) -> None:
             info.external_attr = 0o644 << 16
             with path.open("rb") as f:
                 zf.writestr(info, f.read())
-    logger.info("Wrote %s (%.1f MB, %d files)",
-                zip_path, zip_path.stat().st_size / 1e6, len(paths))
+    logger.info(
+        "Wrote %s (%.1f MB, %d files)",
+        zip_path,
+        zip_path.stat().st_size / 1e6,
+        len(paths),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -673,9 +691,7 @@ def main(argv: list[str] | None = None) -> int:
             site_dirs, args.rust_vendor_full, args.sources_root / "rust"
         )
     if "go" in ecosystems:
-        counts["go"] = collect_go_sources(
-            args.go_vendor_dir, args.sources_root / "go"
-        )
+        counts["go"] = collect_go_sources(args.go_vendor_dir, args.sources_root / "go")
     if "native" in ecosystems:
         counts["native"] = collect_native_sources(
             args.native_source_dir, args.sources_root / "native"

@@ -67,9 +67,7 @@ def load_policy(policy_path: Path) -> Policy:
 # we see in real CycloneDX / pip-licenses output. Handles AND, OR, WITH, and
 # parenthesized groups. Returns a tree (a nested tuple).
 
-_TOKEN_RE = re.compile(
-    r"\s*(?:(\()|(\))|(AND|OR|WITH)\b|([A-Za-z0-9.+\-_]+))"
-)
+_TOKEN_RE = re.compile(r"\s*(?:(\()|(\))|(AND|OR|WITH)\b|([A-Za-z0-9.+\-_]+))")
 
 
 def _tokenize(expr: str) -> list[tuple[str, str]]:
@@ -125,7 +123,9 @@ class _Parser:
     def parse(self):
         result = self._or()
         if self.pos != len(self.tokens):
-            raise ValueError(f"trailing tokens after expression: {self.tokens[self.pos :]}")
+            raise ValueError(
+                f"trailing tokens after expression: {self.tokens[self.pos :]}"
+            )
         return result
 
     def _or(self):
@@ -244,7 +244,10 @@ def validate_row(
     if not spdx or spdx == "UNKNOWN":
         if policy.unknown_action == "deny":
             return Violation(
-                ecosystem, name, version, spdx,
+                ecosystem,
+                name,
+                version,
+                spdx,
                 "license is UNKNOWN and policy.licenses.unknown = 'deny'",
             )
         return None
@@ -264,7 +267,10 @@ def validate_row(
         tree = parse_spdx(spdx)
     except ValueError as exc:
         return Violation(
-            ecosystem, name, version, spdx,
+            ecosystem,
+            name,
+            version,
+            spdx,
             f"could not parse SPDX expression: {exc}",
         )
 
@@ -274,7 +280,9 @@ def validate_row(
     # Diagnose the failure: list every leaf and its allow/deny status.
     leaves = _collect_leaves(tree)
     denied = [n for n in leaves if n in effective_deny]
-    not_allowed = [n for n in leaves if n not in effective_allow and n not in effective_deny]
+    not_allowed = [
+        n for n in leaves if n not in effective_allow and n not in effective_deny
+    ]
     if denied:
         reason = f"contains denied license(s): {sorted(set(denied))}"
     elif not_allowed:

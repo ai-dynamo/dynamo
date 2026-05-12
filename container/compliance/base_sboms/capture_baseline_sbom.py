@@ -81,8 +81,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from container.compliance.policy import validate as policy_validate  # noqa: E402
 from container.compliance import overrides as license_overrides  # noqa: E402
+from container.compliance.policy import validate as policy_validate  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -267,10 +267,22 @@ _CANONICAL_NAME_MAP: dict[str, str] = {
 # granted...", "Redistribution and use...", "By submitting...") that
 # happen to follow a "License:" pseudo-header. Dropping them silently
 # matches what a careful auditor would do: these aren't licenses.
-_NON_LICENSE_TOKENS: frozenset[str] = frozenset({
-    "by", "permission", "redistribution", "this", "the", "see", "for",
-    "unknown", "various", "free", "other", "dual",
-})
+_NON_LICENSE_TOKENS: frozenset[str] = frozenset(
+    {
+        "by",
+        "permission",
+        "redistribution",
+        "this",
+        "the",
+        "see",
+        "for",
+        "unknown",
+        "various",
+        "free",
+        "other",
+        "dual",
+    }
+)
 
 # Some syft outputs use sha256:HEX content fingerprints as license "names"
 # when it couldn't identify the license but wants a stable tag. These are
@@ -561,7 +573,9 @@ def capture(
         try:
             baseline_sbom = syft_scan(baseline_ref, platform)
         except subprocess.CalledProcessError as exc:
-            logger.error("syft scan failed on baseline: %s", (exc.stderr or b"").decode())
+            logger.error(
+                "syft scan failed on baseline: %s", (exc.stderr or b"").decode()
+            )
             return 2
 
     # --- From-image SBOM: persisted cache under a TMPDIR by default. Not
@@ -591,11 +605,15 @@ def capture(
                 len(from_sbom.get("components", [])),
             )
     if from_sbom is None:
-        logger.info("Running syft on from-image (for delta validation; not persisted)...")
+        logger.info(
+            "Running syft on from-image (for delta validation; not persisted)..."
+        )
         try:
             from_sbom = syft_scan(from_ref, platform)
         except subprocess.CalledProcessError as exc:
-            logger.error("syft scan failed on from-image: %s", (exc.stderr or b"").decode())
+            logger.error(
+                "syft scan failed on from-image: %s", (exc.stderr or b"").decode()
+            )
             return 2
         if not no_from_sbom_cache:
             try:
