@@ -227,10 +227,20 @@ FATAL_CUDA_ERROR_PATTERNS = re.compile(
 FATAL_KV_TRANSFER_ERROR_PATTERNS = re.compile(
     "|".join(
         [
+            # C++ error strings (these typically appear in TRT-LLM logs but
+            # are masked by the Python wrapper below; included so we still
+            # match if a future TRT-LLM release surfaces them through to
+            # the Python RequestError):
             r"Cannot assign cache transfer buffer.*poisoned",
             r"previous transfer left the buffer pool poisoned",
             r"Poisoned .* cache transfer buffer",
             r"process must restart before these memory ranges",
+            # Python wrapper string that TRT-LLM's _check_disagg_*_status
+            # actually raises to dynamo as a RequestError. In disaggregated
+            # mode, any "Error in kv cache transfer" (context or generation)
+            # is the practical signal that the worker is in an unrecoverable
+            # state — restart it.
+            r"Error in kv cache transfer for (context|generation) requests",
         ]
     ),
     re.IGNORECASE,
