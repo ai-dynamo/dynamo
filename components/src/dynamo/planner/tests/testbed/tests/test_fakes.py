@@ -17,6 +17,13 @@ import pytest
 if TYPE_CHECKING:
     from dynamo.planner.tests.testbed.scenarios import ScenarioSpec
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------

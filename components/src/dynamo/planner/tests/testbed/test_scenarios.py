@@ -19,6 +19,13 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+    pytest.mark.planner,
+]
+
 # ---------------------------------------------------------------------------
 # Scenario discovery
 # ---------------------------------------------------------------------------

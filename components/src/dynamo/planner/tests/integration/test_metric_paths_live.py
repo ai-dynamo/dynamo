@@ -67,7 +67,12 @@ from dynamo.planner.monitoring.traffic_metrics import (  # noqa: E402
     PrometheusAPIClient,
 )
 
-pytestmark = [pytest.mark.integration, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+    pytest.mark.planner,
+]
 
 
 # ---------------------------------------------------------------------------

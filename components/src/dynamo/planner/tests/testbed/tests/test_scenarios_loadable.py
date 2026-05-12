@@ -19,6 +19,13 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
+
 _SCENARIOS_DIR = Path(__file__).parent.parent / "scenarios"
 
 

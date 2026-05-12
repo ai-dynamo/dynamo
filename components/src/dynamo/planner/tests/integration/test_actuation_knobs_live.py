@@ -71,7 +71,12 @@ from dynamo.planner.connectors.kubernetes import KubernetesConnector  # noqa: E4
 from dynamo.planner.connectors.kubernetes_api import KubernetesAPI  # noqa: E402
 from dynamo.planner.core.budget import POWER_ANNOTATION_KEY  # noqa: E402
 
-pytestmark = [pytest.mark.integration, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+    pytest.mark.planner,
+]
 
 
 # ---------------------------------------------------------------------------

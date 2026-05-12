@@ -18,6 +18,13 @@ import pytest
 if TYPE_CHECKING:
     from dynamo.planner.tests.testbed.recorder import TickHistory
 
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+    pytest.mark.planner,
+]
+
 _SCENARIOS_DIR = Path(__file__).parent.parent / "scenarios"
 
 

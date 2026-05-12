@@ -17,6 +17,15 @@ from __future__ import annotations
 import math
 import random
 
+import pytest
+
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
+
 # ---------------------------------------------------------------------------
 # Helpers — build an overlay against the actual current API
 # (SystemSpec is per-SKU constants; OverlaySpec.system is a SKU name string).
