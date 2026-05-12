@@ -195,6 +195,10 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
+      # TEMP probe: bust caches to test the cache-poisoning hypothesis for the
+      # kvbm/NIXL undefined-symbol ImportError that's reproduced on main HEAD.
+      # Revert once we've confirmed the cause.
+      no_cache: true
     secrets: inherit
 
   vllm-dev-build:
