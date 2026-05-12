@@ -81,9 +81,7 @@ def add_argument(
         arg_type: Type for the argument (default: str)
     """
     arg_dest = _get_dest_name(flag_name, kwargs.get("dest"))
-    value_type_for_env: Optional[Union[type, Callable[..., Any]]] = None
-    if arg_type is not None and isinstance(arg_type, type):
-        value_type_for_env = arg_type
+    value_type_for_env: Optional[Union[type, Callable[..., Any]]] = arg_type
     if isinstance(default, list) and (arg_type is None or arg_type is str):
         value_type_for_env = None
     default_with_env = env_or_default(env_var, default, value_type=value_type_for_env)

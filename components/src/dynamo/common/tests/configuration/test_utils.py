@@ -149,7 +149,7 @@ class TestAddArgument:
         assert args.model_name is None
 
     def test_callable_type_with_invalid_env_value_fails_parse(self, monkeypatch):
-        """Test invalid env value still fails validation via argparse type callable."""
+        """Test invalid env value is rejected by the callable validator at registration."""
         monkeypatch.setenv("TEST_MODEL_NAME", "   ")
         parser = argparse.ArgumentParser()
 
@@ -158,17 +158,42 @@ class TestAddArgument:
                 raise argparse.ArgumentTypeError("model-name must be non-empty")
             return value.strip()
 
+        with pytest.raises((SystemExit, argparse.ArgumentTypeError)):
+            add_argument(
+                parser,
+                flag_name="--model-name",
+                env_var="TEST_MODEL_NAME",
+                default=None,
+                help="Model name",
+                arg_type=validate_model_name,
+            )
+            parser.parse_args([])
+
+    def test_nullable_callable_type_with_typed_default_uses_env(self, monkeypatch):
+        """Callable arg_type must convert env values even when default is non-None.
+
+        Regression: previously the env path fell back to type(default) (e.g. float)
+        because callables are not types, so env var "None" raised ValueError on float("None").
+        """
+        monkeypatch.setenv("TEST_THRESHOLD", "None")
+        parser = argparse.ArgumentParser()
+
+        def nullable_float(value):
+            if value is None or value == "None":
+                return None
+            return float(value)
+
         add_argument(
             parser,
-            flag_name="--model-name",
-            env_var="TEST_MODEL_NAME",
-            default=None,
-            help="Model name",
-            arg_type=validate_model_name,
+            flag_name="--threshold",
+            env_var="TEST_THRESHOLD",
+            default=1.0,
+            help="Threshold",
+            arg_type=nullable_float,
         )
 
-        with pytest.raises(SystemExit):
-            parser.parse_args([])
+        args = parser.parse_args([])
+        assert args.threshold is None
 
 
 class TestAddNegatableBool:
