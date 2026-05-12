@@ -325,6 +325,76 @@ async def test_init_llm_worker_engine_args_with_extra_engine_args(
         assert config.max_batch_size == 512
 
 
+@pytest.mark.asyncio
+async def test_arg_map_preserves_user_engine_args(tmp_path, monkeypatch, caplog):
+    """User-supplied load_format, return_perf_metrics, and max_seq_len from --extra-engine-args YAML survive Dynamo massaging.
+
+    Regression test for dynamo issue 9288 — the init_llm_worker arg_map
+    construction silently clobbered user-supplied values:
+      1. load_format (line 274 unconditional assignment).
+      2. return_perf_metrics (initially set before YAML is parsed; re-applied after).
+
+    The _warn_override_collisions call for the YAML path was also missing.
+    """
+    monkeypatch.delenv("DYN_TRTLLM_MAX_SEQ_LEN", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+
+    yaml_file = tmp_path / "engine_override.yaml"
+    yaml_file.write_text(
+        "load_format: fp8\nreturn_perf_metrics: true\nmax_seq_len: 8192\n"
+    )
+
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--max-seq-len",
+            "131072",
+            "--extra-engine-args",
+            str(yaml_file),
+        ]
+    )
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+        engine_args = exc_info.value.engine_args
+        # load_format fix: user-supplied YAML value must survive the
+        # unconditional arg_map["load_format"] = engine_load_format line.
+        assert engine_args["load_format"] == "fp8", (
+            f"Expected load_format=fp8 from YAML override, "
+            f"got {engine_args['load_format']}"
+        )
+        # return_perf_metrics fix: user-supplied True from YAML must not be
+        # silently downgraded to False by the initial arg_map default or
+        # by the kv_cache event buffer massaging block.
+        assert engine_args["return_perf_metrics"] is True, (
+            f"Expected return_perf_metrics=True from YAML override, "
+            f"got {engine_args['return_perf_metrics']}"
+        )
+        # max_seq_len already passes through update_llm_args_with_extra_options
+        # (non-destructive merge); this is a belt-and-suspenders check.
+        assert engine_args["max_seq_len"] == 8192, (
+            f"Expected max_seq_len=8192 from YAML override, "
+            f"got {engine_args['max_seq_len']}"
+        )
+
+
 class MultimodalProcessorInstantiated(Exception):
     """Custom exception for testing MultimodalRequestProcessor."""
 
