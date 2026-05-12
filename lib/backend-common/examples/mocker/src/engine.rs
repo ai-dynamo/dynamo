@@ -24,8 +24,8 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use dynamo_backend_common::{
     AsyncEngineContext, BackendError, CommonArgs, DisaggregationMode, DynamoError, EngineConfig,
-    ErrorType, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, WorkerConfig,
-    chunk, usage,
+    ErrorType, GenerateContext, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
+    PreprocessedRequest, WorkerConfig, chunk, usage,
 };
 use dynamo_mocker::common::protocols::{
     DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
@@ -280,7 +280,7 @@ impl LLMEngine for MockerBackend {
     async fn generate(
         &self,
         request: PreprocessedRequest,
-        ctx: Arc<dyn AsyncEngineContext>,
+        ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         let request_tx = self
             .request_tx
@@ -345,7 +345,7 @@ impl LLMEngine for MockerBackend {
             uuid,
             ActiveEntry {
                 tx,
-                ctx: ctx.clone(),
+                ctx: ctx.inner_arc(),
             },
         );
 
@@ -489,6 +489,12 @@ mod tests {
     use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
     use futures::StreamExt;
 
+    /// Wraps a runtime context into a `GenerateContext` for tests. None of the
+    /// mocker tests exercise the deferred-abort path so `first_token` is None.
+    fn gen_ctx(ctx: Arc<dyn AsyncEngineContext>) -> GenerateContext {
+        GenerateContext::new(ctx, None)
+    }
+
     fn test_engine() -> MockerBackend {
         test_engine_with_mode(DisaggregationMode::Aggregated)
     }
@@ -572,7 +578,7 @@ mod tests {
         // The engine must still serve after the rejected double-start.
         let ctx = Context::new(());
         let stream = engine
-            .generate(request(Some(2)), ctx.context())
+            .generate(request(Some(2)), gen_ctx(ctx.context()))
             .await
             .expect("engine must still be usable after rejected double-start");
         let chunks: Vec<_> = collect_ok(stream).await;
@@ -610,7 +616,7 @@ mod tests {
     async fn generate_before_start_is_an_error() {
         let engine = test_engine();
         let ctx = Context::new(());
-        let result = engine.generate(request(Some(1)), ctx.context()).await;
+        let result = engine.generate(request(Some(1)), gen_ctx(ctx.context())).await;
         let Err(err) = result else {
             panic!("expected generate() to fail before start()");
         };
@@ -627,7 +633,7 @@ mod tests {
 
         let ctx = Context::new(());
         let stream = engine
-            .generate(request(Some(0)), ctx.context())
+            .generate(request(Some(0)), gen_ctx(ctx.context()))
             .await
             .expect("stream");
         let chunks: Vec<_> = collect_ok(stream).await;
@@ -658,7 +664,7 @@ mod tests {
         let ctrl = ctx.context();
         ctrl.stop_generating();
         let stream = engine
-            .generate(request(Some(0)), ctrl)
+            .generate(request(Some(0)), gen_ctx(ctrl))
             .await
             .expect("stream");
         let chunks: Vec<_> = collect_ok(stream).await;
@@ -680,7 +686,7 @@ mod tests {
         let ctx = Context::new(());
         let ctrl = ctx.context();
         let stream = engine
-            .generate(request(Some(4)), ctrl)
+            .generate(request(Some(4)), gen_ctx(ctrl))
             .await
             .expect("stream");
         let chunks: Vec<_> = collect_ok(stream).await;
@@ -707,7 +713,7 @@ mod tests {
         let ctx = Context::new(());
         let ctrl = ctx.context();
         let stream = engine
-            .generate(request(Some(10_000)), ctrl.clone())
+            .generate(request(Some(10_000)), gen_ctx(ctrl.clone()))
             .await
             .expect("stream");
         ctrl.stop_generating();
@@ -750,7 +756,7 @@ mod tests {
         engine.start(0).await.unwrap();
 
         let stream = engine
-            .generate(request(Some(5)), Context::new(()).context())
+            .generate(request(Some(5)), gen_ctx(Context::new(()).context()))
             .await
             .expect("stream");
         let chunks = collect_ok(stream).await;
@@ -785,7 +791,7 @@ mod tests {
         engine.start(0).await.unwrap();
 
         let result = engine
-            .generate(request(Some(2)), Context::new(()).context())
+            .generate(request(Some(2)), gen_ctx(Context::new(()).context()))
             .await;
         let Err(err) = result else {
             panic!("decode without prefill_result must error");
@@ -807,7 +813,7 @@ mod tests {
             "mocker_handle": "synthetic-from-test",
         }));
         let stream = engine
-            .generate(req, Context::new(()).context())
+            .generate(req, gen_ctx(Context::new(()).context()))
             .await
             .expect("stream");
         let chunks = collect_ok(stream).await;

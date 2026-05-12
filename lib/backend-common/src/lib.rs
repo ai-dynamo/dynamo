@@ -27,9 +27,9 @@ pub mod worker;
 pub use args::CommonArgs;
 pub use disagg::DisaggregationMode;
 pub use engine::{
-    AsyncEngineContext, BootstrapInfo, CompletionUsage, EngineConfig, FinishReason, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, OutputOptions, PrefillResult, PreprocessedRequest,
-    SamplingOptions, StopConditions, chunk, usage,
+    AsyncEngineContext, BootstrapInfo, CompletionUsage, EngineConfig, FinishReason,
+    GenerateContext, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, OutputOptions, PrefillResult,
+    PreprocessedRequest, SamplingOptions, StopConditions, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use run::run;

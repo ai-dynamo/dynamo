@@ -10,10 +10,12 @@
 //! Object-safety: every instance method takes `&self`. `Arc<dyn LLMEngine>` is
 //! the handle `Worker` drives the lifecycle through.
 
+use std::ops::Deref;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use tokio::sync::watch;
 
 use crate::error::DynamoError;
 
@@ -26,6 +28,55 @@ pub use dynamo_llm::protocols::common::{
 };
 pub use dynamo_protocols::types::CompletionUsage;
 pub use dynamo_runtime::engine::AsyncEngineContext;
+
+/// Per-request handle wrapping the runtime context. `Deref`s to
+/// `dyn AsyncEngineContext` so engine code uses it transparently.
+pub struct GenerateContext {
+    inner: Arc<dyn AsyncEngineContext>,
+    /// Decode-mode first-token signal. `Some` only on decode-mode requests;
+    /// `None` otherwise.
+    first_token: Option<watch::Sender<bool>>,
+}
+
+impl GenerateContext {
+    pub fn new(
+        inner: Arc<dyn AsyncEngineContext>,
+        first_token: Option<watch::Sender<bool>>,
+    ) -> Self {
+        Self { inner, first_token }
+    }
+
+    /// Clone the underlying runtime context Arc — for spawned tasks
+    /// outliving `generate`'s scope.
+    pub fn inner_arc(&self) -> Arc<dyn AsyncEngineContext> {
+        self.inner.clone()
+    }
+
+    /// Fire the first-token signal. Idempotent; no-op on non-decode
+    /// requests. Engines normally don't need this — the framework
+    /// auto-fires on the first non-empty chunk. Use only when first-token
+    /// is observable via a side channel before the main stream yields.
+    pub fn notify_first_token(&self) {
+        if let Some(tx) = &self.first_token {
+            let _ = tx.send(true);
+        }
+    }
+
+    /// Framework-internal: borrow the underlying Sender for cross-boundary
+    /// threading (PyO3 mirrors this handle into Python's `Context` so
+    /// `notify_first_token()` fires the same signal). Rust engines should
+    /// call [`notify_first_token`](Self::notify_first_token) instead.
+    pub fn first_token_sender(&self) -> Option<&watch::Sender<bool>> {
+        self.first_token.as_ref()
+    }
+}
+
+impl Deref for GenerateContext {
+    type Target = dyn AsyncEngineContext;
+    fn deref(&self) -> &Self::Target {
+        &*self.inner
+    }
+}
 
 /// Registration metadata returned by [`LLMEngine::start`].
 ///
@@ -138,7 +189,7 @@ pub trait LLMEngine: Send + Sync + 'static {
     async fn generate(
         &self,
         request: PreprocessedRequest,
-        ctx: Arc<dyn AsyncEngineContext>,
+        ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError>;
 
     /// Abort an in-flight request (optional, default no-op).

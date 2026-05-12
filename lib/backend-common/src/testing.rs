@@ -31,7 +31,7 @@ use dynamo_runtime::engine::AsyncEngineContext;
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::StreamExt;
 
-use crate::engine::LLMEngine;
+use crate::engine::{GenerateContext, LLMEngine};
 use ConformanceFailure::*;
 
 const DEFAULT_CANCEL_DEADLINE: Duration = Duration::from_secs(2);
@@ -187,7 +187,7 @@ async fn check_single_generate<E: LLMEngine>(
 ) -> Result<(), ConformanceFailure> {
     let ctx = mock_context();
     let stream = engine
-        .generate(request(model), ctx)
+        .generate(request(model), GenerateContext::new(ctx, None))
         .await
         .map_err(|e| GenerateFailed(e.to_string()))?;
     let items: Vec<_> = stream.collect().await;
@@ -229,7 +229,7 @@ async fn check_concurrent_generates<E: LLMEngine>(
     let futs = (0..CONCURRENT).map(|_| async {
         let ctx = mock_context();
         let stream = engine
-            .generate(request(model), ctx)
+            .generate(request(model), GenerateContext::new(ctx, None))
             .await
             .map_err(|e| ConcurrentGenerateFailed(e.to_string()))?;
         let n = stream.count().await;
@@ -258,7 +258,7 @@ async fn check_cancellation<E: LLMEngine>(
     let stream = engine
         .generate(
             request_with_max_tokens(model, Some(LONG_MAX_TOKENS)),
-            ctx.clone(),
+            GenerateContext::new(ctx.clone(), None),
         )
         .await
         .map_err(|e| GenerateFailed(e.to_string()))?;

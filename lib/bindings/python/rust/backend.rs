@@ -521,7 +521,7 @@ impl LLMEngine for PyLLMEngine {
     async fn generate(
         &self,
         request: PreprocessedRequest,
-        ctx: Arc<dyn AsyncEngineContext>,
+        ctx: dynamo_backend_common::GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
@@ -538,12 +538,15 @@ impl LLMEngine for PyLLMEngine {
             }
         });
 
+        let first_token = ctx.first_token_sender().cloned();
+        let inner_ctx = ctx.inner_arc();
+
         // Pythonize the request, call generate(request, context=ctx), and
         // turn the resulting Python async generator into a Rust stream.
         let stream = tokio::task::spawn_blocking(move || -> PyResult<_> {
             Python::with_gil(|py| {
                 let py_request = pythonize(py, &request)?;
-                let py_ctx = Py::new(py, PyContext::new(ctx, trace_context))?;
+                let py_ctx = Py::new(py, PyContext::new(inner_ctx, trace_context, first_token))?;
 
                 let kwargs = PyDict::new(py);
                 kwargs.set_item("context", &py_ctx)?;
@@ -634,7 +637,7 @@ impl LLMEngine for PyLLMEngine {
             let py_future = tokio::task::spawn_blocking(move || {
                 Python::with_gil(|py| -> PyResult<_> {
                     let bound = engine.bind(py);
-                    let py_ctx = Py::new(py, PyContext::new(ctx, trace_context))?;
+                    let py_ctx = Py::new(py, PyContext::new(ctx, trace_context, None))?;
                     let coroutine = bound.call_method1("abort", (py_ctx,))?;
                     let locals = TaskLocals::new(event_loop.bind(py).clone());
                     pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)

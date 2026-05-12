@@ -473,7 +473,10 @@ impl Worker {
             self.config.endpoint
         );
 
-        let ingress = Ingress::for_engine(Arc::new(EngineAdapter::new(self.engine.clone())))
+        let ingress = Ingress::for_engine(Arc::new(EngineAdapter::new(
+            self.engine.clone(),
+            self.config.disaggregation_mode,
+        )))
             .map_err(|e| {
                 err(
                     ErrorType::Backend(BackendError::Unknown),
@@ -1058,7 +1061,7 @@ mod tests {
         async fn generate(
             &self,
             _request: PreprocessedRequest,
-            _ctx: Arc<dyn crate::engine::AsyncEngineContext>,
+            _ctx: crate::engine::GenerateContext,
         ) -> Result<
             BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
             DynamoError,
@@ -1192,7 +1195,7 @@ mod tests {
         async fn generate(
             &self,
             _request: PreprocessedRequest,
-            _ctx: Arc<dyn crate::engine::AsyncEngineContext>,
+            _ctx: crate::engine::GenerateContext,
         ) -> Result<
             BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
             DynamoError,

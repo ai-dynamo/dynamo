@@ -397,6 +397,13 @@ class Context:
         """
         ...
 
+    def notify_first_token(self) -> None:
+        """Fire the first-token signal so the framework can release any
+        deferred ``engine.abort()``. Idempotent; no-op on non-decode
+        requests. Engines normally don't need this — the framework
+        auto-fires on the first non-empty chunk in the response stream."""
+        ...
+
     @property
     def trace_id(self) -> Optional[str]:
         """
