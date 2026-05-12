@@ -58,11 +58,18 @@ case "$CONFIG" in
     DEPLOY_KIND="deployment"
     DEPLOY_NAME="qwen35-vllm-serve"
     BENCH_POD="qwen35-bench"
+    # Service the bench Pod hits at http://$FRONTEND:8000.
+    BENCH_FRONTEND="qwen35-vllm-serve"
+    # Sub-dir under /perf-cache/artifacts/qwen35_fp8/ for this config's run.
+    BENCH_RUN_LABEL="vllm-serve"
     ;;
   dynamo-fd)
     DEPLOY_KIND="dgd"
     DEPLOY_NAME="qwen35-dynamo-fd"
     BENCH_POD="qwen35-fd-bench"
+    # The Dynamo operator auto-creates a <dgd-name>-frontend Service.
+    BENCH_FRONTEND="qwen35-dynamo-fd-frontend"
+    BENCH_RUN_LABEL="dynamo-fd"
     ;;
   "")
     echo "ERROR: --config <name> required" >&2
@@ -73,6 +80,9 @@ case "$CONFIG" in
     echo "Available: vllm-serve dynamo-fd" >&2
     exit 2 ;;
 esac
+# Export the per-config knobs so envsubst can substitute them into the
+# shared root-level perf.yaml at apply time.
+export BENCH_POD BENCH_FRONTEND BENCH_RUN_LABEL
 
 HW_ENV="$HERE/hw/${HW}.env"
 if [[ ! -f "$HW_ENV" ]]; then
@@ -99,9 +109,11 @@ else
   K="kubectl -n $NAMESPACE"
   echo "[ctx]    using current-context $(kubectl config current-context 2>/dev/null || echo '<none>')"
 fi
-# Limit envsubst to our own hw vars so embedded ${MODEL_NAME} /
-# ${KEEP_INPUTS_JSON:-} shell vars in perf.yaml's inline script stay literal.
-TPL_VARS='$VLLM_IMAGE $HW_NODE_SELECTOR $HW_TOLERATIONS'
+# Limit envsubst to our own hw + per-config vars so the embedded shell
+# vars inside perf.yaml's inline bash (${MODEL_NAME}, ${KEEP_INPUTS_JSON:-},
+# ${FRONTEND}, ${RUN_LABEL}, ${RUN_DIR}, ${AIPERF_GIT_REF}, ...) stay
+# literal. The bash-side vars are resolved at runtime inside the Pod.
+TPL_VARS='$VLLM_IMAGE $HW_NODE_SELECTOR $HW_TOLERATIONS $BENCH_POD $BENCH_FRONTEND $BENCH_RUN_LABEL'
 APPLY_TPL() { envsubst "$TPL_VARS" <"$1" | $K apply -f -; }
 
 # ---------------- config-agnostic prep ----------------
@@ -170,7 +182,11 @@ deploy() {
 
 bench() {
   $K delete pod "$BENCH_POD" --ignore-not-found
-  APPLY_TPL "$CONFIG_DIR/perf.yaml"
+  # Shared root-level perf.yaml — not $CONFIG_DIR/perf.yaml. The
+  # per-config knobs (pod name, frontend service, run sub-dir) come
+  # from envsubst on $BENCH_POD / $BENCH_FRONTEND / $BENCH_RUN_LABEL,
+  # which run-benchmark.sh's case statement exports.
+  APPLY_TPL "$HERE/perf.yaml"
   $K wait --for=condition=Ready "pod/$BENCH_POD" --timeout=300s
   echo "[bench] pod Ready; polling for .aiperf-done sentinel (max ~50 min)"
   # Don't trust `kubectl logs -f` as a synchronization primitive — under
@@ -179,7 +195,7 @@ bench() {
   # run that way once). The bench Pod writes a /perf-cache/artifacts/.../
   # .aiperf-done sentinel after aiperf finishes and the inputs.json
   # cleanup runs (see perf.yaml). Poll for it via `kubectl exec ls`.
-  local sentinel="/perf-cache/artifacts/qwen35_fp8/${CONFIG}/.aiperf-done"
+  local sentinel="/perf-cache/artifacts/qwen35_fp8/${BENCH_RUN_LABEL}/.aiperf-done"
   local deadline=$((SECONDS + 3000))   # 50 min
   while (( SECONDS < deadline )); do
     if $K exec "$BENCH_POD" -- test -f "$sentinel" 2>/dev/null; then

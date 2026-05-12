@@ -83,7 +83,7 @@ spec:
                 --port 8000 \
                 --tensor-parallel-size 8 \
                 --enable-expert-parallel \
-                --gpu-memory-utilization 0.90 \
+                --gpu-memory-utilization 0.85 \
                 --max-model-len 32768 \
                 --mm-encoder-tp-mode data \
                 --mm-processor-cache-gb 30 \

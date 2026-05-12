@@ -60,10 +60,11 @@ export NAMESPACE=<your-namespace>
 # per config). Artifacts land under
 # ~/workspace/dynamo-tmp/logs/<MM-DD>/qwen35-fp8-h100/{vllm-serve,dynamo-fd}/.
 ./run-all-benchmarks.sh -n ${NAMESPACE}
-
-# 2-way comparison:
-python3 compare.py ~/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen35-fp8-h100/
 ```
+
+Each config's `profile_export_aiperf.json` is the contract output;
+extract numbers or run analysis tooling over them separately
+(deliberately not shipped in the recipe).
 
 Or step-by-step for a single config:
 
@@ -81,7 +82,7 @@ qwen3.5-397b-fp8/
 ├── README.md
 ├── run-benchmark.sh            # Unified driver — branches on --config/--hw
 ├── run-all-benchmarks.sh       # Sequential 2-config orchestrator
-├── compare.py                  # 2-way comparison (throughput, TTFT, ITL)
+├── perf.yaml                   # ONE shared aiperf bench Pod template
 ├── hw/
 │   └── h100.env                # Hardware axis (8×H100, shared across both configs)
 ├── model-cache/
@@ -89,12 +90,16 @@ qwen3.5-397b-fp8/
 ├── data-gen/
 │   └── generate-datasets-job.yaml
 ├── vllm-serve/
-│   ├── deploy.yaml             # Templated (image, nodeSelector, tolerations)
-│   └── perf.yaml               # Templated
+│   └── deploy.yaml             # Templated (image, nodeSelector, tolerations)
 └── dynamo-fd/
-    ├── deploy.yaml             # DynamoGraphDeployment, frontend-decoding ON
-    └── perf.yaml
+    └── deploy.yaml             # DynamoGraphDeployment, frontend-decoding ON
 ```
+
+The shared `perf.yaml` is parameterized via envsubst on three
+per-config vars exported by `run-benchmark.sh`'s case statement:
+`$BENCH_POD`, `$BENCH_FRONTEND` (Service the bench Pod hits), and
+`$BENCH_RUN_LABEL` (sub-dir under `/perf-cache/artifacts/qwen35_fp8/`).
+Only `deploy.yaml` legitimately differs per config.
 
 ## Hardware target
 
@@ -137,11 +142,26 @@ The HF cache is mounted at the root so any model already cached in
 the namespace is reused. The Qwen3.5-397B-A17B-FP8 download lands in
 the standard `hub/models--Qwen--Qwen3.5-397B-A17B-FP8/` directory.
 
-If your cluster doesn't pre-provision `shared-model-cache`, create one
-yourself before running the recipe — RWX access mode, ≥600 GiB, pick
-an RWX storage class (e.g. `dgxc-enterprise-file` on dgxc, FSx Lustre
-on AWS). The recipe will not create it for you; `run-benchmark.sh`
-errors out if the PVC is missing.
+If your cluster doesn't pre-provision `shared-model-cache`, create
+one yourself before running the recipe. The driver's `pvc()` step
+asserts the PVC exists and errors out otherwise — it deliberately
+does NOT apply a stub manifest. Copy-paste, swap the
+`storageClassName` for an RWX/Retain class on your cluster (e.g.
+`dgxc-enterprise-file` on dgxc, an FSx Lustre class on AWS — never
+`ebs`, which is RWO + AZ-pinned), and apply:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-model-cache
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 600Gi
+  storageClassName: <your-rwx-storage-class>
+```
 
 ## aiperf install
 
@@ -152,8 +172,8 @@ Our sliding-window dataset writes one row per `(user, turn)` with
 `session_id=user_<N>`; PR 824 is what makes aiperf's `single_turn`
 mode honor that ordering so prefix-cache hits across turns are real.
 
-The pin lives in `<config>/perf.yaml` (`AIPERF_GIT_REF` env var, identical
-across both configs). Bump when you want newer aiperf fixes.
+The pin lives in the shared `perf.yaml` (`AIPERF_GIT_REF` env var).
+Bump when you want newer aiperf fixes.
 
 ## Naming & ownership
 
@@ -183,9 +203,14 @@ kubectl -n "$NAMESPACE" get pvc,deploy,job,pod \
   any one user are sent in causal order, letting prefix-cache hits land.
 - The vllm command in `deploy.yaml` uses `--tensor-parallel-size 8
   --enable-expert-parallel --mm-encoder-tp-mode data
-  --mm-processor-cache-gb 30 --max-model-len 32768` to fit
-  Qwen3.5-397B-A17B-FP8 across the 8 H100s with multimodal
-  context (5×2400x1080 base64 images per turn). NCCL watchdog is
+  --mm-processor-cache-gb 30 --max-model-len 32768
+  --gpu-memory-utilization 0.85` to fit Qwen3.5-397B-A17B-FP8
+  across the 8 H100s with multimodal context (5×2400x1080 base64
+  images per turn). `--gpu-memory-utilization` is deliberately
+  matched at 0.85 across both configs — the obvious move is to set
+  vllm-serve to 0.90 (it has no encoder cache consumer) but matching
+  keeps the comparison apples-to-apples since the headline metrics
+  are throughput / prefill-bound, not VRAM-bound. NCCL watchdog is
   relaxed to 1800 s on both server and worker pods so DeepGEMM JIT +
   cudagraph capture don't trigger a spurious heartbeat SIGABRT.
 - First-time deploy is slow: image pull (~3 min) + 400 GiB weight load
