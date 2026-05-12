@@ -33,7 +33,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	// Inter-pod GMS additionally needs DYN_VLLM_GMS_SHADOW_MODE, whose name
 	// is a vLLM upstream convention rather than a statement about whether
 	// shadow pods are present.
-	if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
+	if GetGPUMemoryService(component) != nil {
 		EnsureVLLMGMSLoadFormat(container)
 	}
 	if component.IsInterPodGMSEnabled() {
