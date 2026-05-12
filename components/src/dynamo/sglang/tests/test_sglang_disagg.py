@@ -11,6 +11,9 @@ at top level — gated with ``importorskip``.
 
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import MagicMock
+
 import pytest
 
 pytest.importorskip(
@@ -19,7 +22,10 @@ pytest.importorskip(
 )
 
 from dynamo.common.constants import DisaggregationMode  # noqa: E402
-from dynamo.sglang.llm_engine import SglangLLMEngine  # noqa: E402
+from dynamo.sglang.llm_engine import (  # noqa: E402
+    SglangDeferredAbort,
+    SglangLLMEngine,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -136,3 +142,17 @@ def test_decode_bootstrap_raises_when_required_field_missing():
                 "bootstrap_info": {"bootstrap_host": "h", "bootstrap_port": 1},
             }
         )
+
+
+@pytest.mark.asyncio
+async def test_sglang_deferred_abort_invokes_tokenizer_abort_request():
+    """`SglangDeferredAbort._do_abort_now` forwards to
+    `tokenizer_manager.abort_request(rid=..., abort_all=False)`."""
+    tokenizer_manager = MagicMock()
+    guard = SglangDeferredAbort(tokenizer_manager, "req-xyz")
+    guard.signal_first_token()
+    guard.abort()
+    await asyncio.sleep(0)
+    tokenizer_manager.abort_request.assert_called_once_with(
+        rid="req-xyz", abort_all=False
+    )
