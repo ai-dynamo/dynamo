@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for BuiltinThroughputPropose (PR 6 6-3).
+"""Unit tests for BuiltinThroughputPropose.
 
 Parity-focused: for each mode, seed a PSM with identical config + caps
 + regression + predictions, drive ``PSM._advance_throughput(traffic)``,
@@ -14,7 +14,7 @@ numerical output bit-for-bit.
 - PSM's ``_advance_throughput`` applies per-component budget via
   ``_apply_single_budget`` INSIDE the throughput path when
   ``enable_load_scaling=False``. The builtin does NOT apply budget —
-  that's the CONSTRAIN stage's job (PR 6 6-6). So we compare:
+  that's the CONSTRAIN stage's job. So we compare:
     * ``enable_load_scaling=True`` path: PSM returns None (sets lower
       bound); builtin emits AT_LEAST(num_p, num_d) — comparable by
       checking builtin's replicas against PSM's would-be ``desired``
@@ -244,8 +244,8 @@ def _benchmark_fpms_for_agg(worker_id="w1"):
 
 @pytest.mark.asyncio
 async def test_enable_load_publishes_lower_bound_and_returns_accept():
-    # v11 § M-K (plugin decomposition): with enable_load_scaling=True,
-    # throughput-propose is a **side-effect-only** plugin — it writes
+    # With enable_load_scaling=True, throughput-propose is a
+    # **side-effect-only** plugin — it writes
     # the computed lower bound to the orchestrator's shared state and
     # returns ACCEPT; load-propose reads the bound in its own decision.
     # No AT_LEAST is emitted (that would double-apply the floor in the

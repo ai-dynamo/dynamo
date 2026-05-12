@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for PluginFrameworkMetrics (PR 8 sub-task 8-2)."""
+"""Tests for PluginFrameworkMetrics."""
 
 from __future__ import annotations
 
@@ -277,11 +277,11 @@ def test_default_registry_construction_succeeds():
     """Without an explicit registry, metrics land on the global REGISTRY.
     The production path must be usable without changing anything.
 
-    Note: ``OrchestratorEngineAdapter.__init__`` now claims these metric
-    names on the global REGISTRY at first construction (PR 8 final
-    wiring fix). Other tests that construct the adapter therefore race
-    with this one. We skip when names are already registered — the
-    production path is the same either way.
+    Note: ``OrchestratorEngineAdapter.__init__`` claims these metric
+    names on the global REGISTRY at first construction. Other tests
+    that construct the adapter therefore race with this one. We skip
+    when names are already registered — the production path is the
+    same either way.
     """
     from prometheus_client import REGISTRY
 
@@ -319,7 +319,7 @@ def test_default_registry_construction_succeeds():
 
 
 # ---------------------------------------------------------------------------
-# PR 8 8-3 family-3 metrics (unit-level)
+# Family-3 metrics (unit-level)
 # ---------------------------------------------------------------------------
 
 
@@ -377,7 +377,7 @@ def test_constrain_capped_total_increments(metrics):
 
 
 # ---------------------------------------------------------------------------
-# PR 8 8-5 family-6 tick metrics (unit-level)
+# Family-6 tick metrics (unit-level)
 # ---------------------------------------------------------------------------
 
 

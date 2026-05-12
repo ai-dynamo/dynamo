@@ -17,7 +17,7 @@ LOAD_DECISION_STATES = [
     "scale_down",
     "scale_down_capped_by_throughput",
     "scale_down_refused_consolidation",
-    # DEP-XXXX PR 8 (v11 observability): plugin-era decision reasons.
+    # Plugin-era decision reasons.
     # prometheus_client.Enum.states is construction-time fixed; new values
     # MUST be appended (never inserted or reordered) so existing scrapers
     # with older label sets keep parsing.
@@ -36,7 +36,7 @@ THROUGHPUT_DECISION_STATES = [
     "model_not_ready",
     "set_lower_bound",
     "scale",
-    # DEP-XXXX PR 8 (v11 observability): plugin-era decision reasons.
+    # Plugin-era decision reasons.
     # Same append-only rule as LOAD_DECISION_STATES.
     "override_by_user_plugin",
     "held_over",
@@ -171,7 +171,7 @@ class PlannerPrometheusMetrics:
 
 
 # ---------------------------------------------------------------------------
-# DEP-XXXX PR 8 sub-task 8-2: plugin-framework metrics (family 2)
+# Plugin-framework metrics (family 2)
 # ---------------------------------------------------------------------------
 
 
@@ -185,7 +185,7 @@ CIRCUIT_STATE_OPEN = 1.0
 
 
 class PluginFrameworkMetrics:
-    """Plugin-layer Prometheus metrics (DEP-XXXX PR 8 sub-task 8-2).
+    """Plugin-layer Prometheus metrics.
 
     Separate from ``PlannerPrometheusMetrics`` because this family is
     about **plugin invocation mechanics** (eval count / latency / circuit
@@ -269,7 +269,7 @@ class PluginFrameworkMetrics:
         MUST call ``reset_overrides(plugin_id, stage)`` at tick start
         (or the gauge will stay stuck at 1 from the previous tick)."""
 
-        # ----- PR 8 8-3: RECONCILE / CONSTRAIN behaviour metrics (family 3) -----
+        # ----- RECONCILE / CONSTRAIN behaviour metrics (family 3) -----
 
         self.reconcile_clamped_total = Counter(
             f"{PREFIX}_reconcile_clamped_total",
@@ -301,13 +301,13 @@ class PluginFrameworkMetrics:
             **kw,
         )
 
-        # ----- PR 8 8-5: Tick scheduling metrics (family 6) -----
+        # ----- Tick scheduling metrics (family 6) -----
         #
         # These describe the orchestrator's tick loop behaviour —
         # how often plugins get deferred, how much latency the cache
-        # replay adds, and whether ticks meet their deadline.  Separate
-        # from family-5 EXECUTE because family 6 only lights up on the
-        # orchestrator path; PSM has no multi-cadence scheduling.
+        # replay adds, and whether ticks meet their deadline.  Only
+        # lights up on the orchestrator path; PSM has no multi-cadence
+        # scheduling.
 
         self.tick_skipped_total = Counter(
             f"{PREFIX}_tick_skipped_total",

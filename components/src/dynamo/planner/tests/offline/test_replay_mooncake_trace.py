@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Replay adapter driven by a **real mooncake-format trace**
-(DEP-XXXX PR 8 sub-task 8-8 follow-up — task #76).
+"""Replay adapter driven by a **real mooncake-format trace**.
 
 The existing ``test_replay_dual_path.py`` proves PSM and orchestrator
 paths agree tick-by-tick when fed identical synthetic
@@ -31,9 +30,8 @@ Why this matters: replay is the offline-diagnosis tool of last resort.
 If something looks wrong in production, an SRE replays the trace
 through this adapter to reproduce and instrument the planner's
 decisions. Up to now we only proved that worked on the PSM path
-*and* on synthetic fixtures; this test locks "real trace + post-PR-10
-orchestrator path" — the actual production combination once PR 10
-flips the flag.
+*and* on synthetic fixtures; this test locks "real trace + orchestrator
+path" — the production combination once the feature flag is flipped.
 """
 
 from __future__ import annotations

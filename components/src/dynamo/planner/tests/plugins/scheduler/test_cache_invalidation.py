@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""6-row cache-invalidation must-pass tests (PR 3 sub-task 3-8, v11 § 3-8).
+"""6-row cache-invalidation must-pass tests.
 
 Each of the 6 rows in the cache invalidation table gets its own dedicated
-test. These are MUST-PASS — any future PR touching the scheduler must
-keep all six green.
+test. These are MUST-PASS — any future change touching the scheduler
+must keep all six green.
 """
 
 from __future__ import annotations

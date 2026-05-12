@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""PluginScheduler (DEP-XXXX PR 3 sub-task 3-8).
+"""PluginScheduler.
 
 Single-threaded asyncio invariant
 ---------------------------------
@@ -10,7 +10,7 @@ Single-threaded asyncio invariant
 ``record_result`` / ``invalidate_cache`` / ``compute_active_set`` mutate
 the same in-memory dict; concurrent invocations from multiple asyncio
 tasks (e.g. inside ``asyncio.gather`` plugin coroutines) is undefined
-behaviour (v11 § P0-2 review).
+behaviour.
 
 The expected orchestrator pattern is::
 
@@ -20,11 +20,10 @@ The expected orchestrator pattern is::
     for plugin, result in zip(active.triggered, results):
         scheduler.record_result(plugin.plugin_id, stage, result, now)
 
-No locks needed by assumption. PR 5 5-9 adds a lint assert that
-``asyncio.current_task()`` is the main task during these calls.
+No locks needed by assumption.
 
-Cache invalidation 6-row table (v11 § 3-8)
-------------------------------------------
+Cache invalidation 6-row table
+------------------------------
 
 Row-by-row, the scheduler clears a plugin's HOLD_LAST cache when:
 
@@ -111,7 +110,7 @@ class PluginScheduler:
         circuit_breaker.on_open(self._on_circuit_open)
         # Expose cache_age to the server's list_plugins.
         registry.attach_cache_age_lookup(self.cache_age)
-        # PR 8 8-5 (family 6): per-plugin tick scheduling metrics.
+        # Per-plugin tick scheduling metrics (family 6).
         # None = emission off; production path passes the orchestrator's
         # shared PluginFrameworkMetrics instance.
         self._metrics = metrics
@@ -150,8 +149,8 @@ class PluginScheduler:
             is_due = self._is_due(plugin, now)
             if is_due:
                 triggered.append(plugin)
-                # PR 8 8-5: tick_lag_seconds = how far behind the
-                # scheduled cadence this tick is.  For the first-ever
+                # tick_lag_seconds = how far behind the scheduled
+                # cadence this tick is.  For the first-ever
                 # call (last_call_at == -inf) lag is undefined; pin at
                 # 0.  For zero-interval plugins lag is also 0 ("every
                 # tick" means "always on time").

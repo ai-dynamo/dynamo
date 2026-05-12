@@ -144,7 +144,7 @@ class ReplayPlannerAdapter:
         self._capabilities = capabilities
         self._is_disagg = planner_config.mode == "disagg"
 
-        # PR 8 8-8: tick engine selected by the feature flag. On PSM path
+        # Tick engine selected by the feature flag. On PSM path
         # ``self._sm`` is the actual state machine (reused for helpers
         # like ``warm_load_predictors``). On orchestrator path it is
         # ``None``; a throwaway PSM inside ``OrchestratorEngineAdapter.
@@ -231,7 +231,7 @@ class ReplayPlannerAdapter:
                 break
 
             tick_input = self._build_tick_input(next_tick, result)
-            # PR 8 8-8: ``EngineProtocol.tick`` is async. On PSM path the
+            # ``EngineProtocol.tick`` is async. On PSM path the
             # ``_PSMEngineAdapter`` wraps PSM's sync ``on_tick`` in an
             # async-defined-but-never-awaits shim, so ``run_until_complete``
             # returns synchronously without yielding to the loop. On
@@ -396,12 +396,12 @@ class ReplayPlannerAdapter:
         per worker (which will be added by _observe_fpm via fpm_observations).
         This avoids double-counting the cached snapshot.
 
-        PR 8 8-8: works on both paths via ``_get_regression(kind)`` so
+        Works on both paths via ``_get_regression(kind)`` so
         orchestrator replay and PSM replay share identical snapshot
         feeding. Returns early on easy mode (no regressions) or when
         the requested regression slot isn't installed (the install gap
-        is a separate concern — fixed via the empty-regression bootstrap
-        in PR 7 7-4 follow-up).
+        is fixed via the empty-regression bootstrap in
+        ``_install_benchmark_fpms``).
         """
         if self._is_easy_mode():
             return  # easy mode has no regression models

@@ -1,29 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Public gRPC entry point for the plugin registry (DEP-XXXX W2).
+"""Public gRPC entry point for the plugin registry.
 
-Wraps a :class:`PluginRegistryServer` (PR 3 — single-process Python
-methods) and exposes its 4 RPCs over the network so external plugin
-processes can register / heartbeat / unregister / list themselves
-without needing to be inside the planner Python process.
-
-Why this is a separate module
------------------------------
-
-PR 5 shipped the in-process orchestrator and ``register_internal``
-path; the network-facing gateway was deferred. ``test_integration.py``
-still says "real UDS / gRPC socket round-trip belongs in a
-``tests/integration`` e2e suite" — this gateway is what makes that
-suite meaningful.
+Wraps a :class:`PluginRegistryServer` (single-process Python methods)
+and exposes its 4 RPCs over the network so external plugin processes
+can register / heartbeat / unregister / list themselves without
+needing to be inside the planner Python process.
 
 The class is deliberately thin: every RPC just converts proto →
 Pydantic via ``_proto_bridge``, calls the underlying
 ``PluginRegistryServer`` method (which already enforces auth /
 protocol / dedup / endpoint-scheme), and converts the response back.
 That keeps the auth + reject-reason contract identical between the
-in-process call site (W1) and the gRPC call site (W2) — operators
-never have two diverging code paths to reason about.
+in-process call site and the gRPC call site — operators never have
+two diverging code paths to reason about.
 
 Lifecycle
 ---------
@@ -112,7 +103,7 @@ class PluginRegistryGatewayServicer(pbg.PluginRegistryServicer):
                 grpc.StatusCode.INVALID_ARGUMENT,
                 f"heartbeat: malformed request: {type(exc).__name__}: {exc}",
             )
-        # ``server.heartbeat`` is a PR 3 historical helper that takes
+        # ``server.heartbeat`` is a historical helper that takes
         # plugin_id directly and returns bool. Wrap the bool into
         # ``HeartbeatResponse`` for the gRPC contract.
         ok = await self._server.heartbeat(pyd_req.plugin_id)
@@ -132,7 +123,7 @@ class PluginRegistryGatewayServicer(pbg.PluginRegistryServicer):
             )
         # ``server.unregister`` takes (plugin_id, *, reason) — match
         # the in-process method's signature; it returns bool, not a
-        # Pydantic message (PR 3 historical), so we wrap.
+        # Pydantic message (historical), so we wrap.
         ok = await self._server.unregister(
             pyd_req.plugin_id, reason=pyd_req.reason
         )

@@ -8,17 +8,17 @@ Re-runs each scenario in ``scenarios.ALL_SCENARIOS`` through the current
 in ``golden/<scenario_name>.jsonl`` byte-for-byte.
 
 This test is the **fixture lock guard**:
-- After ``pre-plugin-architecture`` git tag, any change to
+- After the ``pre-plugin-architecture`` git tag, any change to
   ``core/state_machine.py`` / ``core/load_scaling.py`` /
   ``core/throughput_scaling.py`` that alters ``on_tick`` output will
   cause this test to fail in CI.
-- During PR 5/6/7 implementation, the test ensures we don't accidentally
-  break PSM behavior (PR 5 / PR 7 are explicitly read-only on PSM until
-  PR 11 cleanup).
+- During the plugin framework rollout the test ensures we don't
+  accidentally break PSM behavior (the PSM modules are explicitly
+  read-only until the eventual cleanup).
 
-If a fixture diverges intentionally (e.g. PR 11 deletes PSM and the
-test gets rewritten to run against orchestrator), the README protocol
-documents how to regenerate fixtures.
+If a fixture diverges intentionally (e.g. PSM is removed and the
+test gets rewritten to run against the orchestrator), the README
+protocol documents how to regenerate fixtures.
 
 Picked up by the existing ``planner-test`` CI job via pytest markers
 ``pre_merge and planner and gpu_0``.
@@ -62,7 +62,7 @@ def test_g3_fixture_parity(scenario):
         "1. Was PSM intentionally modified? Check core/state_machine.py / "
         "load_scaling.py / throughput_scaling.py recent changes.\n"
         "2. If unintentional, fix the regression.\n"
-        "3. If intentional (e.g. PR 11 cleanup), regenerate fixtures via "
+        "3. If intentional (e.g. PSM removal), regenerate fixtures via "
         "the README protocol.\n\n"
         "Diffs:\n" + "\n\n".join(diffs)
     )

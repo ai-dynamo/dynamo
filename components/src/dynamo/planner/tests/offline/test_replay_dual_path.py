@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dual-path parity for ``ReplayPlannerAdapter`` (PR 8 sub-task 8-8).
+"""Dual-path parity for ``ReplayPlannerAdapter``.
 
 Validates that replay on the orchestrator path produces the same
 ``scaling_events`` / ``total_ticks`` as replay on the PSM path when

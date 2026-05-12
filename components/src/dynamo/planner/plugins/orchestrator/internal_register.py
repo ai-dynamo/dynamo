@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Module-level convenience function wrapping orchestrator register_internal
-(DEP-XXXX PR 5 sub-task 5-5).
+"""Module-level convenience function wrapping orchestrator
+``register_internal``.
 
-The actual logic lives in ``PluginRegistryServer.register_internal``
-(PR 3); this file exists so PR 6 builtin implementations and PR 7
+The actual logic lives in ``PluginRegistryServer.register_internal``;
+this file exists so builtin plugin implementations and
 ``NativePlannerBase`` have a single import path — ``from
 dynamo.planner.plugins.orchestrator.internal_register import
-register_internal`` — consistent with the PR 5 spec in the DEP.
+register_internal``.
 """
 
 from __future__ import annotations
@@ -38,8 +38,8 @@ def register_internal(
     """Register an in-process plugin on the given orchestrator.
 
     Equivalent to ``orchestrator.register_internal(...)``; kept as a
-    standalone function so the pr 5-5 spec's signature is directly
-    callable by code that prefers a functional style.
+    standalone function so the signature is directly callable by code
+    that prefers a functional style.
     """
     return orchestrator.register_internal(
         plugin_id=plugin_id,

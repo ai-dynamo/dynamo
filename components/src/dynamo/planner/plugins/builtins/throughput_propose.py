@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``BuiltinThroughputPropose`` — PROPOSE-stage builtin (DEP-XXXX PR 6 sub-task 6-3).
+"""``BuiltinThroughputPropose`` — PROPOSE-stage builtin.
 
 Ports PSM's ``_advance_throughput`` pipeline
 (``_throughput_{agg,disagg,single}`` + ``_compute_{prefill,decode}_replicas``)
@@ -16,7 +16,7 @@ The plugin emits an ``OverrideResult`` where every target has the same
 ``type`` field, determined by ``config.enable_load_scaling``:
 
 - ``enable_load_scaling=True`` → ``AT_LEAST(desired)`` — load-propose
-  will later emit ``SET(load_desired)``; PR 4 ``type_aware_merge`` then
+  will later emit ``SET(load_desired)``; ``type_aware_merge`` then
   computes ``max(floor, min(ceiling, rec))``, matching PSM's
   ``max(load_desired, throughput_lower_bound)`` behaviour.
 - ``enable_load_scaling=False`` → ``SET(desired)``; the CONSTRAIN stage
@@ -27,8 +27,8 @@ Budget application
 ------------------
 
 This plugin **does not** apply ``max_gpu_budget`` / ``min_endpoint``
-clamps itself — that's the job of ``BuiltinBudgetConstrain`` (PR 6 6-6)
-at the CONSTRAIN stage, which emits ``AT_LEAST=min_endpoint`` and
+clamps itself — that's the job of ``BuiltinBudgetConstrain`` at the
+CONSTRAIN stage, which emits ``AT_LEAST=min_endpoint`` and
 ``AT_MOST=max_gpu_budget/gpu_per_component``. The only floor this
 plugin still applies (matching PSM) is ``config.min_endpoint`` inside
 ``_compute_*_replicas`` — that's the PSM-internal "never return less
@@ -38,7 +38,7 @@ Regression models + capabilities
 --------------------------------
 
 - ``self.get_regression("prefill" / "decode" / "agg")`` — live references
-  to the orchestrator-owned regression models. PR 7 NativePlannerBase
+  to the orchestrator-owned regression models. ``NativePlannerBase``
   seeds these at startup from mode-specific regression instances.
 - ``self._orch.capabilities`` — static per-engine
   ``WorkerCapabilities`` (max_num_batched_tokens, max_kv_tokens, etc.).
@@ -87,10 +87,10 @@ class BuiltinThroughputPropose(BuiltinPluginBase):
     ) -> None:
         super().__init__(orchestrator, config)
 
-        # PR 8 A2: last-tick diagnostic summary, read by
+        # Last-tick diagnostic summary, read by
         # ``OrchestratorEngineAdapter`` after ``orchestrator.tick`` so
         # the observable ``TickDiagnostics.throughput_decision_reason*``
-        # fields match the values PSM path surfaces. Mirrors 8-9's
+        # fields match the values PSM path surfaces. Mirrors
         # ``BuiltinLoadPropose._last_load_diagnostics`` shape so the
         # adapter projection helper can stay symmetric.
         #
@@ -127,8 +127,8 @@ class BuiltinThroughputPropose(BuiltinPluginBase):
     async def Propose(
         self, request: ProposeStageRequest
     ) -> ProposeStageResponse:
-        # PR 8 A2: reset diagnostics at the start of every evaluation so
-        # the adapter never reads a stale reason from the previous tick.
+        # Reset diagnostics at the start of every evaluation so the
+        # adapter never reads a stale reason from the previous tick.
         self._last_throughput_diagnostics = self._empty_diagnostics()
         mode = self._config.mode
 
@@ -174,7 +174,7 @@ class BuiltinThroughputPropose(BuiltinPluginBase):
             self._stamp_mode_reason_if_unset(mode, "model_not_ready")
             return _accept()
 
-        # v11 § M-K (plugin decomposition): when ``enable_load_scaling=True``
+        # Plugin decomposition: when ``enable_load_scaling=True``
         # PSM's ``_advance_throughput`` sets ``_throughput_lower_bound_p/d``
         # (a side effect) and returns ``None`` — load-propose later reads
         # that bound and incorporates it into its decision. Mirror that

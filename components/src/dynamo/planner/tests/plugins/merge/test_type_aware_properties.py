@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hypothesis property-based tests for type_aware_merge (PR 4 sub-task 4-6).
+"""Hypothesis property-based tests for type_aware_merge.
 
-Invariants (v11 main doc § 4.3):
+Invariants:
 
 1. **clamp correctness** — every output replicas value satisfies
    ``floor <= replicas <= ceiling``, where ``floor = max(AT_LEAST)`` and
@@ -24,8 +24,8 @@ Invariants (v11 main doc § 4.3):
 6. **idempotency** — duplicating a plugin's output (same targets, same
    priority) does not change the merge result.
 
-Requires ``hypothesis`` (dev extra; see ``DEP-XXXX_PR4_Detailed_zh.md``
-Q4 decision). The file is auto-skipped when hypothesis is unavailable.
+Requires ``hypothesis`` (dev extra). The file is auto-skipped when
+hypothesis is unavailable.
 """
 
 from __future__ import annotations

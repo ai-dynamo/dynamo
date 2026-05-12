@@ -4,8 +4,8 @@
 """Bidirectional converters between proto generated messages and Pydantic mirror.
 
 Used by:
-- Round-trip tests in ``tests/plugins/proto/test_round_trip.py`` (PR 1 1-8)
-- ``InProcessTransport`` boundary in PR 2 (proto in / proto out, but plugin
+- Round-trip tests in ``tests/plugins/proto/test_round_trip.py``
+- ``InProcessTransport`` boundary (proto in / proto out, but plugin
   authors can use Pydantic internally and convert)
 
 Conversion strategy:

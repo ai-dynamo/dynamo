@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for BuiltinLoadPredictor (PR 6 6-2).
+"""Unit tests for BuiltinLoadPredictor.
 
 Parity-focused: for each predictor class in ``LOAD_PREDICTORS``, feed
 the same traffic observations through both a bare PSM predictor
 instance and ``BuiltinLoadPredictor``; assert ``predict_next`` output
 is equal (float-bit-exact when deterministic, else within strict
-tolerance). This is the invariant PR 6 6-8 G3 sweep relies on.
+tolerance). This is the invariant the G3 sweep relies on.
 """
 
 from __future__ import annotations

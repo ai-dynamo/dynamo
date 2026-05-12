@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for chain_augment (PR 4 sub-task 4-5).
+"""Unit tests for chain_augment.
 
 Covered patterns:
 - Replace: single plugin emits complete PredictionData
@@ -15,11 +15,11 @@ Covered patterns:
 - partial-merge preserves earlier fields when later plugin has None
 - Empty chain / mixed priority order from caller
 
-Note (deviation from PR 4 doc v1.1 pseudocode): PR 1 as-built does not
-expose a REJECT mechanism in ``PredictStageResponse`` (the proto message
-has only ``predictions``/``reason``/``final``). So the ``degraded`` field
-on ``ChainAugmentOutcome`` is always empty in v1. A future proto revision
-can introduce explicit reject; tests here assert ``degraded == []``.
+Note: the as-built ``PredictStageResponse`` does not expose a REJECT
+mechanism (the proto message has only ``predictions`` / ``reason`` /
+``final``). So the ``degraded`` field on ``ChainAugmentOutcome`` is
+always empty. A future proto revision can introduce explicit reject;
+tests here assert ``degraded == []``.
 """
 
 from __future__ import annotations

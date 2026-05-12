@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for BuiltinLoadPropose (PR 6 6-4).
+"""Unit tests for BuiltinLoadPropose.
 
 Algorithmic parity vs ``PSM._advance_load`` across mode × easy/sla ×
 config toggle combos. Tests call the plugin's ``_advance_load`` sync

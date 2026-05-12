@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``BuiltinLoadPropose`` — PROPOSE-stage builtin (DEP-XXXX PR 6 sub-task 6-4).
+"""``BuiltinLoadPropose`` — PROPOSE-stage builtin.
 
 Ports PSM's ``_advance_load`` family:
 
@@ -16,12 +16,12 @@ Ports PSM's ``_advance_load`` family:
 Scope divergences from PSM (encoded in the implementation):
 
 1. **FPM wire format**: ``PipelineContext.observations.fpm`` uses the
-   encoded ``FpmData`` (bytes per engine) shape from PR 1, not PSM's
-   Python ``FpmObservations`` dict. Until a decoder lands, the plugin
-   reads FPM + worker counts from a side-channel primed via
-   ``prime_tick()`` before each ``orchestrator.tick`` call. Unit tests
-   and the ``OrchestratorEngineAdapter`` use this priming hook;
-   production wire-format deserialisation is a follow-up.
+   encoded ``FpmData`` (bytes per engine) shape, not PSM's Python
+   ``FpmObservations`` dict. Until a decoder lands, the plugin reads
+   FPM + worker counts from a side-channel primed via ``prime_tick()``
+   before each ``orchestrator.tick`` call. Unit tests and the
+   ``OrchestratorEngineAdapter`` use this priming hook; production
+   wire-format deserialisation is a follow-up.
 2. **Throughput lower bounds**: PSM's ``_advance_load`` reads
    ``self._throughput_lower_bound_p/d``, set by ``_advance_throughput``
    earlier in the same tick. In the full plugin decomposition, the
@@ -94,11 +94,11 @@ class BuiltinLoadPropose(BuiltinPluginBase):
         super().__init__(orchestrator, config)
         # Side-channel tick state primed by ``prime_tick`` before each
         # orchestrator invocation; becomes a wire-format decode call
-        # when PR 1 FpmData gains a Python round-trip.
+        # when FpmData gains a Python round-trip.
         self._cached_fpm_obs: Optional[FpmObservations] = None
         self._cached_counts: Optional[WorkerCounts] = None
 
-        # PR 8 8-9: last-tick diagnostic summary, read by
+        # Last-tick diagnostic summary, read by
         # ``OrchestratorEngineAdapter`` after ``orchestrator.tick`` so
         # the observable ``TickDiagnostics.load_decision_reason*`` +
         # ``estimated_*_ms`` fields match the values PSM path surfaces.
@@ -200,8 +200,8 @@ class BuiltinLoadPropose(BuiltinPluginBase):
     async def Propose(
         self, request: ProposeStageRequest
     ) -> ProposeStageResponse:
-        # PR 8 8-9: reset diagnostics at the start of every evaluation so
-        # the adapter never reads a stale reason from the previous tick.
+        # Reset diagnostics at the start of every evaluation so the
+        # adapter never reads a stale reason from the previous tick.
         self._last_load_diagnostics = self._empty_diagnostics()
 
         if not self._config.enable_load_scaling:

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for the ``NativePlannerBase._wire_predicted_load_if_supported``
-hook (PR 7 sub-task 7-7).
+hook.
 
 The hook runs once per tick between ``engine.tick`` and
 ``_apply_effects``. It's a no-op unless:
@@ -145,9 +145,9 @@ def test_skipped_when_all_prediction_fields_none():
 
 
 def test_fires_when_only_one_prediction_field_set():
-    """A partial prediction (e.g. layered-predictor pattern from PR 4)
-    should still wire — GlobalPlanner accepts ``None`` for individual
-    fields."""
+    """A partial prediction (e.g. layered-predictor pattern from
+    ``chain_augment``) should still wire — GlobalPlanner accepts
+    ``None`` for individual fields."""
     connector = _RecordingConnector()
     planner = _MinimalPlanner(_config(use_orchestrator=True), connector)
     planner._wire_predicted_load_if_supported(

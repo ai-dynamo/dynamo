@@ -1,18 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""End-to-end integration test (PR 3 sub-task 3-11).
+"""End-to-end registry integration test.
 
-Exercises the full PR 3 stack wired together — config → auth → registry
-→ circuit breaker → scheduler → heartbeat monitor — through realistic
-lifecycle scenarios:
+Exercises the full registry stack wired together — config → auth →
+registry → circuit breaker → scheduler → heartbeat monitor — through
+realistic lifecycle scenarios:
 
 1. Register happy path: config-driven factory + full metadata in
    ``list_plugins``.
 2. Tick + record_result + HOLD_LAST inheritance across multiple ticks.
-3. Unregister → cache invalidation (v11 row 1).
+3. Unregister → cache invalidation (row 1 of the table).
 4. Circuit breaker OPEN → cache invalidation + plugin drop from
-   active set (v11 row 3), then HALF_OPEN → recovery.
+   active set (row 3), then HALF_OPEN → recovery.
 5. Heartbeat missed eviction → full cleanup path (v11 row 2).
 6. Client-driven version upgrade: unregister + re-register → fresh state
    (v11 row 4 + Q6).
@@ -56,7 +56,8 @@ pytestmark = [
 
 # The real transport factory (make_transport_for_endpoint) opens sockets;
 # we monkeypatch at the module level so builds succeed without touching
-# the filesystem / network. PR 5 wires these end-to-end with real UDS.
+# the filesystem / network. The orchestrator e2e suite wires these
+# end-to-end with real UDS.
 @pytest.fixture
 def stub_transport(monkeypatch):
     class _Stub(PluginTransport):
@@ -301,7 +302,8 @@ async def test_client_driven_version_upgrade(stub_transport):
 
 @pytest.mark.asyncio
 async def test_in_process_user_plugin_survives_heartbeat_monitor(stub_transport):
-    # v11 § G-3 regression at integration level.
+    # Regression at integration level: in-process plugins must not be
+    # evicted by the heartbeat monitor.
     clock = VirtualClock()
     server, _, _, monitor = _assemble(clock)
     server.register_internal(

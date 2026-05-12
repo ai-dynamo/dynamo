@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``BuiltinLoadPredictor`` — real PREDICT builtin (DEP-XXXX PR 6 sub-task 6-2).
+"""``BuiltinLoadPredictor`` — real PREDICT builtin.
 
 Ports PSM's load-prediction pipeline (``_observe_traffic`` +
 ``_predict_load`` + ``warm_load_predictors``) into a standalone plugin.
@@ -21,9 +21,9 @@ Lifecycle
 - ``Bootstrap`` (RPC): no-op by default. Warm-up from historical
   observations is done via the Python-level helper
   ``warm_from_observations`` which the orchestrator's
-  ``bootstrap_plugins`` wiring (PR 6 6-9) calls directly; keeping
-  warm-up off the RPC path avoids serialising
-  ``list[TrafficObservation]`` through proto ``bytes`` in v1.
+  ``bootstrap_plugins`` wiring calls directly; keeping warm-up off the
+  RPC path avoids serialising ``list[TrafficObservation]`` through
+  proto ``bytes``.
 - ``Reset`` (RPC): re-instantiates the three predictors using the
   same config — mirrors PSM's ``config.reload`` semantics.
 
@@ -98,8 +98,8 @@ class BuiltinLoadPredictor(BuiltinPluginBase):
         self, observations: Sequence[TrafficObservation]
     ) -> None:
         """Python-level helper used by ``LocalPlannerOrchestrator``
-        bootstrap wiring (PR 6 6-9) to prime the predictors before the
-        first tick. Mirrors PSM's ``warm_load_predictors``:
+        bootstrap wiring to prime the predictors before the first
+        tick. Mirrors PSM's ``warm_load_predictors``:
 
         - No-op in easy mode.
         - Feed each observation through ``add_data_point``.
@@ -181,10 +181,10 @@ class BuiltinLoadPredictor(BuiltinPluginBase):
     # ------------------------------------------------------------------
 
     async def Bootstrap(self, request: BootstrapRequest) -> BootstrapResponse:
-        # v1 in-process warmup path is ``warm_from_observations`` (called
-        # by PR 6 6-9). The RPC form stays a no-op until an out-of-process
-        # deployment needs to ship TrafficObservation history over the wire,
-        # at which point we'll define a proto-level encoding for
+        # In-process warmup uses ``warm_from_observations``. The RPC
+        # form stays a no-op until an out-of-process deployment needs
+        # to ship TrafficObservation history over the wire, at which
+        # point we'll define a proto-level encoding for
         # ``BootstrapRequest.bootstrap_data``.
         return BootstrapResponse(ok=True)
 

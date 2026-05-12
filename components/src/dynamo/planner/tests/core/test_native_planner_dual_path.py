@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for ``NativePlannerBase._ensure_engine`` dual-path wiring
-(PR 7 sub-task 7-3 finish).
+"""Tests for ``NativePlannerBase._ensure_engine`` dual-path wiring.
 
 ``NativePlannerBase.__init__`` has substantial external wiring
 (connectors, Prometheus, runtime client caches) that makes full

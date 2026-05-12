@@ -4,8 +4,8 @@
 """In-process transport: direct Python call.
 
 Used by:
-- Builtin plugins (PR 6) — registered via ``register_internal``, zero RPC overhead
-- ``in_process`` user plugins (PR 5 5-6) — loaded by config
+- Builtin plugins — registered via ``register_internal``, zero RPC overhead
+- ``in_process`` user plugins — loaded by config
 - Replay / unit tests — first-class production transport, NOT a test fallback
 """
 
@@ -30,7 +30,7 @@ class InProcessTransport(PluginTransport):
     methods are dispatched via ``asyncio.to_thread`` to avoid blocking
     the orchestrator event loop.
 
-    **⚠ Sync plugin red line** (PR 2 2-8 README enforces): sync plugin
+    **⚠ Sync plugin red line** (see transport/README.md): sync plugin
     methods MUST NOT do blocking IO (HTTP, file, ``time.sleep > 100ms``);
     otherwise thread pool exhaustion will block the orchestrator. If
     your plugin needs IO, write it as ``async def``.

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for AllowUnauthenticatedAuth (PR 3 sub-task 3-3).
+"""Unit tests for AllowUnauthenticatedAuth.
 
 The validator is dev-only. Construction must log a WARNING so operators
 see it even if no Register call ever arrives.

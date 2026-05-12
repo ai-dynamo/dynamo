@@ -103,7 +103,7 @@ def make_transport_for_endpoint(
         endpoint: must start with ``inproc://``, ``unix://``, or ``grpc://``
         config: TransportConfig (timeouts, mTLS, etc.)
         in_process_instance: required when ``endpoint`` starts with ``inproc://``;
-            ignored otherwise. Bridges PR 3 ``register_internal`` (P1-5 review v11).
+            ignored otherwise. Bridges the ``register_internal`` path.
 
     Raises:
         ValueError: invalid endpoint scheme, missing instance for inproc,

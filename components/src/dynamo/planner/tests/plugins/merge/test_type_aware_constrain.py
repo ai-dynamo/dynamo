@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for type_aware_merge CONSTRAIN mode (PR 4 sub-task 4-2).
+"""Unit tests for type_aware_merge CONSTRAIN mode.
 
 With ``set_allowed=False`` (CONSTRAIN stage):
 - SET targets are silently dropped from the merge
 - dropped keys are recorded in ``MergeOutcome.set_dropped`` for audit
 - AT_LEAST / AT_MOST bounds merge normally
 
-v11 § 4.3: register-time static rejection of CONSTRAIN-SET plugins is
-infeasible (proto3 has no plugin-declared output-type metadata); drop +
-audit is the only workable approach.
+Register-time static rejection of CONSTRAIN-SET plugins is infeasible
+(proto3 has no plugin-declared output-type metadata); drop + audit is
+the only workable approach.
 """
 
 from __future__ import annotations

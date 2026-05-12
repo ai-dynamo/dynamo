@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Registry-internal data types (DEP-XXXX PR 3 sub-task 3-1).
+"""Registry-internal data types.
 
 ``RegisteredPlugin`` is the in-memory record the ``PluginRegistryServer``
 owns for each active plugin. It holds the union of:
@@ -12,12 +12,11 @@ owns for each active plugin. It holds the union of:
   ``last_call_at``, ``evaluations_total``, ``enabled``) that the
   scheduler / heartbeat monitor read + update.
 - The constructed ``PluginTransport`` and a tag ``transport_type``
-  driving the heartbeat-skip rule (v11 § G-3).
+  driving the heartbeat-skip rule.
 
 CircuitBreaker state is **not** stored on ``RegisteredPlugin`` — it lives
-in ``CircuitBreaker`` keyed by ``plugin_id`` (separable lifecycle, per
-v11 cache persistence table row 3: "restart clears circuit, back to
-CLOSED").
+in ``CircuitBreaker`` keyed by ``plugin_id`` (separable lifecycle:
+restart clears circuit, back to CLOSED).
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for SchedulingConfig + PlannerConfig.scheduling (PR 7 sub-task 7-1)."""
+"""Unit tests for SchedulingConfig + PlannerConfig.scheduling."""
 
 from __future__ import annotations
 

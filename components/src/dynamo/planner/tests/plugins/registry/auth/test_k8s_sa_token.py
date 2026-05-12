@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for K8sSATokenAuth (DEP-XXXX PR 3.5 follow-up).
+"""Unit tests for K8sSATokenAuth.
 
 Tests use a fake ``kube_client`` that returns canned TokenReview
 responses (dict shape). ``K8sSATokenAuth._get`` handles both real

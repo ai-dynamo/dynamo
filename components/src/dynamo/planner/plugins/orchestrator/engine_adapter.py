@@ -2,15 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """``OrchestratorEngineAdapter`` — production ``EngineProtocol`` adapter
-for the PR 5/6 plugin chain (DEP-XXXX PR 7 sub-task 7-3 foundation).
+for the plugin chain.
 
 Wraps ``LocalPlannerOrchestrator`` + the 5 real builtin plugins
 (BuiltinLoadPredictor / BuiltinThroughputPropose / BuiltinLoadPropose /
 BuiltinReconcile / BuiltinBudgetConstrain) behind the same
 ``initial_tick`` / ``tick`` / ``shutdown`` interface that the legacy
-``_PSMEngineAdapter`` exposes. ``NativePlannerBase`` (PR 7 sub-task 7-3
-proper) selects between the two via
-``PlannerConfig.scheduling.use_orchestrator``.
+``_PSMEngineAdapter`` exposes. ``NativePlannerBase`` selects between
+the two via ``PlannerConfig.scheduling.use_orchestrator``.
 
 Internal responsibilities
 -------------------------
@@ -39,8 +38,8 @@ Internal responsibilities
 5. **PipelineOutcome → PlannerEffects projection**:
    Reads the orchestrator's ``final_proposal.targets``, detects "no
    change" against ``worker_counts``, and projects to
-   ``PlannerEffects.scale_to``. ``diagnostics`` is empty (PR 6 § Q2 —
-   numeric fields moving to Prometheus).
+   ``PlannerEffects.scale_to``. ``diagnostics`` is empty — numeric
+   fields moved to Prometheus.
 
 Bootstrap API
 -------------
@@ -125,10 +124,10 @@ class OrchestratorEngineAdapter:
         self._next_load_s: float = float("inf")
         self._next_throughput_s: float = float("inf")
 
-        # PR 8 8-2/8-3/8-5: plugin-framework metrics live alongside the
-        # adapter so they share the orchestrator's lifecycle.  Use the
-        # default global ``prometheus_client.REGISTRY`` so planner's
-        # existing ``start_http_server`` on ``metric_reporting_prometheus_port``
+        # Plugin-framework metrics live alongside the adapter so they
+        # share the orchestrator's lifecycle.  Use the default global
+        # ``prometheus_client.REGISTRY`` so planner's existing
+        # ``start_http_server`` on ``metric_reporting_prometheus_port``
         # picks them up automatically.  Construction is lazy-guarded: if
         # an adapter is built a second time in the same Python process
         # (replay, tests), the first construction claims the metric
@@ -292,7 +291,7 @@ class OrchestratorEngineAdapter:
         agg_fpms: Optional[Sequence[Any]] = None,
         historical_traffic: Optional[Sequence[TrafficObservation]] = None,
     ) -> None:
-        """One-shot pre-first-tick bootstrap from benchmark FPMs (PR 7 7-4).
+        """One-shot pre-first-tick bootstrap from benchmark FPMs.
 
         Mirrors PSM's ``load_benchmark_fpms`` + ``warm_load_predictors``
         but through the plugin chain:
@@ -305,8 +304,8 @@ class OrchestratorEngineAdapter:
         2. Call ``bootstrap_plugins`` to warm ``BuiltinLoadPredictor``
            from ``historical_traffic`` and fan out Bootstrap RPC.
 
-        Using PSM as the regression factory is a v1 shortcut — PR 11
-        cleanup will extract regression-construction from PSM into a
+        Using PSM as the regression factory is a shortcut — a future
+        cleanup can extract regression-construction from PSM into a
         standalone helper so this can drop the throwaway instance.
         """
         # Import locally to avoid pulling PSM into module-level imports
@@ -392,9 +391,9 @@ class OrchestratorEngineAdapter:
             outcome, tick_input.worker_counts or WorkerCounts()
         )
 
-        # 7. Populate prediction fields on diagnostics. PR 7 sub-task 7-7
-        #    uses these to wire ``GlobalPlannerConnector.set_predicted_load``
-        #    in ``NativePlannerBase.run()``.
+        # 7. Populate prediction fields on diagnostics. These wire
+        #    ``GlobalPlannerConnector.set_predicted_load`` in
+        #    ``NativePlannerBase.run()``.
         diagnostics = TickDiagnostics()
         if (
             outcome.predict_outcome is not None
@@ -405,18 +404,18 @@ class OrchestratorEngineAdapter:
             diagnostics.predicted_isl = p.predicted_isl
             diagnostics.predicted_osl = p.predicted_osl
 
-        # PR 8 8-9: surface builtin_load_propose's per-tick reason +
-        # estimates onto ``TickDiagnostics`` so orchestrator path logs +
-        # Prometheus enum match the semantic detail PSM path has carried
-        # since v0.  Plugin stores last decision on itself; we read
+        # Surface builtin_load_propose's per-tick reason + estimates
+        # onto ``TickDiagnostics`` so orchestrator-path logs + Prometheus
+        # enum match the semantic detail PSM path has carried since v0.
+        # Plugin stores last decision on itself; we read
         # ``_last_load_diagnostics`` and project to the appropriate
         # legacy field (agg → aggregate ``load_decision_reason``;
         # disagg/prefill/decode → per-component fields).
         self._project_load_diagnostics(diagnostics)
 
-        # PR 8 A2: same shape for builtin_throughput_propose. Without
-        # this projection, ``throughput_decision_reason`` stays None on
-        # the orchestrator path while PSM path populated it from
+        # Same shape for builtin_throughput_propose. Without this
+        # projection, ``throughput_decision_reason`` stays None on the
+        # orchestrator path while PSM path populated it from
         # ``_diag_throughput_reason`` — making it impossible to tell
         # accept-with-decision from accept-skipped on dashboards.
         self._project_throughput_diagnostics(diagnostics)

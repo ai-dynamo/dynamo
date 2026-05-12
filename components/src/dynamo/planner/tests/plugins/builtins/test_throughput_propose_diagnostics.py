@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for ``BuiltinThroughputPropose._last_throughput_diagnostics``
-(PR 8 follow-up A2 — Accept-path observability parity with PSM).
+(Accept-path observability parity with PSM).
 
 Mirrors ``test_load_propose_diagnostics.py``: every exit branch of
 ``Propose`` / ``_throughput_*`` / ``_compute_*_replicas`` must leave a

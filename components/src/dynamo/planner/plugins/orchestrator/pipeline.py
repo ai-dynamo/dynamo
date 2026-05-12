@@ -1,22 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""4-stage plugin pipeline driver (DEP-XXXX PR 5 sub-task 5-4).
+"""4-stage plugin pipeline driver.
 
 Pipeline order: PREDICT → PROPOSE → RECONCILE → CONSTRAIN → EXECUTE.
 
-- **PREDICT** runs as a priority-descending chain via PR 4 ``chain_augment``;
+- **PREDICT** runs as a priority-descending chain via ``chain_augment``;
   any partial prediction gets threaded onto ``PipelineContext.predictions``
   for downstream stages.
 - **PROPOSE / RECONCILE / CONSTRAIN** fan out via ``asyncio.gather`` and
-  collapse with PR 4 ``type_aware_merge``. CONSTRAIN runs with
+  collapse with ``type_aware_merge``. CONSTRAIN runs with
   ``set_allowed=False`` so SET override targets are dropped + audited.
 - **EXECUTE** is a decision only — the pipeline returns a
   ``PipelineOutcome`` naming the action (``apply`` / ``skip_no_targets`` /
   ``skip_short_circuit`` / ``skip_tick_timeout``). The orchestrator (or
-  PR 7 NativePlannerBase) projects this onto ``PlannerConnector`` calls.
+  ``NativePlannerBase``) projects this onto ``PlannerConnector`` calls.
 
-Strong constraints enforced here (v11):
+Strong constraints enforced here:
 
 - **M-1** — stage results are paired with plugins via ``zip(plugins, results)``.
   Callers must never reach back through ``result.plugin`` or assume the
@@ -106,18 +106,17 @@ class PipelineOutcome:
 
 class _PredictAdapter:
     """Adapts a ``RegisteredPlugin`` to the
-    ``PredictPluginCallable`` protocol expected by PR 4 ``chain_augment``.
+    ``PredictPluginCallable`` protocol expected by ``chain_augment``.
 
     ``chain_augment`` wants ``async call(method, context)``; the
     transport signature is ``async call(method, request)``. This adapter
     wraps the ``PipelineContext`` into a ``PredictStageRequest`` on the
     way in and forwards the response unchanged.
 
-    PR 8 8-2 wiring gap fix: emits ``plugin_evaluations_total`` +
-    ``plugin_latency_seconds`` for every PREDICT call so family-2
-    metrics cover all 4 stages uniformly. Previously PREDICT silently
-    bypassed emission because ``chain_augment`` is a separate dispatch
-    path from ``_run_fanout_stage``.
+    Emits ``plugin_evaluations_total`` + ``plugin_latency_seconds`` for
+    every PREDICT call so the family-2 metrics cover all 4 stages
+    uniformly; ``chain_augment`` is a separate dispatch path from
+    ``_run_fanout_stage`` and would otherwise silently bypass emission.
     """
 
     def __init__(
@@ -183,10 +182,9 @@ def _proposal_to_baseline(
     """Project a ``ScalingProposal`` to the ``baseline`` shape consumed
     by the next stage's ``type_aware_merge``.
 
-    Per PR 4 § "Cross-Task Coordination" #4, the baseline for each stage
-    is the prior stage's output (not the caller's initial baseline).
-    If the prior stage produced no proposal (short-circuit edge case),
-    fall back to the caller's baseline.
+    The baseline for each stage is the prior stage's output (not the
+    caller's initial baseline). If the prior stage produced no proposal
+    (short-circuit edge case), fall back to the caller's baseline.
     """
     if proposal is None:
         return dict(fallback)
@@ -209,7 +207,7 @@ def _stage_request(stage: str, ctx: PipelineContext):
         # v1 limitation: proposals list is empty; per-plugin PROPOSE
         # results are available in the upstream merge but not threaded
         # as a ReconcileStageRequest.proposals payload in this iteration.
-        # PR 7 or a later follow-up will add that path if needed.
+        # A later follow-up will add that path if needed.
         return ReconcileStageRequest(context=ctx)
     if stage == "constrain":
         return ConstrainStageRequest(context=ctx)
@@ -284,7 +282,7 @@ async def _run_fanout_stage(
     circuit breaker, threads inherited HOLD_LAST results into the merge,
     and returns the ``type_aware_merge`` outcome.
 
-    When ``metrics`` is provided, emits PR 8 family-2 plugin metrics
+    When ``metrics`` is provided, emits the family-2 plugin metrics
     (evaluations / latency / held_over / cache_age / circuit_state /
     override_active) at the appropriate points.  Passing ``None``
     disables emission for tests + replay that don't construct a
@@ -394,7 +392,7 @@ async def _run_fanout_stage(
 
 
 # ---------------------------------------------------------------------------
-# PR 8 8-2 helpers: classify plugin result → metric label, emit gauges.
+# Family-2 metric helpers: classify plugin result → metric label, emit gauges.
 # Keeping these close to the fan-out helper so the metric vocabulary
 # stays in one place and matches what dashboards expect.
 # ---------------------------------------------------------------------------
@@ -552,7 +550,7 @@ def _emit_clamps_and_rejects(
     outcome: MergeOutcome,
     plugin_results: list,
 ) -> None:
-    """PR 8 8-3: surface ``type_aware_merge`` clamp + reject events as
+    """Surface ``type_aware_merge`` clamp + reject events as
     family-3 counters.
 
     - ``reconcile_clamped_total`` / ``constrain_capped_total`` fire once
@@ -606,14 +604,14 @@ async def run_pipeline(
 
     Args:
         ctx: Initial PipelineContext (observations / request_id / decision_id).
-        scheduler: PR 3 PluginScheduler; provides the active set per stage
+        scheduler: PluginScheduler; provides the active set per stage
             and records OverrideResult for HOLD_LAST inheritance.
-        circuit_breaker: PR 3 CircuitBreaker; records success/failure
+        circuit_breaker: CircuitBreaker; records success/failure
             transitions driven by plugin call outcomes here.
         baseline: Current replicas per ComponentKey — fed to every
             ``type_aware_merge`` call for recommendation fallback and
             AT_LEAST/AT_MOST clamping.
-        clock: PR 2 Clock; used only for the whole-tick deadline guard.
+        clock: Used only for the whole-tick deadline guard.
         tick_now: Monotonic timestamp the active set + record_result use
             for "due" detection and HOLD_LAST cache age.
         tick_max_duration_seconds: Outermost deadline — wraps the entire
@@ -632,8 +630,8 @@ async def run_pipeline(
             for p in predict_active.triggered
         ]
         ca = await chain_augment(predict_adapters, current_ctx)
-        # PR 8 8-2 fix: also refresh circuit_state gauge for predict
-        # plugins (fan-out helper does this for other stages).
+        # Refresh circuit_state gauge for predict plugins (fan-out
+        # helper does this for other stages).
         if metrics is not None:
             _set_circuit_state(metrics, predict_active.triggered, circuit_breaker)
         if ca.misuse_warnings:
@@ -670,7 +668,7 @@ async def run_pipeline(
             )
 
         # ---- RECONCILE stage ----
-        # Baseline flows from PROPOSE's output (PR 4 cross-task #4).
+        # Baseline flows from PROPOSE's output.
         reconcile_baseline = _proposal_to_baseline(propose.proposal, baseline)
         reconcile = await _run_fanout_stage(
             stage="reconcile",
@@ -699,7 +697,7 @@ async def run_pipeline(
             )
 
         # ---- CONSTRAIN stage ----
-        # Baseline flows from RECONCILE's output (PR 4 cross-task #4).
+        # Baseline flows from RECONCILE's output.
         constrain_baseline = _proposal_to_baseline(reconcile.proposal, baseline)
         constrain = await _run_fanout_stage(
             stage="constrain",
@@ -752,9 +750,9 @@ async def run_pipeline(
     # Outermost safety deadline (M-7: this is the ONLY asyncio.wait_for
     # in this module, and it wraps the entire pipeline, not a single stage).
     try:
-        # PR 8 8-5: tick_duration_seconds histogram — measured around
-        # the outer wait_for so it includes every stage + the timeout
-        # machinery itself (matches what operators see as "tick cost").
+        # tick_duration_seconds histogram — measured around the outer
+        # wait_for so it includes every stage + the timeout machinery
+        # itself (matches what operators see as "tick cost").
         tick_start = clock.now()
         try:
             outcome = await asyncio.wait_for(

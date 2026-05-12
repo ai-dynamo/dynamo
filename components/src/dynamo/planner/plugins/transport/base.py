@@ -4,7 +4,7 @@
 """``PluginTransport`` ABC — unified contract for plugin RPC invocation.
 
 All three transports (in-process / uds / grpc) implement this interface.
-The orchestrator's pipeline driver (PR 5) treats them uniformly via
+The orchestrator's pipeline driver treats them uniformly via
 ``await plugin.transport.call(method, request)``.
 """
 
@@ -18,13 +18,13 @@ class PluginTransport(abc.ABC):
     """Abstract transport interface for plugin RPC invocation.
 
     **Lifecycle**:
-    - Constructed once per plugin (during register / register_internal in PR 3 / 5)
+    - Constructed once per plugin (during register / register_internal)
     - ``call(method, request)`` invoked many times across ticks
     - ``close()`` called once during plugin unregister or orchestrator shutdown
         (must be idempotent — orchestrator may call multiple times defensively)
 
     **Concurrency**:
-    - Single-threaded asyncio model (DEP v11 §"线程模型")
+    - Single-threaded asyncio model
     - ``call()`` is async; multiple concurrent calls to the SAME transport
       from different ``asyncio.gather`` branches are safe (gRPC channel
       multiplexing handles it)

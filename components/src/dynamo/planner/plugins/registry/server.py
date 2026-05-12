@@ -1,29 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""PluginRegistryServer (DEP-XXXX PR 3 sub-task 3-2).
+"""PluginRegistryServer.
 
 Hosts the four Register / Heartbeat / Unregister / ListPlugins operations.
-Invokable both via gRPC (PR 3.5 / PR 5 wires a generated gRPC servicer to
-these methods) and in-process (orchestrator calls ``register_internal``
-for builtin plugins + ``unregister`` during shutdown).
+Invokable both via gRPC (a generated gRPC servicer wires to these methods)
+and in-process (orchestrator calls ``register_internal`` for builtin
+plugins + ``unregister`` during shutdown).
 
 Responsibilities
 ----------------
 1. Gate every Register through the ``AuthValidator`` and a protocol
-   version check; reject duplicates (v11 § Q6 — clients must Unregister +
-   Register for version upgrades, not upsert).
+   version check; reject duplicates (clients must Unregister + Register
+   for version upgrades, not upsert).
 2. Build the appropriate ``PluginTransport`` via an injected factory
    (``functools.partial(make_transport_for_endpoint, config=...)`` or
    equivalent) — the server stays decoupled from ``TransportConfig``.
 3. Maintain the in-memory ``dict[plugin_id -> RegisteredPlugin]`` and
    update ``last_heartbeat_at`` / ``last_call_at`` / ``evaluations_total``
-   (the last two are written by the orchestrator via accessors once PR 5
-   lands).
+   (the last two are written by the orchestrator via accessors).
 4. On Unregister, close the transport, reset the plugin's circuit-breaker
    state, and fan out to any ``on_unregister`` subscriber
-   (PluginScheduler uses this to drop the plugin's HOLD_LAST cache per
-   v11 cache invalidation rows 1 + 2).
+   (PluginScheduler uses this to drop the plugin's HOLD_LAST cache).
 
 The class is **single-threaded asyncio** — all methods run on the event
 loop main task; the internal dict is unlocked.
@@ -108,7 +106,7 @@ class PluginRegistryServer:
             log.info("register rejected plugin_id=%s reason=%s", req.plugin_id, reason)
             return RegisterResponse(accepted=False, reject_reason=reason)
 
-        # 3. Duplicate plugin_id → reject per v11 § Q6.
+        # 3. Duplicate plugin_id → reject.
         if req.plugin_id in self._plugins:
             reason = "duplicate_plugin_id: must Unregister before re-Register"
             log.info("register rejected plugin_id=%s reason=%s", req.plugin_id, reason)
@@ -218,7 +216,8 @@ class PluginRegistryServer:
         """Return plugin metadata filtered by ``stage_filter`` and
         ``include_disabled``. Full observability fields
         (``last_call_at_seconds_ago`` / ``cache_age_seconds``) are stubbed
-        to ``0.0`` here; PR 3 sub-task 3-9 wires them through the scheduler.
+        to ``0.0`` here and wired through the scheduler via
+        ``attach_cache_age_lookup``.
         """
         now = self._clock.monotonic()
         out: list[PluginInfo] = []
@@ -298,10 +297,10 @@ class PluginRegistryServer:
         request_timeout_seconds: float = 0.0,
     ) -> RegisteredPlugin:
         """Register without auth / protocol checks; wrap ``instance`` in
-        ``InProcessTransport`` via the factory (P1-5 v11).
+        ``InProcessTransport`` via the factory.
 
-        Used by PR 5 orchestrator at startup for builtin plugins and by
-        PR 7 NativePlannerBase for ``in_process_plugins`` config entries.
+        Used by the orchestrator at startup for builtin plugins and by
+        ``NativePlannerBase`` for ``in_process_plugins`` config entries.
         ``is_builtin=False`` should be passed for user in-process plugins
         so they show up as such in ListPlugins + metrics; they still
         bypass auth (trust boundary is the Python process).

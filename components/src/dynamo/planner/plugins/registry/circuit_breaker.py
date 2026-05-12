@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Per-plugin circuit breaker (DEP-XXXX PR 3 sub-task 3-7).
+"""Per-plugin circuit breaker.
 
 State machine::
 

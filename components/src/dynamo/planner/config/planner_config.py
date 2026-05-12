@@ -109,8 +109,8 @@ class ExternalPluginEntry(BaseModel):
     )
     needs: list[str] = Field(
         default_factory=list,
-        description="Capability list (PR 4 type-aware merge); empty "
-        "in v1 (no plugin yet uses needs declaration).",
+        description="Capability list (consumed by type-aware merge); "
+        "empty in v1 (no plugin yet uses needs declaration).",
     )
 
     @field_validator("hold_policy", mode="before")
@@ -133,16 +133,15 @@ class ExternalPluginEntry(BaseModel):
 
 
 class GatewayConfig(BaseModel):
-    """Plugin-registry gRPC gateway config (DEP-XXXX W2).
+    """Plugin-registry gRPC gateway config.
 
     When ``enabled=True``, the planner stands up a gRPC server hosting
     the public ``PluginRegistry`` service so external plugin processes
     can register / heartbeat / unregister themselves over the network.
     See `docs/components/planner/external-plugins.md`.
 
-    Default ``enabled=False`` keeps existing deployments unchanged
-    (PR 5 / orchestrator path historically had no public registry
-    endpoint). Operators opt in explicitly.
+    Default ``enabled=False`` keeps existing deployments unchanged.
+    Operators opt in explicitly.
     """
 
     enabled: bool = Field(
@@ -170,7 +169,7 @@ class GatewayConfig(BaseModel):
 
 
 class SchedulingConfig(BaseModel):
-    """Planner-level scheduling config (DEP-XXXX PR 7 sub-task 7-1).
+    """Planner-level scheduling config.
 
     Controls which tick engine drives the planner and how long each
     tick may run. Backwards compatible: all fields have safe defaults,
@@ -186,10 +185,10 @@ class SchedulingConfig(BaseModel):
         default=False,
         description=(
             "Feature flag: when True, the planner drives ticks through "
-            "``LocalPlannerOrchestrator`` (PR 5) + real builtin plugins "
-            "(PR 6); when False (default), uses the legacy ``PlannerStateMachine`` "
-            "path. Both paths are wired in ``NativePlannerBase`` via ``EngineProtocol``. "
-            "PR 7 ships the flag defaulted OFF so upgrade ≠ cutover — "
+            "``LocalPlannerOrchestrator`` + real builtin plugins; when "
+            "False (default), uses the legacy ``PlannerStateMachine`` "
+            "path. Both paths are wired in ``NativePlannerBase`` via "
+            "``EngineProtocol``. Defaulted OFF so upgrade ≠ cutover — "
             "operations control the enable timing."
         ),
     )
@@ -216,8 +215,7 @@ class SchedulingConfig(BaseModel):
         gt=0,
         description=(
             "Outermost deadline wrapping the entire 4-stage pipeline "
-            "(orchestrator path only). See PR 5 `tick_max_duration_seconds` "
-            "capacity-planning runbook."
+            "(orchestrator path only)."
         ),
     )
     external_plugins: list[ExternalPluginEntry] = Field(
@@ -391,7 +389,7 @@ class PlannerConfig(BaseModel):
             "Tick-engine scheduling config — see ``SchedulingConfig`` "
             "docstring. Default uses the legacy PSM path; set "
             "``scheduling.use_orchestrator=true`` to opt into the "
-            "PR 5/6 orchestrator path (DEP-XXXX)."
+            "orchestrator path."
         ),
     )
 

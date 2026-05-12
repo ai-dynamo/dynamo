@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for EngineProtocol + _PSMEngineAdapter (PR 7 sub-task 7-2).
+"""Unit tests for EngineProtocol + _PSMEngineAdapter.
 
 Scope of this test file:
 - Protocol conformance (runtime_checkable): both adapters pass
@@ -10,9 +10,9 @@ Scope of this test file:
   ``on_tick`` to match the protocol's async ``tick``.
 - ``_PSMEngineAdapter.shutdown`` is idempotent + a no-op.
 
-Orchestrator-side adapter parity is out-of-scope for this file — PR 7
-sub-task 7-3 lands the full TickInput↔PipelineContext bridge + the
-OrchestratorEngineAdapter that completes the dual-path picture.
+Orchestrator-side adapter parity is out-of-scope for this file —
+``test_engine_adapter.py`` exercises the full TickInput↔PipelineContext
+bridge + ``OrchestratorEngineAdapter``.
 """
 
 from __future__ import annotations

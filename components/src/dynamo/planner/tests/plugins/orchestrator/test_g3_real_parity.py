@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""G3 behaviour parity through the 5 REAL builtin plugins (PR 6 sub-task 6-7).
+"""G3 behaviour parity through the 5 REAL builtin plugins.
 
 The five-builtin chain:
 
@@ -18,13 +18,13 @@ We compare **scale_to only** (ScalingDecision.num_prefill /
 num_decode), projected from the orchestrator's ``final_proposal``. We
 do NOT compare ``diagnostics`` or ``next_tick`` because:
 
-- v11 § Q2 (PR 6 doc): numeric diagnostic fields are scheduled to move
-  from ``TickDiagnostics`` to Prometheus metrics — the golden fixture's
-  diagnostic shape will be re-recorded in PR 6 6-8 against the plugin
-  chain, not the current PSM shape.
+- Numeric diagnostic fields are scheduled to move from
+  ``TickDiagnostics`` to Prometheus metrics — the golden fixture's
+  diagnostic shape will be re-recorded against the plugin chain, not
+  the current PSM shape.
 - ``next_tick`` bookkeeping (``_next_load_s`` / ``_next_throughput_s``)
   has not yet been decomposed across plugins; it remains a PSM-shaped
-  concern until PR 6 6-9 wires it through the orchestrator.
+  concern until a follow-up wires it through the orchestrator.
 
 Until those land, bit-level parity is impossible; the scale_to parity
 this file asserts is the most meaningful subset — it validates that
@@ -180,9 +180,9 @@ def _build_orchestrator_with_real_builtins(config, caps):
 def _observe_fpm_into_regressions(orch, obs: FpmObservations, mode: str) -> None:
     """Feed an ``FpmObservations`` dict into whichever regression models
     the orchestrator holds — mirrors PSM's ``_observe_fpm`` side effect,
-    which in PR 6 is intended to belong to the FPM-owning plugin but
-    currently lives outside the stage chain. Called by the test harness
-    between ticks so regression-state tracking is identical to PSM.
+    which is intended to belong to the FPM-owning plugin but currently
+    lives outside the stage chain. Called by the test harness between
+    ticks so regression-state tracking is identical to PSM.
     """
     if mode == "agg":
         if obs.decode:
@@ -285,8 +285,8 @@ async def _run_scenario_through_real_builtins(scenario):
     # the scenario's bootstrap_fn (mimicking ``PSM.load_benchmark_fpms``),
     # (2) install them on the orchestrator via ``install_regressions``,
     # (3) fan out Bootstrap RPC to plugins via ``bootstrap_plugins``.
-    # The two calls are distinct per PR 6 6-9 split: regression install
-    # is orchestrator-owned state; Bootstrap is a plugin lifecycle.
+    # The two calls are distinct: regression install is
+    # orchestrator-owned state; Bootstrap is a plugin lifecycle.
     bootstrap_psm = PlannerStateMachine(config, caps)
     if scenario.bootstrap_fn is not None:
         scenario.bootstrap_fn(bootstrap_psm)

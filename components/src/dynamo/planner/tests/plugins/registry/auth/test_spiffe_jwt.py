@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for SpiffeJwtAuth (DEP-XXXX PR 3.5 follow-up).
+"""Unit tests for SpiffeJwtAuth.
 
 Uses a real ``cryptography`` RSA keypair + hand-rolled ``PyJWT`` tokens
 instead of a full SPIRE deployment. The JWKS client is substituted via

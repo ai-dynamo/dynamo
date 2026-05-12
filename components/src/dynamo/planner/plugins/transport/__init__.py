@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Transport abstractions for plugin invocation (DEP-XXXX PR 2).
+"""Transport abstractions for plugin invocation.
 
 Three transports under one ``PluginTransport`` ABC:
 - ``InProcessTransport``: direct Python call (``inproc://<plugin_id>``)
 - ``UdsTransport``: grpc-over-uds (``unix:///path/to/sock``)
 - ``GrpcTransport``: grpc + optional mTLS (``grpc://host:port``)
 
-All three satisfy the same ``call(method, request)`` contract; PR 2 6
-contract test enforces byte-equality across them.
+All three satisfy the same ``call(method, request)`` contract;
+the contract test enforces byte-equality across them.
 """
 
 from dynamo.planner.plugins.transport._mtls import MtlsConfig

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for PluginRegistryServer (PR 3 sub-task 3-2)."""
+"""Unit tests for PluginRegistryServer."""
 
 from __future__ import annotations
 

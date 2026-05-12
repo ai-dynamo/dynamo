@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for HeartbeatMonitor (PR 3 sub-task 3-6)."""
+"""Unit tests for HeartbeatMonitor."""
 
 from __future__ import annotations
 
@@ -142,7 +142,7 @@ async def test_late_heartbeat_resets_deadline():
 
 
 # ---------------------------------------------------------------------------
-# In-process skip (v11 § G-3)
+# In-process skip
 # ---------------------------------------------------------------------------
 
 

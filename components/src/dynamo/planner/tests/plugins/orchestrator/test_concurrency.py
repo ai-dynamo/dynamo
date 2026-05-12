@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Concurrency / failure / timeout tests (PR 5 sub-task 5-9).
+"""Concurrency / failure / timeout tests.
 
 These exercise the pipeline's `asyncio.gather` semantics:
 

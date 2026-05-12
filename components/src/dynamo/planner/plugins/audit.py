@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``AuditLogger`` — structured audit log for plugin lifecycle + decisions
-(DEP-XXXX PR 8 sub-task 8-7).
+"""``AuditLogger`` — structured audit log for plugin lifecycle + decisions.
 
 Why a dedicated audit layer instead of scattered ``logger.info`` calls
 ---------------------------------------------------------------------
@@ -60,7 +59,7 @@ _AUDIT_LOG_PREFIX = "AUDIT "
 
 
 class AuditEvent(str, enum.Enum):
-    """Canonical audit event catalog (v11 PR 8 8-7).
+    """Canonical audit event catalog.
 
     Inherits from ``str`` so `audit.emit(AuditEvent.PLUGIN_EVALUATED, ...)`
     serialises identically to `audit.emit("plugin_evaluated", ...)`.
@@ -119,7 +118,7 @@ class AuditEvent(str, enum.Enum):
     """CONSTRAIN plugin returned SET; orchestrator dropped it (CONSTRAIN is AT_LEAST/AT_MOST only)."""
 
     ORCHESTRATOR_DRIFT_DETECTED = "orchestrator_drift_detected"
-    """Reserved (PR 5 v1.2 removed dual-execution; kept for enum stability)."""
+    """Reserved (dual-execution removed; kept for enum stability)."""
 
 
 class AuditLogger:

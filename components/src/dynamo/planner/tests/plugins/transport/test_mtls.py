@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for MtlsConfig (PR 2 sub-task 2-4)."""
+"""Unit tests for MtlsConfig."""
 
 from __future__ import annotations
 

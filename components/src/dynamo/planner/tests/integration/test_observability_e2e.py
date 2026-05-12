@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""End-to-end observability test (PR 8 sub-task 8-10).
+"""End-to-end observability test.
 
 Drives a full orchestrator tick with stub plugins and verifies that
 **both** the Prometheus metric counters AND the audit event stream

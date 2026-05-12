@@ -485,7 +485,7 @@ def _decode_throughput_only_sla() -> Scenario:
 
 
 # ---------------------------------------------------------------------------
-# Coverage gap scenarios (PR 6 sub-task 6-8 expansion)
+# Coverage gap scenarios
 # ---------------------------------------------------------------------------
 
 
@@ -698,7 +698,7 @@ ALL_SCENARIOS: list[Scenario] = [
     _agg_throughput_only_sla(),
     _prefill_throughput_only_sla(),
     _decode_throughput_only_sla(),
-    # PR 6 6-8 coverage gaps
+    # Coverage gaps
     _agg_load_throughput_sla(),
     _prefill_load_only_sla(),
     _decode_load_only_sla(),

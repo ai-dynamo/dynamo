@@ -1,15 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""End-to-end test for the **external plugin** path
-(DEP-XXXX PR 3 / PR 5 leftover e2e suite).
+"""End-to-end test for the **external plugin** path.
 
-This is the integration test PR 3's ``test_integration.py`` deferred
-("a real UDS / gRPC socket round-trip test belongs in a
-``tests/integration`` e2e suite") and PR 5 never added: a third-party
-plugin running in its own gRPC server, registering with the planner
-through the public ``register()`` RPC over a real socket, and being
-invoked by the orchestrator during a tick.
+A third-party plugin running in its own gRPC server, registering with
+the planner through the public ``register()`` RPC over a real socket,
+and being invoked by the orchestrator during a tick.
 
 Coverage gap before this file:
 - transport contract test exercises every transport (in_process / uds /
@@ -33,12 +29,12 @@ What this file proves:
    transport schemes.
 
 The test deliberately **does not** stand up a gRPC gateway in front of
-``PluginRegistryServer`` — that's the missing piece PR 5 left out. This
-file calls ``server.register()`` from Python directly; a real external
-plugin would need either (a) a future gateway or (b) ``register_internal``
-for in-process Python plugins. The transport hop being exercised is the
-**plugin invocation** hop (orchestrator → plugin), which is the path
-that mattered for the dual-path correctness story.
+``PluginRegistryServer``. This file calls ``server.register()`` from
+Python directly; a real external plugin would need either (a) a gateway
+or (b) ``register_internal`` for in-process Python plugins. The
+transport hop being exercised is the **plugin invocation** hop
+(orchestrator → plugin), which is the path that matters for dual-path
+correctness.
 """
 
 from __future__ import annotations
@@ -623,7 +619,7 @@ async def test_external_predict_plugin_threaded_through_chain_augment():
 
     Stage-specific check beyond PROPOSE: the wire boundary correctly
     handles the ``optional float`` semantics (``HasField()``-driven
-    partial-merge in PR 4 chain-augment) — pre-bridge-fix, every
+    partial-merge in ``chain_augment``) — pre-bridge-fix, every
     PREDICT plugin call would have failed at gRPC serialisation just
     like PROPOSE did, but only the PROPOSE tests would have caught it.
     """

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``BuiltinPluginBase`` — base class for PR 6 real builtin plugins.
+"""``BuiltinPluginBase`` — base class for real builtin plugins.
 
 Holds a reference to the owning ``LocalPlannerOrchestrator`` so
 subclasses can reach the shared regression-model store via
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 
 class BuiltinPluginBase(PluginLifecycle):
-    """Shared scaffolding for all PR 6 builtin plugins.
+    """Shared scaffolding for all builtin plugins.
 
     Subclasses override ``Bootstrap`` / ``Reset`` when they have state
     to seed or zero; the default implementations return ``ok=True`` so
@@ -50,7 +50,7 @@ class BuiltinPluginBase(PluginLifecycle):
         self._config = config
 
     # ------------------------------------------------------------------
-    # Regression-model forwarders (v11 § Q2 single-threaded asyncio)
+    # Regression-model forwarders (single-threaded asyncio)
     # ------------------------------------------------------------------
 
     def get_regression(self, kind: str) -> Optional[Any]:

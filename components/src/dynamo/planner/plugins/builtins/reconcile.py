@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``BuiltinReconcile`` (DEP-XXXX PR 6 sub-task 6-5).
+"""``BuiltinReconcile``.
 
 The simplest real builtin: a passthrough that re-emits
 ``PipelineContext.proposal`` as an ``OverrideResult`` with ``SET``
@@ -12,21 +12,20 @@ Why have it at all? Two reasons:
 1. The RECONCILE stage exists so user-provided reconcile plugins can
    participate in priority-aware merging. With at least one builtin
    present that always emits the current proposal, the merge at this
-   stage is well-defined even when no user plugin fires (PR 4's
-   ``type_aware_merge`` collapses the single entry back to the same
+   stage is well-defined even when no user plugin fires
+   (``type_aware_merge`` collapses the single entry back to the same
    proposal).
 2. Future work: when ``ReconcileStageRequest.proposals`` is threaded
    through the pipeline with the full list of per-plugin PROPOSE
-   outputs (PR 5 5-4 marked as v1 limitation), this builtin can fold
-   that list into its own merge call and surface richer reconciled
-   output. That extension is additive — we keep the same plugin class.
+   outputs, this builtin can fold that list into its own merge call
+   and surface richer reconciled output. That extension is additive —
+   we keep the same plugin class.
 
 Until the proposals list is threaded, this plugin is a passthrough.
-That is **sufficient** for G3 parity because the orchestrator's
-pipeline (PR 5) already re-invokes ``type_aware_merge`` on the
-aggregated plugin results at the RECONCILE stage; this builtin only
-adds a single priority-1 OverrideResult that matches the incoming
-proposal.
+That is **sufficient** for G3 parity because the orchestrator pipeline
+already re-invokes ``type_aware_merge`` on the aggregated plugin
+results at the RECONCILE stage; this builtin only adds a single
+priority-1 OverrideResult that matches the incoming proposal.
 """
 
 from __future__ import annotations

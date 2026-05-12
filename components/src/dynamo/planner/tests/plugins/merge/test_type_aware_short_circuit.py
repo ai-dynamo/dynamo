@@ -1,16 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for type_aware_merge REJECT short-circuit + final paths
-(PR 4 sub-task 4-3).
+"""Unit tests for type_aware_merge REJECT short-circuit + final paths.
 
-REJECT matrix (v11 § G-2: REJECT > final priority):
+REJECT matrix (REJECT > final priority):
 - single REJECT → short_circuited, proposal=None, reason includes plugin_id
 - REJECT + other SET → still short-circuits
 - REJECT + final OverrideResult → still short-circuits
 - multiple REJECTs → short_circuit_reason reflects the first one
 
-final matrix (v11 § G-2 priority rule for PROPOSE/RECONCILE):
+final matrix (priority rule for PROPOSE/RECONCILE):
 - single final SET → that plugin's targets become the proposal verbatim
 - multiple finals → priority-smallest wins
 - final + non-final bounds → non-final entries discarded
@@ -101,7 +100,7 @@ def test_reject_with_other_set_still_short_circuits():
 
 
 def test_reject_outranks_final():
-    # v11 § G-2: REJECT > final priority even when final is priority-small.
+    # REJECT > final priority even when final is priority-small.
     out = type_aware_merge(
         [
             _override("p1", 10, [_ct("prefill", OverrideType.SET, 8)], final=True),

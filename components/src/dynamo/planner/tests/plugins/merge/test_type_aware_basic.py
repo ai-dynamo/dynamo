@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for type_aware_merge basic paths (PR 4 sub-task 4-2).
+"""Unit tests for type_aware_merge basic paths.
 
 Covers the non-short-circuit, non-CONSTRAIN cases:
 - baseline passthrough / AcceptResult passthrough

@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``PluginLifecycle`` ABC (DEP-XXXX PR 6 sub-task 6-1).
+"""``PluginLifecycle`` ABC.
 
 Plugins implement ``Bootstrap`` + ``Reset`` so the orchestrator / mode
 subclass can seed model state at startup and zero it on config reload.
-v11 § YAGNI: ``Snapshot`` / ``Restore`` are intentionally NOT part of
-this contract — add them back only when a real debugging-replay or
+``Snapshot`` / ``Restore`` are intentionally NOT part of this contract
+(YAGNI) — add them back only when a real debugging-replay or
 fast-recovery use case shows up.
 
 Relation to stage methods (``Predict`` / ``Propose`` / ``Reconcile`` /

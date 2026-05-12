@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""End-to-end integration test: 5-builtin orchestrator + mock connector
-(DEP-XXXX PR 6 sub-task 6-11).
+"""End-to-end integration test: 5-builtin orchestrator + mock connector.
 
 Drives representative scenarios through the full builtin chain
 (BuiltinLoadPredictor / BuiltinThroughputPropose / BuiltinLoadPropose /
@@ -17,8 +16,7 @@ assert:
   that builtin from the active set and changes pipeline output.
 
 ``NativePlannerBase`` + real PSM production path are NOT exercised —
-PR 7 wires the orchestrator in with a feature flag; this test proves
-the orchestrator side works before that wiring lands.
+those live in the dual-path parity integration suite.
 """
 
 from __future__ import annotations
@@ -69,8 +67,8 @@ pytestmark = [
 
 
 class _RecordingConnector(PlannerConnector):
-    """Captures every add/remove call. PR 7 NativePlannerBase replaces
-    this with the production connector (Kubernetes / Global / etc.)."""
+    """Captures every add/remove call. Production replaces this with
+    the real connector (Kubernetes / Global / etc.)."""
 
     def __init__(self):
         self.adds: list[tuple[str, bool]] = []

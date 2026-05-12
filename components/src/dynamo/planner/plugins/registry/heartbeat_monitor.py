@@ -1,22 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Heartbeat-liveness background monitor (DEP-XXXX PR 3 sub-task 3-6).
+"""Heartbeat-liveness background monitor.
 
 Long-running asyncio coroutine that periodically scans the registry's
 plugins and evicts any UDS / gRPC plugin whose last heartbeat is older
 than ``timeout_seconds * missed_threshold``.
 
 In-process plugins (``transport_type == "in_process"``, **regardless** of
-``is_builtin``; v11 § G-3) are unconditionally skipped — they live inside
-the planner process, so "heartbeat missed" isn't meaningful and evicting
+``is_builtin``) are unconditionally skipped — they live inside the
+planner process, so "heartbeat missed" isn't meaningful and evicting
 them would kill correctly-registered user plugins that don't emit
 heartbeats.
 
 Eviction goes through the normal ``registry.unregister(plugin_id,
 reason="heartbeat_missed")`` path so audit logs, circuit-breaker reset,
-and scheduler cache invalidation all happen through a single code path
-(v11 § Q3 decision).
+and scheduler cache invalidation all happen through a single code path.
 """
 
 from __future__ import annotations
@@ -82,7 +81,7 @@ class HeartbeatMonitor:
         # Snapshot the list — `unregister` mutates `_plugins` mid-iteration.
         for plugin in self._registry.all_plugins():
             if plugin.transport_type == "in_process":
-                # v11 § G-3: in-process plugins never miss heartbeats.
+                # In-process plugins never miss heartbeats.
                 continue
             elapsed = now - plugin.last_heartbeat_at
             if elapsed > deadline:

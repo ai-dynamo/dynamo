@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dual-path parity integration test (DEP-XXXX PR 7 sub-task 7-8).
+"""Dual-path parity integration test.
 
 For every G3 scenario, drive the same tick sequence through:
 
@@ -12,8 +12,8 @@ For every G3 scenario, drive the same tick sequence through:
 Assert that both paths emit the same ``PlannerEffects.scale_to`` **and**
 ``PlannerEffects.next_tick.at_s`` per tick. Existing parity tests
 compare each path against the frozen golden fixture independently; this
-test gives a **single regression signal** when the paths diverge — the
-thing PR 7 7-8 is supposed to protect during production cutover.
+test gives a **single regression signal** when the paths diverge —
+the thing that protects production cutover.
 
 Scope this file validates:
 
@@ -27,9 +27,8 @@ Scope this file validates:
 Not covered here (explicitly documented):
 
 - ``diagnostics``: orchestrator path returns empty ``TickDiagnostics``
-  (PR 6 Q2 Prometheus migration pending); comparing would fail by
-  design. PR 7 7-10 rollout runbook calls this out as the known
-  observability regression.
+  (Prometheus migration pending); comparing would fail by design. The
+  rollout runbook calls this out as the known observability regression.
 - Connector call sequence: ``_apply_effects`` is path-agnostic (reads
   only ``effects.scale_to``), so scale_to parity implies connector
   parity. A separate test could assert this directly; today's scale_to

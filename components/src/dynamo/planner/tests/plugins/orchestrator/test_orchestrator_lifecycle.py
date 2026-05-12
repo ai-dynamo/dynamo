@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Lifecycle + regression-model accessor tests for LocalPlannerOrchestrator
-(PR 5 sub-tasks 5-2, 5-5)."""
+"""Lifecycle + regression-model accessor tests for LocalPlannerOrchestrator."""
 
 from __future__ import annotations
 
@@ -97,7 +96,7 @@ def test_module_level_register_internal_equivalent(ctx_factory):
 
 
 # ---------------------------------------------------------------------------
-# Regression-model accessors (v11 § Q2)
+# Regression-model accessors
 # ---------------------------------------------------------------------------
 
 

@@ -130,11 +130,11 @@ class TickDiagnostics:
     throughput_decision_reason_decode: Optional[str] = None
 
     # ------------------------------------------------------------------
-    # DEP-XXXX PR 8 (v11 observability) — plugin-era diagnostic fields.
+    # Plugin-era diagnostic fields.
     #
     # The numeric fields above (estimated_*_ms, engine_rps_*, predicted_*)
-    # are populated by the PSM path only; v11 Q2 moves these to
-    # plugin-emitted Prometheus metrics on the orchestrator path to avoid
+    # are populated by the PSM path only; on the orchestrator path
+    # those values move to plugin-emitted Prometheus metrics to avoid
     # cross-plugin coupling through a shared dataclass.  They stay here
     # so the existing diagnostics_recorder + PSM fixtures keep working.
     #

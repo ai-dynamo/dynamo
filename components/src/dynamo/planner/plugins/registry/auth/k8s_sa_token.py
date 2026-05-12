@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """``K8sSATokenAuth`` — validates Kubernetes ServiceAccount projected tokens
-via the cluster's ``TokenReview`` API (DEP-XXXX PR 3.5 follow-up).
+via the cluster's ``TokenReview`` API.
 
 Flow per ``validate(token)``:
 

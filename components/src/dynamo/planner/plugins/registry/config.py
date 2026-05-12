@@ -1,33 +1,30 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Registry configuration schema + factories (DEP-XXXX PR 3 sub-task 3-10).
+"""Registry configuration schema + factories.
 
-Schema shape (v11)
-------------------
+Schema shape
+------------
 
 ``planner.plugin_registration.*``
   - ``endpoints`` (UDS socket + optional gRPC listen addr)
   - ``auth`` (trusted_sources + per-source config)
-  - ``transport`` (TransportConfig; see PR 2 ``transport/config.py``)
+  - ``transport`` (TransportConfig; see ``transport/config.py``)
   - ``protocol_version_min`` / ``_max``
   - ``heartbeat_timeout_seconds`` / ``heartbeat_missed_threshold``
-  - ``in_process_plugins`` (v11 § C-2: moved from SchedulingConfig to
-    live next to other "how plugins register" settings)
-  - ``admin`` (Q5 v1: simplified — ``AllowAllAdminAuth`` default)
+  - ``in_process_plugins`` — lives next to other "how plugins register"
+    settings
+  - ``admin`` (simplified — ``AllowAllAdminAuth`` default)
 
 ``planner.scheduling.*``
-  - ``clock`` (see PR 2 ``transport/config.py``)
+  - ``clock`` (see ``transport/config.py``)
   - ``request_timeout_seconds`` / ``tick_max_duration_seconds``
-  - ``builtins`` — per-builtin-plugin toggles (M-6 v11: actual default for
+  - ``builtins`` — per-builtin-plugin toggles (actual default for
     ``enabled`` is the ``enable_*_scaling`` toggle of the parent planner
     config; overriden here)
 
 Auth scope: all four sources (``static_secret`` / ``allow_unauthenticated``
-/ ``k8s_sa`` / ``spiffe_jwt``) are wired. ``k8s_sa`` and ``spiffe_jwt``
-were deferred from v1 to PR 3.5 to avoid blocking the registry ship on
-K8s RBAC and SPIRE integration; they share the same schema shape so no
-config migration is required.
+/ ``k8s_sa`` / ``spiffe_jwt``) are wired; they share the same schema shape.
 """
 
 from __future__ import annotations
@@ -139,10 +136,13 @@ class BuiltinPluginToggle(BaseModel):
 
 
 class InProcessPluginSpec(BaseModel):
-    """v11 § C-2: moved from SchedulingConfig to PluginRegistrationConfig
-    so all "how plugins come to exist" settings live together.
-    v11 § M-5: ``extra="forbid"`` rejects unknown fields (including
-    ``protocol_version``, which is nonsensical for in-process plugins)."""
+    """Spec for an in-process plugin entry — lives under
+    PluginRegistrationConfig so all "how plugins come to exist"
+    settings live together.
+
+    ``extra="forbid"`` rejects unknown fields (including
+    ``protocol_version``, which is nonsensical for in-process plugins).
+    """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -160,7 +160,7 @@ class InProcessPluginSpec(BaseModel):
 
 class SchedulingConfig(BaseModel):
     """``planner.scheduling.*`` config tree. Note: ``in_process_plugins``
-    is NOT here in v11 (moved to PluginRegistrationConfig)."""
+    lives under ``PluginRegistrationConfig``, not here."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -170,13 +170,13 @@ class SchedulingConfig(BaseModel):
 
 
 # ----------------------------------------------------------------------------
-# Admin (Q5 v1: simplified)
+# Admin
 # ----------------------------------------------------------------------------
 
 
 class AdminAuthConfig(BaseModel):
-    """Admin (ListPlugins) RBAC config. v1 default = allow_all (dev); Q5
-    leaves K8s RBAC admin to PR 3.5 follow-up."""
+    """Admin (ListPlugins) RBAC config. Default = allow_all (dev);
+    K8s RBAC admin is a follow-up."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -290,8 +290,8 @@ def build_registry_from_config(
 ) -> tuple[PluginRegistryServer, CircuitBreaker]:
     """Construct and wire the registry + circuit breaker.
 
-    Returns the pair so caller (orchestrator / PR 5) can hand the
-    circuit breaker to other subsystems (scheduler, heartbeat monitor).
+    Returns the pair so the caller (orchestrator) can hand the circuit
+    breaker to other subsystems (scheduler, heartbeat monitor).
     """
     auth = build_auth_validator(config.auth)
     cb = CircuitBreaker(clock)

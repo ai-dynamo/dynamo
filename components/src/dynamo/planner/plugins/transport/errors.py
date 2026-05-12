@@ -3,10 +3,11 @@
 
 """Plugin call error hierarchy.
 
-All transport ``call()`` failures MUST raise a ``PluginCallError`` subclass —
-no naked exceptions, no silent return. Subtype hierarchy lets the orchestrator
-(PR 5) decide selectively: timeout → circuit breaker; connection → reconnect;
-unknown method → contract violation; serialization → plugin bug audit.
+All transport ``call()`` failures MUST raise a ``PluginCallError``
+subclass — no naked exceptions, no silent return. The subtype hierarchy
+lets the orchestrator decide selectively: timeout → circuit breaker;
+connection → reconnect; unknown method → contract violation;
+serialization → plugin bug audit.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ class PluginCallError(Exception):
 class PluginTimeoutError(PluginCallError):
     """``asyncio.wait_for`` exceeded ``request_timeout_seconds`` for this RPC.
 
-    Orchestrator increments circuit breaker failure count (PR 3 3-7).
+    Orchestrator increments circuit breaker failure count.
     """
 
 

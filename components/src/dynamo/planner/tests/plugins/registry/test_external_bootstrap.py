@@ -2,14 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for ``LocalPlannerOrchestrator.register_external_from_config``
-and ``ExternalPluginEntry`` (DEP-XXXX W1 — static config-driven external
-plugin registration).
+and ``ExternalPluginEntry`` (static config-driven external plugin
+registration).
 
-The W1 path is the deployment model where a list of plugin endpoints
-is supplied to the planner at startup (typically from a ConfigMap),
+This is the deployment model where a list of plugin endpoints is
+supplied to the planner at startup (typically from a ConfigMap),
 and the planner registers each by calling ``registry.register(...)``
-on its own behalf — distinct from the W2 path (gRPC gateway with
-plugins self-registering over the network).
+on its own behalf — distinct from the gRPC gateway path (where
+plugins self-register over the network).
 
 Key invariants asserted here:
 

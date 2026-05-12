@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Chain-augment merge for PREDICT stage (DEP-XXXX PR 4 sub-task 4-5).
+"""Chain-augment merge for PREDICT stage.
 
 Sequential layered prediction: each plugin sees the running ``prediction``
 on its ``PipelineContext`` and may override, augment, or pass through.
@@ -18,18 +18,18 @@ Ordering and semantics
 - ``predictions=None`` in a response ≈ ACCEPT (no opinion; chain
   continues, running prediction unchanged). The wire contract in
   ``proto/v1/plugin.proto`` does **not** expose a REJECT mechanism for
-  PREDICT, so ``ChainAugmentOutcome.degraded`` is not populated in v1;
+  PREDICT, so ``ChainAugmentOutcome.degraded`` is not populated;
   a future proto revision may add an explicit reject field, at which
   point this function would populate ``degraded`` similarly to how
   ``type_aware_merge`` tracks ``set_dropped``.
 - ``final=True`` breaks the chain immediately. Subsequent plugins are
   **not** called — ``PredictPluginCallable.call`` is never awaited for
   them.
-- v11 § P1-2 **strong contract**: ``final=True`` MUST come from the
+- **Strong contract**: ``final=True`` MUST come from the
   lowest-priority-number (highest-precedence) plugin. Otherwise the chain
   breaks BEFORE higher-precedence plugins ever run. ``chain_augment``
   detects this at runtime, logs a WARNING, and records a message in
-  ``ChainAugmentOutcome.misuse_warnings``. PR 5 orchestrator emits
+  ``ChainAugmentOutcome.misuse_warnings``. The orchestrator emits
   Prometheus ``predict_chain_final_at_non_lowest_priority_total{plugin_id}``.
 
 This function is async only because it awaits plugin RPCs; the algorithmic
@@ -115,7 +115,7 @@ async def chain_augment(
                     f"the lowest priority in the chain "
                     f"(lowest_priority={lowest_priority}). "
                     "Chain broke BEFORE the higher-precedence plugin could "
-                    "run. See PR 4 README 'chain-augment final 使用规范'."
+                    "run. See merge/README.md 'chain-augment final 使用规范'."
                 )
                 log.warning(msg)
                 misuse_warnings.append(msg)

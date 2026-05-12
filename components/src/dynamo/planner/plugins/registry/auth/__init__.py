@@ -1,17 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pluggable auth validators for PluginRegistry (DEP-XXXX PR 3 sub-task 3-3,
-PR 3.5 follow-up).
+"""Pluggable auth validators for PluginRegistry.
 
 Validator hierarchy::
 
     AuthValidator (ABC)
-    ├── StaticSecretAuth        # v1 must-have (shared-secret map)
+    ├── StaticSecretAuth        # shared-secret map
     ├── MultiSourceAuth         # fan-out across the above
     ├── AllowUnauthenticatedAuth  # DEV ONLY; emits WARNING on init
-    ├── K8sSATokenAuth          # PR 3.5: Kubernetes ServiceAccount TokenReview
-    └── SpiffeJwtAuth           # PR 3.5: SPIFFE JWT-SVID via SPIRE JWKS
+    ├── K8sSATokenAuth          # Kubernetes ServiceAccount TokenReview
+    └── SpiffeJwtAuth           # SPIFFE JWT-SVID via SPIRE JWKS
 
 All five are wired in ``registry/config.py``'s ``build_auth_validator``.
 Selection is per-deployment config — single- and multi-tenant clusters

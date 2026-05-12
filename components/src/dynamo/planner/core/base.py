@@ -186,9 +186,9 @@ class NativePlannerBase:
         # State machine (created after WorkerInfo is resolved) — PSM path only.
         self._state_machine: Optional[PlannerStateMachine] = None
 
-        # Tick engine (DEP-XXXX PR 7 sub-task 7-3): the main-loop dispatch
-        # target. When ``scheduling.use_orchestrator`` is False (default),
-        # wraps ``self._state_machine``. When True, wraps an
+        # Tick engine: the main-loop dispatch target. When
+        # ``scheduling.use_orchestrator`` is False (default), wraps
+        # ``self._state_machine``. When True, wraps an
         # ``OrchestratorEngineAdapter``. Both paths satisfy
         # ``EngineProtocol`` so ``run()`` doesn't branch.
         self._engine: Optional[EngineProtocol] = None
@@ -225,14 +225,14 @@ class NativePlannerBase:
         decode_fpms=None,
         agg_fpms=None,
     ) -> None:
-        """Route benchmark FPMs into the correct engine path (PR 7 7-4).
+        """Route benchmark FPMs into the correct engine path.
 
         Mode subclasses call this from ``_bootstrap_regression`` with
         whatever FPM subset their mode produces. Routing:
 
         - PSM path (``use_orchestrator=False``): call
           ``PSM.load_benchmark_fpms(...)`` as before — identical to
-          pre-PR-7 behaviour.
+          legacy behaviour.
         - Orchestrator path: call
           ``OrchestratorEngineAdapter.bootstrap_from_fpms(...)`` which
           builds regressions via a throwaway PSM, installs them on the
@@ -258,7 +258,7 @@ class NativePlannerBase:
                 agg_fpms=agg_fpms,
             )
         else:
-            # PSM path — match pre-PR-7 behaviour. Only non-``None``
+            # PSM path — match legacy behaviour. Only non-``None``
             # values pass through so the call shape is unchanged for
             # modes that supply only one FPM kind.
             kwargs = {}
@@ -272,7 +272,7 @@ class NativePlannerBase:
                 self.state_machine.load_benchmark_fpms(**kwargs)
 
     def _ensure_engine(self) -> EngineProtocol:
-        """Lazy-construct the tick engine (PR 7 sub-task 7-3).
+        """Lazy-construct the tick engine.
 
         - PSM path (``scheduling.use_orchestrator=False``, default): build
           ``PlannerStateMachine`` as before, wrap in ``_PSMEngineAdapter``.
@@ -280,11 +280,7 @@ class NativePlannerBase:
           callers (e.g. ``state_machine`` property).
         - Orchestrator path (``scheduling.use_orchestrator=True``): build
           ``OrchestratorEngineAdapter``. ``self._state_machine`` stays
-          ``None``. Note: mode subclasses' ``_bootstrap_regression`` is
-          currently PSM-only (PR 7 sub-task 7-4 adds the dual-path fork);
-          until that lands, the orchestrator path runs without regression
-          seeding and only produces sensible output for easy-mode
-          scenarios.
+          ``None``.
         """
         if self._engine is not None:
             return self._engine
@@ -803,11 +799,11 @@ class NativePlannerBase:
         ``TickDiagnostics``.
 
         Gated on ``scheduling.use_orchestrator=True``. The PSM path is
-        intentionally skipped — the pre-PR-7 production code path never
-        called ``set_predicted_load``, so enabling it in PSM path would
-        be a behaviour change masquerading as a "fix". PR 7 delivers
-        this wire only on the new path; the PSM gap is left for a
-        separate PR if/when someone wants to address it.
+        intentionally skipped — the legacy code path never called
+        ``set_predicted_load``, so enabling it in the PSM path would be
+        a behaviour change masquerading as a "fix". This wire is
+        delivered only on the orchestrator path; the PSM gap is left
+        for a separate change if/when someone wants to address it.
         """
         if not self.config.scheduling.use_orchestrator:
             return
@@ -989,7 +985,7 @@ class NativePlannerBase:
                 # engine paths); None when the tick doesn't request them.
                 if tick_input.worker_counts is not None:
                     self._last_worker_counts = tick_input.worker_counts
-                # PR 7 dual-path: drive ticks through EngineProtocol
+                # Dual-path: drive ticks through EngineProtocol
                 # (PSM or orchestrator chosen by use_orchestrator flag),
                 # not the direct PSM call upstream main has.
                 effects = await engine.tick(next_tick, tick_input)

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for PR 8 sub-task 8-6: TickDiagnostics plugin-era fields.
+"""Tests for the plugin-era ``TickDiagnostics`` fields.
 
-The v11 extension adds three plugin-aware fields:
+The extension adds three plugin-aware fields:
 - plugin_overrides: list[tuple[str, str, str, str, int]]
 - reconcile_reasons: dict[str, str]
 - held_over_plugins: list[str]

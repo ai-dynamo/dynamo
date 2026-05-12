@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``SpiffeJwtAuth`` — validates SPIFFE JWT-SVIDs against a SPIRE JWKS
-(DEP-XXXX PR 3.5 follow-up).
+"""``SpiffeJwtAuth`` — validates SPIFFE JWT-SVIDs against a SPIRE JWKS.
 
 Flow per ``validate(token)``:
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Registry error hierarchy (DEP-XXXX PR 3 sub-task 3-1).
+"""Registry error hierarchy.
 
 All errors raised by ``PluginRegistryServer`` and its auth validators
 inherit ``RegistryError``. Orchestrator callers catch the base class for
@@ -37,7 +37,7 @@ class ProtocolVersionError(RegistryError):
 class DuplicatePluginIdError(RegistryError):
     """``plugin_id`` already registered.
 
-    Per v11 § Q6, the server rejects duplicates rather than upserting —
-    clients must explicitly ``Unregister`` + ``Register`` for version
-    upgrades so cache invalidation is deterministic.
+    The server rejects duplicates rather than upserting — clients must
+    explicitly ``Unregister`` + ``Register`` for version upgrades so
+    cache invalidation is deterministic.
     """

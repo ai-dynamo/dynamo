@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Load in-process user plugins from config specs (DEP-XXXX PR 5 sub-task 5-6).
+"""Load in-process user plugins from config specs.
 
-Given a list of ``InProcessPluginSpec`` (see PR 3
-``registry/config.py``), import the named module, instantiate the named
-class with ``kwargs``, and hand the instance to
-``orchestrator.register_internal``.
+Given a list of ``InProcessPluginSpec`` (see ``registry/config.py``),
+import the named module, instantiate the named class with ``kwargs``,
+and hand the instance to ``orchestrator.register_internal``.
 
-Used at orchestrator startup (PR 7 NativePlannerBase) to wire user
-in-process plugins declared in ``planner.plugin_registration.in_process_plugins``.
+Used at orchestrator startup by ``NativePlannerBase`` to wire user
+in-process plugins declared in
+``planner.plugin_registration.in_process_plugins``.
 """
 
 from __future__ import annotations

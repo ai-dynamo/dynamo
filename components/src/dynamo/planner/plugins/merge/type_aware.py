@@ -1,16 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Type-aware merge (DEP-XXXX PR 4 sub-task 4-2).
+"""Type-aware merge.
 
-Pure function used by the PR 5 orchestrator in PROPOSE / RECONCILE /
-CONSTRAIN stages. See main doc v11 § 4.3 and ``DEP-XXXX_PR4_Detailed_zh.md``
-4-2 row for pseudocode + key design decisions.
+Pure function used by the orchestrator in PROPOSE / RECONCILE /
+CONSTRAIN stages.
 
 Algorithm outline
 -----------------
 1. **REJECT short-circuit** — any ``RejectResult`` returns
-   ``short_circuited=True``; out-ranks ``final`` per v11 § G-2.
+   ``short_circuited=True``; out-ranks ``final``.
 2. **final priority** — if any ``OverrideResult`` carries ``final=True``,
    the priority-smallest final's targets become the proposal outright.
 3. **Bucket by ``(sub_component_type, component_name)``**; inside each
@@ -24,7 +23,7 @@ Algorithm outline
 
 ``set_allowed=False`` (CONSTRAIN mode) drops SET targets from both the
 final path and the bucket-merge path and records dropped keys in
-``MergeOutcome.set_dropped`` for orchestrator audit (v11 § 4.3:
+``MergeOutcome.set_dropped`` for orchestrator audit (emits the
 ``plugin_constrain_set_dropped_total{plugin_id}`` Prometheus counter).
 
 The function is **sync** and **deterministic** — no I/O, no Clock. Output
@@ -77,7 +76,7 @@ def type_aware_merge(
         ``MergeOutcome`` — either ``short_circuited=True`` with
         ``proposal=None`` on REJECT, or a populated ``ScalingProposal``.
     """
-    # Step 1: REJECT short-circuit (REJECT > final per v11 § G-2)
+    # Step 1: REJECT short-circuit (REJECT > final)
     for r in plugin_results:
         if isinstance(r.result, RejectResult):
             return MergeOutcome(
@@ -169,7 +168,7 @@ def type_aware_merge(
         # Clamp order: floor wins when floor > ceiling.
         result_replicas = max(floor, min(ceiling, recommendation))
 
-        # PR 8 8-3: record per-key clamps so the orchestrator emits
+        # Record per-key clamps so the orchestrator emits
         # the right family-3 counter.  Only report clamps that
         # actually changed the value — if recommendation was already
         # within [floor, ceiling] this key was un-clamped and the

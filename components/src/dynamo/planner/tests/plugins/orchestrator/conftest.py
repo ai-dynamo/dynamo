@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared fixtures and stub plugins for PR 5 orchestrator tests."""
+"""Shared fixtures and stub plugins for orchestrator tests."""
 
 from __future__ import annotations
 

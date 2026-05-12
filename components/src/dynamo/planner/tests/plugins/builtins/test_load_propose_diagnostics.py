@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for ``BuiltinLoadPropose._last_load_diagnostics`` (PR 8 sub-task 8-9).
+"""Tests for ``BuiltinLoadPropose._last_load_diagnostics``.
 
 Every exit branch of ``Propose`` / ``_advance_load_*`` must leave a
 reason populated so ``OrchestratorEngineAdapter`` can project it onto

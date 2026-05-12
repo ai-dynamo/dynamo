@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for PluginLifecycle ABC + BuiltinPluginBase (PR 6 6-1)."""
+"""Unit tests for PluginLifecycle ABC + BuiltinPluginBase."""
 
 from __future__ import annotations
 

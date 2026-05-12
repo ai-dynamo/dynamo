@@ -1,32 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``LocalPlannerOrchestrator`` — thin composition of the PR 1-4 pieces
-(DEP-XXXX PR 5 sub-task 5-2).
+"""``LocalPlannerOrchestrator`` — thin composition of the plugin pieces.
 
 Owns:
   - the ``PluginRegistryServer`` (plugin lifecycle)
   - the ``CircuitBreaker`` (per-plugin failure-budget state)
   - the ``PluginScheduler`` (per-tick active-set + HOLD_LAST cache)
-  - a regression-model dict (placeholder; real shape comes in PR 6 with
-    the throughput-scaling builtin)
+  - a regression-model dict consumed by the throughput-scaling builtin
 
 Does **not** own:
   - the existing ``PlannerConnector`` — EXECUTE is returned as a
-    ``PipelineOutcome`` decision; the caller (PR 7 NativePlannerBase)
+    ``PipelineOutcome`` decision; the caller (``NativePlannerBase``)
     translates ``apply`` into ``connector.add_component`` /
     ``remove_component`` calls.
-  - any adapter between PR 1's ``PipelineContext`` and the existing
-    ``core/types.py`` TickInput / PlannerEffects — also PR 7.
+  - any adapter between the proto ``PipelineContext`` and the existing
+    ``core/types.py`` TickInput / PlannerEffects — that lives in the
+    engine adapter.
 
-Regression-model access (v11 § Q2, v1.3 simplified):
+Regression-model access:
   - ``get_regression(kind)`` returns the live reference; single-threaded
     asyncio means no locks are required.
   - ``update_regression(kind, fpm)`` mutates in place; callers (the
-    throughput-propose builtin in PR 6) invoke this serially on the
-    event-loop main task.
-  - ``snapshot_regression`` was part of v1.2 but removed — add it back
-    only when an async builtin needs to read across an ``await``.
+    throughput-propose builtin) invoke this serially on the event-loop
+    main task.
+  - Holding a returned reference across an ``await`` is unsafe — fetch
+    a fresh reference after every await point.
 """
 
 from __future__ import annotations
@@ -83,44 +82,43 @@ class LocalPlannerOrchestrator:
         self._circuit_breaker = circuit_breaker
         self._clock = clock
         self._tick_max_duration_seconds = tick_max_duration_seconds
-        # PR 8 8-2: optional family-2 metrics. ``None`` = emission off
+        # Optional plugin-framework metrics. ``None`` = emission off
         # (test path, replay without scraping endpoint); every production
         # call path passes a populated ``PluginFrameworkMetrics``.
         self._metrics = metrics
-        # Placeholder regression-model store. PR 6 throughput-propose /
-        # load-propose builtins read entries keyed by component kind
-        # ("prefill" / "decode" / "agg"); PR 7 NativePlannerBase wires
-        # the mode-specific models in at startup.
+        # Regression-model store keyed by component kind ("prefill" /
+        # "decode" / "agg"). The throughput-propose / load-propose
+        # builtins read these; ``NativePlannerBase`` wires the
+        # mode-specific models in at startup.
         self._regression: dict[str, Any] = {}
         # Per-engine static capabilities (from WorkerInfo / MDC).
-        # Builtins that compute engine throughput (PR 6 throughput-propose
-        # / load-propose) need these to clamp to max_num_batched_tokens /
+        # Builtins that compute engine throughput (throughput-propose /
+        # load-propose) need these to clamp to max_num_batched_tokens /
         # max_kv_tokens / etc. ``None`` is allowed for early pipelines
-        # that don't run those builtins (PR 5 skeleton).
+        # that don't run those builtins.
         self._capabilities = capabilities
         # Cross-plugin shared state: PSM tracks ``_throughput_lower_bound_p/d``
         # on the state machine; in the plugin decomposition the throughput-
         # propose builtin writes these and the load-propose builtin reads
-        # them. PR 6 6-7 wires the plumbing; PR 7 / later refactor can
-        # swap for AT_LEAST-merge semantics.
+        # them. A later refactor can swap this for AT_LEAST-merge semantics.
         self._throughput_lower_bound: dict[str, int] = {"prefill": 1, "decode": 1}
 
     # ------------------------------------------------------------------
-    # Regression model accessors (v11 § Q2)
+    # Regression model accessors
     # ------------------------------------------------------------------
 
     def get_regression(self, kind: str) -> Optional[Any]:
         """Live reference to the regression model for ``kind``.
 
         Callers MUST use synchronously on the event loop main task.
-        Holding the reference across an ``await`` is unsafe until
-        ``snapshot_regression`` is re-introduced (v11 § Q2)."""
+        Holding the reference across an ``await`` is unsafe — fetch a
+        fresh reference after every await point."""
         return self._regression.get(kind)
 
     def update_regression(self, kind: str, model: Any) -> None:
         """Install / replace the regression model for ``kind``. Typically
         called by the throughput-propose builtin after adding a new FPM
-        observation (PR 6)."""
+        observation."""
         self._regression[kind] = model
 
     @property
@@ -158,7 +156,7 @@ class LocalPlannerOrchestrator:
         """Register a plugin object that lives in this Python process.
 
         Thin wrapper around ``PluginRegistryServer.register_internal``;
-        exists so callers (PR 7 NativePlannerBase, tests) can interact
+        exists so callers (``NativePlannerBase``, tests) can interact
         with a single facade without reaching through to the registry.
         """
         return self._registry.register_internal(
@@ -181,12 +179,12 @@ class LocalPlannerOrchestrator:
     async def register_external_from_config(
         self, entries: Sequence[Any]
     ) -> tuple[int, list[tuple[str, str]]]:
-        """Register a static list of out-of-process plugins (W1 path).
+        """Register a static list of out-of-process plugins.
 
         ``entries`` is typically ``PlannerConfig.scheduling.external_plugins``.
         Each entry is converted to a ``RegisterRequest`` and pushed
         through the same ``await registry.register(...)`` code path the
-        gRPC gateway (W2) uses — so behaviour is identical between
+        gRPC gateway uses — so behaviour is identical between
         static-config and dynamic-self-register deployments.
 
         **Failure isolation**: a single bad entry (auth failure, bad
@@ -262,7 +260,7 @@ class LocalPlannerOrchestrator:
         Returns a ``PipelineOutcome`` naming the EXECUTE decision
         (``apply`` / ``skip_no_targets`` / ``skip_short_circuit`` /
         ``skip_tick_timeout``) — the caller is responsible for
-        projecting ``apply`` onto a ``PlannerConnector`` (PR 7).
+        projecting ``apply`` onto a ``PlannerConnector``.
         """
         tick_now = self._clock.monotonic()
         return await run_pipeline(
@@ -286,7 +284,7 @@ class LocalPlannerOrchestrator:
             await self._registry.unregister(plugin.plugin_id, reason="shutdown")
 
     # ------------------------------------------------------------------
-    # Pre-first-tick initialisation (PR 6 sub-task 6-9)
+    # Pre-first-tick initialisation
     # ------------------------------------------------------------------
 
     def install_regressions(
@@ -302,9 +300,9 @@ class LocalPlannerOrchestrator:
 
         This is **orchestrator-owned state** (not a plugin concern) —
         the caller constructs regressions (typically via
-        ``PSM.load_benchmark_fpms`` on a throwaway PSM, or in PR 7
-        equivalent) and hands them here for shared access across
-        builtins. ``None`` for any kind skips that slot.
+        ``PSM.load_benchmark_fpms`` on a throwaway PSM) and hands them
+        here for shared access across builtins. ``None`` for any kind
+        skips that slot.
 
         Distinct from ``bootstrap_plugins`` on purpose — regressions
         must be installed **before** ``bootstrap_plugins`` is called
@@ -323,7 +321,7 @@ class LocalPlannerOrchestrator:
         *,
         historical_traffic: Optional[Sequence["TrafficObservation"]] = None,
     ) -> None:
-        """Fan out the PR 6 1-6 plugin Bootstrap lifecycle hooks.
+        """Fan out plugin Bootstrap lifecycle hooks.
 
         Two things happen in order:
 
@@ -333,8 +331,8 @@ class LocalPlannerOrchestrator:
            ``PSM.warm_load_predictors``.
         2. **Dispatch Bootstrap RPC** to every registered plugin so
            any side effects in concrete plugin implementations fire.
-           Plugins that don't implement Bootstrap (e.g. PR 5 shim)
-           have the ``PluginUnknownMethodError`` caught and skipped.
+           Plugins that don't implement Bootstrap have the
+           ``PluginUnknownMethodError`` caught and skipped.
 
         Regression installation is a **separate** concern — call
         ``install_regressions(...)`` before this if plugin Bootstrap

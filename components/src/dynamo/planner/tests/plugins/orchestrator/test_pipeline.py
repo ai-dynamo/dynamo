@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""4-stage pipeline tests (PR 5 sub-task 5-4).
+"""4-stage pipeline tests.
 
 Covers:
 - PREDICT chain_augment threads predictions into PROPOSE ctx
@@ -424,7 +424,7 @@ async def test_whole_tick_timeout_returns_skip_tick_timeout(ctx_factory):
 def test_M7_pipeline_py_has_no_stage_level_wait_for():
     """Assert the pipeline source contains exactly one
     ``asyncio.wait_for`` call, and that call wraps the whole-tick body
-    (``_body()``), not an ``asyncio.gather``. v11 § M-7."""
+    (``_body()``), not an ``asyncio.gather`` (M-7 invariant)."""
     from dynamo.planner.plugins.orchestrator import pipeline as _pipeline_module
 
     source_path = pathlib.Path(_pipeline_module.__file__)

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for OrchestratorEngineAdapter (PR 7 sub-task 7-3 foundation).
+"""Unit tests for OrchestratorEngineAdapter.
 
 Scope:
 - Protocol conformance: adapter satisfies ``EngineProtocol``.
@@ -127,8 +127,8 @@ async def test_g3_parity_via_adapter(scenario):
     produce the same ``scale_to`` decision sequence as PSM.
 
     Any mismatch means the adapter diverged from PSM on a supported
-    scenario — a regression the next PR 7 step (NativePlannerBase
-    wiring) would inherit."""
+    scenario — a regression that the ``NativePlannerBase`` wiring
+    would inherit."""
     fixture_path = DEFAULT_OUTPUT_DIR / f"{scenario.name}.jsonl"
     assert fixture_path.exists(), f"missing fixture: {fixture_path}"
     fixture = _read_fixture(fixture_path)

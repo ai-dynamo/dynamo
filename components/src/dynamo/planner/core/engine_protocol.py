@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``EngineProtocol`` — shared abstraction for the tick engine
-(DEP-XXXX PR 7 sub-task 7-2).
+"""``EngineProtocol`` — shared abstraction for the tick engine.
 
 ``NativePlannerBase`` drives its tick loop through an ``EngineProtocol``
 rather than a concrete ``PlannerStateMachine`` so the planner can run
@@ -12,8 +11,8 @@ under two paths that are selectable at runtime via
 - **PSM path** (default, ``use_orchestrator=False``): legacy behaviour.
   ``_PSMEngineAdapter`` wraps a ``PlannerStateMachine`` instance and
   forwards tick calls to its synchronous ``on_tick``.
-- **Orchestrator path** (``use_orchestrator=True``): PR 5/6 decomposition.
-  A separate orchestrator adapter (landed in PR 7 sub-task 7-3) bridges
+- **Orchestrator path** (``use_orchestrator=True``): plugin
+  decomposition. A separate orchestrator adapter bridges
   ``TickInput`` → ``PipelineContext`` and projects ``PipelineOutcome``
   back onto ``PlannerEffects``.
 

@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for ``OrchestratorEngineAdapter._project_load_diagnostics``
-(PR 8 sub-task 8-9).
+"""Tests for ``OrchestratorEngineAdapter._project_load_diagnostics``.
 
 Validates the end-to-end chain: ``BuiltinLoadPropose`` writes to
 ``_last_load_diagnostics`` during ``Propose``, the adapter reads it

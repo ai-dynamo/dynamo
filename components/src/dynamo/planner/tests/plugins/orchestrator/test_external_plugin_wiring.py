@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for ``OrchestratorEngineAdapter`` startup wiring of W1 + W2
-(DEP-XXXX external plugin path).
+"""Tests for ``OrchestratorEngineAdapter`` startup wiring of the
+external plugin path (static-config + gateway).
 
 Locks the contracts:
 

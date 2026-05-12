@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hypothesis property-based tests for chain_augment (PR 4 sub-task 4-6).
+"""Hypothesis property-based tests for chain_augment.
 
 Invariants:
 

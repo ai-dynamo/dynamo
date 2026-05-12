@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for ``NativePlannerBase._install_benchmark_fpms`` dual-path
-routing + ``OrchestratorEngineAdapter.bootstrap_from_fpms`` (PR 7 sub-
-task 7-4).
+routing + ``OrchestratorEngineAdapter.bootstrap_from_fpms``.
 
 The 4 mode subclasses (``PrefillPlanner`` / ``DecodePlanner`` /
 ``AggPlanner`` / ``DisaggPlanner``) each call ``_install_benchmark_fpms``

@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``BuiltinBudgetConstrain`` — CONSTRAIN-stage builtin (DEP-XXXX PR 6 sub-task 6-6).
+"""``BuiltinBudgetConstrain`` — CONSTRAIN-stage builtin.
 
 Semantic rewrite of PSM's ``_apply_global_budget`` / ``_apply_single_budget``:
 instead of clamping inside the ``_advance_*`` decision methods, emit
 ``AT_LEAST`` (min_endpoint floor) and ``AT_MOST`` (max_gpu_budget ceiling)
-at the CONSTRAIN stage. PR 4 ``type_aware_merge`` with ``set_allowed=False``
+at the CONSTRAIN stage. ``type_aware_merge`` with ``set_allowed=False``
 applies them to the upstream proposal.
 
 Output shape
@@ -25,8 +25,7 @@ Output shape
   order ("prefill priority, decode uses remaining") for the single-
   component case; **diverges** from PSM when BOTH components exceed
   their independent ceiling simultaneously (PSM does proportional
-  scaling, this emits independent ceilings). Documented trade-off per
-  PR 6 design.
+  scaling, this emits independent ceilings). Documented trade-off.
 - **scaling_in_progress freeze**: when ``expected_num_*`` differs from
   ``ready_num_*``, emit ``AT_LEAST=current`` **and** ``AT_MOST=current``
   so the merge clamps replicas to their current value (no scaling
@@ -41,10 +40,10 @@ Input side-channel
 ------------------
 
 Like ``BuiltinLoadPropose``, the plugin reads ``WorkerCounts`` via a
-side-channel ``prime_tick`` helper because ``PipelineContext.observations.workers``
-in PR 1 format doesn't fully round-trip the ``expected_num_*`` fields
-the scaling-in-progress check needs. PR 6 6-9 / PR 7 wire this through
-the orchestrator.
+side-channel ``prime_tick`` helper because
+``PipelineContext.observations.workers`` doesn't fully round-trip the
+``expected_num_*`` fields the scaling-in-progress check needs.
+``OrchestratorEngineAdapter`` calls ``prime_tick`` before each tick.
 """
 
 from __future__ import annotations

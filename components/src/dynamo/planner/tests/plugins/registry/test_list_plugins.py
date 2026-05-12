@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for list_plugins end-to-end with scheduler cache_age wiring
-(PR 3 sub-task 3-9).
+"""Unit tests for list_plugins end-to-end with scheduler cache_age wiring.
 
 Basic filter tests live in test_server.py; this file focuses on the
 observability fields (``circuit_state``, ``cache_age_seconds``,

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for ``MergeOutcome.clamped`` population (PR 8 sub-task 8-3).
+"""Tests for ``MergeOutcome.clamped`` population.
 
 Extends existing ``type_aware_merge`` tests to verify the new
 ``clamped`` field accurately records which (key, direction, source)

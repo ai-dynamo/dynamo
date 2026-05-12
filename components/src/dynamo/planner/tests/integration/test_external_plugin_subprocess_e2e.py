@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Cross-process e2e test for the W2 gateway path (DEP-XXXX).
+"""Cross-process e2e test for the gateway path.
 
 The planner-side gRPC gateway (``plugins/registry/gateway.py``) plus
 the subprocess plugin runner (``external_plugin_subprocess_runner.py``)

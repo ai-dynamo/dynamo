@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Transport contract test (PR 2 sub-task 2-6) — **core acceptance**.
+"""Transport contract test — **core acceptance**.
 
 For a single ``echo`` plugin (returns the request's PipelineContext as the
 response's predictions field), assert that all 4 transports

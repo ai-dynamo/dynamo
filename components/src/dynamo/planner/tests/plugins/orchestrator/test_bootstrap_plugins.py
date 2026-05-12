@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the PR 6 sub-task 6-9 startup entry points on
+"""Unit tests for the startup entry points on
 ``LocalPlannerOrchestrator``:
 
 - ``install_regressions(prefill=, decode=, agg=)`` — orchestrator-owned

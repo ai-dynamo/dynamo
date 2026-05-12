@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for BuiltinBudgetConstrain (PR 6 6-6).
+"""Unit tests for BuiltinBudgetConstrain.
 
 The plugin emits ``AT_LEAST`` / ``AT_MOST`` targets; the test validates
 both the **shape** of emitted targets and the **merge outcome** when
-piped through PR 4 ``type_aware_merge`` against a stand-in upstream
+piped through ``type_aware_merge`` against a stand-in upstream
 proposal — i.e. does the plugin produce the correct clamp behaviour?
 """
 
@@ -90,7 +90,7 @@ def _config(**kw):
 def _merge_with_upstream(
     plugin_result, upstream_proposal=None, baseline=None
 ):
-    """Run PR 4 type_aware_merge with the plugin's result + an optional
+    """Run type_aware_merge with the plugin's result + an optional
     upstream proposal. CONSTRAIN mode (set_allowed=False) drops SET
     plugin outputs; the real pipeline threads the upstream proposal into
     the **baseline** dict (see pipeline._proposal_to_baseline), so we

@@ -16,13 +16,13 @@ optional-ness must match exactly.
 3. **JSON serialization** for audit logs / debug: Pydantic ``model_dump()``
    gives JSON directly.
 
-**Lock-step contract** (PR 1 round-trip test enforces): any change to the
-proto MUST come with a matching change here, verified by
+**Lock-step contract** (the round-trip test enforces): any change to
+the proto MUST come with a matching change here, verified by
 ``tests/plugins/proto/test_round_trip.py``.
 
-PR 5 / PR 6 plugin implementations are encouraged to use these classes
-internally; the ``call(method, request)`` transport boundary still uses
-proto generated messages (see ``_proto_bridge.py`` for converters).
+Plugin implementations are encouraged to use these classes internally;
+the ``call(method, request)`` transport boundary still uses proto
+generated messages (see ``_proto_bridge.py`` for converters).
 """
 
 from __future__ import annotations
@@ -174,9 +174,9 @@ class ObservationData(_ProtoMirror):
 
 
 class PredictionData(_ProtoMirror):
-    """v11 critical: all three prediction fields are Optional[float].
+    """All three prediction fields are ``Optional[float]``.
 
-    PR 4 chain-augment partial-merge uses field set/unset to distinguish
+    ``chain_augment`` partial-merge uses field set/unset to distinguish
     "I assert this value (even 0.0)" vs "no opinion, preserve previous".
     Proto3 ``optional`` modifier on the corresponding proto fields preserves
     this; here in Pydantic, ``Optional[float] = None`` carries the same

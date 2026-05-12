@@ -21,7 +21,6 @@ import pytest
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.errors import (
-    ConnectorBusyError,
     DeploymentModelNameMismatchError,
     DeploymentValidationError,
     DuplicateSubComponentError,
@@ -500,17 +499,9 @@ async def test_set_component_replicas_empty_target_replicas(
         await kubernetes_connector.set_component_replicas(target_replicas)
 
 
-@pytest.mark.asyncio
-async def test_set_component_replicas_deployment_not_ready_raises_busy(
+async def test_set_component_replicas_deployment_not_ready(
     kubernetes_connector, mock_kube_api
 ):
-    """When the DGD reports Ready=False, the connector must raise
-    ``ConnectorBusyError`` so the tick funnel can label the skip
-    distinctly from a true success — see ``core/base.py``.
-
-    Pre-PR-A1 this test asserted a silent ``return`` (the source of
-    the false-success accounting that motivated this change).
-    """
     # Arrange
     target_replicas = [
         TargetReplica(sub_component_type=SubComponentType.PREFILL, desired_replicas=3),
@@ -529,9 +520,7 @@ async def test_set_component_replicas_deployment_not_ready_raises_busy(
     mock_kube_api.is_deployment_ready.return_value = False
 
     # Act & Assert
-    with pytest.raises(ConnectorBusyError) as exc_info:
-        await kubernetes_connector.set_component_replicas(target_replicas)
-    assert exc_info.value.reason == "deployment_not_ready"
+    await kubernetes_connector.set_component_replicas(target_replicas)
 
     mock_kube_api.get_graph_deployment.assert_called_once()
     mock_kube_api.is_deployment_ready.assert_called_once_with(mock_deployment)

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for LOAD/THROUGHPUT decision state enum extensions (PR 8 sub-task 8-1).
+"""Tests for LOAD/THROUGHPUT decision state enum extensions.
 
 Enum.states is fixed at construction time; these tests guard against
 accidental removal or reordering that would break scrapers.
@@ -38,6 +38,9 @@ _V1_LOAD_STATES = [
     "scale_up",
     "scale_down",
     "scale_down_capped_by_throughput",
+    # Upstream main added this after the original v1 list but before the
+    # plugin-era additions. Append-only contract still honoured.
+    "scale_down_refused_consolidation",
 ]
 
 _V1_THROUGHPUT_STATES = [
@@ -50,8 +53,8 @@ _V1_THROUGHPUT_STATES = [
     "scale",
 ]
 
-# v11 PR 8 additions — appended in this order.
-_V11_LOAD_ADDITIONS = [
+# Plugin-era additions — appended in this order.
+_PLUGIN_LOAD_ADDITIONS = [
     "override_by_user_plugin",
     "reconcile_clamped_to_floor",
     "reconcile_clamped_to_ceiling",
@@ -59,7 +62,7 @@ _V11_LOAD_ADDITIONS = [
     "rejected_by_plugin",
 ]
 
-_V11_THROUGHPUT_ADDITIONS = [
+_PLUGIN_THROUGHPUT_ADDITIONS = [
     "override_by_user_plugin",
     "held_over",
     "circuit_open",
@@ -79,17 +82,17 @@ def test_v1_throughput_states_preserved_in_original_order():
 
 
 def test_v11_load_additions_appended_in_order():
-    assert LOAD_DECISION_STATES[len(_V1_LOAD_STATES):] == _V11_LOAD_ADDITIONS
+    assert LOAD_DECISION_STATES[len(_V1_LOAD_STATES):] == _PLUGIN_LOAD_ADDITIONS
 
 
 def test_v11_throughput_additions_appended_in_order():
     assert (
         THROUGHPUT_DECISION_STATES[len(_V1_THROUGHPUT_STATES):]
-        == _V11_THROUGHPUT_ADDITIONS
+        == _PLUGIN_THROUGHPUT_ADDITIONS
     )
 
 
-@pytest.mark.parametrize("state", _V11_LOAD_ADDITIONS)
+@pytest.mark.parametrize("state", _PLUGIN_LOAD_ADDITIONS)
 def test_new_load_state_is_settable_on_enum(state):
     """Construct an Enum with our extended states list and verify the
     new state can be set without raising. Uses an isolated registry so
@@ -110,7 +113,7 @@ def test_new_load_state_is_settable_on_enum(state):
     assert active[0].labels["test_load_state"] == state
 
 
-@pytest.mark.parametrize("state", _V11_THROUGHPUT_ADDITIONS)
+@pytest.mark.parametrize("state", _PLUGIN_THROUGHPUT_ADDITIONS)
 def test_new_throughput_state_is_settable_on_enum(state):
     registry = CollectorRegistry()
     gauge = Enum(

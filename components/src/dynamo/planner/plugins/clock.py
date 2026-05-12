@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Deterministic clock abstraction (DEP-XXXX PR 2 sub-task 2-5).
+"""Deterministic clock abstraction.
 
-All time access in the orchestrator (PR 5) and PluginRegistry (PR 3) MUST
-go through ``Clock`` — direct ``time.time()`` / ``time.monotonic()`` /
-``asyncio.sleep`` is forbidden (lint check enabled in PR 5 5-9).
+All time access in the orchestrator and PluginRegistry MUST go through
+``Clock`` — direct ``time.time()`` / ``time.monotonic()`` /
+``asyncio.sleep`` is forbidden.
 
-**Two time sources** (v11 C-7 decision):
+**Two time sources**:
 - ``now()``: epoch float (wall-clock); use for audit log timestamps,
   ``decision_id`` generation
 - ``monotonic()``: monotonic float; use for duration / scheduling

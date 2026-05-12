@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Worked example verbatim assertions (PR 4 sub-task 4-4).
+"""Worked example verbatim assertions.
 
 This file is the **source of truth** for type_aware_merge behaviour. The 9
-cases below mirror the worked example table in the v11 main design doc
-PROPOSE section verbatim — any edit to that table MUST come with a matching
+cases below mirror the worked example table in the design doc PROPOSE
+section verbatim — any edit to that table MUST come with a matching
 edit here (and vice versa). Test IDs match the ``case_name`` so CI output
 points directly at the offending case.
 

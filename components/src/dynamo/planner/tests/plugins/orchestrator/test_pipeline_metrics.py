@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""End-to-end integration test for PR 8 sub-task 8-2 metric emissions.
+"""End-to-end integration test for family-2 metric emissions.
 
 Drives a real ``LocalPlannerOrchestrator`` through a tick with stub
 plugins and asserts the family-2 metrics land with the expected
@@ -337,7 +337,7 @@ async def test_held_over_plugin_emits_held_over_counter(ctx_factory, metrics):
 
 
 # ---------------------------------------------------------------------------
-# PR 8 8-3 family-3 metrics (pipeline integration)
+# Family-3 metrics (pipeline integration)
 # ---------------------------------------------------------------------------
 
 
@@ -480,7 +480,7 @@ async def test_reject_emits_reject_short_circuited_total(ctx_factory, metrics):
 
 
 # ---------------------------------------------------------------------------
-# PR 8 8-5 family-6 pipeline integration
+# Family-6 pipeline integration
 # ---------------------------------------------------------------------------
 
 

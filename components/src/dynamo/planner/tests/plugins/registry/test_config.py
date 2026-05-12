@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for registry config + factories (PR 3 sub-task 3-10)."""
+"""Unit tests for registry config + factories."""
 
 from __future__ import annotations
 
@@ -80,15 +80,14 @@ async def test_multi_source_preserves_order():
 
 
 def test_k8s_sa_source_requires_subtree():
-    """PR 3.5 wired k8s_sa; the factory now raises ValueError (not
-    NotImplementedError) when the source is listed without its
-    sub-config, instead of blanket-rejecting the source."""
+    """The factory raises ValueError when ``k8s_sa`` is listed without
+    its sub-config (instead of blanket-rejecting the source)."""
     with pytest.raises(ValueError, match="AuthConfig.k8s_sa is None"):
         build_auth_validator(AuthConfig(trusted_sources=["k8s_sa"]))
 
 
 def test_spiffe_jwt_source_requires_subtree():
-    """PR 3.5 wired spiffe_jwt; same pattern as the k8s_sa check."""
+    """Same shape as the k8s_sa check, but for ``spiffe_jwt``."""
     with pytest.raises(ValueError, match="AuthConfig.spiffe is None"):
         build_auth_validator(AuthConfig(trusted_sources=["spiffe_jwt"]))
 
