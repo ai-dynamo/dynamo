@@ -1088,12 +1088,12 @@ func TestVLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
 
 func TestVLLMBackend_UpdateContainer_IntraPodGMS(t *testing.T) {
 	backend := &VLLMBackend{}
-	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
 			Enabled: true,
 			Mode:    v1alpha1.GMSModeIntraPod,
 		},
-	}
+	})
 	container := &corev1.Container{
 		Command: []string{"python3"},
 		Args:    []string{"-m", "dynamo.vllm"},
