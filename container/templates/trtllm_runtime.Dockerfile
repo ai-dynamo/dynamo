@@ -237,6 +237,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 ARG ENABLE_KVBM
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv pip uninstall -y nixl nixl-cu12 nixl-cu13 nixl-cpu nixl-xpu || true && \
     uv pip install \
       pip \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
@@ -248,7 +249,7 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
             echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
             exit 1; \
         fi; \
-        uv pip install "$KVBM_WHEEL"; \
+        uv pip install --no-deps "$KVBM_WHEEL"; \
     fi && \
     cd /workspace/benchmarks && \
     UV_GIT_LFS=1 uv pip install --no-cache . && \
@@ -261,6 +262,7 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
 # JIT compilation on sm_100a, where cubins are not pre-compiled).
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv pip uninstall -y nixl nixl-cu12 nixl-cu13 nixl-cpu nixl-xpu || true && \
     uv pip install pip /opt/dynamo/wheelhouse/nixl/nixl*.whl
 {% endif %}
 

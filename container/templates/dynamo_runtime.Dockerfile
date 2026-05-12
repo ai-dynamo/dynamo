@@ -100,6 +100,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 ARG ENABLE_KVBM
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv pip uninstall -y nixl nixl-cu12 nixl-cu13 nixl-cpu nixl-xpu || true && \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
@@ -110,13 +111,14 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
             echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
             exit 1; \
         fi; \
-        uv pip install "$KVBM_WHEEL"; \
+        uv pip install --no-deps "$KVBM_WHEEL"; \
     fi
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
 # Install NIXL wheel only (pre-built C++ binary, not buildable from source).
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv pip uninstall -y nixl nixl-cu12 nixl-cu13 nixl-cpu nixl-xpu || true && \
     uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl
 {% endif %}
 
