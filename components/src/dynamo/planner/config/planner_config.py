@@ -76,6 +76,21 @@ class PlannerConfig(BaseModel):
         ),
     )
     max_gpu_budget: int = SLAPlannerDefaults.max_gpu_budget
+    min_gpu_budget: int = SLAPlannerDefaults.min_gpu_budget
+    """Per-DGD GPU floor enforced by the local planner. -1 disables (default).
+
+    When set alongside ``max_gpu_budget`` with ``min == max``, the local
+    planner pins the per-DGD total and only redistributes replicas between
+    prefill and decode. Tolerance band:
+    ``[min_gpu_budget - tolerance, max_gpu_budget + tolerance]`` where
+    ``tolerance = max(prefill_engine_num_gpu, decode_engine_num_gpu)`` —
+    needed because integer worker steps from pools with different per-replica
+    GPU counts can't always exactly cancel.
+
+    This is per-DGD scope. The GlobalPlanner has a separate cluster-wide
+    ``min_total_gpus`` flag for cross-DGD enforcement; the two are
+    orthogonal and can both be set.
+    """
     min_endpoint: int = SLAPlannerDefaults.min_endpoint
 
     decode_engine_num_gpu: Optional[int] = None

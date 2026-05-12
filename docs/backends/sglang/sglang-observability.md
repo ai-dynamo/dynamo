@@ -111,6 +111,90 @@ For the complete and authoritative list of all SGLang metrics, see the [official
 
 ---
 
+## Forward Pass Metrics (FPM)
+
+Forward Pass Metrics provide **per-iteration scheduler telemetry** pushed over ZMQ, giving the [Planner](../../components/planner/README.md) real-time visibility into batch composition, queue depth, and GPU forward pass duration. Unlike Prometheus metrics (which are scraped asynchronously and reflect only the latest gauge value), FPM emits a structured message after every scheduler iteration with the exact batch state.
+
+### Pipeline
+
+```mermaid
+flowchart LR
+    A["SGLang Scheduler<br/>(child process)"] -->|ZMQ PUB<br/>IPC per dp_rank| B["FpmEventRelay<br/>(Rust)"]
+    B -->|NATS<br/>event plane| C["FpmEventSubscriber<br/>(Rust)"]
+    C --> D["Planner<br/>regression models"]
+```
+
+The transport is backend-agnostic: the same `FpmEventRelay` and `FpmEventSubscriber` are used by both SGLang and vLLM backends.
+
+### Enabling FPM
+
+FPM requires the Dynamo adapter (`dynamo.sglang`) to inject the worker identity and IPC path before engine initialization. This happens automatically when the Dynamo runtime creates the SGLang worker.
+
+The Planner subscribes to FPM via the NATS event plane. See the [Planner Guide](../../components/planner/planner-guide.md) for configuration (`load_adjustment_interval`, `max_num_fpm_samples`, `fpm_sample_bucket_size`).
+
+### Schema
+
+**ForwardPassMetrics** (top-level, one per iteration):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | `int` | Schema version (currently 1) |
+| `worker_id` | `str` | Dynamo endpoint `connection_id` |
+| `dp_rank` | `int` | Data-parallel rank |
+| `counter_id` | `int` | Monotonic sequence number per (worker, dp_rank) |
+| `wall_time` | `float` | GPU forward pass duration in seconds (via DeviceTimer) |
+| `scheduled_requests` | `ScheduledRequestMetrics` | Batch composition this iteration |
+| `queued_requests` | `QueuedRequestMetrics` | Waiting requests snapshot |
+
+**ScheduledRequestMetrics** (requests in this batch):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `num_prefill_requests` | `int` | Prefill requests (new + chunked continuations) |
+| `sum_prefill_tokens` | `int` | Tokens freshly computed (chunk size, not full prompt) |
+| `var_prefill_length` | `float` | Variance of full prompt lengths |
+| `sum_prefill_kv_tokens` | `int` | KV tokens read but not computed (prefix cache + prior chunks) |
+| `num_decode_requests` | `int` | Decode requests generating output tokens |
+| `sum_decode_kv_tokens` | `int` | Total KV context length across decode requests |
+| `var_decode_kv_tokens` | `float` | Variance of decode KV context lengths |
+
+**QueuedRequestMetrics** (requests waiting to be scheduled):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `num_prefill_requests` | `int` | Queued prefill requests |
+| `sum_prefill_tokens` | `int` | Total tokens across queued prefill |
+| `var_prefill_length` | `float` | Variance of queued prefill lengths |
+| `num_decode_requests` | `int` | Queued decode requests |
+| `sum_decode_kv_tokens` | `int` | Total KV tokens across queued decode |
+| `var_decode_kv_tokens` | `float` | Variance of queued decode KV lengths |
+
+### GPU-Accurate Timing
+
+FPM uses SGLang's `DeviceTimer` infrastructure (CUDA event pairs around `model_runner.forward()` and `cuda_graph.replay()`) for GPU-accurate `wall_time`. This avoids the CPU scheduling overhead that would be included by timing at the scheduler level.
+
+When DeviceTimer events are not yet ready (overlap scheduler mode where GPU work from iteration N is still in flight), FPM skips emission for that iteration rather than reporting an inaccurate monotonic clock fallback.
+
+### Disaggregated Mode
+
+In disaggregated serving, queued request metrics read from the correct engine-specific queues:
+
+| Engine | Queue Source |
+|--------|-------------|
+| Unified (non-disagg) | `waiting_queue` |
+| Prefill | `disagg_prefill_bootstrap_queue` |
+| Decode | `disagg_decode_prealloc_queue` + `disagg_decode_transfer_queue` |
+
+### Cross-Repo Contract Test
+
+SGLang defines its own `ForwardPassMetrics` struct that must field-for-field match Dynamo's shared schema. A cross-repo contract test (`dynamo/sglang/tests/test_fpm_contract.py`) guards against schema drift by encoding with SGLang's struct and decoding with Dynamo's.
+
+### Design Reference
+
+For the full motivation and design rationale, see the [Forward Pass Metrics RFC](../../proposals/vllm-rfc-forward-pass-metrics.md).
+
+---
+
 ## Distributed Tracing
 
 Dynamo propagates [W3C Trace Context](https://www.w3.org/TR/trace-context/) headers through the SGLang request pipeline, allowing you to correlate traces across the frontend, router, and individual SGLang workers in a disaggregated deployment.
