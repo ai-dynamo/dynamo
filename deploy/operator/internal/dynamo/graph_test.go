@@ -6101,6 +6101,7 @@ func TestGenerateBasePodSpec_TRTLLMSSHMountUsesSecretVolume(t *testing.T) {
 		"worker",
 		nil,
 		nil,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -9021,21 +9022,21 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 	controllerConfig := &configv1alpha1.OperatorConfiguration{}
 
 	t.Run("frontend gets policy env vars when kvTransferPolicy is set", func(t *testing.T) {
-		dgd := &v1alpha1.DynamoGraphDeployment{
+		dgd := &v1beta1.DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
-			Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
-				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-					"frontend": {ComponentType: commonconsts.ComponentTypeFrontend},
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
 				},
-				KvTransferPolicy: &v1alpha1.KvTransferPolicy{
+				KvTransferPolicy: &v1beta1.KvTransferPolicy{
 					LabelKey:      "topology.kubernetes.io/zone",
 					Domain:        "zone",
-					NoMatchPolicy: v1alpha1.NoMatchPolicyFail,
+					NoMatchPolicy: v1beta1.NoMatchPolicyFail,
 				},
 			},
 		}
-		component := dgd.Spec.Services["frontend"].DeepCopy()
+		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkSGLang, secretsRetriever, dgd, RoleMain, 1,
 			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, nil,
@@ -9051,21 +9052,21 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 	})
 
 	t.Run("frontend gets fallback noMatchPolicy", func(t *testing.T) {
-		dgd := &v1alpha1.DynamoGraphDeployment{
+		dgd := &v1beta1.DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
-			Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
-				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-					"frontend": {ComponentType: commonconsts.ComponentTypeFrontend},
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
 				},
-				KvTransferPolicy: &v1alpha1.KvTransferPolicy{
+				KvTransferPolicy: &v1beta1.KvTransferPolicy{
 					LabelKey:      "nvidia.com/rack",
 					Domain:        "rack",
-					NoMatchPolicy: v1alpha1.NoMatchPolicyFallback,
+					NoMatchPolicy: v1beta1.NoMatchPolicyFallback,
 				},
 			},
 		}
-		component := dgd.Spec.Services["frontend"].DeepCopy()
+		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkSGLang, secretsRetriever, dgd, RoleMain, 1,
 			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, nil,
@@ -9078,21 +9079,21 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 	})
 
 	t.Run("worker does not get policy env vars", func(t *testing.T) {
-		dgd := &v1alpha1.DynamoGraphDeployment{
+		dgd := &v1beta1.DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
-			Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
-				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-					"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
 				},
-				KvTransferPolicy: &v1alpha1.KvTransferPolicy{
+				KvTransferPolicy: &v1beta1.KvTransferPolicy{
 					LabelKey:      "topology.kubernetes.io/zone",
 					Domain:        "zone",
-					NoMatchPolicy: v1alpha1.NoMatchPolicyFail,
+					NoMatchPolicy: v1beta1.NoMatchPolicyFail,
 				},
 			},
 		}
-		component := dgd.Spec.Services["worker"].DeepCopy()
+		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkSGLang, secretsRetriever, dgd, RoleMain, 1,
 			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil,
@@ -9107,16 +9108,16 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 	})
 
 	t.Run("frontend without policy has no policy env vars", func(t *testing.T) {
-		dgd := &v1alpha1.DynamoGraphDeployment{
+		dgd := &v1beta1.DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
-			Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
-				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-					"frontend": {ComponentType: commonconsts.ComponentTypeFrontend},
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
 				},
 			},
 		}
-		component := dgd.Spec.Services["frontend"].DeepCopy()
+		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkSGLang, secretsRetriever, dgd, RoleMain, 1,
 			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, nil,
@@ -9131,21 +9132,21 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 	})
 
 	t.Run("frontend defaults noMatchPolicy to fail when omitted", func(t *testing.T) {
-		dgd := &v1alpha1.DynamoGraphDeployment{
+		dgd := &v1beta1.DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
-			Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
-				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-					"frontend": {ComponentType: commonconsts.ComponentTypeFrontend},
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
 				},
-				KvTransferPolicy: &v1alpha1.KvTransferPolicy{
+				KvTransferPolicy: &v1beta1.KvTransferPolicy{
 					LabelKey: "topology.kubernetes.io/zone",
 					Domain:   "zone",
 					// NoMatchPolicy omitted (zero value)
 				},
 			},
 		}
-		component := dgd.Spec.Services["frontend"].DeepCopy()
+		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkSGLang, secretsRetriever, dgd, RoleMain, 1,
 			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, nil,

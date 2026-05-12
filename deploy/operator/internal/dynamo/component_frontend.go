@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -94,7 +95,7 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 
 // kvTransferPolicyEnvVars returns the env vars a frontend router needs to
 // enforce the KV transfer policy.
-func kvTransferPolicyEnvVars(policy *v1alpha1.KvTransferPolicy) []corev1.EnvVar {
+func kvTransferPolicyEnvVars(policy *v1beta1.KvTransferPolicy) []corev1.EnvVar {
 	noMatchPolicy := string(policy.NoMatchPolicy)
 	if noMatchPolicy == "" {
 		noMatchPolicy = string(v1alpha1.NoMatchPolicyFail)
