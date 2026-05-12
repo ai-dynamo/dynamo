@@ -1088,9 +1088,14 @@ impl InstanceLeader {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No parallel worker configured"))?;
 
-        // Check if already loaded
+        // Idempotent: if already imported, skip. The TP=N asymmetric path can
+        // fan out multiple concurrent callers (one per local worker rank) into
+        // ensure_remote_metadata → import_remote_metadata for the same
+        // remote_instance. The second caller sees has_remote_metadata=true
+        // here; returning Ok(()) is correct — the metadata is already loaded
+        // and the handle mappings are already populated.
         if parallel_worker.has_remote_metadata(remote_instance) {
-            anyhow::bail!("Metadata already imported for instance {}", remote_instance);
+            return Ok(());
         }
 
         // Connect to remote - this imports metadata and stores handle mappings
