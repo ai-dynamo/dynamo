@@ -50,8 +50,13 @@ runs:
         if [ -n "${{ inputs.cuda_version }}" ]; then
           RENDER_ARGS+=" --cuda-version ${{ inputs.cuda_version }}"
         fi
-        RENDERED_PATH=$(python3 container/render.py ${RENDER_ARGS} --output-short-filename)
-        echo "rendered=${RENDERED_PATH}" >> $GITHUB_OUTPUT
+        # render.py prints an "INFO: Generated Dockerfile written to ..." line
+        # to stdout, so we can't capture its output as the path. With
+        # --output-short-filename the file is always written to
+        # container/rendered.Dockerfile (see render.py:render()), so just
+        # hardcode that path here.
+        python3 container/render.py ${RENDER_ARGS} --output-short-filename
+        echo "rendered=container/rendered.Dockerfile" >> $GITHUB_OUTPUT
 
     # /legal/ — NOTICES tree. FROM scratch stage; export bounded by NOTICES file
     # size (a few MB) regardless of runtime image size.

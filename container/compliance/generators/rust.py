@@ -18,6 +18,7 @@ import json
 import logging
 from pathlib import Path
 
+from .. import overrides as license_overrides
 from .common import UNKNOWN, Component, dedupe_by_name_version
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,13 @@ def _component_from_sbom_entry(entry: dict) -> Component | None:
         return None
 
     spdx = _normalize_license(entry.get("licenses"))
+    if spdx == UNKNOWN:
+        # Fall back to license_overrides.yaml when the SBOM didn't carry
+        # a license field (sgl-model-gateway and other sglang-internal
+        # crates ship with no License in Cargo.toml).
+        overridden = license_overrides.lookup(ECOSYSTEM, name, str(version))
+        if overridden:
+            spdx = overridden
 
     purl = entry.get("purl")
     source_url: str | None = None

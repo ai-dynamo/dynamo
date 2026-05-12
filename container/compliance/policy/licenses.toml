@@ -2518,6 +2518,36 @@ name = "libkdb5-10t64"
 allow = ["GPL-2.0-only"]
 reason = "MIT Kerberos KDB; binary is MIT — mere aggregation"
 
+[[exceptions]]
+type = "dpkg"
+name = "libkrb5-dev"
+allow = ["GPL-2.0-only"]
+reason = "MIT Kerberos developer headers; binary is MIT — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libpgm-dev"
+allow = ["LGPL-2.0-or-later", "LGPL-2.1-only"]
+reason = "OpenPGM dev (used by ZeroMQ); shipped binary is BSD-3/ISC, LGPL clauses are for build-time aux — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "libsodium-dev"
+allow = ["GPL-2.0-or-later"]
+reason = "libsodium developer headers; shipped binary is BSD-2/CC0/ISC/MIT, GPL clause for build aux — mere aggregation"
+
+[[exceptions]]
+type = "dpkg"
+name = "python3-pip"
+allow = ["LGPL-2.1-or-later"]
+reason = "pip itself is MIT; bundled vendored deps include LGPL packages used only at install time — mere aggregation; system component"
+
+[[exceptions]]
+type = "dpkg"
+name = "ucf"
+allow = ["GPL-2.0-only"]
+reason = "Update Configuration File framework; Debian system component invoked as a separate process during package configuration — mere aggregation"
+
 # --- Rust [[exceptions]] ---
 
 [[exceptions]]

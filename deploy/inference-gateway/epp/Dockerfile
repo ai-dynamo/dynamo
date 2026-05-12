@@ -111,11 +111,13 @@ ARG BUILD_REF
 
 WORKDIR /workspace
 
-# Install build dependencies for CGO
+# Install build dependencies for CGO + git (needed by cyclonedx-gomod's
+# `git describe` version detection — see SBOM stage below).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     libc-dev \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy go mod files first for better caching (from default context = epp/)
@@ -143,18 +145,23 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
 # a build artifact for frontend's compliance pipeline. cyclonedx-gomod is
 # pinned to v1.7.0 to keep the SBOM tool itself reproducible.
 #
-# -version: cyclonedx-gomod defaults to detecting the module version from
-# git, but the COPY-of-build-context above doesn't carry .git/, so the tool
-# fails with "no git repository found". Pass BUILD_REF explicitly (same
-# source the go build at line ~136 stamps into the binary). Fall back to
-# "0.0.0-dev" when BUILD_REF is empty (local builds without the CI arg).
+# cyclonedx-gomod app runs `git describe` to determine the module's version.
+# The COPY of the build context doesn't bring .git/ (BuildKit excludes it
+# unless an .dockerignore opt-in is set), so the tool fails with "no git
+# repository found". Init a throwaway repo with a single tagged commit so
+# `git describe` succeeds. BUILD_REF is the dynamo commit SHA the rest of
+# this Dockerfile already stamps into the binary; reusing it keeps the
+# SBOM's module version consistent with the binary's GitCommit string.
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
     --mount=type=cache,target=/root/.cache/go-build,sharing=shared \
+    git init -q . && \
+    git -c user.email=ci@example -c user.name=ci add -A && \
+    git -c user.email=ci@example -c user.name=ci commit -q --allow-empty -m "sbom build" && \
+    git tag "v0.0.0-${BUILD_REF:-dev}" && \
     GOBIN=/usr/local/bin go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.7.0 && \
     cyclonedx-gomod app -licenses -json \
         -main ./cmd/epp \
         -output /sbom-go.cdx.json \
-        -version "${BUILD_REF:-0.0.0-dev}" \
         .
 
 # =============================================================================
