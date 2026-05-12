@@ -90,7 +90,7 @@ flowchart LR
 
 ### Multimodal Example
 
-In the case of the [Dynamo Multimodal Disaggregated Example](../../features/multimodal/multimodal-vllm.md):
+In the case of the [Dynamo Multimodal Disaggregated Example](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-vllm.md):
 
  1. The HTTP frontend accepts a text prompt and a URL to an image.
 

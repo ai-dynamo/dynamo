@@ -73,7 +73,7 @@ docker run \
 | [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ | Prefill/decode separation with NIXL KV transfer |
 | [**KV-Aware Routing**](../../components/router/README.md) | ✅ | |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ | |
-| [**Multimodal Support**](../../features/multimodal/multimodal-sglang.md) | ✅ | Image via EPD, E/PD, E/P/D patterns |
+| [**Multimodal Support**](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-sglang.md) | ✅ | Image via EPD, E/PD, E/P/D patterns |
 | [**Diffusion Models**](sglang-diffusion.md) | ✅ | LLM diffusion, image, and video generation |
 | [**Request Cancellation**](../../fault-tolerance/request-cancellation.md) | ✅ | Aggregated full; disaggregated decode-only |
 | [**Graceful Shutdown**](../../fault-tolerance/graceful-shutdown.md) | ✅ | Discovery unregister + grace period |

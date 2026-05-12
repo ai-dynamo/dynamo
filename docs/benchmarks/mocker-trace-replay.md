@@ -63,7 +63,7 @@ flowchart TD
     MES --> P
 ```
 
-See [`lib/mocker/src/replay/offline/README.md`](../../lib/mocker/src/replay/offline/README.md) for offline-harness internals (logical clock, event queue, worker model) and [`docs/mocker/mocker.md`](../mocker/mocker.md) for engine-core details (scheduler, KV block manager).
+See the [Offline Replay README](https://github.com/ai-dynamo/dynamo/blob/main/lib/mocker/src/replay/offline/README.md) for offline-harness internals (logical clock, event queue, worker model) and the [Dynamo Mocker](../mocker/mocker.md) for engine-core details (scheduler, KV block manager).
 
 ## Quick Start
 

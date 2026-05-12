@@ -46,7 +46,7 @@ TensorRT-LLM documents `n`/`best_of` behavior and validates this guard as greedy
 
 ## Multimodal Support
 
-Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [TensorRT-LLM Multimodal Guide](../../features/multimodal/multimodal-trtllm.md).
+Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [TensorRT-LLM Multimodal Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/features/multimodal/multimodal-trtllm.md).
 
 ## Diffusion Support (Experimental)
 

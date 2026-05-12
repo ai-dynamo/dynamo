@@ -8,7 +8,7 @@ title: Mocker Backend (Rust)
 
 Reference Rust backend for Dynamo. Wraps the `dynamo-mocker` scheduler
 in the `LLMEngine` contract from
-[`dynamo-backend-common`](../../../lib/backend-common/), giving a
+[`dynamo-backend-common`](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common), giving a
 full-fidelity mocked engine — one shared forward-pass loop paces all
 in-flight requests (continuous batching), not independent per-request
 timers. Use it as a template for writing your own Rust backend, a
@@ -17,7 +17,7 @@ forcing function that keeps the mocker scheduler tied to the
 `LLMEngine` contract.
 
 See the `LLMEngine` trait's doc comments in
-[`engine.rs`](../../../lib/backend-common/src/engine.rs) for the
+[`engine.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/src/engine.rs) for the
 authoritative contract.
 
 ## Quick demo (docker compose)
@@ -73,7 +73,7 @@ reachable via `NATS_SERVER` / `ETCD_ENDPOINTS` env vars.
 
 1. New crate depending on `dynamo-backend-common`; place under `lib/`.
 2. Implement
-   [`LLMEngine`](../../../lib/backend-common/src/engine.rs)
+   [`LLMEngine`](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/src/engine.rs)
    plus an inherent
    `from_args(argv) -> Result<(Self, WorkerConfig), DynamoError>`.
 3. Mirror the mocker example's three-line `main.rs`.
@@ -109,6 +109,6 @@ lib/backend-common/examples/mocker/
 
 ## References
 
-- Crate: [`lib/backend-common/`](../../../lib/backend-common/)
-- Example source: [`lib/backend-common/examples/mocker/`](../../../lib/backend-common/examples/mocker/)
-- Conformance kit: [`lib/backend-common/src/testing.rs`](../../../lib/backend-common/src/testing.rs)
+- Crate: [`lib/backend-common/`](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common)
+- Example source: [`lib/backend-common/examples/mocker/`](https://github.com/ai-dynamo/dynamo/tree/main/lib/backend-common/examples/mocker)
+- Conformance kit: [`lib/backend-common/src/testing.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/backend-common/src/testing.rs)
