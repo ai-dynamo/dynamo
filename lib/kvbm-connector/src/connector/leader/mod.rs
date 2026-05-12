@@ -9,9 +9,7 @@ use super::worker::ConnectorWorkerClient;
 use crate::{BlockId, G2, InstanceId, KvbmRuntime};
 use kvbm_config::OnboardMode;
 use kvbm_engine::leader::InstanceLeader;
-use kvbm_engine::leader::{
-    FindMatchesOptions, FindMatchesResult, Leader, OnboardingStatus, StagingMode,
-};
+use kvbm_engine::leader::{FindMatchesOptions, Leader, StagingMode};
 use kvbm_engine::offload::OffloadEngine;
 use kvbm_engine::worker::SerializedLayout;
 use kvbm_engine::worker::VeloWorkerClient;
@@ -276,9 +274,9 @@ impl ConnectorLeader {
         let outcome = self.process_match(&mut slot, num_computed_tokens);
         let match_breakdown = slot
             .onboarding_state()
-            .map(|state| state.find_session.match_breakdown())
+            .map(|state| state.aggregate_breakdown())
             .unwrap_or_default();
-        let blocks_queried = slot.match_query_blocks();
+        let blocks_queried = slot.total_query_blocks();
 
         // Single point for state transition
         match slot.finalize_match_check(outcome) {
