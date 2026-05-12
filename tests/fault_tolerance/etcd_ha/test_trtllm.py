@@ -12,6 +12,7 @@ from tests.conftest import NatsServer
 from tests.fault_tolerance.etcd_ha.utils import (
     DynamoFrontendProcess,
     EtcdCluster,
+    nats_server_env,
     send_inference_request,
     wait_for_processes_to_terminate,
 )
@@ -152,7 +153,7 @@ def test_etcd_ha_failover_trtllm_aggregated(request, predownload_models):
     - Frontend/worker disconnection from their connected ETCD replica
     """
     # Step 1: Start NATS server
-    with NatsServer(request):
+    with NatsServer(request, port=0) as nats, nats_server_env(nats):
         logger.info("NATS server started successfully")
 
         # Step 2: Start 3-node ETCD cluster
@@ -227,7 +228,7 @@ def test_etcd_ha_failover_trtllm_disaggregated(
     - Frontend/worker disconnection from their connected ETCD replica
     """
     # Step 1: Start NATS server
-    with NatsServer(request):
+    with NatsServer(request, port=0) as nats, nats_server_env(nats):
         logger.info("NATS server started successfully")
 
         # Step 2: Start 3-node ETCD cluster
@@ -300,7 +301,7 @@ def test_etcd_non_ha_shutdown_trtllm_aggregated(request, predownload_models):
     5. Verifies that frontend and worker shut down gracefully
     """
     # Step 1: Start NATS server
-    with NatsServer(request):
+    with NatsServer(request, port=0) as nats, nats_server_env(nats):
         logger.info("NATS server started successfully")
 
         # Step 2: Start single ETCD node using EtcdCluster with num_replicas=1
@@ -362,7 +363,7 @@ def test_etcd_non_ha_shutdown_trtllm_disaggregated(
     5. Verifies that frontend and both workers shut down gracefully
     """
     # Step 1: Start NATS server
-    with NatsServer(request):
+    with NatsServer(request, port=0) as nats, nats_server_env(nats):
         logger.info("NATS server started successfully")
 
         # Step 2: Start single ETCD node using EtcdCluster with num_replicas=1
