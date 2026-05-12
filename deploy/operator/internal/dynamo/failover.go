@@ -156,6 +156,14 @@ func injectInterPodGMSRestoreLoader(podSpec *corev1.PodSpec, storage snapshotpro
 		}
 	}
 
+	gmsSharedMount := corev1.VolumeMount{Name: gmsSharedVolumeName, MountPath: gmsSharedMountPath}
+	for _, mount := range mainContainer.VolumeMounts {
+		if mount.Name == gmsSharedVolumeName && mount.MountPath == gmsSharedMountPath {
+			gmsSharedMount = *mount.DeepCopy()
+			break
+		}
+	}
+
 	loader := corev1.Container{
 		Name:    checkpoint.GMSLoaderContainer,
 		Image:   mainContainer.Image,
@@ -165,7 +173,7 @@ func injectInterPodGMSRestoreLoader(podSpec *corev1.PodSpec, storage snapshotpro
 			{Name: checkpoint.EnvCheckpointDir, Value: checkpoint.ResolveGMSArtifactDir(storage)},
 		},
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: gmsSharedVolumeName, MountPath: gmsSharedMountPath},
+			gmsSharedMount,
 			{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath},
 		},
 		Resources: *mainContainer.Resources.DeepCopy(),

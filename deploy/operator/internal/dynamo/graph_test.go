@@ -7563,6 +7563,20 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 				"GMS clique %q main container command must not be rewritten to sleep infinity (should remain the gms wrapper)", clique.Name)
 			assert.Equal(t, []string{"python3", "-m", checkpoint.GMSCheckpointLoaderModule}, loader.Command,
 				"GMS clique %q should run the inter-pod GMS loader as a regular sidecar", clique.Name)
+			mainMountsByPath := map[string]corev1.VolumeMount{}
+			for _, mount := range mainContainer.VolumeMounts {
+				mainMountsByPath[mount.MountPath] = mount
+			}
+			loaderMountsByPath := map[string]corev1.VolumeMount{}
+			for _, mount := range loader.VolumeMounts {
+				loaderMountsByPath[mount.MountPath] = mount
+			}
+			require.Contains(t, mainMountsByPath, gmsSharedMountPath,
+				"GMS clique %q main container must mount the rank-scoped GMS socket path", clique.Name)
+			require.Contains(t, loaderMountsByPath, gmsSharedMountPath,
+				"GMS clique %q loader must mount the same rank-scoped GMS socket path", clique.Name)
+			assert.Equal(t, mainMountsByPath[gmsSharedMountPath].SubPathExpr, loaderMountsByPath[gmsSharedMountPath].SubPathExpr,
+				"GMS clique %q loader must see the same socket directory as the GMS server", clique.Name)
 		} else {
 			sawEngine = true
 			assert.Equal(t, commonconsts.MainContainerName, targetAnnotation,
