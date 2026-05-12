@@ -100,10 +100,17 @@ class PlannerPrometheusMetrics:
 
     def __init__(self, model_name: Optional[str] = None) -> None:
         self._model_name = model_name
-        extra: list[str] = ["model_name"] if model_name else []
-        static: dict[str, str] = {"model_name": model_name} if model_name else {}
+        # Use ``is not None`` rather than truthiness so an explicit
+        # ``model_name=""`` is treated as a real (empty-string) label rather
+        # than as unset.  Empty-string is a valid Prometheus label value and
+        # the caller's intent is unambiguous.
+        labeled = model_name is not None
+        extra: list[str] = ["model_name"] if labeled else []
+        static: dict[str, str] = {"model_name": model_name} if labeled else {}
 
-        def _gauge(name: str, doc: str, *, extra_labels: Optional[list[str]] = None) -> Any:
+        def _gauge(
+            name: str, doc: str, *, extra_labels: Optional[list[str]] = None
+        ) -> Any:
             ln = (extra_labels or []) + extra
             g = Gauge(name, doc, labelnames=ln) if ln else Gauge(name, doc)
             return _PreLabeledMetric(g, **static)

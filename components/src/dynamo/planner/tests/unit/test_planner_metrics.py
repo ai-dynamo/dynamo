@@ -9,8 +9,8 @@ metric output must be byte-identical to the prior unlabeled behaviour
 (back-compat for existing scrapers / dashboards).
 """
 
-from prometheus_client import CollectorRegistry, generate_latest
 import pytest
+from prometheus_client import CollectorRegistry, generate_latest
 
 from dynamo.planner.monitoring.planner_metrics import (
     PlannerPrometheusMetrics,
@@ -79,6 +79,18 @@ def test_no_model_name_keeps_metrics_unlabeled(_isolated_registry):
     assert "model_name=" not in out
 
 
+def test_empty_string_model_name_still_labels(_isolated_registry):
+    # ``model_name=""`` is an explicit (if unusual) request to label every
+    # metric with an empty model_name value.  A truthiness check would treat
+    # it as "unset" and produce unlabeled metrics, which is the opposite of
+    # the caller's intent.  Guard against that regression.
+    pm = PlannerPrometheusMetrics(model_name="")
+    pm.num_prefill_replicas.set(1)
+
+    out = _scrape(_isolated_registry)
+    assert 'dynamo_planner_num_prefill_replicas{model_name=""} 1.0' in out
+
+
 def test_model_name_labels_simple_gauges(_isolated_registry):
     model = "google/gemma-3-27b-it-disagg"
     pm = PlannerPrometheusMetrics(model_name=model)
@@ -87,16 +99,12 @@ def test_model_name_labels_simple_gauges(_isolated_registry):
     pm.observed_ttft_ms.set(123.4)
 
     out = _scrape(_isolated_registry)
-    assert (
-        f'dynamo_planner_num_prefill_replicas{{model_name="{model}"}} 1.0' in out
-    )
+    assert f'dynamo_planner_num_prefill_replicas{{model_name="{model}"}} 1.0' in out
     assert (
         f'dynamo_planner_predicted_num_decode_replicas{{model_name="{model}"}} 2.0'
         in out
     )
-    assert (
-        f'dynamo_planner_observed_ttft_ms{{model_name="{model}"}} 123.4' in out
-    )
+    assert f'dynamo_planner_observed_ttft_ms{{model_name="{model}"}} 123.4' in out
 
 
 def test_model_name_merges_with_existing_engine_labels(_isolated_registry):
@@ -108,11 +116,11 @@ def test_model_name_merges_with_existing_engine_labels(_isolated_registry):
     out = _scrape(_isolated_registry)
     # Labels are emitted alphabetically: dp_rank, model_name, worker_id.
     assert (
-        'dynamo_planner_engine_queued_prefill_tokens'
+        "dynamo_planner_engine_queued_prefill_tokens"
         f'{{dp_rank="0",model_name="{model}",worker_id="w1"}} 99.0'
     ) in out
     assert (
-        'dynamo_planner_engine_queued_decode_kv_tokens'
+        "dynamo_planner_engine_queued_decode_kv_tokens"
         f'{{dp_rank="1",model_name="{model}",worker_id="w2"}} 11.0'
     ) in out
 
@@ -125,7 +133,7 @@ def test_model_name_labels_enums(_isolated_registry):
     out = _scrape(_isolated_registry)
     # Enum sets one series per state; the chosen state has value 1.0.
     assert (
-        'dynamo_planner_load_scaling_decision'
+        "dynamo_planner_load_scaling_decision"
         f'{{dynamo_planner_load_scaling_decision="scale_down",model_name="{model}"}}'
         " 1.0"
     ) in out
