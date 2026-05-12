@@ -27,28 +27,28 @@ export GPU_NODE=2
 export DISK_SIZE=200
 
 gcloud container clusters create ${CLUSTER_NAME} \
-  --project=${PROJECT_ID} \
-  --location=${ZONE} \
-  --subnetwork=default \
-  --disk-size=${DISK_SIZE} \
-  --machine-type=${CLUSTER_MACHINE_TYPE} \
-  --num-nodes=${CPU_NODE}
+ 	--project=${PROJECT_ID} \
+ 	--location=${ZONE} \
+	--subnetwork=default \
+    --disk-size=${DISK_SIZE} \
+	--machine-type=${CLUSTER_MACHINE_TYPE} \
+ 	--num-nodes=${CPU_NODE}
 ```
 
 #### Create GPU pool
 
 ```bash
 gcloud container node-pools create gpu-pool \
-  --accelerator type=${GPU_TYPE},count=${GPU_COUNT},gpu-driver-version=latest \
-  --project=${PROJECT_ID} \
-  --location=${ZONE} \
-  --cluster=${CLUSTER_NAME} \
-  --machine-type=${NODE_POOL_MACHINE_TYPE} \
-  --disk-size=${DISK_SIZE} \
-  --num-nodes=${GPU_NODE} \
-  --enable-autoscaling \
-  --min-nodes=1 \
-  --max-nodes=3
+ 	--accelerator type=${GPU_TYPE},count=${GPU_COUNT},gpu-driver-version=latest \
+ 	--project=${PROJECT_ID} \
+ 	--location=${ZONE} \
+ 	--cluster=${CLUSTER_NAME} \
+	--machine-type=${NODE_POOL_MACHINE_TYPE} \
+    --disk-size=${DISK_SIZE} \
+    --num-nodes=${GPU_NODE} \
+    --enable-autoscaling \
+    --min-nodes=1 \
+    --max-nodes=3
 ```
 
 ### Clone Dynamo GitHub repository

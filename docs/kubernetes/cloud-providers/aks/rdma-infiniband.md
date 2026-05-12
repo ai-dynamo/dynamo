@@ -420,3 +420,4 @@ kubectl rollout restart daemonset/nvidia-driver-daemonset -n gpu-operator
 - [Enable InfiniBand VM extension — Microsoft Learn](https://learn.microsoft.com/en-us/azure/virtual-machines/extensions/enable-infiniband)
 - [NVIDIA Network Operator Documentation](https://docs.nvidia.com/networking/display/cokan10/network+operator)
 - [Disaggregated Communication Guide](../../disagg-communication-guide.md) — transport options, UCX configuration, performance expectations
+
