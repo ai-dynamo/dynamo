@@ -1090,6 +1090,10 @@ mod tests {
             request_report.prefix_cache_reused_ratio,
             workload_report.prefix_cache_reused_ratio
         );
+        assert_eq!(
+            request_report.first_admission_prefix_cache_reused_ratio,
+            workload_report.first_admission_prefix_cache_reused_ratio
+        );
     }
 
     #[test]

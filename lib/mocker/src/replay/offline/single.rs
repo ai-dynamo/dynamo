@@ -537,6 +537,12 @@ mod tests {
         assert!(
             (left.prefix_cache_reused_ratio - right.prefix_cache_reused_ratio).abs() <= epsilon
         );
+        assert!(
+            (left.first_admission_prefix_cache_reused_ratio
+                - right.first_admission_prefix_cache_reused_ratio)
+                .abs()
+                <= epsilon
+        );
         assert!((left.latency.ttft.mean_ms - right.latency.ttft.mean_ms).abs() <= epsilon);
         assert!((left.latency.ttft.min_ms - right.latency.ttft.min_ms).abs() <= epsilon);
         assert!((left.latency.ttft.max_ms - right.latency.ttft.max_ms).abs() <= epsilon);

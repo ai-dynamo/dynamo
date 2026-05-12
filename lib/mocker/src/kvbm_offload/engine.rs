@@ -152,12 +152,12 @@ impl PreparedSwapIn {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct G3LookupPlan {
+struct LowerTierLookupPlan {
     g2_prefix_blocks: usize,
     g3_stage_blocks: usize,
 }
 
-impl G3LookupPlan {
+impl LowerTierLookupPlan {
     fn reservation_blocks(self) -> usize {
         self.g2_prefix_blocks.saturating_add(self.g3_stage_blocks)
     }
@@ -749,11 +749,14 @@ impl MockOffloadEngine {
         })
     }
 
-    fn build_g3_lookup_plan(
+    fn build_lower_tier_lookup_plan(
         &self,
         plhs: &[SequenceHash],
         g3_manager: &BlockManager<G3>,
-    ) -> G3LookupPlan {
+    ) -> LowerTierLookupPlan {
+        // This is a planning pass only. `check_presence` does not acquire
+        // blocks, so the later G2-ready path must still call `match_blocks`
+        // to pin the source blocks it will onboard.
         let g2_presence = self.g2_manager.block_registry().check_presence::<G2>(plhs);
         let g3_presence = g3_manager.block_registry().check_presence::<G3>(plhs);
         let g2_prefix_blocks = g2_presence.iter().take_while(|(_, in_g2)| *in_g2).count();
@@ -762,8 +765,7 @@ impl MockOffloadEngine {
             .skip(g2_prefix_blocks)
             .take_while(|(_, in_g3)| *in_g3)
             .count();
-
-        G3LookupPlan {
+        LowerTierLookupPlan {
             g2_prefix_blocks,
             g3_stage_blocks,
         }
@@ -1120,14 +1122,16 @@ impl MockOffloadEngine {
         self.pump_pending_staged_swap_ins(now_ms);
     }
 
-    /// Earliest foreground completion that can unblock scheduler work.
+    /// Earliest transfer completion that can change offload-visible state.
     ///
-    /// Background G2→G3 copies are excluded even though they have shared-link
-    /// deadlines. Offline replay drains them opportunistically at arrivals and
-    /// foreground deadlines; they must not manufacture an extra scheduling pass
-    /// that changes admission timing.
+    /// G2→G3 write-through copies are background from the scheduler's matching
+    /// perspective, but they still pin G2 source blocks and hold shared G3
+    /// reservations. Offline replay must therefore drain those completions at
+    /// their DES timestamp, not at an arbitrary later arrival, otherwise G3 can
+    /// artificially reduce effective G2 capacity even when the G2→G3 link is
+    /// configured as instant.
     pub fn earliest_pending_deadline(&self) -> Option<f64> {
-        self.worker.earliest_foreground_finish()
+        self.worker.earliest_finish()
     }
 
     /// Enqueue a burst of G1→G2 evictions with router metadata that will be
@@ -1217,9 +1221,14 @@ impl MockOffloadEngine {
         }
     }
 
-    /// Find and pin the longest G2-resident prefix without reserving G2→G1
-    /// bandwidth yet. The caller must reserve destination G1 slots before
-    /// passing the prepared lookup to [`start_onboard_prefix`](Self::start_onboard_prefix).
+    /// Prepare the longest lower-tier prefix without reserving G2→G1 bandwidth.
+    ///
+    /// With G3 disabled this pins the currently available G2 prefix. With G3
+    /// enabled it first does a presence-only G2/G3 planning pass. If the G3
+    /// suffix can be staged into G2, it returns a deferred staging plan; if not,
+    /// it falls back to pinning only the G2 prefix that is available right now.
+    /// The caller must reserve destination G1 slots before passing the prepared
+    /// lookup to [`start_onboard_prefix`](Self::start_onboard_prefix).
     pub(crate) fn prepare_onboard_prefix(
         &mut self,
         plhs: &[SequenceHash],
@@ -1227,89 +1236,67 @@ impl MockOffloadEngine {
         if plhs.is_empty() {
             return None;
         }
-        let g3_lookup_plan = self
-            .g3_manager
-            .as_ref()
-            .map(|g3_manager| self.build_g3_lookup_plan(plhs, g3_manager))
-            .unwrap_or_default();
-        let mut g3_staging_capacity_reservation = if g3_lookup_plan.g3_stage_blocks == 0 {
-            None
-        } else {
+
+        let Some(g3_manager) = self.g3_manager.as_ref() else {
+            let g2_blocks = self.g2_manager.match_blocks(plhs);
+            if g2_blocks.is_empty() {
+                return None;
+            }
+            return Some(PreparedSwapIn::from_g2_blocks(plhs.len(), g2_blocks));
+        };
+
+        let lower_tier_plan = self.build_lower_tier_lookup_plan(plhs, g3_manager);
+        if lower_tier_plan.g3_stage_blocks > 0 {
             let available_g2 = self.g2_manager.available_blocks();
-            let required_g2 = g3_lookup_plan.g3_stage_blocks;
-            let reserved = self
+            let required_g2 = lower_tier_plan.g3_stage_blocks;
+            if self
                 .g2_destination_reservations
-                .try_reserve(available_g2, required_g2);
-            if reserved {
-                Some(CapacityReservationGuard::new(
+                .try_reserve(available_g2, required_g2)
+            {
+                let g2_capacity_reservation = CapacityReservationGuard::new(
                     self.g2_destination_reservations.clone(),
                     required_g2,
-                ))
-            } else {
-                tracing::debug!(
-                    plhs_len = plhs.len(),
-                    g2_prefix_blocks = g3_lookup_plan.g2_prefix_blocks,
-                    stage_blocks = g3_lookup_plan.g3_stage_blocks,
-                    reservation_blocks = g3_lookup_plan.reservation_blocks(),
-                    available_g2,
-                    required_g2,
-                    reserved_g2 = self.g2_destination_reservations.reserved_blocks(),
-                    "kvbm-offload: skipping G3 staging; insufficient G2 capacity"
                 );
-                None
+                return Some(PreparedSwapIn::from_staging_plan(
+                    plhs.len(),
+                    lower_tier_plan.reservation_blocks(),
+                    Some(g2_capacity_reservation),
+                    plhs[..lower_tier_plan.reservation_blocks()].to_vec(),
+                ));
             }
-        };
-        let g3_staging_enabled = g3_staging_capacity_reservation.is_some();
-        if self.g3_manager.is_some() && !g3_staging_enabled && g3_lookup_plan.g2_prefix_blocks == 0
-        {
+
             tracing::debug!(
                 plhs_len = plhs.len(),
-                g3_stage_blocks = g3_lookup_plan.g3_stage_blocks,
+                g2_prefix_blocks = lower_tier_plan.g2_prefix_blocks,
+                stage_blocks = lower_tier_plan.g3_stage_blocks,
+                reservation_blocks = lower_tier_plan.reservation_blocks(),
+                available_g2,
+                required_g2,
+                reserved_g2 = self.g2_destination_reservations.reserved_blocks(),
+                "kvbm-offload: skipping G3 staging; insufficient G2 capacity"
+            );
+        }
+
+        if lower_tier_plan.g2_prefix_blocks == 0 {
+            tracing::debug!(
+                plhs_len = plhs.len(),
+                g3_stage_blocks = lower_tier_plan.g3_stage_blocks,
                 "kvbm-offload: lower-tier lookup MISS"
             );
             return None;
         }
-        if g3_staging_enabled {
-            return Some(PreparedSwapIn::from_staging_plan(
-                plhs.len(),
-                g3_lookup_plan.reservation_blocks(),
-                g3_staging_capacity_reservation.take(),
-                plhs[..g3_lookup_plan.reservation_blocks()].to_vec(),
-            ));
-        }
 
-        let lookup_plhs = if self.g3_manager.is_some() {
-            &plhs[..g3_lookup_plan.g2_prefix_blocks]
-        } else {
-            plhs
-        };
-        let options = FindMatchesOptions {
-            search_remote: false,
-            staging_mode: StagingMode::Hold,
-        };
-        let mut result = self
-            .leader
-            .find_matches_with_options(lookup_plhs, options)
-            .expect("find_matches_with_options must not fail for mocker local lookup");
-
-        match &mut result {
-            FindMatchesResult::Ready(_) => {
-                let g2_blocks = result
-                    .take_g2_blocks()
-                    .expect("Ready variant must yield G2 blocks");
-                if g2_blocks.is_empty() {
-                    tracing::debug!(
-                        plhs_len = plhs.len(),
-                        "kvbm-offload: lower-tier lookup MISS"
-                    );
-                    return None;
-                }
-                Some(PreparedSwapIn::from_g2_blocks(plhs.len(), g2_blocks))
-            }
-            FindMatchesResult::AsyncSession(_) => {
-                unreachable!("local Hold lookup without G3 staging must return Ready in mocker")
-            }
+        let lookup_plhs = &plhs[..lower_tier_plan.g2_prefix_blocks];
+        let g2_blocks = self.g2_manager.match_blocks(lookup_plhs);
+        if g2_blocks.is_empty() {
+            tracing::debug!(
+                plhs_len = plhs.len(),
+                lookup_blocks = lookup_plhs.len(),
+                "kvbm-offload: lower-tier lookup MISS"
+            );
+            return None;
         }
+        Some(PreparedSwapIn::from_g2_blocks(plhs.len(), g2_blocks))
     }
 
     /// Reserve G2→G1 bandwidth for a prepared lookup after the caller has
@@ -1740,14 +1727,9 @@ mod tests {
             .expect("G1→G2 should reserve bandwidth");
         engine.tick(first_deadline);
 
-        assert!(
-            engine.earliest_pending_deadline().is_none(),
-            "background G2→G3 should not create a scheduler deadline"
-        );
         let second_deadline = engine
-            .worker
-            .earliest_finish()
-            .expect("G2→G3 background copy should reserve bandwidth");
+            .earliest_pending_deadline()
+            .expect("G2→G3 background copy should create a capacity-release deadline");
         engine.tick(second_deadline);
 
         let g3_manager = engine.g3_manager().expect("G3 enabled").clone();

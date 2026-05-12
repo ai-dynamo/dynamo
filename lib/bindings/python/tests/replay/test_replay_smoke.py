@@ -599,6 +599,7 @@ def test_format_report_table_matches_aiperf_shape():
         "completed_requests": 711,
         "wall_time_ms": 4046.31,
         "prefix_cache_reused_ratio": 0.3587,
+        "first_admission_prefix_cache_reused_ratio": 0.1234,
     }
 
     rendered = format_report_table(report)
@@ -608,6 +609,7 @@ def test_format_report_table_matches_aiperf_shape():
     assert "Output Token Throughput (tokens/sec)" in rendered
     assert "Request Throughput (requests/sec)" in rendered
     assert "Prefix Cache Reused Ratio: 0.36" in rendered
+    assert "First Admission Prefix Cache Reused Ratio: 0.12" in rendered
     assert "10,944.03" in rendered
     assert "255.54" in rendered
     assert "N/A" in rendered
