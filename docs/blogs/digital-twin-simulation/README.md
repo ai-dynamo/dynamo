@@ -337,34 +337,38 @@ to the next major section.
 
 ## 3. Optimization And Discovery With The Twin
 
-Once the twin can run a workload through composed components, it can also search
-the design space. The optimizer uses replay as the scoring function: propose a
-layout, run the workload, collect metrics, and compare the result against the
-objective.
+Once the twin can run a workload through composed components, replay becomes a
+scoring function for both optimization and discovery: propose a layout or policy,
+run the workload, collect metrics, and compare the result against the objective
+or hypothesis.
+
+### 3.1 Systematic Optimization Via Replay
+
+The optimizer today uses a crude but practical block-coordinate descent over the
+deployment knobs: choose a TP shape, choose a worker split for that TP shape,
+then choose the router setting. That works because the current search space is
+still small and locally smooth enough for coarse coordinate search to find useful
+candidates. As the search space grows, the same replay scoring loop can be
+connected to richer black-box optimizers such as Hyperopt-style Bayesian search,
+genetic algorithms, or [Vizier](https://github.com/google/vizier).
 
 ```mermaid
 flowchart LR
     A["TP search<br/>choose TP shape<br/>(prefill_tp, decode_tp)<br/>under GPU budget"] --> B["Worker search<br/>choose worker split<br/>(prefill_workers, decode_workers)<br/>for the chosen TP"] --> C["Router search<br/>choose routing mode<br/>and overlap_score_weight"] --> A
 ```
 
-This three-block loop is not meant to be the final form of optimization. It is a
-concrete example of the kind of joint search the digital twin makes practical:
-optimize the parallel mapping and worker layout at the same time as the router
-policy. The best choice in one dimension depends on the others, so the loop
-revisits them rather than treating them as independent knobs.
-
-The same pattern can grow as more components become first-class simulation
-targets. Planner scaling parameters, KVBM/offload policies, distributed cache
-placement, and future topology-aware movement strategies can be inserted into
-the search loop as additional coordinates or as richer algorithmic policies.
+The point is joint search. The best parallel mapping depends on the worker
+layout, and the best worker layout depends on the router policy. The same
+pattern can grow as more components become first-class simulation targets:
+Planner scaling parameters, KVBM/offload policies, distributed cache placement,
+and topology-aware movement strategies can be inserted as additional coordinates
+or as richer algorithmic policies.
 
 The default objective is throughput. Latency-oriented objectives, such as mean
 TTFT or mean end-to-end latency, can be scored as negative values so the search
 still maximizes a single score. Feasible states are ranked by the selected
 objective. If all states are infeasible, the fallback is to rank by violation
 penalty instead of pretending the best infeasible result is acceptable.
-
-### 3.1 Example Result: A Workload-Relative Candidate
 
 The table below is one optimizer run on the full `toolagent_trace.jsonl` trace.
 The replay used trace speedup rather than a replay-concurrency cap, with two
@@ -401,7 +405,9 @@ Router discovery examples:
 - Add optional AIC-backed decode-load estimates so router decisions can better
   account for downstream decode pressure.
 
-#### Planner Discovery Examples
+Here we focus the in-depth discovery example on the Planner, a core, novel, and
+under-exposed Dynamo component.
+
 Planner exposes a family of stateful decisions: when to scale, how aggressively,
 and which optimization target to chase. Their effects compound across minutes of
 traffic, and a misconfigured Planner can under-provision, miss SLA, or thrash
