@@ -1,5 +1,5 @@
 #!/bin/bash
-# Launch 4 dynamo_kvrouter sbatch scripts × 8 concurrencies × 3 reps = 96 jobs.
+# Launch 2 dynamo_kvrouter sbatch scripts × 8 concurrencies × 3 reps = 48 jobs.
 # Reps are interleaved so a complete (script,concurrency) sweep finishes before
 # any duplicate runs start — useful for partial best-of-3.
 #
@@ -20,8 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 SCRIPTS=(
   "$SCRIPT_DIR/run_benchx_1ctx1gen_dynamo_kvrouter.sh"
-  "$SCRIPT_DIR/run_benchx_2ctx1gen_dyanmo_kvrouter.sh"
-  "$SCRIPT_DIR/run_benchx_3ctx1gen_dynamo_kvrouter.sh"
+  # "$SCRIPT_DIR/run_benchx_2ctx1gen_dyanmo_kvrouter.sh"   # skipped
+  # "$SCRIPT_DIR/run_benchx_3ctx1gen_dynamo_kvrouter.sh"   # skipped
   "$SCRIPT_DIR/run_benchx_4ctx1gen_dynamo_kvrouter.sh"
 )
 
