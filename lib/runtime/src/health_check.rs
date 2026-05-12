@@ -20,11 +20,6 @@ pub struct HealthCheckConfig {
     pub canary_wait_time: Duration,
     /// Timeout for health check requests
     pub request_timeout: Duration,
-    /// Polling interval for the disagg activity notifier.
-    /// Must be strictly less than canary_wait_time to guarantee at
-    /// least one poll fires before the canary timer expires on an idle
-    /// but active(prefill/KV-transfer) worker.
-    pub activity_poll_interval: Duration,
 }
 
 impl Default for HealthCheckConfig {
@@ -34,9 +29,6 @@ impl Default for HealthCheckConfig {
             request_timeout: Duration::from_secs(
                 crate::config::DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS,
             ),
-            // Poll every 5 s so the activity notifier fires well before
-            // the default 60 s canary timeout on a busy prefill worker.
-            activity_poll_interval: Duration::from_secs(5),
         }
     }
 }
@@ -48,8 +40,6 @@ pub struct HealthCheckManager {
     /// Track per-endpoint health check tasks
     /// Maps: endpoint_subject -> task_handle
     endpoint_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
-    /// Track per-endpoint activity poller tasks (DIS-1971 disagg fix)
-    activity_poller_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
 }
 
 impl HealthCheckManager {
@@ -58,7 +48,6 @@ impl HealthCheckManager {
             drt,
             config,
             endpoint_tasks: Arc::new(Mutex::new(HashMap::new())),
-            activity_poller_tasks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -698,6 +687,57 @@ mod push_handler_notify_tests {
             endpoint,
             HealthStatus::NotReady,
             "canary fired but engine errored, status stays NotReady",
+        );
+    }
+
+    // =================================================================
+    // Test 6: Activity notifier resets canary timer without client stream
+    // DIS-1971 blocking finding: the activity notifier path in tokio::select!
+    // must reset the canary timer when fired.  This test uses a zero-chunk
+    // engine (no client stream) and fires only the activity notifier to
+    // prove the timer is reset without the primary notifier firing.
+    // =================================================================
+    #[tokio::test]
+    async fn test_activity_notifier_resets_canary_without_client_stream() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "test.activity_notifier_alone";
+
+        // Zero-chunk engine: no client token stream at all — the primary
+        // notifier will never fire.  This mirrors a prefill-only worker
+        // doing KV transfer (no user-facing stream).
+        let zero_engine: Arc<MockStreamingEngine> = Arc::new(MockStreamingEngine {
+            num_chunks: 0,
+            error_indices: vec![],
+        });
+
+        register_endpoint(&drt, endpoint, zero_engine);
+        assert_status(&drt, endpoint, HealthStatus::NotReady, "initial");
+
+        // Register the secondary activity notifier.
+        let activity_notifier: Arc<tokio::sync::Notify> = Arc::new(tokio::sync::Notify::new());
+        drt.system_health()
+            .lock()
+            .register_activity_notifier(endpoint, activity_notifier.clone());
+
+        // Short canary wait so the test runs fast; without activity notifier
+        // firing the endpoint would time out after 200 ms.
+        start_manager(&drt, 200).await;
+
+        // Allow task to enter tokio::select! loop.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Fire the activity notifier — simulates backend poller detecting
+        // trtllm_num_requests_running > 0 on a busy prefill worker.
+        activity_notifier.notify_one();
+
+        // Let the notified() branch run and set Ready.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::Ready,
+            "activity notifier alone should reset timer and set Ready",
         );
     }
 
