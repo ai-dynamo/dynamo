@@ -10,6 +10,7 @@ from tests.utils.multimodal import (
     make_audio_payload,
     make_image_payload,
     make_image_payload_b64,
+    make_image_payload_cached_tokens,
     make_video_payload,
 )
 from tests.utils.payload_builder import chat_payload, chat_payload_default
@@ -39,6 +40,15 @@ _LLAVA_EXPECTED_COLORS = [
 VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "agg": "agg_multimodal.sh",
     "agg_video": "agg_multimodal.sh",
+    # Aggregated MM-aware router. Default uses the Rust frontend with the
+    # `lightseek-mm` feature; the `_chat_processor` variant uses the vLLM
+    # Python preprocessor (`--dyn-chat-processor=vllm`) to enable the
+    # DYNAMO_MM_TRANSFER shm/NIXL pre-rendered mm_kwargs delivery channel.
+    "agg_router": "agg_multimodal_router.sh",
+    "agg_router_chat_processor": "agg_multimodal_router_chat_processor.sh",
+    # Frontend-decode reuses the same script as `agg_router`; the topology
+    # config below toggles `--frontend-decoding` on the worker via env.
+    "agg_router_frontend_decode": "agg_multimodal_router.sh",
     "e_pd": "disagg_multimodal_e_pd.sh",
     "epd": "disagg_multimodal_epd.sh",
     "epd_video": "disagg_multimodal_epd.sh",
@@ -90,6 +100,63 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
             ),
+            # `agg_router` exercises agg_multimodal_router.sh: Rust frontend
+            # with the `lightseek-mm` feature, MM-aware KV routing, multi-worker.
+            # Smoke-level on pre_merge so regressions to the script's plumbing
+            # (worker boot order, ZMQ KV events, MM-routing build) surface in
+            # gating CI before they merge. The fine-grained routing-correctness
+            # assertions live in tests/mm_router/test_router_rust_mm_router_e2e.py.
+            #
+            # The payload sends two identical MM requests and asserts the
+            # second sees cached_tokens > 0 — proves the warm worker reused
+            # its KV cache, which only happens if the router routed both
+            # requests to the same worker. If routing silently regressed to
+            # text-prefix only, both requests would still succeed but the
+            # second's cached_tokens would be 0 and this case would fail.
+            "agg_router": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=400,
+                profiled_vram_gib=18.7,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
+                env={"SINGLE_GPU": "true"},
+                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
+            ),
+            # The chat-processor variant of the MM-aware router: same routing
+            # architecture, but the frontend uses --dyn-chat-processor=vllm
+            # (Python preprocessor) instead of the Rust+lightseek path. Kept
+            # on pre_merge alongside the default so both entry points stay
+            # covered by gating CI; the routing assertions are equivalent.
+            # SINGLE_GPU=true packs both workers onto GPU 0 to match the
+            # single-GPU CI environment (the chat-processor script's own
+            # default is false for production multi-GPU usage).
+            "agg_router_chat_processor": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=400,
+                profiled_vram_gib=18.7,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
+                env={"SINGLE_GPU": "true"},
+                tests=[MmCase(payload=make_image_payload(["green"]))],
+            ),
+            # Frontend-decode variant: same `agg_multimodal_router.sh` as
+            # `agg_router`, but `VLLM_EXTRA_ARGS=--frontend-decoding` so
+            # the worker registers a `media_decoder` on its model card and
+            # the frontend's MediaLoader runs in-process. mm_hash becomes
+            # content-addressed (xxh3 over decoded RGB), enabling
+            # cross-URL cache reuse. Smoke-level gate so regressions to
+            # the decoded branch in `gather_multi_modal_data` surface in
+            # CI; the content-hash correctness assertion lives in
+            # tests/mm_router/test_router_rust_mm_frontend_decode_e2e.py.
+            "agg_router_frontend_decode": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=400,
+                profiled_vram_gib=18.7,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
+                env={
+                    "SINGLE_GPU": "true",
+                    "VLLM_EXTRA_ARGS": "--frontend-decoding",
+                },
+                tests=[MmCase(payload=make_image_payload(["green"]))],
+            ),
             "e_pd": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=340,
@@ -123,6 +190,67 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
         },
+    ),
+    # Lightseek-supported VLM coverage on `agg_router` (Rust-frontend
+    # MM-aware routing path). Each profile below adds the same smoke test
+    # as Qwen3-VL-2B's agg_router (pre_merge), but on post_merge with the
+    # corresponding family — Qwen2.5-VL, Qwen2-VL, Phi-3-vision — so the
+    # full lightseek model list (FAMILIES in lightseek_mm.rs) is exercised
+    # end-to-end. SINGLE_GPU=true packs both workers onto GPU 0 to match
+    # the gpu_1 single-GPU box. Initial VRAM profiles are estimates; the
+    # first post_merge run will surface real peaks and we'll tighten.
+    MultimodalModelProfile(
+        name="Qwen/Qwen2.5-VL-3B-Instruct",
+        short_name="qwen2.5-vl-3b",
+        topologies={
+            "agg_router": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=500,
+                profiled_vram_gib=19.0,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
+                env={"SINGLE_GPU": "true"},
+                tests=[MmCase(payload=make_image_payload(["green"]))],
+            ),
+        },
+    ),
+    MultimodalModelProfile(
+        name="Qwen/Qwen2-VL-2B-Instruct",
+        short_name="qwen2-vl-2b",
+        topologies={
+            "agg_router": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=500,
+                profiled_vram_gib=16.0,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
+                env={"SINGLE_GPU": "true"},
+                tests=[MmCase(payload=make_image_payload(["green"]))],
+            ),
+        },
+    ),
+    MultimodalModelProfile(
+        name="microsoft/Phi-3-vision-128k-instruct",
+        short_name="phi3-vision",
+        topologies={
+            # Phi-3-vision is the largest of the post_merge additions
+            # (~8.6 GB weights × 2 workers + KV ≈ ~21 GiB peak); profile
+            # leaves slim headroom on a 24 GiB box. If first post_merge
+            # run OOMs, drop to one worker (NUM_WORKERS=1) or move to
+            # gpu_2 with one worker per GPU.
+            "agg_router": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=500,
+                profiled_vram_gib=22.0,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
+                env={"SINGLE_GPU": "true"},
+                # cached_tokens-asserting payload proves MM-aware routing
+                # engaged (2nd identical request hits the warm worker's KV
+                # cache); a silent regression to text-prefix-only routing
+                # would still return "green" but 0 cached tokens.
+                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
+            ),
+        },
+        # Phi-3-vision uses --trust-remote-code for its custom processor.
+        extra_vllm_args=["--trust-remote-code"],
     ),
     MultimodalModelProfile(
         name="Qwen/Qwen3.5-0.8B",
@@ -212,6 +340,20 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         name="llava-hf/llava-1.5-7b-hf",
         short_name="llava-1.5-7b",
         topologies={
+            # Rust-frontend MM-aware routing for the LLaVA family. Two
+            # workers, one per GPU on the gpu_2 runner (no SINGLE_GPU
+            # packing — 7B × 2 would exceed 24 GiB on a single card). Each
+            # worker peaks ~19 GiB; the 24 GiB L4 tier has headroom.
+            "agg_router": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=600,
+                gpu_marker="gpu_2",
+                profiled_vram_gib=19.2,
+                requested_vllm_kv_cache_bytes=4_318_854_000,
+                # cached_tokens-asserting payload proves MM-aware routing
+                # engaged for LLaVA-1.5 (placeholder-template `<image>` path).
+                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
+            ),
             "agg": TopologyConfig(
                 # nightly-only: 7B 1-GPU footprint is tight (vram=19.2 GiB).
                 # Exercises a different image (coco bus) + a string-content
@@ -299,6 +441,25 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         )
                     )
                 ],
+            ),
+        },
+    ),
+    # LLaVA-NeXT covers a separate lightseek processor (LlavaNextProcessor,
+    # anyres multi-crop) vs LLaVA-1.5's plain LlavaProcessor. Same gpu_2
+    # multi-GPU layout as LLaVA-1.5 agg_router above; ~14 GiB / GPU.
+    MultimodalModelProfile(
+        name="llava-hf/llava-v1.6-mistral-7b-hf",
+        short_name="llava-next-mistral-7b",
+        topologies={
+            "agg_router": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=600,
+                gpu_marker="gpu_2",
+                profiled_vram_gib=19.2,
+                requested_vllm_kv_cache_bytes=4_318_854_000,
+                # cached_tokens-asserting payload proves MM-aware routing
+                # engaged for LLaVA-NeXT (anyres multi-crop processor).
+                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
             ),
         },
     ),

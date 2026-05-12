@@ -86,11 +86,12 @@ When providing hardware configuration manually, use lowercase underscore format:
 | `h100_sxm` | `H100-SXM5-80GB` |
 | `h200_sxm` | `H200-SXM-141GB` |
 | `a100_sxm` | `A100-SXM4-80GB` |
+| `a30` | `A30` |
 | `l40s` | `L40S` |
 
 All supported values: `gb200_sxm`, `b200_sxm`, `h200_sxm`, `h100_sxm`,
-`h100_pcie`, `a100_sxm`, `a100_pcie`, `l40s`, `l40`, `l4`, `v100_sxm`,
-`v100_pcie`, `t4`, `mi200`, `mi300`.
+`h100_pcie`, `a100_sxm`, `a100_pcie`, `a30`, `l40s`, `l40`, `l4`,
+`v100_sxm`, `v100_pcie`, `t4`, `mi200`, `mi300`.
 
 > [!NOTE]
 > Not all SKUs are supported by the AIC profiler for `rapid` mode. See

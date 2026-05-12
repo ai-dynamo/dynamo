@@ -278,7 +278,7 @@ def test_request_cancellation_vllm_aggregated(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                     log_offset=frontend_log_offset,
                 )
 
@@ -371,7 +371,7 @@ def test_request_cancellation_vllm_decode_cancel(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                 )
 
                 logger.info(
@@ -464,7 +464,7 @@ def test_request_cancellation_vllm_prefill_cancel(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                 )
 
                 # Verify decode worker never received the request
