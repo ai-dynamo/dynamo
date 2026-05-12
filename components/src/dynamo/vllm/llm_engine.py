@@ -21,6 +21,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo._core import Context
+from dynamo.common.backend.abort import DeferredAbort
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.engine import (
     EngineConfig,
@@ -38,58 +39,16 @@ from .handlers import build_sampling_params
 logger = logging.getLogger(__name__)
 
 
-class _DeferredAbort:
-    """Holds ``engine_client.abort()`` on decode workers until first
-    engine output. Aborting mid-NIXL-transfer orphans the prefill peer.
-    Mirrors the legacy ``vllm/handlers.py:_DeferredAbort``."""
+class VllmDeferredAbort(DeferredAbort):
+    """`DeferredAbort` for `AsyncLLM.abort(request_id)`."""
 
-    def __init__(self, engine_client: Any, request_id: str):
+    def __init__(self, engine_client: AsyncLLM, request_id: str):
+        super().__init__()
         self._engine_client = engine_client
         self._request_id = request_id
-        self._first_token_received = False
-        self._first_token_event = asyncio.Event()
-        # Strong reference so the task isn't GC'd while parked on the event.
-        self._abort_task: asyncio.Task | None = None
 
-    def signal_first_token(self) -> None:
-        if not self._first_token_received:
-            self._first_token_received = True
-            self._first_token_event.set()
-
-    def schedule_abort(self) -> None:
-        if self._abort_task is not None:
-            return
-        if self._first_token_received:
-            self._abort_task = asyncio.create_task(self._run_abort())
-        else:
-            self._abort_task = asyncio.create_task(self._wait_and_abort())
-
-    async def _wait_and_abort(self) -> None:
-        # Re-raise CancelledError so close() can cancel without firing abort.
-        await self._first_token_event.wait()
-        await self._run_abort()
-
-    async def _run_abort(self) -> None:
-        try:
-            await self._engine_client.abort(self._request_id)
-        except Exception as e:
-            logger.warning("deferred abort raised for %s: %s", self._request_id, e)
-
-    async def close(self) -> None:
-        """Called from generate's finally. Cancels a parked wait task
-        when first token never arrived; safe with no scheduled abort."""
-        if self._abort_task is None or self._abort_task.done():
-            return
-        if not self._first_token_received:
-            self._abort_task.cancel()
-        try:
-            await self._abort_task
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.warning(
-                "deferred abort cleanup error for %s: %s", self._request_id, e
-            )
+    async def _do_abort_now(self) -> None:
+        await self._engine_client.abort(self._request_id)
 
 
 class VllmLLMEngine(LLMEngine):
@@ -102,7 +61,7 @@ class VllmLLMEngine(LLMEngine):
         self._prometheus_temp_dir: tempfile.TemporaryDirectory[str] | None = None
         self._model_max_len: int | None = None
         # Populated only in decode mode.
-        self._active_aborts: dict[str, _DeferredAbort] = {}
+        self._active_aborts: dict[str, VllmDeferredAbort] = {}
 
     @classmethod
     async def from_args(
@@ -230,19 +189,19 @@ class VllmLLMEngine(LLMEngine):
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
         is_decode = self.disaggregation_mode == DisaggregationMode.DECODE
-        # Decode-only — only decode has an in-flight NIXL pull to protect.
-        # Skip the guard when the runtime didn't assign a request_id
-        # (no abort routing is possible without one).
-        abort_guard: _DeferredAbort | None = None
+        # Only decode has an in-flight NIXL pull to protect.
+        abort_guard: VllmDeferredAbort | None = None
         if is_decode and request_id is not None:
-            abort_guard = _DeferredAbort(self.engine_client, request_id)
+            abort_guard = VllmDeferredAbort(self.engine_client, request_id)
             self._active_aborts[request_id] = abort_guard
 
         try:
             num_output_tokens_so_far: dict[int, int] = {}
+            first_signalled = False
             async for res in gen:
-                if abort_guard is not None:
+                if abort_guard is not None and not first_signalled:
                     abort_guard.signal_first_token()
+                    first_signalled = True
                 if not res.outputs:
                     yield {
                         "finish_reason": "error: No outputs from vLLM engine",
@@ -287,8 +246,7 @@ class VllmLLMEngine(LLMEngine):
                     yield out
                     num_output_tokens_so_far[output_idx] = next_total
         finally:
-            # Pop first so a late abort() falls through to direct
-            # engine.abort(); then close() cancels any parked wait task.
+            # pop before close(); ordering matters for late abort()
             if abort_guard is not None and request_id is not None:
                 self._active_aborts.pop(request_id, None)
                 await abort_guard.close()
@@ -299,11 +257,10 @@ class VllmLLMEngine(LLMEngine):
             return
         guard = self._active_aborts.get(request_id)
         if guard is not None:
-            # Non-blocking; defers the real abort until first output.
-            guard.schedule_abort()
+            guard.abort()
         else:
             await self.engine_client.abort(request_id)
-        logger.debug("Aborted request %s", request_id)
+        logger.debug("abort requested for %s", request_id)
 
     async def cleanup(self) -> None:
         try:
