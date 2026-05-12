@@ -69,7 +69,7 @@ qwen3.6-35b/
 ├── run-benchmark.sh            # Unified driver — branches on --config/--hw
 ├── run-all-benchmarks.sh       # Sequential 3-config orchestrator
 ├── perf.yaml                   # Single shared aiperf bench Pod template
-├── hw/                         # Hardware axis (shared across all configs)
+├── hw/                         # Per-cluster user state — edit hostname here
 │   ├── h100.env
 │   └── gb200.env
 ├── model-cache/
@@ -167,8 +167,9 @@ Our sliding-window dataset writes one row per `(user, turn)` with
 `session_id=user_<N>`; PR 824 is what makes aiperf's `single_turn`
 mode honor that ordering so prefix-cache hits across turns are real.
 
-The pin lives in `<config>/perf.yaml` (`AIPERF_GIT_REF` env var, identical
-across all three configs). Bump when you want newer aiperf fixes.
+The pin lives in the shared `perf.yaml` (`AIPERF_GIT_REF` env var) at
+the recipe root, applied identically across all three configs. Bump
+when you want newer aiperf fixes.
 
 ## Naming & ownership
 
