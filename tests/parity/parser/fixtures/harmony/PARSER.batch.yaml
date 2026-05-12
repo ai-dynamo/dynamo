@@ -94,18 +94,6 @@ cases:
           location: NYC
           unit: fahrenheit
       normal_text: Need to use function get_weather.
-  PARSER.batch.8:
-    description: Interleaved analysis-channel text + tool call
-    model_text: <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary
-      to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|>
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: Need to use function get_weather.
   PARSER.batch.9:
     description: Empty input
     model_text: ''

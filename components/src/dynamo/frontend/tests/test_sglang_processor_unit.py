@@ -10,6 +10,7 @@ Parallels test_vllm_unit.py for the vLLM backend.
 """
 
 
+import asyncio
 import json
 import sys
 import types
@@ -34,12 +35,18 @@ from dynamo.frontend.sglang_prepost import (
 )
 from dynamo.frontend.sglang_processor import (
     SglangPreprocessWorkerResult,
+    SglangProcessor,
     _build_dynamo_preproc,
     _init_worker,
     _map_finish_reason,
     _runtime_config_parser_name,
 )
-from dynamo.frontend.utils import PreprocessError, random_call_id, random_uuid
+from dynamo.frontend.utils import (
+    PreprocessError,
+    nvext_extra_field_requested,
+    random_call_id,
+    random_uuid,
+)
 
 # Needs sglang packages (gpu_1 container).  No need for parallel marker.
 pytestmark = [
@@ -251,6 +258,62 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         )
         assert result["model"] == "my-model"
         assert result["token_ids"] == [10, 20, 30]
+
+    def test_stop_token_id_array_maps_to_stop_token_ids(self):
+        """Integer stop arrays are token-id stops, not string stops."""
+        result = _build_dynamo_preproc(
+            {"model": "test", "stop": [32, 34]},
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["stop_conditions"]["stop"] == []
+        assert result["stop_conditions"]["stop_token_ids"] == [32, 34]
+
+    def test_string_stops_remain_string_stops(self):
+        """String stops are forwarded as string stops."""
+        result = _build_dynamo_preproc(
+            {"model": "test", "stop": " The"},
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["stop_conditions"]["stop"] == [" The"]
+        assert result["stop_conditions"]["stop_token_ids"] == []
+
+        result = _build_dynamo_preproc(
+            {"model": "test", "stop": ["A", "B"]},
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["stop_conditions"]["stop"] == ["A", "B"]
+        assert result["stop_conditions"]["stop_token_ids"] == []
+
+    def test_token_id_display_string_remains_string_stop(self):
+        """token_id:N strings are output display strings, not token-id stops."""
+        result = _build_dynamo_preproc(
+            {"model": "test", "stop": "token_id:576"},
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["stop_conditions"]["stop"] == ["token_id:576"]
+        assert result["stop_conditions"]["stop_token_ids"] == []
+
+        result = _build_dynamo_preproc(
+            {"model": "test", "stop": ["token_id:576"]},
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["stop_conditions"]["stop"] == ["token_id:576"]
+        assert result["stop_conditions"]["stop_token_ids"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -1567,6 +1630,58 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert choice is not None
         assert choice["finish_reason"] == "stop"
 
+    def test_stop_reason_not_emitted_on_choice(self, tokenizer):
+        """Backend stop_reason is not part of the OpenAI choice shape."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+        )
+
+        choice = post.process_output(
+            {"token_ids": [], "finish_reason": "stop", "stop_reason": "END"}
+        )
+
+        assert choice is not None
+        assert "stop_reason" not in choice
+
+    def test_stop_reason_emits_in_nvext_when_requested(self, tokenizer):
+        """Frontend emits backend stop_reason under nvext when requested."""
+
+        class FakeRouter:
+            async def generate(self, *args, **kwargs):
+                yield {
+                    "token_ids": [],
+                    "finish_reason": "stop",
+                    "stop_reason": "END",
+                }
+
+        async def collect():
+            processor = SglangProcessor(
+                tokenizer=tokenizer,
+                router=FakeRouter(),
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+                eos_token_id=None,
+            )
+            post = SglangStreamingPostProcessor(
+                tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+            )
+            request = {
+                "model": "test-model",
+                "nvext": {"extra_fields": ["stop_reason"]},
+            }
+            return [
+                item
+                async for item in processor._generate_and_stream(
+                    "req-stop", request, {}, [], post
+                )
+            ]
+
+        items = asyncio.run(collect())
+
+        assert len(items) == 1
+        assert items[0]["nvext"]["stop_reason"] == "END"
+        assert "stop_reason" not in items[0]["choices"][0]
+
     def test_lookback_trimming(self, tokenizer):
         """Verify _all_token_ids doesn't grow unbounded."""
         post = SglangStreamingPostProcessor(
@@ -1683,6 +1798,13 @@ class TestUtilities:  # (mixed — see per-test annotations)
         """PreprocessError stores message and stringifies."""
         err = PreprocessError("n=2 unsupported")
         assert "n=2" in str(err)
+
+    def test_nvext_extra_field_requested(self):
+        assert nvext_extra_field_requested(
+            {"nvext": {"extra_fields": ["stop_reason"]}}, "stop_reason"
+        )
+        assert not nvext_extra_field_requested({"nvext": {}}, "stop_reason")
+        assert not nvext_extra_field_requested({}, "stop_reason")
 
 
 # ---------------------------------------------------------------------------

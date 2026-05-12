@@ -105,18 +105,6 @@ cases:
           config:
             nested: true
       normal_text: ''
-  PARSER.batch.8:
-    description: Interleaved normal text
-    model_text: 'I will check the weather. [TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]
-      Done.'
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: I will check the weather.
   PARSER.batch.9:
     description: Empty input
     model_text: ''

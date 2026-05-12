@@ -11,7 +11,14 @@ For quick start instructions, see the [Router README](README.md). This document 
 Instead of launching the KV Router via command line, you can create a `KvRouter` object directly in Python. This allows per-request routing configuration overrides.
 
 >[!Warning]
-> **Multiple Routers in Same Process**: If you need to run multiple `KvRouter` instances for fault tolerance or load distribution, you must launch them in **separate processes** (e.g., using `python -m dynamo.frontend` with different ports). Creating multiple `KvRouter` objects in the same Python process is not supported - they share the same cancellation token from the component's primary lease, so dropping one router will cancel all routers in that process. For in-process routing, use a single `KvRouter` instance.
+> **Multiple Routers from the Same Runtime**: Do not create multiple independently managed `KvRouter` instances from the same `DistributedRuntime`. Routers created from endpoints owned by the same runtime share that runtime's primary cancellation token, so dropping one router can cancel background work used by the others. For one in-process frontend, use a single `KvRouter`; for independent router lifetimes, use separate frontend processes or create each router from a separate `DistributedRuntime`.
+
+With the event loop available as `loop`, independent in-process router lifetimes require separate runtimes:
+
+```python
+router_a = KvRouter(DistributedRuntime(loop, "etcd", "tcp").endpoint("dynamo.backend.generate"), 16, KvRouterConfig())
+router_b = KvRouter(DistributedRuntime(loop, "etcd", "tcp").endpoint("dynamo.backend.generate"), 16, KvRouterConfig())
+```
 
 ### Methods
 
@@ -79,7 +86,7 @@ async def main():
             "top_p": 0.9,
         },
         router_config_override={
-            "overlap_score_weight": 2.0,    # Prioritize cache hits for this request
+            "overlap_score_credit": 1.0,    # Prioritize cache hits for this request
             "router_temperature": 0.5,       # Add routing randomness
         }
     )
@@ -98,13 +105,13 @@ if __name__ == "__main__":
 
 ## K8s Examples
 
-For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployment section](README.md#kubernetes-deployment) in the Quick Start guide.
+For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployment section](router-guide.md#kubernetes-deployment) in the Router Guide.
 
 ### Complete K8s Examples
 
-- [TRT-LLM aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/agg_router.yaml)
-- [vLLM aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/agg_router.yaml)
-- [SGLang aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/agg_router.yaml)
+- [TRT-LLM aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/agg_router.yaml)
+- [vLLM aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_router.yaml)
+- [SGLang aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg_router.yaml)
 - [Kubernetes deployment guide](../../kubernetes/README.md)
 
 **For A/B Testing and Advanced K8s Setup:**
@@ -127,7 +134,9 @@ spec:
           value: kv
         - name: DYN_ROUTER_TEMPERATURE
           value: "0.5"  # Add some randomness to prevent worker saturation
-        - name: DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT
+        - name: DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT
+          value: "1.0"  # Prefer device-local KV cache reuse
+        - name: DYN_ROUTER_PREFILL_LOAD_SCALE
           value: "1.5"  # Prioritize TTFT over ITL
         - name: DYN_KV_CACHE_BLOCK_SIZE
           value: "16"
