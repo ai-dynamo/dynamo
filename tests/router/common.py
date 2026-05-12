@@ -1761,51 +1761,61 @@ def _test_router_indexers_sync(
 
         # Verify standalone HTTP indexers build the same tree (via ZMQ)
         if standalone_indexer_url:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{standalone_indexer_url}/dump") as resp:
-                    assert resp.status == 200, f"GET /dump failed: {resp.status}"
-                    dump_a = await resp.json()
-
             # /dump returns {model:tenant -> {"block_size": N, "events": [...]}}
             expected_key = f"{model_name}:default"
-            assert expected_key in dump_a, (
-                f"Expected dump key '{expected_key}', "
-                f"got keys={list(dump_a.keys())}"
-            )
-            for k, v in dump_a.items():
-                assert (
-                    isinstance(v, dict) and "events" in v
-                ), f"Dump key '{k}' returned unexpected format: {v}"
-            sorted_standalone_a = sorted(dump_a[expected_key]["events"], key=sort_key)
-            logger.info(f"Standalone Indexer A has {len(sorted_standalone_a)} events")
 
-            assert_event_dumps_equal(
-                sorted_state1, sorted_standalone_a, "Router 1", "Standalone A"
+            async def fetch_standalone_events(session, indexer_url, indexer_label):
+                async with session.get(f"{indexer_url}/dump") as resp:
+                    assert resp.status == 200, f"GET /dump failed: {resp.status}"
+                    dump = await resp.json()
+
+                assert expected_key in dump, (
+                    f"{indexer_label} missing dump key '{expected_key}', "
+                    f"got keys={list(dump.keys())}"
+                )
+                for k, v in dump.items():
+                    assert (
+                        isinstance(v, dict) and "events" in v
+                    ), f"{indexer_label} dump key '{k}' returned unexpected format: {v}"
+                return sorted(dump[expected_key]["events"], key=sort_key)
+
+            async def wait_for_standalone_events(
+                indexer_url, expected_events, expected_label, actual_label
+            ):
+                last_error = None
+                async with aiohttp.ClientSession() as session:
+                    for attempt in range(50):
+                        actual_events = await fetch_standalone_events(
+                            session, indexer_url, actual_label
+                        )
+                        logger.info(
+                            f"{actual_label} has {len(actual_events)} events "
+                            f"(attempt {attempt + 1})"
+                        )
+                        try:
+                            assert_event_dumps_equal(
+                                expected_events,
+                                actual_events,
+                                expected_label,
+                                actual_label,
+                            )
+                            return actual_events
+                        except AssertionError as exc:
+                            last_error = exc
+                            await asyncio.sleep(0.2)
+
+                assert last_error is not None
+                raise last_error
+
+            sorted_standalone_a = await wait_for_standalone_events(
+                standalone_indexer_url, sorted_state1, "Router 1", "Standalone A"
             )
             logger.info("Standalone A matches Router 1")
 
             if standalone_indexer_b_url:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(f"{standalone_indexer_b_url}/dump") as resp:
-                        assert (
-                            resp.status == 200
-                        ), f"GET /dump from Indexer B failed: {resp.status}"
-                        dump_b = await resp.json()
-
-                assert expected_key in dump_b, (
-                    f"Indexer B missing dump key '{expected_key}', "
-                    f"got keys={list(dump_b.keys())}"
-                )
-                sorted_standalone_b = sorted(
-                    dump_b[expected_key]["events"], key=sort_key
-                )
-                logger.info(
-                    f"Standalone Indexer B has {len(sorted_standalone_b)} events"
-                )
-
-                assert_event_dumps_equal(
+                await wait_for_standalone_events(
+                    standalone_indexer_b_url,
                     sorted_standalone_a,
-                    sorted_standalone_b,
                     "Standalone A",
                     "Standalone B",
                 )
