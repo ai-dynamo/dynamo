@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -88,6 +89,10 @@ pub struct ModelWatcher {
     /// Tracks in-flight `handle_put` tasks by instance path so that `handle_delete`
     /// can await a racing put before proceeding with cleanup.
     pending_puts: DashMap<String, JoinHandle<()>>,
+    /// Frontend's `--model-path`. Threaded into `download_config` so
+    /// `file://` slots can fall back here when the worker's path is
+    /// unreachable on this host.
+    local_model_path: Option<PathBuf>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -167,11 +172,16 @@ impl ModelWatcher {
             registering_worker_sets: DashSet::new(),
             registration_notify: Notify::new(),
             pending_puts: DashMap::new(),
+            local_model_path: None,
         }
     }
 
     pub fn set_notify_on_model_update(&mut self, tx: Sender<ModelUpdate>) {
         self.model_update_tx = Some(tx);
+    }
+
+    pub fn set_local_model_path(&mut self, path: Option<PathBuf>) {
+        self.local_model_path = path;
     }
 
     /// Wait until we have at least one chat completions model and return it's name.
@@ -673,7 +683,8 @@ impl ModelWatcher {
         mcid: &ModelCardInstanceId,
         card: &mut ModelDeploymentCard,
     ) -> anyhow::Result<()> {
-        card.download_config().await?;
+        card.download_config(self.local_model_path.as_deref())
+            .await?;
 
         // Use per-worker-set router config if the worker provided one in its MDC,
         // otherwise fall back to the frontend-level global config.
