@@ -82,6 +82,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from container.compliance.policy import validate as policy_validate  # noqa: E402
+from container.compliance import overrides as license_overrides  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,9 @@ _CORPUS_DIR = Path(__file__).resolve().parent
 _MANIFEST_PATH = _CORPUS_DIR / "manifest.json"
 _POLICY_PATH = _CORPUS_DIR.parent / "policy" / "licenses.toml"
 _SIZE_CAP_BYTES = 4 * 1024 * 1024  # 4 MB; 1 MB headroom under GitLab's 5 MB pain point
+_DEFAULT_FROM_SBOM_CACHE_DIR = (
+    Path(os.environ.get("TMPDIR", "/tmp")) / "dynamo-compliance-syft-cache"
+)
 
 
 # ---- registry: digest + layer resolution -------------------------------------
@@ -390,6 +394,14 @@ def compute_delta(from_sbom: dict, baseline_sbom: dict) -> list[dict]:
 def validate_delta(delta: list[dict], policy_path: Path) -> tuple[int, list[str]]:
     """Run policy/validate.validate_row on every delta component.
 
+    For each component, the SPDX expression is resolved as:
+      1. license_overrides.yaml (by ecosystem, name) — authoritative when
+         we've explicitly verified a package's license. The same map our
+         runtime generators (dpkg.py, python.py) consult; reusing it here
+         means a single source of truth for hand-curated license facts.
+      2. syft's CycloneDX output, normalized via _extract_spdx +
+         _canonicalize_license_name.
+
     Returns (violation_count, formatted_violation_lines).
     """
     policy = policy_validate.load_policy(policy_path)
@@ -399,11 +411,13 @@ def validate_delta(delta: list[dict], policy_path: Path) -> tuple[int, list[str]
         version = str(component.get("version") or "")
         purl = component.get("purl") or ""
         ecosystem = _ecosystem_from_purl(purl)
-        spdx = _extract_spdx(component)
         if ecosystem == "unknown":
             # syft emits operating-system components and other non-package
             # entries -- skip those (no ecosystem the policy gates).
             continue
+        # Hand-curated override beats syft's heuristic.
+        override = license_overrides.lookup(ecosystem, name, version)
+        spdx = override if override else _extract_spdx(component)
         v = policy_validate.validate_row(policy, ecosystem, name, version, spdx)
         if v is not None:
             violations.append(str(v))
@@ -464,9 +478,15 @@ def capture(
     corpus_dir: Path,
     manifest_path: Path,
     policy_path: Path,
+    reuse_cached_sbom: bool = False,
+    from_sbom_cache_dir: Path | None = None,
+    no_from_sbom_cache: bool = False,
 ) -> int:
     from_image, from_tag = split_ref(from_ref)
     baseline_image, baseline_tag = split_ref(baseline_ref)
+
+    if from_sbom_cache_dir is None:
+        from_sbom_cache_dir = _DEFAULT_FROM_SBOM_CACHE_DIR
 
     logger.info("Resolving registry digests...")
     try:
@@ -477,6 +497,17 @@ def capture(
         return 2
     logger.info("  from_image     %s @ %s", from_ref, from_digest)
     logger.info("  baseline_image %s @ %s", baseline_ref, baseline_digest)
+
+    # Cache-key paths. Both keys include the manifest digest, so a rebuilt
+    # vendor tag (different digest) naturally invalidates the cache — no
+    # explicit invalidation is needed.
+    short = _short_name(baseline_image)
+    baseline_digest_hex = baseline_digest.removeprefix("sha256:")
+    sbom_filename = f"{short}@{baseline_digest_hex[:8]}.cdx.json"
+    sbom_path = corpus_dir / sbom_filename
+    from_digest_hex = from_digest.removeprefix("sha256:")
+    from_cache_filename = f"{from_digest_hex}-{platform.replace('/', '_')}.cdx.json"
+    from_cache_path = from_sbom_cache_dir / from_cache_filename
 
     if not skip_layer_prefix_check:
         logger.info("Verifying layer-prefix relationship (platform=%s)...", platform)
@@ -508,19 +539,78 @@ def capture(
             len(from_layers),
         )
 
-    logger.info("Running syft on baseline...")
-    try:
-        baseline_sbom = syft_scan(baseline_ref, platform)
-    except subprocess.CalledProcessError as exc:
-        logger.error("syft scan failed on baseline: %s", (exc.stderr or b"").decode())
-        return 2
+    # --- Baseline SBOM: corpus file is the cache. The filename embeds the
+    # baseline's manifest digest, and OCI digests are immutable — same digest
+    # means same bytes — so reusing an existing file is safe by construction.
+    if reuse_cached_sbom and sbom_path.is_file():
+        baseline_sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
+        if not baseline_sbom.get("components"):
+            logger.warning(
+                "Cached baseline SBOM at %s has no components[]; ignoring cache and running syft.",
+                sbom_path,
+            )
+            reuse_cached_sbom = False
+        else:
+            logger.info(
+                "Baseline SBOM cache hit: %s (skipping syft scan, %d components)",
+                sbom_filename,
+                len(baseline_sbom.get("components", [])),
+            )
+    if not (reuse_cached_sbom and sbom_path.is_file()):
+        logger.info("Running syft on baseline...")
+        try:
+            baseline_sbom = syft_scan(baseline_ref, platform)
+        except subprocess.CalledProcessError as exc:
+            logger.error("syft scan failed on baseline: %s", (exc.stderr or b"").decode())
+            return 2
 
-    logger.info("Running syft on from-image (for delta validation; not persisted)...")
-    try:
-        from_sbom = syft_scan(from_ref, platform)
-    except subprocess.CalledProcessError as exc:
-        logger.error("syft scan failed on from-image: %s", (exc.stderr or b"").decode())
-        return 2
+    # --- From-image SBOM: persisted cache under a TMPDIR by default. Not
+    # committed to the repo (different per-runner) but survives across
+    # back-to-back invocations of this script, which is the slow path we
+    # care about when iterating on overrides/exceptions.
+    from_sbom = None
+    if not no_from_sbom_cache and from_cache_path.is_file():
+        try:
+            from_sbom = json.loads(from_cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "From-image SBOM cache at %s unreadable (%s); falling through to syft.",
+                from_cache_path,
+                exc,
+            )
+            from_sbom = None
+        if from_sbom is not None and not from_sbom.get("components"):
+            logger.warning(
+                "Cached from-image SBOM has no components[]; ignoring cache and running syft."
+            )
+            from_sbom = None
+        if from_sbom is not None:
+            logger.info(
+                "From-image SBOM cache hit: %s (%d components)",
+                from_cache_path,
+                len(from_sbom.get("components", [])),
+            )
+    if from_sbom is None:
+        logger.info("Running syft on from-image (for delta validation; not persisted)...")
+        try:
+            from_sbom = syft_scan(from_ref, platform)
+        except subprocess.CalledProcessError as exc:
+            logger.error("syft scan failed on from-image: %s", (exc.stderr or b"").decode())
+            return 2
+        if not no_from_sbom_cache:
+            try:
+                from_sbom_cache_dir.mkdir(parents=True, exist_ok=True)
+                from_cache_path.write_text(
+                    json.dumps(from_sbom, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+                logger.info("Cached from-image SBOM to %s", from_cache_path)
+            except OSError as exc:
+                logger.warning(
+                    "Could not write from-image SBOM cache to %s (%s); continuing without cache.",
+                    from_cache_path,
+                    exc,
+                )
 
     delta = compute_delta(from_sbom, baseline_sbom)
     logger.info(
@@ -544,12 +634,9 @@ def capture(
         return 1
     logger.info("  OK: all %d delta components pass policy", len(delta))
 
-    # Apply slim filter, compute filename, write (unless --dry-run).
+    # Apply slim filter; the filename + path were computed up front so the
+    # baseline-cache check could short-circuit syft.
     slim = slim_cyclonedx(baseline_sbom)
-    short = _short_name(baseline_image)
-    digest8 = baseline_digest.removeprefix("sha256:")[:8]
-    sbom_filename = f"{short}@{digest8}.cdx.json"
-    sbom_path = corpus_dir / sbom_filename
 
     payload = json.dumps(slim, separators=(",", ":"))
     payload_bytes = payload.encode("utf-8")
@@ -644,6 +731,31 @@ def main(argv: list[str] | None = None) -> int:
         default=_POLICY_PATH,
         help="Policy file to validate the delta against (default: %(default)s)",
     )
+    parser.add_argument(
+        "--reuse-cached-sbom",
+        action="store_true",
+        help=(
+            "If the baseline SBOM file already exists in the corpus dir for "
+            "this baseline's manifest digest, load it instead of re-running "
+            "syft. Safe because OCI digests are immutable — same digest means "
+            "same bytes."
+        ),
+    )
+    parser.add_argument(
+        "--from-sbom-cache-dir",
+        type=Path,
+        default=_DEFAULT_FROM_SBOM_CACHE_DIR,
+        help=(
+            "Directory for cached from-image SBOMs, keyed by manifest digest "
+            "+ platform. Default: %(default)s. Cache hits skip the slow syft "
+            "scan on the from-image (5-10 min on large framework images)."
+        ),
+    )
+    parser.add_argument(
+        "--no-from-sbom-cache",
+        action="store_true",
+        help="Disable the from-image SBOM cache entirely (do not read or write).",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -662,6 +774,9 @@ def main(argv: list[str] | None = None) -> int:
             corpus_dir=args.corpus_dir,
             manifest_path=args.manifest,
             policy_path=args.policy,
+            reuse_cached_sbom=args.reuse_cached_sbom,
+            from_sbom_cache_dir=args.from_sbom_cache_dir,
+            no_from_sbom_cache=args.no_from_sbom_cache,
         )
     except Exception:  # pragma: no cover
         logger.exception("Unhandled error during capture")
