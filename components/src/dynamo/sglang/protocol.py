@@ -19,6 +19,7 @@ TokenIdType = int
 class StopConditions(BaseModel):
     max_tokens: Optional[int] = None
     stop: Optional[List[str]] = None
+    stop_token_ids: Optional[List[TokenIdType]] = None
     stop_token_ids_hidden: Optional[List[TokenIdType]] = None
     min_tokens: Optional[int] = None
     ignore_eos: Optional[bool] = None

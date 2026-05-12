@@ -78,8 +78,11 @@ sglang_configs = {
                 3.7
             ),  # actual peak at recommended token count
             pytest.mark.requested_sglang_kv_tokens(
-                96
-            ),  # KV cache cap (2x safety over min=48)
+                2048
+            ),  # >= prompt(~16) + max_tokens(1000) + scheduler reserve;
+            # SGLang 0.5.11 silently hangs (no scheduler activity, no error)
+            # when prompt+max_tokens nears max_total_tokens. Bisected hang
+            # threshold ~1040 for these payloads; 2048 leaves headroom.
             pytest.mark.timeout(195),  # profiled 33s on RTX 6000 Ada
             pytest.mark.pre_merge,
         ],
@@ -111,7 +114,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.7),
-            pytest.mark.requested_sglang_kv_tokens(96),
+            pytest.mark.requested_sglang_kv_tokens(2048),  # see "aggregated" above
             pytest.mark.timeout(195),
             pytest.mark.pre_merge,
             pytest.mark.unified,
@@ -420,11 +423,6 @@ sglang_configs = {
             pytest.mark.gpu_1,
             # No profiled_vram_gib: multimodal_epd.sh uses explicit
             # --mem-fraction-static via DYN_ENCODE_GPU_MEM / DYN_WORKER_GPU_MEM.
-            # Expected to fail until SGLang release includes the upstream fix:
-            # https://github.com/sgl-project/sglang/pull/22431
-            pytest.mark.xfail(
-                reason="Known upstream SGLang issue for video_e_pd_qwen E/PD path; expected failure until next SGLang version bump includes sglang#22431."
-            ),
             pytest.mark.timeout(360),
             pytest.mark.pre_merge,
         ],

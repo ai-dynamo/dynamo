@@ -13,7 +13,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/tensorrtllm-runtime:my-tag
-    TRTLLMPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
@@ -38,7 +38,7 @@ spec:
             - ./examples/backends/trtllm/engine_configs/qwen3/prefill.yaml
             - --disaggregation-mode
             - prefill
-    TRTLLMDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode

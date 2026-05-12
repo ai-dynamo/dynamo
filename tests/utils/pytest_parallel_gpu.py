@@ -310,6 +310,7 @@ def run_parallel(
     gpu_indices: list[int] | None = None,
     extra_pytest_args: list[str] | None = None,
     stream: bool = False,
+    parent_basetemp: str | None = None,
 ) -> int:
     """Run tests in parallel with VRAM-aware scheduling across multiple GPUs.
 
@@ -545,6 +546,17 @@ def run_parallel(
         ]
         if extra_pytest_args:
             cmd.extend(extra_pytest_args)
+        # Give each child a unique --basetemp under the parent's root.
+        # pytest rmtrees the given basetemp at session startup, so a shared
+        # root would let siblings wipe each other's tmp_path trees mid-run.
+        # Prefix with w{w_id} because safe_name normalizes "/" and "::" and
+        # is not guaranteed collision-free across parametrized ids.
+        # Appended after extra_pytest_args so the orchestrator's per-child
+        # path wins over any --basetemp that a caller stuffs into
+        # extra_pytest_args (pytest uses argparse semantics: last value wins).
+        if parent_basetemp:
+            child_basetemp = os.path.join(parent_basetemp, f"w{test.w_id}-{safe_name}")
+            cmd.extend(["--basetemp", child_basetemp])
 
         proc = subprocess.Popen(
             cmd,

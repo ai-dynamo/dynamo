@@ -19,8 +19,9 @@ use anyhow::Context;
 use anyhow::{Result, bail};
 
 use dynamo_protocols::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
-    ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, EncodingFormat,
+    ChatCompletionMessageContent, ChatCompletionRequestMessage,
+    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
+    ChatCompletionToolChoiceOption, EncodingFormat,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use futures::Stream;
@@ -806,12 +807,18 @@ impl OpenAIPreprocessor {
                 | Some(ChatCompletionToolChoiceOption::Named(_))
         );
 
+        let reasoning_disabled_by_request = Self::is_reasoning_disabled_by_request(
+            self.runtime_config.reasoning_parser.as_deref(),
+            request.chat_template_args.as_ref(),
+        );
+
         // Try to parse reasoning content only if parser is configured.
         let should_parse_reasoning = self.runtime_config.reasoning_parser.is_some()
-            && !Self::is_reasoning_disabled_by_request(
-                self.runtime_config.reasoning_parser.as_deref(),
-                request.chat_template_args.as_ref(),
-            )
+            && !reasoning_disabled_by_request
+            && !suppress_reasoning_after_tool
+            && !tool_choice_forces_guided_json;
+        let should_strip_disabled_reasoning_start = reasoning_disabled_by_request
+            && Self::is_nemotron_force_reasoning(self.runtime_config.reasoning_parser.as_deref())
             && !suppress_reasoning_after_tool
             && !tool_choice_forces_guided_json;
 
@@ -827,6 +834,10 @@ impl OpenAIPreprocessor {
                 stream,
                 self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
                 prompt_injected_reasoning,
+            ))
+        } else if should_strip_disabled_reasoning_start {
+            Box::pin(Self::strip_leading_reasoning_start_from_stream(
+                stream, "<think>",
             ))
         } else {
             Box::pin(stream)
@@ -1299,10 +1310,17 @@ impl OpenAIPreprocessor {
         )
     }
 
+    fn is_nemotron_force_reasoning(reasoning_parser: Option<&str>) -> bool {
+        matches!(
+            reasoning_parser,
+            Some("nemotron_nano" | "nemotron3" | "nemotron_v3")
+        )
+    }
+
     /// Check if reasoning parsing should be disabled based on per-request parameters.
     /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
-    /// For nemotron_nano: disabled when chat_template_args contains "enable_thinking": false
-    ///   or "force_nonempty_content": true.
+    /// For Nemotron force-reasoning aliases: disabled when chat_template_args
+    ///   contains "enable_thinking": false or "force_nonempty_content": true.
     /// For deepseek_r1 / deepseek_v4: disabled when chat_template_args contains
     ///   "thinking": false or "thinking_mode": "chat" — matches the V4 formatter's
     ///   `resolve_thinking_mode` convention, so the parser and the prompt stay in sync.
@@ -1324,7 +1342,7 @@ impl OpenAIPreprocessor {
                 }
                 false
             }
-            Some("nemotron_nano") | Some("nemotron3") => {
+            parser if Self::is_nemotron_force_reasoning(parser) => {
                 if let Some(args) = chat_template_args {
                     if let Some(enable_thinking) = args.get("enable_thinking")
                         && enable_thinking == &serde_json::Value::Bool(false)
@@ -1430,6 +1448,149 @@ impl OpenAIPreprocessor {
                 Some((processed_response, state))
             } else {
                 None
+            }
+        })
+        .fuse()
+    }
+
+    // Motivation: when Nemotron reasoning is disabled by request flags, the
+    // backend may still emit a leading <think>. Buffer the initial stream
+    // bytes so split chunks like "<thi" + "nk>answer" are stripped cleanly.
+    fn strip_leading_reasoning_start_from_stream<S>(
+        stream: S,
+        think_start_token: &'static str,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        struct StripReasoningStartState {
+            stream:
+                Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
+            think_start_token: &'static str,
+            choices: HashMap<u32, StripChoiceState>,
+            last_response: Option<Annotated<NvCreateChatCompletionStreamResponse>>,
+            eof_flushed: bool,
+        }
+
+        #[derive(Default)]
+        struct StripChoiceState {
+            buffer: String,
+            decided: bool,
+        }
+
+        fn take_undecided_buffer(choice_state: &mut StripChoiceState) -> Option<String> {
+            if choice_state.decided || choice_state.buffer.is_empty() {
+                return None;
+            }
+
+            choice_state.decided = true;
+            Some(std::mem::take(&mut choice_state.buffer))
+        }
+
+        fn drain_undecided_buffers(
+            choices: &mut HashMap<u32, StripChoiceState>,
+        ) -> HashMap<u32, String> {
+            choices
+                .iter_mut()
+                .filter_map(|(index, choice_state)| {
+                    take_undecided_buffer(choice_state).map(|buffer| (*index, buffer))
+                })
+                .collect()
+        }
+
+        let state = StripReasoningStartState {
+            stream: Box::pin(stream),
+            think_start_token,
+            choices: HashMap::new(),
+            last_response: None,
+            eof_flushed: false,
+        };
+
+        stream::unfold(state, |mut state| async move {
+            if let Some(mut response) = state.stream.next().await {
+                let Some(mut data) = response.data.take() else {
+                    return Some((response, state));
+                };
+
+                for choice in data.inner.choices.iter_mut() {
+                    let choice_state = state.choices.entry(choice.index).or_default();
+                    let text = match choice.delta.content.take() {
+                        Some(ChatCompletionMessageContent::Text(text)) => text,
+                        other => {
+                            if let Some(buffer) = take_undecided_buffer(choice_state) {
+                                choice.delta.content =
+                                    Some(ChatCompletionMessageContent::Text(buffer));
+                            } else {
+                                choice.delta.content = other;
+                            }
+                            continue;
+                        }
+                    };
+
+                    let output = if choice_state.decided {
+                        text
+                    } else {
+                        choice_state.buffer.push_str(&text);
+                        if state.think_start_token.starts_with(&choice_state.buffer)
+                            && choice_state.buffer.len() < state.think_start_token.len()
+                        {
+                            choice.delta.content = None;
+                            continue;
+                        }
+
+                        choice_state.decided = true;
+                        if choice_state.buffer.starts_with(state.think_start_token) {
+                            choice_state.buffer[state.think_start_token.len()..].to_string()
+                        } else {
+                            choice_state.buffer.clone()
+                        }
+                    };
+
+                    choice_state.buffer.clear();
+                    choice.delta.content = if output.is_empty() {
+                        None
+                    } else {
+                        Some(ChatCompletionMessageContent::Text(output))
+                    };
+                }
+
+                response.data = Some(data);
+                state.last_response = Some(response.clone());
+
+                Some((response, state))
+            } else if state.eof_flushed {
+                None
+            } else {
+                state.eof_flushed = true;
+                let mut flushed = drain_undecided_buffers(&mut state.choices);
+                if flushed.is_empty() {
+                    None
+                } else {
+                    let mut response = state.last_response.clone()?;
+                    let data = response.data.as_mut()?;
+                    data.inner.usage = None;
+                    data.inner.choices.retain_mut(|choice| {
+                        if let Some(buffer) = flushed.remove(&choice.index) {
+                            choice.delta.role = None;
+                            choice.delta.content = Some(ChatCompletionMessageContent::Text(buffer));
+                            choice.delta.tool_calls = None;
+                            choice.delta.function_call = None;
+                            choice.delta.refusal = None;
+                            choice.delta.reasoning_content = None;
+                            choice.finish_reason = None;
+                            choice.logprobs = None;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+
+                    if data.inner.choices.is_empty() {
+                        None
+                    } else {
+                        Some((response, state))
+                    }
+                }
             }
         })
         .fuse()
@@ -1952,6 +2113,14 @@ mod tests {
             );
             m
         };
+        let force_nonempty_content_true = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "force_nonempty_content".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            m
+        };
         let thinking_mode_chat = {
             let mut m = std::collections::HashMap::new();
             m.insert(
@@ -2069,6 +2238,24 @@ mod tests {
                 Some(&empty_args),
                 false,
                 "nemotron_nano + empty args → enabled",
+            ),
+            (
+                Some("nemotron3"),
+                Some(&force_nonempty_content_true),
+                true,
+                "nemotron3 + force_nonempty_content=true → disabled",
+            ),
+            (
+                Some("nemotron_v3"),
+                Some(&enable_thinking_false),
+                true,
+                "nemotron_v3 + enable_thinking=false → disabled",
+            ),
+            (
+                Some("nemotron_v3"),
+                Some(&force_nonempty_content_true),
+                true,
+                "nemotron_v3 + force_nonempty_content=true → disabled",
             ),
             // deepseek_v4 — same convention as deepseek_r1; verify all three aliases
             // (deepseek_v4 / deepseek-v4 / deepseekv4) plus both signal keys.
