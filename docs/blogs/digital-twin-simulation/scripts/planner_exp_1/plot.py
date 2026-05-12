@@ -84,14 +84,7 @@ def main() -> None:
                 pts = by_kind.get((mode, target), [])
                 if not pts:
                     continue
-                if target == "sla":
-                    label = (
-                        f"{mode} planner (sla 1500ms ttft)"
-                        if metric == "ttft_ms"
-                        else f"{mode} planner (sla 50ms itl)"
-                    )
-                else:
-                    label = f"{mode} planner ({target})"
+                label = f"{mode} planner-{target}"
                 marker = TARGET_MARKERS[target]
                 xs = [r["gpu_hours"] for r in pts]
                 ys = [(r[metric] or {}).get("p90") for r in pts]
@@ -118,13 +111,13 @@ def main() -> None:
 
     draw_pareto(ax_ttft, "ttft_ms", log_y=True)
     ax_ttft.set_ylabel("p90 TTFT (ms, log)")
-    ax_ttft.set_title("Pareto: GPU-hours vs p90 TTFT")
-    ax_ttft.legend(loc="best", fontsize=8)
+    ax_ttft.set_title("p90 TTFT")
+    # Single shared legend on the first panel only; two columns to keep it compact.
+    ax_ttft.legend(loc="upper right", fontsize=8, ncol=2, framealpha=0.9)
 
     draw_pareto(ax_itl, "itl_ms", log_y=False)
     ax_itl.set_ylabel("p90 ITL (ms)")
-    ax_itl.set_title("Pareto: GPU-hours vs p90 ITL")
-    ax_itl.legend(loc="best", fontsize=8)
+    ax_itl.set_title("p90 ITL")
 
     # Pull xmin / ymin lower so the lower-left corner has visual headroom
     # for the "better" indicator without overlapping data and annotations.
@@ -134,7 +127,9 @@ def main() -> None:
     ax_itl.set_ylim(bottom=-60)  # linear scale; smallest data point ~15ms
 
     fig.suptitle(
-        "Exp 1 — Qwen3-32B / TP=2 / H200 / vLLM — toolagent_trace, startup=60s",
+        "Exp 1 — GPU-hours vs latency: planner vs static, agg vs disagg\n"
+        "Qwen3-32B / TP=2 / H200 / vLLM, planner-SLA target TTFT=1500 ms / ITL=50 ms, startup=60 s",
+        fontsize=11,
         y=1.0,
     )
     plt.tight_layout()

@@ -1,6 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Plot Exp 2 results: latency / oscillation / cost vs load_adjustment_interval."""
+"""Plot Exp 2 results: p90 TTFT vs load_adjustment_interval.
+
+Single-panel focus on the headline metric (p90 TTFT). Secondary metrics
+(ITL, scaling-event count, GPU-hours) are reported in the blog text
+rather than the figure to keep the visual lean.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +21,10 @@ sys.path.insert(0, str(_HERE.parent))
 from common import image_path, results_json_path  # noqa: E402
 
 EXP_NAME = "planner_exp_2"
-GRAY = "#8C8C8C"
+NV_GREEN = "#76B900"
+SLA_GRAY = "#8C8C8C"
+SWEET_LO_S = 5
+SWEET_HI_S = 10
 
 
 def load() -> list[dict]:
@@ -28,59 +36,65 @@ def load() -> list[dict]:
 def main() -> None:
     rows = load()
     xs = [r["params"]["load_adjustment_interval_s"] for r in rows]
-    ttft_avg = [(r["ttft_ms"] or {}).get("avg") for r in rows]
     ttft_p90 = [(r["ttft_ms"] or {}).get("p90") for r in rows]
-    itl_avg = [(r["itl_ms"] or {}).get("avg") for r in rows]
-    itl_p90 = [(r["itl_ms"] or {}).get("p90") for r in rows]
     events = [r["scale_up_events"] + r["scale_down_events"] for r in rows]
-    gpu_h = [r["gpu_hours"] for r in rows]
 
-    fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+    fig, ax = plt.subplots(figsize=(9, 5.5))
 
-    ax = axes[0, 0]
-    ax.plot(xs, ttft_avg, "o-", label="avg")
-    ax.plot(xs, ttft_p90, "s-", label="p90")
-    ax.axhline(1500, ls="--", color=GRAY, alpha=0.6, label="SLA 1500ms")
+    # Highlight the 5–10 s sweet spot as a soft green band behind the curve.
+    ax.axvspan(SWEET_LO_S, SWEET_HI_S, alpha=0.15, color=NV_GREEN, zorder=0)
+    ax.text(
+        (SWEET_LO_S * SWEET_HI_S) ** 0.5,  # geometric midpoint on log axis
+        0.97,
+        "5–10 s sweet spot",
+        transform=ax.get_xaxis_transform(),
+        ha="center",
+        va="top",
+        fontsize=10,
+        fontweight="bold",
+        color=NV_GREEN,
+    )
+
+    # SLA reference line.
+    ax.axhline(1500, ls="--", color=SLA_GRAY, alpha=0.8, label="TTFT SLA 1500 ms")
+
+    # Main curve.
+    ax.plot(
+        xs,
+        ttft_p90,
+        "o-",
+        color="#0072B2",
+        lw=2,
+        markersize=7,
+        label="p90 TTFT",
+        zorder=3,
+    )
+
+    # Annotate each point with its scaling-event count so the cost
+    # of oscillation stays visible in the figure as well as the text.
+    for x, y, n in zip(xs, ttft_p90, events):
+        ax.annotate(
+            f"{n} events",
+            (x, y),
+            textcoords="offset points",
+            xytext=(0, 9),
+            fontsize=7,
+            ha="center",
+            color="#444444",
+        )
+
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("load_adjustment_interval (s, log)")
-    ax.set_ylabel("TTFT (ms, log)")
-    ax.set_title("TTFT vs interval")
-    ax.grid(True, which="both", alpha=0.3)
-    ax.legend()
-
-    ax = axes[0, 1]
-    ax.plot(xs, itl_avg, "o-", label="avg")
-    ax.plot(xs, itl_p90, "s-", label="p90")
-    ax.axhline(50, ls="--", color=GRAY, alpha=0.6, label="SLA 50ms")
-    ax.set_xscale("log")
-    ax.set_xlabel("load_adjustment_interval (s, log)")
-    ax.set_ylabel("ITL (ms)")
-    ax.set_title("ITL vs interval")
-    ax.grid(True, which="both", alpha=0.3)
-    ax.legend()
-
-    ax = axes[1, 0]
-    ax.plot(xs, events, "o-", color="C3")
-    ax.set_xscale("log")
-    ax.set_xlabel("load_adjustment_interval (s, log)")
-    ax.set_ylabel("scale_up + scale_down events")
-    ax.set_title("Oscillation vs interval")
-    ax.grid(True, which="both", alpha=0.3)
-
-    ax = axes[1, 1]
-    ax.plot(xs, gpu_h, "o-", color="C2")
-    ax.set_xscale("log")
-    ax.set_xlabel("load_adjustment_interval (s, log)")
-    ax.set_ylabel("Cumulative GPU-hours")
-    ax.set_title("GPU-hours vs interval")
-    ax.grid(True, which="both", alpha=0.3)
-
-    fig.suptitle(
-        "Exp 2 — Qwen3-32B / TP=2 / H200 / vLLM — toolagent_trace, "
-        "load-only planner, startup_time=0",
-        y=1.0,
+    ax.set_ylabel("p90 TTFT (ms, log)")
+    ax.set_title(
+        "Exp 2 — p90 TTFT vs load_adjustment_interval\n"
+        "Qwen3-32B / TP=2 / H200 / vLLM, load-only planner, startup_time=0",
+        fontsize=11,
     )
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(loc="upper left")
+
     plt.tight_layout()
     out = image_path(EXP_NAME)
     out.parent.mkdir(parents=True, exist_ok=True)
