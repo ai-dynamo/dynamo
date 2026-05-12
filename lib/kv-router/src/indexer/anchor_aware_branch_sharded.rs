@@ -1,12 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Anchor-aware routing-trie sharding over `ThreadPoolIndexer<T>`.
+//! Branch-sharded routing-trie sharding over `ThreadPoolIndexer<T>`.
 //!
-//! This is an opt-in alternative to [`super::BranchShardedIndexer`]. The
-//! existing branch-sharded indexer keeps its flat branch-key routing semantics;
-//! this type owns a bounded routing prefix tree that can answer shallow drained
-//! reads and route depth-boundary suffixes through explicit backend anchors.
+//! This implementation owns a bounded routing prefix tree that can answer
+//! shallow drained reads and route depth-boundary suffixes through explicit
+//! backend anchors.
 
 use std::{
     collections::VecDeque,
@@ -95,8 +94,8 @@ struct StoreRouteDecision {
     skip_backend: bool,
 }
 
-/// Anchor-aware branch-sharded wrapper over N [`ThreadPoolIndexer<T>`] instances.
-pub struct AnchorAwareBranchShardedIndexer<T: AnchorCapableSyncIndexer> {
+/// Branch-sharded wrapper over N [`ThreadPoolIndexer<T>`] instances.
+pub struct BranchShardedIndexer<T: AnchorCapableSyncIndexer> {
     shards: Vec<Arc<ThreadPoolIndexer<T>>>,
     num_shards: usize,
     max_routing_depth: usize,
@@ -108,8 +107,12 @@ pub struct AnchorAwareBranchShardedIndexer<T: AnchorCapableSyncIndexer> {
     metrics: ShardedIndexerMetrics,
 }
 
-impl<T: AnchorCapableSyncIndexer> AnchorAwareBranchShardedIndexer<T> {
-    /// Create an anchor-aware branch-sharded indexer from pre-built shards.
+/// Compatibility alias for the previous implementation name.
+#[deprecated(note = "use BranchShardedIndexer instead")]
+pub type AnchorAwareBranchShardedIndexer<T> = BranchShardedIndexer<T>;
+
+impl<T: AnchorCapableSyncIndexer> BranchShardedIndexer<T> {
+    /// Create a branch-sharded indexer from pre-built shards.
     pub fn new(shards: Vec<ThreadPoolIndexer<T>>, prefix_depth: usize, kv_block_size: u32) -> Self {
         assert!(!shards.is_empty(), "Must provide at least one shard");
         let num_shards = shards.len();
@@ -128,7 +131,7 @@ impl<T: AnchorCapableSyncIndexer> AnchorAwareBranchShardedIndexer<T> {
         }
     }
 
-    /// Alias for [`AnchorAwareBranchShardedIndexer::new`].
+    /// Alias for [`BranchShardedIndexer::new`].
     pub fn new_with_options(
         shards: Vec<ThreadPoolIndexer<T>>,
         prefix_depth: usize,
@@ -639,7 +642,7 @@ impl<T: AnchorCapableSyncIndexer> AnchorAwareBranchShardedIndexer<T> {
 }
 
 #[async_trait]
-impl<T: AnchorCapableSyncIndexer> KvIndexerInterface for AnchorAwareBranchShardedIndexer<T> {
+impl<T: AnchorCapableSyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
     async fn find_matches(
         &self,
         sequence: Vec<LocalBlockHash>,
@@ -881,7 +884,7 @@ impl<T: AnchorCapableSyncIndexer> KvIndexerInterface for AnchorAwareBranchSharde
             };
 
             format!(
-                "AnchorAwareBranchShardedIndexer find_matches ({total_calls} total: {dispatched} dispatched, \
+                "BranchShardedIndexer find_matches ({total_calls} total: {dispatched} dispatched, \
              {shallow} shallow):{timing}\n  \
              remove broadcasts = {broadcasts}\n  \
              anchors = {anchor_installs} installs / {anchor_reuses} reuses"
@@ -903,11 +906,11 @@ mod tests {
     fn make_indexer(
         num_shards: usize,
         depth: usize,
-    ) -> AnchorAwareBranchShardedIndexer<ConcurrentRadixTreeCompressed> {
+    ) -> BranchShardedIndexer<ConcurrentRadixTreeCompressed> {
         let shards = (0..num_shards)
             .map(|_| ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 32))
             .collect();
-        AnchorAwareBranchShardedIndexer::new(shards, depth, 32)
+        BranchShardedIndexer::new(shards, depth, 32)
     }
 
     fn local_hashes(values: &[u64]) -> Vec<LocalBlockHash> {
@@ -1000,7 +1003,7 @@ mod tests {
     }
 
     fn has_anchor_for_worker(
-        index: &AnchorAwareBranchShardedIndexer<ConcurrentRadixTreeCompressed>,
+        index: &BranchShardedIndexer<ConcurrentRadixTreeCompressed>,
         worker: WorkerWithDpRank,
     ) -> bool {
         index
@@ -1010,7 +1013,7 @@ mod tests {
     }
 
     async fn normalized_scores(
-        index: &AnchorAwareBranchShardedIndexer<ConcurrentRadixTreeCompressed>,
+        index: &BranchShardedIndexer<ConcurrentRadixTreeCompressed>,
         query: &[u64],
     ) -> Vec<(WorkerWithDpRank, u32)> {
         let mut scores: Vec<_> = index

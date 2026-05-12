@@ -63,7 +63,6 @@ pub mod radix_tree;
 mod tests;
 
 // Re-export everything that was public in the old single-file module.
-pub use anchor_aware_branch_sharded::AnchorAwareBranchShardedIndexer as BranchShardedIndexer;
 pub use anchor_aware_branch_sharded::*;
 pub use kv_indexer::*;
 pub use local::*;

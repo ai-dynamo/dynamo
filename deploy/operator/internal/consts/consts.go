@@ -72,6 +72,10 @@ const (
 	DynamoComponentEnvVar             = "DYN_COMPONENT"
 	DynamoDiscoveryBackendEnvVar      = "DYN_DISCOVERY_BACKEND"
 
+	// DynamoOperatorAllowGMSSnapshotEnvVar enables the temporary internal
+	// GMS + Snapshot admission gate when set to "1".
+	DynamoOperatorAllowGMSSnapshotEnvVar = "DYN_OPERATOR_ALLOW_GMS_SNAPSHOT"
+
 	GlobalDynamoNamespace = "dynamo"
 
 	ComponentTypePlanner      = "planner"
@@ -144,6 +148,7 @@ const (
 	// Used consistently across controllers, webhooks, and metrics
 	ResourceTypeDynamoGraphDeployment               = "DynamoGraphDeployment"
 	ResourceTypeDynamoComponentDeployment           = "DynamoComponentDeployment"
+	ResourceTypeDynamoCheckpoint                    = "DynamoCheckpoint"
 	ResourceTypeDynamoModel                         = "DynamoModel"
 	ResourceTypeDynamoGraphDeploymentRequest        = "DynamoGraphDeploymentRequest"
 	ResourceTypeDynamoGraphDeploymentScalingAdapter = "DynamoGraphDeploymentScalingAdapter"

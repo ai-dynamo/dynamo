@@ -21,7 +21,13 @@
 # Set to false if CRDs are managed externally (e.g., via GitOps or a separate pipeline).
 upgradeCRD: true
 
+featureGates:
+  # -- Temporary internal gate for GMS + Snapshot.
+  gmsSnapshot: false
+
 # Environment variables to pass to operator Deployment.
+#
+# Prefer featureGates.gmsSnapshot for the temporary GMS + Snapshot gate.
 env: []
 
 # -- DEPRECATED: Namespace-restricted mode is deprecated and will be removed in a future release. Use cluster-wide mode (the default) instead. Do not enable this for new deployments.
