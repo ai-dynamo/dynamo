@@ -496,7 +496,12 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 # wheels' embedded SBOMs to keep only the third-party crates we actually
 # ship. Stay scoped to one RUN layer (cache invalidation contained).
 ARG ENABLE_SOURCE_ARCHIVAL=false
-RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+# Mount cargo registry + git caches so re-runs don't re-download the
+# ~750 crates from crates.io every build. `sharing=shared` lets parallel
+# builds (e.g. multiple frameworks in CI) read the same cache concurrently.
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
+    if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
         mkdir -p /tmp/dynamo-vendor-full && \
         cd /opt/dynamo && \
         cargo vendor --locked /tmp/dynamo-vendor-full > /dev/null && \
