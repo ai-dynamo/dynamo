@@ -279,6 +279,7 @@ class OmniHandler(BaseOmniHandler):
         if text_prompt is None:
             raise ValueError("No user message found in chat completion request")
 
+        sampling_params_list: list | None
         output_modalities = {
             str(modality).lower() for modality in (self.config.output_modalities or [])
         }
