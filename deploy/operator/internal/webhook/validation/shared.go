@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
@@ -140,9 +141,7 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 		return nil, err
 	}
 
-	// Snapshot restore plus GMS is temporarily disabled while the underlying
-	// GPU driver restore path is being fixed.
-	if err := v.validateCheckpointWithGPUMemoryService(); err != nil {
+	if err := v.validateSnapshotWithGPUMemoryService(); err != nil {
 		return nil, err
 	}
 
@@ -414,18 +413,11 @@ func (v *SharedSpecValidator) validateGPUMemoryService() error {
 	return nil
 }
 
-func (v *SharedSpecValidator) validateCheckpointWithGPUMemoryService() error {
-	if v.spec.Checkpoint == nil || !v.spec.Checkpoint.Enabled {
-		return nil
-	}
-	if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
-		return nil
-	}
-
-	return fmt.Errorf(
-		"%s.checkpoint: checkpointing with gpuMemoryService is temporarily disabled due to known GPU driver issues; "+
-			"disable either checkpointing or gpuMemoryService for this service",
-		v.fieldPath)
+func (v *SharedSpecValidator) validateSnapshotWithGPUMemoryService() error {
+	return checkpoint.ValidateGMSSnapshotGate(
+		fmt.Sprintf("%s.checkpoint", v.fieldPath),
+		v.spec.Checkpoint != nil && v.spec.Checkpoint.Enabled,
+		v.spec.GPUMemoryService)
 }
 
 // validateServiceAnnotations validates known annotations on the service-level spec.

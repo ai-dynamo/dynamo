@@ -11,6 +11,8 @@
 //!
 //! The Preprocessor will accept any IngressRequest and transform it to a BackendRequest.
 
+#[cfg(feature = "lightseek-mm")]
+pub mod lightseek_mm;
 pub mod media;
 pub mod prompt;
 pub mod speculative_prefill;
@@ -1578,7 +1580,6 @@ impl OpenAIPreprocessor {
                             choice.delta.refusal = None;
                             choice.delta.reasoning_content = None;
                             choice.finish_reason = None;
-                            choice.stop_reason = None;
                             choice.logprobs = None;
                             true
                         } else {
