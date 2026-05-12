@@ -1861,10 +1861,9 @@ func TestDGD_ApplyIdempotence_CSAMergePatch(t *testing.T) {
 	}
 }
 
-// TestDGD_RoundTrip_KvCacheTransferTopology verifies that KvCacheTransferTopology
-// survives a v1beta1 → v1alpha1 → v1beta1 round-trip (and vice versa) without
-// any data loss.
-func TestDGD_RoundTrip_KvCacheTransferTopology(t *testing.T) {
+// TestDGD_RoundTrip_KvTransferPolicy verifies that KvTransferPolicy survives a
+// v1beta1 → v1alpha1 → v1beta1 round-trip (and vice versa) without data loss.
+func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
 	t.Run("v1beta1_roundtrip", func(t *testing.T) {
 		src := &v1beta1.DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "topo", Namespace: "ns"},
@@ -1873,10 +1872,10 @@ func TestDGD_RoundTrip_KvCacheTransferTopology(t *testing.T) {
 				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 					{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
 				},
-				KvCacheTransferTopology: &v1beta1.KvCacheTransferTopology{
-					Label:          "topology.kubernetes.io/zone",
-					Level:          v1beta1.TopologyDomain("zone"),
-					MismatchPolicy: v1beta1.MismatchPolicyFail,
+				KvTransferPolicy: &v1beta1.KvTransferPolicy{
+					LabelKey:      "topology.kubernetes.io/zone",
+					Domain:        v1beta1.TopologyDomain("zone"),
+					NoMatchPolicy: v1beta1.NoMatchPolicyFail,
 				},
 			},
 		}
@@ -1894,10 +1893,10 @@ func TestDGD_RoundTrip_KvCacheTransferTopology(t *testing.T) {
 				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 					{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
 				},
-				KvCacheTransferTopology: &v1beta1.KvCacheTransferTopology{
-					Label:          "nvidia.com/rack",
-					Level:          v1beta1.TopologyDomain("rack"),
-					MismatchPolicy: v1beta1.MismatchPolicyFallback,
+				KvTransferPolicy: &v1beta1.KvTransferPolicy{
+					LabelKey:      "nvidia.com/rack",
+					Domain:        v1beta1.TopologyDomain("rack"),
+					NoMatchPolicy: v1beta1.NoMatchPolicyFallback,
 				},
 			},
 		}
@@ -1915,20 +1914,20 @@ func TestDGD_RoundTrip_KvCacheTransferTopology(t *testing.T) {
 				Services: map[string]*DynamoComponentDeploymentSharedSpec{
 					"frontend": {ComponentType: "frontend"},
 				},
-				KvCacheTransferTopology: &KvCacheTransferTopology{
-					Label:          "topology.kubernetes.io/zone",
-					Level:          TopologyDomain("zone"),
-					MismatchPolicy: MismatchPolicyFail,
+				KvTransferPolicy: &KvTransferPolicy{
+					LabelKey:      "topology.kubernetes.io/zone",
+					Domain:        TopologyDomain("zone"),
+					NoMatchPolicy: NoMatchPolicyFail,
 				},
 			},
 		}
 		got := roundTripFromV1alpha1(t, src)
-		if diff := cmp.Diff(src.Spec.KvCacheTransferTopology, got.Spec.KvCacheTransferTopology); diff != "" {
-			t.Errorf("v1alpha1 round-trip KvCacheTransferTopology mismatch (-want +got):\n%s", diff)
+		if diff := cmp.Diff(src.Spec.KvTransferPolicy, got.Spec.KvTransferPolicy); diff != "" {
+			t.Errorf("v1alpha1 round-trip KvTransferPolicy mismatch (-want +got):\n%s", diff)
 		}
 	})
 
-	t.Run("nil_topology_roundtrip", func(t *testing.T) {
+	t.Run("nil_policy_roundtrip", func(t *testing.T) {
 		src := &v1beta1.DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "no-topo", Namespace: "ns"},
 			Spec: v1beta1.DynamoGraphDeploymentSpec{
@@ -1939,8 +1938,8 @@ func TestDGD_RoundTrip_KvCacheTransferTopology(t *testing.T) {
 			},
 		}
 		got := roundTripFromV1beta1(t, src)
-		if got.Spec.KvCacheTransferTopology != nil {
-			t.Errorf("expected nil KvCacheTransferTopology, got %+v", got.Spec.KvCacheTransferTopology)
+		if got.Spec.KvTransferPolicy != nil {
+			t.Errorf("expected nil KvTransferPolicy, got %+v", got.Spec.KvTransferPolicy)
 		}
 	})
 }

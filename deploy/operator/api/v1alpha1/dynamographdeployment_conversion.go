@@ -111,9 +111,9 @@ func ConvertFromDynamoGraphDeploymentSpec(src *DynamoGraphDeploymentSpec, dst *v
 		dst.TopologyConstraint = &v1beta1.SpecTopologyConstraint{}
 		ConvertFromSpecTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
 	}
-	if src.KvCacheTransferTopology != nil {
-		dst.KvCacheTransferTopology = &v1beta1.KvCacheTransferTopology{}
-		ConvertFromKvCacheTransferTopology(src.KvCacheTransferTopology, dst.KvCacheTransferTopology)
+	if src.KvTransferPolicy != nil {
+		dst.KvTransferPolicy = &v1beta1.KvTransferPolicy{}
+		ConvertFromKvTransferPolicy(src.KvTransferPolicy, dst.KvTransferPolicy)
 	}
 	dst.Env = src.Envs
 	if save != nil && len(src.PVCs) > 0 {
@@ -417,9 +417,9 @@ func ConvertToDynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, 
 		dst.TopologyConstraint = &SpecTopologyConstraint{}
 		ConvertToSpecTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
 	}
-	if src.KvCacheTransferTopology != nil {
-		dst.KvCacheTransferTopology = &KvCacheTransferTopology{}
-		ConvertToKvCacheTransferTopology(src.KvCacheTransferTopology, dst.KvCacheTransferTopology)
+	if src.KvTransferPolicy != nil {
+		dst.KvTransferPolicy = &KvTransferPolicy{}
+		ConvertToKvTransferPolicy(src.KvTransferPolicy, dst.KvTransferPolicy)
 	}
 	dst.Envs = src.Env
 
@@ -561,23 +561,23 @@ func ConvertToRestartStrategy(src *v1beta1.RestartStrategy, dst *RestartStrategy
 	}
 }
 
-// ConvertFromKvCacheTransferTopology converts KV-cache transfer topology from
-// v1alpha1 to v1beta1.
-func ConvertFromKvCacheTransferTopology(src *KvCacheTransferTopology, dst *v1beta1.KvCacheTransferTopology) {
-	*dst = v1beta1.KvCacheTransferTopology{
-		Label:          src.Label,
-		Level:          v1beta1.TopologyDomain(src.Level),
-		MismatchPolicy: v1beta1.MismatchPolicy(src.MismatchPolicy),
+// ConvertFromKvTransferPolicy converts KV transfer policy from v1alpha1 to
+// v1beta1.
+func ConvertFromKvTransferPolicy(src *KvTransferPolicy, dst *v1beta1.KvTransferPolicy) {
+	*dst = v1beta1.KvTransferPolicy{
+		LabelKey:      src.LabelKey,
+		Domain:        v1beta1.TopologyDomain(src.Domain),
+		NoMatchPolicy: v1beta1.NoMatchPolicy(src.NoMatchPolicy),
 	}
 }
 
-// ConvertToKvCacheTransferTopology converts KV-cache transfer topology from
-// v1beta1 to v1alpha1.
-func ConvertToKvCacheTransferTopology(src *v1beta1.KvCacheTransferTopology, dst *KvCacheTransferTopology) {
-	*dst = KvCacheTransferTopology{
-		Label:          src.Label,
-		Level:          TopologyDomain(src.Level),
-		MismatchPolicy: MismatchPolicy(src.MismatchPolicy),
+// ConvertToKvTransferPolicy converts KV transfer policy from v1beta1 to
+// v1alpha1.
+func ConvertToKvTransferPolicy(src *v1beta1.KvTransferPolicy, dst *KvTransferPolicy) {
+	*dst = KvTransferPolicy{
+		LabelKey:      src.LabelKey,
+		Domain:        TopologyDomain(src.Domain),
+		NoMatchPolicy: NoMatchPolicy(src.NoMatchPolicy),
 	}
 }
 

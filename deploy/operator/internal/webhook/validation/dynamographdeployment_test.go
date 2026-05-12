@@ -1544,9 +1544,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			errMsg:      "annotation nvidia.com/dynamo-operator-origin-version has invalid value \"bad\": must be valid semver\nannotation nvidia.com/vllm-distributed-executor-backend has invalid value \"invalid\": must be \"mp\" or \"ray\"",
 			errContains: true,
 		},
-		// --- KvCacheTransferTopology validation ---
+		// --- KvTransferPolicy validation ---
 		{
-			name: "valid kvCacheTransferTopology with label",
+			name: "valid kvTransferPolicy with labelKey",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-graph",
@@ -1557,17 +1557,17 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"frontend": {ComponentType: consts.ComponentTypeFrontend},
 					},
-					KvCacheTransferTopology: &nvidiacomv1alpha1.KvCacheTransferTopology{
-						Label:          "topology.kubernetes.io/zone",
-						Level:          "zone",
-						MismatchPolicy: nvidiacomv1alpha1.MismatchPolicyFail,
+					KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
+						LabelKey:      "topology.kubernetes.io/zone",
+						Domain:        "zone",
+						NoMatchPolicy: nvidiacomv1alpha1.NoMatchPolicyFail,
 					},
 				},
 			},
 			wantErr: false,
 		},
 		{
-			name: "kvCacheTransferTopology missing label",
+			name: "kvTransferPolicy missing labelKey",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-graph",
@@ -1578,17 +1578,17 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"frontend": {ComponentType: consts.ComponentTypeFrontend},
 					},
-					KvCacheTransferTopology: &nvidiacomv1alpha1.KvCacheTransferTopology{
-						Label: "",
-						Level: "zone",
+					KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
+						LabelKey: "",
+						Domain:   "zone",
 					},
 				},
 			},
 			wantErr: true,
-			errMsg:  "spec.kvCacheTransferTopology.label is required",
+			errMsg:  "spec.kvTransferPolicy.labelKey is required",
 		},
 		{
-			name: "kvCacheTransferTopology missing level",
+			name: "kvTransferPolicy missing domain",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-graph",
@@ -1599,17 +1599,17 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"frontend": {ComponentType: consts.ComponentTypeFrontend},
 					},
-					KvCacheTransferTopology: &nvidiacomv1alpha1.KvCacheTransferTopology{
-						Label: "topology.kubernetes.io/zone",
-						Level: "",
+					KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
+						LabelKey: "topology.kubernetes.io/zone",
+						Domain:   "",
 					},
 				},
 			},
 			wantErr: true,
-			errMsg:  "spec.kvCacheTransferTopology.level is required",
+			errMsg:  "spec.kvTransferPolicy.domain is required",
 		},
 		{
-			name: "kvCacheTransferTopology invalid level format",
+			name: "kvTransferPolicy invalid domain format",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-graph",
@@ -1620,18 +1620,18 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"frontend": {ComponentType: consts.ComponentTypeFrontend},
 					},
-					KvCacheTransferTopology: &nvidiacomv1alpha1.KvCacheTransferTopology{
-						Label: "topology.kubernetes.io/zone",
-						Level: "INVALID_LEVEL",
+					KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
+						LabelKey: "topology.kubernetes.io/zone",
+						Domain:   "INVALID_DOMAIN",
 					},
 				},
 			},
 			wantErr:     true,
-			errMsg:      "spec.kvCacheTransferTopology.level \"INVALID_LEVEL\" is not a valid topology domain",
+			errMsg:      "spec.kvTransferPolicy.domain \"INVALID_DOMAIN\" is not a valid topology domain",
 			errContains: true,
 		},
 		{
-			name: "kvCacheTransferTopology invalid mismatchPolicy",
+			name: "kvTransferPolicy invalid noMatchPolicy",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-graph",
@@ -1642,19 +1642,19 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"frontend": {ComponentType: consts.ComponentTypeFrontend},
 					},
-					KvCacheTransferTopology: &nvidiacomv1alpha1.KvCacheTransferTopology{
-						Label:          "topology.kubernetes.io/zone",
-						Level:          "zone",
-						MismatchPolicy: "invalid-policy",
+					KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
+						LabelKey:      "topology.kubernetes.io/zone",
+						Domain:        "zone",
+						NoMatchPolicy: "invalid-policy",
 					},
 				},
 			},
 			wantErr:     true,
-			errMsg:      "spec.kvCacheTransferTopology.mismatchPolicy \"invalid-policy\" is invalid",
+			errMsg:      "spec.kvTransferPolicy.noMatchPolicy \"invalid-policy\" is invalid",
 			errContains: true,
 		},
 		{
-			name: "kvCacheTransferTopology omitted mismatchPolicy defaults to fail",
+			name: "kvTransferPolicy omitted noMatchPolicy defaults to fail",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-graph",
@@ -1665,17 +1665,17 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"frontend": {ComponentType: consts.ComponentTypeFrontend},
 					},
-					KvCacheTransferTopology: &nvidiacomv1alpha1.KvCacheTransferTopology{
-						Label: "topology.kubernetes.io/zone",
-						Level: "zone",
-						// mismatchPolicy omitted
+					KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
+						LabelKey: "topology.kubernetes.io/zone",
+						Domain:   "zone",
+						// noMatchPolicy omitted
 					},
 				},
 			},
 			wantErr: false,
 		},
 		{
-			name: "kvCacheTransferTopology with fallback mismatchPolicy",
+			name: "kvTransferPolicy with fallback noMatchPolicy",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-graph",
@@ -1686,17 +1686,17 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"frontend": {ComponentType: consts.ComponentTypeFrontend},
 					},
-					KvCacheTransferTopology: &nvidiacomv1alpha1.KvCacheTransferTopology{
-						Label:          "topology.kubernetes.io/zone",
-						Level:          "zone",
-						MismatchPolicy: nvidiacomv1alpha1.MismatchPolicyFallback,
+					KvTransferPolicy: &nvidiacomv1alpha1.KvTransferPolicy{
+						LabelKey:      "topology.kubernetes.io/zone",
+						Domain:        "zone",
+						NoMatchPolicy: nvidiacomv1alpha1.NoMatchPolicyFallback,
 					},
 				},
 			},
 			wantErr: false,
 		},
 		{
-			name: "no kvCacheTransferTopology is valid",
+			name: "no kvTransferPolicy is valid",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-graph",

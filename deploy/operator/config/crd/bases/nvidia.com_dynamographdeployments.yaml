@@ -222,24 +222,24 @@ spec:
                       - name
                     type: object
                   type: array
-                kvCacheTransferTopology:
+                kvTransferPolicy:
                   description: |-
-                    KvCacheTransferTopology constrains KV-cache transfers between prefill
-                    and decode workers to the same topology domain.
+                    KvTransferPolicy constrains KV-cache transfers between prefill and
+                    decode workers to the same topology domain.
                   properties:
-                    label:
+                    domain:
                       description: |-
-                        Label is a raw pod label key (e.g. "topology.kubernetes.io/zone") used
-                        to identify the topology domain of each worker pod.
-                      minLength: 1
-                      type: string
-                    level:
-                      description: |-
-                        Level is the topology domain to enforce for KV-cache transfers
+                        Domain is the topology domain to enforce for KV-cache transfers
                         (e.g. "zone", "rack").
                       pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
                       type: string
-                    mismatchPolicy:
+                    labelKey:
+                      description: |-
+                        LabelKey is a raw pod label key (e.g. "topology.kubernetes.io/zone")
+                        used to identify the topology domain of each worker pod.
+                      minLength: 1
+                      type: string
+                    noMatchPolicy:
                       allOf:
                         - enum:
                             - fail
@@ -249,12 +249,12 @@ spec:
                             - fallback
                       default: fail
                       description: |-
-                        MismatchPolicy controls behavior when no same-domain decode workers
+                        NoMatchPolicy controls behavior when no same-domain decode workers
                         exist. Defaults to "fail".
                       type: string
                   required:
-                    - label
-                    - level
+                    - domain
+                    - labelKey
                   type: object
                 labels:
                   additionalProperties:
@@ -20593,30 +20593,30 @@ spec:
                       - name
                     type: object
                   type: array
-                kvCacheTransferTopology:
+                kvTransferPolicy:
                   description: |-
-                    kvCacheTransferTopology constrains KV-cache transfers between prefill
-                    and decode workers to the same topology domain. When set, the frontend
-                    router receives topology-level and mismatch-policy env vars, and
-                    workers publish their topology metadata. Only the `label` path is
-                    supported in this release; `clusterTopologyName` support will be added
-                    in a future release.
+                    kvTransferPolicy constrains KV-cache transfers between prefill and
+                    decode workers to the same topology domain. When set, the frontend
+                    router receives domain and no-match-policy env vars, and workers
+                    publish their topology metadata. Only the `labelKey` path is supported
+                    in this release; `clusterTopologyName` support will be added in a
+                    future release.
                   properties:
-                    label:
+                    domain:
                       description: |-
-                        label is a raw pod label key (e.g. "topology.kubernetes.io/zone") used
-                        to identify the topology domain of each worker pod. When set, the
+                        domain is the topology domain to enforce for KV-cache transfers
+                        (e.g. "zone", "rack"). Must be a valid topology domain name.
+                      pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                      type: string
+                    labelKey:
+                      description: |-
+                        labelKey is a raw pod label key (e.g. "topology.kubernetes.io/zone")
+                        used to identify the topology domain of each worker pod. When set, the
                         operator copies the specified node label onto worker pods and projects
                         it as a DYN_TOPOLOGY_* env var. This path does not require Grove.
                       minLength: 1
                       type: string
-                    level:
-                      description: |-
-                        level is the topology domain to enforce for KV-cache transfers
-                        (e.g. "zone", "rack"). Must be a valid topology domain name.
-                      pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
-                      type: string
-                    mismatchPolicy:
+                    noMatchPolicy:
                       allOf:
                         - enum:
                             - fail
@@ -20626,12 +20626,12 @@ spec:
                             - fallback
                       default: fail
                       description: |-
-                        mismatchPolicy controls behavior when no same-domain decode workers
+                        noMatchPolicy controls behavior when no same-domain decode workers
                         exist. Defaults to "fail".
                       type: string
                   required:
-                    - label
-                    - level
+                    - domain
+                    - labelKey
                   type: object
                 labels:
                   additionalProperties:

@@ -92,10 +92,10 @@ type DynamoGraphDeploymentSpec struct {
 	// +optional
 	TopologyConstraint *SpecTopologyConstraint `json:"topologyConstraint,omitempty"`
 
-	// KvCacheTransferTopology constrains KV-cache transfers between prefill
-	// and decode workers to the same topology domain.
+	// KvTransferPolicy constrains KV-cache transfers between prefill and
+	// decode workers to the same topology domain.
 	// +optional
-	KvCacheTransferTopology *KvCacheTransferTopology `json:"kvCacheTransferTopology,omitempty"`
+	KvTransferPolicy *KvTransferPolicy `json:"kvTransferPolicy,omitempty"`
 }
 
 type Restart struct {
