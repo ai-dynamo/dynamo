@@ -246,6 +246,7 @@ async def test_stage_connector_refs_with_processor():
 async def test_stage_connector_refs_processor_token_prompt_builds_engine_core_request():
     """Processor OmniTokensPrompt outputs are wrapped like native inter-stage inputs."""
     engine = _MockEngine()
+    engine.engine = MagicMock()
     fetched_output = SimpleNamespace(outputs=[SimpleNamespace(token_ids=[1])])
     processed_prompt = {"prompt_token_ids": [10, 20, 30]}
 
@@ -281,6 +282,13 @@ async def test_stage_connector_refs_processor_token_prompt_builds_engine_core_re
     assert hasattr(engine.received_prompt, "prompt_token_ids")
     assert engine.received_prompt.prompt_token_ids == [10, 20, 30]
     assert engine.received_prompt.external_req_id == "req-token-prompt"
+    engine.engine.output_processors[0].add_request.assert_called_once_with(
+        request=engine.received_prompt,
+        prompt=None,
+        parent_req=None,
+        request_index=0,
+        queue=None,
+    )
     assert chunks[0]["stage_connector_refs"]["2"] == {"name": "ref1"}
 
 
@@ -389,6 +397,48 @@ async def test_stage_connector_refs_with_stage_list_processor():
     assert processor_calls[0]["requires_mm"] is True
     assert engine.received_prompt == processed_prompt
     assert chunks[0]["stage_connector_refs"]["1"] == {"name": "ref1"}
+
+
+@pytest.mark.asyncio
+async def test_requested_final_stage_writes_shm_instead_of_downstream_connector():
+    """A per-request final stage should return SHM even if YAML has a next edge."""
+    engine = _MockEngine(output={"output": "text", "finished": True})
+
+    in_connector = MagicMock()
+    in_connector.get.return_value = {"engine_inputs": {"prompt": "ready"}}
+
+    out_connector = MagicMock()
+    out_connector.put.return_value = (True, 0, {"name": "ref2"})
+
+    worker = _make_worker(
+        engine=engine,
+        connectors={("0", "1"): in_connector, ("1", "2"): out_connector},
+        stage_id=1,
+    )
+    request = {
+        "request_id": "req-final-stage",
+        "original_prompt": {"prompt": "hi"},
+        "stage_connector_refs": {"0": {"name": "ref0"}},
+        "final_stage_id": 1,
+    }
+
+    with (
+        patch("dynamo.vllm.omni.stage_worker.serialize_obj", return_value=b"payload"),
+        patch(
+            "dynamo.vllm.omni.stage_worker.shm_write_bytes",
+            return_value={"name": "final-shm"},
+        ),
+    ):
+        chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    out_connector.put.assert_not_called()
+    assert chunks == [
+        {
+            "shm_meta": {"name": "final-shm"},
+            "finished": True,
+            "final_stage_id": 1,
+        }
+    ]
 
 
 @pytest.mark.asyncio

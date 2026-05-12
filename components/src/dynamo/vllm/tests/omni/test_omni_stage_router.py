@@ -9,9 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from dynamo.common.utils.output_modalities import RequestType
-
 try:
+    from dynamo.common.utils.output_modalities import RequestType
     from dynamo.vllm.omni import stage_router
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
@@ -229,6 +228,53 @@ async def test_generate_stage_error_stops_pipeline():
 
     assert chunks == [{"error": "thinker exploded", "finished": True}]
     assert not stage1_called
+
+
+@pytest.mark.asyncio
+async def test_generate_stops_at_requested_final_stage():
+    """Router should not invoke audio stages for a text-only final_stage_id."""
+    stage1_called = False
+
+    async def stage0_handler(request):
+        return {
+            "shm_meta": {"name": "stage0-shm"},
+            "final_stage_id": 0,
+            "finished": True,
+        }
+
+    async def stage1_handler(request):
+        nonlocal stage1_called
+        stage1_called = True
+        return {"shm_meta": {"name": "stage1-shm"}, "finished": True}
+
+    mock_formatter = AsyncMock()
+    mock_formatter.format.return_value = {"text": "stage 0"}
+    router = _make_router(
+        stage_configs=[_make_stage_cfg(0), _make_stage_cfg(1)],
+        stage_clients={
+            "stage0": _StageClient(stage0_handler),
+            "stage1": _StageClient(stage1_handler),
+        },
+        formatter=mock_formatter,
+    )
+
+    p1, p2 = _patched_generate(router, {"prompt": "x", "modalities": ["text"]})
+    with p1, p2:
+        with patch.object(
+            stage_router,
+            "shm_deserialize",
+            return_value=SimpleNamespace(final_output_type="text"),
+        ) as shm_deserialize:
+            chunks = [
+                c
+                async for c in router.generate(
+                    {"prompt": "x", "modalities": ["text"]}, None
+                )
+            ]
+
+    assert chunks == [{"text": "stage 0"}]
+    assert not stage1_called
+    shm_deserialize.assert_called_once_with({"name": "stage0-shm"})
 
 
 # ── existing tests (formatting + error paths) ────────────

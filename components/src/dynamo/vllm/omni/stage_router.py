@@ -103,6 +103,13 @@ class OmniStageRouter:
             if stage_outputs[-1].error:
                 yield {"error": stage_outputs[-1].error, "finished": True}
                 return
+            final_stage_id = stage_outputs[-1].final_stage_id
+            if final_stage_id is not None and final_stage_id <= stage_idx:
+                logger.info(
+                    "Router: stopping at requested final_stage_id=%d",
+                    final_stage_id,
+                )
+                break
 
         final = stage_outputs[-1]
         if not final.shm_meta:

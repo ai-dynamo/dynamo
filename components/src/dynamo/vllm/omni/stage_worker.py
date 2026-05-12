@@ -209,7 +209,10 @@ class OmniStageWorker:
         # determines whether output should go to a connector or to SHM.
         from_s, to_s = _connector_key(self.stage_id, self.stage_id + 1)
         connector = self.connectors.get((from_s, to_s))
-        if connector is not None:
+        is_final_stage_for_request = (
+            final_stage_id is not None and final_stage_id <= self.stage_id
+        )
+        if connector is not None and not is_final_stage_for_request:
             try:
                 ok, _, metadata = connector.put(  # type: ignore[arg-type]
                     from_s,
@@ -253,7 +256,10 @@ class OmniStageWorker:
         # solution would use a connector edge (like inter-stage connectors) instead.
         # Tracked in TODO: shm_meta should be replaced by a YAML-configured connector edge.
         shm_meta = shm_write_bytes(serialize_obj(last_result), name=request_id)
-        yield {"shm_meta": shm_meta, "finished": True}
+        out = {"shm_meta": shm_meta, "finished": True}
+        if final_stage_id is not None:
+            out["final_stage_id"] = final_stage_id
+        yield out
 
     def _build_engine_core_request_from_upstream(
         self,
@@ -299,14 +305,7 @@ class OmniStageWorker:
         # in _build_add_request_message (the isinstance(prompt, EngineCoreRequest)
         # branch bypasses that block).  Register manually so that the engine's
         # output processor can match the response back to this request.
-        prompt.external_req_id = prompt.request_id
-        self.engine.engine.output_processors[0].add_request(
-            request=prompt,
-            prompt=None,
-            parent_req=None,
-            request_index=0,
-            queue=None,
-        )
+        self._register_engine_core_request(prompt)
         return prompt
 
     def _build_engine_core_request_from_processor_prompt(
@@ -324,8 +323,7 @@ class OmniStageWorker:
         normal vLLM input validation from a raw OmniTokensPrompt.
         """
         if isinstance(prompt, EngineCoreRequest):
-            if prompt.external_req_id is None:
-                prompt.external_req_id = prompt.request_id
+            self._register_engine_core_request(prompt)
             return prompt
         if isinstance(prompt, list):
             if len(prompt) != 1:
@@ -348,8 +346,19 @@ class OmniStageWorker:
             prompt=prompt,
             params=params,
         )
-        request.external_req_id = request.request_id
+        self._register_engine_core_request(request)
         return request
+
+    def _register_engine_core_request(self, request: EngineCoreRequest) -> None:
+        if request.external_req_id is None:
+            request.external_req_id = request.request_id
+        self.engine.engine.output_processors[0].add_request(
+            request=request,
+            prompt=None,
+            parent_req=None,
+            request_index=0,
+            queue=None,
+        )
 
     def _resolve_final_stage_id(
         self,
