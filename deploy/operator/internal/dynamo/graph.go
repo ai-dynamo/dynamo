@@ -348,10 +348,11 @@ func generateSingleDCD(
 	rollingUpdateCtx RollingUpdateContext,
 ) (*v1beta1.DynamoComponentDeployment, error) {
 	deployment := &v1beta1.DynamoComponentDeployment{}
-	deployment.Spec.DynamoComponentDeploymentSharedSpec = *component
+	deployment.Spec.DynamoComponentDeploymentSharedSpec = *component.DeepCopy()
 	deployment.Name = GetDCDResourceName(parentDGD, componentName, rollingUpdateCtx.NewWorkerHash)
 	deployment.Spec.BackendFramework = backendFramework
 	deployment.Namespace = parentDGD.Namespace
+	component = &deployment.Spec.DynamoComponentDeploymentSharedSpec
 
 	if err := applyDGDComponentAlphaCompatibilityToDCD(parentDGD, componentName, deployment); err != nil {
 		return nil, err

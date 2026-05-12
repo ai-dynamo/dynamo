@@ -50,7 +50,7 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 	}
 
 	dcds, err := GenerateDynamoComponentsDeployments(
-		dgd.DeepCopy(),
+		dgd,
 		nil,
 		nil,
 		RollingUpdateContext{NewWorkerHash: dgdWorkerHashPlaceholderValue},

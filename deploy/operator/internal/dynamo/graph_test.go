@@ -7884,6 +7884,61 @@ func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {
 	assert.Equal(t, int32(1), *frontendDCD.Spec.Replicas)
 }
 
+func TestGenerateDynamoComponentsDeploymentsDoesNotMutateParentDGD(t *testing.T) {
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-dgd",
+			Namespace: "ns",
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Annotations: map[string]string{"dgd-annotation": "value"},
+			Labels:      map[string]string{"dgd-label": "value"},
+			Env:         []corev1.EnvVar{{Name: "GLOBAL_ENV", Value: "from-dgd"}},
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "prefill",
+					ComponentType: v1beta1.ComponentTypePrefill,
+					PodTemplate: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Annotations: map[string]string{"component-annotation": "value"},
+							Labels:      map[string]string{"component-label": "value"},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name: commonconsts.MainContainerName,
+									Env:  []corev1.EnvVar{{Name: "COMPONENT_ENV", Value: "from-component"}},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	original := dgd.DeepCopy()
+
+	dcds, err := GenerateDynamoComponentsDeployments(
+		dgd,
+		&RestartState{},
+		map[string]string{"prefill": "2026-05-12T13:00:00Z"},
+		RollingUpdateContext{
+			NewWorkerHash:     "aabb1122",
+			OldWorkerReplicas: map[string]int32{"prefill": 1},
+			NewWorkerReplicas: map[string]int32{"prefill": 2},
+		},
+	)
+	require.NoError(t, err)
+	require.Empty(t, cmp.Diff(original, dgd))
+
+	prefillDCD := dcds["prefill"]
+	require.NotNil(t, prefillDCD)
+	assert.Equal(t, "aabb1122", GetPodTemplateLabels(&prefillDCD.Spec.DynamoComponentDeploymentSharedSpec)[commonconsts.KubeLabelDynamoWorkerHash])
+}
+
 func TestGenerateDynamoComponentsDeploymentsAddsWorkerClassForEPP(t *testing.T) {
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
