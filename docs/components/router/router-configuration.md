@@ -22,9 +22,37 @@ This page collects the main router flags for frontend-embedded and standalone de
 
 For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` to the approximate throughput ratio of one non-CPU worker relative to one CPU worker. The default is `8`.
 
+### AIC Prefill Load Model
+
+Use `--router-prefill-load-model aic` when you want prompt-side load tracking to decay the oldest active prefill request using an AIC-predicted duration instead of keeping prompt load static until first token. For the cost-model behavior, see [Routing Concepts](router-concepts.md#active-load-modeling).
+
+Enable it on the frontend like this:
+
+```bash
+python -m dynamo.frontend \
+    --router-mode kv \
+    --router-prefill-load-model aic \
+    --aic-backend vllm \
+    --aic-system h200_sxm \
+    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8
+```
+
+Required when `--router-prefill-load-model=aic` is enabled:
+
+- `--router-mode kv` on the frontend
+- `--router-track-prefill-tokens`
+- `--aic-backend`
+- `--aic-system`
+- `--aic-model-path`
+
+Optional AIC knobs:
+
+- `--aic-backend-version`: pinned AIC database version; if omitted, Dynamo uses a backend-specific default
+- `--aic-tp-size`: tensor-parallel size for the modeled backend; defaults to `1`
+
 ## KV Event Transport and Persistence
 
-- `--no-router-kv-events`: Disables KV event tracking. By default, the router uses KV events to monitor block creation and deletion from workers. When disabled, the router predicts cache state from routing decisions with TTL-based expiration.
+- `--no-router-kv-events`: Disables KV event tracking. By default, the router consumes KV events to monitor block creation and deletion from workers that publish them. When disabled, the router predicts cache state from routing decisions with TTL-based expiration.
 - `--router-durable-kv-events`: **Deprecated.** Enables JetStream mode for KV event transport. The event-plane subscriber in local indexer mode is now the recommended path.
 - `--router-reset-states`: Only applies in JetStream mode (`--router-durable-kv-events`). Resets the router state on startup by clearing both the JetStream event stream and NATS object store, starting from a fresh state.
 - `--router-snapshot-threshold`: Only applies in JetStream mode (`--router-durable-kv-events`). Sets the number of messages in JetStream before triggering a snapshot.
@@ -75,7 +103,7 @@ Use `--router-track-output-blocks` when your workload is output-heavy and you wa
 
 The threshold is applied as `active_tokens > threshold * max_num_batched_tokens`, so this fallback inflates the effective denominator and a threshold like `1.0` may effectively never queue. To get the originally intended "fraction of the per-step prefill window" semantics on SGLang, either set `--max-prefill-tokens` explicitly on the SGLang backend so the MDC value matches the prefill window, or use a much smaller `--router-queue-threshold` (for example `0.1`) to compensate for the inflated denominator.
 
-Use `--router-prefill-load-model aic` when you want prompt-side load tracking to decay the oldest active prefill request using an AIC-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and the shared `--aic-*` config.
+Use `--router-prefill-load-model aic` when you want prompt-side load tracking to decay the oldest active prefill request using an AIC-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and the shared `--aic-*` config; see [AIC Prefill Load Model](#aic-prefill-load-model) for the full flag set.
 
 Use `--router-queue-policy wspt` when your workload has a mix of short and long requests and you want to minimize average TTFT. Use the default `fcfs` when you want to minimize tail TTFT.
 

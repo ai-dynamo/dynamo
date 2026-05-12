@@ -14,13 +14,13 @@ To launch the Dynamo frontend with the KV Router:
 python -m dynamo.frontend --router-mode kv --http-port 8000
 ```
 
-For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service. Workers automatically report KV cache events — no worker-side configuration changes needed.
+For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service. For event-driven KV state, configure backend workers to publish KV cache events using the backend-specific flags described in [Router Operations](router-operations.md#additional-notes). Use `--no-router-kv-events` only when you want approximate cache-state prediction.
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--router-mode kv` | `round_robin` | Enable KV cache-aware routing |
+| `--router-mode kv` | `round-robin` | Enable KV cache-aware routing |
 | `--router-kv-overlap-score-weight` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
-| `--no-router-kv-events` | enabled | Fall back to approximate routing (no event consumption from workers) |
+| `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Consume worker KV events, or fall back to approximate routing without events |
 | `--router-queue-threshold` | `4.0` | Backpressure queue threshold; enables priority scheduling via `nvext.agent_hints.priority` |
 | `--router-queue-policy` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
 | `--no-router-track-prefill-tokens` | disabled | Ignore prompt-side prefill tokens in router load accounting; useful for decode-only routing paths |
@@ -39,9 +39,8 @@ For deployment modes and quick start steps, see the [Router Guide](router-guide.
 - You cannot use `--static-endpoint` mode with KV routing (use dynamic discovery instead)
 
 **Multimodal Support:**
-- **TRT-LLM and vLLM**: Multimodal routing supported for images via multimodal hashes
-- **SGLang**: Image routing not yet supported
-- **Other modalities** (audio, video, etc.): Not yet supported
+- **Image routing via multimodal hashes**: Supported in the documented TRT-LLM and vLLM router paths.
+- **Other backend or modality combinations**: Check the backend-specific multimodal docs before relying on multimodal hash routing.
 
 **Limitations:**
 - Static endpoints not supported—KV router requires dynamic model discovery via etcd to track worker instances and their KV cache states
