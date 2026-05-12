@@ -10,7 +10,7 @@ and ITL (avg/p50/p90/p99) side-by-side.
 Usage:
   python3 compare.py <results_dir>
 
-Where <results_dir> is the directory passed as --summary by run-all.sh,
+Where <results_dir> is the directory passed as --summary by run-all-benchmarks.sh,
 e.g. ~/workspace/dynamo-tmp/logs/05-11/qwen36-fp8-gb200/
 
 Expects:

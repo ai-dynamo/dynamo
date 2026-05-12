@@ -50,7 +50,7 @@ Then pick a target with `--hw h100` or `--hw gb200`, and a config with
 Or run all three sequentially + cleanup between configs:
 
 ```bash
-./run-all.sh -n "$NAMESPACE" --hw gb200
+./run-all-benchmarks.sh -n "$NAMESPACE" --hw gb200
 ```
 
 Adding a new hardware target later is a one-file change in `hw/`.
@@ -150,7 +150,7 @@ across all three configs). Bump when you want newer aiperf fixes.
 qwen3.6-35b/
 ├── README.md
 ├── run-benchmark.sh            # Unified driver — branches on --config/--hw
-├── run-all.sh                  # Sequential 3-config orchestrator
+├── run-all-benchmarks.sh       # Sequential 3-config orchestrator
 ├── compare.py                  # 3-way comparison (throughput, TTFT, ITL)
 ├── hw/                         # Hardware axis (shared across all configs)
 │   ├── h100.env
@@ -183,7 +183,7 @@ export HW=gb200   # or h100
 # Run all three configs sequentially (prep + deploy + bench + retrieve + clean
 # per config). Artifacts land under
 # ~/workspace/dynamo-tmp/logs/<MM-DD>/qwen36-fp8-${HW}/{vllm-serve,dynamo-fd,dynamo-fd-ec}/.
-./run-all.sh -n ${NAMESPACE} --hw ${HW}
+./run-all-benchmarks.sh -n ${NAMESPACE} --hw ${HW}
 
 # 3-way comparison:
 python3 compare.py ~/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen36-fp8-${HW}/

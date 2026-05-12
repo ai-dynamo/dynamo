@@ -66,7 +66,7 @@ See the recipe README for the full deploy, dataset generation, and `aiperf` invo
 
 ```bash
 cd recipes/qwen3.6-35b
-./run-all.sh -n <namespace> --hw h100     # or --hw gb200
+./run-all-benchmarks.sh -n <namespace> --hw h100     # or --hw gb200
 python3 compare.py ~/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen36-fp8-h100/
 ```
 

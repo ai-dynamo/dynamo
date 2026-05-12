@@ -10,9 +10,9 @@
 # configs frees the GPU for the next deployment so they share one node.
 #
 # Usage:
-#   ./run-all.sh -n <namespace>                    # H100
-#   ./run-all.sh -n <namespace> --hw gb200         # GB200
-#   ./run-all.sh -n <namespace> --hw gb200 --skip-prep   # already PVC/download/dataset-ready
+#   ./run-all-benchmarks.sh -n <namespace>                    # H100
+#   ./run-all-benchmarks.sh -n <namespace> --hw gb200         # GB200
+#   ./run-all-benchmarks.sh -n <namespace> --hw gb200 --skip-prep   # already PVC/download/dataset-ready
 #
 # Prep step (PVC + model download + data gen) runs once before the first
 # deploy unless --skip-prep is passed.
@@ -43,7 +43,7 @@ CONFIGS=(vllm-serve dynamo-fd dynamo-fd-ec)
 TS_DIR="$(date +%m-%d)"
 SUMMARY_DIR="$HOME/workspace/dynamo-tmp/logs/${TS_DIR}/qwen36-fp8-${HW}"
 mkdir -p "$SUMMARY_DIR"
-RUN_LOG="$SUMMARY_DIR/run-all.log"
+RUN_LOG="$SUMMARY_DIR/run-all-benchmarks.log"
 echo "[run-all] hw=$HW namespace=$NAMESPACE" | tee -a "$RUN_LOG"
 echo "[run-all] summary dir: $SUMMARY_DIR" | tee -a "$RUN_LOG"
 
