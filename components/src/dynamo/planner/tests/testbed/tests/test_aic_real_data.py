@@ -466,7 +466,7 @@ class TestAICDriftLoopRealData:
                 num_req=10.0,
                 isl=2048.0,
                 osl=256.0,
-                ttft_avg=opt._config.ttft / 1000.0 * 2.0,  # 2× SLA
+                ttft_avg=opt._config.ttft_ms / 1000.0 * 2.0,  # 2× SLA
                 itl_avg=0.005,
                 total_tokens_per_s=200.0,
                 scheduled_prefill_tokens=2000.0,

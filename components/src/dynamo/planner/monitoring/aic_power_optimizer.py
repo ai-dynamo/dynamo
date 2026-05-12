@@ -327,8 +327,8 @@ class AICPowerOptimizer:
         corrected_ttft_ms = aic_ttft_ms * max(1.0, self._c_ttft)
         corrected_itl_ms = aic_itl_ms * max(1.0, self._c_itl)
 
-        ttft_sla_ms = self._config.ttft  # SLA in ms
-        itl_sla_ms = self._config.itl
+        ttft_sla_ms = self._config.ttft_ms  # SLA in ms
+        itl_sla_ms = self._config.itl_ms
 
         if corrected_ttft_ms > ttft_sla_ms or corrected_itl_ms > itl_sla_ms:
             msg = (
@@ -557,10 +557,12 @@ class AICPowerOptimizer:
         sla_violated = False
         if traffic.ttft_avg is not None:
             sla_violated = sla_violated or traffic.ttft_avg > (
-                self._config.ttft / 1000.0
+                self._config.ttft_ms / 1000.0
             )
         if traffic.itl_avg is not None:
-            sla_violated = sla_violated or traffic.itl_avg > (self._config.itl / 1000.0)
+            sla_violated = sla_violated or traffic.itl_avg > (
+                self._config.itl_ms / 1000.0
+            )
 
         # Capacity-exceeded: upward direction only (§5.6 "Direction matters").
         capacity_exceeded = False
