@@ -509,11 +509,12 @@ jobs:
       - trtllm-multi-gpu-test
       - dynamo-pipeline
       - rust-tests
-    # `!cancelled() && !failure()` lets test jobs be `skipped` (when
-    # run_tests=false) without blocking the release, while still gating on
-    # `success` when tests do run. dynamo-pipeline is unconditional so its
-    # status remains a real gate either way.
-    if: ${{ !cancelled() && !failure() && needs.compute-release-mode.outputs.release == 'true' }}
+    # Framework (vllm/sglang/trtllm) and rust tests are advisory for the
+    # nightly release: we wait for them to finish (so failures still surface
+    # in Slack/UI) but their result does not block the release. dynamo-pipeline
+    # remains a hard gate because it produces the dynamo-runtime artifacts and
+    # validates pre_merge checks against them.
+    if: ${{ !cancelled() && needs.compute-release-mode.outputs.release == 'true' && needs.dynamo-pipeline.result == 'success' }}
     uses: ./.github/workflows/release.yml
     with:
       commit_sha: ${{ needs.resolve-source-sha.outputs.source_sha }}
