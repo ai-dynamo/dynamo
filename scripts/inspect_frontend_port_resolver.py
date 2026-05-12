@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Verify ``KubernetesConnector.resolve_frontend_http_port`` against a live
 DGD's frontend pod.  Reads each frontend pod and prints both the
 named-port-resolved value and the legacy fallback so the diff between them
