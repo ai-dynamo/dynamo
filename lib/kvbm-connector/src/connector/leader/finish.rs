@@ -66,7 +66,6 @@ impl ConnectorLeader {
             }
         }
 
-
         // Mark the slot for deletion
         let initial_status = slot.slot_mark_finished();
 
@@ -216,7 +215,6 @@ impl ConnectorLeader {
             cleanup_preparing_to_onboard(onboarding_state, instance_leader, request_id_owned).await;
         });
     }
-
 
     fn remove_slot(&self, request_id: &str) {
         let Some((_, shared_slot)) = self.slots.remove(request_id) else {
@@ -603,8 +601,11 @@ mod cleanup_tests {
         let state = state_from(vec![find]);
 
         let leader_for_task = leader.clone();
-        let task =
-            tokio::spawn(cleanup_preparing_to_onboard(state, leader_for_task, "r3".into()));
+        let task = tokio::spawn(cleanup_preparing_to_onboard(
+            state,
+            leader_for_task,
+            "r3".into(),
+        ));
 
         // With status still Searching, cleanup is blocked on wait_for_completion.
         // Give it a tick to ensure it has polled.

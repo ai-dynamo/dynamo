@@ -98,7 +98,6 @@ fn select_onboard_block_ids(
     block_ids[num_computed_blocks..num_computed_blocks + num_external_blocks].to_vec()
 }
 
-
 impl ConnectorLeader {
     /// Prepare intra-pass onboarding by storing G2/G1 block pairs.
     ///
@@ -439,7 +438,11 @@ async fn execute_onboarding(
         staging_ms = staging_complete.duration_since(start).as_millis() as u64,
         xfer_ms = end_xfer.duration_since(start_xfer).as_millis() as u64,
         total_ms = end_xfer.duration_since(start).as_millis() as u64,
-        src = if bypass_host { "kvbm_engine::G3" } else { "kvbm_engine::G2" },
+        src = if bypass_host {
+            "kvbm_engine::G3"
+        } else {
+            "kvbm_engine::G2"
+        },
         dst = "kvbm_engine::G1",
         "Onboard transfer complete"
     );
