@@ -111,6 +111,12 @@ class DynamoSGLangArgGroup(ArgGroup):
             default=False,
             help="Enable RL training support. Registers the call_tokenizer_manager engine route for generic tokenizer_manager passthrough.",
         )
+        g.add_argument(
+            "--warmup-decode-engine",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Run a small Engine API generation before registering a decode worker ready. Useful for moving lazy kernel compilation into startup.",
+        )
 
         # Topology constraint: rejecting --frontend-decoding combined with the
         # EPD multimodal flags happens in DynamoSGLangConfig.validate() below.
@@ -143,6 +149,7 @@ class DynamoSGLangConfig(ConfigBase):
 
     video_generation_worker: bool
     enable_rl: bool
+    warmup_decode_engine: bool
     frontend_decoding: bool = False
     sglang_trace_level: int
 

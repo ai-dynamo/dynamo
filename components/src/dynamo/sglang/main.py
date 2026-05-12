@@ -41,7 +41,10 @@ async def worker():
         config.server_args.load_format = setup_gms(config.server_args)
 
     # Checkpoint mode: engine must be created BEFORE runtime (no NATS/etcd during CRIU)
-    snapshot_controller = await prepare_snapshot_engine(config.server_args)
+    snapshot_controller = await prepare_snapshot_engine(
+        config.server_args,
+        warmup_decode_engine=config.dynamo_args.warmup_decode_engine,
+    )
 
     dynamo_args = config.dynamo_args
     snapshot_engine = None

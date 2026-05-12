@@ -13,12 +13,15 @@ import sglang as sgl
 from dynamo.common.utils.snapshot import CheckpointConfig, EngineSnapshotController
 
 from .request_handlers.handler_base import SGLangEngineQuiesceController
+from .warmup import warmup_generation_engine
 
 logger = logging.getLogger(__name__)
 
 
 async def prepare_snapshot_engine(
     server_args,
+    *,
+    warmup_decode_engine: bool = False,
 ) -> EngineSnapshotController[sgl.Engine] | None:
     """Single entry point for Dynamo Snapshot integration.
 
@@ -57,6 +60,13 @@ async def prepare_snapshot_engine(
     logger.info(
         f"SGLang engine loaded in {time.time() - start_time:.2f}s (checkpoint mode)"
     )
+
+    if warmup_decode_engine:
+        await warmup_generation_engine(
+            engine,
+            server_args,
+            label="checkpoint decode",
+        )
 
     gc.collect()
 

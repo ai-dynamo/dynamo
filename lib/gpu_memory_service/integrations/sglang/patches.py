@@ -6,6 +6,8 @@
 - patch_torch_memory_saver: Routes weights and kv_cache to GMS
 - patch_model_runner: Fixes memory accounting with pre-loaded weights
 - patch_static_state_for_gms: No-ops named-buffer export/import (GMS preserves them)
+- patch_idle_runtime_checks_for_gms: Honors SGLang's idle mem-check env as
+  an actual check gate, avoiding idle-loop work on restore smoke paths
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 _torch_memory_saver_patched = False
 _model_runner_patched = False
 _static_state_patched = False
+_idle_runtime_checks_patched = False
 
 
 def patch_torch_memory_saver() -> None:
@@ -262,3 +265,51 @@ def patch_static_state_for_gms() -> None:
             "[GMS] Could not patch scheduler_update_weights_mixin: ",
             exc_info=True,
         )
+
+
+def patch_idle_runtime_checks_for_gms() -> None:
+    """Skip SGLang idle memory checks when its strict idle check env is false.
+
+    Upstream still walks the request/KV pools on every idle loop and only uses
+    SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_IDLE to decide whether a detected leak
+    should warn or raise. For snapshot+GMS restore probes this can keep a
+    restored worker doing idle housekeeping after warmup and before the first
+    real request. Preserve metrics/event/timer idle hooks, but bypass the
+    expensive validation checks when the existing upstream env is disabled.
+    """
+    global _idle_runtime_checks_patched
+    if _idle_runtime_checks_patched:
+        return
+
+    try:
+        from sglang.srt.environ import envs
+        from sglang.srt.managers.scheduler_runtime_checker_mixin import (
+            SchedulerRuntimeCheckerMixin,
+        )
+    except Exception:
+        logger.warning("[GMS] Could not import SGLang idle checker", exc_info=True)
+        return
+
+    if hasattr(SchedulerRuntimeCheckerMixin, "_gms_idle_runtime_checks_patched"):
+        _idle_runtime_checks_patched = True
+        return
+
+    original_on_idle = SchedulerRuntimeCheckerMixin.on_idle
+
+    def patched_on_idle(self):
+        if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_IDLE.get():
+            return original_on_idle(self)
+
+        if not self.is_fully_idle():
+            return
+
+        self._maybe_log_idle_metrics()
+        self._publish_kv_events()
+        self.new_token_ratio = self.init_new_token_ratio
+        self.reset_device_timer_window()
+        self.maybe_sleep_on_idle()
+
+    SchedulerRuntimeCheckerMixin.on_idle = patched_on_idle
+    SchedulerRuntimeCheckerMixin._gms_idle_runtime_checks_patched = True
+    _idle_runtime_checks_patched = True
+    logger.info("[GMS] Patched SGLang idle runtime checks")

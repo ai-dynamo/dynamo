@@ -27,6 +27,7 @@ from dynamo.sglang.publisher import (
 )
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from dynamo.sglang.warmup import warmup_decode_handler, warmup_runtime_endpoint
 
 
 async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
@@ -111,6 +112,21 @@ async def init_decode(
         shutdown_event,
         enable_frontend_decoding=dynamo_args.frontend_decoding,
     )
+
+    if dynamo_args.warmup_decode_engine:
+        try:
+            await warmup_decode_handler(handler, server_args)
+        except asyncio.TimeoutError as e:
+            logging.error(
+                "Decode warmup timed out after 1800s; aborting worker startup"
+            )
+            raise RuntimeError(
+                "Decode warmup timed out; worker cannot serve requests"
+            ) from e
+        except Exception as e:
+            logging.error("Decode warmup failed: %s; aborting worker startup", e)
+            raise RuntimeError(f"Decode warmup failed: {e}") from e
+
     handler.register_engine_routes(runtime)
 
     if config.serving_mode == DisaggregationMode.DECODE:
@@ -122,7 +138,7 @@ async def init_decode(
             engine, use_text_input=dynamo_args.use_sglang_tokenizer
         ).to_dict()
 
-    logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
+    logging.info(f"Configured model endpoint types: {dynamo_args.endpoint_types}")
     if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:
         logging.warning(
             "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
@@ -137,6 +153,41 @@ async def init_decode(
         shutdown_endpoints.append(session_control_endpoint)
 
     try:
+
+        async def register_model_after_endpoint_warmup() -> None:
+            if dynamo_args.warmup_decode_engine:
+                try:
+                    await warmup_runtime_endpoint(
+                        generate_endpoint, engine, server_args
+                    )
+                except asyncio.TimeoutError as e:
+                    logging.error(
+                        "Decode runtime endpoint warmup timed out after 1800s; "
+                        "aborting worker startup"
+                    )
+                    raise RuntimeError(
+                        "Decode runtime endpoint warmup timed out; "
+                        "worker cannot serve requests"
+                    ) from e
+                except Exception as e:
+                    logging.error(
+                        "Decode runtime endpoint warmup failed: %s; "
+                        "aborting worker startup",
+                        e,
+                    )
+                    raise RuntimeError(
+                        f"Decode runtime endpoint warmup failed: {e}"
+                    ) from e
+
+            await register_model_with_readiness_gate(
+                engine,
+                generate_endpoint,
+                server_args,
+                dynamo_args,
+                output_type=parse_endpoint_types(dynamo_args.endpoint_types),
+                readiness_gate=ready_event,
+            )
+
         gather_tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -156,14 +207,7 @@ async def init_decode(
                 handler.list_loras,
                 metrics_labels=metrics_labels,
             ),
-            register_model_with_readiness_gate(
-                engine,
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                output_type=parse_endpoint_types(dynamo_args.endpoint_types),
-                readiness_gate=ready_event,
-            ),
+            register_model_after_endpoint_warmup(),
         ]
         if getattr(server_args, "enable_streaming_session", False):
             gather_tasks.append(
