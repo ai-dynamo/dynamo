@@ -51,18 +51,18 @@ def test_all_fields_work():
         namespace="test-ns",
         backend="vllm",
         environment="kubernetes",
-        ttft=200,
-        itl=50,
+        ttft_ms=200,
+        itl_ms=50,
         max_gpu_budget=16,
-        throughput_adjustment_interval=60,
+        throughput_adjustment_interval_seconds=60,
     )
     assert config.namespace == "test-ns"
     assert config.backend == "vllm"
     assert config.environment == "kubernetes"
-    assert config.ttft == 200
-    assert config.itl == 50
+    assert config.ttft_ms == 200
+    assert config.itl_ms == 50
     assert config.max_gpu_budget == 16
-    assert config.throughput_adjustment_interval == 60
+    assert config.throughput_adjustment_interval_seconds == 60
 
 
 def test_throughput_metrics_source_default():

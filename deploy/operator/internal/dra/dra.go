@@ -25,7 +25,11 @@ const (
 	// ClaimName is the pod-level DRA ResourceClaim name for shared GPU access.
 	ClaimName = "intrapod-shared-gpu"
 
-	defaultDeviceClassName = "gpu.nvidia.com"
+	// DefaultDeviceClassName is the default DRA DeviceClass name used when a
+	// component does not specify an explicit gpuType. It matches the
+	// DeviceClass that ships with the NVIDIA DRA Driver and is the single
+	// source of truth for this string across the operator.
+	DefaultDeviceClassName = "gpu.nvidia.com"
 )
 
 // ApplyClaim replaces the first container's nvidia.com/gpu resources with a
@@ -120,7 +124,7 @@ func GenerateResourceClaimTemplate(
 	}
 
 	if deviceClassName == "" {
-		deviceClassName = defaultDeviceClassName
+		deviceClassName = DefaultDeviceClassName
 	}
 
 	if cl != nil {

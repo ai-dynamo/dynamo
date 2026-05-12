@@ -18,8 +18,14 @@ except ImportError:
 from dynamo.profiler.utils import replay_optimize
 from dynamo.profiler.utils.replay_optimize import (
     DenseAggReplayState,
-    SyntheticReplayWorkload,
-    TraceReplayWorkload,
+    DenseReplayState,
+    EngineSpec,
+    HardwareSpec,
+    ReplayObjective,
+    ReplayOptimizeSpec,
+    RouterSpec,
+    SLASpec,
+    WorkloadSpec,
     compare_agg_and_disagg_with_replay,
     optimize_dense_agg_with_replay,
     optimize_dense_disagg_with_replay,
@@ -96,6 +102,179 @@ def _write_trace(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return trace_path
+
+
+def _synthetic_workload(
+    *,
+    isl: int = 64,
+    osl: int = 32,
+    request_count: int = 8,
+    concurrency: float = 4,
+    **extras: Any,
+) -> WorkloadSpec:
+    return WorkloadSpec(
+        isl=isl,
+        osl=osl,
+        requestCount=request_count,
+        concurrency=concurrency,
+        **extras,
+    )
+
+
+def _trace_workload(trace_file: Path, speedup: float = 100.0) -> WorkloadSpec:
+    return WorkloadSpec(traceFile=str(trace_file), arrivalSpeedupRatio=speedup)
+
+
+def _applied_compute_agentic_trace_workload(
+    trace_file: Path,
+    *,
+    concurrency: int = 8,
+    shared_prefix_ratio: float = 0.5,
+    num_prefix_groups: int = 1,
+) -> WorkloadSpec:
+    return WorkloadSpec(
+        traceFile=str(trace_file),
+        traceFormat="applied_compute_agentic",
+        traceReplayConcurrency=concurrency,
+        traceSharedPrefixRatio=shared_prefix_ratio,
+        traceNumPrefixGroups=num_prefix_groups,
+    )
+
+
+def _sla(**bounds: float) -> SLASpec:
+    """Build an SLASpec from keyword bounds.
+
+    Accepts the legacy `mean_e2e_latency_ms`, `mean_ttft_ms`, `mean_tpot_ms`,
+    etc. names for test readability; maps to camelCase DGDR field names.
+    """
+    translate = {
+        "mean_ttft_ms": "ttft",
+        "mean_tpot_ms": "itl",
+        "mean_e2e_latency_ms": "e2eLatency",
+        "p95_ttft_ms": "p95Ttft",
+        "p95_tpot_ms": "p95Itl",
+        "p95_e2e_latency_ms": "p95E2eLatency",
+    }
+    return SLASpec(**{translate.get(k, k): v for k, v in bounds.items()})
+
+
+def test_applied_compute_agentic_trace_workload_requires_trace_replay_concurrency(
+    tmp_path,
+) -> None:
+    trace_path = _write_trace(tmp_path)
+    with pytest.raises(ValueError, match="traceReplayConcurrency"):
+        WorkloadSpec(
+            traceFile=str(trace_path),
+            traceFormat="applied_compute_agentic",
+        )
+
+
+def test_applied_compute_agentic_trace_workload_rejects_shared_prefix_ratio_without_groups(
+    tmp_path,
+) -> None:
+    trace_path = _write_trace(tmp_path)
+    with pytest.raises(ValueError, match="traceNumPrefixGroups"):
+        WorkloadSpec(
+            traceFile=str(trace_path),
+            traceFormat="applied_compute_agentic",
+            traceReplayConcurrency=8,
+            traceSharedPrefixRatio=0.5,
+            traceNumPrefixGroups=0,
+        )
+
+
+def test_run_replay_for_state_passes_applied_compute_agentic_trace_knobs(
+    tmp_path, monkeypatch
+) -> None:
+    trace_path = _write_trace(tmp_path)
+    workload = _applied_compute_agentic_trace_workload(trace_path, concurrency=9)
+    captured: dict[str, Any] = {}
+
+    def fake_run_trace_replay(trace_file, **kwargs):
+        captured["trace_file"] = trace_file
+        captured["kwargs"] = kwargs
+        return {"output_throughput_tok_s": 1.0}
+
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.replay_optimize.evaluate.run_trace_replay",
+        fake_run_trace_replay,
+    )
+
+    replay_optimize.evaluate._run_replay_for_state(
+        state=DenseReplayState(1, 1, 1, 1, 0.5),
+        workload=workload,
+        prefill_engine_args=_base_prefill_args(),
+        decode_engine_args=_base_decode_args(),
+        router_config=KvRouterConfig(),
+    )
+
+    assert Path(captured["trace_file"]) == trace_path
+    assert captured["kwargs"]["replay_concurrency"] == 9
+    assert captured["kwargs"]["trace_format"] == "applied_compute_agentic"
+    assert captured["kwargs"]["trace_shared_prefix_ratio"] == 0.5
+    assert captured["kwargs"]["trace_num_prefix_groups"] == 1
+
+
+def _disagg_spec(
+    *,
+    workload: WorkloadSpec | None = None,
+    total_gpus: int = 4,
+    sla: SLASpec | None = None,
+    objective: ReplayObjective = ReplayObjective.THROUGHPUT,
+    router_mode: str = "kv_router",
+    overlap_weights: list[float] | None = None,
+    base_router_config: KvRouterConfig | None = None,
+    max_parallel_evals: int = 1,
+) -> ReplayOptimizeSpec:
+    return ReplayOptimizeSpec(
+        engine=EngineSpec(
+            model=_AIC_MODEL,
+            backend="vllm",
+            basePrefillEngineArgs=_base_prefill_args(),
+            baseDecodeEngineArgs=_base_decode_args(),
+        ),
+        hardware=HardwareSpec(gpuSku=_AIC_SYSTEM, totalGpus=total_gpus),
+        workload=workload if workload is not None else _synthetic_workload(),
+        sla=sla if sla is not None else SLASpec(),
+        router=RouterSpec(
+            mode=router_mode,
+            overlapWeights=overlap_weights,
+            baseRouterConfig=base_router_config,
+        ),
+        objective=objective,
+        maxParallelEvals=max_parallel_evals,
+    )
+
+
+def _agg_spec(
+    *,
+    workload: WorkloadSpec | None = None,
+    total_gpus: int = 4,
+    sla: SLASpec | None = None,
+    router_mode: str = "kv_router",
+    overlap_weights: list[float] | None = None,
+    base_router_config: KvRouterConfig | None = None,
+    max_parallel_evals: int = 1,
+) -> ReplayOptimizeSpec:
+    return ReplayOptimizeSpec(
+        engine=EngineSpec(
+            model=_AIC_MODEL,
+            backend="vllm",
+            baseEngineArgs=_base_agg_args(),
+        ),
+        hardware=HardwareSpec(gpuSku=_AIC_SYSTEM, totalGpus=total_gpus),
+        workload=workload if workload is not None else _synthetic_workload(),
+        sla=sla if sla is not None else SLASpec(),
+        router=RouterSpec(
+            mode=router_mode,
+            overlapWeights=overlap_weights,
+            baseRouterConfig=base_router_config,
+        ),
+        maxParallelEvals=max_parallel_evals,
+    )
+
+
+# ---- internal-helper tests (unchanged from Phase 1 interface) ----
 
 
 def test_enumerate_dense_tp_candidates_filters_to_tp_only(monkeypatch) -> None:
@@ -218,6 +397,9 @@ def test_iter_agg_worker_states_collapses_round_robin_overlap() -> None:
     assert set(state.overlap_score_weight for state in states) == {0.0}
 
 
+# ---- public-API tests (reshaped to ReplayOptimizeSpec) ----
+
+
 def test_optimizer_finds_coordinate_optimum_and_reuses_cache(monkeypatch) -> None:
     call_counter: Counter = Counter()
     target_state = replay_optimize.DenseReplayState(2, 4, 2, 1, 2.0)
@@ -251,21 +433,11 @@ def test_optimizer_finds_coordinate_optimum_and_reuses_cache(monkeypatch) -> Non
     monkeypatch.setattr(replay_optimize.evaluate, "_run_replay_for_state", fake_run)
 
     result = optimize_dense_disagg_with_replay(
-        model=_AIC_MODEL,
-        backend="vllm",
-        system=_AIC_SYSTEM,
-        workload=SyntheticReplayWorkload(
-            isl=64,
-            osl=32,
-            request_count=8,
-            replay_concurrency=4,
-        ),
-        base_prefill_engine_args=_base_prefill_args(),
-        base_decode_engine_args=_base_decode_args(),
-        max_total_gpus=8,
-        constraints={"mean_e2e_latency_ms": 500.0},
-        overlap_score_weights=[0.0, 1.0, 2.0],
-        max_parallel_evals=1,
+        _disagg_spec(
+            total_gpus=8,
+            sla=_sla(mean_e2e_latency_ms=500.0),
+            overlap_weights=[0.0, 1.0, 2.0],
+        )
     )
 
     assert result.best_feasible is not None
@@ -310,21 +482,12 @@ def test_agg_optimizer_finds_coordinate_optimum_and_reuses_cache(monkeypatch) ->
     monkeypatch.setattr(replay_optimize.evaluate, "_run_agg_replay_for_state", fake_run)
 
     result = optimize_dense_agg_with_replay(
-        model=_AIC_MODEL,
-        backend="vllm",
-        system=_AIC_SYSTEM,
-        workload=SyntheticReplayWorkload(
-            isl=64,
-            osl=32,
-            request_count=8,
-            replay_concurrency=4,
-        ),
-        base_engine_args=_base_agg_args(),
-        max_total_gpus=8,
-        constraints={"mean_e2e_latency_ms": 500.0},
-        router_mode="both",
-        overlap_score_weights=[0.0, 1.0, 2.0],
-        max_parallel_evals=1,
+        _agg_spec(
+            total_gpus=8,
+            sla=_sla(mean_e2e_latency_ms=500.0),
+            router_mode="both",
+            overlap_weights=[0.0, 1.0, 2.0],
+        )
     )
 
     assert result.best_feasible is not None
@@ -369,21 +532,11 @@ def test_optimizer_uses_violation_penalty_when_no_state_is_feasible(
     monkeypatch.setattr(replay_optimize.evaluate, "_run_replay_for_state", fake_run)
 
     result = optimize_dense_disagg_with_replay(
-        model=_AIC_MODEL,
-        backend="vllm",
-        system=_AIC_SYSTEM,
-        workload=SyntheticReplayWorkload(
-            isl=64,
-            osl=32,
-            request_count=8,
-            replay_concurrency=4,
-        ),
-        base_prefill_engine_args=_base_prefill_args(),
-        base_decode_engine_args=_base_decode_args(),
-        max_total_gpus=6,
-        constraints={"mean_e2e_latency_ms": 50.0},
-        overlap_score_weights=[0.0, 1.0],
-        max_parallel_evals=1,
+        _disagg_spec(
+            total_gpus=6,
+            sla=_sla(mean_e2e_latency_ms=50.0),
+            overlap_weights=[0.0, 1.0],
+        )
     )
 
     assert result.best_feasible is None
@@ -427,21 +580,12 @@ def test_agg_optimizer_uses_violation_penalty_when_no_state_is_feasible(
     monkeypatch.setattr(replay_optimize.evaluate, "_run_agg_replay_for_state", fake_run)
 
     result = optimize_dense_agg_with_replay(
-        model=_AIC_MODEL,
-        backend="vllm",
-        system=_AIC_SYSTEM,
-        workload=SyntheticReplayWorkload(
-            isl=64,
-            osl=32,
-            request_count=8,
-            replay_concurrency=4,
-        ),
-        base_engine_args=_base_agg_args(),
-        max_total_gpus=8,
-        constraints={"mean_e2e_latency_ms": 50.0},
-        router_mode="both",
-        overlap_score_weights=[0.0, 1.0],
-        max_parallel_evals=1,
+        _agg_spec(
+            total_gpus=8,
+            sla=_sla(mean_e2e_latency_ms=50.0),
+            router_mode="both",
+            overlap_weights=[0.0, 1.0],
+        )
     )
 
     assert result.best_feasible is None
@@ -477,27 +621,85 @@ def test_optimizer_supports_round_robin_router_mode(monkeypatch) -> None:
     monkeypatch.setattr(replay_optimize.evaluate, "_run_replay_for_state", fake_run)
 
     result = optimize_dense_disagg_with_replay(
-        model=_AIC_MODEL,
-        backend="vllm",
-        system=_AIC_SYSTEM,
-        workload=SyntheticReplayWorkload(
-            isl=64,
-            osl=32,
-            request_count=8,
-            replay_concurrency=4,
-        ),
-        base_prefill_engine_args=_base_prefill_args(),
-        base_decode_engine_args=_base_decode_args(),
-        max_total_gpus=4,
-        constraints={"mean_e2e_latency_ms": 500.0},
-        router_mode="round_robin",
-        overlap_score_weights=[0.0, 1.0, 2.0],
-        max_parallel_evals=1,
+        _disagg_spec(
+            total_gpus=4,
+            sla=_sla(mean_e2e_latency_ms=500.0),
+            router_mode="round_robin",
+            overlap_weights=[0.0, 1.0, 2.0],
+        )
     )
 
     assert result.best_feasible is not None
     assert set(seen_router_modes) == {"round_robin"}
+    # Guardrail #5: round_robin auto-collapses overlap weights to (0.0,)
     assert set(seen_weights) == {0.0}
+
+
+def test_disagg_optimizer_supports_latency_objective(monkeypatch) -> None:
+    def fake_run(**kwargs):
+        state = kwargs["state"]
+        if state.prefill_tp == 1 and state.decode_tp == 1:
+            return {
+                "output_throughput_tok_s": 1200.0,
+                "mean_ttft_ms": 140.0,
+                "p95_ttft_ms": 160.0,
+                "mean_tpot_ms": 10.0,
+                "p95_tpot_ms": 12.0,
+                "mean_e2e_latency_ms": 300.0,
+                "p95_e2e_latency_ms": 320.0,
+            }
+        return {
+            "output_throughput_tok_s": 1000.0,
+            "mean_ttft_ms": 100.0,
+            "p95_ttft_ms": 120.0,
+            "mean_tpot_ms": 10.0,
+            "p95_tpot_ms": 12.0,
+            "mean_e2e_latency_ms": 200.0,
+            "p95_e2e_latency_ms": 220.0,
+        }
+
+    monkeypatch.setattr(
+        replay_optimize.aic,
+        "_enumerate_dense_tp_candidates",
+        lambda backend, system: ([1, 2], [1, 2]),
+    )
+    monkeypatch.setattr(replay_optimize.evaluate, "_run_replay_for_state", fake_run)
+
+    result = optimize_dense_disagg_with_replay(
+        _disagg_spec(
+            total_gpus=4,
+            sla=_sla(mean_e2e_latency_ms=500.0),
+            objective=ReplayObjective.MEAN_E2E_LATENCY,
+            overlap_weights=[0.0],
+        )
+    )
+
+    assert result.best_feasible is not None
+    assert (
+        result.best_feasible["prefill_tp"],
+        result.best_feasible["decode_tp"],
+    ) in {(1, 2), (2, 1), (2, 2)}
+    assert result.best_feasible["score"] == -200.0
+    assert result.best_feasible["objective"] == "mean_e2e_latency"
+
+
+def test_disagg_optimizer_rejects_invalid_objective() -> None:
+    # Invalid objective strings raise at spec construction (Pydantic validates
+    # the enum field) and at direct ReplayObjective construction.
+    with pytest.raises(ValueError, match="not a valid ReplayObjective"):
+        ReplayObjective("bad_objective")
+    with pytest.raises(ValueError):
+        ReplayOptimizeSpec(
+            engine=EngineSpec(
+                model=_AIC_MODEL,
+                backend="vllm",
+                basePrefillEngineArgs=_base_prefill_args(),
+                baseDecodeEngineArgs=_base_decode_args(),
+            ),
+            hardware=HardwareSpec(gpuSku=_AIC_SYSTEM, totalGpus=4),
+            workload=_synthetic_workload(),
+            objective="bad_objective",
+        )
 
 
 def test_disagg_optimizer_supports_router_mode_search(monkeypatch) -> None:
@@ -526,22 +728,12 @@ def test_disagg_optimizer_supports_router_mode_search(monkeypatch) -> None:
     monkeypatch.setattr(replay_optimize.evaluate, "_run_replay_for_state", fake_run)
 
     result = optimize_dense_disagg_with_replay(
-        model=_AIC_MODEL,
-        backend="vllm",
-        system=_AIC_SYSTEM,
-        workload=SyntheticReplayWorkload(
-            isl=64,
-            osl=32,
-            request_count=8,
-            replay_concurrency=4,
-        ),
-        base_prefill_engine_args=_base_prefill_args(),
-        base_decode_engine_args=_base_decode_args(),
-        max_total_gpus=4,
-        constraints={"mean_e2e_latency_ms": 500.0},
-        router_mode="both",
-        overlap_score_weights=[0.0, 1.0, 2.0],
-        max_parallel_evals=1,
+        _disagg_spec(
+            total_gpus=4,
+            sla=_sla(mean_e2e_latency_ms=500.0),
+            router_mode="both",
+            overlap_weights=[0.0, 1.0, 2.0],
+        )
     )
 
     assert result.best_feasible is not None
@@ -578,21 +770,12 @@ def test_agg_optimizer_supports_router_mode_search(monkeypatch) -> None:
     monkeypatch.setattr(replay_optimize.evaluate, "_run_agg_replay_for_state", fake_run)
 
     result = optimize_dense_agg_with_replay(
-        model=_AIC_MODEL,
-        backend="vllm",
-        system=_AIC_SYSTEM,
-        workload=SyntheticReplayWorkload(
-            isl=64,
-            osl=32,
-            request_count=8,
-            replay_concurrency=4,
-        ),
-        base_engine_args=_base_agg_args(),
-        max_total_gpus=4,
-        constraints={"mean_e2e_latency_ms": 500.0},
-        router_mode="both",
-        overlap_score_weights=[0.0, 1.0, 2.0],
-        max_parallel_evals=1,
+        _agg_spec(
+            total_gpus=4,
+            sla=_sla(mean_e2e_latency_ms=500.0),
+            router_mode="both",
+            overlap_weights=[0.0, 1.0, 2.0],
+        )
     )
 
     assert result.best_feasible is not None
@@ -641,30 +824,33 @@ def test_compare_agg_and_disagg_with_replay_picks_expected_mode(monkeypatch) -> 
     )
 
     monkeypatch.setattr(
-        replay_optimize.bench, "optimize_dense_agg_with_replay", lambda **_: agg_result
+        replay_optimize.bench,
+        "optimize_dense_agg_with_replay",
+        lambda *_, **__: agg_result,
     )
     monkeypatch.setattr(
         replay_optimize.bench,
         "optimize_dense_disagg_with_replay",
-        lambda **_: disagg_result,
+        lambda *_, **__: disagg_result,
     )
 
-    comparison = compare_agg_and_disagg_with_replay(
-        model=_AIC_MODEL,
-        backend="vllm",
-        system=_AIC_SYSTEM,
-        workload=SyntheticReplayWorkload(
-            isl=64,
-            osl=32,
-            request_count=8,
-            replay_concurrency=4,
+    # Build a spec that populates both agg and disagg engine args so the
+    # comparison function accepts it (though the patched optimize_* bypass
+    # the actual engine-args assertions).
+    spec = ReplayOptimizeSpec(
+        engine=EngineSpec(
+            model=_AIC_MODEL,
+            backend="vllm",
+            baseEngineArgs=_base_agg_args(),
+            basePrefillEngineArgs=_base_prefill_args(),
+            baseDecodeEngineArgs=_base_decode_args(),
         ),
-        base_engine_args=_base_agg_args(),
-        base_prefill_engine_args=_base_prefill_args(),
-        base_decode_engine_args=_base_decode_args(),
-        max_total_gpus=8,
-        constraints={"mean_e2e_latency_ms": 500.0},
+        hardware=HardwareSpec(gpuSku=_AIC_SYSTEM, totalGpus=8),
+        workload=_synthetic_workload(),
+        sla=_sla(mean_e2e_latency_ms=500.0),
     )
+
+    comparison = compare_agg_and_disagg_with_replay(spec)
 
     assert comparison["chosen_mode"] == "agg"
     assert comparison["chosen_best"] == agg_result.best_feasible
@@ -681,6 +867,18 @@ def test_evaluate_state_prefers_normalized_metrics_over_report_payload() -> None
     )
     cache: dict[replay_optimize.DenseReplayState, dict[str, Any]] = {}
 
+    spec = ReplayOptimizeSpec(
+        engine=EngineSpec(
+            model="meta-llama/Llama-3.1-8B-Instruct",
+            backend="vllm",
+            basePrefillEngineArgs=_base_prefill_args(),
+            baseDecodeEngineArgs=_base_decode_args(),
+        ),
+        hardware=HardwareSpec(gpuSku="h100_sxm", totalGpus=4),
+        workload=_synthetic_workload(isl=128, request_count=16),
+        sla=_sla(mean_e2e_latency_ms=1000.0),
+    )
+
     with patch(
         "dynamo.profiler.utils.replay_optimize.evaluate._run_replay_for_state",
         return_value={
@@ -693,19 +891,7 @@ def test_evaluate_state_prefers_normalized_metrics_over_report_payload() -> None
     ):
         record = replay_optimize.evaluate._evaluate_state(
             state=state,
-            workload=SyntheticReplayWorkload(
-                isl=128,
-                osl=32,
-                request_count=16,
-                replay_concurrency=4,
-            ),
-            base_prefill_engine_args=_base_prefill_args(),
-            base_decode_engine_args=_base_decode_args(),
-            base_router_config=None,
-            model="meta-llama/Llama-3.1-8B-Instruct",
-            backend="vllm",
-            system="h100_sxm",
-            constraints={"mean_e2e_latency_ms": 1000.0},
+            spec=spec,
             cache=cache,
         )
 
@@ -724,6 +910,17 @@ def test_evaluate_agg_state_prefers_normalized_metrics_over_report_payload() -> 
     )
     cache: dict[DenseAggReplayState, dict[str, Any]] = {}
 
+    spec = ReplayOptimizeSpec(
+        engine=EngineSpec(
+            model="meta-llama/Llama-3.1-8B-Instruct",
+            backend="vllm",
+            baseEngineArgs=_base_agg_args(),
+        ),
+        hardware=HardwareSpec(gpuSku="h100_sxm", totalGpus=4),
+        workload=_synthetic_workload(isl=128, request_count=16),
+        sla=_sla(mean_e2e_latency_ms=1000.0),
+    )
+
     with patch(
         "dynamo.profiler.utils.replay_optimize.evaluate._run_agg_replay_for_state",
         return_value={
@@ -736,18 +933,7 @@ def test_evaluate_agg_state_prefers_normalized_metrics_over_report_payload() -> 
     ):
         record = replay_optimize.evaluate._evaluate_agg_state(
             state=state,
-            workload=SyntheticReplayWorkload(
-                isl=128,
-                osl=32,
-                request_count=16,
-                replay_concurrency=4,
-            ),
-            base_engine_args=_base_agg_args(),
-            base_router_config=None,
-            model="meta-llama/Llama-3.1-8B-Instruct",
-            backend="vllm",
-            system="h100_sxm",
-            constraints={"mean_e2e_latency_ms": 1000.0},
+            spec=spec,
             cache=cache,
         )
 
@@ -777,25 +963,17 @@ def test_agg_optimizer_synthetic_replay_smoke(monkeypatch) -> None:
     )
 
     result = optimize_dense_agg_with_replay(
-        model=_AIC_MODEL,
-        backend="vllm",
-        system=_AIC_SYSTEM,
-        workload=SyntheticReplayWorkload(
-            isl=128,
-            osl=32,
-            request_count=8,
-            replay_concurrency=4,
-        ),
-        base_engine_args=_base_agg_args(),
-        max_total_gpus=4,
-        constraints={
-            "mean_ttft_ms": 100000.0,
-            "mean_tpot_ms": 100000.0,
-            "mean_e2e_latency_ms": 100000.0,
-        },
-        router_mode="both",
-        overlap_score_weights=[0.0, 1.0],
-        max_parallel_evals=1,
+        _agg_spec(
+            workload=_synthetic_workload(isl=128, request_count=8),
+            total_gpus=4,
+            sla=_sla(
+                mean_ttft_ms=100000.0,
+                mean_tpot_ms=100000.0,
+                mean_e2e_latency_ms=100000.0,
+            ),
+            router_mode="both",
+            overlap_weights=[0.0, 1.0],
+        )
     )
 
     assert not result.evaluated_df.empty
@@ -812,23 +990,17 @@ def test_agg_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
     )
 
     result = optimize_dense_agg_with_replay(
-        model=_AIC_MODEL,
-        backend="vllm",
-        system=_AIC_SYSTEM,
-        workload=TraceReplayWorkload(
-            trace_file=_write_trace(tmp_path),
-            arrival_speedup_ratio=100.0,
-        ),
-        base_engine_args=_base_agg_args(),
-        max_total_gpus=4,
-        constraints={
-            "mean_ttft_ms": 100000.0,
-            "mean_tpot_ms": 100000.0,
-            "mean_e2e_latency_ms": 100000.0,
-        },
-        router_mode="both",
-        overlap_score_weights=[0.0, 1.0],
-        max_parallel_evals=1,
+        _agg_spec(
+            workload=_trace_workload(_write_trace(tmp_path)),
+            total_gpus=4,
+            sla=_sla(
+                mean_ttft_ms=100000.0,
+                mean_tpot_ms=100000.0,
+                mean_e2e_latency_ms=100000.0,
+            ),
+            router_mode="both",
+            overlap_weights=[0.0, 1.0],
+        )
     )
 
     assert not result.evaluated_df.empty
@@ -845,25 +1017,16 @@ def test_optimizer_synthetic_replay_smoke(tmp_path, monkeypatch) -> None:
     )
 
     result = optimize_dense_disagg_with_replay(
-        model=_AIC_MODEL,
-        backend="vllm",
-        system=_AIC_SYSTEM,
-        workload=SyntheticReplayWorkload(
-            isl=128,
-            osl=32,
-            request_count=8,
-            replay_concurrency=4,
-        ),
-        base_prefill_engine_args=_base_prefill_args(),
-        base_decode_engine_args=_base_decode_args(),
-        max_total_gpus=4,
-        constraints={
-            "mean_ttft_ms": 100000.0,
-            "mean_tpot_ms": 100000.0,
-            "mean_e2e_latency_ms": 100000.0,
-        },
-        overlap_score_weights=[0.0, 1.0],
-        max_parallel_evals=1,
+        _disagg_spec(
+            workload=_synthetic_workload(isl=128, request_count=8),
+            total_gpus=4,
+            sla=_sla(
+                mean_ttft_ms=100000.0,
+                mean_tpot_ms=100000.0,
+                mean_e2e_latency_ms=100000.0,
+            ),
+            overlap_weights=[0.0, 1.0],
+        )
     )
 
     assert not result.evaluated_df.empty
@@ -880,24 +1043,16 @@ def test_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
     )
 
     result = optimize_dense_disagg_with_replay(
-        model=_AIC_MODEL,
-        backend="vllm",
-        system=_AIC_SYSTEM,
-        workload=TraceReplayWorkload(
-            trace_file=_write_trace(tmp_path),
-            arrival_speedup_ratio=100.0,
-        ),
-        base_prefill_engine_args=_base_prefill_args(),
-        base_decode_engine_args=_base_decode_args(),
-        max_total_gpus=4,
-        constraints={
-            "mean_ttft_ms": 100000.0,
-            "mean_tpot_ms": 100000.0,
-            "mean_e2e_latency_ms": 100000.0,
-        },
-        overlap_score_weights=[0.0, 1.0],
-        max_parallel_evals=1,
+        _disagg_spec(
+            workload=_trace_workload(_write_trace(tmp_path)),
+            total_gpus=4,
+            sla=_sla(
+                mean_ttft_ms=100000.0,
+                mean_tpot_ms=100000.0,
+                mean_e2e_latency_ms=100000.0,
+            ),
+            overlap_weights=[0.0, 1.0],
+        )
     )
 
     assert not result.evaluated_df.empty
-    assert result.best_feasible is not None

@@ -627,6 +627,99 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesR
 	}
 }
 
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_createsCheckpointStoragePVC(t *testing.T) {
+	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+	}
+
+	ctx := context.Background()
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	if err != nil {
+		t.Fatalf("Failed to compute checkpoint hash: %v", err)
+	}
+
+	referenced := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      friendlyCheckpointName,
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: identity,
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
+			IdentityHash: hash,
+		},
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme.Scheme).
+			WithObjects(referenced).
+			WithStatusSubresource(referenced).
+			Build(),
+		Config: &configv1alpha1.OperatorConfiguration{
+			Checkpoint: configv1alpha1.CheckpointConfiguration{
+				Storage: configv1alpha1.CheckpointStorageConfiguration{
+					Type: configv1alpha1.CheckpointStorageTypePVC,
+					PVC: configv1alpha1.CheckpointPVCConfig{
+						PVCName:          "snapshot-pvc",
+						BasePath:         "/checkpoints",
+						Create:           true,
+						Size:             "2Gi",
+						StorageClassName: "efs-sc",
+						AccessMode:       string(corev1.ReadWriteMany),
+					},
+				},
+			},
+		},
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	ref := friendlyCheckpointName
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: string(commonconsts.ComponentTypeWorker),
+					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+						Enabled:       true,
+						Mode:          v1alpha1.CheckpointModeAuto,
+						CheckpointRef: &ref,
+					},
+				},
+			},
+		},
+	}
+
+	if _, _, err := reconciler.reconcileCheckpoints(ctx, dgd); err != nil {
+		t.Fatalf("reconcileCheckpoints() error = %v", err)
+	}
+
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := reconciler.Get(ctx, types.NamespacedName{Name: "snapshot-pvc", Namespace: "default"}, pvc); err != nil {
+		t.Fatalf("expected checkpoint storage PVC to be created: %v", err)
+	}
+	storageRequest := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	if storageRequest.String() != "2Gi" {
+		t.Fatalf("PVC storage request = %s, want 2Gi", storageRequest.String())
+	}
+	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != "efs-sc" {
+		t.Fatalf("PVC storageClassName = %v, want efs-sc", pvc.Spec.StorageClassName)
+	}
+	if len(pvc.Spec.AccessModes) != 1 || pvc.Spec.AccessModes[0] != corev1.ReadWriteMany {
+		t.Fatalf("PVC accessModes = %v, want [ReadWriteMany]", pvc.Spec.AccessModes)
+	}
+}
+
 func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeWaitsForExistingCreatingCheckpoint(t *testing.T) {
 	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
 		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
@@ -770,7 +863,9 @@ func Test_reconcileGroveResources(t *testing.T) {
 		name                   string
 		dgdSpec                v1alpha1.DynamoGraphDeploymentSpec
 		existingGroveResources []client.Object
+		draEnabled             bool
 		wantReconcileResult    ReconcileResult
+		wantErrSubstring       string
 	}{
 		{
 			name: "singular frontend service with 2 replicas - creates a PodClique with 2 replicas - ready",
@@ -1038,6 +1133,25 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "inter-pod GMS failover requires DRA - returns clear error when DRA is disabled",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"decode": {
+						ComponentType: string(commonconsts.ComponentTypeDecode),
+						Replicas:      ptr.To(int32(1)),
+						Failover: &v1alpha1.FailoverSpec{
+							Enabled:    true,
+							Mode:       v1alpha1.GMSModeInterPod,
+							NumShadows: 1,
+						},
+					},
+				},
+			},
+			draEnabled:       false,
+			wantErrSubstring: "requires DRA",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1073,7 +1187,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{},
+				RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: tt.draEnabled},
 				ScaleClient:   &mockScaleClient{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
@@ -1083,6 +1197,11 @@ func Test_reconcileGroveResources(t *testing.T) {
 			}
 
 			result, err := reconciler.reconcileGroveResources(ctx, dgd, nil, nil)
+			if tt.wantErrSubstring != "" {
+				g.Expect(err).To(gomega.HaveOccurred())
+				g.Expect(err.Error()).To(gomega.ContainSubstring(tt.wantErrSubstring))
+				return
+			}
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
@@ -2698,9 +2817,15 @@ func TestPropagateTopologyCondition(t *testing.T) {
 }
 
 func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
+	// Register Grove types with the scheme so fake client can handle them
+	if err := grovev1alpha1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add grovev1alpha1 to scheme: %v", err)
+	}
+
 	tests := []struct {
 		name         string
 		obj          client.Object
+		existingPCS  *grovev1alpha1.PodCliqueSet // PCS object that exists in the cluster
 		wantRequests int
 		wantName     string
 		wantNs       string
@@ -2721,9 +2846,63 @@ func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
 					},
 				},
 			},
+			existingPCS: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "dynamo-recipe",
+					Namespace: "mwieczorek-dsv32-trtllm-agg",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoGraphDeploymentName: "dynamo-recipe",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: v1alpha1.GroupVersion.String(),
+							Kind:       "DynamoGraphDeployment",
+							Name:       "dynamo-recipe",
+							Controller: ptr.To(true),
+						},
+					},
+				},
+			},
 			wantRequests: 1,
 			wantName:     "dynamo-recipe",
 			wantNs:       "mwieczorek-dsv32-trtllm-agg",
+		},
+		{
+			name: "PCSG with truncated PCS name resolves to original DGD name",
+			obj: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "truncated-pcs-0-worker",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: grovev1alpha1.SchemeGroupVersion.String(),
+							Kind:       "PodCliqueSet",
+							Name:       "truncated-pcs",
+							Controller: ptr.To(true),
+						},
+					},
+				},
+			},
+			existingPCS: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "truncated-pcs",
+					Namespace: "default",
+					Labels: map[string]string{
+						commonconsts.KubeLabelDynamoGraphDeploymentName: "my-very-long-original-dgd-name",
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: v1alpha1.GroupVersion.String(),
+							Kind:       "DynamoGraphDeployment",
+							Name:       "my-very-long-original-dgd-name",
+							Controller: ptr.To(true),
+						},
+					},
+				},
+			},
+			wantRequests: 1,
+			wantName:     "my-very-long-original-dgd-name",
+			wantNs:       "default",
 		},
 		{
 			name: "PCSG with no ownerRef returns no requests",
@@ -2780,7 +2959,15 @@ func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
-			r := &DynamoGraphDeploymentReconciler{}
+
+			// Build fake client with existing PCS if provided
+			builder := fake.NewClientBuilder().WithScheme(scheme.Scheme)
+			if tt.existingPCS != nil {
+				builder = builder.WithObjects(tt.existingPCS)
+			}
+			r := &DynamoGraphDeploymentReconciler{
+				Client: builder.Build(),
+			}
 			reqs := r.mapPodCliqueScalingGroupToRequests(context.Background(), tt.obj)
 
 			g.Expect(reqs).To(gomega.HaveLen(tt.wantRequests))

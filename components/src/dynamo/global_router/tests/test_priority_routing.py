@@ -69,8 +69,8 @@ def _make_prefill_strategy(
     num_pools=2, priority_overrides=None
 ) -> PrefillPoolSelectionStrategy:
     return PrefillPoolSelectionStrategy(
-        ttft_min=10,
-        ttft_max=3000,
+        ttft_min_ms=10,
+        ttft_max_ms=3000,
         ttft_resolution=2,
         isl_min=0,
         isl_max=32000,
@@ -88,7 +88,7 @@ class TestPrefillSelectPoolWithPriority:
             ]
         )
         # Grid would select pool 0 (low ISL, low TTFT), but priority overrides
-        result = strategy.select_pool(isl=100, ttft_target=50, priority=50)
+        result = strategy.select_pool(isl=100, ttft_target_ms=50, priority=50)
         assert result == 1
 
     def test_no_priority_uses_grid(self):
@@ -97,7 +97,7 @@ class TestPrefillSelectPoolWithPriority:
                 PriorityPoolOverride(min_priority=10, max_priority=100, target_pool=1)
             ]
         )
-        result = strategy.select_pool(isl=100, ttft_target=50)
+        result = strategy.select_pool(isl=100, ttft_target_ms=50)
         assert result == 0  # grid result, no priority
 
     def test_unmatched_priority_uses_grid(self):
@@ -106,12 +106,12 @@ class TestPrefillSelectPoolWithPriority:
                 PriorityPoolOverride(min_priority=10, max_priority=100, target_pool=1)
             ]
         )
-        result = strategy.select_pool(isl=100, ttft_target=50, priority=5)
+        result = strategy.select_pool(isl=100, ttft_target_ms=50, priority=5)
         assert result == 0  # priority=5 doesn't match [10, 100]
 
     def test_no_overrides_backward_compatible(self):
         strategy = _make_prefill_strategy()
-        result = strategy.select_pool(isl=100, ttft_target=50, priority=50)
+        result = strategy.select_pool(isl=100, ttft_target_ms=50, priority=50)
         assert result == 0  # no overrides configured, grid result
 
 
@@ -122,8 +122,8 @@ def _make_decode_strategy(
     num_pools=2, priority_overrides=None
 ) -> DecodePoolSelectionStrategy:
     return DecodePoolSelectionStrategy(
-        itl_min=10,
-        itl_max=500,
+        itl_min_ms=10,
+        itl_max_ms=500,
         itl_resolution=2,
         context_length_min=0,
         context_length_max=32000,
@@ -140,7 +140,7 @@ class TestDecodeSelectPoolWithPriority:
                 PriorityPoolOverride(min_priority=10, max_priority=100, target_pool=1)
             ]
         )
-        result = strategy.select_pool(context_length=100, itl_target=20, priority=50)
+        result = strategy.select_pool(context_length=100, itl_target_ms=20, priority=50)
         assert result == 1
 
     def test_no_priority_uses_grid(self):
@@ -149,7 +149,7 @@ class TestDecodeSelectPoolWithPriority:
                 PriorityPoolOverride(min_priority=10, max_priority=100, target_pool=1)
             ]
         )
-        result = strategy.select_pool(context_length=100, itl_target=20)
+        result = strategy.select_pool(context_length=100, itl_target_ms=20)
         assert result == 0
 
 
@@ -235,6 +235,7 @@ class TestValidatePriorityOverrides:
             ]
         )
         config = GlobalRouterConfig(
+            mode="disagg",
             num_prefill_pools=2,
             num_decode_pools=2,
             prefill_pool_dynamo_namespaces=["a", "b"],
@@ -252,6 +253,7 @@ class TestValidatePriorityOverrides:
             ]
         )
         config = GlobalRouterConfig(
+            mode="disagg",
             num_prefill_pools=2,
             num_decode_pools=2,
             prefill_pool_dynamo_namespaces=["a", "b"],
@@ -269,6 +271,7 @@ class TestValidatePriorityOverrides:
             ]
         )
         config = GlobalRouterConfig(
+            mode="disagg",
             num_prefill_pools=2,
             num_decode_pools=2,
             prefill_pool_dynamo_namespaces=["a", "b"],
@@ -286,6 +289,7 @@ class TestValidatePriorityOverrides:
             ]
         )
         config = GlobalRouterConfig(
+            mode="disagg",
             num_prefill_pools=2,
             num_decode_pools=2,
             prefill_pool_dynamo_namespaces=["a", "b"],
@@ -294,3 +298,11 @@ class TestValidatePriorityOverrides:
             decode_pool_selection_strategy=_make_decode_strategy(),
         )
         config.validate()  # should not raise
+
+    def test_default_mode_is_disagg(self, tmp_path):
+        """Config without explicit mode defaults to disagg."""
+        config_data = _base_config()
+        # No "mode" key
+        config_path = _write_config(tmp_path, config_data)
+        config = load_config(config_path)
+        assert config.mode == "disagg"

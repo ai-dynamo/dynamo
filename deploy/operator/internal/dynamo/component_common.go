@@ -146,7 +146,7 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 	if context.Discovery.Mode == configv1alpha1.KubeDiscoveryModeContainer {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "CONTAINER_NAME",
-			Value: container.Name,
+			Value: commonconsts.MainContainerName,
 		})
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "DYN_KUBE_DISCOVERY_MODE",

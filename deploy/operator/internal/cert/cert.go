@@ -29,10 +29,24 @@ const (
 	certificateAuthorityOrganization = "NVIDIA"
 	namespaceFile                    = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 	dgdrCRDName                      = "dynamographdeploymentrequests.nvidia.com"
+	dgdCRDName                       = "dynamographdeployments.nvidia.com"
+	dcdCRDName                       = "dynamocomponentdeployments.nvidia.com"
+	dgdsaCRDName                     = "dynamographdeploymentscalingadapters.nvidia.com"
 	partOfLabel                      = "app.kubernetes.io/part-of"
 	partOfValue                      = "dynamo-operator"
 	operatorNamespaceLabel           = "nvidia.com/dynamo-operator-namespace"
 )
+
+// convertibleCRDs is the list of CRDs whose conversion webhook this operator
+// patches at startup. Each of these resources has at least two API versions
+// with distinct shapes (see api/v1alpha1/*_conversion.go) and relies on the
+// operator's /convert endpoint to translate between them.
+var convertibleCRDs = []string{
+	dgdrCRDName,
+	dgdCRDName,
+	dcdCRDName,
+	dgdsaCRDName,
+}
 
 // CertProvisioner abstracts the mechanism that adds a certificate rotator to
 // the controller-runtime manager. The default implementation delegates to the
@@ -283,16 +297,28 @@ func (i *CABundleInjector) injectIntoMutatingWebhooks(ctx context.Context, caBun
 	return nil
 }
 
-// ensureCRDConversion patches the DGDR CRD with the conversion webhook config,
-// setting the caBundle and service reference to this operator's webhook service.
+// ensureCRDConversion patches each multi-version CRD owned by this operator
+// with the conversion webhook configuration, setting the CA bundle and
+// service reference to this operator's webhook service. Missing CRDs are
+// tolerated with an info-level log so that a standalone operator image can
+// be brought up before the CRDs are installed (helm install idempotency).
 func (i *CABundleInjector) ensureCRDConversion(ctx context.Context, caBundle []byte) error {
+	for _, name := range convertibleCRDs {
+		if err := i.patchConversion(ctx, name, caBundle); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (i *CABundleInjector) patchConversion(ctx context.Context, crdName string, caBundle []byte) error {
 	crd := &apiextensionsv1.CustomResourceDefinition{}
-	if err := i.client.Get(ctx, types.NamespacedName{Name: dgdrCRDName}, crd); err != nil {
+	if err := i.client.Get(ctx, types.NamespacedName{Name: crdName}, crd); err != nil {
 		if apierrors.IsNotFound(err) {
-			i.logger.Info("DGDR CRD not found, skipping conversion webhook setup")
+			i.logger.Info("CRD not found, skipping conversion webhook setup", "crd", crdName)
 			return nil
 		}
-		return fmt.Errorf("getting CRD %s: %w", dgdrCRDName, err)
+		return fmt.Errorf("getting CRD %s: %w", crdName, err)
 	}
 
 	original := crd.DeepCopy()
@@ -313,9 +339,9 @@ func (i *CABundleInjector) ensureCRDConversion(ctx context.Context, caBundle []b
 	}
 
 	if err := i.client.Patch(ctx, crd, client.MergeFrom(original)); err != nil {
-		return fmt.Errorf("patching CRD %s conversion config: %w", dgdrCRDName, err)
+		return fmt.Errorf("patching CRD %s conversion config: %w", crdName, err)
 	}
-	i.logger.Info("Configured CRD conversion webhook", "crd", dgdrCRDName)
+	i.logger.Info("Configured CRD conversion webhook", "crd", crdName)
 	return nil
 }
 

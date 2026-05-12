@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 # Mapping from backend name to the image-name component of the published
 # backend runtime image.
-# e.g. vllm → nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+# e.g. vllm → nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
 BACKEND_IMAGE_NAMES: dict[str, str] = {
     "vllm": "vllm-runtime",
     "sglang": "sglang-runtime",
@@ -80,12 +80,12 @@ def derive_backend_image(profiler_image: str, backend: str) -> str:
     Examples::
 
         derive_backend_image(
-            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0", "vllm"
+            "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1", "vllm"
         )
-        # → "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0"
+        # → "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1"
 
-        derive_backend_image("myregistry.io/sglang-runtime:1.0.0", "sglang")
-        # → "myregistry.io/sglang-runtime:1.0.0"
+        derive_backend_image("myregistry.io/sglang-runtime:1.1.1", "sglang")
+        # → "myregistry.io/sglang-runtime:1.1.1"
 
     Args:
         profiler_image: Any Docker image reference of the form
@@ -166,6 +166,21 @@ def resolve_model_path(dgdr: DynamoGraphDeploymentRequestSpec) -> str:
     return dgdr.model
 
 
+def pick_decode_component(client) -> str:
+    """Pick the decode worker component name from a deployment client.
+
+    Returns the first entry in ``client.components`` that is not the frontend
+    (case-insensitive), falling back to the literal ``"decode"`` if every
+    component is frontend or the list is empty. The previous fallback
+    (``client.components[-1]``) could resolve to ``"frontend"`` in degenerate
+    component lists, which routed log-path lookups at the frontend service.
+    """
+    for svc in getattr(client, "components", None) or []:
+        if str(svc).lower() != "frontend":
+            return svc
+    return "decode"
+
+
 def is_planner_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     """True when the DGDR spec has a planner config with scaling enabled."""
     return (
@@ -189,22 +204,29 @@ def needs_profile_data(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
 
     Profile data (NPZ/JSON on disk) is consumed by:
 
-    * **Mocker workers** for latency simulation — always required when
-      mocker is enabled.
+    * **Mocker workers** for latency simulation — required for thorough
+      mode. In rapid mode the mocker pulls latency data directly from the
+      AIConfigurator SDK via ``--aic-perf-model`` flags injected by the
+      profiler, so no NPZ is emitted.
     * **Planner** when throughput scaling is enabled — required for
-      thorough mode only. In rapid mode the planner now runs AIC
-      interpolation in-process at bootstrap (see ``aic_interpolation.py``),
-      so the profiler no longer emits NPZ for planner-only rapid deployments.
+      thorough mode only. In rapid mode the planner runs AIC interpolation
+      in-process at bootstrap (see ``aic_interpolation.py``), so the
+      profiler no longer emits NPZ for planner rapid deployments either.
     """
+    sweep_mode = (
+        dgdr.features.planner.pre_deployment_sweeping_mode
+        if dgdr.features is not None and dgdr.features.planner is not None
+        else None
+    )
+    is_rapid = sweep_mode == PlannerPreDeploymentSweepMode.Rapid
     if is_mocker_enabled(dgdr):
-        return True
+        return not is_rapid
     if (
         dgdr.features is not None
         and dgdr.features.planner is not None
         and dgdr.features.planner.enable_throughput_scaling
     ):
-        sweep_mode = dgdr.features.planner.pre_deployment_sweeping_mode
-        return sweep_mode != PlannerPreDeploymentSweepMode.Rapid
+        return not is_rapid
     return False
 
 

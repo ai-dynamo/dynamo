@@ -69,6 +69,7 @@ impl NvCreateChatCompletionRequest {
             enable_logprobs: self.inner.logprobs.unwrap_or(false)
                 || self.inner.top_logprobs.unwrap_or(0) > 0,
             response_fields,
+            return_tokens_as_token_ids: self.return_tokens_as_token_ids.unwrap_or(false),
             runtime_config: ModelRuntimeConfig::default(),
         };
 
@@ -87,6 +88,8 @@ pub struct DeltaGeneratorOptions {
     pub enable_logprobs: bool,
     /// Determines which nvext response fields may be emitted for this request.
     pub response_fields: NvExtResponseFieldSelection,
+    /// When true, logprob token fields use "token_id:<id>" format instead of decoded text.
+    pub return_tokens_as_token_ids: bool,
 
     pub runtime_config: ModelRuntimeConfig,
 }
@@ -198,16 +201,23 @@ impl DeltaGenerator {
             .map(|(_, lp)| lp as f32)
             .collect::<Vec<f32>>();
 
+        let return_as_ids = self.options.return_tokens_as_token_ids;
         let content = top_logprobs.map(|top_logprobs| {
             toks.iter()
                 .zip(tok_lps)
                 .zip(top_logprobs)
                 .map(|(((t, tid), lp), top_lps)| {
-                    let converted = convert_backend_top_logprobs(&top_lps, t, *tid, lp);
+                    let token_str = if return_as_ids {
+                        format!("token_id:{}", tid)
+                    } else {
+                        t.clone()
+                    };
+                    let converted =
+                        convert_backend_top_logprobs(&top_lps, t, *tid, lp, return_as_ids);
                     dynamo_protocols::types::ChatCompletionTokenLogprob {
-                        token: t.clone(),
+                        token: token_str.clone(),
                         logprob: lp,
-                        bytes: token_to_utf8_bytes(t),
+                        bytes: token_to_utf8_bytes(&token_str),
                         top_logprobs: converted,
                     }
                 })
@@ -227,18 +237,15 @@ impl DeltaGenerator {
     /// * `text` - The text content for the response.
     /// * `finish_reason` - The reason why the response finished (e.g., stop, length, etc.).
     /// * `logprobs` - Optional log probabilities of the generated tokens.
-    /// * `stop_reason` - Optional stop string or token that triggered the stop.
     ///
     /// # Returns
     /// * An [`dynamo_protocols::types::CreateChatCompletionStreamResponse`] instance representing the choice.
-    #[allow(deprecated)]
     pub fn create_choice(
         &mut self,
         index: u32,
         text: Option<String>,
         finish_reason: Option<dynamo_protocols::types::FinishReason>,
         logprobs: Option<dynamo_protocols::types::ChatChoiceLogprobs>,
-        stop_reason: Option<dynamo_protocols::types::StopReason>,
     ) -> NvCreateChatCompletionStreamResponse {
         let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
             content: text.map(dynamo_protocols::types::ChatCompletionMessageContent::Text),
@@ -257,7 +264,6 @@ impl DeltaGenerator {
             index,
             delta,
             finish_reason,
-            stop_reason,
             logprobs,
         };
 
@@ -391,16 +397,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             }
             None => None,
         };
+        let stop_reason = delta.stop_reason.clone();
 
         // Create the streaming response.
-        let index = 0;
-        let mut stream_response = self.create_choice(
-            index,
-            delta.text,
-            finish_reason,
-            logprobs,
-            delta.stop_reason,
-        );
+        let index = delta.index.unwrap_or(0);
+        let mut stream_response = self.create_choice(index, delta.text, finish_reason, logprobs);
 
         // Record finish for timing/ITL accounting even when timing is not returned to the client.
         // Kept at call site because it's a side effect on the tracker — not a gating decision.
@@ -418,6 +419,8 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             self.tracker.as_ref(),
             delta.disaggregated_params.as_ref(),
             finish_reason.is_some(),
+            delta.engine_data,
+            stop_reason,
         ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
             stream_response.nvext = Some(nvext_json);
@@ -494,6 +497,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -558,6 +562,59 @@ mod tests {
                 "token_ids": [11, 22, 33],
                 "routed_experts": {"layer_0": [1, 3]}
             })),
+            engine_data: None,
+        }
+    }
+
+    fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateChatCompletionRequest {
+        let messages = vec![ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text("test".to_string()),
+                name: None,
+            },
+        )];
+
+        NvCreateChatCompletionRequest {
+            inner: CreateChatCompletionRequest {
+                model: "test-model".to_string(),
+                messages,
+                stream: Some(true),
+                stream_options: None,
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: Some(
+                crate::protocols::openai::nvext::NvExt::builder()
+                    .extra_fields(fields)
+                    .build()
+                    .unwrap(),
+            ),
+            chat_template_args: None,
+            media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
+            unsupported_fields: Default::default(),
+        }
+    }
+
+    fn make_backend_output_with_engine_data() -> crate::protocols::common::llm_backend::BackendOutput
+    {
+        crate::protocols::common::llm_backend::BackendOutput {
+            token_ids: vec![42],
+            tokens: vec![Some("hello".to_string())],
+            text: Some("hello".to_string()),
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+            stop_reason: None,
+            index: Some(0),
+            completion_usage: None,
+            disaggregated_params: None,
+            engine_data: Some(serde_json::json!({
+                "kv_transfer_time_ms": 12.3,
+                "disaggregated_kv_transfer_time_ms": 8.1,
+                "prefill_compute_time_ms": 45.6
+            })),
         }
     }
 
@@ -573,6 +630,38 @@ mod tests {
             .expect("choice generation");
 
         assert!(response.nvext.is_none());
+    }
+
+    #[test]
+    fn test_backend_choice_index_is_preserved() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-choice-index".to_string());
+        let mut output = final_backend_output();
+        output.index = Some(2);
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+
+        assert_eq!(response.inner.choices[0].index, 2);
+    }
+
+    #[test]
+    fn test_stop_reason_emits_in_nvext_when_requested() {
+        let request = create_test_request_with_extra_fields(vec!["stop_reason".to_string()]);
+        let mut generator = request.response_generator("req-stop-reason-nvext".to_string());
+        let mut output = final_backend_output();
+        output.stop_reason = Some(dynamo_protocols::types::StopReason::String(
+            "END".to_string(),
+        ));
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+
+        let response_json = serde_json::to_value(&response).expect("serialize response");
+        assert!(response_json["choices"][0].get("stop_reason").is_none());
+        assert_eq!(response_json["nvext"]["stop_reason"], "END");
     }
 
     #[test]
@@ -652,5 +741,94 @@ mod tests {
         assert!(nvext_json.get("worker_id").is_none());
         assert!(nvext_json.get("timing").is_none());
         assert!(nvext_json.get("token_ids").is_none());
+    }
+
+    #[test]
+    fn test_engine_data_included_when_requested_via_extra_fields() {
+        let request = create_test_request_with_extra_fields(vec!["engine_data".to_string()]);
+        let mut generator = request.response_generator("req-engine-1".to_string());
+
+        let backend_output = make_backend_output_with_engine_data();
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("should produce a response");
+
+        let nvext = response.nvext.expect("nvext should be present");
+        let engine_data = nvext
+            .get("engine_data")
+            .expect("engine_data should be present");
+        assert_eq!(engine_data["kv_transfer_time_ms"], 12.3);
+        assert_eq!(engine_data["prefill_compute_time_ms"], 45.6);
+    }
+
+    #[test]
+    fn test_engine_data_excluded_when_not_requested() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-engine-2".to_string());
+
+        let backend_output = make_backend_output_with_engine_data();
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("should produce a response");
+
+        // nvext may or may not be present (tracker may inject worker_id),
+        // but engine_data specifically must be absent
+        if let Some(nvext) = &response.nvext {
+            assert!(
+                nvext.get("engine_data").is_none() || nvext.get("engine_data").unwrap().is_null(),
+                "engine_data should not be present when not requested"
+            );
+        }
+    }
+
+    #[test]
+    fn test_engine_data_excluded_when_other_extra_fields_requested() {
+        let request = create_test_request_with_extra_fields(vec!["timing".to_string()]);
+        let mut generator = request.response_generator("req-engine-3".to_string());
+
+        let backend_output = make_backend_output_with_engine_data();
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("should produce a response");
+
+        if let Some(nvext) = &response.nvext {
+            assert!(
+                nvext.get("engine_data").is_none() || nvext.get("engine_data").unwrap().is_null(),
+                "engine_data should not be present when only timing is requested"
+            );
+        }
+    }
+
+    #[test]
+    fn test_engine_data_none_from_backend_no_nvext_noise() {
+        let request = create_test_request_with_extra_fields(vec!["engine_data".to_string()]);
+        let mut generator = request.response_generator("req-engine-4".to_string());
+
+        let backend_output = crate::protocols::common::llm_backend::BackendOutput {
+            token_ids: vec![42],
+            tokens: vec![Some("hello".to_string())],
+            text: Some("hello".to_string()),
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+            stop_reason: None,
+            index: Some(0),
+            completion_usage: None,
+            disaggregated_params: None,
+            engine_data: None, // engine didn't provide any data
+        };
+
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("should produce a response");
+
+        // engine_data is None from backend, so nvext.engine_data should be absent
+        if let Some(nvext) = &response.nvext {
+            assert!(
+                nvext.get("engine_data").is_none() || nvext.get("engine_data").unwrap().is_null(),
+                "engine_data should not appear when backend provides None"
+            );
+        }
     }
 }

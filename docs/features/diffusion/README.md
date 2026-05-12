@@ -14,7 +14,7 @@ Dynamo supports serving diffusion models across multiple backends, enabling gene
 | Modality | vLLM-Omni | SGLang | TRT-LLM |
 |----------|-----------|--------|---------|
 | Text-to-Text | ✅ | ✅ | ❌ |
-| Text-to-Image | ✅ | ✅ | ❌ |
+| Text-to-Image | ✅ | ✅ | ✅ |
 | Text-to-Video | ✅ | ✅ | ✅ |
 | Image-to-Video | ✅ | ❌ | ❌ |
 
@@ -26,5 +26,5 @@ For deployment guides, configuration, and examples for each backend:
 
 - **[vLLM-Omni](../../backends/vllm/vllm-omni.md)**
 - **[SGLang Diffusion](../../backends/sglang/sglang-diffusion.md)**
-- **[TRT-LLM Diffusion](../../backends/trtllm/trtllm-video-diffusion.md)**
+- **[TRT-LLM Diffusion](../../backends/trtllm/trtllm-diffusion.md)**
 - **[FastVideo (custom worker)](fastvideo.md)**

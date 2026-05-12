@@ -25,12 +25,18 @@ outputs:
   trtllm:
     description: 'Whether trtllm files changed'
     value: ${{ steps.filter.outputs.trtllm_any_modified }}
+  sample:
+    description: 'Whether sample-backend files changed'
+    value: ${{ steps.filter.outputs.sample_any_modified }}
   planner:
     description: 'Whether planner files changed'
     value: ${{ steps.filter.outputs.planner_any_modified }}
   frontend:
     description: 'Whether frontend files changed'
     value: ${{ steps.filter.outputs.frontend_any_modified }}
+  benchmarks:
+    description: 'Whether benchmarks files changed'
+    value: ${{ steps.filter.outputs.benchmarks_any_modified }}
   rust:
     description: 'Whether rust files changed'
     value: ${{ steps.filter.outputs.rust_any_modified }}
@@ -113,7 +119,9 @@ runs:
         echo "vllm: ${{ steps.filter.outputs.vllm_any_modified }}"
         echo "sglang: ${{ steps.filter.outputs.sglang_any_modified }}"
         echo "trtllm: ${{ steps.filter.outputs.trtllm_any_modified }}"
+        echo "sample: ${{ steps.filter.outputs.sample_any_modified }}"
         echo "frontend: ${{ steps.filter.outputs.frontend_any_modified }}"
+        echo "benchmarks: ${{ steps.filter.outputs.benchmarks_any_modified }}"
         echo "rust: ${{ steps.filter.outputs.rust_any_modified }}"
         echo ""
         echo "=== Files Matching Each Filter ==="
@@ -126,14 +134,16 @@ runs:
         echo "vllm: ${{ steps.filter.outputs.vllm_all_modified_files }}"
         echo "sglang: ${{ steps.filter.outputs.sglang_all_modified_files }}"
         echo "trtllm: ${{ steps.filter.outputs.trtllm_all_modified_files }}"
+        echo "sample: ${{ steps.filter.outputs.sample_all_modified_files }}"
         echo "frontend: ${{ steps.filter.outputs.frontend_all_modified_files }}"
+        echo "benchmarks: ${{ steps.filter.outputs.benchmarks_all_modified_files }}"
         echo "rust: ${{ steps.filter.outputs.rust_all_modified_files }}"
 
     - name: Check for uncovered files
       shell: bash
       run: |
         # Combine all filter-specific files into one list
-        COVERED_FILES=$(echo "${{ steps.filter.outputs.docs_all_modified_files }} ${{ steps.filter.outputs.examples_all_modified_files }} ${{ steps.filter.outputs.ignore_all_modified_files }} ${{ steps.filter.outputs.ci_all_modified_files }} ${{ steps.filter.outputs.core_all_modified_files }} ${{ steps.filter.outputs.operator_all_modified_files }} ${{ steps.filter.outputs.deploy_all_modified_files }} ${{ steps.filter.outputs.planner_all_modified_files }} ${{ steps.filter.outputs.vllm_all_modified_files }} ${{ steps.filter.outputs.sglang_all_modified_files }} ${{ steps.filter.outputs.trtllm_all_modified_files }} ${{ steps.filter.outputs.frontend_all_modified_files }} ${{ steps.filter.outputs.rust_all_modified_files }}" | tr ' ' '\n' | grep -v '^$' | sort -u)
+        COVERED_FILES=$(echo "${{ steps.filter.outputs.docs_all_modified_files }} ${{ steps.filter.outputs.examples_all_modified_files }} ${{ steps.filter.outputs.ignore_all_modified_files }} ${{ steps.filter.outputs.ci_all_modified_files }} ${{ steps.filter.outputs.core_all_modified_files }} ${{ steps.filter.outputs.operator_all_modified_files }} ${{ steps.filter.outputs.deploy_all_modified_files }} ${{ steps.filter.outputs.planner_all_modified_files }} ${{ steps.filter.outputs.vllm_all_modified_files }} ${{ steps.filter.outputs.sglang_all_modified_files }} ${{ steps.filter.outputs.trtllm_all_modified_files }} ${{ steps.filter.outputs.sample_all_modified_files }} ${{ steps.filter.outputs.frontend_all_modified_files }} ${{ steps.filter.outputs.benchmarks_all_modified_files }} ${{ steps.filter.outputs.rust_all_modified_files }}" | tr ' ' '\n' | grep -v '^$' | sort -u)
 
         # Get all modified files
         ALL_FILES=$(echo "${{ steps.filter.outputs.all_all_modified_files }}" | tr ' ' '\n' | grep -v '^$' | sort -u)
