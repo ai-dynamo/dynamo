@@ -11,7 +11,84 @@ across three configs on the same single-GPU hardware target:
 | `dynamo-fd-ec` | Dynamo + vLLM | on         | on                | 8 GiB           |
 
 All three configs share one hardware target (H100 or GB200) chosen at
-deploy time via `--hw {h100,gb200}`. See **Hardware targets** below.
+deploy time via `--hw {h100,gb200}`. See [Hardware targets](#hardware-targets) below.
+
+## Pre-requisites
+
+1. Kubectl context pointing at a cluster with the right GPUs.
+2. A namespace you have write access to (`$NAMESPACE` below).
+3. A `shared-model-cache` PVC in that namespace (RWX). If your cluster
+   pre-provisions it (common on platform-managed AWS / FSx clusters),
+   you don't need to do anything. Otherwise see
+   [Storage: shared-model-cache](#storage-shared-model-cache).
+4. **Fill in your hostname** in `hw/h100.env` or `hw/gb200.env` —
+   replace the `<FILL-IN-…-HOSTNAME>` placeholder. See
+   [Hardware targets](#hardware-targets) for the lookup command.
+5. `envsubst` on the laptop driving the recipe (Ubuntu:
+   `apt install gettext-base`; macOS: `brew install gettext`).
+6. **HuggingFace token: not required.** `Qwen/Qwen3.6-35B-A3B-FP8` is
+   public (`gated: false`), so neither the download Job nor `vllm serve`
+   needs one. To swap in a gated model, uncomment the `hf-token-secret`
+   blocks in `model-download.yaml` + `<config>/deploy.yaml` and create:
+   ```bash
+   kubectl -n "$NAMESPACE" create secret generic hf-token-secret \
+     --from-literal=HF_TOKEN="$HF_TOKEN"
+   ```
+
+## Quick start
+
+```bash
+export NAMESPACE=<your-namespace>
+export HW=gb200   # or h100
+
+# Run all three configs sequentially (prep + deploy + bench + retrieve + clean
+# per config). Artifacts land under
+# ~/workspace/dynamo-tmp/logs/<MM-DD>/qwen36-fp8-${HW}/{vllm-serve,dynamo-fd,dynamo-fd-ec}/.
+./run-all-benchmarks.sh -n ${NAMESPACE} --hw ${HW}
+
+# 3-way comparison:
+python3 compare.py ~/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen36-fp8-${HW}/
+```
+
+Or step-by-step for a single config:
+
+```bash
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config vllm-serve
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd-ec
+```
+
+`run-benchmark.sh` accepts `--step {pvc|download|dataset|deploy|bench|retrieve|clean}` for granular control. `pvc`, `download`, and `dataset` are config-agnostic (any `--config` works to run them once).
+
+## Directory layout
+
+```text
+qwen3.6-35b/
+├── README.md
+├── run-benchmark.sh            # Unified driver — branches on --config/--hw
+├── run-all-benchmarks.sh       # Sequential 3-config orchestrator
+├── compare.py                  # 3-way comparison (throughput, TTFT, ITL)
+├── hw/                         # Hardware axis (shared across all configs)
+│   ├── h100.env
+│   └── gb200.env
+├── model-cache/
+│   ├── model-cache.yaml
+│   └── model-download.yaml
+├── data-gen/
+│   └── generate-datasets-job.yaml
+├── vllm-serve/
+│   ├── config.env              # Config-axis metadata (kind, names)
+│   ├── deploy.yaml             # Templated (image, nodeSelector, tolerations)
+│   └── perf.yaml               # Templated
+├── dynamo-fd/
+│   ├── config.env
+│   ├── deploy.yaml             # DynamoGraphDeployment, frontend-decoding ON
+│   └── perf.yaml
+└── dynamo-fd-ec/
+    ├── config.env
+    ├── deploy.yaml             # DynamoGraphDeployment, FD + embedding cache
+    └── perf.yaml
+```
 
 ## Hardware targets
 
@@ -27,7 +104,7 @@ the YAML templates substitute via `envsubst`:
   carries the `kubernetes.io/arch=arm64:NoSchedule` toleration.
 
 **Before first use**: edit `hw/h100.env` and `hw/gb200.env` and replace
-the `<FILL-IN-…-HOSTNAME>` placeholders with kubernetes.io/hostname
+the `<FILL-IN-…-HOSTNAME>` placeholders with `kubernetes.io/hostname`
 values from your cluster:
 
 ```bash
@@ -38,64 +115,7 @@ kubectl get nodes -L kubernetes.io/arch -L nvidia.com/gpu.product \
   | awk '/arm64/ && /GB200/'
 ```
 
-Then pick a target with `--hw h100` or `--hw gb200`, and a config with
-`--config {vllm-serve,dynamo-fd,dynamo-fd-ec}`:
-
-```bash
-./run-benchmark.sh -n "$NAMESPACE" --hw gb200 --config vllm-serve
-./run-benchmark.sh -n "$NAMESPACE" --hw gb200 --config dynamo-fd
-./run-benchmark.sh -n "$NAMESPACE" --hw gb200 --config dynamo-fd-ec
-```
-
-Or run all three sequentially + cleanup between configs:
-
-```bash
-./run-all-benchmarks.sh -n "$NAMESPACE" --hw gb200
-```
-
 Adding a new hardware target later is a one-file change in `hw/`.
-
-The wrapper requires `envsubst` (Ubuntu: `apt install gettext-base`;
-macOS: `brew install gettext`).
-
-## Pre-requisites
-
-1. Kubectl context pointing at a cluster with the right GPUs.
-2. A namespace you have write access to (`$NAMESPACE` below).
-3. A `shared-model-cache` PVC in that namespace (RWX). If your cluster
-   pre-provisions it (common on platform-managed AWS / FSx clusters),
-   you don't need to do anything. Otherwise uncomment the PVC
-   definition in `model-cache/model-cache.yaml` and pick an RWX
-   storage class — see that file for guidance.
-4. **HuggingFace token: not required for this recipe.**
-   `Qwen/Qwen3.6-35B-A3B-FP8` is public (`gated: false`), so neither the
-   download Job nor `vllm serve` needs a token. The `hf-token-secret`
-   references in `model-download.yaml` and `deploy.yaml` are commented
-   out. To swap in a gated model, uncomment those blocks and create:
-   ```bash
-   kubectl -n "$NAMESPACE" create secret generic hf-token-secret \
-     --from-literal=HF_TOKEN="$HF_TOKEN"
-   ```
-
-We use **`ebs`** by default. Swap `storageClassName: ebs` →
-`dgxc-enterprise-file` in `model-cache/model-cache.yaml` for RWX/Retain.
-
-## Naming & ownership
-
-All resources carry a `qwen36-` prefix (per-model) and these labels:
-
-```yaml
-labels:
-  app.kubernetes.io/name: qwen3.6-35b
-  app.kubernetes.io/managed-by: dynamo-recipe
-```
-
-So in a shared namespace you can find this recipe's resources via:
-
-```bash
-kubectl -n "$NAMESPACE" get pvc,deploy,job,pod \
-  -l app.kubernetes.io/name=qwen3.6-35b
-```
 
 ## Storage: shared-model-cache
 
@@ -144,60 +164,22 @@ mode honor that ordering so prefix-cache hits across turns are real.
 The pin lives in `<config>/perf.yaml` (`AIPERF_GIT_REF` env var, identical
 across all three configs). Bump when you want newer aiperf fixes.
 
-## Directory layout
+## Naming & ownership
 
-```text
-qwen3.6-35b/
-├── README.md
-├── run-benchmark.sh            # Unified driver — branches on --config/--hw
-├── run-all-benchmarks.sh       # Sequential 3-config orchestrator
-├── compare.py                  # 3-way comparison (throughput, TTFT, ITL)
-├── hw/                         # Hardware axis (shared across all configs)
-│   ├── h100.env
-│   └── gb200.env
-├── model-cache/
-│   ├── model-cache.yaml
-│   └── model-download.yaml
-├── data-gen/
-│   └── generate-datasets-job.yaml
-├── vllm-serve/
-│   ├── config.env              # Config-axis metadata (kind, names)
-│   ├── deploy.yaml             # Templated (image, nodeSelector, tolerations)
-│   └── perf.yaml               # Templated
-├── dynamo-fd/
-│   ├── config.env
-│   ├── deploy.yaml             # DynamoGraphDeployment, frontend-decoding ON
-│   └── perf.yaml
-└── dynamo-fd-ec/
-    ├── config.env
-    ├── deploy.yaml             # DynamoGraphDeployment, FD + embedding cache
-    └── perf.yaml
+All resources carry a `qwen36-` prefix (per-model) and these labels:
+
+```yaml
+labels:
+  app.kubernetes.io/name: qwen3.6-35b
+  app.kubernetes.io/managed-by: dynamo-recipe
 ```
 
-## Quick start
+So in a shared namespace you can find this recipe's resources via:
 
 ```bash
-export NAMESPACE=<your-namespace>
-export HW=gb200   # or h100
-
-# Run all three configs sequentially (prep + deploy + bench + retrieve + clean
-# per config). Artifacts land under
-# ~/workspace/dynamo-tmp/logs/<MM-DD>/qwen36-fp8-${HW}/{vllm-serve,dynamo-fd,dynamo-fd-ec}/.
-./run-all-benchmarks.sh -n ${NAMESPACE} --hw ${HW}
-
-# 3-way comparison:
-python3 compare.py ~/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen36-fp8-${HW}/
+kubectl -n "$NAMESPACE" get pvc,deploy,job,pod \
+  -l app.kubernetes.io/name=qwen3.6-35b
 ```
-
-Or step-by-step for a single config:
-
-```bash
-./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config vllm-serve
-./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd
-./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd-ec
-```
-
-`run-benchmark.sh` accepts `--step {pvc|download|dataset|deploy|bench|retrieve|clean}` for granular control. `pvc`, `download`, and `dataset` are config-agnostic (any `--config` works to run them once).
 
 ## Notes
 
