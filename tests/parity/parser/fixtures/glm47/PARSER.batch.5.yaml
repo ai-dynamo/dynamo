@@ -17,20 +17,11 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        normal_text: ''
-      vllm:
+      dynamo: &d_5_a
         calls: []
         normal_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
-      sglang:
-        calls: []
-        normal_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      vllm: *d_5_a
+      sglang: *d_5_a
   PARSER.batch.5.b:
     description: Closing </tool_call> without matching <tool_call> open
     ref: dynamo
@@ -50,15 +41,50 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo:
+      dynamo: &d_5_c
+        calls: []
+        normal_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>N
+      vllm: *d_5_c
+      sglang: *d_5_c
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only </tool_call> end marker (body complete)
+    ref: dynamo
+    model_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>Boston</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>New York</arg_value>
+    tools:
+    - *id001
+    expected:
+      dynamo: &d_5_d
         calls:
         - name: get_weather
-          arguments: {}
-        normal_text: ''
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New York</arg_value>
       vllm:
-        calls: []
-        normal_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>N
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
-      sglang:
-        calls: []
-        normal_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>N
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: ''
+        reason: vLLM drops the raw 2nd block from normal_text
+      sglang: *d_5_d
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>Boston</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>New York
+    tools:
+    - *id001
+    expected:
+      dynamo: &d_5_e
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New York
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: ''
+        reason: vLLM drops the raw 2nd block from normal_text
+      sglang: *d_5_e

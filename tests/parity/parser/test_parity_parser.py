@@ -64,8 +64,8 @@ def _case_sort_key(case_id: str) -> tuple[int, str]:
     """Sort key for case IDs that may carry a sub-letter.
 
     `PARSER.batch.5`   → (5, "")
+    `PARSER.batch.5.d` → (5, "d")
     `PARSER.batch.8.a` → (8, "a")
-    `PARSER.batch.8.b` → (8, "b")
     """
     parts = case_id.split(".")
     top = int(parts[2])
