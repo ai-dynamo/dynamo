@@ -32,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	gpupkg "github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"k8s.io/utils/ptr"
 )
@@ -45,7 +44,6 @@ func newFakeReconciler(objs ...client.Object) *DynamoGraphDeploymentRequestRecon
 		Client:    fakeClient,
 		APIReader: fakeClient,
 		Recorder:  &record.FakeRecorder{},
-		Config:    &configv1alpha1.OperatorConfiguration{},
 	}
 }
 
@@ -113,6 +111,11 @@ func TestEnrichHardwareFromDiscovery(t *testing.T) {
 			name:          "nothing set, unknown GPU falls back to model name",
 			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 4, Model: "FutureGPU-X1000", VRAMPerGPU: 65536},
 			wantGPUSKU:    "FutureGPU-X1000", wantVRAM: 65536, wantGPUsNode: 4, wantTotalGPUs: 4,
+		},
+		{
+			name:          "nothing set, Intel B60 discovered",
+			discoveredGPU: &gpupkg.GPUInfo{NodeName: "xpu-node", GPUsPerNode: 3, Model: "Intel(R) Graphics [0xe211]", VRAMPerGPU: 24480, System: "b60"},
+			wantGPUSKU:    "b60", wantVRAM: 24480, wantGPUsNode: 3, wantTotalGPUs: 3,
 		},
 		{
 			name: "only totalGpus missing, discovery fills it",

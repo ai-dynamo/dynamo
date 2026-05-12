@@ -122,6 +122,8 @@ def assemble_final_config(
     # the get_perf_metrics endpoint is available to the planner. Mocker
     # workers don't use DYN_BENCHMARK_MODE, so skip when mocker is active.
     if not mocker and resolved_backend == "vllm":
+        if getattr(getattr(dgdr, "hardware", None), "gpuSku", None) == "b60":
+            enable_vllm_xpu_runtime(base)
         enable_vllm_benchmark_mode(base)
 
     # Steps 3-4: layer features, collecting ConfigMaps
@@ -162,6 +164,13 @@ def _vllm_worker_roles() -> dict[str, str]:
     }
 
 
+def _set_env_var(env_list: list[dict], name: str, value: str) -> None:
+    env_list[:] = [
+        e for e in env_list if not (isinstance(e, dict) and e.get("name") == name)
+    ]
+    env_list.append({"name": name, "value": value})
+
+
 def enable_vllm_benchmark_mode(config_dict: dict) -> None:
     """Set ``DYN_BENCHMARK_MODE`` on every vLLM worker in *config_dict*.
 
@@ -182,18 +191,49 @@ def enable_vllm_benchmark_mode(config_dict: dict) -> None:
             "mainContainer", {}
         )
         env_list = main_container.setdefault("env", [])
-        # Strip any existing DYN_BENCHMARK_MODE; append canonical value.
-        env_list[:] = [
-            e
-            for e in env_list
-            if not (isinstance(e, dict) and e.get("name") == "DYN_BENCHMARK_MODE")
-        ]
-        env_list.append({"name": "DYN_BENCHMARK_MODE", "value": mode})
+        _set_env_var(env_list, "DYN_BENCHMARK_MODE", mode)
         logger.info(
             "Enabled vLLM self-benchmark on service %s (DYN_BENCHMARK_MODE=%s)",
             svc_name,
             mode,
         )
+
+
+def enable_vllm_xpu_runtime(config_dict: dict) -> None:
+    """Inject the minimum XPU runtime settings into every vLLM worker service."""
+    services = config_dict.get("spec", {}).get("services", {})
+    for svc_name in _vllm_worker_roles():
+        svc = services.get(svc_name)
+        if svc is None:
+            continue
+        resources = svc.setdefault("resources", {})
+        limits = resources.setdefault("limits", {})
+        limits["gpuType"] = "gpu.intel.com/xe"
+        main_container = svc.setdefault("extraPodSpec", {}).setdefault(
+            "mainContainer", {}
+        )
+        env_list = main_container.setdefault("env", [])
+        _set_env_var(env_list, "VLLM_TARGET_DEVICE", "xpu")
+
+        args = main_container.get("args", [])
+        if "--kv-transfer-config" not in args:
+            continue
+        idx = args.index("--kv-transfer-config")
+        if idx + 1 >= len(args):
+            continue
+        try:
+            kv_cfg = json.loads(args[idx + 1])
+        except (TypeError, json.JSONDecodeError):
+            logger.warning(
+                "Skipping XPU KV config injection for %s because --kv-transfer-config is not valid JSON",
+                svc_name,
+            )
+            continue
+        if isinstance(kv_cfg, dict):
+            kv_cfg["kv_buffer_device"] = "xpu"
+            args[idx + 1] = json.dumps(kv_cfg, separators=(",", ":"))
+            main_container["args"] = args
+            logger.info("Enabled XPU KV buffer device for service %s", svc_name)
 
 
 def generate_mocker_config(
