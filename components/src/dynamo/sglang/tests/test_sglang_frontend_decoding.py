@@ -28,17 +28,19 @@ def _make_config(
     multimodal_encode_worker: bool = False,
     multimodal_worker: bool = False,
 ) -> DynamoSGLangConfig:
-    return DynamoSGLangConfig(
-        use_sglang_tokenizer=False,
-        multimodal_encode_worker=multimodal_encode_worker,
-        multimodal_worker=multimodal_worker,
-        embedding_transfer_mode=EmbeddingTransferMode.NIXL_WRITE,
-        embedding_worker=False,
-        image_diffusion_worker=False,
-        video_generation_worker=False,
-        enable_rl=False,
-        frontend_decoding=frontend_decoding,
-    )
+    # ConfigBase has no kwargs __init__; sibling tests (test_backend_args.py)
+    # construct via no-arg + setattr.
+    config = DynamoSGLangConfig()
+    config.use_sglang_tokenizer = False
+    config.multimodal_encode_worker = multimodal_encode_worker
+    config.multimodal_worker = multimodal_worker
+    config.embedding_transfer_mode = EmbeddingTransferMode.NIXL_WRITE
+    config.embedding_worker = False
+    config.image_diffusion_worker = False
+    config.video_generation_worker = False
+    config.enable_rl = False
+    config.frontend_decoding = frontend_decoding
+    return config
 
 
 def test_validate_rejects_frontend_decoding_with_encode_worker():
