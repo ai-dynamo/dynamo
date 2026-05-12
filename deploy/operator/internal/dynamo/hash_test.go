@@ -257,26 +257,26 @@ func TestComputeBetaDGDWorkersSpecHash_TracksGeneratedDCDSpecAndMetadata(t *test
 	}
 	baseHash := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, base()))
 
-	replicas := base()
-	replicas.Spec.Services["worker"].Replicas = ptr.To(int32(99))
-	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, replicas)))
-
 	namespace := base()
 	namespace.Namespace = "other"
 	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, namespace)))
-
-	scalingAdapter := betaDGD(t, base())
-	scalingAdapter.Spec.Components[0].ScalingAdapter = &v1beta1.ScalingAdapter{}
-	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, scalingAdapter))
 }
 
-func TestComputeBetaDGDWorkersSpecHash_IgnoresNonWorkerDCDFields(t *testing.T) {
+func TestComputeBetaDGDWorkersSpecHash_IgnoresNonRolloutFields(t *testing.T) {
 	base := func() *v1alpha1.DynamoGraphDeployment {
 		return baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {ComponentType: commonconsts.ComponentTypeWorker},
 		})
 	}
 	baseHash := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, base()))
+
+	replicas := base()
+	replicas.Spec.Services["worker"].Replicas = ptr.To(int32(99))
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, replicas)))
+
+	scalingAdapter := betaDGD(t, base())
+	scalingAdapter.Spec.Components[0].ScalingAdapter = &v1beta1.ScalingAdapter{}
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, scalingAdapter))
 
 	serviceName := base()
 	serviceName.Spec.Services["worker"].ServiceName = "changed"

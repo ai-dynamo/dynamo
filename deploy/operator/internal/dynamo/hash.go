@@ -80,7 +80,7 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 			workerDCDs[componentName] = workerTemplate{
 				Labels:      GetDCDKubeLabels(dcd),
 				Annotations: GetDCDKubeAnnotations(dcd),
-				Spec:        dcd.Spec,
+				Spec:        workerHashSpec(dcd),
 			}
 		}
 	}
@@ -92,4 +92,15 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])[:8], nil
+}
+
+func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoComponentDeploymentSpec {
+	spec := dcd.Spec.DeepCopy()
+
+	// Replica count and autoscaling ownership patch the active DCD. They must
+	// not create a new worker generation.
+	spec.Replicas = nil
+	spec.ScalingAdapter = nil
+
+	return *spec
 }
