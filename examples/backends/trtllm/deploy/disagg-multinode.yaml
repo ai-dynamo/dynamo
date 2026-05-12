@@ -98,6 +98,10 @@ spec:
           - mountPath: /models
             name: models
           workingDir: /workspace/examples/backends/trtllm
+        volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: models
     replicas: 1
     type: frontend
   - multinode:

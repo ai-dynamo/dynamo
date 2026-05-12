@@ -166,7 +166,7 @@ yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then
 ### Deploy the LoRA-enabled Multimodal Graph
 
 ```bash
-kubectl apply -f agg_qwen_lora.yaml -n ${NAMESPACE}
+kubectl apply -f agg_qwen_lora_updated.yaml -n ${NAMESPACE}
 ```
 
 ### Verify Deployment

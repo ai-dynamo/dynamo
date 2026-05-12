@@ -37,6 +37,10 @@ spec:
           - mountPath: /home/dynamo/.cache/huggingface
             name: model-cache
           workingDir: /workspace
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
     replicas: 1
     type: frontend
   - compilationCache:
@@ -89,9 +93,11 @@ spec:
           volumeMounts:
           - mountPath: /home/dynamo/.cache/huggingface
             name: model-cache
-          - mountPath: /home/dynamo/.cache/vllm
-            name: compilation-cache
           workingDir: /workspace
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
         nodeSelector:
           node.kubernetes.io/instance-type: g7e.12xlarge
         tolerations:
@@ -150,9 +156,11 @@ spec:
           volumeMounts:
           - mountPath: /home/dynamo/.cache/huggingface
             name: model-cache
-          - mountPath: /home/dynamo/.cache/vllm
-            name: compilation-cache
           workingDir: /workspace
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
         nodeSelector:
           node.kubernetes.io/instance-type: g7e.12xlarge
         tolerations:

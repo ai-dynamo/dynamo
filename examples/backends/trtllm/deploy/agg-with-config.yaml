@@ -59,9 +59,10 @@ spec:
             limits:
               nvidia.com/gpu: "1"
           volumeMounts:
-          - mountPath: /workspace/
+          - mountPath: /workspace/examples/backends/trtllm/engine_configs/qwen3/agg.yaml
             name: nvidia-config
             readOnly: true
+            subPath: agg.yaml
           workingDir: /workspace/examples/backends/trtllm
         volumes:
         - configMap:

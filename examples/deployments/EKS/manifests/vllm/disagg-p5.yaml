@@ -37,6 +37,10 @@ spec:
           - mountPath: /home/dynamo/.cache/huggingface
             name: model-cache
           workingDir: /workspace
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
     replicas: 1
     type: frontend
   - compilationCache:
@@ -92,9 +96,11 @@ spec:
           volumeMounts:
           - mountPath: /home/dynamo/.cache/huggingface
             name: model-cache
-          - mountPath: /home/dynamo/.cache/vllm
-            name: compilation-cache
           workingDir: /workspace
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
         nodeSelector:
           karpenter.sh/capacity-type: reserved
           node.kubernetes.io/instance-type: p5.48xlarge
@@ -157,9 +163,11 @@ spec:
           volumeMounts:
           - mountPath: /home/dynamo/.cache/huggingface
             name: model-cache
-          - mountPath: /home/dynamo/.cache/vllm
-            name: compilation-cache
           workingDir: /workspace
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
         nodeSelector:
           karpenter.sh/capacity-type: reserved
           node.kubernetes.io/instance-type: p5.48xlarge

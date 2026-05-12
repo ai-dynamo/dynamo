@@ -164,7 +164,7 @@ yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then
 ### Deploy the LoRA-enabled vLLM Graph
 
 ```bash
-kubectl apply -f agg_lora.yaml -n ${NAMESPACE}
+kubectl apply -f agg_lora_updated.yaml -n ${NAMESPACE}
 ```
 
 ### Verify Deployment

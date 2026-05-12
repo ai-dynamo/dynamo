@@ -36,6 +36,10 @@ spec:
           - mountPath: /root/.cache/huggingface
             name: huggingface-cache
           workingDir: /opt/app
+        volumes:
+        - name: huggingface-cache
+          persistentVolumeClaim:
+            claimName: huggingface-cache
     replicas: 1
     sharedMemorySize: 8Gi
     type: worker

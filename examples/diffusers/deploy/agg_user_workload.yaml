@@ -36,6 +36,10 @@ spec:
           - mountPath: /root/.cache/huggingface
             name: huggingface-cache
           workingDir: /opt/app
+        volumes:
+        - name: huggingface-cache
+          persistentVolumeClaim:
+            claimName: huggingface-cache
         imagePullSecrets:
         - name: my-image-pull-secret
         tolerations:
