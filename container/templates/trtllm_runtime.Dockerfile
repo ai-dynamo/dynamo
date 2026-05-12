@@ -339,11 +339,17 @@ ENV PYTHONPATH=/opt
 # to subtract before writing NOTICES. Default is rendered from
 # context.yaml's trtllm.cuda13.1.baseline_sbom (cuda-dl-base runtime).
 ARG BASELINE_SBOM_FILE="{{ context[framework][device_key].baseline_sbom | default('') }}"
+{# EFA builds: attribute libfabric + aws-ofi-nccl via the native overlay.
+   trtllm's baseline already ships libfabric-aws@2.1.0amzn5.0 but the
+   EFA installer may install a different version; explicit native
+   attribution closes the version-skew gap defensively. #}
 RUN python3 -m compliance.generators \
-    --ecosystem python,rust,dpkg \
+    --ecosystem python,rust,dpkg{% if make_efa %},native{% endif %} \
     --venv ${VIRTUAL_ENV} \
     --output-dir /legal \
-    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
+{% if make_efa %}    --native-yaml /opt/compliance/native_packages.yaml \
+    --native-image trtllm-runtime-efa \
+{% endif %}    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
     -v
 RUN find /legal -name '*-deps.csv' -print0 | \
     xargs -0 -n1 -I {} python3 -m compliance.policy.validate \

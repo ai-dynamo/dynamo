@@ -460,11 +460,19 @@ ENV PYTHONPATH=/opt
 # haven't captured yet (xpu, cpu) and that's fine — the licenses
 # stage just emits NOTICES for everything it sees, same as before.
 ARG BASELINE_SBOM_FILE="{{ context[framework][device_key].baseline_sbom | default('') }}"
+{# EFA builds add libfabric + aws-ofi-nccl via the AWS efa_installer.sh.
+   These don't show up in dpkg state (the installer drops binaries
+   directly), so attribute them via the native overlay. The aws stage
+   runs AFTER licenses, but the YAML-driven native generator doesn't
+   inspect the filesystem — it emits from the static overlay, so the
+   ordering doesn't matter. #}
 RUN python3 -m compliance.generators \
-    --ecosystem python,rust,dpkg \
+    --ecosystem python,rust,dpkg{% if make_efa %},native{% endif %} \
     --venv ${VIRTUAL_ENV} \
     --output-dir /legal \
-    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
+{% if make_efa %}    --native-yaml /opt/compliance/native_packages.yaml \
+    --native-image vllm-runtime-efa \
+{% endif %}    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
     -v
 RUN find /legal -name '*-deps.csv' -print0 | \
     xargs -0 -n1 -I {} python3 -m compliance.policy.validate \

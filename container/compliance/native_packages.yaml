@@ -58,3 +58,35 @@ packages:
     source: https://github.com/ai-dynamo/dynamo
     images:
       - snapshot-agent
+
+  # --- EFA (Elastic Fabric Adapter) components ---
+  # Installed by container/templates/aws.Dockerfile via the AWS-published
+  # `efa_installer.sh` (efa_version 1.47.0). The installer drops binaries
+  # directly without registering with apt, so dpkg/python/rust/go
+  # generators can't see them. This YAML overlay attributes them.
+  #
+  # Image filter:
+  #   - vllm-runtime-efa: baseline (nvcr.io/nvidia/cuda:X.Y-runtime) has
+  #     no libfabric, so EFA legitimately adds both libs.
+  #   - trtllm-runtime-efa: baseline (cuda-dl-base) already ships
+  #     libfabric-aws@2.1.0amzn5.0, but the EFA installer may install a
+  #     different version; explicit attribution closes the version-skew
+  #     gap defensively.
+  #   - (sglang-runtime-efa intentionally omitted: sglang's upstream
+  #     image already ships libfabric1@1.17.0-3build2; the make_efa
+  #     build is redundant and appears to be dead config.)
+  - name: libfabric
+    version: 1.22.0
+    license: BSD-2-Clause
+    source: https://github.com/ofiwg/libfabric
+    images:
+      - vllm-runtime-efa
+      - trtllm-runtime-efa
+
+  - name: aws-ofi-nccl
+    version: 1.16.3-aws
+    license: Apache-2.0
+    source: https://github.com/aws/aws-ofi-nccl
+    images:
+      - vllm-runtime-efa
+      - trtllm-runtime-efa
