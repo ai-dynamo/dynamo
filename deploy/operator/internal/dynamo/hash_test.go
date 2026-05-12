@@ -48,7 +48,7 @@ func rawBetaDGD(t testing.TB, src *v1alpha1.DynamoGraphDeployment) *v1beta1.Dyna
 
 func mustComputeBetaDGDWorkersSpecHash(t testing.TB, dgd *v1beta1.DynamoGraphDeployment) string {
 	t.Helper()
-	hash, err := v1beta1.ComputeDGDWorkersSpecHash(dgd)
+	hash, err := ComputeDGDWorkersSpecHash(dgd)
 	if err != nil {
 		t.Fatalf("compute v1beta1 DGD worker hash: %v", err)
 	}
@@ -143,6 +143,20 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresNonWorkers(t *testing.T) {
 	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, withFrontend)), mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, withoutFrontend)))
 }
 
+func TestComputeBetaDGDWorkersSpecHash_IgnoresGeneratedDCDObjectIdentity(t *testing.T) {
+	dgd := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType:         commonconsts.ComponentTypeWorker,
+			GlobalDynamoNamespace: true,
+		},
+	})
+	baseHash := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd))
+
+	changed := dgd.DeepCopy()
+	changed.Namespace = "other"
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, changed)))
+}
+
 func TestComputeBetaDGDWorkersSpecHash_NoWorkers(t *testing.T) {
 	dgd := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"frontend": {ComponentType: commonconsts.ComponentTypeFrontend},
@@ -200,7 +214,42 @@ func TestComputeBetaDGDWorkersSpecHash_ChangesOnPodAffectingFields(t *testing.T)
 	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, dgd6), "podTemplate metadata change should change hash")
 }
 
-func TestComputeBetaDGDWorkersSpecHash_StableOnExcludedFields(t *testing.T) {
+func TestComputeBetaDGDWorkersSpecHash_TracksPropagatedDGDObjectAnnotations(t *testing.T) {
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+	}))
+	dgd.Annotations = map[string]string{
+		commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+	}
+	baseHash := mustComputeBetaDGDWorkersSpecHash(t, dgd)
+
+	changed := dgd.DeepCopy()
+	changed.Annotations[commonconsts.KubeAnnotationVLLMDistributedExecutorBackend] = "mp"
+	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, changed))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_IgnoresOverriddenDGDObjectAnnotations(t *testing.T) {
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+	}))
+	dgd.Annotations = map[string]string{
+		commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+	}
+	dgd.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "component",
+			},
+		},
+	}
+	baseHash := mustComputeBetaDGDWorkersSpecHash(t, dgd)
+
+	changed := dgd.DeepCopy()
+	changed.Annotations[commonconsts.KubeAnnotationVLLMDistributedExecutorBackend] = "mp"
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, changed))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_TracksGeneratedDCDSpecAndMetadata(t *testing.T) {
 	base := func() *v1alpha1.DynamoGraphDeployment {
 		return baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {ComponentType: commonconsts.ComponentTypeWorker},
@@ -208,36 +257,41 @@ func TestComputeBetaDGDWorkersSpecHash_StableOnExcludedFields(t *testing.T) {
 	}
 	baseHash := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, base()))
 
-	tests := []struct {
-		name   string
-		mutate func(*v1alpha1.DynamoGraphDeployment)
-	}{
-		{"replicas", func(d *v1alpha1.DynamoGraphDeployment) {
-			d.Spec.Services["worker"].Replicas = ptr.To(int32(99))
-		}},
-		{"serviceName", func(d *v1alpha1.DynamoGraphDeployment) {
-			d.Spec.Services["worker"].ServiceName = "changed"
-		}},
-		{"dynamoNamespace", func(d *v1alpha1.DynamoGraphDeployment) {
-			d.Spec.Services["worker"].DynamoNamespace = ptr.To("changed")
-		}},
-		{"ingress", func(d *v1alpha1.DynamoGraphDeployment) {
-			d.Spec.Services["worker"].Ingress = &v1alpha1.IngressSpec{Enabled: true}
-		}},
-		{"scalingAdapter", func(d *v1alpha1.DynamoGraphDeployment) {
-			d.Spec.Services["worker"].ScalingAdapter = &v1alpha1.ScalingAdapter{}
-		}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dgd := base()
-			tt.mutate(dgd)
-			assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd)), "excluded field %s should not change hash", tt.name)
-		})
-	}
+	namespace := base()
+	namespace.Namespace = "other"
+	assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, namespace)))
 }
 
-func TestComputeBetaDGDWorkersSpecHash_StableOnPreservedAlphaResourceMetadata(t *testing.T) {
+func TestComputeBetaDGDWorkersSpecHash_IgnoresNonRolloutFields(t *testing.T) {
+	base := func() *v1alpha1.DynamoGraphDeployment {
+		return baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+			"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+		})
+	}
+	baseHash := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, base()))
+
+	replicas := base()
+	replicas.Spec.Services["worker"].Replicas = ptr.To(int32(99))
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, replicas)))
+
+	scalingAdapter := betaDGD(t, base())
+	scalingAdapter.Spec.Components[0].ScalingAdapter = &v1beta1.ScalingAdapter{}
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, scalingAdapter))
+
+	serviceName := base()
+	serviceName.Spec.Services["worker"].ServiceName = "changed"
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, serviceName)))
+
+	ingress := base()
+	ingress.Spec.Services["worker"].Ingress = &v1alpha1.IngressSpec{Enabled: true}
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, ingress)))
+
+	disabledScalingAdapter := base()
+	disabledScalingAdapter.Spec.Services["worker"].ScalingAdapter = &v1alpha1.ScalingAdapter{}
+	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, disabledScalingAdapter)))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_TracksPreservedAlphaResourceMetadata(t *testing.T) {
 	base := func() *v1alpha1.DynamoGraphDeployment {
 		return baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {ComponentType: commonconsts.ComponentTypeWorker},
@@ -260,7 +314,7 @@ func TestComputeBetaDGDWorkersSpecHash_StableOnPreservedAlphaResourceMetadata(t 
 		t.Run(tt.name, func(t *testing.T) {
 			dgd := base()
 			tt.mutate(dgd)
-			assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, rawBetaDGD(t, dgd)), "preserved alpha resource metadata should not change hash")
+			assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, rawBetaDGD(t, dgd)), "preserved alpha resource metadata is rendered onto workloads")
 		})
 	}
 }

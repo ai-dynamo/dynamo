@@ -1,7 +1,6 @@
 package dynamo
 
 import (
-	"context"
 	"encoding/json"
 	"maps"
 	"testing"
@@ -175,12 +174,12 @@ func updateDynDeploymentConfig(dcd *v1alpha1.DynamoComponentDeployment, newPort 
 	return nil
 }
 
-func overrideWithDynDeploymentConfig(ctx context.Context, dcd *v1alpha1.DynamoComponentDeployment) error {
+func overrideWithDynDeploymentConfig(dcd *v1alpha1.DynamoComponentDeployment) error {
 	rawConfig := dcd.GetDynamoDeploymentConfig()
 	if rawConfig == nil {
 		return nil
 	}
-	config, err := ParseDynDeploymentConfig(ctx, rawConfig)
+	config, err := ParseDynDeploymentConfig(rawConfig)
 	if err != nil {
 		return err
 	}

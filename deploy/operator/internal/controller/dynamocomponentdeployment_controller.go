@@ -567,7 +567,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 
 	kubeName := opt.dynamoComponentDeployment.Name
 	kubeNs := opt.dynamoComponentDeployment.Namespace
-	labels := r.getKubeLabels(opt.dynamoComponentDeployment)
+	labels := dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment)
 
 	if labels == nil {
 		labels = make(map[string]string)
@@ -824,56 +824,13 @@ func (r *DynamoComponentDeploymentReconciler) dcdIngressSpec(dcd *nvidiacomv1bet
 	return dynamo.GenerateDefaultIngressSpec(parentDGD, r.Config.Ingress), true, nil
 }
 
-func (r *DynamoComponentDeploymentReconciler) getKubeLabels(dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) map[string]string {
-	labels := map[string]string{}
-	if dynamoComponentDeployment != nil {
-		objectLabels := dynamoComponentDeployment.GetLabels()
-		maps.Copy(labels, objectLabels)
-		maps.Copy(labels, dynamo.GetDCDPreservedAlphaLabels(dynamoComponentDeployment))
-		maps.Copy(labels, dynamo.GetPodTemplateLabels(&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec))
-		dynamo.AddBaseModelLabel(labels, dynamoComponentDeployment.Spec.ModelRef)
-		if subComponentType := dynamo.GetDCDSubComponentType(dynamoComponentDeployment); subComponentType != "" {
-			labels[commonconsts.KubeLabelDynamoSubComponentType] = subComponentType
-		}
-		if componentName := dynamo.GetDCDComponentName(dynamoComponentDeployment); componentName != "" {
-			labels[commonconsts.KubeLabelDynamoComponent] = componentName
-		}
-		if dynamoNamespace := dynamo.GetDCDDynamoNamespace(dynamoComponentDeployment); dynamoNamespace != "" {
-			labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
-		}
-		for _, key := range []string{
-			commonconsts.KubeLabelDynamoComponent,
-			commonconsts.KubeLabelDynamoNamespace,
-			commonconsts.KubeLabelDynamoGraphDeploymentName,
-			commonconsts.KubeLabelDynamoWorkerHash,
-			commonconsts.KubeLabelDynamoComponentClass,
-		} {
-			if value := objectLabels[key]; value != "" {
-				labels[key] = value
-			}
-		}
-	}
-	return labels
-}
-
-func (r *DynamoComponentDeploymentReconciler) getKubeAnnotations(dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) map[string]string {
-	annotations := map[string]string{}
-	if dynamoComponentDeployment != nil {
-		maps.Copy(annotations, dynamo.GetDCDPreservedAlphaAnnotations(dynamoComponentDeployment))
-		maps.Copy(annotations, dynamo.GetPodTemplateAnnotations(&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec))
-		dynamo.AddBaseModelAnnotation(annotations, dynamoComponentDeployment.Spec.ModelRef)
-		delete(annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
-	}
-	return annotations
-}
-
 //nolint:nakedret
 func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Context, opt generateResourceOption) (kubeDeployment *appsv1.Deployment, toDelete bool, err error) {
 	kubeNs := opt.dynamoComponentDeployment.Namespace
 
-	labels := r.getKubeLabels(opt.dynamoComponentDeployment)
+	labels := dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment)
 
-	annotations := r.getKubeAnnotations(opt.dynamoComponentDeployment)
+	annotations := dynamo.GetDCDKubeAnnotations(opt.dynamoComponentDeployment)
 
 	kubeName := opt.dynamoComponentDeployment.Name
 
@@ -961,8 +918,8 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if err != nil {
 		return nil, err
 	}
-	podLabels := r.getKubeLabels(dcd)
-	podAnnotations := r.getKubeAnnotations(dcd)
+	podLabels := dynamo.GetDCDKubeLabels(dcd)
+	podAnnotations := dynamo.GetDCDKubeAnnotations(dcd)
 	kubeName := dcd.Name
 
 	// Convert user-provided metrics annotation into controller-managed label
@@ -1089,7 +1046,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(ctx context.Contex
 		},
 	}
 
-	annotations := r.getKubeAnnotations(dcd)
+	annotations := dynamo.GetDCDKubeAnnotations(dcd)
 	isK8sDiscovery := commonController.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, annotations)
 
 	if !(isK8sDiscovery || dcd.IsFrontendComponent()) {
@@ -1112,7 +1069,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(ctx context.Contex
 		ComponentType:   componentType,
 		DynamoNamespace: dynamoNamespace,
 		ComponentName:   dynamo.GetDCDComponentName(dcd),
-		Labels:          r.getKubeLabels(dcd),
+		Labels:          dynamo.GetDCDKubeLabels(dcd),
 		Annotations:     annotations,
 		IsK8sDiscovery:  isK8sDiscovery,
 	})

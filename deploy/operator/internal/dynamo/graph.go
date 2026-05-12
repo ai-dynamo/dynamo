@@ -254,7 +254,7 @@ func (s ServiceConfig) GetNamespace() *string {
 	return &s.Config.Dynamo.Namespace
 }
 
-func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeploymentConfig, error) {
+func ParseDynDeploymentConfig(jsonContent []byte) (DynDeploymentConfig, error) {
 	var config DynDeploymentConfig
 	err := json.Unmarshal(jsonContent, &config)
 	return config, err
@@ -278,7 +278,6 @@ type RollingUpdateContext struct {
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig.
 // The map key is the component name.
 func GenerateDynamoComponentsDeployments(
-	ctx context.Context,
 	parentDGD *v1beta1.DynamoGraphDeployment,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
@@ -295,7 +294,7 @@ func GenerateDynamoComponentsDeployments(
 		component := &parentDGD.Spec.Components[i]
 		componentName := component.ComponentName
 		dynamoNamespace := parentDGD.GetDynamoNamespaceForComponent(component)
-		dcd, err := generateSingleDCD(ctx, parentDGD, componentName, component, dynamoNamespace, backendFramework, restartState, existingRestartAnnotations, rollingUpdateCtx)
+		dcd, err := generateSingleDCD(parentDGD, componentName, component, dynamoNamespace, backendFramework, restartState, existingRestartAnnotations, rollingUpdateCtx)
 		if err != nil {
 			return nil, err
 		}
@@ -339,7 +338,6 @@ func GetDynamoNamespace(object metav1.Object, service *v1beta1.DynamoComponentDe
 
 // generateSingleDCD creates a DynamoComponentDeployment for a single service.
 func generateSingleDCD(
-	ctx context.Context,
 	parentDGD *v1beta1.DynamoGraphDeployment,
 	componentName string,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
@@ -350,10 +348,11 @@ func generateSingleDCD(
 	rollingUpdateCtx RollingUpdateContext,
 ) (*v1beta1.DynamoComponentDeployment, error) {
 	deployment := &v1beta1.DynamoComponentDeployment{}
-	deployment.Spec.DynamoComponentDeploymentSharedSpec = *component
+	deployment.Spec.DynamoComponentDeploymentSharedSpec = *component.DeepCopy()
 	deployment.Name = GetDCDResourceName(parentDGD, componentName, rollingUpdateCtx.NewWorkerHash)
 	deployment.Spec.BackendFramework = backendFramework
 	deployment.Namespace = parentDGD.Namespace
+	component = &deployment.Spec.DynamoComponentDeploymentSharedSpec
 
 	if err := applyDGDComponentAlphaCompatibilityToDCD(parentDGD, componentName, deployment); err != nil {
 		return nil, err
@@ -377,8 +376,7 @@ func generateSingleDCD(
 		}
 	}
 
-	propagateDGDAnnotations(parentDGD.GetAnnotations(), &deployment.Spec.DynamoComponentDeploymentSharedSpec)
-	propagateDGDSpecMetadata(parentDGD.Spec.Annotations, parentDGD.Spec.Labels, &deployment.Spec.DynamoComponentDeploymentSharedSpec)
+	applyDGDTemplateDefaults(&deployment.Spec.DynamoComponentDeploymentSharedSpec, parentDGD)
 
 	// Apply restart annotation if this component should be restarted.
 	if restartState.ShouldAnnotateComponent(componentName) {
@@ -395,12 +393,7 @@ func generateSingleDCD(
 		ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec).Spec.ServiceAccountName = commonconsts.PlannerServiceAccountName
 	}
 
-	if len(parentDGD.Spec.Env) > 0 {
-		podTemplate := ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec)
-		main := ensureMainContainer(podTemplate)
-		main.Env = MergeEnvs(parentDGD.Spec.Env, main.Env)
-	}
-	if err := applyDynDeploymentConfig(ctx, deployment, commonconsts.DynamoServicePort); err != nil {
+	if err := applyDynDeploymentConfig(deployment, commonconsts.DynamoServicePort); err != nil {
 		return nil, err
 	}
 
@@ -473,7 +466,7 @@ func GetDGDComponentPreservedIngressSpec(dgd *v1beta1.DynamoGraphDeployment, com
 	return ingressSpec, true
 }
 
-func applyDynDeploymentConfig(ctx context.Context, dcd *v1beta1.DynamoComponentDeployment, frontendPort int) error {
+func applyDynDeploymentConfig(dcd *v1beta1.DynamoComponentDeployment, frontendPort int) error {
 	main := GetMainContainer(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 	if main == nil {
 		return nil
@@ -491,7 +484,7 @@ func applyDynDeploymentConfig(ctx context.Context, dcd *v1beta1.DynamoComponentD
 		setDynamoDeploymentConfig(main, updatedConfig)
 		rawConfig = updatedConfig
 	}
-	config, err := ParseDynDeploymentConfig(ctx, rawConfig)
+	config, err := ParseDynDeploymentConfig(rawConfig)
 	if err != nil {
 		return err
 	}
@@ -1729,7 +1722,32 @@ func GeneratePodSpecForComponent(
 	checkpointInfo *checkpoint.CheckpointInfo,
 	deployerOverride MultinodeDeployer,
 ) (*corev1.PodSpec, error) {
+	if component == nil {
+		return nil, fmt.Errorf("component is nil")
+	}
+	if dynamoDeployment == nil {
+		return nil, fmt.Errorf("dynamoDeployment is nil")
+	}
 	component = component.DeepCopy()
+	applyDGDTemplateDefaults(component, dynamoDeployment)
+	if operatorConfig == nil {
+		operatorConfig = &configv1alpha1.OperatorConfiguration{}
+	}
+
+	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo, deployerOverride)
+	if err != nil {
+		return nil, err
+	}
+	return podSpec, nil
+}
+
+func applyDGDTemplateDefaults(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	dynamoDeployment *v1beta1.DynamoGraphDeployment,
+) {
+	if component == nil || dynamoDeployment == nil {
+		return
+	}
 	if len(dynamoDeployment.Spec.Env) > 0 {
 		podTemplate := ensurePodTemplate(component)
 		main := ensureMainContainer(podTemplate)
@@ -1738,12 +1756,6 @@ func GeneratePodSpecForComponent(
 
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
 	propagateDGDSpecMetadata(dynamoDeployment.Spec.Annotations, dynamoDeployment.Spec.Labels, component)
-
-	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo, deployerOverride)
-	if err != nil {
-		return nil, err
-	}
-	return podSpec, nil
 }
 
 // dgdPropagatedAnnotationKeys lists DGD metadata annotations that are propagated

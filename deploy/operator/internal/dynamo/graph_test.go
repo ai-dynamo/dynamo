@@ -721,7 +721,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateDynamoComponentsDeployments(context.Background(), betaDGD(t, tt.args.parentDynamoGraphDeployment), nil, nil, RollingUpdateContext{})
+			got, err := GenerateDynamoComponentsDeployments(betaDGD(t, tt.args.parentDynamoGraphDeployment), nil, nil, RollingUpdateContext{})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateDynamoComponentsDeployments() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -757,7 +757,7 @@ func Test_GetDynamoComponentDeploymentsGlobalNamespace(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateDynamoComponentsDeployments(context.Background(), betaDGD(t, dgd), nil, nil, RollingUpdateContext{})
+	got, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), nil, nil, RollingUpdateContext{})
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -819,7 +819,7 @@ func TestGenerateDynamoComponentsDeployments_UsesDynDeploymentWorkers(t *testing
 				},
 			}
 
-			dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, nil, RollingUpdateContext{})
+			dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
 			require.NoError(t, err)
 			dcd, ok := dcds[componentName]
 			require.True(t, ok, "expected generated DCD for component %q", componentName)
@@ -877,7 +877,7 @@ func TestGenerateDynamoComponentsDeployments_PropagatesPreservedAlphaServiceAnno
 	beta := &v1beta1.DynamoGraphDeployment{}
 	require.NoError(t, alpha.ConvertTo(beta))
 
-	got, err := GenerateDynamoComponentsDeployments(context.Background(), beta, nil, nil, RollingUpdateContext{})
+	got, err := GenerateDynamoComponentsDeployments(beta, nil, nil, RollingUpdateContext{})
 	require.NoError(t, err)
 	dcd := got["frontend"]
 	require.NotNil(t, dcd)
@@ -1148,7 +1148,6 @@ func Test_updateDynDeploymentConfig(t *testing.T) {
 
 func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 	type args struct {
-		ctx                       context.Context
 		dynamoDeploymentComponent *v1alpha1.DynamoComponentDeployment
 	}
 	tests := []struct {
@@ -1160,7 +1159,6 @@ func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 		{
 			name: "no env var",
 			args: args{
-				ctx: context.Background(),
 				dynamoDeploymentComponent: &v1alpha1.DynamoComponentDeployment{
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -1197,7 +1195,6 @@ func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 		{
 			name: "override workers and resources",
 			args: args{
-				ctx: context.Background(),
 				dynamoDeploymentComponent: &v1alpha1.DynamoComponentDeployment{
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -1251,7 +1248,6 @@ func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 		{
 			name: "override subset of resources",
 			args: args{
-				ctx: context.Background(),
 				dynamoDeploymentComponent: &v1alpha1.DynamoComponentDeployment{
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -1305,7 +1301,7 @@ func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := overrideWithDynDeploymentConfig(tt.args.ctx, tt.args.dynamoDeploymentComponent); (err != nil) != tt.wantErr {
+			if err := overrideWithDynDeploymentConfig(tt.args.dynamoDeploymentComponent); (err != nil) != tt.wantErr {
 				t.Errorf("overrideWithDynDeploymentConfig() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if diff := cmp.Diff(tt.args.dynamoDeploymentComponent, tt.expected); diff != "" {
@@ -7846,7 +7842,7 @@ func TestApplyDynDeploymentConfig_FallsBackToFrontendConfigKeyForRenamedFrontend
 		},
 	}
 
-	require.NoError(t, applyDynDeploymentConfig(context.Background(), dcd, commonconsts.DynamoServicePort))
+	require.NoError(t, applyDynDeploymentConfig(dcd, commonconsts.DynamoServicePort))
 
 	main := GetMainContainer(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 	require.NotNil(t, main)
@@ -7866,14 +7862,13 @@ func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {
 		},
 	}
 
-	ctx := context.Background()
 	ruCtx := RollingUpdateContext{
 		NewWorkerHash:     "aabb1122",
 		OldWorkerReplicas: map[string]int32{"prefill": 2},
 		NewWorkerReplicas: map[string]int32{"prefill": 2},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(ctx, betaDGD(t, dgd), &RestartState{}, nil, ruCtx)
+	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), &RestartState{}, nil, ruCtx)
 	assert.NoError(t, err)
 
 	// Worker DCD: hash suffix in name, hash label, replica override
@@ -7889,6 +7884,61 @@ func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {
 	assert.Equal(t, int32(1), *frontendDCD.Spec.Replicas)
 }
 
+func TestGenerateDynamoComponentsDeploymentsDoesNotMutateParentDGD(t *testing.T) {
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-dgd",
+			Namespace: "ns",
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Annotations: map[string]string{"dgd-annotation": "value"},
+			Labels:      map[string]string{"dgd-label": "value"},
+			Env:         []corev1.EnvVar{{Name: "GLOBAL_ENV", Value: "from-dgd"}},
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "prefill",
+					ComponentType: v1beta1.ComponentTypePrefill,
+					PodTemplate: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Annotations: map[string]string{"component-annotation": "value"},
+							Labels:      map[string]string{"component-label": "value"},
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name: commonconsts.MainContainerName,
+									Env:  []corev1.EnvVar{{Name: "COMPONENT_ENV", Value: "from-component"}},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	original := dgd.DeepCopy()
+
+	dcds, err := GenerateDynamoComponentsDeployments(
+		dgd,
+		&RestartState{},
+		map[string]string{"prefill": "2026-05-12T13:00:00Z"},
+		RollingUpdateContext{
+			NewWorkerHash:     "aabb1122",
+			OldWorkerReplicas: map[string]int32{"prefill": 1},
+			NewWorkerReplicas: map[string]int32{"prefill": 2},
+		},
+	)
+	require.NoError(t, err)
+	require.Empty(t, cmp.Diff(original, dgd))
+
+	prefillDCD := dcds["prefill"]
+	require.NotNil(t, prefillDCD)
+	assert.Equal(t, "aabb1122", GetPodTemplateLabels(&prefillDCD.Spec.DynamoComponentDeploymentSharedSpec)[commonconsts.KubeLabelDynamoWorkerHash])
+}
+
 func TestGenerateDynamoComponentsDeploymentsAddsWorkerClassForEPP(t *testing.T) {
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-dgd", Namespace: "ns"},
@@ -7900,7 +7950,7 @@ func TestGenerateDynamoComponentsDeploymentsAddsWorkerClassForEPP(t *testing.T) 
 		},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, &RestartState{}, nil, RollingUpdateContext{NewWorkerHash: "aabb1122"})
+	dcds, err := GenerateDynamoComponentsDeployments(dgd, &RestartState{}, nil, RollingUpdateContext{NewWorkerHash: "aabb1122"})
 	require.NoError(t, err)
 
 	prefillDCD := dcds["prefill"]
@@ -7936,7 +7986,7 @@ func TestGenerateDynamoComponentsDeployments_InferBackendFrameworkForGeneratedDC
 		},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), betaDGD(t, dgd), &RestartState{}, nil, RollingUpdateContext{NewWorkerHash: "2dad72b9"})
+	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), &RestartState{}, nil, RollingUpdateContext{NewWorkerHash: "2dad72b9"})
 	require.NoError(t, err)
 
 	assert.Equal(t, string(BackendFrameworkVLLM), dcds["decode"].Spec.BackendFramework)
@@ -7953,7 +8003,7 @@ func TestGenerateSingleDCD_NoRollingUpdate(t *testing.T) {
 		},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), betaDGD(t, dgd), &RestartState{}, nil, RollingUpdateContext{})
+	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), &RestartState{}, nil, RollingUpdateContext{})
 	assert.NoError(t, err)
 
 	dcd := dcds["worker"]
@@ -7981,7 +8031,7 @@ func TestGenerateSingleDCD_RollingUpdateZeroReplicas(t *testing.T) {
 		NewWorkerReplicas: map[string]int32{"decode": 0},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), betaDGD(t, dgd), &RestartState{}, nil, ruCtx)
+	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), &RestartState{}, nil, ruCtx)
 	assert.NoError(t, err)
 
 	decodeDCD := dcds["decode"]
@@ -8627,7 +8677,7 @@ func TestGenerateDynamoComponentsDeployments_SpecMetadataPropagation(t *testing.
 		},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), betaDGD(t, dgd), nil, nil, RollingUpdateContext{})
+	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), nil, nil, RollingUpdateContext{})
 	require.NoError(t, err)
 
 	dcd := dcds["frontend"]

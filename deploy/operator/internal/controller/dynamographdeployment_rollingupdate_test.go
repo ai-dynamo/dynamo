@@ -207,6 +207,33 @@ func TestShouldTriggerRollingUpdate(t *testing.T) {
 	}
 }
 
+func TestShouldTriggerRollingUpdate_IgnoresReplicaChanges(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Envs:          []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
+		},
+	})
+	legacyHash := legacyDGDWorkersSpecHash(t, dgd)
+	v2Hash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{
+		consts.AnnotationCurrentWorkerHash:   legacyHash,
+		consts.AnnotationCurrentWorkerHashV2: v2Hash,
+	}
+
+	dgd.Spec.Components[0].Replicas = ptr.To(int32(10))
+
+	r := createTestReconcilerWithStatus(dgd)
+	desired, err := r.desiredWorkerHashes(dgd)
+	require.NoError(t, err)
+	assert.Equal(t, legacyHash, desired.v1)
+	assert.Equal(t, v2Hash, desired.v2)
+
+	trigger, err := r.shouldTriggerRollingUpdate(dgd)
+	require.NoError(t, err)
+	assert.False(t, trigger)
+}
+
 func TestInitializeWorkerHashIfNeeded_FirstDeploy(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
@@ -359,7 +386,7 @@ func TestLegacyAlphaHashCompatibility_NoOpUpgradeUsesExistingWorkerGeneration(t 
 	require.Equal(t, legacyHash, rollingCtx.NewWorkerHash)
 	require.False(t, rollingCtx.InProgress())
 
-	dcds, err := dynamo.GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, nil, rollingCtx)
+	dcds, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, rollingCtx)
 	require.NoError(t, err)
 	require.Equal(t, "qwen-vllmdecodeworker-"+legacyHash, dcds["VllmDecodeWorker"].Name)
 	require.NotEqual(t, "qwen-vllmdecodeworker-"+v2Hash, dcds["VllmDecodeWorker"].Name)
