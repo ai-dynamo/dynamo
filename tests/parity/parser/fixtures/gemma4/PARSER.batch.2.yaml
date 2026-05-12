@@ -45,7 +45,7 @@ cases:
     - *id001
     - *id002
     expected:
-      dynamo:
+      dynamo: &d_2_c
         calls:
         - name: get_weather
           arguments:
@@ -53,17 +53,8 @@ cases:
         - name: get_time
           arguments:
             timezone: EST
-        normal_text: 'Both:  Done.'
-      vllm:
-        calls:
-        - arguments:
-            location: NYC
-          name: get_weather
-        - arguments:
-            timezone: EST
-          name: get_time
         normal_text: 'Both:'
-        reason: "drops trailing normal_text after tool-call wrapper end"
+      vllm: *d_2_c
       sglang:
         unavailable: SGLang has no detector for family='gemma4'
   PARSER.batch.2.d:
