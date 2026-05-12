@@ -37,19 +37,28 @@ opt-out and lets `run.rs` stay non-generic.
   release logic inside the `generate` stream body using RAII; use
   `abort` only for out-of-band notifications (e.g. telling a remote
   scheduler to cancel compute early).
-- `cleanup(&self) -> Result<(), DynamoError>` — called once on shutdown.
-  Guaranteed to run if `start()` succeeded, even if later registration or
-  serve fails.
+- `cleanup(&self) -> Result<(), DynamoError>` — called exactly once.
+  Runs after `start()` returns Ok on shutdown (even if registration /
+  serve fails), **and** after `start()` raises — so implementations
+  must be null-safe against partial state (inner LLM, sockets,
+  background tasks). Must also be idempotent: a second call after a
+  successful first returns `Ok(())` without re-entering teardown.
 
 ## Contract for `generate`
 
-Exactly one **terminal chunk** must be the last item yielded. A terminal
-chunk is one with `finish_reason = Some(...)`. Non-terminal chunks
-leave `finish_reason` unset. Terminal chunks may carry tokens (the
-final tokens of the completion) or be empty — the contract is that
-`finish_reason` marks the end.
+The stream item type is `Result<LLMEngineOutput, DynamoError>`.
 
-`completion_usage` on a terminal chunk is optional (but recommended —
+Exactly one **terminal item** must be the last item yielded. A terminal
+item is either:
+
+  * `Ok(chunk)` with `finish_reason = Some(...)`, or
+  * `Err(dynamo_err)` carrying a typed mid-stream failure.
+
+Non-terminal items are `Ok(chunk)` with `finish_reason` unset. Terminal
+`Ok` chunks may carry tokens (the final tokens of the completion) or be
+empty — the contract is that `finish_reason` (or an `Err`) marks the end.
+
+`completion_usage` on a terminal `Ok` chunk is optional (but recommended —
 the OpenAI frontend aggregates it when present).
 
 In debug builds, the framework wraps the stream in a validator that
@@ -58,7 +67,7 @@ release.
 
 Rule the validator enforces:
 
-1. No chunk may be yielded after a terminal chunk.
+1. No item may be yielded after a terminal item (terminal `Ok` chunk or `Err`).
 
 The validator does **not** enforce "stream must end with a terminal
 chunk" — a stream may end early for legitimate reasons (adapter breaks
@@ -86,16 +95,22 @@ upstream `LLMEngineOutput` constructors, optionally chained with the
 use dynamo_backend_common::{chunk, LLMEngineOutput, LLMEngineOutputExt, usage};
 
 // Non-terminal
-yield chunk::token(id);
+yield Ok(chunk::token(id));
 
 // Length-terminated with final token(s) and usage stats.
-yield LLMEngineOutput::length()
+yield Ok(LLMEngineOutput::length()
     .with_tokens(vec![final_id])
-    .with_usage(usage(prompt_len, n));
+    .with_usage(usage(prompt_len, n)));
 
 // Cancellation with partial-usage stats.
-yield LLMEngineOutput::cancelled()
-    .with_usage(usage(prompt_len, generated));
+yield Ok(LLMEngineOutput::cancelled()
+    .with_usage(usage(prompt_len, generated)));
+
+// Typed mid-stream error — preserves BackendError variant downstream.
+yield Err(DynamoError::builder()
+    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+    .message("bad request")
+    .build());
 
 // Also available upstream: LLMEngineOutput::stop(), LLMEngineOutput::error(msg).
 ```
@@ -127,6 +142,38 @@ aggregates it when present. `usage(prompt, completion)` computes
   Engine-originated failures use `ErrorType::Backend(BackendError::X)`
   where `BackendError` is the runtime's nested category enum. No custom
   error types inside backend-common.
+
+## Disaggregated Serving
+
+`DisaggregationMode` (`disagg.rs`) is metadata carried on `WorkerConfig`.
+`Aggregated` is the default and keeps existing callers unchanged.
+`CommonArgs` exposes the `--disaggregation-mode` flag (env
+`DYN_DISAGGREGATION_MODE`) so engines that flatten `CommonArgs` get the
+flag automatically.
+
+What the **`Worker`** does with the mode at registration time:
+
+- `Prefill` → register with `ModelType::Prefill` regardless of
+  `endpoint_types`, so the frontend's `PrefillRouter` targets it.
+- `Decode` → keep `endpoint_types`, but force-disable
+  `enable_local_indexer` (decode workers don't host the indexer
+  endpoint, so they must not advertise it).
+- `Aggregated` → register with the parsed `endpoint_types`.
+
+What an **`LLMEngine`** does with the mode (engine-side dispatch in
+`generate` and `drain`): see `examples/mocker` for a worked reference.
+The mocker stamps a synthetic `disaggregated_params` payload on the
+prefill terminal and rejects decode requests that arrive without
+`PrefillResult`. Real engines run an analogous protocol with their
+own KV transfer transport.
+
+`drain` is the prefill shutdown hook: poll-until-idle so in-flight
+NIXL/KV transfers finish before GPU memory is released. Aggregated and
+decode engines leave the default no-op.
+
+`PrefillResult` and `BootstrapInfo` are re-exported from
+`dynamo-backend-common` so engines don't need a separate `dynamo-llm`
+dep just to read these fields off `PreprocessedRequest`.
 
 ## Adding a New Engine
 
@@ -183,9 +230,15 @@ failed to start / crashed), `BackendError::Unknown` (uncategorized),
 could finish), `BackendError::Cancelled`, `BackendError::ResponseTimeout`,
 `BackendError::Disconnected`, `BackendError::ConnectionTimeout`.
 
-Mid-stream non-fatal errors are signalled via a terminal
-`LLMEngineOutput` with `finish_reason = Some(FinishReason::Error(msg))`.
-Use the existing `LLMEngineOutput::error(msg)` constructor.
+Mid-stream errors have two equivalent terminal forms:
+
+  * **Typed** (preferred): yield `Err(DynamoError)` from the stream.
+    Forwarded as `Annotated::error` with the `ErrorType::Backend(...)`
+    variant preserved end-to-end. Use this when the failure category
+    matters to the caller (e.g. `BackendError::InvalidArgument` vs.
+    `Disconnected`).
+  * **String**: yield `Ok(LLMEngineOutput::error(msg))`. Convenient for
+    pure message-level failures. Loses the typed `BackendError` variant.
 
 ## Logging
 
@@ -216,10 +269,15 @@ use dynamo_backend_common::testing;
 
 #[tokio::test]
 async fn my_engine_satisfies_contract() {
-    let engine = MyEngine::new_for_test();
-    testing::run_conformance(engine).await.expect("conformance");
+    testing::run_conformance(MyEngine::new_for_test)
+        .await
+        .expect("conformance");
 }
 ```
+
+`run_conformance` takes a factory rather than a built engine — it
+constructs one engine for the main lifecycle test and a second
+pristine engine for the "cleanup before start" check.
 
 The kit asserts:
 
@@ -234,6 +292,9 @@ The kit asserts:
   other terminal reason, or no terminal at all — the check raises
   `ConformanceFailure::CancellationIgnored`.
 - `cleanup()` succeeds and is idempotent (two calls in a row both Ok).
+- `cleanup()` is safe on a never-started engine — mirrors `Worker`'s
+  post-start-failure path. Failures here surface as
+  `CleanupWithoutStartFailed`.
 
 Also available: `testing::mock_context()` and
 `testing::cancelling_context(after)` for hand-written tests.

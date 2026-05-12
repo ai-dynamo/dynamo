@@ -140,6 +140,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 None
             },
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         })
     }
@@ -804,7 +805,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
-                    stop_reason: None,
                     logprobs: None,
                 }],
                 created: 1726000000,

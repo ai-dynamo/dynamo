@@ -1,29 +1,75 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Thin Python shim over ``dynamo._core.backend.Worker``.
+
+The lifecycle state machine, signal handling, discovery unregister,
+grace-period sleep, drain, cleanup, and 3-phase runtime shutdown all live
+in Rust (``dynamo_backend_common::Worker``). This module only:
+
+  * exposes the engine-author-friendly ``WorkerConfig`` dataclass with a
+    ``from_runtime_config`` helper, and
+  * drives the Rust ``Worker`` for a given ``LLMEngine`` instance.
+
+Engine semantics (``start``/``generate``/``abort``/``drain``/``cleanup``)
+remain the only thing engine authors implement.
+"""
+
+from __future__ import annotations
+
 import asyncio
-import enum
 import logging
-from collections.abc import AsyncGenerator
+import warnings
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional
 
-from dynamo._core import Context
-from dynamo.common.utils.endpoint_types import parse_endpoint_types
-from dynamo.common.utils.graceful_shutdown import install_signal_handlers
-from dynamo.common.utils.runtime import create_runtime
-from dynamo.llm import ModelInput, ModelRuntimeConfig, register_model
-from dynamo.llm.exceptions import (
-    CannotConnect,
-    DynamoException,
-    EngineShutdown,
-    Unknown,
-)
+from dynamo._core import backend as _backend
+from dynamo.common.constants import DisaggregationMode
+from dynamo.llm import ModelInput
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .engine import EngineConfig, GenerateChunk, GenerateRequest, LLMEngine
+from .engine import LLMEngine
 
 logger = logging.getLogger(__name__)
+
+# Map the user-facing `dynamo.common.constants.DisaggregationMode` (which
+# carries 4 modes including ENCODE) to the 3-mode Rust enum. ENCODE is not
+# supported by the unified abstraction yet — multimodal encode workers stay
+# on the legacy main.py path until they migrate.
+_DISAGG_MODE_TO_RUST = {
+    DisaggregationMode.AGGREGATED: _backend.DisaggregationMode.Aggregated,
+    DisaggregationMode.PREFILL: _backend.DisaggregationMode.Prefill,
+    DisaggregationMode.DECODE: _backend.DisaggregationMode.Decode,
+}
+
+
+def _to_rust_disaggregation_mode(mode: DisaggregationMode):
+    try:
+        return _DISAGG_MODE_TO_RUST[mode]
+    except KeyError as e:
+        raise NotImplementedError(
+            f"DisaggregationMode.{mode.name} is not supported by the unified "
+            "backend abstraction; use the legacy backend entry point for this "
+            "worker role"
+        ) from e
+
+
+def _coerce_disagg_mode(value) -> DisaggregationMode:
+    """`None` → `AGGREGATED`. Native `DisaggregationMode` passes through.
+    Foreign enums (e.g. TRT-LLM's local `DisaggregationMode`) coerce by
+    `name` — same name → same mode, regardless of value-string. Anything
+    else raises so a typo-string can't be silently mapped to AGG."""
+    if value is None:
+        return DisaggregationMode.AGGREGATED
+    if isinstance(value, DisaggregationMode):
+        return value
+    if isinstance(value, Enum) and value.name in DisaggregationMode.__members__:
+        return DisaggregationMode[value.name]
+    raise TypeError(
+        f"disaggregation_mode is {type(value).__name__}({value!r}); "
+        "expected dynamo.common.constants.DisaggregationMode"
+    )
 
 
 @dataclass
@@ -40,7 +86,16 @@ class WorkerConfig:
     event_plane: Optional[str] = None
     use_kv_events: bool = False
     custom_jinja_template: Optional[str] = None
-    metrics_labels: list = field(default_factory=list)
+    tool_call_parser: Optional[str] = None
+    reasoning_parser: Optional[str] = None
+    exclude_tools_when_tool_choice_none: bool = True
+    enable_local_indexer: bool = True
+    metrics_labels: list[tuple[str, str]] = field(default_factory=list)
+    # Disaggregation role; default AGGREGATED keeps existing callers unchanged.
+    # The Rust Worker reads this for registration (Prefill→ModelType::Prefill,
+    # Decode→disable local indexer); engines read it from their own runtime
+    # config to switch per-mode protocol behavior in `generate()`.
+    disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED
 
     @classmethod
     def from_runtime_config(
@@ -72,188 +127,80 @@ class WorkerConfig:
             "custom_jinja_template": getattr(
                 runtime_cfg, "custom_jinja_template", None
             ),
+            "tool_call_parser": getattr(runtime_cfg, "dyn_tool_call_parser", None),
+            "reasoning_parser": getattr(runtime_cfg, "dyn_reasoning_parser", None),
+            "exclude_tools_when_tool_choice_none": getattr(
+                runtime_cfg, "exclude_tools_when_tool_choice_none", True
+            ),
+            "enable_local_indexer": getattr(runtime_cfg, "enable_local_indexer", True),
         }
+        # vLLM/TRT-LLM expose `disaggregation_mode`; SGLang exposes
+        # `serving_mode`. Skip the probe when an override is supplied so
+        # backends with a foreign enum (TRT-LLM) bypass the coercer.
+        if "disaggregation_mode" not in overrides:
+            kwargs["disaggregation_mode"] = _coerce_disagg_mode(
+                getattr(
+                    runtime_cfg,
+                    "disaggregation_mode",
+                    getattr(runtime_cfg, "serving_mode", None),
+                )
+            )
         if model_input is not None:
             kwargs["model_input"] = model_input
         kwargs.update(overrides)
         return cls(**kwargs)
 
 
-class _LifecycleState(enum.Enum):
-    INIT = "init"  # _start_engine has not been called
-    STARTING = "starting"  # engine.start() in flight (lock held)
-    RUNNING = "running"  # engine.start() returned successfully
-    STOPPING = "stopping"  # engine.cleanup() in flight (lock held)
-    STOPPED = "stopped"  # cleanup done, never started, or start failed
-
-
 class Worker:
+    """Drive the Rust ``Worker`` for a single ``LLMEngine`` instance."""
+
     def __init__(self, engine: LLMEngine, config: WorkerConfig):
-        self.config = config
         self.engine = engine
-        # Lifecycle is INIT -> STARTING -> RUNNING -> STOPPING -> STOPPED.
-        # A single lock serializes start and cleanup so engine.start() and
-        # engine.cleanup() can never run concurrently and cleanup never
-        # observes a half-built engine. STARTING/STOPPING are only visible
-        # to the lock holder; other coroutines see INIT/RUNNING/STOPPED.
-        self._state = _LifecycleState.INIT
-        self._lifecycle_lock = asyncio.Lock()
-
-    async def _start_engine(self) -> EngineConfig:
-        # Holds _lifecycle_lock through the entire engine.start() call so a
-        # cleanup arriving on the signal-handler path waits for start to
-        # finish before deciding what to do. On exit the state is RUNNING
-        # (success) or STOPPED (failure / shutdown-before-start) — never
-        # STARTING.
-        async with self._lifecycle_lock:
-            if self._state == _LifecycleState.STOPPED:
-                # Shutdown signal arrived before start; abort cleanly.
-                raise EngineShutdown("Shutdown requested before engine start")
-            if self._state != _LifecycleState.INIT:
-                raise RuntimeError(
-                    f"_start_engine called in unexpected state: {self._state.value}"
-                )
-            self._state = _LifecycleState.STARTING
-            try:
-                config = await self.engine.start()
-            except BaseException:
-                # Mark stopped so a follow-up _cleanup_once is a no-op.
-                self._state = _LifecycleState.STOPPED
-                raise
-            self._state = _LifecycleState.RUNNING
-            return config
-
-    async def _cleanup_once(self) -> None:
-        # Serialized with _start_engine via _lifecycle_lock. Called from two
-        # paths: the graceful-shutdown signal handler (before runtime.shutdown
-        # tears down Rust services) and run()'s finally block. The lock makes
-        # whichever caller arrives second wait until the first finishes, and
-        # the state machine ensures engine.cleanup() runs at most once and
-        # only when the engine actually started.
-        async with self._lifecycle_lock:
-            if self._state in (_LifecycleState.INIT, _LifecycleState.STOPPED):
-                # INIT: shutdown arrived before _start_engine; nothing to do.
-                # STOPPED: already cleaned up, or start failed and never
-                # produced anything to clean up.
-                self._state = _LifecycleState.STOPPED
-                return
-            assert (
-                self._state == _LifecycleState.RUNNING
-            ), f"_cleanup_once invoked in unexpected state: {self._state.value}"
-            self._state = _LifecycleState.STOPPING
-            try:
-                await self.engine.cleanup()
-                logger.info("Engine cleanup complete")
-            finally:
-                # Mark stopped even on failure so a follow-up call no-ops;
-                # engines like vLLM/TRT-LLM tear down NCCL groups in
-                # cleanup() and a second attempt can hang or raise.
-                self._state = _LifecycleState.STOPPED
-
-    async def generate(
-        self, request: GenerateRequest, context: Context
-    ) -> AsyncGenerator[GenerateChunk, None]:
-        async def _monitor_cancel():
-            await context.async_killed_or_stopped()
-            try:
-                await self.engine.abort(context)
-            except Exception:
-                logger.debug("Error during request abort", exc_info=True)
-
-        cancel_task = asyncio.create_task(_monitor_cancel())
-        try:
-            async for chunk in self.engine.generate(request, context):
-                if context.is_stopped():
-                    break
-                if "index" not in chunk:
-                    chunk["index"] = 0
-                yield chunk
-        except DynamoException:
-            raise
-        except Exception as exc:
-            raise Unknown(f"Engine generate failed: {exc}") from exc
-        finally:
-            if not cancel_task.done():
-                cancel_task.cancel()
-                try:
-                    await cancel_task
-                except asyncio.CancelledError:
-                    pass
+        self.config = config
 
     async def run(self) -> None:
         configure_dynamo_logging()
-        cfg = self.config
-        shutdown_event = asyncio.Event()
 
-        try:
-            runtime, loop = create_runtime(
-                discovery_backend=cfg.discovery_backend,
-                request_plane=cfg.request_plane,
-                event_plane=cfg.event_plane,
-                use_kv_events=cfg.use_kv_events,
+        if self.config.use_kv_events:
+            # The runtime auto-detects NATS now; the field is preserved on
+            # the dataclass for source-compat with existing callers but no
+            # longer plumbed anywhere. Surface the silent-drop loudly so
+            # operators don't assume their setting took effect.
+            warnings.warn(
+                "WorkerConfig.use_kv_events is deprecated and ignored. NATS "
+                "enablement is determined automatically from the event-plane "
+                "configuration; remove this argument.",
+                DeprecationWarning,
+                stacklevel=2,
             )
-        except DynamoException:
-            raise
-        except Exception as exc:
-            raise CannotConnect(f"Failed to create runtime: {exc}") from exc
 
-        endpoint = runtime.endpoint(f"{cfg.namespace}.{cfg.component}.{cfg.endpoint}")
-        shutdown_endpoints = [endpoint]
-
-        install_signal_handlers(
-            loop,
-            runtime,
-            shutdown_endpoints,
-            shutdown_event,
-            cleanup_callback=self._cleanup_once,
+        runtime_cfg = _backend.RuntimeConfig(
+            discovery_backend=self.config.discovery_backend,
+            request_plane=self.config.request_plane,
+            event_plane=self.config.event_plane,
+        )
+        worker_cfg = _backend.WorkerConfig(
+            namespace=self.config.namespace,
+            component=self.config.component,
+            endpoint=self.config.endpoint,
+            model_name=self.config.model_name,
+            served_model_name=self.config.served_model_name,
+            model_input=self.config.model_input,
+            endpoint_types=self.config.endpoint_types,
+            custom_jinja_template=self.config.custom_jinja_template,
+            tool_call_parser=self.config.tool_call_parser,
+            reasoning_parser=self.config.reasoning_parser,
+            exclude_tools_when_tool_choice_none=(
+                self.config.exclude_tools_when_tool_choice_none
+            ),
+            enable_local_indexer=self.config.enable_local_indexer,
+            metrics_labels=list(self.config.metrics_labels),
+            disaggregation_mode=_to_rust_disaggregation_mode(
+                self.config.disaggregation_mode
+            ),
+            runtime=runtime_cfg,
         )
 
-        try:
-            engine_config = await self._start_engine()
-        except DynamoException:
-            raise
-        except Exception as exc:
-            raise EngineShutdown(f"Engine initialization failed: {exc}") from exc
-
-        try:
-            runtime_config = ModelRuntimeConfig()
-            if engine_config.total_kv_blocks is not None:
-                runtime_config.total_kv_blocks = engine_config.total_kv_blocks
-            if engine_config.max_num_seqs is not None:
-                runtime_config.max_num_seqs = engine_config.max_num_seqs
-            if engine_config.max_num_batched_tokens is not None:
-                runtime_config.max_num_batched_tokens = (
-                    engine_config.max_num_batched_tokens
-                )
-
-            model_type = parse_endpoint_types(cfg.endpoint_types)
-
-            served_name = cfg.served_model_name or cfg.model_name
-
-            await register_model(
-                cfg.model_input,
-                model_type,
-                endpoint,
-                cfg.model_name,
-                served_name,
-                context_length=engine_config.context_length,
-                kv_cache_block_size=engine_config.kv_cache_block_size,
-                runtime_config=runtime_config,
-                custom_template_path=cfg.custom_jinja_template,
-            )
-
-            logger.info(
-                "Serving %s on %s.%s.%s",
-                served_name,
-                cfg.namespace,
-                cfg.component,
-                cfg.endpoint,
-            )
-
-            await endpoint.serve_endpoint(
-                self.generate,
-                graceful_shutdown=True,
-                metrics_labels=cfg.metrics_labels,
-            )
-        finally:
-            await self._cleanup_once()
+        loop = asyncio.get_running_loop()
+        worker = _backend.Worker(self.engine, worker_cfg, loop)
+        await worker.run()

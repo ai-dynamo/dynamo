@@ -176,7 +176,7 @@ _Appears in:_
 | `namespace` _string_ | Namespace is the desired namespace for the created DynamoGraphDeployment.<br />If not specified, defaults to the DGDR namespace. |  | Optional: \{\} <br /> |
 | `labels` _object (keys:string, values:string)_ | Labels are additional labels to add to the DynamoGraphDeployment metadata.<br />These are merged with auto-generated labels from the profiling process. |  | Optional: \{\} <br /> |
 | `annotations` _object (keys:string, values:string)_ | Annotations are additional annotations to add to the DynamoGraphDeployment metadata. |  | Optional: \{\} <br /> |
-| `workersImage` _string_ | WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.<br />This image is used for both temporary DGDs created during online profiling and the final DGD.<br />If omitted, the image from the base config file (e.g., disagg.yaml) is used.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2" |  | Optional: \{\} <br /> |
+| `workersImage` _string_ | WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.<br />This image is used for both temporary DGDs created during online profiling and the final DGD.<br />If omitted, the image from the base config file (e.g., disagg.yaml) is used.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1" |  | Optional: \{\} <br /> |
 
 
 #### DeploymentStatus
@@ -382,7 +382,6 @@ _Appears in:_
 | `serviceName` _string_ | The name of the component |  |  |
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
-| `dynamoNamespace` _string_ | DynamoNamespace is deprecated and will be removed in a future version.<br />The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component |  | Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
@@ -426,7 +425,6 @@ _Appears in:_
 | `serviceName` _string_ | The name of the component |  |  |
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
-| `dynamoNamespace` _string_ | DynamoNamespace is deprecated and will be removed in a future version.<br />The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component |  | Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
@@ -1022,7 +1020,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `config` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.<br />The profiler will validate the configuration and report any errors. |  | Optional: \{\} <br />Type: object <br /> |
 | `configMapRef` _[ConfigMapKeySelector](#configmapkeyselector)_ | ConfigMapRef is an optional reference to a ConfigMap containing the DynamoGraphDeployment<br />base config file (disagg.yaml). This is separate from the profiling config above.<br />The path to this config will be set as engine.config in the profiling config. |  | Optional: \{\} <br /> |
-| `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2" |  | Required: \{\} <br /> |
+| `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1" |  | Required: \{\} <br /> |
 | `outputPVC` _string_ | OutputPVC is an optional PersistentVolumeClaim name for storing profiling output.<br />If specified, all profiling artifacts (logs, plots, configs, raw data) will be written<br />to this PVC instead of an ephemeral emptyDir volume. This allows users to access<br />complete profiling results after the job completes by mounting the PVC.<br />The PVC must exist in the same namespace as the DGDR.<br />If not specified, profiling uses emptyDir and only essential data is saved to ConfigMaps.<br />Note: ConfigMaps are still created regardless of this setting for planner integration. |  | Optional: \{\} <br /> |
 | `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core)_ | Resources specifies the compute resource requirements for the profiling job container.<br />If not specified, no resource requests or limits are set. |  | Optional: \{\} <br /> |
 | `tolerations` _[Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core) array_ | Tolerations allows the profiling job to be scheduled on nodes with matching taints.<br />For example, to schedule on GPU nodes, add a toleration for the nvidia.com/gpu taint. |  | Optional: \{\} <br /> |
@@ -1638,10 +1636,10 @@ _Appears in:_
 
 DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.
 
-v1beta1 is currently an UNSERVED version: it is defined so that conversion
-scaffolding and type generation can land ahead of the full multi-version
-wiring. Callers must continue to use v1alpha1 until v1beta1 is promoted to
-served in a subsequent MR.
+v1beta1 is a served version: the API server accepts reads and writes
+against it, and transparently converts to/from v1alpha1 (still the
+storage version until a later MR flips it). Conversion goes through the
+operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 
 
 
@@ -1679,7 +1677,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Required: \{\} <br /> |
+| `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
 | `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly. |  | Enum: [frontend worker prefill decode planner epp] <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate is the pod template used to create the component's pods.<br />The operator injects its defaults (image, command, env, ports, probes,<br />resources, volume mounts) into the container named `"main"` inside<br />`podTemplate.spec.containers`, merging user overrides by name. If no<br />container named `"main"` is present, the operator auto-generates it<br />with standard defaults. All other containers in `podTemplate.spec.containers`<br />are treated as user-managed sidecars: the operator does not inject<br />defaults into them, so sidecars must specify required fields (e.g. `image`)<br />themselves. The validation webhook rejects pod templates where a<br />non-`"main"` container is missing a required field such as `image`. |  | Optional: \{\} <br /> |
@@ -1708,8 +1706,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `backendFramework` _string_ | backendFramework specifies the backend framework. |  | Enum: [sglang vllm trtllm] <br />Required: \{\} <br /> |
-| `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Required: \{\} <br /> |
+| `backendFramework` _string_ | backendFramework specifies the backend framework. |  | Enum: [sglang vllm trtllm] <br /> |
+| `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
 | `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly. |  | Enum: [frontend worker prefill decode planner epp] <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate is the pod template used to create the component's pods.<br />The operator injects its defaults (image, command, env, ports, probes,<br />resources, volume mounts) into the container named `"main"` inside<br />`podTemplate.spec.containers`, merging user overrides by name. If no<br />container named `"main"` is present, the operator auto-generates it<br />with standard defaults. All other containers in `podTemplate.spec.containers`<br />are treated as user-managed sidecars: the operator does not inject<br />defaults into them, so sidecars must specify required fields (e.g. `image`)<br />themselves. The validation webhook rejects pod templates where a<br />non-`"main"` container is missing a required field such as `image`. |  | Optional: \{\} <br /> |
@@ -1731,10 +1729,10 @@ _Appears in:_
 
 DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 
-v1beta1 is currently an UNSERVED version: it is defined so that conversion
-scaffolding and type generation can land ahead of the full multi-version
-wiring. Callers must continue to use v1alpha1 until v1beta1 is promoted to
-served in a subsequent MR.
+v1beta1 is a served version: the API server accepts reads and writes
+against it, and transparently converts to/from v1alpha1 (still the
+storage version until a later MR flips it). Conversion goes through the
+operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 
 
 
@@ -1815,7 +1813,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />Can be a HuggingFace ID or a private model name. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `backend` _[BackendType](#backendtype)_ | Backend specifies the inference backend to use for profiling and deployment. | auto | Enum: [auto sglang trtllm vllm] <br />Optional: \{\} <br /> |
-| `image` _string_ | Image is the container image reference for the profiling job (frontend image).<br />Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.2". |  | Optional: \{\} <br /> |
+| `image` _string_ | Image is the container image reference for the profiling job (frontend image).<br />Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1". |  | Optional: \{\} <br /> |
 | `modelCache` _[ModelCacheSpec](#modelcachespec)_ | ModelCache provides optional PVC configuration for pre-downloaded model weights.<br />When provided, weights are loaded from the PVC instead of downloading from HuggingFace. |  | Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#hardwarespec)_ | Hardware describes the hardware resources available for profiling and deployment.<br />Typically auto-filled by the operator from cluster discovery. |  | Optional: \{\} <br /> |
 | `workload` _[WorkloadSpec](#workloadspec)_ | Workload defines the expected workload characteristics for SLA-based profiling. |  | Optional: \{\} <br /> |
@@ -1861,10 +1859,9 @@ The adapter acts as an intermediary between autoscalers and the DGD,
 ensuring that only the adapter controller modifies the DGD's component replicas.
 This prevents conflicts when multiple autoscaling mechanisms are in play.
 
-v1beta1 is currently an UNSERVED version: it is defined so that conversion
-scaffolding and type generation can land ahead of the full multi-version
-wiring. Callers must continue to use v1alpha1 until v1beta1 is promoted to
-served in a subsequent MR.
+v1alpha1 remains the storage version; conversion between served versions is
+handled by the operator's conversion webhook
+(see api/v1alpha1/dynamographdeploymentscalingadapter_conversion.go).
 
 
 
@@ -2089,7 +2086,7 @@ _Underlying type:_ _string_
 GPUSKUType is the AIC hardware system identifier for a supported GPU.
 
 _Validation:_
-- Enum: [gb200_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]
+- Enum: [gb200_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]
 
 _Appears in:_
 - [HardwareSpec](#hardwarespec)
@@ -2103,6 +2100,7 @@ _Appears in:_
 | `h100_pcie` |  |
 | `a100_sxm` | --- Ampere ---<br /> |
 | `a100_pcie` |  |
+| `a30` |  |
 | `l40s` | --- Ada ---<br /> |
 | `l40` |  |
 | `l4` |  |
@@ -2131,7 +2129,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU selects the GPU type to target.<br />When omitted, auto-detected by selecting the GPU with the highest<br />node count, then highest VRAM. In mixed-GPU clusters, set this to<br />choose which GPU type to use. Discovery and totalGpus are then<br />restricted to nodes matching this SKU. |  | Enum: [gb200_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300] <br />Optional: \{\} <br /> |
+| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU selects the GPU type to target.<br />When omitted, auto-detected by selecting the GPU with the highest<br />node count, then highest VRAM. In mixed-GPU clusters, set this to<br />choose which GPU type to use. Discovery and totalGpus are then<br />restricted to nodes matching this SKU. |  | Enum: [gb200_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie a30 l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300] <br />Optional: \{\} <br /> |
 | `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB.<br />When omitted, auto-detected from cluster GPU nodes. |  | Optional: \{\} <br /> |
 | `totalGpus` _integer_ | TotalGPUs is the GPU budget for profiling and deployment.<br />The profiler uses this to determine parallelism and replica count.<br />When omitted, computed by counting GPUs on discovered nodes<br />(filtered by gpuSku when set), temporarily capped at 32 to<br />limit profiler search space. This cap may be removed in a future<br />release. Set this field explicitly to override. |  | Optional: \{\} <br /> |
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node.<br />When omitted, auto-detected from cluster GPU nodes. |  | Optional: \{\} <br /> |
@@ -2602,7 +2600,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled indicates if checkpoint functionality is enabled |  |  |
 | `seccomp` _[CheckpointSeccompConfiguration](#checkpointseccompconfiguration)_ | Seccomp controls the localhost seccomp profile applied to checkpoint and<br />restore pods. A nil value means "use the default profile"; set<br />Seccomp.Disabled=true to disable seccomp injection entirely. |  |  |
-| `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Deprecated: Storage is retained for compatibility and ignored by the<br />current snapshot flow. Snapshot storage is discovered from the<br />snapshot-agent DaemonSet instead. |  |  |
+| `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Storage optionally configures the namespace-local checkpoint PVC that<br />workload pods mount. When omitted, the operator preserves the legacy<br />behavior of discovering storage from a snapshot-agent DaemonSet in the<br />workload namespace. |  |  |
 
 
 #### CheckpointOCIConfig
@@ -2627,8 +2625,8 @@ _Appears in:_
 
 
 
-Deprecated: CheckpointPVCConfig is retained for compatibility and ignored by
-the current snapshot flow.
+CheckpointPVCConfig configures the namespace-local PVC mounted into
+checkpoint and restore workload pods.
 
 
 
@@ -2637,8 +2635,12 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `pvcName` _string_ | PVCName is the legacy PVC name. |  |  |
-| `basePath` _string_ | BasePath is the legacy base directory within the PVC. |  |  |
+| `pvcName` _string_ | PVCName is the PVC name in each workload namespace. |  |  |
+| `basePath` _string_ | BasePath is the mount path inside checkpoint and restore workload pods. |  |  |
+| `create` _boolean_ | Create tells the operator to create the PVC in workload namespaces when<br />it is missing. When false, the PVC must already exist. |  |  |
+| `size` _string_ | Size is the storage request used when Create is true. |  |  |
+| `storageClassName` _string_ | StorageClassName is the optional StorageClass name used when Create is true. |  |  |
+| `accessMode` _string_ | AccessMode is the PVC access mode used when Create is true. |  |  |
 
 
 #### CheckpointS3Config
@@ -2685,8 +2687,8 @@ _Appears in:_
 
 
 
-Deprecated: CheckpointStorageConfiguration is retained for compatibility and
-ignored by the current snapshot flow.
+CheckpointStorageConfiguration configures checkpoint storage for operator
+pod mutations. Only PVC storage is implemented today.
 
 
 
@@ -2695,10 +2697,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `type` _string_ | Type is the legacy storage backend type: pvc, s3, or oci. |  |  |
-| `pvc` _[CheckpointPVCConfig](#checkpointpvcconfig)_ | PVC configuration for legacy pvc-based settings. |  |  |
-| `s3` _[CheckpointS3Config](#checkpoints3config)_ | S3 configuration for legacy s3-based settings. |  |  |
-| `oci` _[CheckpointOCIConfig](#checkpointociconfig)_ | OCI configuration for legacy oci-based settings. |  |  |
+| `type` _string_ | Type is the storage backend type. Only pvc is implemented today. |  |  |
+| `pvc` _[CheckpointPVCConfig](#checkpointpvcconfig)_ | PVC configuration for pvc-based settings. |  |  |
+| `s3` _[CheckpointS3Config](#checkpoints3config)_ | Deprecated: S3 is retained for compatibility and ignored. |  |  |
+| `oci` _[CheckpointOCIConfig](#checkpointociconfig)_ | Deprecated: OCI is retained for compatibility and ignored. |  |  |
 
 
 #### DRAConfiguration

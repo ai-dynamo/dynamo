@@ -263,6 +263,23 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
     if config.getoption("skip_service_restart", default=None):
         extra_args.append("--skip-service-restart")
 
+    # Forward -o cache_dir= so workers don't fall back to <cwd>/.pytest_cache.
+    # In CI cwd=/workspace is read-only for the runner uid, and pyproject's
+    # filterwarnings=["error"] escalates the resulting PytestCacheWarning into
+    # a test failure. Only forward cache_dir when absolute -- pytest's default
+    # ini value is the relative ".pytest_cache", and forwarding it would
+    # needlessly pin every worker to an explicit override outside our CI
+    # scenario.
+    cache_dir = config.getini("cache_dir")
+    if cache_dir and os.path.isabs(str(cache_dir)):
+        extra_args.extend(["-o", f"cache_dir={cache_dir}"])
+    # --basetemp is racy if forwarded directly: pytest rmtrees the given
+    # basetemp at session startup, so concurrent children sharing one root
+    # would wipe each other's temp trees. The orchestrator suffixes a unique
+    # per-test subdir before passing it to each child.
+    raw_basetemp = config.getoption("basetemp", default=None)
+    parent_basetemp = str(raw_basetemp) if raw_basetemp else None
+
     old_downloads_ready = os.environ.get(_GPU_PARALLEL_DOWNLOADS_READY_ENV)
     old_hf_offline = os.environ.get("HF_HUB_OFFLINE")
     downloads_ready = False
@@ -288,6 +305,7 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
             gpu_indices=gpu_indices,
             extra_pytest_args=extra_args or None,
             stream=is_stream,
+            parent_basetemp=parent_basetemp,
         )
     finally:
         if downloads_ready:
@@ -617,9 +635,9 @@ def pytest_collection_modifyitems(config, items):
             getattr(m, "name", "") == "skip" for m in getattr(item, "own_markers", [])
         ):
             continue
-        model_mark = item.get_closest_marker("model")
-        if model_mark and model_mark.args:
-            models_to_download.add(model_mark.args[0])
+        for model_mark in item.iter_markers("model"):
+            for repo_id in model_mark.args:
+                models_to_download.add(repo_id)
 
     # Store models to download in pytest config for fixtures to access
     if models_to_download:

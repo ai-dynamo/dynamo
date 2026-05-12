@@ -58,10 +58,15 @@ def _build_agg_candidate_engine_args(
 
 def _build_router_config(
     base_router_config: KvRouterConfig | None,
-    overlap_score_weight: float,
+    overlap_score_credit: float,
+    prefill_load_scale: float,
 ) -> KvRouterConfig:
     if base_router_config is None:
-        return KvRouterConfig(overlap_score_weight=overlap_score_weight)
+        return KvRouterConfig(
+            overlap_score_credit=overlap_score_credit,
+            prefill_load_scale=prefill_load_scale,
+        )
     router_config = base_router_config.copy()
-    router_config.overlap_score_weight = overlap_score_weight
+    router_config.overlap_score_credit = overlap_score_credit
+    router_config.prefill_load_scale = prefill_load_scale
     return router_config

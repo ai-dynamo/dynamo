@@ -110,15 +110,10 @@ pub async fn run_input(
         tracing::warn!(error = %e, "Agent tool event ingest initialization failed; continuing without tool traces");
     }
 
-    // Initialize audit bus + sink workers (off hot path; fan-out supported)
-    if crate::audit::config::policy().enabled {
-        let cap: usize = std::env::var("DYN_AUDIT_CAPACITY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1024);
-        crate::audit::bus::init(cap);
-        crate::audit::sink::spawn_workers_from_env().await?;
-        tracing::info!(cap, "Audit initialized");
+    // Initialize audit bus + sink workers (off hot path; fan-out supported).
+    // Soft-fail like trace: a failed audit sink should not bring the server down.
+    if let Err(e) = crate::audit::init_from_env_with_shutdown(drt.child_token()).await {
+        tracing::warn!(error = %e, "Audit initialization failed; continuing without audit sink");
     }
 
     match in_opt {
