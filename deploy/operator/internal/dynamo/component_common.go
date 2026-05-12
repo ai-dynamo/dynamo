@@ -67,6 +67,7 @@ type ComponentContext struct {
 	Discovery                      DiscoveryContext
 	EPPConfig                      *v1beta1.EPPConfig
 	WorkerHashSuffix               string
+	KvTransferPolicy               *v1alpha1.KvTransferPolicy
 }
 
 func (b *BaseComponentDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
