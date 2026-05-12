@@ -71,7 +71,7 @@ effective_isl = input_tokens - cached_tokens
 
 By default, that effective prefill load remains charged at full value until the first output token marks prefill complete. With `--router-prefill-load-model aic`, the router also asks AIC for an expected prefill duration using the effective ISL and cached prefix length. The active load tracker then decays the oldest active prefill request on each worker over that predicted duration. This only changes router-side prompt load accounting; it does not change backend execution.
 
-#### Decode Load Modeling (Advanced)
+#### Decode Load Modeling
 
 For decode load, the router tracks active KV blocks assigned to each worker. By default, this covers the prompt-side blocks that are already assigned to active requests and frees them when each request finishes.
 
