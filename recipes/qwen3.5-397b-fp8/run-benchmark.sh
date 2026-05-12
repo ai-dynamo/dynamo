@@ -9,9 +9,13 @@
 #   --hw <name>      → sources hw/<name>.env (VLLM_IMAGE, HW_NODE_SELECTOR, HW_TOLERATIONS)
 #   --config <name>  → resolves to DEPLOY_KIND, DEPLOY_NAME, BENCH_POD inline (see CONFIGS table below)
 #
+# Optional:
+#   --context <ctx>  → kubectl --context to pin every call (else KUBE_CONTEXT env, else current-context)
+#
 # Usage:
 #   ./run-benchmark.sh -n <namespace> --hw h100 --config vllm-serve
 #   ./run-benchmark.sh -n <namespace> --hw h100 --config dynamo-fd --step deploy
+#   KUBE_CONTEXT=my-cluster ./run-benchmark.sh -n <namespace> --hw h100 --config vllm-serve
 #
 # Steps: pvc | download | dataset | deploy | bench | retrieve | clean | all
 #   pvc/download/dataset are config-agnostic (idempotent prep).
@@ -22,6 +26,11 @@ NAMESPACE=""
 STEP="all"
 HW="h100"
 CONFIG=""
+# Pin the kubectl context for every call in this script so a parallel
+# `kubectl config use-context` (Claude tool runs, sibling sweeps) can't
+# silently retarget the sweep mid-run. Falls back to KUBE_CONTEXT env
+# var, then to the global current-context. CLI flag wins.
+KUBE_CONTEXT="${KUBE_CONTEXT:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -29,6 +38,7 @@ while [[ $# -gt 0 ]]; do
     --step) STEP="$2"; shift 2 ;;
     --hw) HW="$2"; shift 2 ;;
     --config) CONFIG="$2"; shift 2 ;;
+    --context) KUBE_CONTEXT="$2"; shift 2 ;;
     -h|--help)
       grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -82,7 +92,13 @@ set -a; . "$HW_ENV"; set +a
 echo "[hw]     $HW → image=$VLLM_IMAGE node=$HW_NODE_SELECTOR"
 echo "[config] $CONFIG → kind=$DEPLOY_KIND deploy=$DEPLOY_NAME bench-pod=$BENCH_POD"
 
-K="kubectl -n $NAMESPACE"
+if [[ -n "$KUBE_CONTEXT" ]]; then
+  K="kubectl --context=$KUBE_CONTEXT -n $NAMESPACE"
+  echo "[ctx]    pinned to $KUBE_CONTEXT"
+else
+  K="kubectl -n $NAMESPACE"
+  echo "[ctx]    using current-context $(kubectl config current-context 2>/dev/null || echo '<none>')"
+fi
 # Limit envsubst to our own hw vars so embedded ${MODEL_NAME} /
 # ${KEEP_INPUTS_JSON:-} shell vars in perf.yaml's inline script stay literal.
 TPL_VARS='$VLLM_IMAGE $HW_NODE_SELECTOR $HW_TOLERATIONS'

@@ -12,6 +12,8 @@
 # Usage:
 #   ./run-all-benchmarks.sh -n <namespace>                          # H100
 #   ./run-all-benchmarks.sh -n <namespace> --skip-prep              # already PVC/download/dataset-ready
+#   ./run-all-benchmarks.sh -n <namespace> --context <kube-context> # pin kubectl context for every call
+#   KUBE_CONTEXT=<ctx> ./run-all-benchmarks.sh -n <namespace>       # env-var form, same effect
 #
 # Prep step (PVC + model download + data gen) runs once before the first
 # deploy unless --skip-prep is passed.
@@ -20,17 +22,24 @@ set -euo pipefail
 NAMESPACE=""
 HW="h100"
 SKIP_PREP="0"
+KUBE_CONTEXT="${KUBE_CONTEXT:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -n|--namespace) NAMESPACE="$2"; shift 2 ;;
     --hw) HW="$2"; shift 2 ;;
     --skip-prep) SKIP_PREP="1"; shift ;;
+    --context) KUBE_CONTEXT="$2"; shift 2 ;;
     -h|--help)
       grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+# Build the forwarded arg list once so every $DRIVER call passes
+# --context through identically.
+DRIVER_EXTRA=()
+[[ -n "$KUBE_CONTEXT" ]] && DRIVER_EXTRA+=(--context "$KUBE_CONTEXT")
 if [[ -z "$NAMESPACE" ]]; then
   echo "ERROR: -n <namespace> required" >&2; exit 2
 fi
@@ -53,7 +62,7 @@ echo "[run-all] summary dir: $SUMMARY_DIR" | tee -a "$RUN_LOG"
 if [[ "$SKIP_PREP" != "1" ]]; then
   for step in pvc download dataset; do
     echo "[prep] $step" | tee -a "$RUN_LOG"
-    "$DRIVER" -n "$NAMESPACE" --hw "$HW" --config vllm-serve --step "$step" 2>&1 | tee -a "$RUN_LOG"
+    "$DRIVER" -n "$NAMESPACE" --hw "$HW" --config vllm-serve --step "$step" ${DRIVER_EXTRA[@]+"${DRIVER_EXTRA[@]}"} 2>&1 | tee -a "$RUN_LOG"
   done
 fi
 
@@ -61,11 +70,11 @@ for cfg in "${CONFIGS[@]}"; do
   echo "" | tee -a "$RUN_LOG"
   echo "========== [$cfg] ==========" | tee -a "$RUN_LOG"
   for step in deploy bench retrieve clean; do
-    "$DRIVER" -n "$NAMESPACE" --hw "$HW" --config "$cfg" --step "$step" 2>&1 | tee -a "$RUN_LOG"
+    "$DRIVER" -n "$NAMESPACE" --hw "$HW" --config "$cfg" --step "$step" ${DRIVER_EXTRA[@]+"${DRIVER_EXTRA[@]}"} 2>&1 | tee -a "$RUN_LOG"
   done
 done
 
 echo "" | tee -a "$RUN_LOG"
-echo "[run-all] all three configs done." | tee -a "$RUN_LOG"
+echo "[run-all] all configs done." | tee -a "$RUN_LOG"
 echo "[run-all] results: $SUMMARY_DIR/{vllm-serve,dynamo-fd}/" | tee -a "$RUN_LOG"
 echo "[run-all] next: python3 $HERE/compare.py $SUMMARY_DIR" | tee -a "$RUN_LOG"
