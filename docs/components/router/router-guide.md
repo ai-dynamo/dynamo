@@ -37,7 +37,9 @@ Backend workers register themselves using the `register_model` API, after which 
 | `--router-temperature <float>` | `0.0` | Controls routing randomness (0.0 = deterministic, higher = more random) |
 | `--kv-cache-block-size <size>` | Backend-specific | KV cache block size (should match backend config) |
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Enable/disable real-time KV event tracking |
-| `--router-kv-overlap-score-weight <float>` | `1.0` | Balance prefill vs decode optimization (higher = better TTFT) |
+| `--load-aware` / `--no-load-aware` | `--no-load-aware` | Route by active load without cache-reuse signals; implies `--router-mode kv` on the frontend |
+| `--router-kv-overlap-score-credit <float>` | `1.0` | Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 |
+| `--router-prefill-load-scale <float>` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
 | `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `--router-track-prefill-tokens` | Include prompt-side load in active worker load accounting |
 | `--router-prefill-load-model <none\|aic>` | `none` | Prompt-side load model. `aic` decays only the oldest active prefill using an AIC-predicted duration |
 | `--router-queue-threshold <float>` | `4.0` | Queue threshold fraction; enables priority scheduling via `priority` |
@@ -126,10 +128,12 @@ All CLI arguments can be configured via environment variables using the `DYN_` p
 | CLI Argument | Environment Variable | Default |
 |--------------|---------------------|---------|
 | `--router-mode kv` | `DYN_ROUTER_MODE=kv` | `round-robin` |
+| `--load-aware` | `DYN_ROUTER_LOAD_AWARE=true` | `false` |
 | `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` |
 | `--kv-cache-block-size` | `DYN_KV_CACHE_BLOCK_SIZE` | Backend-specific |
 | `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS=false` | `true` |
-| `--router-kv-overlap-score-weight` | `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT` | `1.0` |
+| `--router-kv-overlap-score-credit` | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` | `1.0` |
+| `--router-prefill-load-scale` | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `1.0` |
 | `--router-queue-policy` | `DYN_ROUTER_QUEUE_POLICY` | `fcfs` |
 | `DYN_ENCODER_CUDA_TO_CPU_RATIO` | `8` | Throughput ratio of a non-CPU worker relative to one CPU worker for `device-aware-weighted` routing |
 

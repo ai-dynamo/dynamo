@@ -41,7 +41,13 @@ from .sglang_prepost import (
     detect_force_reasoning_from_template,
     preprocess_chat_request,
 )
-from .utils import PreprocessError, extract_mm_urls, random_uuid, worker_warmup
+from .utils import (
+    PreprocessError,
+    extract_mm_urls,
+    nvext_extra_field_requested,
+    random_uuid,
+    worker_warmup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -197,12 +203,16 @@ def _build_dynamo_preproc(
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
 
     stop = request.get("stop")
+    stop_token_ids = request.get("stop_token_ids", [])
     if isinstance(stop, str):
         stop = [stop]
+    elif isinstance(stop, list) and all(
+        isinstance(item, int) and not isinstance(item, bool) for item in stop
+    ):
+        stop_token_ids = [*stop_token_ids, *stop]
+        stop = []
     elif stop is None:
         stop = []
-
-    stop_token_ids = request.get("stop_token_ids", [])
 
     # Handle logprobs
     logprobs_val = None
@@ -246,6 +256,7 @@ def _build_dynamo_preproc(
             # (e.g. <|tool_call|>) to detect calls. Mirrors the
             # post-processor's _skip_special_tokens logic.
             "skip_special_tokens": tool_call_parser is None,
+            "return_tokens_as_token_ids": request.get("return_tokens_as_token_ids"),
         },
         "eos_token_ids": [eos_token_id] if eos_token_id is not None else [],
         "annotations": [],
@@ -519,6 +530,7 @@ class SglangProcessor:
                 new_ids = engine_response["token_ids"]
                 raw_finish = engine_response.get("finish_reason")
                 finish_reason = _map_finish_reason(raw_finish)
+                stop_reason = engine_response.get("stop_reason")
 
                 if usage := engine_response.get("completion_usage"):
                     pending_usage = usage
@@ -554,6 +566,10 @@ class SglangProcessor:
                         }
                         if pending_usage:
                             dynamo_out["usage"] = pending_usage
+                        if stop_reason is not None and nvext_extra_field_requested(
+                            request, "stop_reason"
+                        ):
+                            dynamo_out["nvext"] = {"stop_reason": stop_reason}
 
                         yield dynamo_out
 

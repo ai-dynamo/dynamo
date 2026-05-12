@@ -58,7 +58,7 @@ impl Indexer {
         block_size: u32,
         model_name: Option<&str>,
     ) -> Result<Self> {
-        if kv_router_config.overlap_score_weight == 0.0 {
+        if kv_router_config.overlap_score_credit == 0.0 {
             return Ok(Self::None);
         }
 
@@ -240,7 +240,7 @@ impl Indexer {
             Self::Remote(_) => Ok(Vec::new()),
             Self::None => {
                 panic!(
-                    "Cannot dump events: indexer does not exist (is overlap_score_weight set to 0?)"
+                    "Cannot dump events: indexer does not exist (is overlap_score_credit set to 0?)"
                 );
             }
         }
