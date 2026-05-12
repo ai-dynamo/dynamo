@@ -21,6 +21,15 @@ use super::utils::{KubeDiscoveryMode, PodInfo, extract_endpoint_info, extract_re
 
 const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
 
+#[derive(Clone)]
+struct CachedCrMetadata {
+    metadata: Arc<DiscoveryMetadata>,
+    generation: i64,
+    uid: Option<String>,
+}
+
+type CrMetadataCache = HashMap<String, CachedCrMetadata>;
+
 /// Readiness data source for the discovery daemon.
 ///
 /// Pod mode watches EndpointSlices (one entry per ready pod).
@@ -140,7 +149,8 @@ impl DiscoveryDaemon {
     /// Run the discovery daemon.
     ///
     /// Watches a readiness source and DynamoWorkerMetadata CRs. An entry is
-    /// included in the snapshot only if it appears ready AND has a matching CR.
+    /// included in the snapshot only if it appears ready AND has valid current
+    /// or cached metadata from a matching CR.
     pub async fn run(
         self,
         watch_tx: tokio::sync::watch::Sender<Arc<MetadataSnapshot>>,
@@ -191,6 +201,8 @@ impl DiscoveryDaemon {
         // Event-driven loop with debouncing
         let mut sequence = 0u64;
         let mut prev_snapshot = MetadataSnapshot::empty();
+        // Keeps transient invalid CR updates from looking like removals.
+        let mut valid_cr_cache: CrMetadataCache = HashMap::new();
 
         loop {
             tokio::select! {
@@ -200,7 +212,10 @@ impl DiscoveryDaemon {
 
                     tracing::trace!("Debounce window elapsed, processing snapshot");
 
-                    match self.aggregate_snapshot(&source, &cr_reader, sequence).await {
+                    match self
+                        .aggregate_snapshot(&source, &cr_reader, &mut valid_cr_cache, sequence)
+                        .await
+                    {
                         Ok(snapshot) => {
                             if snapshot.has_changes_from(&prev_snapshot) {
                                 prev_snapshot = snapshot.clone();
@@ -233,6 +248,7 @@ impl DiscoveryDaemon {
         &self,
         source: &DiscoverySource,
         cr_reader: &reflector::Store<DynamoWorkerMetadata>,
+        valid_cr_cache: &mut CrMetadataCache,
         sequence: u64,
     ) -> Result<MetadataSnapshot> {
         let start = std::time::Instant::now();
@@ -246,19 +262,38 @@ impl DiscoveryDaemon {
         );
 
         let cr_state = cr_reader.state();
-        let mut cr_map: HashMap<String, (Arc<DiscoveryMetadata>, i64)> = HashMap::new();
+        let mut cr_map: CrMetadataCache = HashMap::new();
+        let mut invalid_crs: HashMap<String, Option<String>> = HashMap::new();
+        let mut observed_crs: HashSet<String> = HashSet::new();
 
         for arc_cr in cr_state.iter() {
             let Some(cr_name) = arc_cr.metadata.name.as_ref() else {
                 continue;
             };
 
+            observed_crs.insert(cr_name.clone());
             let generation = arc_cr.metadata.generation.unwrap_or(0);
+            let uid = arc_cr.metadata.uid.clone();
+
+            if arc_cr.spec.data.is_null() {
+                tracing::debug!(
+                    "DynamoWorkerMetadata CR '{}' has null spec.data; reusing last valid metadata if available",
+                    cr_name
+                );
+                invalid_crs.insert(cr_name.clone(), uid);
+                continue;
+            }
 
             match serde_json::from_value::<DiscoveryMetadata>(arc_cr.spec.data.clone()) {
                 Ok(metadata) => {
                     tracing::trace!("Loaded metadata from CR '{cr_name}'");
-                    cr_map.insert(cr_name.clone(), (Arc::new(metadata), generation));
+                    let cached = CachedCrMetadata {
+                        metadata: Arc::new(metadata),
+                        generation,
+                        uid,
+                    };
+                    cr_map.insert(cr_name.clone(), cached.clone());
+                    valid_cr_cache.insert(cr_name.clone(), cached);
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -266,9 +301,12 @@ impl DiscoveryDaemon {
                         cr_name,
                         e
                     );
+                    invalid_crs.insert(cr_name.clone(), uid);
                 }
             }
         }
+
+        valid_cr_cache.retain(|cr_name, _| observed_crs.contains(cr_name));
 
         tracing::trace!("Daemon loaded {} DynamoWorkerMetadata CRs", cr_map.len());
 
@@ -276,15 +314,34 @@ impl DiscoveryDaemon {
         let mut generations: HashMap<u64, i64> = HashMap::new();
 
         for (instance_id, cr_key) in ready_entries {
-            if let Some((metadata, generation)) = cr_map.get(&cr_key) {
-                instances.insert(instance_id, metadata.clone());
-                generations.insert(instance_id, *generation);
+            if let Some(cached) = cr_map.get(&cr_key) {
+                instances.insert(instance_id, cached.metadata.clone());
+                generations.insert(instance_id, cached.generation);
                 tracing::trace!(
                     "Included '{}' (instance_id={:x}, generation={}) in snapshot",
                     cr_key,
                     instance_id,
-                    generation
+                    cached.generation
                 );
+            } else if let Some(uid) = invalid_crs.get(&cr_key) {
+                if let Some(cached) =
+                    cached_metadata_for_invalid_cr(&cr_key, uid.as_deref(), valid_cr_cache)
+                {
+                    instances.insert(instance_id, cached.metadata.clone());
+                    generations.insert(instance_id, cached.generation);
+                    tracing::trace!(
+                        "Included cached metadata for '{}' (instance_id={:x}, generation={}) because current CR data is not valid",
+                        cr_key,
+                        instance_id,
+                        cached.generation
+                    );
+                } else {
+                    tracing::trace!(
+                        "Skipping '{}' (instance_id={:x}): DynamoWorkerMetadata CR data is not valid yet",
+                        cr_key,
+                        instance_id
+                    );
+                }
             } else {
                 tracing::trace!(
                     "Skipping '{}' (instance_id={:x}): no DynamoWorkerMetadata CR found",
@@ -309,5 +366,51 @@ impl DiscoveryDaemon {
             sequence,
             timestamp: std::time::Instant::now(),
         })
+    }
+}
+
+fn cached_metadata_for_invalid_cr<'a>(
+    cr_key: &str,
+    uid: Option<&str>,
+    valid_cr_cache: &'a CrMetadataCache,
+) -> Option<&'a CachedCrMetadata> {
+    let cached = valid_cr_cache.get(cr_key)?;
+
+    if cached.uid.as_deref() == uid {
+        Some(cached)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cached_cr(uid: &str) -> CachedCrMetadata {
+        CachedCrMetadata {
+            metadata: Arc::new(DiscoveryMetadata::new()),
+            generation: 7,
+            uid: Some(uid.to_string()),
+        }
+    }
+
+    #[test]
+    fn cached_metadata_for_invalid_cr_reuses_same_kube_object() {
+        let mut cache = CrMetadataCache::new();
+        cache.insert("worker-a".to_string(), cached_cr("uid-1"));
+
+        let cached = cached_metadata_for_invalid_cr("worker-a", Some("uid-1"), &cache)
+            .expect("cache should be reused for the same CR UID");
+
+        assert_eq!(cached.generation, 7);
+    }
+
+    #[test]
+    fn cached_metadata_for_invalid_cr_rejects_recreated_kube_object() {
+        let mut cache = CrMetadataCache::new();
+        cache.insert("worker-a".to_string(), cached_cr("uid-1"));
+
+        assert!(cached_metadata_for_invalid_cr("worker-a", Some("uid-2"), &cache).is_none());
     }
 }
