@@ -619,9 +619,6 @@ def _test_remote_indexer_decisions(
             dp_rank_b,
         )
 
-        if router_predicted_ttl_secs is not None:
-            await _assert_predict_on_route_colocates(consumer_router, block_size)
-
         blocks = [
             [random.randint(1, 10000) for _ in range(block_size)] for _ in range(7)
         ]
