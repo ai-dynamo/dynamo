@@ -17,13 +17,12 @@ The γ-class subclass (ReplayFakeActuator) is in replay/replay_fake_actuator.py.
 
 from __future__ import annotations
 
-import asyncio
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
-from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.config.defaults import SubComponentType
+from dynamo.planner.connectors.base import PlannerConnector
 
 if TYPE_CHECKING:
     from dynamo.planner.tests.testbed.fake_planner_metrics import FakePlannerMetrics
@@ -58,7 +57,11 @@ class FakeActuator(PlannerConnector):
         self._sku_max_w = int(system_spec.sku_max_w)
 
         self._applied_n_p: int = 1
-        self._applied_n_d: int = getattr(scenario.fleet, "gpus_per_decode_engine", 4) if scenario.fleet else 4
+        self._applied_n_d: int = (
+            getattr(scenario.fleet, "gpus_per_decode_engine", 4)
+            if scenario.fleet
+            else 4
+        )
         self._applied_cap_p: int = scenario.planner.prefill_engine_gpu_power_limit
         self._applied_cap_d: int = scenario.planner.decode_engine_gpu_power_limit
         self._annotations: dict[str, dict[str, str]] = {}  # pod_name → {key: value}
@@ -145,7 +148,9 @@ class FakeActuator(PlannerConnector):
         if fault_frac is not None:
             if random.random() < fault_frac:
                 self._metrics.admission_partial_success_total.inc()
-                raise RuntimeError(f"503 Service Unavailable (synthetic POST fault to {pod})")
+                raise RuntimeError(
+                    f"503 Service Unavailable (synthetic POST fault to {pod})"
+                )
 
     def applied_caps_snapshot(self) -> AppliedCaps:
         return AppliedCaps(cap_p=self._applied_cap_p, cap_d=self._applied_cap_d)

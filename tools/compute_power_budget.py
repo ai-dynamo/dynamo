@@ -70,6 +70,7 @@ _NON_GPU_OVERHEAD_PER_NODE_W = 1_500  # conservative default (CPU + NIC + storag
 # Data types
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SizingInput:
     rack_capacity_w: int
@@ -90,7 +91,7 @@ class SizingResult:
 
     # Sanity checks
     sum_of_dgd_limits: int
-    max_sustained_draw_at_tdp: int   # all GPUs at TDP simultaneously
+    max_sustained_draw_at_tdp: int  # all GPUs at TDP simultaneously
 
     def print_report(self) -> None:
         print("\n" + "=" * 60)
@@ -145,7 +146,7 @@ class SizingResult:
         print()
         print("  Additional planner settings to review:")
         print(f"  power_agent_safe_default_watts: {math.ceil(self.gpu_tdp_w * 0.70)}")
-        print(f"    (= 70% of TDP; adjust for your model's idle power profile)")
+        print("    (= 70% of TDP; adjust for your model's idle power profile)")
         print()
         print("  Cold-start coefficient recommendations (H200 SXM, dense):")
         print("    aic_initial_c_ttft         : 1.15")
@@ -159,8 +160,11 @@ class SizingResult:
 # Core sizing logic
 # ---------------------------------------------------------------------------
 
+
 def compute_budget(inp: SizingInput) -> SizingResult:
-    usable_w = math.floor(inp.rack_capacity_w * inp.headroom_factor) - inp.non_gpu_overhead_w
+    usable_w = (
+        math.floor(inp.rack_capacity_w * inp.headroom_factor) - inp.non_gpu_overhead_w
+    )
     if usable_w <= 0:
         raise ValueError(
             f"usable_w={usable_w} W is non-positive. "
@@ -202,6 +206,7 @@ def compute_budget(inp: SizingInput) -> SizingResult:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def _parse_gpu_sku(value: str) -> Optional[int]:
     slug = value.lower().replace("-", "_")

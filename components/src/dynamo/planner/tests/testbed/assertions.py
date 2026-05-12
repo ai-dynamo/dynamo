@@ -27,22 +27,48 @@ from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from dynamo.planner.tests.testbed.recorder import TickHistory, TickSnapshot
-    from dynamo.planner.tests.testbed.scenarios import Assertion, ScenarioSpec
+    from dynamo.planner.tests.testbed.scenarios import (
+        ExprAssertion,
+        ScenarioSpec,
+        StructuredAssertion,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_ALLOWED_NAMES = frozenset({"history", "planner", "counters", "abs", "min", "max", "len"})
+_ALLOWED_NAMES = frozenset(
+    {"history", "planner", "counters", "abs", "min", "max", "len"}
+)
 _ALLOWED_NODE_TYPES = (
-    ast.Expression, ast.BoolOp, ast.UnaryOp, ast.BinOp, ast.Compare,
-    ast.Call, ast.Attribute, ast.Subscript, ast.Index,
-    ast.Name, ast.Constant,  # ast.Num/ast.Str deprecated in 3.8, removed in 3.14
-    ast.And, ast.Or, ast.Not,
-    ast.Gt, ast.GtE, ast.Lt, ast.LtE, ast.Eq, ast.NotEq,
-    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod,
-    ast.USub, ast.UAdd,
+    ast.Expression,
+    ast.BoolOp,
+    ast.UnaryOp,
+    ast.BinOp,
+    ast.Compare,
+    ast.Call,
+    ast.Attribute,
+    ast.Subscript,
+    ast.Index,
+    ast.Name,
+    ast.Constant,  # ast.Num/ast.Str deprecated in 3.8, removed in 3.14
+    ast.And,
+    ast.Or,
+    ast.Not,
+    ast.Gt,
+    ast.GtE,
+    ast.Lt,
+    ast.LtE,
+    ast.Eq,
+    ast.NotEq,
+    ast.Add,
+    ast.Sub,
+    ast.Mult,
+    ast.Div,
+    ast.Mod,
+    ast.USub,
+    ast.UAdd,
     ast.Load,
 )
 
@@ -52,8 +78,14 @@ def _safe_eval(expr: str, context: dict[str, Any]) -> Any:
     tree = ast.parse(expr, mode="eval")
     for node in ast.walk(tree):
         if not isinstance(node, _ALLOWED_NODE_TYPES):
-            raise ValueError(f"Disallowed AST node type {type(node).__name__} in expr: {expr!r}")
-        if isinstance(node, ast.Name) and node.id not in _ALLOWED_NAMES and node.id not in context:
+            raise ValueError(
+                f"Disallowed AST node type {type(node).__name__} in expr: {expr!r}"
+            )
+        if (
+            isinstance(node, ast.Name)
+            and node.id not in _ALLOWED_NAMES
+            and node.id not in context
+        ):
             raise ValueError(f"Unknown name {node.id!r} in expr: {expr!r}")
     return eval(compile(tree, "<assertion>", "eval"), {"__builtins__": {}}, context)
 
@@ -110,7 +142,10 @@ def evaluate_all(
     counters = counters or {}
 
     for assertion in parsed:
-        from dynamo.planner.tests.testbed.scenarios import StructuredAssertion, ExprAssertion
+        from dynamo.planner.tests.testbed.scenarios import (
+            ExprAssertion,
+            StructuredAssertion,
+        )
 
         if isinstance(assertion, StructuredAssertion):
             _eval_structured(assertion, history, scenario, counters, failures)
@@ -131,8 +166,6 @@ def _eval_structured(
     counters: dict[str, Any],
     failures: list[str],
 ) -> None:
-    from dynamo.planner.tests.testbed.scenarios import StructuredAssertion
-
     desc = a.description or f"field={a.field} op={a.op} value={a.value}"
 
     # Resolve expected value
@@ -154,19 +187,27 @@ def _eval_structured(
     if a.at_tick is not None:
         tick_idx = a.at_tick
         if tick_idx >= len(history):
-            failures.append(f"[{desc}] at_tick={tick_idx} but history only has {len(history)} ticks")
+            failures.append(
+                f"[{desc}] at_tick={tick_idx} but history only has {len(history)} ticks"
+            )
             return
         snaps = [history[tick_idx]]
-        _check_snaps(snaps, a.field, a.op, expected, tolerance, desc, failures, mode="at_tick")
+        _check_snaps(
+            snaps, a.field, a.op, expected, tolerance, desc, failures, mode="at_tick"
+        )
 
     elif a.always is True:
         snaps = list(history.snapshots)
-        _check_snaps(snaps, a.field, a.op, expected, tolerance, desc, failures, mode="always")
+        _check_snaps(
+            snaps, a.field, a.op, expected, tolerance, desc, failures, mode="always"
+        )
 
     elif a.eventually_by_tick is not None:
         limit = min(a.eventually_by_tick, len(history) - 1)
         snaps = history.snapshots[: limit + 1]
-        _check_snaps_eventually(snaps, a.field, a.op, expected, tolerance, desc, failures)
+        _check_snaps_eventually(
+            snaps, a.field, a.op, expected, tolerance, desc, failures
+        )
 
 
 def _check_snaps(
@@ -234,14 +275,18 @@ def _eval_expr(
     if a.at_tick is not None:
         tick_idx = a.at_tick
         if tick_idx >= len(history):
-            failures.append(f"[{desc}] at_tick={tick_idx} but history only has {len(history)} ticks")
+            failures.append(
+                f"[{desc}] at_tick={tick_idx} but history only has {len(history)} ticks"
+            )
             return
         _eval_expr_at(a.expr, context, desc, failures, tick_idx)
 
     elif a.always is True:
         for snap in history.snapshots:
             context["history"] = history.snapshots
-            if not _eval_expr_at(a.expr, context, desc, failures, snap.tick, silent=True):
+            if not _eval_expr_at(
+                a.expr, context, desc, failures, snap.tick, silent=True
+            ):
                 failures.append(f"[{desc}] FAIL at tick {snap.tick}")
 
     elif a.eventually_by_tick is not None:
@@ -251,7 +296,9 @@ def _eval_expr(
                     return
             except Exception:
                 pass
-        failures.append(f"[{desc}] FAIL: expression never true by tick {a.eventually_by_tick}")
+        failures.append(
+            f"[{desc}] FAIL: expression never true by tick {a.eventually_by_tick}"
+        )
 
 
 def _eval_expr_at(
@@ -266,7 +313,9 @@ def _eval_expr_at(
         result = _safe_eval(expr, context)
         if not result:
             if not silent:
-                failures.append(f"[{desc}] FAIL at tick {tick}: expr evaluated to {result!r}")
+                failures.append(
+                    f"[{desc}] FAIL at tick {tick}: expr evaluated to {result!r}"
+                )
             return False
         return True
     except Exception as e:

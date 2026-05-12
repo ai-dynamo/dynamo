@@ -44,9 +44,7 @@ try:
         except Exception as _exc:
             # Truncate huge ValidationError stacks; the first line names the
             # offending field which is what authors need.
-            _LOAD_ERRORS.append(
-                f"  {_yaml_path.stem}: {str(_exc).splitlines()[0]}"
-            )
+            _LOAD_ERRORS.append(f"  {_yaml_path.stem}: {str(_exc).splitlines()[0]}")
 except ImportError as _e:  # pragma: no cover — only when packaging is broken
     _LOAD_ERRORS.append(f"  Could not import scenarios module: {_e}")
 
@@ -71,6 +69,7 @@ def test_scenario_yaml_parses(scenario_path: Path) -> None:
 
     scenario = load_scenario(scenario_path)
     assert scenario.name, f"{scenario_path.stem} has no name"
-    assert scenario.class_name in ("alpha", "gamma"), (
-        f"{scenario_path.stem} has invalid class={scenario.class_name!r}"
-    )
+    assert scenario.class_name in (
+        "alpha",
+        "gamma",
+    ), f"{scenario_path.stem} has invalid class={scenario.class_name!r}"

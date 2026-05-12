@@ -9,20 +9,24 @@ Guards:
 """
 from __future__ import annotations
 
-import math
 import statistics
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
+if TYPE_CHECKING:
+    from dynamo.planner.tests.testbed.recorder import TickHistory
 
 _SCENARIOS_DIR = Path(__file__).parent.parent / "scenarios"
 
 
-def _run_scenario_with_bias(scenario_name: str, power_bias_decode: float = 1.0) -> "TickHistory":
+def _run_scenario_with_bias(
+    scenario_name: str, power_bias_decode: float = 1.0
+) -> "TickHistory":
     """Load a scenario, override decode bias to the given value, and run it."""
-    from dynamo.planner.tests.testbed.scenarios import load_scenario
     from dynamo.planner.tests.testbed.runner import ScenarioRunner
+    from dynamo.planner.tests.testbed.scenarios import load_scenario
 
     yaml_path = _SCENARIOS_DIR / f"{scenario_name}.yaml"
     scenario = load_scenario(yaml_path)
@@ -46,7 +50,9 @@ def _median_c_power_d(history: "TickHistory") -> float:
 
 
 def _late_avg_c_power_d(history: "TickHistory", last_n: int = 10) -> float:
-    values = [s.c_power_d for s in history.snapshots[-last_n:] if s.c_power_d is not None]
+    values = [
+        s.c_power_d for s in history.snapshots[-last_n:] if s.c_power_d is not None
+    ]
     if not values:
         pytest.skip("No c_power_d values in last ticks")
     return sum(values) / len(values)
@@ -58,11 +64,13 @@ def _late_avg_c_power_d(history: "TickHistory", last_n: int = 10) -> float:
 @pytest.mark.testbed
 def test_alpha_no_bias() -> None:
     """A1 with bias=1.0: c_power_d converges to [0.95, 1.05] (AIC-echo case)."""
-    history = _run_scenario_with_bias("A1_power_under_estimate_decode", power_bias_decode=1.0)
-    avg = _late_avg_c_power_d(history)
-    assert 0.90 <= avg <= 1.10, (
-        f"α no-bias: expected c_power_d in [0.90, 1.10]; got {avg:.4f}"
+    history = _run_scenario_with_bias(
+        "A1_power_under_estimate_decode", power_bias_decode=1.0
     )
+    avg = _late_avg_c_power_d(history)
+    assert (
+        0.90 <= avg <= 1.10
+    ), f"α no-bias: expected c_power_d in [0.90, 1.10]; got {avg:.4f}"
 
 
 # ---------------------------------------------------------------------------
@@ -76,11 +84,13 @@ def test_gamma_no_bias() -> None:
         "dynamo.llm",
         reason="γ self-consistency requires dynamo.llm (mocker) package",
     )
-    history = _run_scenario_with_bias("G1_realistic_decode_drift", power_bias_decode=1.0)
-    avg = _late_avg_c_power_d(history)
-    assert 0.90 <= avg <= 1.10, (
-        f"γ no-bias: expected c_power_d in [0.90, 1.10]; got {avg:.4f}"
+    history = _run_scenario_with_bias(
+        "G1_realistic_decode_drift", power_bias_decode=1.0
     )
+    avg = _late_avg_c_power_d(history)
+    assert (
+        0.90 <= avg <= 1.10
+    ), f"γ no-bias: expected c_power_d in [0.90, 1.10]; got {avg:.4f}"
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +115,7 @@ def test_alpha_gamma_agree_on_decode_drift() -> None:
     # this cross-validation meaningless.
     try:
         from dynamo.llm import PlannerReplayBridge  # type: ignore[import]
+
         if not hasattr(PlannerReplayBridge, "from_synthetic_disagg"):
             pytest.skip(
                 "PlannerReplayBridge.from_synthetic_disagg not available; "
@@ -115,19 +126,23 @@ def test_alpha_gamma_agree_on_decode_drift() -> None:
         pass  # already handled by importorskip above
     bias = 1.30
 
-    alpha_history = _run_scenario_with_bias("A1_power_under_estimate_decode", power_bias_decode=bias)
-    gamma_history = _run_scenario_with_bias("G1_realistic_decode_drift", power_bias_decode=bias)
+    alpha_history = _run_scenario_with_bias(
+        "A1_power_under_estimate_decode", power_bias_decode=bias
+    )
+    gamma_history = _run_scenario_with_bias(
+        "G1_realistic_decode_drift", power_bias_decode=bias
+    )
 
     alpha_avg = _late_avg_c_power_d(alpha_history)
     gamma_avg = _late_avg_c_power_d(gamma_history)
 
     # Both must indicate positive drift (> 1.0 means underestimate corrected upward)
-    assert alpha_avg > 1.0, (
-        f"α A1: expected c_power_d > 1.0 with bias=1.30; got {alpha_avg:.4f}"
-    )
-    assert gamma_avg > 1.0, (
-        f"γ G1: expected c_power_d > 1.0 with bias=1.30; got {gamma_avg:.4f}"
-    )
+    assert (
+        alpha_avg > 1.0
+    ), f"α A1: expected c_power_d > 1.0 with bias=1.30; got {alpha_avg:.4f}"
+    assert (
+        gamma_avg > 1.0
+    ), f"γ G1: expected c_power_d > 1.0 with bias=1.30; got {gamma_avg:.4f}"
 
     # Magnitude must agree within 20%
     ratio = abs(alpha_avg - gamma_avg) / max(alpha_avg, gamma_avg)

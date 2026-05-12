@@ -15,20 +15,20 @@ Usage:
 """
 from __future__ import annotations
 
-import pytest
 from pathlib import Path
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # Scenario discovery
 # ---------------------------------------------------------------------------
 _SCENARIOS_DIR = Path(__file__).parent / "scenarios"
 _ALPHA_YAMLS = sorted(
-    p for p in _SCENARIOS_DIR.glob("*.yaml") if not p.stem.startswith("_")
-    and not p.stem.startswith("G")
+    p
+    for p in _SCENARIOS_DIR.glob("*.yaml")
+    if not p.stem.startswith("_") and not p.stem.startswith("G")
 )
-_GAMMA_YAMLS = sorted(
-    p for p in _SCENARIOS_DIR.glob("G*.yaml")
-)
+_GAMMA_YAMLS = sorted(p for p in _SCENARIOS_DIR.glob("G*.yaml"))
 
 
 def _scenario_id(path: Path) -> str:
@@ -46,9 +46,9 @@ def _scenario_id(path: Path) -> str:
 )
 def test_alpha(scenario_path: Path, tmp_path: Path) -> None:
     """Run one α-class scenario and assert all expectations pass."""
-    from dynamo.planner.tests.testbed.scenarios import load_scenario
-    from dynamo.planner.tests.testbed.runner import ScenarioRunner
     from dynamo.planner.tests.testbed.assertions import evaluate_all
+    from dynamo.planner.tests.testbed.runner import ScenarioRunner
+    from dynamo.planner.tests.testbed.scenarios import load_scenario
 
     scenario = load_scenario(scenario_path)
     runner = ScenarioRunner(scenario)
@@ -81,9 +81,9 @@ def test_gamma(scenario_path: Path, tmp_path: Path) -> None:
         "dynamo.llm",
         reason="γ-class scenarios require the dynamo.llm (mocker) package",
     )
-    from dynamo.planner.tests.testbed.scenarios import load_scenario
-    from dynamo.planner.tests.testbed.runner import ScenarioRunner
     from dynamo.planner.tests.testbed.assertions import evaluate_all
+    from dynamo.planner.tests.testbed.runner import ScenarioRunner
+    from dynamo.planner.tests.testbed.scenarios import load_scenario
 
     scenario = load_scenario(scenario_path)
     runner = ScenarioRunner(scenario)

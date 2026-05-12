@@ -56,7 +56,10 @@ from dynamo.planner.offline.trace_data import extract_metrics_from_mooncake
 if TYPE_CHECKING:
     from dynamo.common.forward_pass_metrics import ForwardPassMetrics
     from dynamo.llm import FpmEventSubscriber
-    from dynamo.planner.monitoring.aic_power_optimizer import AICPowerOptimizer, PowerAwareConfig
+    from dynamo.planner.monitoring.aic_power_optimizer import (
+        AICPowerOptimizer,
+        PowerAwareConfig,
+    )
 
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -298,7 +301,9 @@ class NativePlannerBase:
         # AIC optimizer startup sweep (Phase 3).
         if self.config.enable_aic_optimizer:
             try:
-                from dynamo.planner.monitoring.aic_power_optimizer import AICPowerOptimizer
+                from dynamo.planner.monitoring.aic_power_optimizer import (
+                    AICPowerOptimizer,
+                )
 
                 self._aic_optimizer = AICPowerOptimizer(
                     self.config, self.prometheus_metrics
@@ -846,9 +851,7 @@ class NativePlannerBase:
                     e,
                 )
 
-    def _publish_power_budget_metrics(
-        self, num_p: int, num_d: int
-    ) -> None:
+    def _publish_power_budget_metrics(self, num_p: int, num_d: int) -> None:
         """Emit power budget gauges (Phase 1, dashboard observability only).
 
         Uses static config values — not DCGM — so budget enforcement in
@@ -879,7 +882,11 @@ class NativePlannerBase:
         under-reporting worker does not silently raise the effective floor.
         Returns ``None`` when no prefill worker has synced this value via MDC.
         """
-        val = self.prefill_worker_info.max_num_batched_tokens if self.require_prefill else None
+        val = (
+            self.prefill_worker_info.max_num_batched_tokens
+            if self.require_prefill
+            else None
+        )
         return val if val and val > 0 else None
 
     async def _apply_aic_config(self, new_config: "PowerAwareConfig") -> None:
@@ -940,7 +947,9 @@ class NativePlannerBase:
         if self.prometheus_port != 0 and self.config.admission_mode != "off":
             pm = self.prometheus_metrics
             pm.admission_implied_theta_decode.set(new_config.theta_decode_impl)
-            pm.admission_implied_theta_prefill_frac.set(new_config.theta_prefill_frac_impl)
+            pm.admission_implied_theta_prefill_frac.set(
+                new_config.theta_prefill_frac_impl
+            )
 
         # 5. Fan out POSTs to frontends (autoset only).
         if self.config.admission_mode == "autoset" and isinstance(
@@ -960,7 +969,9 @@ class NativePlannerBase:
         if min_M is not None:
             theta_p_abs_set = math.ceil(theta_pf_set * min_M)
             if self.prometheus_port != 0:
-                self.prometheus_metrics.admission_set_theta_prefill_abs.set(theta_p_abs_set)
+                self.prometheus_metrics.admission_set_theta_prefill_abs.set(
+                    theta_p_abs_set
+                )
         else:
             theta_p_abs_set = None
             if self.prometheus_port != 0:
@@ -1008,9 +1019,7 @@ class NativePlannerBase:
         )
 
         failed = [
-            p.metadata.name
-            for p, r in zip(pods, results)
-            if isinstance(r, Exception)
+            p.metadata.name for p, r in zip(pods, results) if isinstance(r, Exception)
         ]
         if failed:
             if self.prometheus_port != 0:
@@ -1191,11 +1200,15 @@ class NativePlannerBase:
                     )
 
                     if self.config.mode == "disagg":
-                        obs_ttft = self.prometheus_traffic_client.get_avg_time_to_first_token(
-                            interval_str, self.model_name or ""
+                        obs_ttft = (
+                            self.prometheus_traffic_client.get_avg_time_to_first_token(
+                                interval_str, self.model_name or ""
+                            )
                         )
-                        obs_itl = self.prometheus_traffic_client.get_avg_inter_token_latency(
-                            interval_str, self.model_name or ""
+                        obs_itl = (
+                            self.prometheus_traffic_client.get_avg_inter_token_latency(
+                                interval_str, self.model_name or ""
+                            )
                         )
                         self._aic_optimizer.update_correction(
                             traffic=tick_input.traffic,
@@ -1225,11 +1238,15 @@ class NativePlannerBase:
                             ),
                         )
                     else:  # agg mode
-                        obs_ttft = self.prometheus_traffic_client.get_avg_time_to_first_token(
-                            interval_str, self.model_name or ""
+                        obs_ttft = (
+                            self.prometheus_traffic_client.get_avg_time_to_first_token(
+                                interval_str, self.model_name or ""
+                            )
                         )
-                        obs_itl = self.prometheus_traffic_client.get_avg_inter_token_latency(
-                            interval_str, self.model_name or ""
+                        obs_itl = (
+                            self.prometheus_traffic_client.get_avg_inter_token_latency(
+                                interval_str, self.model_name or ""
+                            )
                         )
                         self._aic_optimizer.update_correction(
                             traffic=tick_input.traffic,

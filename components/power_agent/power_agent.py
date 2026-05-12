@@ -32,9 +32,7 @@ import logging
 import os
 import re
 import signal
-import sys
 import threading
-import time
 from typing import Optional
 
 # Kubernetes and NVML — imported lazily with clear error messages
@@ -54,6 +52,7 @@ except ImportError:
 
 try:
     from prometheus_client import Counter, Gauge, start_http_server
+
     _PROMETHEUS_AVAILABLE = True
 except ImportError:
     _PROMETHEUS_AVAILABLE = False
@@ -78,8 +77,12 @@ _MANAGED_STATE_PATH = "/var/lib/dynamo-power-agent/managed_gpus.json"
 # drivers, Guaranteed / Burstable / BestEffort QoS, cri-containerd / cri-o.
 # ---------------------------------------------------------------------------
 
-_SYSTEMD_RE = re.compile(r"kubepods-(?:burstable-|besteffort-)?pod([a-fA-F0-9_]+)\.slice")
-_CGROUPFS_RE = re.compile(r"/kubepods(?:/burstable|/besteffort)?/pod([a-fA-F0-9-]+)(?:/|$)")
+_SYSTEMD_RE = re.compile(
+    r"kubepods-(?:burstable-|besteffort-)?pod([a-fA-F0-9_]+)\.slice"
+)
+_CGROUPFS_RE = re.compile(
+    r"/kubepods(?:/burstable|/besteffort)?/pod([a-fA-F0-9-]+)(?:/|$)"
+)
 
 
 def _extract_pod_uid_from_cgroup(pid: int) -> Optional[str]:
@@ -155,10 +158,16 @@ def _record_managed_gpu_uuid(handle) -> None:
 # Prometheus metrics
 # ---------------------------------------------------------------------------
 
+
 class _NoopMetric:
-    def labels(self, **_): return self
-    def set(self, _): pass
-    def inc(self, _=1): pass
+    def labels(self, **_):
+        return self
+
+    def set(self, _):
+        pass
+
+    def inc(self, _=1):
+        pass
 
 
 class PowerAgentMetrics:
@@ -189,7 +198,9 @@ class PowerAgentMetrics:
             )
             try:
                 start_http_server(prometheus_port)
-                logger.info("Prometheus metrics server started on port %d", prometheus_port)
+                logger.info(
+                    "Prometheus metrics server started on port %d", prometheus_port
+                )
             except Exception as e:
                 logger.warning("Failed to start Prometheus server: %s", e)
         else:
@@ -205,7 +216,10 @@ class PowerAgentMetrics:
 # NVML helpers
 # ---------------------------------------------------------------------------
 
-def _clamp_to_constraints(handle, requested_w: int, gpu_idx: int, metrics: PowerAgentMetrics) -> int:
+
+def _clamp_to_constraints(
+    handle, requested_w: int, gpu_idx: int, metrics: PowerAgentMetrics
+) -> int:
     """Clamp `requested_w` to the SKU-defined NVML power-cap range."""
     try:
         min_mw, max_mw = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
@@ -215,14 +229,18 @@ def _clamp_to_constraints(handle, requested_w: int, gpu_idx: int, metrics: Power
     if requested_w < min_w:
         logger.warning(
             "Requested cap %d W below SKU min %d W on GPU %d; clamping up.",
-            requested_w, min_w, gpu_idx,
+            requested_w,
+            min_w,
+            gpu_idx,
         )
         metrics.cap_clamped_total.labels(direction="min").inc()
         return min_w
     if requested_w > max_w:
         logger.warning(
             "Requested cap %d W above SKU max %d W on GPU %d; clamping down.",
-            requested_w, max_w, gpu_idx,
+            requested_w,
+            max_w,
+            gpu_idx,
         )
         metrics.cap_clamped_total.labels(direction="max").inc()
         return max_w
@@ -232,7 +250,9 @@ def _clamp_to_constraints(handle, requested_w: int, gpu_idx: int, metrics: Power
 _managed_gpu_indices: set[int] = set()
 
 
-def _apply_cap(handle, gpu_idx: int, requested_w: int, metrics: PowerAgentMetrics) -> None:
+def _apply_cap(
+    handle, gpu_idx: int, requested_w: int, metrics: PowerAgentMetrics
+) -> None:
     """Apply NVML power cap. All writes go through here."""
     effective_w = _clamp_to_constraints(handle, requested_w, gpu_idx, metrics)
     try:
@@ -241,7 +261,12 @@ def _apply_cap(handle, gpu_idx: int, requested_w: int, metrics: PowerAgentMetric
         _record_managed_gpu_uuid(handle)
         metrics.applied_limit_watts.labels(gpu=str(gpu_idx)).set(effective_w)
     except pynvml.NVMLError as e:
-        logger.error("nvmlDeviceSetPowerManagementLimit GPU %d → %d W failed: %s", gpu_idx, effective_w, e)
+        logger.error(
+            "nvmlDeviceSetPowerManagementLimit GPU %d → %d W failed: %s",
+            gpu_idx,
+            effective_w,
+            e,
+        )
         metrics.apply_failures_total.inc()
 
 
@@ -253,13 +278,17 @@ _shutdown = threading.Event()
 
 
 def _handle_sigterm(signum, frame):
-    logger.info("SIGTERM received — restoring default TGP on managed GPUs and shutting down.")
+    logger.info(
+        "SIGTERM received — restoring default TGP on managed GPUs and shutting down."
+    )
     for gpu_idx in list(_managed_gpu_indices):
         try:
             handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
             default_mw = pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle)
             pynvml.nvmlDeviceSetPowerManagementLimit(handle, default_mw)
-            logger.info("Restored GPU %d to default TGP (%d W)", gpu_idx, default_mw // 1000)
+            logger.info(
+                "Restored GPU %d to default TGP (%d W)", gpu_idx, default_mw // 1000
+            )
         except Exception as e:
             logger.exception("Failed to restore TGP on GPU %d: %s", gpu_idx, e)
     try:
@@ -272,6 +301,7 @@ def _handle_sigterm(signum, frame):
 # ---------------------------------------------------------------------------
 # Orphan cap restoration on startup (UUID-gated)
 # ---------------------------------------------------------------------------
+
 
 def _restore_orphaned_gpus_on_startup(device_count: int) -> None:
     """Restore default TDP only on GPUs this agent previously capped AND that are now idle.
@@ -296,7 +326,9 @@ def _restore_orphaned_gpus_on_startup(device_count: int) -> None:
                 pynvml.nvmlDeviceSetPowerManagementLimit(handle, default_mw)
                 logger.info(
                     "Restored orphaned cap on idle GPU %d (%d W → %d W).",
-                    gpu_idx, current_mw // 1000, default_mw // 1000,
+                    gpu_idx,
+                    current_mw // 1000,
+                    default_mw // 1000,
                 )
                 _previously_managed.discard(uuid)
         except Exception as e:
@@ -307,6 +339,7 @@ def _restore_orphaned_gpus_on_startup(device_count: int) -> None:
 # ---------------------------------------------------------------------------
 # Multi-pod-per-GPU policy
 # ---------------------------------------------------------------------------
+
 
 def _resolve_cap_for_gpu(
     gpu_idx: int,
@@ -327,7 +360,8 @@ def _resolve_cap_for_gpu(
     if not values:
         logger.error(
             "GPU %d: no parseable annotation on any pod; applying safe default (%d W).",
-            gpu_idx, safe_default_watts,
+            gpu_idx,
+            safe_default_watts,
         )
         metrics.apply_failures_total.inc()
         metrics.safe_default_applied_total.inc()
@@ -338,13 +372,18 @@ def _resolve_cap_for_gpu(
         if len(unique) == 1:
             logger.warning(
                 "GPU %d: %d pods all agree on cap %s W (multi-pod-per-GPU is unsupported topology).",
-                gpu_idx, len(pod_annotations), values[0],
+                gpu_idx,
+                len(pod_annotations),
+                values[0],
             )
             metrics.multi_pod_gpu_total.labels(disposition="agree").inc()
         else:
             logger.error(
                 "GPU %d: %d pods with conflicting caps %s; applying safe default (%d W).",
-                gpu_idx, len(pod_annotations), sorted(unique), safe_default_watts,
+                gpu_idx,
+                len(pod_annotations),
+                sorted(unique),
+                safe_default_watts,
             )
             metrics.multi_pod_gpu_total.labels(disposition="conflict").inc()
             metrics.safe_default_applied_total.inc()
@@ -355,7 +394,9 @@ def _resolve_cap_for_gpu(
     except (ValueError, TypeError):
         logger.error(
             "GPU %d: annotation value %r is not an integer; applying safe default (%d W).",
-            gpu_idx, values[0], safe_default_watts,
+            gpu_idx,
+            values[0],
+            safe_default_watts,
         )
         metrics.apply_failures_total.inc()
         metrics.safe_default_applied_total.inc()
@@ -365,6 +406,7 @@ def _resolve_cap_for_gpu(
 # ---------------------------------------------------------------------------
 # Main reconcile loop
 # ---------------------------------------------------------------------------
+
 
 class PowerAgent:
     def __init__(
@@ -386,7 +428,9 @@ class PowerAgent:
 
         pynvml.nvmlInit()
         self.device_count = pynvml.nvmlDeviceGetCount()
-        logger.info("NVML initialized. %d GPU(s) found on this node.", self.device_count)
+        logger.info(
+            "NVML initialized. %d GPU(s) found on this node.", self.device_count
+        )
 
         _restore_orphaned_gpus_on_startup(self.device_count)
 
@@ -400,8 +444,9 @@ class PowerAgent:
     def _list_pods_on_node(self) -> list:
         """List all pods scheduled on this node."""
         try:
-            field_selector = f"spec.nodeName={self.node_name}" if self.node_name else None
-            kwargs: dict = {}
+            field_selector = (
+                f"spec.nodeName={self.node_name}" if self.node_name else None
+            )
             if self.k8s_namespace:
                 result = self._core_v1.list_namespaced_pod(
                     namespace=self.k8s_namespace,
@@ -469,7 +514,9 @@ class PowerAgent:
 
         logger.info(
             "Power Agent started. Node=%s, safe_default=%dW, interval=%ds",
-            self.node_name or "(all)", self.safe_default_watts, RECONCILE_INTERVAL_S,
+            self.node_name or "(all)",
+            self.safe_default_watts,
+            RECONCILE_INTERVAL_S,
         )
 
         while not _shutdown.is_set():
@@ -485,6 +532,7 @@ class PowerAgent:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     import argparse

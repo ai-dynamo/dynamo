@@ -94,13 +94,17 @@ class FakePrometheusClient:
             return None
         return float(obs.traffic.num_req) if obs.traffic else 0.0
 
-    def get_avg_input_sequence_tokens(self, *args: Any, **kwargs: Any) -> Optional[float]:
+    def get_avg_input_sequence_tokens(
+        self, *args: Any, **kwargs: Any
+    ) -> Optional[float]:
         obs = self._get_obs("capacity")
         if obs is None:
             return None
         return float(obs.traffic.isl) if obs.traffic else 0.0
 
-    def get_avg_output_sequence_tokens(self, *args: Any, **kwargs: Any) -> Optional[float]:
+    def get_avg_output_sequence_tokens(
+        self, *args: Any, **kwargs: Any
+    ) -> Optional[float]:
         obs = self._get_obs("capacity")
         if obs is None:
             return None

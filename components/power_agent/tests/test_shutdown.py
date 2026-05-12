@@ -11,7 +11,7 @@ Verifies that:
 
 import signal
 import unittest
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import power_agent
 
@@ -35,9 +35,7 @@ class TestSigtermHandler(unittest.TestCase):
                 power_agent._handle_sigterm(signal.SIGTERM, None)
 
         # Three GPUs managed → three SetPowerManagementLimit calls
-        self.assertEqual(
-            mock_nvml.nvmlDeviceSetPowerManagementLimit.call_count, 3
-        )
+        self.assertEqual(mock_nvml.nvmlDeviceSetPowerManagementLimit.call_count, 3)
         mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_any_call("handle_0", 700_000)
         mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_any_call("handle_1", 700_000)
         mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_any_call("handle_2", 700_000)

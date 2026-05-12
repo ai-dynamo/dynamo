@@ -113,14 +113,14 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     enable_power_awareness: bool = False
     total_gpu_power_limit: Optional[int] = None
     prefill_engine_gpu_power_limit: int = 300  # watts per GPU, prefill replicas
-    decode_engine_gpu_power_limit: int = 300   # watts per GPU, decode replicas
+    decode_engine_gpu_power_limit: int = 300  # watts per GPU, decode replicas
     power_agent_safe_default_watts: Optional[int] = None
 
     # AIC optimizer (Phase 3+, disabled by default)
     enable_aic_optimizer: bool = False
-    aic_reoptimize_interval: int = 300          # seconds between AIC sweeps
+    aic_reoptimize_interval: int = 300  # seconds between AIC sweeps
     aic_drift_relative_threshold: float = 0.15  # fraction before re-sweep triggers
-    aic_drift_consecutive_ticks: int = 3        # ticks of sustained signal needed
+    aic_drift_consecutive_ticks: int = 3  # ticks of sustained signal needed
     # Cold-start values for per-component power coefficients (Phase 3+).
     aic_initial_c_power_prefill: float = 1.0
     aic_initial_c_power_decode: float = 1.0

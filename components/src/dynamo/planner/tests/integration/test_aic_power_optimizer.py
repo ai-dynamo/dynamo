@@ -30,11 +30,11 @@ from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.types import TrafficObservation
 from dynamo.planner.monitoring.aic_power_optimizer import (
+    _COEFF_MAX,
+    _COEFF_MIN,
+    _EMA_ALPHA,
     AICPowerOptimizer,
     PowerAwareConfig,
-    _EMA_ALPHA,
-    _COEFF_MIN,
-    _COEFF_MAX,
 )
 
 pytestmark = [
@@ -66,7 +66,7 @@ _AIC_SPEC = AICInterpolationSpec(
 def _make_config(
     *,
     mode: str = "disagg",
-    total_gpu_power_limit: int | None = 8_000,   # 8 kW — very generous
+    total_gpu_power_limit: int | None = 8_000,  # 8 kW — very generous
     prefill_limit: int = 700,
     decode_limit: int = 700,
     ttft: int = 200,
@@ -263,9 +263,10 @@ class TestOptimizeHappyPath:
             result = opt.optimize()
 
         import math
+
         assert result is not None
-        assert result.cap_p == math.ceil(400.0 * 1.5)   # 600
-        assert result.cap_d == math.ceil(300.0 * 1.2)   # 360
+        assert result.cap_p == math.ceil(400.0 * 1.5)  # 600
+        assert result.cap_d == math.ceil(300.0 * 1.2)  # 360
 
     def test_isl_osl_propagated(self):
         estimator = _make_estimator_mock()
@@ -284,7 +285,9 @@ class TestOptimizeHappyPath:
 
     def test_implied_admission_thresholds_in_unit_interval(self):
         """theta_decode_impl and theta_prefill_frac_impl must always be in [0, 1]."""
-        estimator = _make_estimator_mock(ttft_ms=50.0, itl_ms=10.0, max_kv_tokens=100_000)
+        estimator = _make_estimator_mock(
+            ttft_ms=50.0, itl_ms=10.0, max_kv_tokens=100_000
+        )
         config = _make_config()
         opt, _ = _make_optimizer_with_mock(estimator, config)
 
@@ -384,8 +387,8 @@ class TestAICPowerWClamp:
 
     def test_clamp_metric_increments_only_for_offending_side(self):
         estimator = _make_estimator_mock(
-            power_w_prefill=400.0,    # in range — should NOT clamp
-            power_w_decode=1500.0,    # > 1.1 × 700 — MUST clamp
+            power_w_prefill=400.0,  # in range — should NOT clamp
+            power_w_decode=1500.0,  # > 1.1 × 700 — MUST clamp
             tdp_w=700.0,
         )
         opt, metrics = _make_optimizer_with_mock(estimator)
@@ -421,9 +424,10 @@ class TestAICPowerWClamp:
             result = opt.optimize()
 
         import math
+
         assert result is not None
-        assert result.cap_p == math.ceil(threshold)   # 770
-        assert result.cap_d == math.ceil(threshold)   # 770
+        assert result.cap_p == math.ceil(threshold)  # 770
+        assert result.cap_d == math.ceil(threshold)  # 770
         sides = [
             c.kwargs.get("side")
             for c in metrics.aic_power_w_clamped_total.labels.call_args_list
@@ -435,7 +439,7 @@ class TestAICPowerWClamp:
         per-side values, so a single bad side cannot inflate cap_p == cap_d."""
         estimator = _make_estimator_mock(
             power_w_prefill=400.0,
-            power_w_decode=1275.0,    # bogus
+            power_w_decode=1275.0,  # bogus
             tdp_w=700.0,
         )
         config = _make_config(mode="agg", c_power_agg=1.0)
@@ -448,6 +452,7 @@ class TestAICPowerWClamp:
             result = opt.optimize()
 
         import math
+
         assert result is not None
         # Averaged clamped path: (400 + 700) / 2 = 550
         assert result.cap_p == math.ceil((400.0 + 700.0) / 2.0)
@@ -494,9 +499,11 @@ class TestOptimizeBudgetConstraint:
         """When the budget can't cover min_endpoint prefill, fall back to (min_ep, min_ep)."""
         # 8-GPU engine, cap = 700 W/GPU → 5600 W/replica
         # Budget = 1000 W → cannot cover even 1 prefill replica
-        estimator = _make_estimator_mock(power_w_prefill=0.0, power_w_decode=0.0, tdp_w=700.0)
+        estimator = _make_estimator_mock(
+            power_w_prefill=0.0, power_w_decode=0.0, tdp_w=700.0
+        )
         config = _make_config(
-            total_gpu_power_limit=1_000,   # impossibly small
+            total_gpu_power_limit=1_000,  # impossibly small
             min_endpoint=1,
         )
         opt, _ = _make_optimizer_with_mock(estimator, config)
@@ -600,7 +607,7 @@ class TestOptimizeFailureHandling:
             second_result = opt.optimize()
 
         assert second_result is first_result  # same object = last good config
-        assert not opt._disabled              # not disabled yet (1 of 3 failures)
+        assert not opt._disabled  # not disabled yet (1 of 3 failures)
         assert opt._consecutive_failures == 1
 
     def test_auto_disable_after_max_consecutive_failures(self):
@@ -666,11 +673,17 @@ class TestUpdateCorrection:
         opt, _ = _make_optimizer_with_mock(estimator, config)
         # Inject a plausible last_optimal_config without running optimize().
         opt._last_optimal_config = PowerAwareConfig(
-            n_p=1, n_d=2, cap_p=400, cap_d=300,
-            aic_ttft_ms=50.0, aic_itl_ms=10.0,
+            n_p=1,
+            n_d=2,
+            cap_p=400,
+            cap_d=300,
+            aic_ttft_ms=50.0,
+            aic_itl_ms=10.0,
             aic_seq_per_s_per_replica=100.0,
-            isl=1000, osl=200,
-            theta_decode_impl=0.8, theta_prefill_frac_impl=0.6,
+            isl=1000,
+            osl=200,
+            theta_decode_impl=0.8,
+            theta_prefill_frac_impl=0.6,
             aic_power_w_prefill=700.0,
             aic_power_w_decode=700.0,
             aic_power_w_agg=700.0,
@@ -729,7 +742,9 @@ class TestUpdateCorrection:
         """Decode-side EMA ignores prefill-side scheduled tokens."""
         opt = self._optimizer_with_last_config(c_power_d=1.0)
         # decode side active, prefill idle
-        traffic = _make_traffic(scheduled_prefill_tokens=0.0, scheduled_decode_kv_tokens=2000.0)
+        traffic = _make_traffic(
+            scheduled_prefill_tokens=0.0, scheduled_decode_kv_tokens=2000.0
+        )
         initial_d = opt._c_power_d
         initial_p = opt._c_power_p
 
@@ -741,12 +756,14 @@ class TestUpdateCorrection:
             observed_power_w_decode=850.0,
         )
 
-        assert opt._c_power_p == initial_p   # prefill idle → unchanged
-        assert opt._c_power_d != initial_d   # decode active → updated
+        assert opt._c_power_p == initial_p  # prefill idle → unchanged
+        assert opt._c_power_d != initial_d  # decode active → updated
 
     def test_agg_mode_uses_single_coefficient(self):
         opt = self._optimizer_with_last_config(mode="agg", c_power_agg=1.0)
-        traffic = _make_traffic(scheduled_prefill_tokens=3000.0, scheduled_decode_kv_tokens=2000.0)
+        traffic = _make_traffic(
+            scheduled_prefill_tokens=3000.0, scheduled_decode_kv_tokens=2000.0
+        )
         initial_agg = opt._c_power_agg
         initial_p = opt._c_power_p
 
@@ -756,7 +773,7 @@ class TestUpdateCorrection:
 
         expected_agg = initial_agg + _EMA_ALPHA * (850.0 / 700.0 - initial_agg)
         assert opt._c_power_agg == pytest.approx(expected_agg, rel=1e-3)
-        assert opt._c_power_agg != initial_agg   # agg mode updates c_power_agg
+        assert opt._c_power_agg != initial_agg  # agg mode updates c_power_agg
         # per-component coefficients should remain unchanged in agg mode
         assert opt._c_power_p == initial_p
 
@@ -786,7 +803,7 @@ class TestUpdateCorrection:
             _make_traffic(num_req=10.0),
             observed_ttft_avg=0.1,
         )
-        assert opt._c_ttft == 1.0   # unchanged
+        assert opt._c_ttft == 1.0  # unchanged
 
 
 # ---------------------------------------------------------------------------
@@ -808,7 +825,7 @@ class TestShouldReoptimize:
     def test_rate_limit_prevents_reoptimize(self):
         opt = self._optimizer_with_recent_sweep(aic_reoptimize_interval=300.0)
         # Simulate SLA violation — but interval hasn't elapsed.
-        traffic = _make_traffic(ttft_avg=5.0)   # 5s >> any SLA in ms
+        traffic = _make_traffic(ttft_avg=5.0)  # 5s >> any SLA in ms
         assert opt.should_reoptimize(traffic) is False
 
     def test_sla_miss_triggers_after_hysteresis(self):
@@ -822,7 +839,7 @@ class TestShouldReoptimize:
 
         assert opt.should_reoptimize(traffic) is False  # tick 1
         assert opt.should_reoptimize(traffic) is False  # tick 2
-        assert opt.should_reoptimize(traffic) is True   # tick 3 — triggers
+        assert opt.should_reoptimize(traffic) is True  # tick 3 — triggers
 
     def test_no_reoptimize_on_single_sla_miss(self):
         """One tick of SLA miss doesn't trigger when hysteresis=3."""
@@ -909,7 +926,9 @@ class TestSweepReplicas:
 class TestThroughputRegressionWarning:
     def test_regression_increments_counter(self):
         """When re-optimization yields lower predicted throughput, counter increments."""
-        estimator = _make_estimator_mock(ttft_ms=50.0, itl_ms=10.0, max_kv_tokens=50_000)
+        estimator = _make_estimator_mock(
+            ttft_ms=50.0, itl_ms=10.0, max_kv_tokens=50_000
+        )
         config = _make_config(aic_throughput_regression_warn_threshold=0.05)
         opt, metrics = _make_optimizer_with_mock(estimator, config)
 
@@ -923,12 +942,17 @@ class TestThroughputRegressionWarning:
         # sweep looks like a regression.
         assert first_result is not None
         opt._last_optimal_config = PowerAwareConfig(
-            n_p=1, n_d=100,                   # 100 decode replicas → huge throughput
-            cap_p=400, cap_d=300,
-            aic_ttft_ms=50.0, aic_itl_ms=10.0,
+            n_p=1,
+            n_d=100,  # 100 decode replicas → huge throughput
+            cap_p=400,
+            cap_d=300,
+            aic_ttft_ms=50.0,
+            aic_itl_ms=10.0,
             aic_seq_per_s_per_replica=1000.0,
-            isl=1000, osl=200,
-            theta_decode_impl=0.8, theta_prefill_frac_impl=0.6,
+            isl=1000,
+            osl=200,
+            theta_decode_impl=0.8,
+            theta_prefill_frac_impl=0.6,
             aic_power_w_prefill=400.0,
             aic_power_w_decode=300.0,
         )

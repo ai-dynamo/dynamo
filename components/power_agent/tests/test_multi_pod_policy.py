@@ -12,9 +12,8 @@ Cases:
 """
 
 import unittest
-from unittest.mock import MagicMock, patch
 
-from power_agent import PowerAgentMetrics, _resolve_cap_for_gpu
+from power_agent import _resolve_cap_for_gpu
 
 
 class _FakeMetrics:
@@ -29,16 +28,20 @@ class _FakeMetrics:
         class _L:
             def __init__(self, m):
                 self._m = m
+
             def labels(self, disposition):
                 class _C:
                     def __init__(self, m, d):
                         self._m, self._d = m, d
+
                     def inc(self):
                         if self._d == "agree":
                             self._m.multi_pod_agree += 1
                         else:
                             self._m.multi_pod_conflict += 1
+
                 return _C(self._m, disposition)
+
         return _L(self)
 
     @property
@@ -46,8 +49,10 @@ class _FakeMetrics:
         class _C:
             def __init__(self, m):
                 self._m = m
+
             def inc(self):
                 self._m.apply_failures += 1
+
         return _C(self)
 
     @property
@@ -55,8 +60,10 @@ class _FakeMetrics:
         class _C:
             def __init__(self, m):
                 self._m = m
+
             def inc(self):
                 self._m.safe_default_applied += 1
+
         return _C(self)
 
 

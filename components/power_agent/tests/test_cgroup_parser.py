@@ -62,12 +62,16 @@ class TestCgroupParser(unittest.TestCase):
         self.assertEqual(uid, "cafe0001-dead-0002-beef-0003")
 
     def test_v1_cgroupfs_burstable(self):
-        content = "10:memory:/kubepods/burstable/podcafe0001-dead-0002-beef-0003/abc123\n"
+        content = (
+            "10:memory:/kubepods/burstable/podcafe0001-dead-0002-beef-0003/abc123\n"
+        )
         uid = self._parse(content)
         self.assertEqual(uid, "cafe0001-dead-0002-beef-0003")
 
     def test_v1_cgroupfs_besteffort(self):
-        content = "10:memory:/kubepods/besteffort/podcafe0001-dead-0002-beef-0003/abc123\n"
+        content = (
+            "10:memory:/kubepods/besteffort/podcafe0001-dead-0002-beef-0003/abc123\n"
+        )
         uid = self._parse(content)
         self.assertEqual(uid, "cafe0001-dead-0002-beef-0003")
 

@@ -75,17 +75,17 @@ class PowerAwareConfig:
     1.0 because the cap = ceil(aic_power_w × max(1, c_power)) by construction.
     """
 
-    n_p: int                          # recommended prefill replicas
-    n_d: int                          # recommended decode replicas
-    cap_p: int                        # per-GPU power cap for prefill (watts)
-    cap_d: int                        # per-GPU power cap for decode (watts)
-    aic_ttft_ms: float                # AIC-estimated TTFT (before correction)
-    aic_itl_ms: float                 # AIC-estimated ITL  (before correction)
+    n_p: int  # recommended prefill replicas
+    n_d: int  # recommended decode replicas
+    cap_p: int  # per-GPU power cap for prefill (watts)
+    cap_d: int  # per-GPU power cap for decode (watts)
+    aic_ttft_ms: float  # AIC-estimated TTFT (before correction)
+    aic_itl_ms: float  # AIC-estimated ITL  (before correction)
     aic_seq_per_s_per_replica: float  # saturated decode throughput, for drift ref
     isl: int
     osl: int
-    theta_decode_impl: float          # implied decode KV utilization (§5.7)
-    theta_prefill_frac_impl: float    # implied prefill fractional utilization
+    theta_decode_impl: float  # implied decode KV utilization (§5.7)
+    theta_prefill_frac_impl: float  # implied prefill fractional utilization
     # Raw AIC per-GPU power estimates used as EMA denominators in
     # update_correction().  Falls back to nameplate TDP when AIC's perf DB
     # has zeroed power_w (Phase 3 typical state — see §6.4).
@@ -129,7 +129,9 @@ class AICPowerOptimizer:
         self._c_power_agg: float = config.aic_initial_c_power_agg
 
         # Drift detection state (§5.6).
-        self._estimated_throughput: float = 0.0  # tokens/s; updated by _apply_aic_config
+        self._estimated_throughput: float = (
+            0.0  # tokens/s; updated by _apply_aic_config
+        )
         self._consecutive_violation_ticks: int = 0
         self._time_of_last_optimize: float = 0.0
 
@@ -183,13 +185,18 @@ class AICPowerOptimizer:
                     hf_id=spec.hf_id, system=system, backend=spec.backend
                 )
             else:
-                from dynamo.planner.monitoring.aic_estimator import AIConfiguratorPerfEstimator
+                from dynamo.planner.monitoring.aic_estimator import (
+                    AIConfiguratorPerfEstimator,
+                )
+
                 estimator = AIConfiguratorPerfEstimator(
                     hf_id=spec.hf_id,
                     system=system,
                     backend=spec.backend,
                 )
-            from dynamo.planner.config.parallelization import picked_to_aic_model_config_kwargs
+            from dynamo.planner.config.parallelization import (
+                picked_to_aic_model_config_kwargs,
+            )
         except ImportError as exc:
             self._handle_sweep_failure(
                 f"aiconfigurator not installed: {exc}",
@@ -226,7 +233,9 @@ class AICPowerOptimizer:
 
         # ---------- Single-engine AIC calls (TTFT, ITL, and per-config power_w) ----------
         try:
-            prefill_perf = estimator.estimate_prefill_perf(isl=spec.isl, **prefill_kwargs)
+            prefill_perf = estimator.estimate_prefill_perf(
+                isl=spec.isl, **prefill_kwargs
+            )
             aic_ttft_ms = prefill_perf.get("context_latency")
             if aic_ttft_ms is None or aic_ttft_ms <= 0:
                 raise ValueError(f"AIC returned invalid TTFT: {aic_ttft_ms}")
@@ -241,7 +250,9 @@ class AICPowerOptimizer:
 
         try:
             attention_dp = max(1, spec.decode_pick.dp)
-            per_rank_max_kv = estimator.get_max_kv_tokens(spec.isl, spec.osl, **decode_kwargs)
+            per_rank_max_kv = estimator.get_max_kv_tokens(
+                spec.isl, spec.osl, **decode_kwargs
+            )
             max_kv_aggregate = max(1, per_rank_max_kv * attention_dp)
             max_concurrency = max(1, max_kv_aggregate // (spec.isl + spec.osl))
             batch_size_per_rank = max(1, max_concurrency // attention_dp)
@@ -360,12 +371,16 @@ class AICPowerOptimizer:
         kv_total_tokens_per_replica = max_kv_aggregate  # aggregated across attention-DP
         theta_decode_impl = min(
             1.0,
-            max_concurrency * (spec.isl + spec.osl / 2.0) / max(1, kv_total_tokens_per_replica),
+            max_concurrency
+            * (spec.isl + spec.osl / 2.0)
+            / max(1, kv_total_tokens_per_replica),
         )
         # θ_prefill_frac_impl: fraction of peak prefill capacity consumed.
         peak_seq_s_per_replica = 1000.0 / max(0.001, aic_ttft_ms)  # at zero queueing
         achieved_seq_s = aic_seq_per_s_per_replica  # per decode replica at saturation
-        theta_prefill_frac_impl = min(1.0, achieved_seq_s / max(0.001, peak_seq_s_per_replica))
+        theta_prefill_frac_impl = min(
+            1.0, achieved_seq_s / max(0.001, peak_seq_s_per_replica)
+        )
 
         config = PowerAwareConfig(
             n_p=best_n_p,
@@ -391,15 +406,12 @@ class AICPowerOptimizer:
                 * self._last_optimal_config.n_d
                 * (self._last_optimal_config.isl + self._last_optimal_config.osl)
             )
-            new_tp = (
-                aic_seq_per_s_per_replica * best_n_d * (spec.isl + spec.osl)
-            )
+            new_tp = aic_seq_per_s_per_replica * best_n_d * (spec.isl + spec.osl)
             regress_pct = (old_tp - new_tp) / max(1.0, old_tp)
             if (
                 old_tp > 0
                 and new_tp < old_tp
-                and regress_pct
-                > self._config.aic_throughput_regression_warn_threshold
+                and regress_pct > self._config.aic_throughput_regression_warn_threshold
             ):
                 logger.warning(
                     "AIC optimizer: re-optimization produced %.1f%% lower predicted "
@@ -459,7 +471,11 @@ class AICPowerOptimizer:
 
         # -- Latency coefficients (gated on num_req > 0) --
         if traffic.num_req > 0:
-            if observed_ttft_avg is not None and observed_ttft_avg > 0 and aic_ttft_s > 0:
+            if (
+                observed_ttft_avg is not None
+                and observed_ttft_avg > 0
+                and aic_ttft_s > 0
+            ):
                 raw = observed_ttft_avg / aic_ttft_s
                 self._c_ttft = _ema_update(self._c_ttft, raw, "ttft", self._metrics)
                 changed = True
@@ -540,7 +556,9 @@ class AICPowerOptimizer:
 
         sla_violated = False
         if traffic.ttft_avg is not None:
-            sla_violated = sla_violated or traffic.ttft_avg > (self._config.ttft / 1000.0)
+            sla_violated = sla_violated or traffic.ttft_avg > (
+                self._config.ttft / 1000.0
+            )
         if traffic.itl_avg is not None:
             sla_violated = sla_violated or traffic.itl_avg > (self._config.itl / 1000.0)
 
@@ -560,14 +578,17 @@ class AICPowerOptimizer:
             self._consecutive_violation_ticks + 1 if needs_reopt else 0
         )
         return (
-            self._consecutive_violation_ticks >= self._config.aic_drift_consecutive_ticks
+            self._consecutive_violation_ticks
+            >= self._config.aic_drift_consecutive_ticks
         )
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _clamp_aic_power_w(self, raw_power_w: float, tdp_w: float, *, side: str) -> float:
+    def _clamp_aic_power_w(
+        self, raw_power_w: float, tdp_w: float, *, side: str
+    ) -> float:
         """Defensive clamp for AIC's reported per-GPU power_w (§6.4, §8 row 7).
 
         Returns ``raw_power_w`` unchanged when it is at or below
@@ -587,8 +608,12 @@ class AICPowerOptimizer:
             "for cap computation. EMA denominator preserves the raw value so "
             "c_power_%s converges to live/raw (typically <1) and gives an "
             "independent signal alongside aic_power_w_clamped_total.",
-            side, raw_power_w, _AIC_POWER_W_NONPHYSICAL_MULTIPLE, threshold,
-            tdp_w, side,
+            side,
+            raw_power_w,
+            _AIC_POWER_W_NONPHYSICAL_MULTIPLE,
+            threshold,
+            tdp_w,
+            side,
         )
         try:
             self._metrics.aic_power_w_clamped_total.labels(side=side).inc()
@@ -632,7 +657,9 @@ class AICPowerOptimizer:
         # Remaining budget after locking in best_n_d.
         if budget is not None:
             remaining_for_p = budget - best_n_d * d_watts
-            best_n_p = min(max_replicas, max(min_ep, remaining_for_p // max(1, p_watts)))
+            best_n_p = min(
+                max_replicas, max(min_ep, remaining_for_p // max(1, p_watts))
+            )
         else:
             best_n_p = min_ep  # conservative default when unbounded
 
@@ -642,7 +669,9 @@ class AICPowerOptimizer:
         """Central failure handler for both startup and runtime sweep failures."""
         if at_startup:
             # §8 rows 1 and 4: disable the optimizer on startup failure.
-            reason = "infeasible_at_startup" if "infeasible" in msg else "startup_exception"
+            reason = (
+                "infeasible_at_startup" if "infeasible" in msg else "startup_exception"
+            )
             logger.error(
                 "AIC optimizer disabled (reason=%s): %s. "
                 "Planner will use static _apply_power_budget() enforcement.",

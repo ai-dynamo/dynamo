@@ -25,21 +25,21 @@ config = PlannerConfig(
     mode="agg",
     backend="vllm",
     optimization_target="throughput",
-    advisory=True,                         # don't scale workers, only annotate
+    advisory=True,  # don't scale workers, only annotate
     live_dashboard_port=0,
     metric_reporting_prometheus_port=0,
     # --- Power-awareness knobs ---
     enable_power_awareness=True,
-    total_gpu_power_limit=2000,            # 2 GPUs × ~1000W headroom
-    decode_engine_gpu_power_limit=320,     # distinctive value (not 280/350/400)
+    total_gpu_power_limit=2000,  # 2 GPUs × ~1000W headroom
+    decode_engine_gpu_power_limit=320,  # distinctive value (not 280/350/400)
     power_agent_safe_default_watts=280,
 )
 print(f"Config: env={config.environment} mode={config.mode}")
 print(f"        advisory={config.advisory} power_aware={config.enable_power_awareness}")
 print(f"        decode_cap={config.decode_engine_gpu_power_limit}W")
 
-from dynamo.planner.__main__ import init_planner
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.planner.__main__ import init_planner  # noqa: E402
+from dynamo.runtime import DistributedRuntime, dynamo_worker  # noqa: E402
 
 
 @dynamo_worker()
@@ -52,6 +52,7 @@ async def worker(runtime: DistributedRuntime):
     except Exception as e:
         print(f"\n[ERR] Planner init: {type(e).__name__}: {e}")
         import traceback
+
         traceback.print_exc()
 
 

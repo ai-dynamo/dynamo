@@ -21,7 +21,9 @@ from dynamo.planner.tests.testbed.fake_actuator import AppliedCaps, FakeActuator
 
 if TYPE_CHECKING:
     from dynamo.planner.tests.testbed.fake_planner_metrics import FakePlannerMetrics
-    from dynamo.planner.tests.testbed.replay.synthetic_power_overlay import SyntheticPowerOverlay
+    from dynamo.planner.tests.testbed.replay.synthetic_power_overlay import (
+        SyntheticPowerOverlay,
+    )
     from dynamo.planner.tests.testbed.scenarios import ScenarioSpec, SystemSpec
 
 
@@ -44,14 +46,16 @@ class ReplayFakeActuator(FakeActuator):
         # We pass fleet=None but override the methods that use it.
         super().__init__(
             scenario=scenario,
-            fleet=None,   # type: ignore[arg-type]
+            fleet=None,  # type: ignore[arg-type]
             metrics=metrics,
             system_spec=system_spec,
         )
         self._bridge = bridge
         self._overlay = overlay
 
-        self._current_n_p = scenario.mocker.num_prefill_workers if scenario.mocker else 1
+        self._current_n_p = (
+            scenario.mocker.num_prefill_workers if scenario.mocker else 1
+        )
         self._current_n_d = scenario.mocker.num_decode_workers if scenario.mocker else 4
 
         # γ-class has no SyntheticFleet, so the FakeActuator parent's

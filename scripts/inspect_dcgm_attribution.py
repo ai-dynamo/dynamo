@@ -41,4 +41,6 @@ qwen = q('DCGM_FI_DEV_POWER_USAGE{exported_pod=~"^qwen3-quickstart-[0-9]+-.*"}')
 print(f"  total: {len(qwen)}")
 for s in qwen:
     m = s["metric"]
-    print(f"  exported_namespace={m.get('exported_namespace')!r} exported_pod={m.get('exported_pod')!r} watts={s['value'][1]}")
+    print(
+        f"  exported_namespace={m.get('exported_namespace')!r} exported_pod={m.get('exported_pod')!r} watts={s['value'][1]}"
+    )

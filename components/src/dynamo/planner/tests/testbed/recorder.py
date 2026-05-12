@@ -97,12 +97,16 @@ class TickHistory:
     def to_csv(self, path: Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        fields = [f.name for f in dataclasses.fields(TickSnapshot)
-                  if f.name not in ("correction_pegged",)]
+        fields = [
+            f.name
+            for f in dataclasses.fields(TickSnapshot)
+            if f.name not in ("correction_pegged",)
+        ]
         with path.open("w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fields + ["correction_pegged_json"])
             writer.writeheader()
             import json
+
             for snap in self.snapshots:
                 row = {k: getattr(snap, k) for k in fields}
                 row["correction_pegged_json"] = json.dumps(snap.correction_pegged)
@@ -117,16 +121,16 @@ class TickHistory:
         if self.snapshots:
             last = self.snapshots[-1]
             lines += [
-                f'testbed_c_ttft{{{labels}}} {last.c_ttft}',
-                f'testbed_c_itl{{{labels}}} {last.c_itl}',
-                f'testbed_c_power_p{{{labels}}} {last.c_power_p}',
-                f'testbed_c_power_d{{{labels}}} {last.c_power_d}',
-                f'testbed_cap_p_watts{{{labels}}} {last.cap_p}',
-                f'testbed_cap_d_watts{{{labels}}} {last.cap_d}',
-                f'testbed_projected_w{{{labels}}} {last.projected_w}',
-                f'testbed_budget_w{{{labels}}} {last.budget_w}',
-                f'testbed_n_p{{{labels}}} {last.n_p}',
-                f'testbed_n_d{{{labels}}} {last.n_d}',
+                f"testbed_c_ttft{{{labels}}} {last.c_ttft}",
+                f"testbed_c_itl{{{labels}}} {last.c_itl}",
+                f"testbed_c_power_p{{{labels}}} {last.c_power_p}",
+                f"testbed_c_power_d{{{labels}}} {last.c_power_d}",
+                f"testbed_cap_p_watts{{{labels}}} {last.cap_p}",
+                f"testbed_cap_d_watts{{{labels}}} {last.cap_d}",
+                f"testbed_projected_w{{{labels}}} {last.projected_w}",
+                f"testbed_budget_w{{{labels}}} {last.budget_w}",
+                f"testbed_n_p{{{labels}}} {last.n_p}",
+                f"testbed_n_d{{{labels}}} {last.n_d}",
             ]
         path.write_text("\n".join(lines) + "\n")
 
@@ -154,13 +158,24 @@ class TickHistory:
         axes[0, 1].set_title("Applied caps (W/GPU)")
         axes[0, 1].legend()
 
-        axes[1, 0].plot(ticks, [s.projected_w for s in self.snapshots], label="projected_w")
-        axes[1, 0].plot(ticks, [s.budget_w for s in self.snapshots], label="budget_w", linestyle="--")
+        axes[1, 0].plot(
+            ticks, [s.projected_w for s in self.snapshots], label="projected_w"
+        )
+        axes[1, 0].plot(
+            ticks,
+            [s.budget_w for s in self.snapshots],
+            label="budget_w",
+            linestyle="--",
+        )
         axes[1, 0].set_title("Power budget utilization")
         axes[1, 0].legend()
 
-        axes[1, 1].plot(ticks, [s.observed_ttft_s * 1000 for s in self.snapshots], label="TTFT (ms)")
-        axes[1, 1].plot(ticks, [s.observed_itl_s * 1000 for s in self.snapshots], label="ITL (ms)")
+        axes[1, 1].plot(
+            ticks, [s.observed_ttft_s * 1000 for s in self.snapshots], label="TTFT (ms)"
+        )
+        axes[1, 1].plot(
+            ticks, [s.observed_itl_s * 1000 for s in self.snapshots], label="ITL (ms)"
+        )
         axes[1, 1].set_title("Observed latency")
         axes[1, 1].legend()
 

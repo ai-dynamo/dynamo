@@ -440,9 +440,7 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         p_gpu = (
             self._capabilities.prefill.num_gpu if self._capabilities.prefill else None
         )
-        d_gpu = (
-            self._capabilities.decode.num_gpu if self._capabilities.decode else None
-        )
+        d_gpu = self._capabilities.decode.num_gpu if self._capabilities.decode else None
         if p_gpu is None or d_gpu is None:
             return num_p, num_d
 
@@ -451,7 +449,7 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             return num_p, num_d
 
         p_watts = self._config.prefill_engine_gpu_power_limit * p_gpu  # per replica
-        d_watts = self._config.decode_engine_gpu_power_limit * d_gpu   # per replica
+        d_watts = self._config.decode_engine_gpu_power_limit * d_gpu  # per replica
 
         projected = num_p * p_watts + num_d * d_watts
         if projected <= budget:
@@ -463,15 +461,14 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             logger.warning(
                 "total_gpu_power_limit (%dW) < minimum required (%dW) for "
                 "min_endpoint replicas; enforcing zero replicas.",
-                budget, min_p_watts + min_d_watts,
+                budget,
+                min_p_watts + min_d_watts,
             )
             return 0, 0
 
         scale = budget / projected
         max_p = math.floor((budget - min_d_watts) / p_watts)
-        scaled_p = max(
-            self._config.min_endpoint, min(max_p, math.floor(num_p * scale))
-        )
+        scaled_p = max(self._config.min_endpoint, min(max_p, math.floor(num_p * scale)))
         remaining = budget - scaled_p * p_watts
         scaled_d = max(
             self._config.min_endpoint, min(num_d, math.floor(remaining / d_watts))
@@ -480,7 +477,12 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         logger.warning(
             "Power budget: projected %dW > limit %dW. "
             "Scaled (%dP, %dD) → (%dP, %dD).",
-            projected, budget, num_p, num_d, scaled_p, scaled_d,
+            projected,
+            budget,
+            num_p,
+            num_d,
+            scaled_p,
+            scaled_d,
         )
         return scaled_p, scaled_d
 

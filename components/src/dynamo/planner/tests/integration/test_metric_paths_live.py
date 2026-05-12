@@ -18,7 +18,6 @@ Run from the dev pod:
 
 from __future__ import annotations
 
-import asyncio
 import os
 import urllib.parse
 import urllib.request
@@ -58,16 +57,14 @@ if not (_IN_CLUSTER and _DGD_NAME):
 
 # Cluster service URLs (these match the ones documented in
 # docs/components/planner/dpp-dev-env.md).
-_PROM_URL = (
-    "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
-)
+_PROM_URL = "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
 
 # Deferred imports — these pull in heavy planner deps that need the runtime ready.
 from dynamo.planner.connectors.kubernetes import KubernetesConnector  # noqa: E402
 from dynamo.planner.monitoring.traffic_metrics import (  # noqa: E402
+    _WORKER_METRIC_NAMES,
     DirectRouterMetricsClient,
     PrometheusAPIClient,
-    _WORKER_METRIC_NAMES,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.gpu_0]
@@ -339,7 +336,7 @@ class TestDcgmPerPodPower:
         # the value must not be None — that would indicate the fix
         # regressed.  Only assert this when raw attribution is present.
         attributed = _raw_prom_query(
-            f'DCGM_FI_DEV_POWER_USAGE{{'
+            f"DCGM_FI_DEV_POWER_USAGE{{"
             f'exported_namespace="{_K8S_NAMESPACE}",'
             f'exported_pod=~"^{_DGD_NAME}-[0-9]+-.*"}}'
         )
@@ -368,7 +365,7 @@ class TestDcgmPerPodPower:
         )
         assert v is None or isinstance(v, float)
         attributed = _raw_prom_query(
-            f'DCGM_FI_DEV_POWER_USAGE{{'
+            f"DCGM_FI_DEV_POWER_USAGE{{"
             f'exported_namespace="{_K8S_NAMESPACE}",'
             f'exported_pod=~"^{_DGD_NAME}-[0-9]+-vllmworker-.*"}}'
         )
@@ -496,9 +493,9 @@ class TestDirectRouterMetricsClientLive:
             text = resp.read().decode("utf-8")
         except Exception as exc:
             pytest.skip(f"Discovered KV-router /metrics endpoint flapped: {exc}")
-        assert "# HELP" in text or "# TYPE" in text, (
-            "Response is not Prometheus text exposition format"
-        )
+        assert (
+            "# HELP" in text or "# TYPE" in text
+        ), "Response is not Prometheus text exposition format"
 
     @pytest.mark.asyncio
     async def test_fetch_and_parse_returns_dict(self, metrics_url: str):
@@ -543,9 +540,7 @@ class TestMdcReadLive:
             f"{_K8S_NAMESPACE!r}; the worker may not have registered yet."
         )
 
-    def test_extract_mdc_entries_for_this_dgd(
-        self, connector: KubernetesConnector
-    ):
+    def test_extract_mdc_entries_for_this_dgd(self, connector: KubernetesConnector):
         entries = connector._extract_mdc_entries()
         assert isinstance(entries, list)
         if not entries:

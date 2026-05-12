@@ -12,7 +12,7 @@ Covers:
 """
 
 import unittest
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import power_agent
 from power_agent import (
@@ -22,7 +22,6 @@ from power_agent import (
     _clamp_to_constraints,
     _nvml_uuid,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -162,7 +161,9 @@ class TestClampToConstraints(unittest.TestCase):
         """If GetPowerManagementLimitConstraints fails, pass the value through."""
         mock_nvml = MagicMock()
         mock_nvml.NVMLError = Exception
-        mock_nvml.nvmlDeviceGetPowerManagementLimitConstraints.side_effect = Exception("nvml")
+        mock_nvml.nvmlDeviceGetPowerManagementLimitConstraints.side_effect = Exception(
+            "nvml"
+        )
         with patch.object(power_agent, "pynvml", mock_nvml):
             result = _clamp_to_constraints(self.handle, 300, 0, self.metrics)
         self.assertEqual(result, 300)
@@ -187,7 +188,9 @@ class TestApplyCap(unittest.TestCase):
         with patch.object(power_agent, "pynvml", mock_nvml):
             with patch("power_agent._persist_managed_gpus"):
                 _apply_cap(handle, 0, 300, metrics)
-        mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_called_once_with(handle, 300_000)
+        mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_called_once_with(
+            handle, 300_000
+        )
 
     def test_adds_gpu_to_managed_indices(self):
         mock_nvml = _make_nvml()
@@ -236,7 +239,9 @@ class TestApplyCap(unittest.TestCase):
         with patch.object(power_agent, "pynvml", mock_nvml):
             with patch("power_agent._persist_managed_gpus"):
                 _apply_cap(handle, 0, 900, metrics)
-        mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_called_once_with(handle, 700_000)
+        mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_called_once_with(
+            handle, 700_000
+        )
 
     def test_clamp_below_min_uses_min(self):
         """Requested 50 W but SKU min is 100 W → NVML receives 100_000 mW."""
@@ -246,7 +251,9 @@ class TestApplyCap(unittest.TestCase):
         with patch.object(power_agent, "pynvml", mock_nvml):
             with patch("power_agent._persist_managed_gpus"):
                 _apply_cap(handle, 0, 50, metrics)
-        mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_called_once_with(handle, 100_000)
+        mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_called_once_with(
+            handle, 100_000
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -44,6 +44,7 @@ def _ensure_dynamo_runtime_on_path() -> None:
     # pure-Python bindings.  Path: <repo>/components/src/dynamo/planner/tests/testbed/
     # → up 6 levels → <repo>/ → lib/bindings/python/src
     import pathlib
+
     this_file = pathlib.Path(__file__).resolve()
     # Ascend: testbed → tests → planner → dynamo → src → components → <repo>
     repo_root = this_file.parents[6]
@@ -66,6 +67,7 @@ def install_stub_if_needed() -> bool:
 
     try:
         import dynamo._core  # noqa: F401  — real binding present
+
         return False
     except ImportError:
         pass
@@ -98,38 +100,74 @@ def install_stub_if_needed() -> bool:
                 f"If you need this in a γ-class scenario, build the real "
                 f"binding (maturin develop in lib/bindings/python)."
             )
+
         return _raise
 
     # --- Classes consumed at module-import time by dynamo.runtime ---
     # These are *imported* but never *instantiated* during testbed runs;
     # making them stub classes satisfies the import-time binding check.
     for _name in (
-        "Client", "Context", "DistributedRuntime", "Endpoint",
+        "Client",
+        "Context",
+        "DistributedRuntime",
+        "Endpoint",
         # dynamo.planner.connectors.virtual imports this at top level
         "VirtualConnectorCoordinator",
         # dynamo.llm imports (only needed for γ; harmless to stub)
-        "AicPerfConfig", "EngineType", "EntrypointArgs",
-        "FpmDirectPublisher", "FpmEventRelay", "FpmEventSubscriber",
-        "HttpAsyncEngine", "HttpService", "KserveGrpcService",
-        "KvEventPublisher", "KvRouter", "KvRouterConfig",
-        "LoRADownloader", "MediaDecoder", "MediaFetcher",
-        "MockEngineArgs", "ModelCardInstanceId", "ModelInput",
-        "ModelRuntimeConfig", "ModelType", "OverlapScores",
-        "PlannerReplayBridge", "PythonAsyncEngine", "RadixTree",
-        "ReasoningConfig", "RouterConfig", "RouterMode", "SglangArgs",
-        "WorkerMetricsPublisher", "ModelDeploymentCard",
+        "AicPerfConfig",
+        "EngineType",
+        "EntrypointArgs",
+        "FpmDirectPublisher",
+        "FpmEventRelay",
+        "FpmEventSubscriber",
+        "HttpAsyncEngine",
+        "HttpService",
+        "KserveGrpcService",
+        "KvEventPublisher",
+        "KvRouter",
+        "KvRouterConfig",
+        "LoRADownloader",
+        "MediaDecoder",
+        "MediaFetcher",
+        "MockEngineArgs",
+        "ModelCardInstanceId",
+        "ModelInput",
+        "ModelRuntimeConfig",
+        "ModelType",
+        "OverlapScores",
+        "PlannerReplayBridge",
+        "PythonAsyncEngine",
+        "RadixTree",
+        "ReasoningConfig",
+        "RouterConfig",
+        "RouterMode",
+        "SglangArgs",
+        "WorkerMetricsPublisher",
+        "ModelDeploymentCard",
         # Exceptions used in dynamo.llm.exceptions
-        "Cancelled", "CannotConnect", "ConnectionTimeout",
-        "Disconnected", "DynamoException", "EngineShutdown",
-        "InvalidArgument", "StreamIncomplete", "Unknown",
+        "Cancelled",
+        "CannotConnect",
+        "ConnectionTimeout",
+        "Disconnected",
+        "DynamoException",
+        "EngineShutdown",
+        "InvalidArgument",
+        "StreamIncomplete",
+        "Unknown",
     ):
         setattr(stub, _name, type(_name, (), {"__init__": _unimplemented(_name)}))
 
     # --- Free functions used at module-import time ---
     for _name in (
-        "compute_block_hash_for_seq", "fetch_model", "lora_name_to_id",
-        "make_engine", "register_model", "run_input", "run_kv_indexer",
-        "run_mocker_trace_replay", "unregister_model",
+        "compute_block_hash_for_seq",
+        "fetch_model",
+        "lora_name_to_id",
+        "make_engine",
+        "register_model",
+        "run_input",
+        "run_kv_indexer",
+        "run_mocker_trace_replay",
+        "unregister_model",
     ):
         setattr(stub, _name, _unimplemented(_name))
 
@@ -180,11 +218,13 @@ def install_predictor_deps_stub_if_needed() -> None:
             fp_kal.KalmanFilter = type(
                 "KalmanFilter",
                 (),
-                {"__init__": lambda *a, **kw: (_ for _ in ()).throw(
-                    NotImplementedError(
-                        "filterpy is stubbed for the testbed (constant predictor only)."
+                {
+                    "__init__": lambda *a, **kw: (_ for _ in ()).throw(
+                        NotImplementedError(
+                            "filterpy is stubbed for the testbed (constant predictor only)."
+                        )
                     )
-                )},
+                },
             )
             sys.modules["filterpy"] = fp
             sys.modules["filterpy.kalman"] = fp_kal
@@ -199,10 +239,12 @@ def install_predictor_deps_stub_if_needed() -> None:
             pr.Prophet = type(
                 "Prophet",
                 (),
-                {"__init__": lambda *a, **kw: (_ for _ in ()).throw(
-                    NotImplementedError(
-                        "prophet is stubbed for the testbed (constant predictor only)."
+                {
+                    "__init__": lambda *a, **kw: (_ for _ in ()).throw(
+                        NotImplementedError(
+                            "prophet is stubbed for the testbed (constant predictor only)."
+                        )
                     )
-                )},
+                },
             )
             sys.modules["prophet"] = pr

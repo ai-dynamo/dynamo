@@ -51,16 +51,16 @@ from pathlib import Path
 
 H200_TRANSFERS: list[tuple[str, str, str]] = [
     # (src_dir_relative,            dst_dir_relative,                  file_glob)
-    ("trtllm/1.3.0rc2",            "h200_sxm/trtllm/1.3.0rc2",        "*.txt"),
-    ("trtllm_allreduce",           "h200_sxm/trtllm/1.3.0rc2",        "*.txt"),
-    ("vllm/0.19.1",                "h200_sxm/vllm/0.19.1",            "*.txt"),
-    ("nccl",                       "h200_sxm/nccl/2.29.2",            "nccl_perf.txt"),
+    ("trtllm/1.3.0rc2", "h200_sxm/trtllm/1.3.0rc2", "*.txt"),
+    ("trtllm_allreduce", "h200_sxm/trtllm/1.3.0rc2", "*.txt"),
+    ("vllm/0.19.1", "h200_sxm/vllm/0.19.1", "*.txt"),
+    ("nccl", "h200_sxm/nccl/2.29.2", "nccl_perf.txt"),
 ]
 
 B200_TRANSFERS: list[tuple[str, str, str]] = [
-    ("trtllm/1.3.0rc6",            "b200_sxm/trtllm/1.3.0rc6",        "*.txt"),
-    ("vllm/0.19.0",                "b200_sxm/vllm/0.19.0",            "*.txt"),
-    ("sglang/0.5.10.post1",        "b200_sxm/sglang/0.5.10.post1",    "*.txt"),
+    ("trtllm/1.3.0rc6", "b200_sxm/trtllm/1.3.0rc6", "*.txt"),
+    ("vllm/0.19.0", "b200_sxm/vllm/0.19.0", "*.txt"),
+    ("sglang/0.5.10.post1", "b200_sxm/sglang/0.5.10.post1", "*.txt"),
 ]
 
 
@@ -149,7 +149,9 @@ def integrate(
                 print(f"  [WARN] Source directory not found: {src_dir}")
                 continue
             print(f"  {src_rel}  →  {dst_rel}/")
-            total += _copy_files(src_dir, dst_dir, glob, dry_run=dry_run, overwrite=overwrite)
+            total += _copy_files(
+                src_dir, dst_dir, glob, dry_run=dry_run, overwrite=overwrite
+            )
 
     # ---- B200 ----
     if b200_data is not None:
@@ -163,7 +165,9 @@ def integrate(
                 print(f"  [WARN] Source directory not found: {src_dir}")
                 continue
             print(f"  {src_rel}  →  {dst_rel}/")
-            total += _copy_files(src_dir, dst_dir, glob, dry_run=dry_run, overwrite=overwrite)
+            total += _copy_files(
+                src_dir, dst_dir, glob, dry_run=dry_run, overwrite=overwrite
+            )
 
         # 2. b200_sxm.yaml system spec
         spec_src = b200_data / "systems" / "b200_sxm.yaml"
@@ -171,7 +175,9 @@ def integrate(
         if spec_src.is_file():
             print(f"\n  b200_sxm.yaml  →  {spec_dst}")
             if spec_dst.exists() and not overwrite:
-                print(f"  [SKIP] {spec_dst} already exists (use --overwrite to replace)")
+                print(
+                    f"  [SKIP] {spec_dst} already exists (use --overwrite to replace)"
+                )
             else:
                 action = "COPY" if not dry_run else "DRY-RUN"
                 print(f"  [{action}] {spec_src} → {spec_dst}")
@@ -224,7 +230,10 @@ def main() -> None:
 
     aic_checkout: Path = args.aic_checkout.resolve()
     if not aic_checkout.is_dir():
-        print(f"ERROR: --aic-checkout directory not found: {aic_checkout}", file=sys.stderr)
+        print(
+            f"ERROR: --aic-checkout directory not found: {aic_checkout}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     h200_data = args.h200_data.resolve() if args.h200_data else None

@@ -289,7 +289,9 @@ class PlannerConfig(BaseModel):
         default=None,
         description="AIC system identifier (e.g. 'h200_sxm'). Falls back to aic_interpolation.system.",
     )
-    aic_reoptimize_interval: int = Field(default=SLAPlannerDefaults.aic_reoptimize_interval)
+    aic_reoptimize_interval: int = Field(
+        default=SLAPlannerDefaults.aic_reoptimize_interval
+    )
     aic_drift_relative_threshold: float = Field(
         default=SLAPlannerDefaults.aic_drift_relative_threshold, ge=0.0
     )

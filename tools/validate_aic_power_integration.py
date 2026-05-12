@@ -36,7 +36,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -73,13 +73,13 @@ def _section(title: str) -> None:
 # ---------------------------------------------------------------------------
 _EXPECTED_RANGES = {
     "h200_sxm": {
-        "prefill_min": 100.0,   # below p50 of any op
-        "prefill_max": 710.0,   # slightly above 700W TDP (instrument noise)
+        "prefill_min": 100.0,  # below p50 of any op
+        "prefill_max": 710.0,  # slightly above 700W TDP (instrument noise)
         "decode_min": 100.0,
         "decode_max": 710.0,
     },
     "b200_sxm": {
-        "prefill_min": 200.0,   # B200 idle floor
+        "prefill_min": 200.0,  # B200 idle floor
         "prefill_max": 1050.0,  # slightly above 1000W TDP
         "decode_min": 200.0,
         "decode_max": 1050.0,
@@ -94,7 +94,9 @@ def _check_power_w_range(
     expected_max: float,
 ) -> bool:
     if expected_min <= value <= expected_max:
-        _pass(f"{name} = {value:.1f} W (expected [{expected_min:.0f}, {expected_max:.0f}] W)")
+        _pass(
+            f"{name} = {value:.1f} W (expected [{expected_min:.0f}, {expected_max:.0f}] W)"
+        )
         return True
     else:
         _fail(
@@ -134,7 +136,7 @@ def validate_estimator(system: str, backend: str, hf_id: str) -> None:
     ranges = _EXPECTED_RANGES.get(system, _EXPECTED_RANGES["h200_sxm"])
 
     # --- Check: prefill power_w is non-zero and in range ---
-    _section(f"  prefill estimate (isl=1024, tp=8)")
+    _section("  prefill estimate (isl=1024, tp=8)")
     try:
         prefill_result = estimator.estimate_prefill_perf(
             isl=1024,
@@ -153,7 +155,9 @@ def validate_estimator(system: str, backend: str, hf_id: str) -> None:
                 "Did you run `tools/integrate_aic_power_data.py` and reinstall the package?"
             )
         else:
-            _check_power_w_range(power_p, "prefill power_w", ranges["prefill_min"], ranges["prefill_max"])
+            _check_power_w_range(
+                power_p, "prefill power_w", ranges["prefill_min"], ranges["prefill_max"]
+            )
 
         if ttft > 0:
             _pass(f"prefill context_latency = {ttft:.2f} ms (non-zero)")
@@ -164,7 +168,7 @@ def validate_estimator(system: str, backend: str, hf_id: str) -> None:
         _fail(f"estimate_prefill_perf raised: {exc}")
 
     # --- Check: decode power_w ---
-    _section(f"  decode estimate (isl=1024, osl=128, bs=16, tp=8)")
+    _section("  decode estimate (isl=1024, osl=128, bs=16, tp=8)")
     try:
         decode_result = estimator.estimate_perf(
             isl=1024,
@@ -185,7 +189,9 @@ def validate_estimator(system: str, backend: str, hf_id: str) -> None:
                 "decode power_w = 0.0 — database has not been updated with power data."
             )
         else:
-            _check_power_w_range(power_d, "decode power_w", ranges["decode_min"], ranges["decode_max"])
+            _check_power_w_range(
+                power_d, "decode power_w", ranges["decode_min"], ranges["decode_max"]
+            )
 
         if itl > 0:
             _pass(f"decode tpot = {itl:.2f} ms (non-zero)")
@@ -246,6 +252,7 @@ def validate_optimizer_uses_real_power(system: str, backend: str, hf_id: str) ->
         return
 
     import logging as _logging
+
     tdp_fallback_fired = False
 
     class _TDPWatcher(_logging.Handler):
@@ -262,7 +269,7 @@ def validate_optimizer_uses_real_power(system: str, backend: str, hf_id: str) ->
     try:
         metrics = MagicMock()
         opt = AICPowerOptimizer(config, metrics)
-        result = opt.optimize()   # uses the real estimator via normal import
+        result = opt.optimize()  # uses the real estimator via normal import
     except Exception as exc:
         _fail(f"optimize() raised: {exc}")
         return
@@ -287,7 +294,9 @@ def validate_optimizer_uses_real_power(system: str, backend: str, hf_id: str) ->
             f"cap_d={result.cap_d} W) — TDP fallback NOT triggered."
         )
 
-    _pass(f"n_p={result.n_p}, n_d={result.n_d}, cap_p={result.cap_p} W, cap_d={result.cap_d} W")
+    _pass(
+        f"n_p={result.n_p}, n_d={result.n_d}, cap_p={result.cap_p} W, cap_d={result.cap_d} W"
+    )
 
 
 def main() -> None:
@@ -296,13 +305,31 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--system", default="h200_sxm", choices=list(_EXPECTED_RANGES), help="AIC system identifier.")
-    parser.add_argument("--backend", default="trtllm", choices=["trtllm", "vllm", "sglang"], help="AIC backend.")
-    parser.add_argument("--hf-id", default="Qwen/Qwen3-32B", help="HuggingFace model ID for the AIC sweep.")
-    parser.add_argument("--skip-optimizer", action="store_true", help="Skip the optimizer smoke test (just check estimator).")
+    parser.add_argument(
+        "--system",
+        default="h200_sxm",
+        choices=list(_EXPECTED_RANGES),
+        help="AIC system identifier.",
+    )
+    parser.add_argument(
+        "--backend",
+        default="trtllm",
+        choices=["trtllm", "vllm", "sglang"],
+        help="AIC backend.",
+    )
+    parser.add_argument(
+        "--hf-id",
+        default="Qwen/Qwen3-32B",
+        help="HuggingFace model ID for the AIC sweep.",
+    )
+    parser.add_argument(
+        "--skip-optimizer",
+        action="store_true",
+        help="Skip the optimizer smoke test (just check estimator).",
+    )
     args = parser.parse_args()
 
-    print(f"\nAIC Power Integration Validator")
+    print("\nAIC Power Integration Validator")
     print(f"  system  : {args.system}")
     print(f"  backend : {args.backend}")
     print(f"  hf_id   : {args.hf_id}")

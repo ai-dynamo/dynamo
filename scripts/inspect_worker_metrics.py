@@ -33,12 +33,12 @@ PLANNER_TARGET_NAMES = {
 }
 
 ENDPOINTS = {
-    f"worker (vllmworker:9090)": f"http://{DGD}-vllmworker:9090/metrics",
+    "worker (vllmworker:9090)": f"http://{DGD}-vllmworker:9090/metrics",
     # The frontend metrics service can be reached via the frontend Service.
     # Operator names the frontend Service `<dgd>-frontend` on port 8000 by
     # default — let's scrape it too.
-    f"frontend (frontend:8000)": f"http://{DGD}-frontend:8000/metrics",
-    f"frontend (frontend:9090)": f"http://{DGD}-frontend:9090/metrics",
+    "frontend (frontend:8000)": f"http://{DGD}-frontend:8000/metrics",
+    "frontend (frontend:9090)": f"http://{DGD}-frontend:9090/metrics",
 }
 
 

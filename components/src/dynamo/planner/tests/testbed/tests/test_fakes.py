@@ -10,9 +10,12 @@ restructure FakeActuator, these tests fail loud at collection.
 from __future__ import annotations
 
 import random
+from typing import TYPE_CHECKING
 
 import pytest
 
+if TYPE_CHECKING:
+    from dynamo.planner.tests.testbed.scenarios import ScenarioSpec
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -25,10 +28,14 @@ def _system_spec():
     return SystemSpec.load("h200_sxm")
 
 
-def _scenario(planner_overrides: dict | None = None,
-              fleet_overrides: dict | None = None) -> "ScenarioSpec":  # type: ignore[name-defined]
+def _scenario(
+    planner_overrides: dict | None = None, fleet_overrides: dict | None = None
+) -> "ScenarioSpec":  # type: ignore[name-defined]
     from dynamo.planner.tests.testbed.scenarios import (
-        FleetSpec, LoadSpec, PlannerSpec, ScenarioSpec,
+        FleetSpec,
+        LoadSpec,
+        PlannerSpec,
+        ScenarioSpec,
     )
 
     planner_kwargs = dict(
@@ -229,13 +236,17 @@ class TestFakePrometheusClient:
 
     def test_decode_power_is_positive_float(self):
         prom, _ = self._make_prom()
-        val = prom.get_avg_per_gpu_power_by_component(component="decode", interval="60s")
+        val = prom.get_avg_per_gpu_power_by_component(
+            component="decode", interval="60s"
+        )
         assert isinstance(val, float)
         assert val > 0
 
     def test_prefill_power_is_positive_float(self):
         prom, _ = self._make_prom()
-        val = prom.get_avg_per_gpu_power_by_component(component="prefill", interval="60s")
+        val = prom.get_avg_per_gpu_power_by_component(
+            component="prefill", interval="60s"
+        )
         assert isinstance(val, float)
         assert val > 0
 
@@ -243,7 +254,9 @@ class TestFakePrometheusClient:
         prom, fleet = self._make_prom()
         # Inject a power_p outage active at tick 0.
         fleet._active_prom_outage["power_p"] = 10
-        val = prom.get_avg_per_gpu_power_by_component(component="prefill", interval="60s")
+        val = prom.get_avg_per_gpu_power_by_component(
+            component="prefill", interval="60s"
+        )
         assert val is None
 
 

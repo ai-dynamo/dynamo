@@ -26,8 +26,12 @@ if TYPE_CHECKING:
     from dynamo.planner.tests.testbed.fake_planner_metrics import FakePlannerMetrics
     from dynamo.planner.tests.testbed.fake_prometheus import FakePrometheusClient
     from dynamo.planner.tests.testbed.recorder import TickHistory
-    from dynamo.planner.tests.testbed.replay.replay_fake_actuator import ReplayFakeActuator
-    from dynamo.planner.tests.testbed.replay.synthetic_power_overlay import SyntheticPowerOverlay
+    from dynamo.planner.tests.testbed.replay.replay_fake_actuator import (
+        ReplayFakeActuator,
+    )
+    from dynamo.planner.tests.testbed.replay.synthetic_power_overlay import (
+        SyntheticPowerOverlay,
+    )
     from dynamo.planner.tests.testbed.scenarios import ScenarioSpec
 
 logger = logging.getLogger(__name__)
@@ -75,7 +79,9 @@ class PowerAwareReplayAdapter(ReplayPlannerAdapter):
                 planner_config.prefill_engine_gpu_power_limit = initial.cap_p
                 planner_config.decode_engine_gpu_power_limit = initial.cap_d
                 self._optimizer._estimated_throughput = (
-                    initial.aic_seq_per_s_per_replica * initial.n_d * (initial.isl + initial.osl)
+                    initial.aic_seq_per_s_per_replica
+                    * initial.n_d
+                    * (initial.isl + initial.osl)
                 )
         else:
             self._optimizer = None
@@ -87,8 +93,7 @@ class PowerAwareReplayAdapter(ReplayPlannerAdapter):
 
     def run(self):  # type: ignore[override]
         """Run γ-class replay loop with power-aware extensions."""
-        from dynamo.planner.offline.replay_adapter import ReplayPlannerReport, ScalingEvent
-        from dynamo.planner.core.types import TickDiagnostics
+        from dynamo.planner.offline.replay_adapter import ReplayPlannerReport
 
         next_tick = self._sm.initial_tick(0.0)
         scaling_events = []
@@ -125,7 +130,6 @@ class PowerAwareReplayAdapter(ReplayPlannerAdapter):
             tick_input = self._build_tick_input(next_tick, result)
 
             # --- γ extension: optimizer correction + drift check ---
-            sweep_fired = False
             if self._optimizer is not None and tick_input.traffic is not None:
                 prom_power_p = self._fake_prom.get_avg_per_gpu_power_by_component(
                     component="prefill", interval="60s"
@@ -151,9 +155,10 @@ class PowerAwareReplayAdapter(ReplayPlannerAdapter):
                         self._config.decode_engine_gpu_power_limit = new_cfg.cap_d
                         self._actuator.apply_caps(new_cfg.cap_p, new_cfg.cap_d)
                         self._optimizer._estimated_throughput = (
-                            new_cfg.aic_seq_per_s_per_replica * new_cfg.n_d * (new_cfg.isl + new_cfg.osl)
+                            new_cfg.aic_seq_per_s_per_replica
+                            * new_cfg.n_d
+                            * (new_cfg.isl + new_cfg.osl)
                         )
-                        sweep_fired = True
 
             # --- Existing: state machine tick ---
             effects = self._sm.on_tick(next_tick, tick_input)
@@ -164,9 +169,15 @@ class PowerAwareReplayAdapter(ReplayPlannerAdapter):
 
             active_p = result["active_prefill_count"]
             active_d = result["active_decode_count"]
-            if self._scaling_target_prefill is not None and active_p == self._scaling_target_prefill:
+            if (
+                self._scaling_target_prefill is not None
+                and active_p == self._scaling_target_prefill
+            ):
                 self._scaling_target_prefill = None
-            if self._scaling_target_decode is not None and active_d == self._scaling_target_decode:
+            if (
+                self._scaling_target_decode is not None
+                and active_d == self._scaling_target_decode
+            ):
                 self._scaling_target_decode = None
 
             # --- γ extension: power budget post-clamp ---
@@ -220,13 +231,16 @@ class GammaHarness:
         from dynamo.planner.config.parallelization import PickedParallelConfig
         from dynamo.planner.config.planner_config import PlannerConfig
         from dynamo.planner.core.types import EngineCapabilities, WorkerCapabilities
-
         from dynamo.planner.tests.testbed.fake_aic import FakeAIC
         from dynamo.planner.tests.testbed.fake_planner_metrics import FakePlannerMetrics
         from dynamo.planner.tests.testbed.fake_prometheus import FakePrometheusClient
+        from dynamo.planner.tests.testbed.replay.replay_fake_actuator import (
+            ReplayFakeActuator,
+        )
+        from dynamo.planner.tests.testbed.replay.synthetic_power_overlay import (
+            SyntheticPowerOverlay,
+        )
         from dynamo.planner.tests.testbed.scenarios import SystemSpec
-        from dynamo.planner.tests.testbed.replay.replay_fake_actuator import ReplayFakeActuator
-        from dynamo.planner.tests.testbed.replay.synthetic_power_overlay import SyntheticPowerOverlay
 
         sc = self.scenario
         rng = random.Random(sc.seed)
@@ -290,7 +304,9 @@ class GammaHarness:
         # Build the bridge
         self.bridge = self._build_bridge(mocker, overlay_spec.system)
 
-        self.actuator = ReplayFakeActuator(sc, self.overlay, self.bridge, self.metrics, system_spec)
+        self.actuator = ReplayFakeActuator(
+            sc, self.overlay, self.bridge, self.metrics, system_spec
+        )
 
         self.adapter = PowerAwareReplayAdapter(
             self.config,
@@ -427,7 +443,8 @@ class GammaHarness:
 
             snap = TickSnapshot(
                 tick=i,
-                n_p=n_p, n_d=n_d,
+                n_p=n_p,
+                n_d=n_d,
                 cap_p=self.config.prefill_engine_gpu_power_limit,
                 cap_d=self.config.decode_engine_gpu_power_limit,
                 observed_ttft_s=0.0,
@@ -440,17 +457,23 @@ class GammaHarness:
                 c_power_p=opt._c_power_p if opt else 1.0,
                 c_power_d=opt._c_power_d if opt else 1.0,
                 estimated_throughput=opt._estimated_throughput if opt else 0.0,
-                consecutive_violation_ticks=opt._consecutive_violation_ticks if opt else 0,
+                consecutive_violation_ticks=opt._consecutive_violation_ticks
+                if opt
+                else 0,
                 projected_w=0.0,
                 budget_w=float(self.config.total_gpu_power_limit or 0),
                 sweep_fired=False,
                 sla_violated=False,
                 capacity_exceeded=False,
                 cap_clamped_min=int(
-                    self.metrics.power_agent_cap_clamped_total.labeled_value(direction="min")
+                    self.metrics.power_agent_cap_clamped_total.labeled_value(
+                        direction="min"
+                    )
                 ),
                 cap_clamped_max=int(
-                    self.metrics.power_agent_cap_clamped_total.labeled_value(direction="max")
+                    self.metrics.power_agent_cap_clamped_total.labeled_value(
+                        direction="max"
+                    )
                 ),
                 optimizer_exceptions=int(
                     self.metrics.aic_optimizer_exceptions_total.value

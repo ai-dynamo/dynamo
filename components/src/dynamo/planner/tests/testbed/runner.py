@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
+    from dynamo.planner.tests.testbed.recorder import TickHistory
     from dynamo.planner.tests.testbed.scenarios import ScenarioSpec
 
 logger = logging.getLogger(__name__)
@@ -57,10 +58,9 @@ class ScenarioRunner:
         from dynamo.planner.core.state_machine import PlannerStateMachine
         from dynamo.planner.core.types import EngineCapabilities, WorkerCapabilities
         from dynamo.planner.monitoring.aic_power_optimizer import AICPowerOptimizer
-
         from dynamo.planner.tests.testbed.clock import Clock
-        from dynamo.planner.tests.testbed.fake_aic import FakeAIC
         from dynamo.planner.tests.testbed.fake_actuator import FakeActuator
+        from dynamo.planner.tests.testbed.fake_aic import FakeAIC
         from dynamo.planner.tests.testbed.fake_planner_metrics import FakePlannerMetrics
         from dynamo.planner.tests.testbed.fake_prometheus import FakePrometheusClient
         from dynamo.planner.tests.testbed.recorder import TickHistory
@@ -146,6 +146,7 @@ class ScenarioRunner:
             BudgetChangeEvent,
             FrontendPostFaultEvent,
         )
+
         for event in self._events:
             if getattr(event, "at_tick", None) != 0:
                 continue
@@ -178,11 +179,14 @@ class ScenarioRunner:
             # the optimizer so its initial _time_of_last_optimize reads 0.0 in
             # virtual time, not wall-clock time.
             import unittest.mock as mock
+
             self._clock_patch = mock.patch("time.monotonic", side_effect=self.clock.now)
             self._clock_patch.start()
 
             self.optimizer = AICPowerOptimizer(self.config, self.metrics)
-            self.optimizer._aic_estimator_factory = self.fake_aic.make_estimator_factory()
+            self.optimizer._aic_estimator_factory = (
+                self.fake_aic.make_estimator_factory()
+            )
 
             # Run the cold-start sweep — mirrors production base.py setup_async()
             # and γ-adapter PowerAwareReplayAdapter.__init__. Without this,
@@ -231,8 +235,9 @@ class ScenarioRunner:
     def _tick_alpha(self, tick: int) -> None:
         from dynamo.planner.tests.testbed.recorder import TickSnapshot
         from dynamo.planner.tests.testbed.scenarios import (
-            ActuationFaultEvent, AicFailureEvent, BiasStepEvent, BiasSineEvent,
-            BiasRampEvent, BudgetChangeEvent, MdcUnavailableEvent,
+            ActuationFaultEvent,
+            AicFailureEvent,
+            BudgetChangeEvent,
         )
 
         sc = self.scenario
@@ -256,7 +261,10 @@ class ScenarioRunner:
                 self.fleet.apply_event(event, tick)
 
         # Clear expired AIC fault
-        if hasattr(self, "_aic_fault_reset_tick") and tick >= self._aic_fault_reset_tick:
+        if (
+            hasattr(self, "_aic_fault_reset_tick")
+            and tick >= self._aic_fault_reset_tick
+        ):
             if self.fake_aic:
                 self.fake_aic.reset_fault()
 
@@ -317,9 +325,10 @@ class ScenarioRunner:
                     # so drift detection compares against achievable capacity.
                     # See note in ``_setup_alpha`` for the production-divergence
                     # rationale (testbed scenarios assume post-clamp semantics).
-                    sweep_final_p, sweep_final_d = self.state_machine._apply_power_budget(
-                        new_cfg.n_p, new_cfg.n_d
-                    )
+                    (
+                        sweep_final_p,
+                        sweep_final_d,
+                    ) = self.state_machine._apply_power_budget(new_cfg.n_p, new_cfg.n_d)
                     self.optimizer._estimated_throughput = (
                         new_cfg.aic_seq_per_s_per_replica
                         * sweep_final_d
@@ -366,7 +375,9 @@ class ScenarioRunner:
             consecutive_violations = self.optimizer._consecutive_violation_ticks
 
         after_pegged = self._read_pegged_counters()
-        pegged_delta = {k: after_pegged.get(k, 0) - before_pegged.get(k, 0) for k in after_pegged}
+        pegged_delta = {
+            k: after_pegged.get(k, 0) - before_pegged.get(k, 0) for k in after_pegged
+        }
 
         n_oscillations = self._update_oscillation_count(
             self.fleet.state.n_p_truth, self.fleet.state.n_d_truth
@@ -397,12 +408,23 @@ class ScenarioRunner:
                 or obs.itl_avg_s > (sc.planner.itl / 1000.0)
             ),
             capacity_exceeded=obs.total_tokens_per_sec > (estimated_throughput * 1.15)
-            if estimated_throughput > 0 else False,
-            cap_clamped_min=int(self.metrics.power_agent_cap_clamped_total.labeled_value(direction="min")),
-            cap_clamped_max=int(self.metrics.power_agent_cap_clamped_total.labeled_value(direction="max")),
+            if estimated_throughput > 0
+            else False,
+            cap_clamped_min=int(
+                self.metrics.power_agent_cap_clamped_total.labeled_value(
+                    direction="min"
+                )
+            ),
+            cap_clamped_max=int(
+                self.metrics.power_agent_cap_clamped_total.labeled_value(
+                    direction="max"
+                )
+            ),
             optimizer_exceptions=int(self.metrics.aic_optimizer_exceptions_total.value),
             correction_pegged={k: v for k, v in pegged_delta.items() if v > 0},
-            admission_partial_failures=int(self.metrics.admission_partial_success_total.value),
+            admission_partial_failures=int(
+                self.metrics.admission_partial_success_total.value
+            ),
             n_oscillations=n_oscillations,
         )
         self.history.append(snap)
@@ -495,10 +517,8 @@ class ScenarioRunner:
 
     def _setup_and_run_gamma(self) -> "TickHistory":
         from dynamo.planner.tests.testbed.replay.power_aware_replay_adapter import (
-            PowerAwareReplayAdapter,
             build_gamma_adapter,
         )
-        from dynamo.planner.tests.testbed.recorder import TickHistory
 
         return build_gamma_adapter(self.scenario).run_and_record()
 
@@ -506,8 +526,12 @@ class ScenarioRunner:
     # Public
     # ------------------------------------------------------------------
 
-    def run(self, csv_path: Optional[Path] = None, prom_path: Optional[Path] = None,
-            plot_path: Optional[Path] = None) -> "TickHistory":
+    def run(
+        self,
+        csv_path: Optional[Path] = None,
+        prom_path: Optional[Path] = None,
+        plot_path: Optional[Path] = None,
+    ) -> "TickHistory":
         sc = self.scenario
         t0 = time.perf_counter()
 
@@ -522,7 +546,9 @@ class ScenarioRunner:
             history = self._setup_and_run_gamma()
 
         elapsed = time.perf_counter() - t0
-        logger.info("Scenario %s completed %d ticks in %.2fs", sc.name, len(history), elapsed)
+        logger.info(
+            "Scenario %s completed %d ticks in %.2fs", sc.name, len(history), elapsed
+        )
 
         if csv_path:
             history.to_csv(Path(csv_path))
@@ -545,7 +571,9 @@ def main() -> None:
     )
     parser.add_argument("--scenario", help="Scenario name (e.g. A1) or full YAML path")
     parser.add_argument("--all", action="store_true", help="Run all scenarios")
-    parser.add_argument("--class-filter", choices=["alpha", "gamma", "all"], default="all")
+    parser.add_argument(
+        "--class-filter", choices=["alpha", "gamma", "all"], default="all"
+    )
     parser.add_argument("--csv", help="Output CSV path (single scenario)")
     parser.add_argument("--csv-dir", help="Output CSV directory (--all mode)")
     parser.add_argument("--plot", help="Output PNG path (single scenario)")
@@ -555,7 +583,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
-    from dynamo.planner.tests.testbed.scenarios import load_scenario, load_all_scenarios
+    from dynamo.planner.tests.testbed.scenarios import load_all_scenarios, load_scenario
 
     scenarios_dir = Path(__file__).parent / "scenarios"
 
@@ -587,7 +615,9 @@ def main() -> None:
             # Search by prefix
             candidates = list(scenarios_dir.glob(f"{args.scenario}*.yaml"))
             if not candidates:
-                raise SystemExit(f"No scenario matching {args.scenario!r} in {scenarios_dir}")
+                raise SystemExit(
+                    f"No scenario matching {args.scenario!r} in {scenarios_dir}"
+                )
             path = candidates[0]
         spec = load_scenario(path)
         runner = ScenarioRunner(spec)

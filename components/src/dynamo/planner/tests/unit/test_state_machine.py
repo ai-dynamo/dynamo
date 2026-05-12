@@ -1376,6 +1376,6 @@ class TestApplyGlobalBudgetNoUpscale:
             sm = self._make_sm(max_gpu_budget=budget, p_gpu=4, d_gpu=1)
             num_p, num_d = sm._apply_global_budget(8, 3)
             total = num_p * 4 + num_d * 1
-            assert total <= budget, (
-                f"budget={budget}: result ({num_p}P,{num_d}D) uses {total} GPUs"
-            )
+            assert (
+                total <= budget
+            ), f"budget={budget}: result ({num_p}P,{num_d}D) uses {total} GPUs"

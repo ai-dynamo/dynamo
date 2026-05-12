@@ -31,8 +31,9 @@ sys.modules["_runtime_stub_isolated"] = _stub_mod
 _spec.loader.exec_module(_stub_mod)
 _stub_installed = _stub_mod.install_stub_if_needed()
 
-import pytest
-from unittest.mock import patch
+from unittest.mock import patch  # noqa: E402
+
+import pytest  # noqa: E402
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -52,7 +53,9 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
-def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
     """Skip γ-class tests when only the ``dynamo._core`` stub is installed.
 
     γ-class scenarios depend on the real Rust mocker (`PlannerReplayBridge`),

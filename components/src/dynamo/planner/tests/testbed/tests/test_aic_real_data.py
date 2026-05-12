@@ -40,7 +40,6 @@ from __future__ import annotations
 import logging
 import os
 import random
-import sys
 import time
 from pathlib import Path
 from typing import Iterator
@@ -77,13 +76,14 @@ pytest.importorskip(
     "`pip install aiconfigurator` or run inside the dev pod.",
 )
 
-from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec  # noqa: E402
+from dynamo.planner.config.aic_interpolation_spec import (  # noqa: E402
+    AICInterpolationSpec,
+)
 from dynamo.planner.config.parallelization import PickedParallelConfig  # noqa: E402
 from dynamo.planner.config.planner_config import PlannerConfig  # noqa: E402
 from dynamo.planner.core.types import TrafficObservation  # noqa: E402
 from dynamo.planner.monitoring.aic_power_optimizer import (  # noqa: E402
     AICPowerOptimizer,
-    PowerAwareConfig,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,6 +113,7 @@ def _patch_aic_systems_dir() -> Iterator[None]:
 
     def _override_resolver() -> str:
         return sandbox
+
     pd.get_system_config_path = _override_resolver
 
     for fn_name in ("get_supported_databases", "get_database", "get_all_databases"):
@@ -158,7 +159,7 @@ def _discover_systems() -> list[dict]:
     out: list[dict] = []
     candidates = [
         # (system, backend, hf_id, expected_tdp_w, expected_clamp_decode)
-        ("h200_sxm", "vllm",   "LLAMA3.1_8B", 700.0,  True),   # known to clamp (1275 W)
+        ("h200_sxm", "vllm", "LLAMA3.1_8B", 700.0, True),  # known to clamp (1275 W)
         ("b200_sxm", "trtllm", "LLAMA3.1_8B", 1000.0, False),  # stays in envelope
     ]
     available = pd.get_supported_databases()
@@ -167,14 +168,16 @@ def _discover_systems() -> list[dict]:
         versions = backends.get(backend, [])
         if not versions:
             continue
-        out.append({
-            "system": sys_name,
-            "backend": backend,
-            "hf_id": hf_id,
-            "tdp_w": tdp,
-            "expect_decode_clamp": clamp_expected,
-            "latest_version": sorted(versions)[-1],
-        })
+        out.append(
+            {
+                "system": sys_name,
+                "backend": backend,
+                "hf_id": hf_id,
+                "tdp_w": tdp,
+                "expect_decode_clamp": clamp_expected,
+                "latest_version": sorted(versions)[-1],
+            }
+        )
     return out
 
 
@@ -190,12 +193,15 @@ def _sku_id(sku: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _make_config(*, system: str, backend: str, hf_id: str, isl: int, osl: int) -> PlannerConfig:
+def _make_config(
+    *, system: str, backend: str, hf_id: str, isl: int, osl: int
+) -> PlannerConfig:
     interp = AICInterpolationSpec(
         hf_id=hf_id,
         system=system,
         backend=backend,
-        isl=isl, osl=osl,
+        isl=isl,
+        osl=osl,
         sweep_max_context_length=isl + osl,
         prefill_interpolation_granularity=8,
         decode_interpolation_granularity=8,
@@ -228,7 +234,9 @@ def _make_config(*, system: str, backend: str, hf_id: str, isl: int, osl: int) -
 
 
 @pytest.mark.real_aic
-@pytest.mark.parametrize("sku", _SKU_TABLE, ids=[_sku_id(s) for s in _SKU_TABLE] or ["no-skus-found"])
+@pytest.mark.parametrize(
+    "sku", _SKU_TABLE, ids=[_sku_id(s) for s in _SKU_TABLE] or ["no-skus-found"]
+)
 class TestAICRealData:
     """End-to-end checks against the real AIC perf database.
 
@@ -247,12 +255,14 @@ class TestAICRealData:
         est = AIConfiguratorPerfEstimator(
             hf_id=sku["hf_id"], system=sku["system"], backend=sku["backend"]
         )
-        assert float(est.database.system_spec["gpu"]["power"]) == pytest.approx(sku["tdp_w"])
+        assert float(est.database.system_spec["gpu"]["power"]) == pytest.approx(
+            sku["tdp_w"]
+        )
 
         prefill = est.estimate_perf(self.ISL, self.OSL, 8, mode="prefill", tp_size=1)
-        decode  = est.estimate_perf(self.ISL, self.OSL, 8, mode="decode",  tp_size=1)
+        decode = est.estimate_perf(self.ISL, self.OSL, 8, mode="decode", tp_size=1)
         prefill_w = float(prefill.get("power_w") or 0.0)
-        decode_w  = float(decode.get("power_w") or 0.0)
+        decode_w = float(decode.get("power_w") or 0.0)
         assert prefill_w > 0, (
             f"{_sku_id(sku)}: AIC returned power_w=0 for prefill — "
             "power data not actually loaded in sandbox"
@@ -267,8 +277,11 @@ class TestAICRealData:
 
     def test_optimize_produces_well_formed_config(self, sku: dict) -> None:
         cfg = _make_config(
-            system=sku["system"], backend=sku["backend"], hf_id=sku["hf_id"],
-            isl=self.ISL, osl=self.OSL,
+            system=sku["system"],
+            backend=sku["backend"],
+            hf_id=sku["hf_id"],
+            isl=self.ISL,
+            osl=self.OSL,
         )
         opt = AICPowerOptimizer(config=cfg, metrics=MagicMock())
         result = opt.optimize()
@@ -276,20 +289,20 @@ class TestAICRealData:
         assert result is not None, "optimize() unexpectedly returned None"
         assert result.n_p >= 1 and result.n_d >= 1
         assert result.cap_p > 0 and result.cap_d > 0
-        # Caps must NEVER exceed nameplate TDP × 1.1 — that's the §8 row 14
-        # clamp contract.  Anything more would be a non-physical NVML cap.
-        clamp_threshold = sku["tdp_w"] * 1.1
-        # cap can be up to TDP * _COEFF_MAX (2.0) when c_power coefficient
-        # has drifted up; that's fine, the underlying *aic_power_w* is what
-        # must be bounded, and that's what the clamp guards.
+        # Caps must NEVER exceed nameplate TDP × _COEFF_MAX (2.0) when c_power
+        # coefficient has drifted up; that's fine, the underlying *aic_power_w*
+        # is what must be bounded, and that's what the clamp guards.
         assert result.cap_d <= sku["tdp_w"] * 2.0 + 1
         assert result.cap_p <= sku["tdp_w"] * 2.0 + 1
 
     def test_clamp_engages_as_expected(self, sku: dict) -> None:
         """Clamp counter fires iff raw aic_power_w > 1.1 × TDP."""
         cfg = _make_config(
-            system=sku["system"], backend=sku["backend"], hf_id=sku["hf_id"],
-            isl=self.ISL, osl=self.OSL,
+            system=sku["system"],
+            backend=sku["backend"],
+            hf_id=sku["hf_id"],
+            isl=self.ISL,
+            osl=self.OSL,
         )
         metrics = MagicMock()
         opt = AICPowerOptimizer(config=cfg, metrics=metrics)
@@ -346,12 +359,16 @@ class TestAICDriftLoopRealData:
     def h200_optimizer(self) -> AICPowerOptimizer:
         """Skip unless the H200 SXM vLLM data is in the sandbox."""
         import aiconfigurator.sdk.perf_database as pd
+
         available = pd.get_supported_databases().get("h200_sxm", {}).get("vllm", [])
         if not available:
             pytest.skip("H200 SXM + vLLM data not in sandbox")
         cfg = _make_config(
-            system="h200_sxm", backend="vllm", hf_id=self.HF_ID,
-            isl=self.ISL, osl=self.OSL,
+            system="h200_sxm",
+            backend="vllm",
+            hf_id=self.HF_ID,
+            isl=self.ISL,
+            osl=self.OSL,
         )
         opt = AICPowerOptimizer(config=cfg, metrics=MagicMock())
         result = opt.optimize()
@@ -370,14 +387,19 @@ class TestAICDriftLoopRealData:
         rng = random.Random(seed)
         for _ in range(n_ticks):
             traffic = TrafficObservation(
-                duration_s=60.0, num_req=10.0,
-                isl=2048.0, osl=256.0,
-                ttft_avg=0.05, itl_avg=0.01,
+                duration_s=60.0,
+                num_req=10.0,
+                isl=2048.0,
+                osl=256.0,
+                ttft_avg=0.05,
+                itl_avg=0.01,
                 total_tokens_per_s=200.0,
                 scheduled_prefill_tokens=2000.0,
                 scheduled_decode_kv_tokens=2000.0,
             )
-            obs = observed_power_w_decode_mean * (1.0 + rng.uniform(-noise_frac, noise_frac))
+            obs = observed_power_w_decode_mean * (
+                1.0 + rng.uniform(-noise_frac, noise_frac)
+            )
             opt.update_correction(
                 traffic=traffic,
                 observed_ttft_avg=traffic.ttft_avg,
@@ -387,15 +409,19 @@ class TestAICDriftLoopRealData:
             )
         return opt._c_power_d
 
-    def test_well_calibrated_converges_to_one(self, h200_optimizer: AICPowerOptimizer) -> None:
+    def test_well_calibrated_converges_to_one(
+        self, h200_optimizer: AICPowerOptimizer
+    ) -> None:
         """Observed == aic_power_w_decode → c_power_d converges to 1.0."""
         target = h200_optimizer._last_optimal_config.aic_power_w_decode
         final = self._drive(h200_optimizer, observed_power_w_decode_mean=target)
-        assert abs(final - 1.0) < 0.05, (
-            f"c_power_d={final:.3f} did not converge to 1.0 under matched observations"
-        )
+        assert (
+            abs(final - 1.0) < 0.05
+        ), f"c_power_d={final:.3f} did not converge to 1.0 under matched observations"
 
-    def test_over_prediction_pegs_at_lower_clamp(self, h200_optimizer: AICPowerOptimizer) -> None:
+    def test_over_prediction_pegs_at_lower_clamp(
+        self, h200_optimizer: AICPowerOptimizer
+    ) -> None:
         """Observed = 500 W < raw aic 1275 W → c_power_d hits 0.5 clamp."""
         raw_aic_decode = h200_optimizer._last_optimal_config.aic_power_w_decode
         if raw_aic_decode < 1000:
@@ -404,9 +430,9 @@ class TestAICDriftLoopRealData:
                 f"(raw={raw_aic_decode:.0f} W); drift-peg test is moot."
             )
         final = self._drive(h200_optimizer, observed_power_w_decode_mean=500.0)
-        assert final == pytest.approx(0.5), (
-            f"c_power_d={final:.3f} should peg at 0.5 when observed << aic"
-        )
+        assert final == pytest.approx(
+            0.5
+        ), f"c_power_d={final:.3f} should peg at 0.5 when observed << aic"
 
     def test_under_prediction_converges_below_upper_clamp(
         self, h200_optimizer: AICPowerOptimizer
@@ -424,16 +450,22 @@ class TestAICDriftLoopRealData:
             f"(raw aic_decode={raw:.0f} W, observed mean={observed:.0f} W)"
         )
 
-    def test_hysteresis_holds_on_sla_drift(self, h200_optimizer: AICPowerOptimizer) -> None:
+    def test_hysteresis_holds_on_sla_drift(
+        self, h200_optimizer: AICPowerOptimizer
+    ) -> None:
         """should_reoptimize fires only after aic_drift_consecutive_ticks."""
         opt = h200_optimizer
-        opt._time_of_last_optimize = time.monotonic() - opt._config.aic_reoptimize_interval - 1.0
+        opt._time_of_last_optimize = (
+            time.monotonic() - opt._config.aic_reoptimize_interval - 1.0
+        )
         hysteresis = opt._config.aic_drift_consecutive_ticks
         triggered_at: int | None = None
         for tick in range(hysteresis + 3):
             traffic = TrafficObservation(
-                duration_s=60.0, num_req=10.0,
-                isl=2048.0, osl=256.0,
+                duration_s=60.0,
+                num_req=10.0,
+                isl=2048.0,
+                osl=256.0,
                 ttft_avg=opt._config.ttft / 1000.0 * 2.0,  # 2× SLA
                 itl_avg=0.005,
                 total_tokens_per_s=200.0,
@@ -443,7 +475,9 @@ class TestAICDriftLoopRealData:
             if opt.should_reoptimize(traffic):
                 triggered_at = tick
                 break
-        assert triggered_at is not None, "should_reoptimize never fired under sustained SLA breach"
+        assert (
+            triggered_at is not None
+        ), "should_reoptimize never fired under sustained SLA breach"
         assert triggered_at + 1 == hysteresis, (
             f"hysteresis broken: triggered at tick={triggered_at}, "
             f"expected exactly tick={hysteresis - 1}"
@@ -453,18 +487,22 @@ class TestAICDriftLoopRealData:
         self, h200_optimizer: AICPowerOptimizer
     ) -> None:
         opt = h200_optimizer
-        opt._time_of_last_optimize = time.monotonic() - opt._config.aic_reoptimize_interval - 1.0
+        opt._time_of_last_optimize = (
+            time.monotonic() - opt._config.aic_reoptimize_interval - 1.0
+        )
         opt._estimated_throughput = 1000.0
         for tick in range(50):
             traffic = TrafficObservation(
-                duration_s=60.0, num_req=10.0,
-                isl=2048.0, osl=256.0,
-                ttft_avg=0.020,   # well under SLA
+                duration_s=60.0,
+                num_req=10.0,
+                isl=2048.0,
+                osl=256.0,
+                ttft_avg=0.020,  # well under SLA
                 itl_avg=0.005,
                 total_tokens_per_s=500.0,
                 scheduled_prefill_tokens=2000.0,
                 scheduled_decode_kv_tokens=2000.0,
             )
-            assert not opt.should_reoptimize(traffic), (
-                f"spurious reoptimize at tick {tick} under healthy load"
-            )
+            assert not opt.should_reoptimize(
+                traffic
+            ), f"spurious reoptimize at tick {tick} under healthy load"

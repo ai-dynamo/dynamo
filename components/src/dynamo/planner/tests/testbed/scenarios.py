@@ -22,7 +22,6 @@ YAML loader performs:
 from __future__ import annotations
 
 import ast
-import dataclasses
 import math
 from pathlib import Path
 from typing import Annotated, Any, Literal, Optional, Union
@@ -78,10 +77,18 @@ class NoiseModel(BaseModel):
 
 
 class NoiseSpec(BaseModel):
-    power_per_gpu: NoiseModel = Field(default_factory=lambda: NoiseModel(model="gaussian", sigma=0.07))
-    ttft: NoiseModel = Field(default_factory=lambda: NoiseModel(model="gaussian", sigma=0.05))
-    itl: NoiseModel = Field(default_factory=lambda: NoiseModel(model="gaussian", sigma=0.04))
-    capacity: NoiseModel = Field(default_factory=lambda: NoiseModel(model="gaussian", sigma=0.03))
+    power_per_gpu: NoiseModel = Field(
+        default_factory=lambda: NoiseModel(model="gaussian", sigma=0.07)
+    )
+    ttft: NoiseModel = Field(
+        default_factory=lambda: NoiseModel(model="gaussian", sigma=0.05)
+    )
+    itl: NoiseModel = Field(
+        default_factory=lambda: NoiseModel(model="gaussian", sigma=0.04)
+    )
+    capacity: NoiseModel = Field(
+        default_factory=lambda: NoiseModel(model="gaussian", sigma=0.03)
+    )
 
 
 class BiasSpec(BaseModel):
@@ -125,7 +132,7 @@ class OverlaySpec(BaseModel):
 class PlannerSpec(BaseModel):
     mode: Literal["disagg", "agg"] = "disagg"
     ttft: float = 500.0  # ms
-    itl: float = 50.0    # ms
+    itl: float = 50.0  # ms
     enable_power_awareness: bool = True
     enable_aic_optimizer: bool = True
     total_gpu_power_limit: Optional[int] = 4000
@@ -222,7 +229,9 @@ class PromOutageEvent(BaseModel):
     type: Literal["prom_outage"]
     at_tick: int
     duration_ticks: int
-    signals: list[str] = Field(default_factory=lambda: ["ttft", "itl", "power_p", "power_d", "capacity"])
+    signals: list[str] = Field(
+        default_factory=lambda: ["ttft", "itl", "power_p", "power_d", "capacity"]
+    )
 
 
 class PromStaleEvent(BaseModel):
@@ -289,10 +298,12 @@ Event = Annotated[
 # Assertions
 # ---------------------------------------------------------------------------
 
+
 # Valid assertion ``field:`` names — derived from TickSnapshot directly to
 # guarantee the two stay in sync as fields are added/renamed.
 def _load_tick_snapshot_fields() -> frozenset[str]:
     from dynamo.planner.tests.testbed.recorder import TICK_SNAPSHOT_FIELDS
+
     return frozenset(TICK_SNAPSHOT_FIELDS)
 
 
@@ -305,6 +316,7 @@ def _tick_snapshot_fields() -> frozenset[str]:
     if _TICK_SNAPSHOT_FIELDS is None:
         _TICK_SNAPSHOT_FIELDS = _load_tick_snapshot_fields()
     return _TICK_SNAPSHOT_FIELDS
+
 
 _ASSERTION_OPS = {"<", "<=", "==", ">=", ">", "within", "!="}
 
@@ -327,7 +339,9 @@ class StructuredAssertion(BaseModel):
     @model_validator(mode="after")
     def _validate_assertion(self) -> "StructuredAssertion":
         if self.op is not None and self.op not in _ASSERTION_OPS:
-            raise ValueError(f"Unknown op: {self.op!r}. Must be one of {_ASSERTION_OPS}")
+            raise ValueError(
+                f"Unknown op: {self.op!r}. Must be one of {_ASSERTION_OPS}"
+            )
         if self.op == "within" and self.tolerance is None:
             raise ValueError("op='within' requires tolerance")
 
@@ -386,9 +400,9 @@ class ScenarioSpec(BaseModel):
     interval_s: float = 60.0
 
     planner: PlannerSpec = Field(default_factory=PlannerSpec)
-    fleet: Optional[FleetSpec] = None     # α-class
-    mocker: Optional[MockerSpec] = None   # γ-class
-    overlay: Optional[OverlaySpec] = None # γ-class
+    fleet: Optional[FleetSpec] = None  # α-class
+    mocker: Optional[MockerSpec] = None  # γ-class
+    overlay: Optional[OverlaySpec] = None  # γ-class
     load: LoadSpec = Field(default_factory=LoadSpec)
     events: list[dict[str, Any]] = Field(default_factory=list)
     assertions: list[dict[str, Any]] = Field(default_factory=list)

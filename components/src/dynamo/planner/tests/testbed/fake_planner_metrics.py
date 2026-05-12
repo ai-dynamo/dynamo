@@ -10,8 +10,6 @@ increments and gauge values without starting a real Prometheus server.
 
 from __future__ import annotations
 
-from collections import defaultdict
-from dataclasses import dataclass, field
 from typing import Any
 
 

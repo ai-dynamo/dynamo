@@ -80,9 +80,7 @@ def _mock_pod(name: str, annotation_value=None) -> Mock:
     pod = MagicMock()
     pod.metadata.name = name
     pod.metadata.annotations = (
-        {POWER_ANNOTATION_KEY: annotation_value}
-        if annotation_value is not None
-        else {}
+        {POWER_ANNOTATION_KEY: annotation_value} if annotation_value is not None else {}
     )
     pod.status.pod_ip = f"10.0.0.{hash(name) % 200 + 1}"
     return pod
@@ -209,7 +207,10 @@ class TestApplyPowerAnnotations:
         connector.get_component_pods = Mock(return_value=[pod])
 
         planner = _bare_planner(
-            connector, _power_config(prefill_cap=300), require_prefill=True, require_decode=False
+            connector,
+            _power_config(prefill_cap=300),
+            require_prefill=True,
+            require_decode=False,
         )
         await planner._apply_power_annotations()
 
@@ -224,7 +225,10 @@ class TestApplyPowerAnnotations:
         connector.get_component_pods = Mock(return_value=[pod])
 
         planner = _bare_planner(
-            connector, _power_config(prefill_cap=350), require_prefill=True, require_decode=False
+            connector,
+            _power_config(prefill_cap=350),
+            require_prefill=True,
+            require_decode=False,
         )
         await planner._apply_power_annotations()
 
@@ -241,7 +245,10 @@ class TestApplyPowerAnnotations:
         connector.get_component_pods = Mock(return_value=[pod])
 
         planner = _bare_planner(
-            connector, _power_config(prefill_cap=300), require_prefill=True, require_decode=False
+            connector,
+            _power_config(prefill_cap=300),
+            require_prefill=True,
+            require_decode=False,
         )
         await planner._apply_power_annotations()
 
@@ -253,7 +260,7 @@ class TestApplyPowerAnnotations:
     ):
         """Prefill and decode pods must receive their own per-component caps."""
         pod_p = _mock_pod("prefill-0")  # no annotation
-        pod_d = _mock_pod("decode-0")   # no annotation
+        pod_d = _mock_pod("decode-0")  # no annotation
 
         def get_pods(sub_type):
             if sub_type == SubComponentType.PREFILL:
@@ -270,7 +277,10 @@ class TestApplyPowerAnnotations:
         )
         await planner._apply_power_annotations()
 
-        calls = {c.args[0]: c.args[2] for c in mock_kube_api.patch_pod_annotation.call_args_list}
+        calls = {
+            c.args[0]: c.args[2]
+            for c in mock_kube_api.patch_pod_annotation.call_args_list
+        }
         assert calls["prefill-0"] == "320"
         assert calls["decode-0"] == "280"
 
@@ -283,7 +293,10 @@ class TestApplyPowerAnnotations:
         connector.get_component_pods = Mock(return_value=[pod])
 
         planner = _bare_planner(
-            connector, _power_config(enable=False), require_prefill=True, require_decode=False
+            connector,
+            _power_config(enable=False),
+            require_prefill=True,
+            require_decode=False,
         )
         await planner._apply_power_annotations()
 
@@ -296,7 +309,10 @@ class TestApplyPowerAnnotations:
         non_k8s_connector = Mock()  # not a KubernetesConnector instance
 
         planner = _bare_planner(
-            non_k8s_connector, _power_config(), require_prefill=True, require_decode=False
+            non_k8s_connector,
+            _power_config(),
+            require_prefill=True,
+            require_decode=False,
         )
         # Must not raise even though non_k8s_connector lacks kube_api
         await planner._apply_power_annotations()
@@ -315,7 +331,10 @@ class TestApplyPowerAnnotations:
         mock_kube_api.patch_pod_annotation.side_effect = RuntimeError("k8s unavailable")
 
         planner = _bare_planner(
-            connector, _power_config(prefill_cap=300), require_prefill=True, require_decode=False
+            connector,
+            _power_config(prefill_cap=300),
+            require_prefill=True,
+            require_decode=False,
         )
 
         with caplog.at_level(logging.WARNING):
@@ -333,12 +352,17 @@ class TestApplyPowerAnnotations:
         connector.get_component_pods = Mock(return_value=pods)
 
         planner = _bare_planner(
-            connector, _power_config(prefill_cap=300), require_prefill=True, require_decode=False
+            connector,
+            _power_config(prefill_cap=300),
+            require_prefill=True,
+            require_decode=False,
         )
         await planner._apply_power_annotations()
 
         assert mock_kube_api.patch_pod_annotation.call_count == 3
-        patched_names = {c.args[0] for c in mock_kube_api.patch_pod_annotation.call_args_list}
+        patched_names = {
+            c.args[0] for c in mock_kube_api.patch_pod_annotation.call_args_list
+        }
         assert patched_names == {"worker-0", "worker-1", "worker-2"}
 
 
@@ -434,7 +458,9 @@ class TestPostBusyThreshold:
                 active_prefill_tokens_threshold_frac=0.6,
             )
 
-        body = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1].get("json")
+        body = mock_client.post.call_args.kwargs.get(
+            "json"
+        ) or mock_client.post.call_args[1].get("json")
         assert body["active_decode_blocks_threshold"] == pytest.approx(0.8)
         assert body["active_prefill_tokens_threshold"] == 512
         assert body["active_prefill_tokens_threshold_frac"] == pytest.approx(0.6)
@@ -491,11 +517,11 @@ class TestPostBusyThreshold:
         mock_client.post = AsyncMock(return_value=mock_response)
 
         with patch("httpx.AsyncClient", return_value=mock_client):
-            await connector.post_busy_threshold(
-                pod, model="m", port=8000, **kwargs
-            )
+            await connector.post_busy_threshold(pod, model="m", port=8000, **kwargs)
 
-        body = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1].get("json")
+        body = mock_client.post.call_args.kwargs.get(
+            "json"
+        ) or mock_client.post.call_args[1].get("json")
         assert field not in body, (
             f"{field}=None must not appear in the POST body — "
             "the frontend treats missing fields as 'no change'"
@@ -574,7 +600,9 @@ class TestPostBusyThreshold:
                 active_prefill_tokens_threshold_frac=None,
             )
 
-        body = mock_client.post.call_args.kwargs.get("json") or mock_client.post.call_args[1].get("json")
+        body = mock_client.post.call_args.kwargs.get(
+            "json"
+        ) or mock_client.post.call_args[1].get("json")
         assert body.get("model") == "Llama-3-8B"
 
 

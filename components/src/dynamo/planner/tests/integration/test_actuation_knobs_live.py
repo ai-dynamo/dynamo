@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Optional
 
 import pytest
 
@@ -113,7 +112,8 @@ def any_worker_pod(kube_api: KubernetesAPI):
     worker_pods = [
         p
         for p in pods
-        if (p.metadata.labels or {}).get("nvidia.com/dynamo-component-type") != "frontend"
+        if (p.metadata.labels or {}).get("nvidia.com/dynamo-component-type")
+        != "frontend"
     ]
     if not worker_pods:
         pytest.skip(f"No worker pods found for DGD {_DGD_NAME!r}")
@@ -138,14 +138,10 @@ class TestTgpAnnotationRoundTrip:
         test_value = "400"
 
         # Capture original so we can restore even on assertion failure.
-        original = (any_worker_pod.metadata.annotations or {}).get(
-            POWER_ANNOTATION_KEY
-        )
+        original = (any_worker_pod.metadata.annotations or {}).get(POWER_ANNOTATION_KEY)
 
         try:
-            kube_api.patch_pod_annotation(
-                pod_name, POWER_ANNOTATION_KEY, test_value
-            )
+            kube_api.patch_pod_annotation(pod_name, POWER_ANNOTATION_KEY, test_value)
 
             # Re-read via the raw API (independent of the planner code path).
             fresh = core_api.read_namespaced_pod(
@@ -161,18 +157,12 @@ class TestTgpAnnotationRoundTrip:
             # otherwise null it via JSON-merge-patch (the only way to
             # actually remove a key).
             if original is not None:
-                kube_api.patch_pod_annotation(
-                    pod_name, POWER_ANNOTATION_KEY, original
-                )
+                kube_api.patch_pod_annotation(pod_name, POWER_ANNOTATION_KEY, original)
             else:
                 core_api.patch_namespaced_pod(
                     name=pod_name,
                     namespace=_K8S_NAMESPACE,
-                    body={
-                        "metadata": {
-                            "annotations": {POWER_ANNOTATION_KEY: None}
-                        }
-                    },
+                    body={"metadata": {"annotations": {POWER_ANNOTATION_KEY: None}}},
                 )
 
     def test_patch_is_idempotent_same_value(
@@ -183,9 +173,7 @@ class TestTgpAnnotationRoundTrip:
     ):
         """Re-patching with the same value must not change the resource version."""
         pod_name = any_worker_pod.metadata.name
-        original = (any_worker_pod.metadata.annotations or {}).get(
-            POWER_ANNOTATION_KEY
-        )
+        original = (any_worker_pod.metadata.annotations or {}).get(POWER_ANNOTATION_KEY)
 
         try:
             kube_api.patch_pod_annotation(pod_name, POWER_ANNOTATION_KEY, "350")
@@ -206,18 +194,12 @@ class TestTgpAnnotationRoundTrip:
             ), "Re-patching with the same value triggered a spec mutation"
         finally:
             if original is not None:
-                kube_api.patch_pod_annotation(
-                    pod_name, POWER_ANNOTATION_KEY, original
-                )
+                kube_api.patch_pod_annotation(pod_name, POWER_ANNOTATION_KEY, original)
             else:
                 core_api.patch_namespaced_pod(
                     name=pod_name,
                     namespace=_K8S_NAMESPACE,
-                    body={
-                        "metadata": {
-                            "annotations": {POWER_ANNOTATION_KEY: None}
-                        }
-                    },
+                    body={"metadata": {"annotations": {POWER_ANNOTATION_KEY: None}}},
                 )
 
 
@@ -229,9 +211,7 @@ class TestTgpAnnotationRoundTrip:
 class TestPodDiscovery:
     """Verify label selectors actually resolve to real running pods."""
 
-    def test_at_least_one_worker_pod_exists_for_dgd(
-        self, kube_api: KubernetesAPI
-    ):
+    def test_at_least_one_worker_pod_exists_for_dgd(self, kube_api: KubernetesAPI):
         label_selector = f"nvidia.com/dynamo-graph-deployment-name={_DGD_NAME}"
         pods = kube_api.list_pods_by_label(label_selector)
         assert pods, f"No pods found for DGD {_DGD_NAME!r} (RBAC or label issue)"
@@ -247,9 +227,7 @@ class TestPodDiscovery:
         assert isinstance(prefill, list)
         assert isinstance(decode, list)
 
-    def test_list_frontend_pods_returns_frontend(
-        self, connector: KubernetesConnector
-    ):
+    def test_list_frontend_pods_returns_frontend(self, connector: KubernetesConnector):
         pods = connector.list_frontend_pods()
         assert pods, f"No frontend pods found for DGD {_DGD_NAME!r}"
         for pod in pods:
@@ -261,11 +239,7 @@ class TestPodDiscovery:
     def test_frontend_pod_has_pod_ip(self, connector: KubernetesConnector):
         """post_busy_threshold requires pod_ip; a Running frontend must expose one."""
         pods = connector.list_frontend_pods()
-        running = [
-            p
-            for p in pods
-            if (p.status.phase == "Running" and p.status.pod_ip)
-        ]
+        running = [p for p in pods if (p.status.phase == "Running" and p.status.pod_ip)]
         assert running, (
             f"No Running frontend pod with pod_ip for DGD {_DGD_NAME!r}; "
             f"phases={[p.status.phase for p in pods]}"
@@ -285,11 +259,7 @@ class TestPostBusyThresholdLive:
         self, connector: KubernetesConnector
     ):
         pods = connector.list_frontend_pods()
-        running = [
-            p
-            for p in pods
-            if p.status.phase == "Running" and p.status.pod_ip
-        ]
+        running = [p for p in pods if p.status.phase == "Running" and p.status.pod_ip]
         if not running:
             pytest.skip("No Running frontend pod with pod IP")
         pod = running[0]
@@ -318,8 +288,7 @@ class TestPostBusyThresholdLive:
             msg = str(exc).lower()
             if "404" in msg or "not found" in msg:
                 pytest.skip(
-                    "Frontend build does not expose /busy_threshold "
-                    f"(got {exc!r})"
+                    "Frontend build does not expose /busy_threshold " f"(got {exc!r})"
                 )
             raise
 
@@ -337,10 +306,7 @@ def _read_dgd_generation(kube_api: KubernetesAPI) -> int:
 def _read_replicas_map(kube_api: KubernetesAPI) -> dict[str, int]:
     dgd = kube_api.get_graph_deployment(_DGD_NAME)
     services = dgd.get("spec", {}).get("services", {}) or {}
-    return {
-        name: int(spec.get("replicas", 0))
-        for name, spec in services.items()
-    }
+    return {name: int(spec.get("replicas", 0)) for name, spec in services.items()}
 
 
 class TestScalingAdvisoryMode:
@@ -425,9 +391,7 @@ class TestApplyPowerAnnotationsLive:
         from dynamo.planner.core.base import NativePlannerBase
 
         pod_name = any_worker_pod.metadata.name
-        original = (any_worker_pod.metadata.annotations or {}).get(
-            POWER_ANNOTATION_KEY
-        )
+        original = (any_worker_pod.metadata.annotations or {}).get(POWER_ANNOTATION_KEY)
         target_watts = 350
         if original == str(target_watts):
             target_watts = 360  # ensure the test value differs from current
@@ -472,18 +436,12 @@ class TestApplyPowerAnnotationsLive:
         finally:
             connector.get_component_pods = original_get_component_pods  # type: ignore[assignment]
             if original is not None:
-                kube_api.patch_pod_annotation(
-                    pod_name, POWER_ANNOTATION_KEY, original
-                )
+                kube_api.patch_pod_annotation(pod_name, POWER_ANNOTATION_KEY, original)
             else:
                 core_api.patch_namespaced_pod(
                     name=pod_name,
                     namespace=_K8S_NAMESPACE,
-                    body={
-                        "metadata": {
-                            "annotations": {POWER_ANNOTATION_KEY: None}
-                        }
-                    },
+                    body={"metadata": {"annotations": {POWER_ANNOTATION_KEY: None}}},
                 )
 
     @pytest.mark.asyncio
@@ -524,9 +482,9 @@ class TestApplyPowerAnnotationsLive:
             ).metadata.annotations
             or {}
         ).get(POWER_ANNOTATION_KEY)
-        assert before == after, (
-            "Pod annotation changed despite enable_power_awareness=False"
-        )
+        assert (
+            before == after
+        ), "Pod annotation changed despite enable_power_awareness=False"
 
 
 # ---------------------------------------------------------------------------

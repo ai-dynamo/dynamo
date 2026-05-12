@@ -22,21 +22,11 @@ from dynamo.planner.core.types import TrafficObservation
 
 if TYPE_CHECKING:
     from dynamo.planner.tests.testbed.scenarios import (
-        ActuationFaultEvent,
-        AicFailureEvent,
         BiasRampEvent,
         BiasSineEvent,
-        BiasStepEvent,
-        BudgetChangeEvent,
         Event,
         FleetSpec,
-        MdcUnavailableEvent,
-        NodeDownEvent,
-        NodeUpEvent,
-        PromOutageEvent,
-        PromStaleEvent,
-        PromWindowCrossEvent,
-        FrontendPostFaultEvent,
+        NoiseModel,
         ScenarioSpec,
         SystemSpec,
     )
@@ -108,14 +98,22 @@ class SyntheticFleet:
         )
 
         # Active event tracking
-        self._active_prom_outage: dict[str, int] = {}   # signal → end_tick
-        self._active_prom_stale: Optional[tuple[int, int]] = None  # (end_tick, lag_ticks)
-        self._active_actuation_fault: Optional[tuple[int, str]] = None  # (end_tick, mode)
-        self._active_frontend_fault: Optional[tuple[int, float]] = None  # (end_tick, fraction)
+        self._active_prom_outage: dict[str, int] = {}  # signal → end_tick
+        self._active_prom_stale: Optional[
+            tuple[int, int]
+        ] = None  # (end_tick, lag_ticks)
+        self._active_actuation_fault: Optional[
+            tuple[int, str]
+        ] = None  # (end_tick, mode)
+        self._active_frontend_fault: Optional[
+            tuple[int, float]
+        ] = None  # (end_tick, fraction)
         self._active_mdc_unavailable: int = 0  # end_tick
         self._sine_events: list[BiasSineEvent] = []
         self._ramp_events: list[BiasRampEvent] = []
-        self._window_cross_events: dict[str, tuple[int, float]] = {}  # signal → (tick, weight)
+        self._window_cross_events: dict[
+            str, tuple[int, float]
+        ] = {}  # signal → (tick, weight)
         self._observation_history: list[Optional[Observation]] = []  # indexed by tick
 
     # ------------------------------------------------------------------
@@ -203,14 +201,20 @@ class SyntheticFleet:
         # Apply prom window-cross mixing (one-tick mixed window after events)
         for signal, (cross_tick, weight_old) in list(self._window_cross_events.items()):
             if tick == cross_tick and tick > 0:
-                prev = self._observation_history[-1] if self._observation_history else None
+                prev = (
+                    self._observation_history[-1] if self._observation_history else None
+                )
                 if prev is not None:
                     if signal in ("power_d", "power_bias_decode"):
                         pre_val = prev.power_w_decode
-                        true_power_w_d = weight_old * pre_val + (1 - weight_old) * true_power_w_d
+                        true_power_w_d = (
+                            weight_old * pre_val + (1 - weight_old) * true_power_w_d
+                        )
                     elif signal in ("power_p", "power_bias_prefill"):
                         pre_val = prev.power_w_prefill
-                        true_power_w_p = weight_old * pre_val + (1 - weight_old) * true_power_w_p
+                        true_power_w_p = (
+                            weight_old * pre_val + (1 - weight_old) * true_power_w_p
+                        )
                 del self._window_cross_events[signal]
 
         throughput = min(offered_load, max(0.0, capacity_tps))
@@ -252,19 +256,18 @@ class SyntheticFleet:
     def apply_event(self, event: "Event", tick: int) -> None:
         """Mutate fleet state based on the event."""
         from dynamo.planner.tests.testbed.scenarios import (
-            BiasStepEvent,
+            ActuationFaultEvent,
             BiasRampEvent,
             BiasSineEvent,
-            ActuationFaultEvent,
+            BiasStepEvent,
+            BudgetChangeEvent,
+            FrontendPostFaultEvent,
+            MdcUnavailableEvent,
             NodeDownEvent,
             NodeUpEvent,
             PromOutageEvent,
             PromStaleEvent,
             PromWindowCrossEvent,
-            BudgetChangeEvent,
-            FrontendPostFaultEvent,
-            MdcUnavailableEvent,
-            AicFailureEvent,
         )
 
         if isinstance(event, BiasStepEvent):
@@ -304,7 +307,10 @@ class SyntheticFleet:
             pass
 
         elif isinstance(event, FrontendPostFaultEvent):
-            self._active_frontend_fault = (tick + event.duration_ticks, event.failing_fraction)
+            self._active_frontend_fault = (
+                tick + event.duration_ticks,
+                event.failing_fraction,
+            )
 
         elif isinstance(event, MdcUnavailableEvent):
             self._active_mdc_unavailable = tick + event.duration_ticks
@@ -357,7 +363,9 @@ class SyntheticFleet:
         noise_spec = getattr(self._fleet.noise, signal, None)
         if noise_spec is None:
             noise_spec = self._fleet.noise.power_per_gpu
-        return _sample_noise(noise_spec, self._rng, f"{signal}_ar1", self.state.ar1_state)
+        return _sample_noise(
+            noise_spec, self._rng, f"{signal}_ar1", self.state.ar1_state
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +392,6 @@ def _sample_noise(
     ar1_key: str,
     ar1_state: dict[str, float],
 ) -> float:
-    from dynamo.planner.tests.testbed.scenarios import NoiseModel
     if spec.model == "gaussian":
         sigma = spec.sigma
         if sigma == 0.0:

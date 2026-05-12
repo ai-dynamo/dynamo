@@ -11,14 +11,17 @@ from the scenario timeline, and exposes results via ``observation_at(tick)``
 
 from __future__ import annotations
 
-import math
 import random
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from dynamo.planner.tests.testbed.fake_actuator import AppliedCaps
-    from dynamo.planner.tests.testbed.scenarios import OverlaySpec, ScenarioSpec, SystemSpec
+    from dynamo.planner.tests.testbed.scenarios import (
+        OverlaySpec,
+        ScenarioSpec,
+        SystemSpec,
+    )
 
 
 @dataclass
@@ -26,8 +29,8 @@ class OverlayObservation:
     """Power signals synthesised from one tick's FPM snapshots."""
 
     tick: int
-    power_w_prefill: float   # per-GPU average
-    power_w_decode: float    # per-GPU average
+    power_w_prefill: float  # per-GPU average
+    power_w_decode: float  # per-GPU average
 
     # Compatibility with SyntheticFleet.observation_at() interface:
     # FakePrometheusClient checks .ttft_avg_s, .itl_avg_s as well.
@@ -97,7 +100,11 @@ class SyntheticPowerOverlay:
 
         # Read scenario bias timeline for this tick
         for event in self._scenario.parsed_events():
-            from dynamo.planner.tests.testbed.scenarios import BiasStepEvent, BiasRampEvent
+            from dynamo.planner.tests.testbed.scenarios import (
+                BiasRampEvent,
+                BiasStepEvent,
+            )
+
             if isinstance(event, BiasStepEvent) and event.at_tick <= tick:
                 if "prefill" in event.signal:
                     bias_p = event.value
@@ -105,7 +112,9 @@ class SyntheticPowerOverlay:
                     bias_d = event.value
             elif isinstance(event, BiasRampEvent):
                 if event.start_tick <= tick <= event.end_tick:
-                    t = (tick - event.start_tick) / max(1, event.end_tick - event.start_tick)
+                    t = (tick - event.start_tick) / max(
+                        1, event.end_tick - event.start_tick
+                    )
                     val = event.from_ + t * (event.to - event.from_)
                     if "prefill" in event.signal:
                         bias_p = val
@@ -204,4 +213,5 @@ class SyntheticPowerOverlay:
     def _noise(self, signal: str) -> float:
         spec = getattr(self._spec.noise, signal, None) or self._spec.noise.power_per_gpu
         from dynamo.planner.tests.testbed.synthetic_fleet import _sample_noise
+
         return _sample_noise(spec, self._rng, f"{signal}_ar1", self._ar1_state)

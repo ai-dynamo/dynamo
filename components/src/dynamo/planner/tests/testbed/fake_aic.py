@@ -16,7 +16,7 @@ Fault injection:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from dynamo.planner.tests.testbed.scenarios import SystemSpec
@@ -88,7 +88,11 @@ class FakeAIC:
 
     def set_fault_mode(self, mode: str) -> None:
         """Set fault mode: 'normal' | 'raises' | 'empty_pareto'."""
-        assert mode in ("normal", "raises", "empty_pareto"), f"Unknown fault mode: {mode}"
+        assert mode in (
+            "normal",
+            "raises",
+            "empty_pareto",
+        ), f"Unknown fault mode: {mode}"
         self._fault_mode = mode
 
     def reset_fault(self) -> None:

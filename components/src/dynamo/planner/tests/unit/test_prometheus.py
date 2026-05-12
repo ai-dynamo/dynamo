@@ -21,12 +21,12 @@ import pytest
 
 from dynamo import prometheus_names
 from dynamo.planner.monitoring.traffic_metrics import (
+    _WORKER_METRIC_NAMES,
     DirectRouterMetricsClient,
     FrontendMetric,
     FrontendMetricContainer,
     Metrics,
     PrometheusAPIClient,
-    _WORKER_METRIC_NAMES,
 )
 
 pytestmark = [
@@ -664,10 +664,7 @@ class TestPowerAwareDcgmQueries:
             assert "avg_over_time" in call_args
             # Selector must filter by exported_pod regex matching the
             # operator's `<dgd>-<replica-idx>-<service-key-lc>-<hash>` form.
-            assert (
-                'exported_pod=~"^my-dgd-[0-9]+-vllmprefillworker-.*"'
-                in call_args
-            )
+            assert 'exported_pod=~"^my-dgd-[0-9]+-vllmprefillworker-.*"' in call_args
             assert 'exported_namespace="kube-namespace"' in call_args
 
     def test_get_avg_per_gpu_power_by_component_lowercases_service_key(self):
@@ -731,10 +728,7 @@ class TestPowerAwareDcgmQueries:
             )
             assert result == pytest.approx(400.0)
             call_args = str(mock_query.call_args).replace("'", '"')
-            assert (
-                'exported_pod=~"^my-dgd-[0-9]+-vllmworker-.*"'
-                in call_args
-            )
+            assert 'exported_pod=~"^my-dgd-[0-9]+-vllmworker-.*"' in call_args
 
     def test_get_avg_per_gpu_power_by_component_returns_none_on_exception(self):
         client = self._client()
@@ -803,7 +797,9 @@ class TestMetricsIsValid:
 
     def test_zero_values_are_valid(self):
         """Zero is a legal observed value — is_valid() must not reject it."""
-        m = _valid_metrics(ttft=0.0, itl=0.0, num_req=0.0, isl=0.0, osl=0.0, request_duration=0.0)
+        m = _valid_metrics(
+            ttft=0.0, itl=0.0, num_req=0.0, isl=0.0, osl=0.0, request_duration=0.0
+        )
         assert m.is_valid() is True
 
 
@@ -902,9 +898,9 @@ class TestDirectRouterMetricsClientParseText:
         text = _prom_text(*lines)
         result = direct_client._parse_prometheus_text(text)
         parsed = result["prefill"]["w0"]
-        assert set(parsed.keys()) == set(_WORKER_METRIC_NAMES.keys()), (
-            "Not all five worker metric fields were parsed"
-        )
+        assert set(parsed.keys()) == set(
+            _WORKER_METRIC_NAMES.keys()
+        ), "Not all five worker metric fields were parsed"
 
     def test_parse_ignores_metrics_not_in_worker_metric_names(self, direct_client):
         text = _prom_text(
@@ -959,7 +955,11 @@ class TestDirectRouterMetricsClientGetRecentAndAveraged:
         direct_client._sample_buffer = [
             _make_sample("prefill", "w0", active_prefill_tokens=50.0)
         ]
-        recent, per_worker_avg, cluster_avg = direct_client.get_recent_and_averaged_metrics("prefill")
+        (
+            recent,
+            per_worker_avg,
+            cluster_avg,
+        ) = direct_client.get_recent_and_averaged_metrics("prefill")
         assert per_worker_avg["w0"]["active_prefill_tokens"] == pytest.approx(50.0)
 
     def test_multiple_samples_per_worker_averaged_over_time(self, direct_client):
@@ -968,7 +968,9 @@ class TestDirectRouterMetricsClientGetRecentAndAveraged:
             _make_sample("prefill", "w0", active_prefill_tokens=20.0),
             _make_sample("prefill", "w0", active_prefill_tokens=30.0),
         ]
-        _, per_worker_avg, cluster_avg = direct_client.get_recent_and_averaged_metrics("prefill")
+        _, per_worker_avg, cluster_avg = direct_client.get_recent_and_averaged_metrics(
+            "prefill"
+        )
         assert per_worker_avg["w0"]["active_prefill_tokens"] == pytest.approx(20.0)
         assert cluster_avg["active_prefill_tokens"] == pytest.approx(20.0)
 
@@ -982,7 +984,9 @@ class TestDirectRouterMetricsClientGetRecentAndAveraged:
                 }
             }
         ]
-        _, per_worker_avg, cluster_avg = direct_client.get_recent_and_averaged_metrics("prefill")
+        _, per_worker_avg, cluster_avg = direct_client.get_recent_and_averaged_metrics(
+            "prefill"
+        )
         assert cluster_avg["active_prefill_tokens"] == pytest.approx(20.0)
 
     def test_filters_by_worker_type(self, direct_client):
@@ -1016,7 +1020,9 @@ class TestDirectRouterMetricsClientGetRecentAndAveraged:
         recent, _, _ = direct_client.get_recent_and_averaged_metrics("prefill")
         assert recent["w0"]["active_prefill_tokens"] == pytest.approx(99.0)
 
-    def test_workers_appearing_only_in_some_samples_averaged_correctly(self, direct_client):
+    def test_workers_appearing_only_in_some_samples_averaged_correctly(
+        self, direct_client
+    ):
         """A worker that appears in only 2 of 3 samples must be averaged over 2, not 3."""
         direct_client._sample_buffer = [
             _make_sample("prefill", "w0", active_prefill_tokens=10.0),

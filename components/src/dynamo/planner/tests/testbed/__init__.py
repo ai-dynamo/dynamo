@@ -11,7 +11,6 @@ See docs/design-docs/powerplanner-testbed-design.md for the full design.
 
 import sys
 
-
 _BANNED = ("pynvml",)
 
 

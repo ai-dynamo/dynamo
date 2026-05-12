@@ -25,7 +25,6 @@ do once the AIC team delivers multi-power-level data.
 from __future__ import annotations
 
 import math
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -37,7 +36,6 @@ from dynamo.planner.core.types import TrafficObservation
 from dynamo.planner.monitoring.aic_power_optimizer import (
     AICPowerOptimizer,
     PowerAwareConfig,
-    _EMA_ALPHA,
 )
 
 pytestmark = [
@@ -60,8 +58,8 @@ H200_DECODE_P50_W = 263.0
 H200_DECODE_P90_W = 558.0
 
 # "Serving-load" operating point (steady-state heavy traffic)
-H200_PREFILL_SERVING_W = H200_PREFILL_P90_W   # 603 W/GPU at heavy prefill load
-H200_DECODE_SERVING_W = H200_DECODE_P90_W     # 558 W/GPU at heavy decode load
+H200_PREFILL_SERVING_W = H200_PREFILL_P90_W  # 603 W/GPU at heavy prefill load
+H200_DECODE_SERVING_W = H200_DECODE_P90_W  # 558 W/GPU at heavy decode load
 
 # GPUs per H200 SXM engine (8-GPU tensor parallel)
 H200_GPUS_PER_ENGINE = 8
@@ -81,7 +79,7 @@ _POWER_LEVELS = {
         "cap_pct": 1.00,
         "prefill_w": H200_PREFILL_SERVING_W,
         "decode_w": H200_DECODE_SERVING_W,
-        "ttft_ms": 50.0,   # fastest at full power
+        "ttft_ms": 50.0,  # fastest at full power
         "itl_ms": 10.0,
         "max_kv": 50_000,
     },
@@ -89,7 +87,7 @@ _POWER_LEVELS = {
         "cap_pct": 0.75,
         "prefill_w": H200_PREFILL_SERVING_W * 0.75,
         "decode_w": H200_DECODE_SERVING_W * 0.75,
-        "ttft_ms": 57.0,   # ~14% slower (throttled GEMMs)
+        "ttft_ms": 57.0,  # ~14% slower (throttled GEMMs)
         "itl_ms": 11.4,
         "max_kv": 50_000,
     },
@@ -97,7 +95,7 @@ _POWER_LEVELS = {
         "cap_pct": 0.50,
         "prefill_w": H200_PREFILL_SERVING_W * 0.50,
         "decode_w": H200_DECODE_SERVING_W * 0.50,
-        "ttft_ms": 70.0,   # ~40% slower
+        "ttft_ms": 70.0,  # ~40% slower
         "itl_ms": 13.0,
         "max_kv": 50_000,
     },
@@ -134,7 +132,7 @@ def _make_config(
     c_itl: float = 1.0,
     c_power_p: float = 1.0,
     c_power_d: float = 1.0,
-    aic_reoptimize_interval: float = 0.0,   # no rate-limit in tests
+    aic_reoptimize_interval: float = 0.0,  # no rate-limit in tests
     aic_drift_consecutive_ticks: int = 3,
     mode: str = "disagg",
 ) -> PlannerConfig:
@@ -236,9 +234,9 @@ class TestFeedbackLoopH200:
         (482.4 W out of 603 W).  EMA raw ratio = 482.4/603 ≈ 0.80 each tick.
         After 20 ticks the coefficient should be within 5% of 0.80.
         """
-        AIC_PREFILL_W = H200_PREFILL_P90_W        # 603 W (synthetic AIC estimate)
-        OBSERVED_W = AIC_PREFILL_W * 0.80          # ≈482.4 W (observed)
-        TRUE_RATIO = OBSERVED_W / AIC_PREFILL_W    # 0.80
+        AIC_PREFILL_W = H200_PREFILL_P90_W  # 603 W (synthetic AIC estimate)
+        OBSERVED_W = AIC_PREFILL_W * 0.80  # ≈482.4 W (observed)
+        TRUE_RATIO = OBSERVED_W / AIC_PREFILL_W  # 0.80
 
         estimator = _estimator_for_level("high")
         config = _make_config(c_power_p=1.0)
@@ -260,9 +258,9 @@ class TestFeedbackLoopH200:
         for _ in range(TICKS):
             opt.update_correction(traffic, observed_power_w_prefill=OBSERVED_W)
 
-        assert abs(opt._c_power_p - TRUE_RATIO) < 0.05, (
-            f"c_power_p={opt._c_power_p:.3f} did not converge to {TRUE_RATIO:.3f}"
-        )
+        assert (
+            abs(opt._c_power_p - TRUE_RATIO) < 0.05
+        ), f"c_power_p={opt._c_power_p:.3f} did not converge to {TRUE_RATIO:.3f}"
 
     def test_ema_stable_when_observed_matches_aic_prediction(self):
         """When observed power equals AIC's prefill power_w, c stays at 1.0.
@@ -341,7 +339,7 @@ class TestFeedbackLoopH200:
 
         assert opt.should_reoptimize(bad_traffic) is False  # tick 1
         assert opt.should_reoptimize(bad_traffic) is False  # tick 2
-        assert opt.should_reoptimize(bad_traffic) is True   # tick 3 — fires
+        assert opt.should_reoptimize(bad_traffic) is True  # tick 3 — fires
 
     def test_no_drift_under_nominal_load(self):
         """At normal load well within budget, no spurious reoptimization triggers."""
@@ -365,9 +363,9 @@ class TestFeedbackLoopH200:
 
         # Good traffic: TTFT within SLA, tokens within estimated capacity.
         good_traffic = _make_traffic(
-            ttft_avg_s=0.100,   # 100ms < 200ms SLA
-            itl_avg_s=0.020,    # 20ms < 50ms SLA
-            total_tokens_per_s=800.0,   # < 1000 × 1.15 threshold
+            ttft_avg_s=0.100,  # 100ms < 200ms SLA
+            itl_avg_s=0.020,  # 20ms < 50ms SLA
+            total_tokens_per_s=800.0,  # < 1000 × 1.15 threshold
         )
         for _ in range(10):
             assert opt.should_reoptimize(good_traffic) is False
@@ -410,9 +408,9 @@ class TestBudgetConstraintPipeline:
             result.n_p * result.cap_p * H200_GPUS_PER_ENGINE
             + result.n_d * result.cap_d * H200_GPUS_PER_ENGINE
         )
-        assert total_w <= 40_000 + 200, (  # small rounding tolerance
-            f"total_w={total_w} W exceeds budget=40000 W"
-        )
+        assert (
+            total_w <= 40_000 + 200
+        ), f"total_w={total_w} W exceeds budget=40000 W"  # small rounding tolerance
 
     def test_corrected_cap_respected_under_budget(self):
         """When c_power_p = 1.10 (10% over-estimate detected), cap inflates by 10%."""
@@ -429,16 +427,16 @@ class TestBudgetConstraintPipeline:
         assert result is not None
         # cap_p should be ceil(H200_PREFILL_P90_W × 1.10)
         expected_cap_p = math.ceil(H200_PREFILL_P90_W * 1.10)
-        assert result.cap_p == expected_cap_p, (
-            f"cap_p={result.cap_p} != expected {expected_cap_p}"
-        )
+        assert (
+            result.cap_p == expected_cap_p
+        ), f"cap_p={result.cap_p} != expected {expected_cap_p}"
 
     def test_total_gpu_power_limit_none_gives_max_replicas(self):
         """With a very generous power budget, replicas are bounded only by max_gpu_budget."""
         estimator = _estimator_for_level("high")
         config = _make_config(
             total_gpu_power_limit=200_000,  # 200 kW — effectively unbounded
-            max_gpu_budget=16,              # 16 GPUs → 2 engines of 8 GPUs each
+            max_gpu_budget=16,  # 16 GPUs → 2 engines of 8 GPUs each
         )
         opt, _ = _make_optimizer(config)
 
@@ -521,9 +519,9 @@ class TestPhase4SyntheticMultiLevel:
         _, high_r = self._optimize_at_level("high", total_gpu_power_limit=120_000)
         _, med_r = self._optimize_at_level("med", total_gpu_power_limit=120_000)
 
-        assert med_r.cap_p < high_r.cap_p, (
-            f"med cap_p={med_r.cap_p} should be < high cap_p={high_r.cap_p}"
-        )
+        assert (
+            med_r.cap_p < high_r.cap_p
+        ), f"med cap_p={med_r.cap_p} should be < high cap_p={high_r.cap_p}"
         assert med_r.cap_d < high_r.cap_d
 
     def test_budget_selects_lower_power_level(self):
@@ -540,9 +538,9 @@ class TestPhase4SyntheticMultiLevel:
         _, low_r = self._optimize_at_level("low", total_gpu_power_limit=TIGHT_BUDGET)
 
         # Low level has lower per-replica cost → should fit more decode replicas.
-        assert low_r.n_d >= high_r.n_d, (
-            f"low n_d={low_r.n_d} should be >= high n_d={high_r.n_d} at tight budget"
-        )
+        assert (
+            low_r.n_d >= high_r.n_d
+        ), f"low n_d={low_r.n_d} should be >= high n_d={high_r.n_d} at tight budget"
 
         # Caps reflect the power_w from each level.
         assert low_r.cap_p < high_r.cap_p
@@ -557,7 +555,9 @@ class TestPhase4SyntheticMultiLevel:
                     result.n_p * result.cap_p * H200_GPUS_PER_ENGINE
                     + result.n_d * result.cap_d * H200_GPUS_PER_ENGINE
                 )
-                assert total_w <= budget + 500, (  # 500W rounding tolerance
+                assert (
+                    total_w <= budget + 500
+                ), (  # 500W rounding tolerance
                     f"level={level}, budget={budget}: total_w={total_w} exceeds budget"
                 )
 
@@ -633,7 +633,9 @@ class TestFullDeploymentScenario:
         ):
             first_result = opt.optimize()
         assert first_result is not None
-        assert not opt._disabled, "Optimizer disabled after first sweep — check SLA feasibility"
+        assert (
+            not opt._disabled
+        ), "Optimizer disabled after first sweep — check SLA feasibility"
 
         # Phase 1: EMA calibration — 15 ticks.
         # - TTFT observed at 55ms vs AIC 50ms → raw_ttft = 55/50 = 1.10 → c_ttft > 1.0
@@ -643,8 +645,8 @@ class TestFullDeploymentScenario:
         OVER_PREDICT_FACTOR = 1.056
         traffic_calibrate = _make_traffic(
             num_req=25.0,
-            ttft_avg_s=0.055,      # 55ms vs 50ms AIC TTFT (within 200ms SLA)
-            itl_avg_s=0.011,       # 11ms vs 10ms AIC ITL
+            ttft_avg_s=0.055,  # 55ms vs 50ms AIC TTFT (within 200ms SLA)
+            itl_avg_s=0.011,  # 11ms vs 10ms AIC ITL
             total_tokens_per_s=400.0,
             scheduled_prefill_tokens=8_000.0,
             scheduled_decode_kv_tokens=5_000.0,
@@ -654,7 +656,8 @@ class TestFullDeploymentScenario:
                 traffic_calibrate,
                 observed_ttft_avg=0.055,
                 observed_itl_avg=0.011,
-                observed_power_w_prefill=H200_PREFILL_P90_W * OVER_PREDICT_FACTOR,  # 637 W
+                observed_power_w_prefill=H200_PREFILL_P90_W
+                * OVER_PREDICT_FACTOR,  # 637 W
                 observed_power_w_decode=H200_DECODE_P90_W * OVER_PREDICT_FACTOR,
             )
             # No drift should trigger during calibration (SLA not violated, no capacity surge).
@@ -665,9 +668,9 @@ class TestFullDeploymentScenario:
         assert opt._c_itl > 1.0, f"c_itl={opt._c_itl} did not calibrate above 1.0"
         # Power coefficient normalises against AIC raw estimate (603W for high level)
         # → raw = 637/603 = 1.056, c_power_p > 1.0 (AIC slightly under-predicts).
-        assert opt._c_power_p > 1.0, (
-            f"c_power_p={opt._c_power_p:.3f} should be > 1.0 when observed > AIC raw"
-        )
+        assert (
+            opt._c_power_p > 1.0
+        ), f"c_power_p={opt._c_power_p:.3f} should be > 1.0 when observed > AIC raw"
         assert opt._c_power_p == pytest.approx(OVER_PREDICT_FACTOR, abs=0.01)
 
         # Phase 2: stable state — 10 ticks, all metrics nominal.
@@ -678,7 +681,6 @@ class TestFullDeploymentScenario:
             total_tokens_per_s=400.0,
         )
         opt._estimated_throughput = 1_000.0  # set reference
-        c_ttft_before_stable = opt._c_ttft
         for _ in range(10):
             opt.update_correction(
                 traffic_stable,
@@ -690,12 +692,12 @@ class TestFullDeploymentScenario:
         # Phase 3: traffic surge — 3 ticks at 120% of estimated capacity.
         traffic_surge = _make_traffic(
             num_req=60.0,
-            ttft_avg_s=0.055,       # TTFT still OK (enough replicas)
+            ttft_avg_s=0.055,  # TTFT still OK (enough replicas)
             total_tokens_per_s=1_200.0,  # 20% above 1000 threshold
         )
         assert opt.should_reoptimize(traffic_surge) is False  # tick 1
         assert opt.should_reoptimize(traffic_surge) is False  # tick 2
-        assert opt.should_reoptimize(traffic_surge) is True   # tick 3 — fires!
+        assert opt.should_reoptimize(traffic_surge) is True  # tick 3 — fires!
 
         # Phase 4: re-optimize.
         with patch(
