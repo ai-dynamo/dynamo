@@ -9,12 +9,11 @@ and feature gap details.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import tempfile
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, cast
 
 from vllm.inputs import TokensPrompt
 from vllm.usage.usage_lib import UsageContext
@@ -82,9 +81,10 @@ class VllmLLMEngine(LLMEngine):
 
         # _resolve_disaggregation_mode() in DynamoVllmConfig has already
         # promoted the field to a DisaggregationMode enum; the field type
-        # is still the input union, so narrow it here for mypy.
-        assert isinstance(config.disaggregation_mode, DisaggregationMode)
-        engine = cls(config.engine_args, config.disaggregation_mode)
+        # is still the input union, so narrow it here for mypy (cast
+        # rather than assert so `-O` builds don't drop the narrowing).
+        mode = cast(DisaggregationMode, config.disaggregation_mode)
+        engine = cls(config.engine_args, mode)
         worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
@@ -156,18 +156,21 @@ class VllmLLMEngine(LLMEngine):
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
-            # `do_remote_decode` must be owned by prefill; setdefault the
-            # rest so a caller-supplied value wins.
-            kv_params = sampling_params.extra_args.setdefault("kv_transfer_params", {})
-            kv_params["do_remote_decode"] = True
-            for key, value in (
-                ("do_remote_prefill", False),
-                ("remote_engine_id", None),
-                ("remote_block_ids", None),
-                ("remote_host", None),
-                ("remote_port", None),
-            ):
-                kv_params.setdefault(key, value)
+            # `do_remote_decode` is prefill's to own; merge caller-supplied
+            # values on top of the defaults so explicit overrides win.
+            kv_defaults = {
+                "do_remote_prefill": False,
+                "remote_engine_id": None,
+                "remote_block_ids": None,
+                "remote_host": None,
+                "remote_port": None,
+            }
+            caller_kv = sampling_params.extra_args.get("kv_transfer_params", {})
+            sampling_params.extra_args["kv_transfer_params"] = {
+                **kv_defaults,
+                **caller_kv,
+                "do_remote_decode": True,
+            }
             sampling_params.max_tokens = 1
             sampling_params.min_tokens = 1
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
@@ -239,14 +242,17 @@ class VllmLLMEngine(LLMEngine):
                                 res, "kv_transfer_params", None
                             )
                             if kv_transfer_params is not None:
-                                out["disaggregated_params"] = {  # type: ignore[typeddict-unknown-key]
+                                out["disaggregated_params"] = {
                                     "kv_transfer_params": kv_transfer_params,
                                 }
 
                     yield out
                     num_output_tokens_so_far[output_idx] = next_total
         finally:
-            # pop before close(); ordering matters for late abort()
+            # Pop the guard from the lookup map BEFORE closing it. A late
+            # abort() racing on a different task would otherwise observe a
+            # half-closed guard; popping first sends that abort() down the
+            # engine-direct path instead.
             if abort_guard is not None and request_id is not None:
                 self._active_aborts.pop(request_id, None)
                 await abort_guard.close()
