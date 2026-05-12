@@ -662,11 +662,7 @@ mod tests {
         // Truncated inside the <arg_value> opening tag itself.
         let message = "<tool_call>get_weather<arg_key>location</arg_key><arg_val";
         let (calls, normal_text) = try_tool_call_parse_glm47(message, &config, None).unwrap();
-        assert_eq!(
-            calls.len(),
-            0,
-            "Truncation mid-tag must NOT produce a call"
-        );
+        assert_eq!(calls.len(), 0, "Truncation mid-tag must NOT produce a call");
         let text = normal_text.unwrap();
         assert!(text.contains("get_weather"));
     }
@@ -683,8 +679,7 @@ mod tests {
         let message = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value><arg_key>unit</arg_key><arg_value>fah";
         let (calls, _) = try_tool_call_parse_glm47(message, &config, None).unwrap();
         assert_eq!(calls.len(), 1, "First complete pair should allow recovery");
-        let args: serde_json::Value =
-            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(args["location"], "NYC");
         assert!(
             args.get("unit").is_none(),
