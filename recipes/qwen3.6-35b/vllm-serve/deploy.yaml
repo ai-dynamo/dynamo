@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # vllm serve baseline — no Dynamo components. Mounts the namespace's
@@ -78,7 +78,7 @@ spec:
                 --host 0.0.0.0 \
                 --port 8000 \
                 --tensor-parallel-size 1 \
-                --gpu-memory-utilization 0.90 \
+                --gpu-memory-utilization 0.85 \
                 --max-model-len 32768 \
                 --mm-processor-cache-gb 30 \
                 --enable-prefix-caching \

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """3-way comparison of vllm-serve vs dynamo-fd vs dynamo-fd-ec aiperf runs.
 
@@ -71,19 +71,21 @@ def main() -> int:
     print(header)
     print("-" * len(header))
 
+    # higher_is_better=True means the raw delta sign is flipped before
+    # printing, so the percentage column always reads "+ = better".
     rows = [
-        ("request_throughput (rps)", ("request_throughput", "avg"), 3),
-        ("TTFT avg (ms)", ("time_to_first_token", "avg"), 1),
-        ("TTFT p50 (ms)", ("time_to_first_token", "p50"), 1),
-        ("TTFT p90 (ms)", ("time_to_first_token", "p90"), 1),
-        ("TTFT p99 (ms)", ("time_to_first_token", "p99"), 1),
-        ("ITL avg (ms)", ("inter_token_latency", "avg"), 2),
-        ("ITL p50 (ms)", ("inter_token_latency", "p50"), 2),
-        ("ITL p90 (ms)", ("inter_token_latency", "p90"), 2),
-        ("ITL p99 (ms)", ("inter_token_latency", "p99"), 2),
+        ("request_throughput (rps)", ("request_throughput", "avg"), 3, True),
+        ("TTFT avg (ms)", ("time_to_first_token", "avg"), 1, False),
+        ("TTFT p50 (ms)", ("time_to_first_token", "p50"), 1, False),
+        ("TTFT p90 (ms)", ("time_to_first_token", "p90"), 1, False),
+        ("TTFT p99 (ms)", ("time_to_first_token", "p99"), 1, False),
+        ("ITL avg (ms)", ("inter_token_latency", "avg"), 2, False),
+        ("ITL p50 (ms)", ("inter_token_latency", "p50"), 2, False),
+        ("ITL p90 (ms)", ("inter_token_latency", "p90"), 2, False),
+        ("ITL p99 (ms)", ("inter_token_latency", "p99"), 2, False),
     ]
 
-    for label, (k, sub), decimals in rows:
+    for label, (k, sub), decimals, _hib in rows:
         vals = [extract(loaded[c], k, sub) if loaded[c] else None for c in CONFIGS]
         line = f"{label:<28}" + "".join(
             f"{(f'{v:.{decimals}f}' if v is not None else 'n/a'):>14}" for v in vals
@@ -93,9 +95,9 @@ def main() -> int:
     print()
     # Pct delta vs vllm-serve for the headline metrics.
     if loaded["vllm-serve"]:
-        print("Delta vs vllm-serve baseline (negative = faster / higher):")
+        print("Delta vs vllm-serve baseline (positive = better):")
         print(f"{'metric':<28}{'dynamo-fd':>14}{'dynamo-fd-ec':>14}")
-        for label, (k, sub), _ in rows:
+        for label, (k, sub), _, higher_is_better in rows:
             base = extract(loaded["vllm-serve"], k, sub)
             if base is None or base == 0:
                 continue
@@ -106,6 +108,8 @@ def main() -> int:
                     deltas.append("n/a")
                 else:
                     pct = (v - base) / base * 100.0
+                    if not higher_is_better:
+                        pct = -pct
                     deltas.append(f"{pct:+.1f}%")
             print(f"{label:<28}{deltas[0]:>14}{deltas[1]:>14}")
 

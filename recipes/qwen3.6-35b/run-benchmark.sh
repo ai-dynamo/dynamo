@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Unified driver for the Qwen3.6-35B-A3B-FP8 3-way benchmark.
@@ -96,8 +96,15 @@ APPLY_TPL() { envsubst "$TPL_VARS" <"$1" | $K apply -f -; }
 # ---------------- config-agnostic prep ----------------
 
 pvc() {
-  $K apply -f "$HERE/model-cache/model-cache.yaml"
-  $K get pvc
+  # `shared-model-cache` is expected to be pre-provisioned in the namespace
+  # (RWX, e.g. FSx Lustre). If your cluster doesn't pre-provision it, create
+  # the PVC out-of-band — see README.md → "Storage: shared-model-cache".
+  if ! $K get pvc shared-model-cache >/dev/null 2>&1; then
+    echo "[pvc] ERROR: PVC 'shared-model-cache' not found in namespace '$NAMESPACE'" >&2
+    echo "[pvc] See README.md → 'Storage: shared-model-cache' for provisioning guidance." >&2
+    exit 1
+  fi
+  $K get pvc shared-model-cache
 }
 
 download() {

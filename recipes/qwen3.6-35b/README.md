@@ -72,7 +72,6 @@ qwen3.6-35b/
 │   ├── h100.env
 │   └── gb200.env
 ├── model-cache/
-│   ├── model-cache.yaml
 │   └── model-download.yaml
 ├── data-gen/
 │   └── generate-datasets-job.yaml
@@ -134,9 +133,27 @@ The HF cache is mounted at the root so any model already cached in
 the namespace is reused. The Qwen3.6-35B-A3B-FP8 download lands in
 the standard `hub/models--Qwen--Qwen3.6-35B-A3B-FP8/` directory.
 
-If your cluster doesn't pre-provision `shared-model-cache`, uncomment
-the PVC block in `model-cache/model-cache.yaml` and pick an RWX storage
-class (e.g. `dgxc-enterprise-file` on dgxc, FSx Lustre on AWS).
+If your cluster doesn't pre-provision `shared-model-cache`, create it
+out-of-band before running the recipe, picking an RWX storage class
+(e.g. `dgxc-enterprise-file` on dgxc, FSx Lustre on AWS):
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-model-cache
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 200Gi
+  storageClassName: <your-rwx-storage-class>
+```
+
+Prefer RWX/Retain (e.g. FSx Lustre) over RWO/Delete (e.g. EBS) —
+RWO EBS volumes get pinned to whichever AZ the first-consumer pod
+schedules into, leaving the GPU pod unschedulable if your GPU
+nodes live in a different AZ.
 
 ## aiperf install
 
