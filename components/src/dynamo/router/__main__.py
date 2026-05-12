@@ -113,6 +113,7 @@ class StandaloneRouterHandler:
             "prefill_result": request.get("prefill_result"),
             "bootstrap_info": request.get("bootstrap_info"),
             "extra_args": request.get("extra_args"),
+            "mm_processor_kwargs": request.get("mm_processor_kwargs"),
         }
 
         async for worker_output in await self.kv_router.generate_from_request(
@@ -179,9 +180,7 @@ async def worker(runtime: DistributedRuntime):
         f"router_track_output_blocks={config.router_track_output_blocks}, "
         f"router_assume_kv_reuse={config.router_assume_kv_reuse}, "
         f"router_track_prefill_tokens={config.router_track_prefill_tokens}, "
-        f"router_ttl_secs={config.router_ttl_secs}, "
-        f"router_max_tree_size={config.router_max_tree_size}, "
-        f"router_prune_target_ratio={config.router_prune_target_ratio}"
+        f"router_ttl_secs={config.router_ttl_secs}"
     )
 
     kv_router_config = build_kv_router_config(config)

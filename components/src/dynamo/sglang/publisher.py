@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -11,8 +13,7 @@ import sglang as sgl
 import zmq
 import zmq.asyncio
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
-
-from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_zmq_socket
+from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto, get_zmq_socket
 
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry

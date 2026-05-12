@@ -4,12 +4,11 @@
 > text backbone (`text_config`) only. The vision encoder is not loaded, so image inputs are not
 > processed. Full multimodal support requires native upstream TRT-LLM support for Kimi K2.5.
 
-This directory contains three aggregated deployment configurations for the `nvidia/Kimi-K2.5-NVFP4` model.
+This directory contains two aggregated deployment configurations for the `nvidia/Kimi-K2.5-NVFP4` model.
 
 | Deployment | Manifest | Description | Hardware Requirement
 |-----------|----------|-------------|----|
 | **Standard Aggregated** | [`deploy.yaml`](deploy.yaml) | Basic aggregated serving with KV-aware routing | 1x8 B200 node |
-| **Aggregated + KVBM** | [`deploy-kvbm.yaml`](deploy-kvbm.yaml) | Aggregated serving with CPU-offloaded KV cache (KV Block Manager) | 1x8 B200 node |
 | **Aggregated + EAGLE SpecDec** | [`deploy-specdec.yaml`](deploy-specdec.yaml) | Performant aggregated deployment with EAGLE speculative decoding and KV-aware routing | 8x4 GB200 nodes |
 
 ## Prerequisites
@@ -33,44 +32,6 @@ kubectl apply -f deploy.yaml -n ${NAMESPACE}
 This creates:
 - A **ConfigMap** (`llm-config`) with TRT-LLM engine parameters (TP=8, EP=8, FP8 KV-cache).
 - A **DynamoGraphDeployment** (`kimi-k25-agg`) with a Frontend (KV-router mode) and a TrtllmWorker serving `nvidia/Kimi-K2.5-NVFP4`.
-
----
-
-## Aggregated Deployment with KVBM
-
-Uses [`deploy-kvbm.yaml`](deploy-kvbm.yaml). This configuration adds CPU-offloaded KV cache via the KV Block Manager (KVBM), which allows larger effective context by spilling KV cache to host memory.
-
-```bash
-kubectl apply -f deploy-kvbm.yaml -n ${NAMESPACE}
-```
-
-This creates:
-- A **ConfigMap** (`llm-config-kimi-agg-kvbm`) with TRT-LLM engine parameters (TP=8, EP=8, FP8 KV-cache, KVBM connector).
-- A **DynamoGraphDeployment** (`kimi-k25-agg-kvbm`) with a Frontend (KV-router mode) and a TrtllmWorker serving `nvidia/Kimi-K2.5-NVFP4`.
-
-### KVBM Configuration
-
-Key environment variables on the worker:
-
-| Variable | Default | Description |
-|---|---|---|
-| `DYN_KVBM_CPU_CACHE_GB` | `10` | CPU cache size in GB for KVBM |
-| `DYN_KVBM_METRICS` | `true` | Enable Prometheus metrics endpoint |
-| `DYN_KVBM_METRICS_PORT` | `6880` | Port for the metrics endpoint |
-
-### Enable Prometheus Metrics Scraping
-
-If you have the [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator) installed, apply the PodMonitor:
-
-```bash
-kubectl apply -f podmonitor-kvbm.yaml -n monitoring
-```
-
-This scrapes `/metrics` on port `6880` (named `kvbm`) every 5 seconds from worker pods labeled with:
-- `nvidia.com/dynamo-component-type: worker`
-- `nvidia.com/metrics-enabled: "true"`
-
-> **Note:** If your Prometheus Operator watches a namespace other than `monitoring` for PodMonitors, change `metadata.namespace` in `podmonitor-kvbm.yaml` accordingly.
 
 ---
 

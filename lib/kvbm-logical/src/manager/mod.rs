@@ -78,6 +78,20 @@ impl<T: BlockMetadata> BlockManager<T> {
     ///
     /// Returns `None` if fewer than `count` blocks are available across both pools.
     pub fn allocate_blocks(&self, count: usize) -> Option<Vec<MutableBlock<T>>> {
+        self.allocate_blocks_with_evictions(count)
+            .map(|(blocks, _evicted)| blocks)
+    }
+
+    /// Like [`allocate_blocks`](Self::allocate_blocks) but also reports the
+    /// [`SequenceHash`] of each block evicted from the inactive pool to
+    /// satisfy the allocation. Callers maintaining a shadow view of which
+    /// registrations are alive (e.g. the mocker's router-event bridge) can
+    /// translate these hashes into cache-invalidation events directly,
+    /// avoiding an O(N) presence scan over the registry.
+    pub fn allocate_blocks_with_evictions(
+        &self,
+        count: usize,
+    ) -> Option<(Vec<MutableBlock<T>>, Vec<SequenceHash>)> {
         let _guard = self.allocate_mutex.lock();
         let from_reset = self.reset_pool.allocate_blocks(count);
         let from_reset_count = from_reset.len();
@@ -85,7 +99,7 @@ impl<T: BlockMetadata> BlockManager<T> {
 
         let remaining_needed = count - blocks.len();
         match self.inactive_pool.allocate_blocks(remaining_needed) {
-            Some(remaining) => {
+            Some((remaining, evicted)) => {
                 let eviction_count = remaining.len() as u64;
                 blocks.extend(remaining);
 
@@ -94,7 +108,7 @@ impl<T: BlockMetadata> BlockManager<T> {
                     .inc_allocations_from_reset(from_reset_count as u64);
                 self.metrics.inc_evictions(eviction_count);
 
-                Some(blocks)
+                Some((blocks, evicted))
             }
             None => None,
         }
@@ -169,18 +183,60 @@ impl<T: BlockMetadata> BlockManager<T> {
             "match_blocks called"
         );
 
-        // First try to match against active blocks
-        let mut matched: Vec<ImmutableBlock<T>> = Vec::with_capacity(seq_hash.len());
-        matched.extend(
-            self.active_pool
-                .find_matches(seq_hash, true)
-                .into_iter()
-                .map(|block| {
-                    ImmutableBlock::new(block, self.upgrade_fn.clone(), Some(self.metrics.clone()))
-                }),
-        );
+        let Some((&first_hash, remaining_after_first)) = seq_hash.split_first() else {
+            tracing::debug!(total_matched = 0, "match_blocks result");
+            return Vec::new();
+        };
 
-        let active_matched = matched.len();
+        let mut matched: Vec<ImmutableBlock<T>>;
+        let active_matched;
+
+        if let Some(first_block) = self.active_pool.find_match(first_hash, true) {
+            matched = Vec::with_capacity(seq_hash.len());
+            matched.push(ImmutableBlock::new(
+                first_block,
+                self.upgrade_fn.clone(),
+                Some(self.metrics.clone()),
+            ));
+
+            if !remaining_after_first.is_empty() {
+                matched.extend(
+                    self.active_pool
+                        .find_matches(remaining_after_first, true)
+                        .into_iter()
+                        .map(|block| {
+                            ImmutableBlock::new(
+                                block,
+                                self.upgrade_fn.clone(),
+                                Some(self.metrics.clone()),
+                            )
+                        }),
+                );
+            }
+
+            active_matched = matched.len();
+        } else {
+            let inactive_found = self.inactive_pool.find_blocks(seq_hash, true);
+            let inactive_matched = inactive_found.len();
+            tracing::debug!(
+                remaining_to_check = seq_hash.len(),
+                inactive_matched,
+                "Matched from inactive pool"
+            );
+
+            if inactive_found.is_empty() {
+                self.metrics.inc_match_blocks_returned(0);
+                tracing::debug!(total_matched = 0, "match_blocks result");
+                return Vec::new();
+            }
+
+            matched = Vec::with_capacity(seq_hash.len());
+            matched.extend(inactive_found.into_iter().map(|block| {
+                ImmutableBlock::new(block, self.upgrade_fn.clone(), Some(self.metrics.clone()))
+            }));
+            active_matched = 0;
+        }
+
         tracing::debug!(active_matched, "Matched from active pool");
 
         // If we didn't match all hashes, try inactive blocks for the remaining ones

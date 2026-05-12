@@ -22,8 +22,9 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
+from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.defaults import SLAPlannerDefaults
 
 logger = logging.getLogger(__name__)
@@ -51,7 +52,8 @@ class PlannerConfig(BaseModel):
         "kubernetes", "virtual", "global-planner"
     ] = SLAPlannerDefaults.environment
     namespace: str = Field(
-        default_factory=lambda: os.environ.get("DYN_NAMESPACE", "dynamo")
+        default_factory=lambda: os.environ.get("DYN_NAMESPACE", "dynamo"),
+        exclude=True,
     )
     backend: Literal["vllm", "sglang", "trtllm", "mocker"] = SLAPlannerDefaults.backend
     mode: Literal["disagg", "prefill", "decode", "agg"] = SLAPlannerDefaults.mode
@@ -61,14 +63,17 @@ class PlannerConfig(BaseModel):
             "Scaling optimization target. "
             "'throughput' (default) and 'latency' use static thresholds on queue "
             "depth and KV cache utilization — no SLA targets or profiling needed. "
-            "'sla' uses regression-based scaling that targets specific ttft/itl values."
+            "'sla' uses regression-based scaling that targets specific ttft_ms/itl_ms values."
         ),
     )
 
-    no_operation: bool = SLAPlannerDefaults.no_operation
     log_dir: Optional[str] = SLAPlannerDefaults.log_dir
-    throughput_adjustment_interval: int = (
-        SLAPlannerDefaults.throughput_adjustment_interval
+    throughput_adjustment_interval_seconds: int = Field(
+        default=SLAPlannerDefaults.throughput_adjustment_interval_seconds,
+        validation_alias=AliasChoices(
+            "throughput_adjustment_interval_seconds",
+            "throughput_adjustment_interval",
+        ),
     )
     max_gpu_budget: int = SLAPlannerDefaults.max_gpu_budget
     min_endpoint: int = SLAPlannerDefaults.min_endpoint
@@ -78,8 +83,25 @@ class PlannerConfig(BaseModel):
 
     profile_results_dir: str = SLAPlannerDefaults.profile_results_dir
 
-    ttft: float = SLAPlannerDefaults.ttft
-    itl: float = SLAPlannerDefaults.itl
+    aic_interpolation: Optional[AICInterpolationSpec] = Field(
+        default=None,
+        description=(
+            "AIConfigurator interpolation spec populated by the profiler in "
+            "rapid mode. When set, the planner runs the AIC sweep in-process "
+            "at bootstrap and uses the resulting FPMs to seed the regression "
+            "models (priority 2 between the get_perf_metrics endpoint and "
+            "the legacy profile_results_dir file loader)."
+        ),
+    )
+
+    ttft_ms: float = Field(
+        default=SLAPlannerDefaults.ttft_ms,
+        validation_alias=AliasChoices("ttft_ms", "ttft"),
+    )
+    itl_ms: float = Field(
+        default=SLAPlannerDefaults.itl_ms,
+        validation_alias=AliasChoices("itl_ms", "itl"),
+    )
 
     # Load predictor settings
     load_predictor: str = SLAPlannerDefaults.load_predictor
@@ -98,7 +120,8 @@ class PlannerConfig(BaseModel):
         default_factory=lambda: os.environ.get(
             "PROMETHEUS_ENDPOINT",
             "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090",
-        )
+        ),
+        exclude=True,
     )
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
@@ -117,14 +140,17 @@ class PlannerConfig(BaseModel):
     enable_load_scaling: bool = SLAPlannerDefaults.enable_load_scaling
 
     # Load-based scaling settings
-    load_adjustment_interval: int = Field(
-        default=SLAPlannerDefaults.load_adjustment_interval,
+    load_adjustment_interval_seconds: int = Field(
+        default=SLAPlannerDefaults.load_adjustment_interval_seconds,
+        validation_alias=AliasChoices(
+            "load_adjustment_interval_seconds", "load_adjustment_interval"
+        ),
         description=(
-            "Interval in seconds for FPM regression model updates AND load-based "
+            "Interval for FPM regression model updates AND load-based "
             "scaling decisions. Even when only throughput-based scaling is enabled, "
             "live FPM observations are fed into the regression at this interval to "
             "keep the performance model accurate. Must be shorter than "
-            "throughput_adjustment_interval."
+            "throughput_adjustment_interval_seconds."
         ),
     )
     max_num_fpm_samples: int = SLAPlannerDefaults.max_num_fpm_samples
@@ -134,6 +160,9 @@ class PlannerConfig(BaseModel):
     )
     load_metric_samples: int = SLAPlannerDefaults.load_metric_samples
     load_min_observations: int = SLAPlannerDefaults.load_min_observations
+
+    # Advisory mode: compute and log decisions without executing scaling
+    advisory: bool = SLAPlannerDefaults.advisory
 
     # Diagnostics report settings
     report_interval_hours: Optional[float] = Field(
@@ -147,6 +176,14 @@ class PlannerConfig(BaseModel):
         default="./planner_reports",
         description="Directory for HTML diagnostics reports.",
     )
+    report_filename: Optional[str] = Field(
+        default=None,
+        description=(
+            "Fixed filename for HTML diagnostics reports. "
+            "When set, reports are written to report_output_dir/report_filename "
+            "instead of the default timestamped name."
+        ),
+    )
     live_dashboard_port: int = Field(
         default=8080,
         description=(
@@ -158,6 +195,9 @@ class PlannerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_config(self) -> "PlannerConfig":
+        if self.ttft_ms <= 0:
+            raise ValueError(f"ttft_ms must be > 0, got {self.ttft_ms}")
+
         if self.report_interval_hours is not None:
             if (
                 not math.isfinite(self.report_interval_hours)
@@ -185,11 +225,11 @@ class PlannerConfig(BaseModel):
             self.enable_load_scaling = True
             self.enable_throughput_scaling = False
             if (
-                self.ttft != SLAPlannerDefaults.ttft
-                or self.itl != SLAPlannerDefaults.itl
+                self.ttft_ms != SLAPlannerDefaults.ttft_ms
+                or self.itl_ms != SLAPlannerDefaults.itl_ms
             ):
                 logger.warning(
-                    "optimization_target=%s ignores ttft/itl values; "
+                    "optimization_target=%s ignores ttft_ms/itl_ms values; "
                     "set optimization_target='sla' to use SLA-based scaling",
                     self.optimization_target,
                 )
@@ -212,13 +252,25 @@ class PlannerConfig(BaseModel):
                     "enable_throughput_scaling is True. Throughput-based scaling "
                     "requires pre-deployment sweeping to profile engine performance."
                 )
+            if (
+                self.pre_deployment_sweeping_mode == PlannerPreDeploymentSweepMode.Rapid
+                and self.aic_interpolation is None
+            ):
+                logger.warning(
+                    "pre_deployment_sweeping_mode='rapid' but aic_interpolation "
+                    "is not set; planner will fall back to profile_results_dir "
+                    "files if the get_perf_metrics endpoint is unavailable."
+                )
 
         if self.enable_load_scaling:
             if self.enable_throughput_scaling:
-                if self.load_adjustment_interval >= self.throughput_adjustment_interval:
+                if (
+                    self.load_adjustment_interval_seconds
+                    >= self.throughput_adjustment_interval_seconds
+                ):
                     raise ValueError(
-                        f"load_adjustment_interval ({self.load_adjustment_interval}s) "
-                        f"must be shorter than throughput_adjustment_interval ({self.throughput_adjustment_interval}s). "
+                        f"load_adjustment_interval_seconds ({self.load_adjustment_interval_seconds}s) "
+                        f"must be shorter than throughput_adjustment_interval_seconds ({self.throughput_adjustment_interval_seconds}s). "
                         "Load-based scaling is the fast reactive loop; throughput-based is the "
                         "slow predictive loop."
                     )

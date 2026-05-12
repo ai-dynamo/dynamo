@@ -27,6 +27,8 @@ const (
 	DynamoNixlPort     = 19090
 	DynamoNixlPortName = "nixl"
 
+	DynamoFPMBasePort = 20380
+
 	MpiRunSshPort = 2222
 
 	// Default security context values
@@ -47,14 +49,27 @@ const (
 	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
 	KubeLabelDynamoNamespace           = "nvidia.com/dynamo-namespace"
-	KubeLabelDynamoComponentType       = "nvidia.com/dynamo-component-type"
-	KubeLabelDynamoSubComponentType    = "nvidia.com/dynamo-sub-component-type"
-	KubeLabelDynamoBaseModel           = "nvidia.com/dynamo-base-model"
-	KubeLabelDynamoBaseModelHash       = "nvidia.com/dynamo-base-model-hash"
-	KubeAnnotationDynamoBaseModel      = "nvidia.com/dynamo-base-model"
-	KubeLabelDynamoDiscoveryBackend    = "nvidia.com/dynamo-discovery-backend"
-	KubeLabelDynamoDiscoveryEnabled    = "nvidia.com/dynamo-discovery-enabled"
-	KubeLabelDynamoWorkerHash          = "nvidia.com/dynamo-worker-hash"
+	// KubeLabelDynamoComponentType is the workload selector contract stamped on
+	// DCDs and rendered onto pods/services. Native v1beta1 prefill/decode worker
+	// DCDs use "prefill" or "decode". A DCD generation that is already serving
+	// alpha-era selectors uses "worker" and pairs it with
+	// KubeLabelDynamoSubComponentType so a no-op upgrade keeps matching existing
+	// pods. This selector contract is separate from worker-hash currentness:
+	// matching current-worker-hash does not imply legacy selectors.
+	KubeLabelDynamoComponentType    = "nvidia.com/dynamo-component-type"
+	KubeLabelDynamoSubComponentType = "nvidia.com/dynamo-sub-component-type"
+	KubeLabelDynamoComponentClass   = "nvidia.com/dynamo-component-class"
+	KubeLabelDynamoBaseModel        = "nvidia.com/dynamo-base-model"
+	KubeLabelDynamoBaseModelHash    = "nvidia.com/dynamo-base-model-hash"
+	KubeAnnotationDynamoBaseModel   = "nvidia.com/dynamo-base-model"
+	KubeLabelDynamoDiscoveryBackend = "nvidia.com/dynamo-discovery-backend"
+	KubeLabelDynamoDiscoveryEnabled = "nvidia.com/dynamo-discovery-enabled"
+	// KubeLabelDynamoWorkerHash is the worker generation label on worker DCDs
+	// and worker pods. During v1/v2 hash compatibility the label key remains
+	// stable and the value may be either the active v1 hash or the active v2 hash
+	// recorded on the parent DGD. Older operators understand only the v1 value,
+	// so v1-compatible releases continue to generate new DCDs with the v1 value.
+	KubeLabelDynamoWorkerHash = "nvidia.com/dynamo-worker-hash"
 
 	KubeLabelValueFalse = "false"
 	KubeLabelValueTrue  = "true"
@@ -70,15 +85,21 @@ const (
 	DynamoComponentEnvVar             = "DYN_COMPONENT"
 	DynamoDiscoveryBackendEnvVar      = "DYN_DISCOVERY_BACKEND"
 
+	// DynamoOperatorAllowGMSSnapshotEnvVar enables the temporary internal
+	// GMS + Snapshot admission gate when set to "1".
+	DynamoOperatorAllowGMSSnapshotEnvVar = "DYN_OPERATOR_ALLOW_GMS_SNAPSHOT"
+
 	GlobalDynamoNamespace = "dynamo"
 
-	ComponentTypePlanner      = "planner"
-	ComponentTypeFrontend     = "frontend"
-	ComponentTypeWorker       = "worker"
-	ComponentTypePrefill      = "prefill"
-	ComponentTypeDecode       = "decode"
-	ComponentTypeEPP          = "epp"
-	ComponentTypeDefault      = "default"
+	ComponentTypePlanner  = "planner"
+	ComponentTypeFrontend = "frontend"
+	ComponentTypeWorker   = "worker"
+	ComponentTypePrefill  = "prefill"
+	ComponentTypeDecode   = "decode"
+	ComponentTypeEPP      = "epp"
+	ComponentTypeDefault  = "default"
+
+	ComponentClassWorker      = "worker"
 	PlannerServiceAccountName = "planner-serviceaccount"
 	EPPServiceAccountName     = "epp-serviceaccount"
 	EPPClusterRoleName        = "epp-cluster-role"
@@ -123,7 +144,18 @@ const (
 	// Grove multinode role suffixes
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
+	GroveRoleSuffixGMS    = "gms"
 
+	// MaxCombinedGroveResourceNameLength is the maximum allowed combined length for Grove
+	// resource names (PCS name + PCSG config name + PCLQ template name).
+	// This constraint comes from Grove's PodCliqueSet webhook validation.
+	// Pod names follow: <pcs-name>-<pcs-index>-<pcsg-name>-<pcsg-index>-<pclq-name>-<random>
+	// The hyphens, indices, and random suffix consume additional characters beyond this limit.
+	MaxCombinedGroveResourceNameLength = 45
+
+	KubeLabelDynamoFailoverEngineGroupMember = "nvidia.com/dynamo-failover-engine-group-member"
+
+	DiscoveryBackendKubernetes   = "kubernetes" // label value for KubeLabelDynamoDiscoveryBackend
 	MainContainerName            = "main"
 	FrontendSidecarContainerName = "sidecar-frontend"
 
@@ -133,6 +165,7 @@ const (
 	// Used consistently across controllers, webhooks, and metrics
 	ResourceTypeDynamoGraphDeployment               = "DynamoGraphDeployment"
 	ResourceTypeDynamoComponentDeployment           = "DynamoComponentDeployment"
+	ResourceTypeDynamoCheckpoint                    = "DynamoCheckpoint"
 	ResourceTypeDynamoModel                         = "DynamoModel"
 	ResourceTypeDynamoGraphDeploymentRequest        = "DynamoGraphDeploymentRequest"
 	ResourceTypeDynamoGraphDeploymentScalingAdapter = "DynamoGraphDeploymentScalingAdapter"
@@ -141,9 +174,6 @@ const (
 	ResourceStateReady    = "ready"
 	ResourceStateNotReady = "not_ready"
 	ResourceStateUnknown  = "unknown"
-
-	// Environment variables injected into pods
-	EnvReadyForCheckpointFile = "DYN_READY_FOR_CHECKPOINT_FILE" // Ready-for-checkpoint file path — checkpoint job pods
 
 	// Pod identity (Downward API) ---
 	// After CRIU restore, env vars contain stale values from the checkpoint pod.
@@ -163,8 +193,31 @@ const (
 	PodInfoFileDynParentDGDName         = "dyn_parent_dgd_k8s_name"
 	PodInfoFileDynParentDGDNamespace    = "dyn_parent_dgd_k8s_namespace"
 
-	// Rolling update annotations
+	// Worker hash rolling-update annotations are controller-owned annotations on
+	// DynamoGraphDeployment. They record the active worker generation and must not
+	// be treated as user-configurable inputs. During a managed rolling update,
+	// these annotations remain on the previously serving worker generation until
+	// the new generation is fully ready and old workers have drained.
+	//
+	// The compatibility contract is intentionally additive: existing annotation
+	// and label keys keep their old meaning. AnnotationCurrentWorkerHash stores
+	// the v1alpha1-compatible worker hash so a downgrade can still understand the
+	// active generation. AnnotationCurrentWorkerHashV2 stores the v2 worker hash
+	// for the same active generation. A worker DCD whose
+	// KubeLabelDynamoWorkerHash value matches either annotation is current. While
+	// v1 compatibility is required, generated worker DCDs use the v1 hash as the
+	// label value. If a worker change is visible only to v2, the controller
+	// removes the v1 annotation and rolls to a v2-labeled DCD because the v1 hash
+	// can no longer prove pod-template compatibility. A future v2-only release
+	// can start using the v2 value with the same label key and keep accepting the
+	// v1 annotation until the next v2 generation change drains old workers.
+
+	// AnnotationCurrentWorkerHash stores the active v1alpha1-compatible worker
+	// generation hash.
 	AnnotationCurrentWorkerHash = "nvidia.com/current-worker-hash"
+
+	// AnnotationCurrentWorkerHashV2 stores the active v2 worker generation hash.
+	AnnotationCurrentWorkerHashV2 = "nvidia.com/current-worker-hash-v2"
 
 	// LegacyWorkerHash is a sentinel value used during migration from pre-rolling-update
 	// operator versions. Legacy worker DCDs (those without a worker hash label) are tagged

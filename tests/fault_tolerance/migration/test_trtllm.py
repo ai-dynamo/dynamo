@@ -196,7 +196,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.timeout(290)  # 3x average
-@pytest.mark.post_merge
+@pytest.mark.nightly
 def test_request_migration_trtllm_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -405,7 +405,7 @@ def test_request_migration_trtllm_kv_transfer(
 
 
 @pytest.mark.timeout(350)  # 3x average
-@pytest.mark.post_merge
+@pytest.mark.nightly
 def test_request_migration_trtllm_decode(
     request,
     runtime_services_dynamic_ports,

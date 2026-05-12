@@ -147,6 +147,7 @@ async fn run_watcher(
     // only has one kind of inference endpoint.
 
     // Pass the discovery stream to the watcher
+    let watch_obj = Arc::new(watch_obj);
     let _watcher_task = tokio::spawn(async move {
         watch_obj.watch(discovery_stream, namespace_filter).await;
     });

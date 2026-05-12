@@ -25,9 +25,8 @@ class BasePlannerDefaults:
     namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
     environment: Literal["kubernetes", "virtual", "global-planner"] = "kubernetes"
     backend: Literal["vllm", "sglang", "trtllm", "mocker"] = "vllm"
-    no_operation = False
     log_dir = None
-    throughput_adjustment_interval = 180  # in seconds
+    throughput_adjustment_interval_seconds = 180
     max_gpu_budget = 8
     min_endpoint = 1  # applies to both decode and prefill
     decode_engine_num_gpu = 1
@@ -46,8 +45,8 @@ class SLAPlannerDefaults(BasePlannerDefaults):
 
     isl = 3000  # in number of tokens
     osl = 150  # in number of tokens
-    ttft = 500.0  # in milliseconds
-    itl = 50.0  # in milliseconds
+    ttft_ms = 500.0
+    itl_ms = 50.0
 
     # for load predictor
     load_predictor = "arima"  # ["constant", "arima", "kalman", "prophet"]
@@ -67,7 +66,9 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     enable_load_scaling = False
 
     # Load-based scaling settings
-    load_adjustment_interval = 5  # in seconds; also controls FPM regression update frequency for throughput scaling
+    load_adjustment_interval_seconds = (
+        5  # also controls FPM regression update frequency for throughput scaling
+    )
     max_num_fpm_samples = 64  # max retained FPM observations for regression
     fpm_sample_bucket_size = (
         16  # must be a perfect square; total buckets across input axes
@@ -75,6 +76,9 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     load_scaling_down_sensitivity = 80  # 0-100
     load_metric_samples = 10  # number of samples per interval
     load_min_observations = 5  # cold start threshold
+
+    # Advisory mode: compute and log decisions without executing scaling
+    advisory = False
 
 
 class SubComponentType(str, Enum):

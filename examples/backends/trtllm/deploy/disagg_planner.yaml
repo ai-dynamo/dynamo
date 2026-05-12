@@ -79,7 +79,14 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
+          # Planner image selection:
+          #   Dynamo >= 1.1.0: use the dedicated planner image
+          #     <registry>/dynamo-planner:<version>
+          #     (backend runtime images no longer ship planner runtime deps
+          #     such as kubernetes_asyncio, pmdarima, prophet, aiconfigurator).
+          #   Dynamo <  1.1.0: use the backend runtime image
+          #     <registry>/tensorrtllm-runtime:<version>.
+          image: my-registry/dynamo-planner:my-tag
           ports:
             - name: metrics
               containerPort: 9085
@@ -89,7 +96,7 @@ spec:
             - -m
             - dynamo.planner
             - --config
-            - '{"environment": "kubernetes", "backend": "trtllm", "throughput_adjustment_interval": 60, "profile_results_dir": "/workspace/profiling_results"}'
+            - '{"environment": "kubernetes", "backend": "trtllm", "throughput_adjustment_interval_seconds": 60, "profile_results_dir": "/workspace/profiling_results"}'
           volumeMounts:
             - name: planner-profile-data
               mountPath: /workspace/profiling_results
@@ -98,7 +105,7 @@ spec:
           - name: planner-profile-data
             configMap:
               name: planner-profile-data
-    TRTLLMDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -138,7 +145,7 @@ spec:
             - ./examples/backends/trtllm/engine_configs/qwen3/decode.yaml
             - --disaggregation-mode
             - decode
-    TRTLLMPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill

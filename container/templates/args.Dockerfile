@@ -66,7 +66,9 @@ ARG SCCACHE_REGION=""
 
 # NIXL configuration
 ARG NIXL_UCX_REF={{ context.dynamo.nixl_ucx_ref }}
+{% if "nixl_ref" in context[framework] -%}
 ARG NIXL_REF={{ context[framework].nixl_ref }}
+{% endif -%}
 {% if device == "cuda" %}
 ARG NIXL_GDRCOPY_REF={{ context.dynamo.nixl_gdrcopy_ref }}
 ARG NIXL_LIBFABRIC_REF={{ context.dynamo.nixl_libfabric_ref }}
@@ -92,8 +94,8 @@ ARG PLANNER_RUNTIME_IMAGE_TAG={{ context.dynamo.planner_runtime_image_tag }}
 # Make sure to update the dependency version in pyproject.toml when updating this
 ARG VLLM_REF={{ context[framework][device_key].vllm_ref }}
 ARG MAX_JOBS={{ context.vllm.max_jobs }}
-# FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
 {% if device == "cuda" -%}
+# FlashInfer cubin/jit-cache version used by the vLLM installer.
 ARG FLASHINF_REF={{ context.vllm.flashinf_ref }}
 {% endif %}
 ARG LMCACHE_REF={{ context.vllm.lmcache_ref }}

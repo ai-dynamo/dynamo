@@ -24,6 +24,7 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
 
 import torch
+from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
@@ -34,6 +35,7 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
 from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
@@ -57,6 +59,93 @@ if TYPE_CHECKING:
     from tensorrt_llm.metrics import MetricsCollector
 
 configure_dynamo_logging()
+
+logger = logging.getLogger(__name__)
+
+
+class TRTLLMEngineQuiesceController:
+    """Adapts TRT-LLM sleep/wake to the standard quiesce controller interface.
+
+    Two memory domains: KV cache via TRT-LLM collective_rpc, weights via GMS.
+    """
+
+    def __init__(self, engine: TensorRTLLMEngine):
+        self._engine = engine
+        self._is_quiesced = False
+
+    @property
+    def is_quiesced(self) -> bool:
+        return self._is_quiesced
+
+    async def quiesce(self, tags: list[str] | None = None) -> bool:
+        if self._is_quiesced:
+            return False
+        tags = tags or ["kv_cache", "weights"]
+        if "kv_cache" in tags:
+            self._collective_rpc("sleep", ["kv_cache"])
+        if "weights" in tags:
+            self._release_gms_weights()
+        self._is_quiesced = True
+        return True
+
+    async def resume(self, tags: list[str] | None = None) -> bool:
+        if not self._is_quiesced:
+            return False
+        tags = tags or ["kv_cache", "weights"]
+        if "weights" in tags:
+            self._restore_gms_weights()
+        if "kv_cache" in tags:
+            self._collective_rpc("wakeup", ["kv_cache"])
+        return True
+
+    def mark_resumed(self) -> None:
+        self._is_quiesced = False
+
+    def _collective_rpc(self, method: str, rpc_tags: list[str]) -> None:
+        """Call TRT-LLM collective_rpc for KV cache sleep/wake."""
+        rpc = getattr(self._engine.llm, "_collective_rpc", None)
+        if rpc is None:
+            logger.warning(
+                "TRT-LLM does not expose _collective_rpc; skipping %s", method
+            )
+            return
+
+        rpc(method, args=(rpc_tags,), kwargs={}, non_block=False)
+
+    @staticmethod
+    def _release_gms_weights() -> None:
+        """Release GMS-managed weight memory."""
+        try:
+            from gpu_memory_service.client.torch.allocator import (
+                get_gms_client_memory_manager,
+            )
+        except ImportError:
+            return
+        manager = get_gms_client_memory_manager("weights")
+        if manager is None:
+            return
+        manager.unmap_all_vas()
+        manager.abort()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+    @staticmethod
+    def _restore_gms_weights() -> None:
+        """Restore GMS-managed weight memory."""
+        try:
+            from gpu_memory_service.client.torch.allocator import (
+                get_gms_client_memory_manager,
+            )
+            from gpu_memory_service.integrations.trtllm.model_loader import (
+                get_gms_lock_mode,
+            )
+        except ImportError:
+            return
+        manager = get_gms_client_memory_manager("weights")
+        if manager is None or not manager.is_unmapped:
+            return
+        manager.connect(get_gms_lock_mode())
+        manager.remap_all_vas()
 
 
 class _Abortable(Protocol):
@@ -127,8 +216,8 @@ class RequestHandlerConfig:
     metrics_collector: Optional["MetricsCollector"] = None
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
+    generate_endpoint: Optional[Any] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
-    disable_request_abort: bool = True
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
     max_seq_len: Optional[int] = None
     disagg_machine_id: int = 0  # 10-bit machine_id for snowflake disagg_request_id
@@ -160,10 +249,18 @@ class HandlerBase(BaseGenerativeHandler):
         self.runtime = config.runtime
         self.kv_block_size: int = config.kv_block_size
         self.shutdown_event = config.shutdown_event
-        self.disable_request_abort = config.disable_request_abort
+        self.generate_endpoint = config.generate_endpoint
         self.additional_metrics = config.additional_metrics
         self.max_seq_len = config.max_seq_len
         self.disagg_machine_id = config.disagg_machine_id
+        # Sleep/wake state
+        self._quiesce_lock = asyncio.Lock()
+        self._inflight_lock = asyncio.Lock()
+        self._inflight_requests = 0
+        self._no_inflight_requests = asyncio.Event()
+        self._no_inflight_requests.set()
+        self._quiesce_controller = TRTLLMEngineQuiesceController(config.engine)
+        self._reject_new_requests = False
 
     def check_error(self, result: dict) -> bool:
         """
@@ -175,6 +272,96 @@ class HandlerBase(BaseGenerativeHandler):
             return (
                 result["finish_reason"] == "stop" or result["finish_reason"] == "error"
             )
+
+    # ------------------------------------------------------------------
+    # In-flight request tracking (used by sleep/wake)
+    # ------------------------------------------------------------------
+
+    async def _set_reject_new_requests(self, reject: bool) -> None:
+        async with self._inflight_lock:
+            self._reject_new_requests = reject
+
+    async def _mark_request_started(self) -> bool:
+        async with self._inflight_lock:
+            if self._reject_new_requests:
+                return False
+            self._inflight_requests += 1
+            self._no_inflight_requests.clear()
+            return True
+
+    async def _mark_request_finished(self) -> None:
+        async with self._inflight_lock:
+            if self._inflight_requests == 0:
+                return
+            self._inflight_requests -= 1
+            if self._inflight_requests == 0:
+                self._no_inflight_requests.set()
+
+    async def _wait_for_inflight_requests(self, timeout_s: float) -> None:
+        try:
+            await asyncio.wait_for(self._no_inflight_requests.wait(), timeout_s)
+        except asyncio.TimeoutError as exc:
+            async with self._inflight_lock:
+                inflight = self._inflight_requests
+            raise RuntimeError(
+                f"Timed out waiting for {inflight} in-flight request(s) to finish"
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # Sleep / wake public API (delegates to TRTLLMEngineQuiesceController)
+    # ------------------------------------------------------------------
+
+    async def release_memory_occupation(self, body: dict) -> dict:
+        """Release GPU memory: unregister endpoint, drain requests, quiesce engine."""
+        body = body or {}
+        tags = body.get("tags")
+
+        async with self._quiesce_lock:
+            if self._quiesce_controller.is_quiesced:
+                return {"status": "ok", "message": "Memory already released"}
+
+            try:
+                await self._set_reject_new_requests(True)
+
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.unregister_endpoint_instance()
+
+                timeout_s = float(body.get("timeout_s", 30.0))
+                await self._wait_for_inflight_requests(timeout_s)
+                await self._quiesce_controller.quiesce(tags)
+
+                return {"status": "ok", "message": "Memory released"}
+            except Exception as exc:
+                logger.error("release_memory_occupation failed: %s", exc)
+                # Rollback: TRT-LLM has no pause_generation(), so we
+                # manually unregistered the endpoint and set reject flag
+                # above. Restore both on failure.
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.register_endpoint_instance()
+                await self._set_reject_new_requests(False)
+                return {"status": "error", "message": str(exc)}
+
+    async def resume_memory_occupation(self, body: dict) -> dict:
+        """Restore GPU memory: resume engine, re-register endpoint."""
+        body = body or {}
+        tags = body.get("tags")
+
+        async with self._quiesce_lock:
+            if not self._quiesce_controller.is_quiesced:
+                return {"status": "ok", "message": "Memory already resumed"}
+
+            try:
+                await self._quiesce_controller.resume(tags)
+
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.register_endpoint_instance()
+
+                await self._set_reject_new_requests(False)
+                self._quiesce_controller.mark_resumed()
+                return {"status": "ok", "message": "Memory resumed"}
+            except Exception as exc:
+                logger.error("resume_memory_occupation failed: %s", exc)
+                return {"status": "error", "message": str(exc)}
 
     @staticmethod
     def _extract_logprobs(
@@ -277,15 +464,8 @@ class HandlerBase(BaseGenerativeHandler):
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            # Abort the generation unless disabled
-            if self.disable_request_abort:
-                logging.debug(
-                    f"Request ID {context.id()} cancelled but abort() skipped "
-                    "(DYN_TRTLLM_DISABLE_REQUEST_ABORT=true)"
-                )
-            else:
-                generation_result.abort()
-                logging.debug(f"Aborted Request ID: {context.id()}")
+            generation_result.abort()
+            logging.debug(f"Aborted Request ID: {context.id()}")
 
             # Clean up any remaining background task
             for task in pending:
@@ -519,6 +699,11 @@ class HandlerBase(BaseGenerativeHandler):
         disaggregated_params = None
         epd_metadata: dict[str, Any] = {}
 
+        # Canary probe: use its pre-built disagg params (skip prefill_result decode
+        # and skip the mode-specific request_type overrides).
+        if request.get(HEALTH_CHECK_KEY) and request.get("disaggregated_params"):
+            return LlmDisaggregatedParams(**request["disaggregated_params"]), None, {}
+
         # PREFILL mode: setup context_only params
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             if ep_disaggregated_params:
@@ -720,6 +905,31 @@ class HandlerBase(BaseGenerativeHandler):
         embeddings: Optional[Union[torch.Tensor, dict]] = None,
         ep_disaggregated_params: Optional[DisaggregatedParams] = None,
     ) -> AsyncGenerator[dict, None]:
+        """Track in-flight count, reject during sleep, then delegate to implementation."""
+        started = await self._mark_request_started()
+        if not started:
+            yield {
+                "finish_reason": {
+                    "error": "Worker is temporarily rejecting new requests"
+                },
+                "token_ids": [],
+            }
+            return
+        try:
+            async for chunk in self._generate_locally_impl(
+                request, context, embeddings, ep_disaggregated_params
+            ):
+                yield chunk
+        finally:
+            await self._mark_request_finished()
+
+    async def _generate_locally_impl(
+        self,
+        request: dict,
+        context: Context,
+        embeddings: Optional[Union[torch.Tensor, dict]] = None,
+        ep_disaggregated_params: Optional[DisaggregatedParams] = None,
+    ) -> AsyncGenerator[dict, None]:
         """
         Generate responses based on the disaggregation mode in the request.
 
@@ -797,7 +1007,10 @@ class HandlerBase(BaseGenerativeHandler):
             logging.error(f"DECODE: Request keys: {list(request.keys())}")
             raise ValueError("Disaggregated params are required for decode mode")
 
-        num_output_tokens_so_far = 0
+        # TensorRT-LLM streams cumulative token_ids per output. For n>1 those
+        # outputs are interleaved by choice index, so maintain one cursor per
+        # choice and emit only the new slice for each Dynamo chunk.
+        output_tokens_per_choice: dict[int, int] = {}
 
         sampling_params = self._override_sampling_params(
             self.default_sampling_params, request
@@ -885,6 +1098,9 @@ class HandlerBase(BaseGenerativeHandler):
                 f"Using dynamo router dp_rank={dp_rank} for TRTLLM attention DP scheduling"
             )
 
+        # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
+        priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
+
         try:
             # NEW: Updated engine call to include multimodal data
             generation_result = self.engine.llm.generate_async(
@@ -894,6 +1110,7 @@ class HandlerBase(BaseGenerativeHandler):
                 streaming=streaming,
                 trace_headers=trace_headers,
                 scheduling_params=scheduling_params,
+                priority=priority,
             )
 
             # In disagg decode mode, wrap abort() to defer until first token
@@ -924,93 +1141,122 @@ class HandlerBase(BaseGenerativeHandler):
                         yield {"finish_reason": "error", "token_ids": []}
                         break
 
-                    output = res.outputs[0]
-                    # The engine returns all tokens generated so far. We must calculate the new
-                    # tokens generated in this iteration to create the "delta".
-                    next_total_toks = len(output.token_ids)
+                    for output in res.outputs:
+                        output_idx = getattr(output, "index", 0) or 0
+                        tokens_so_far = output_tokens_per_choice.get(output_idx, 0)
+                        next_total_toks = len(output.token_ids)
 
-                    out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-
-                    # Extract logprobs from the output
-                    log_probs, top_logprobs = self._extract_logprobs(
-                        output, num_output_tokens_so_far
-                    )
-                    if log_probs:
-                        out["log_probs"] = log_probs
-                    if top_logprobs:
-                        out["top_logprobs"] = top_logprobs
-
-                    if output.finish_reason:
-                        out["finish_reason"] = output.finish_reason
-                    if output.stop_reason:
-                        out["stop_reason"] = output.stop_reason
-                    if self.disaggregation_mode == DisaggregationMode.PREFILL:
-                        # Return the disaggregated params only when operating in prefill mode.
-                        params_dict = self._encode_and_pack_disaggregated_params(
-                            output, disaggregated_params, request, res, processed_input
-                        )
-                        if params_dict is not None:
-                            out["disaggregated_params"] = params_dict
-
-                    if out.get("finish_reason"):
-                        num_input_tokens = len(request.get("token_ids", []))
-
-                        prompt_tokens_details = None
-                        if prefill_prompt_tokens_details:
-                            prompt_tokens_details = prefill_prompt_tokens_details
-                        else:
-                            if output.request_perf_metrics is not None:
-                                kv_cache_metrics = (
-                                    output.request_perf_metrics.kv_cache_metrics
-                                )
-                                cached_tokens = min(
-                                    num_input_tokens,
-                                    kv_cache_metrics.num_reused_blocks
-                                    * self.kv_block_size,
-                                )
-                                if cached_tokens > 0:
-                                    prompt_tokens_details = {
-                                        "cached_tokens": int(cached_tokens),
-                                    }
-
-                        out["completion_usage"] = {
-                            "prompt_tokens": int(num_input_tokens),
-                            "completion_tokens": int(next_total_toks),
-                            "total_tokens": int(num_input_tokens + next_total_toks),
-                            "prompt_tokens_details": prompt_tokens_details,
+                        # The engine returns all tokens generated so far for
+                        # this choice. Calculate only the new tokens generated
+                        # in this iteration to create the delta.
+                        out = {
+                            "token_ids": output.token_ids[tokens_so_far:],
+                            "index": output_idx,
                         }
 
-                    if res.finished and not out.get("finish_reason"):
-                        out["finish_reason"] = "unknown"
-                        logging.warning(
-                            "Request finished with no finish reason set - this indicates a possible bug"
+                        # Extract logprobs from the output. Logprobs are
+                        # aligned with the cumulative token list, so use the
+                        # same per-choice cursor as token_ids.
+                        log_probs, top_logprobs = self._extract_logprobs(
+                            output, tokens_so_far
                         )
+                        if log_probs:
+                            out["log_probs"] = log_probs
+                        if top_logprobs:
+                            out["top_logprobs"] = top_logprobs
 
-                    # Record additional metrics on request finish
-                    if res.finished and metrics_collector and out.get("finish_reason"):
-                        try:
-                            # KV transfer metrics from request_perf_metrics
-                            if output.request_perf_metrics is not None:
-                                # Record KV transfer latency/bytes/speed from timing_metrics
-                                tm = output.request_perf_metrics.timing_metrics
-                                if tm is not None:
-                                    recorded = (
-                                        metrics_collector.record_kv_transfer_perf(tm)
-                                    )
-                                    # Only count success if a transfer actually occurred
-                                    if (
-                                        recorded
-                                        and self.disaggregation_mode
-                                        == DisaggregationMode.PREFILL
-                                    ):
-                                        metrics_collector.record_kv_transfer_success()
-                        except Exception as e:
-                            logging.warning(
-                                "Additional metrics (request finish): %s", e
+                        if output.finish_reason:
+                            out["finish_reason"] = output.finish_reason
+                        if output.stop_reason:
+                            out["stop_reason"] = output.stop_reason
+                        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                            # Return the disaggregated params only when
+                            # operating in prefill mode.
+                            params_dict = self._encode_and_pack_disaggregated_params(
+                                output,
+                                disaggregated_params,
+                                request,
+                                res,
+                                processed_input,
+                            )
+                            if params_dict is not None:
+                                out["disaggregated_params"] = params_dict
+
+                        if out.get("finish_reason") or res.finished:
+                            if not out.get("finish_reason"):
+                                out["finish_reason"] = "unknown"
+                                logging.warning(
+                                    "Request finished with no finish reason set - "
+                                    "this indicates a possible bug"
+                                )
+
+                            num_input_tokens = len(request.get("token_ids", []))
+                            total_completion_tokens = sum(
+                                len(o.token_ids) for o in res.outputs
                             )
 
-                    # Log metrics to TensorRT-LLM MetricsCollector when request finishes
-                    # NOTE: TRT-LLM 1.3.0rc5 (PR #11243) renamed log_metrics_dict → log_request_metrics_dict
+                            prompt_tokens_details = None
+                            if prefill_prompt_tokens_details:
+                                prompt_tokens_details = prefill_prompt_tokens_details
+                            else:
+                                if output.request_perf_metrics is not None:
+                                    kv_cache_metrics = (
+                                        output.request_perf_metrics.kv_cache_metrics
+                                    )
+                                    cached_tokens = min(
+                                        num_input_tokens,
+                                        kv_cache_metrics.num_reused_blocks
+                                        * self.kv_block_size,
+                                    )
+                                    if cached_tokens > 0:
+                                        prompt_tokens_details = {
+                                            "cached_tokens": int(cached_tokens),
+                                        }
+
+                            out["completion_usage"] = {
+                                "prompt_tokens": int(num_input_tokens),
+                                "completion_tokens": int(total_completion_tokens),
+                                "total_tokens": int(
+                                    num_input_tokens + total_completion_tokens
+                                ),
+                                "prompt_tokens_details": prompt_tokens_details,
+                            }
+
+                        # Yield the chunk to the client and update the token
+                        # count for this output choice.
+                        yield out
+                        output_tokens_per_choice[output_idx] = next_total_toks
+
+                    # Record additional metrics on request finish once per iteration.
+                    if res.finished and metrics_collector:
+                        output = next(
+                            (
+                                output
+                                for output in res.outputs
+                                if getattr(output, "finish_reason", None)
+                            ),
+                            None,
+                        )
+                        if output is not None:
+                            try:
+                                if output.request_perf_metrics is not None:
+                                    tm = output.request_perf_metrics.timing_metrics
+                                    if tm is not None:
+                                        # record_kv_transfer_perf() only returns True on
+                                        # the decode worker (the receiver), which observes
+                                        # non-zero kv_cache_transfer_{start,end} in timing
+                                        # metrics. Count the success counter on the same
+                                        # signal so it stays in lock-step with the sibling
+                                        # histograms' _count for the same transfer event.
+                                        if metrics_collector.record_kv_transfer_perf(
+                                            tm
+                                        ):
+                                            metrics_collector.record_kv_transfer_success()
+                            except Exception as e:
+                                logging.warning(
+                                    "Additional metrics (request finish): %s", e
+                                )
+
                     if (
                         res.finished
                         and self.metrics_collector
@@ -1030,10 +1276,6 @@ class HandlerBase(BaseGenerativeHandler):
                                 )
                         except Exception as e:
                             logging.warning(f"Failed to log TensorRT-LLM metrics: {e}")
-
-                    # Yield the chunk to the client and update the token count for the next iteration.
-                    yield out
-                    num_output_tokens_so_far = next_total_toks
 
         # 1. Client cancellation - don't shutdown
         except asyncio.CancelledError:
@@ -1110,6 +1352,21 @@ class HandlerBase(BaseGenerativeHandler):
                 json_object=guided_decoding.get("json_object", False),
                 structural_tag=guided_decoding.get("structural_tag"),
             )
+
+        n = overrides.get("n")
+        if (
+            isinstance(n, int)
+            and not isinstance(n, bool)
+            and n > 1
+            and hasattr(sampling_params, "best_of")
+        ):
+            # Dynamo does not expose best_of here, but TRT-LLM validates that
+            # its internal best_of is at least n when cloning SamplingParams.
+            # Keep that private field in lockstep so OpenAI n>1 requests do
+            # not fail before generation starts.
+            best_of = getattr(sampling_params, "best_of", None)
+            if best_of is None or best_of < n:
+                overrides["best_of"] = n
 
         # NOTE: using `dataclasses.replace` has several benefits over a `setattr` based approach:
         # 1. it catches unsupported fields / attributes.

@@ -12,11 +12,11 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -54,7 +54,7 @@ func buildCheckpointWorkerDefaultEnv(
 
 func buildCheckpointJob(
 	ctx context.Context,
-	reader ctrlclient.Reader,
+	kubeClient ctrlclient.Client,
 	config *configv1alpha1.OperatorConfiguration,
 	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
 	jobName string,
@@ -75,57 +75,69 @@ func buildCheckpointJob(
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = make(map[string]string)
 	}
+	// Checkpoint Jobs always capture exactly the main container. Other
+	// containers in the pod template (e.g. GMS saver sidecars the operator
+	// adds below) are preserved but not checkpointed. The annotation is
+	// the contract the snapshot-agent reads.
+	podTemplate.Annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers([]string{consts.MainContainerName})
 	if podTemplate.Spec.ServiceAccountName == "" {
 		podTemplate.Spec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(ckpt.Name)
 	}
 
 	checkpoint.EnsurePodInfoVolume(&podTemplate.Spec)
 
-	mainContainer, err := snapshotprotocol.ResolveCheckpointWorkerContainer(&podTemplate.Spec)
+	if len(podTemplate.Spec.Containers) == 0 {
+		return nil, fmt.Errorf("checkpoint job requires at least one container")
+	}
+	mainContainer, err := checkpoint.RequireMainContainer(&podTemplate.Spec)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("checkpoint job pod template: %w", err)
 	}
 	mainContainer.Env = dynamo.MergeEnvs(
 		buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
 		mainContainer.Env,
 	)
 	dynamo.AddStandardEnvVars(mainContainer, config)
-	mainContainer.Env = append(mainContainer.Env, corev1.EnvVar{
-		Name:  consts.EnvReadyForCheckpointFile,
-		Value: config.Checkpoint.ReadyForCheckpointFilePath,
-	})
-	mainContainer.ReadinessProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{
-				Command: []string{"cat", config.Checkpoint.ReadyForCheckpointFilePath},
-			},
-		},
-		InitialDelaySeconds: 15,
-		PeriodSeconds:       2,
-	}
-	mainContainer.LivenessProbe = nil
-	mainContainer.StartupProbe = nil
-	checkpoint.EnsurePodInfoMount(mainContainer)
-	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
 
-	var gmsSidecars []corev1.Container
+	checkpoint.EnsurePodInfoMount(mainContainer)
+	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, dynamo.ToBetaSharedMemorySize(ckpt.Spec.Job.SharedMemory))
+	// NewCheckpointJob handles control volume + readiness probe from the
+	// snapshot contract.
+
+	if err := checkpoint.EnsureStoragePVC(ctx, kubeClient, ckpt.Namespace, config.Checkpoint.Storage); err != nil {
+		return nil, err
+	}
+	if storage, ok, err := checkpoint.StorageFromConfig(config.Checkpoint.Storage); err != nil {
+		return nil, err
+	} else if ok {
+		snapshotprotocol.InjectCheckpointVolume(&podTemplate.Spec, storage.PVCName)
+		snapshotprotocol.InjectCheckpointVolumeMount(mainContainer, storage.BasePath)
+		if podTemplate.Annotations == nil {
+			podTemplate.Annotations = map[string]string{}
+		}
+		snapshotprotocol.ApplyCheckpointStorageMetadata(podTemplate.Annotations, storage)
+	}
+
 	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
-		storage, err := checkpoint.ResolveGMSCheckpointStorage(
+		claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
+		if err := dra.ApplyClaim(&podTemplate.Spec, claimTemplateName); err != nil {
+			return nil, fmt.Errorf("failed to apply DRA claim for GMS checkpoint: %w", err)
+		}
+		storage, err := checkpoint.ResolveStorage(
 			ctx,
-			reader,
+			kubeClient,
 			ckpt.Namespace,
 			hash,
 			ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation],
+			config.Checkpoint.Storage,
 		)
 		if err != nil {
 			return nil, err
 		}
-		gmsSidecars, err = checkpoint.BuildGMSCheckpointJobSidecars(&podTemplate.Spec, mainContainer, storage)
-		if err != nil {
+		if err := checkpoint.EnsureGMSCheckpointJobSidecars(&podTemplate.Spec, mainContainer, storage); err != nil {
 			return nil, err
 		}
 	}
-	podTemplate.Spec.Containers = append(podTemplate.Spec.Containers, gmsSidecars...)
 
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds
 	if activeDeadlineSeconds == nil {
@@ -133,17 +145,26 @@ func buildCheckpointJob(
 		activeDeadlineSeconds = &defaultDeadline
 	}
 
-	wrapLaunchJob := false
-	if gpus, ok := mainContainer.Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]; ok {
-		wrapLaunchJob = gpus.Cmp(*resource.NewQuantity(1, resource.DecimalSI)) > 0
+	// Wrap with cuda-checkpoint --launch-job for multi-GPU jobs (TP*PP > 1).
+	// Use checkpoint identity (not container limits) because DRA may have
+	// already removed nvidia.com/gpu from the template.
+	tp := ckpt.Spec.Identity.TensorParallelSize
+	pp := ckpt.Spec.Identity.PipelineParallelSize
+	if tp == 0 {
+		tp = 1
 	}
+	if pp == 0 {
+		pp = 1
+	}
+	wrapLaunchJob := tp*pp > 1
+
 	ttlSecondsAfterFinish := snapshotprotocol.DefaultCheckpointJobTTLSeconds
 
 	return snapshotprotocol.NewCheckpointJob(podTemplate, snapshotprotocol.CheckpointJobOptions{
 		Namespace:             ckpt.Namespace,
 		CheckpointID:          hash,
 		ArtifactVersion:       snapshotprotocol.ArtifactVersion(ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation]),
-		SeccompProfile:        snapshotprotocol.DefaultSeccompLocalhostProfile,
+		SeccompProfile:        config.Checkpoint.EffectiveSeccompProfile(),
 		Name:                  jobName,
 		ActiveDeadlineSeconds: activeDeadlineSeconds,
 		TTLSecondsAfterFinish: &ttlSecondsAfterFinish,

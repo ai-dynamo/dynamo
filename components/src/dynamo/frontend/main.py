@@ -114,17 +114,6 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
     vllm_flags = None
     sglang_flags = None
 
-    # --trust-remote-code is only meaningful with --dyn-chat-processor vllm.
-    # Warn and strip it when a different (or no) chat processor is active so
-    # it does not propagate as an unknown-argument error below.
-    if "--trust-remote-code" in unknown and config.chat_processor != "vllm":
-        logger.warning(
-            "--trust-remote-code has no effect without '--dyn-chat-processor vllm'. "
-            "It is only supported by the vLLM chat processor. "
-            "Pass '--dyn-chat-processor vllm' to enable trust_remote_code."
-        )
-        unknown = [arg for arg in unknown if arg != "--trust-remote-code"]
-
     # parse extra vllm flags using vllm native parser.
     if config.chat_processor == "vllm":
         try:
@@ -179,7 +168,8 @@ async def async_main():
     os.environ.pop("DYN_SYSTEM_PORT", None)
     config, vllm_flags, sglang_flags = parse_args()
     dump_config(config.dump_config_to, config)
-    os.environ["DYN_EVENT_PLANE"] = config.event_plane
+    if config.event_plane:
+        os.environ["DYN_EVENT_PLANE"] = config.event_plane
     if config.tokenizer_backend == "fastokens":
         os.environ["DYN_TOKENIZER"] = "fastokens"
     else:
@@ -242,12 +232,7 @@ async def async_main():
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
     router_config = RouterConfig(
-        router_mode,
-        kv_router_config,
-        active_decode_blocks_threshold=config.active_decode_blocks_threshold,
-        active_prefill_tokens_threshold=config.active_prefill_tokens_threshold,
-        active_prefill_tokens_threshold_frac=config.active_prefill_tokens_threshold_frac,
-        enforce_disagg=config.enforce_disagg,
+        router_mode, kv_router_config, **config.router_kwargs()
     )
     kwargs: dict[str, Any] = {
         "http_host": config.http_host,

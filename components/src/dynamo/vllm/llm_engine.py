@@ -64,8 +64,8 @@ class VllmLLMEngine(LLMEngine):
         return engine, worker_config
 
     async def start(self) -> EngineConfig:
-        os.environ["VLLM_NO_USAGE_STATS"] = "1"
-        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        os.environ.setdefault("VLLM_NO_USAGE_STATS", "1")
+        os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
         if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
             self._prometheus_temp_dir = tempfile.TemporaryDirectory(
@@ -122,32 +122,41 @@ class VllmLLMEngine(LLMEngine):
 
         gen = self.engine_client.generate(prompt, sampling_params, request_id)
 
-        num_output_tokens_so_far = 0
+        num_output_tokens_so_far: dict[int, int] = {}
         async for res in gen:
             if not res.outputs:
                 yield {
                     "finish_reason": "error: No outputs from vLLM engine",
+                    "index": 0,
                     "token_ids": [],
                 }
                 break
 
-            output = res.outputs[0]
-            next_total = len(output.token_ids)
-            out: GenerateChunk = {
-                "token_ids": output.token_ids[num_output_tokens_so_far:]
-            }
-
-            if output.finish_reason:
-                out["finish_reason"] = str(output.finish_reason)
-                prompt_tokens = len(res.prompt_token_ids) if res.prompt_token_ids else 0
-                out["completion_usage"] = {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": next_total,
-                    "total_tokens": prompt_tokens + next_total,
+            for output in res.outputs:
+                output_idx = getattr(output, "index", 0) or 0
+                previous_total = num_output_tokens_so_far.get(output_idx, 0)
+                next_total = len(output.token_ids)
+                out: GenerateChunk = {
+                    "index": output_idx,
+                    "token_ids": output.token_ids[previous_total:],
                 }
 
-            yield out
-            num_output_tokens_so_far = next_total
+                if output.finish_reason:
+                    out["finish_reason"] = str(output.finish_reason)
+                    prompt_tokens = (
+                        len(res.prompt_token_ids) if res.prompt_token_ids else 0
+                    )
+                    completion_tokens = sum(
+                        len(choice.token_ids) for choice in res.outputs
+                    )
+                    out["completion_usage"] = {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens,
+                    }
+
+                yield out
+                num_output_tokens_so_far[output_idx] = next_total
 
     async def abort(self, context: Context) -> None:
         request_id = context.id()
@@ -156,8 +165,17 @@ class VllmLLMEngine(LLMEngine):
             logger.debug("Aborted request %s", request_id)
 
     async def cleanup(self) -> None:
-        if self.engine_client is not None:
-            self.engine_client.shutdown()
-        if self._prometheus_temp_dir is not None:
-            self._prometheus_temp_dir.cleanup()
-        logger.info("vLLM engine shutdown")
+        try:
+            if self.engine_client is not None:
+                self.engine_client.shutdown()
+        finally:
+            self.engine_client = None
+            if self._prometheus_temp_dir is not None:
+                if (
+                    os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+                    == self._prometheus_temp_dir.name
+                ):
+                    os.environ.pop("PROMETHEUS_MULTIPROC_DIR", None)
+                self._prometheus_temp_dir.cleanup()
+                self._prometheus_temp_dir = None
+            logger.info("vLLM engine shutdown")

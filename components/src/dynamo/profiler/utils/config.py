@@ -218,11 +218,105 @@ def parse_override_engine_args(args: list[str]) -> tuple[dict, list[str]]:
     return override_dict, args
 
 
+def get_requested_total_gpus(total_gpus_needed: Any) -> int | None:
+    """Normalize a picked total GPU request from AIC output."""
+    if total_gpus_needed is None:
+        return None
+    try:
+        requested_total_gpus = int(total_gpus_needed)
+    except (TypeError, ValueError):
+        return None
+    return requested_total_gpus if requested_total_gpus > 0 else None
+
+
+def clamp_total_gpus_to_budget(
+    requested_total_gpus: Any,
+    total_gpu_budget: int,
+) -> tuple[int, bool]:
+    """Clamp a requested total GPU count to the deployment budget."""
+    normalized_request = get_requested_total_gpus(requested_total_gpus)
+    if normalized_request is None:
+        return total_gpu_budget, False
+    return (
+        min(normalized_request, total_gpu_budget),
+        normalized_request > total_gpu_budget,
+    )
+
+
+def _get_per_instance_gpus(worker_service: Service) -> int | None:
+    """Derive per-instance GPU count from worker CLI args (TP x PP).
+
+    Data-parallel workers are independent replicas, so multinode placement
+    must be based on the GPUs required by a single instance rather than the
+    total GPUs consumed across all replicas.
+    """
+    args: list[str] | None = None
+    if (
+        worker_service.extraPodSpec
+        and worker_service.extraPodSpec.mainContainer
+        and worker_service.extraPodSpec.mainContainer.args
+    ):
+        args = break_arguments(worker_service.extraPodSpec.mainContainer.args)
+
+    if not args:
+        return None
+
+    def _match_flag(
+        arg: str, next_arg: str | None, names: tuple[str, ...]
+    ) -> str | None:
+        """Return the value for `arg` if it matches any of `names` in either
+        `--name value` or `--name=value` form, else None."""
+        for name in names:
+            if arg == name:
+                return next_arg
+            if arg.startswith(name + "="):
+                return arg.split("=", 1)[1]
+        return None
+
+    TP_FLAGS = ("--tensor-parallel-size", "--tp")
+    PP_FLAGS = ("--pipeline-parallel-size", "--pp")
+    DP_FLAGS = ("--data-parallel-size", "--data-parallel-size-local", "--dp")
+
+    tp = 1
+    pp = 1
+    saw_parallelism_flag = False
+    for index, arg in enumerate(args):
+        next_arg = args[index + 1] if index + 1 < len(args) else None
+
+        tp_value = _match_flag(arg, next_arg, TP_FLAGS)
+        if tp_value is not None:
+            try:
+                tp = int(tp_value)
+                saw_parallelism_flag = True
+            except ValueError:
+                pass
+            continue
+
+        pp_value = _match_flag(arg, next_arg, PP_FLAGS)
+        if pp_value is not None:
+            try:
+                pp = int(pp_value)
+                saw_parallelism_flag = True
+            except ValueError:
+                pass
+            continue
+
+        if _match_flag(arg, next_arg, DP_FLAGS) is not None:
+            saw_parallelism_flag = True
+
+    if not saw_parallelism_flag:
+        return None
+
+    return tp * pp
+
+
 def set_multinode_config(
     worker_service: Service, gpu_count: int, num_gpus_per_node: int
 ) -> None:
-    """Helper function to set multinode configuration based on GPU count and GPUs per node."""
-    if gpu_count <= num_gpus_per_node:
+    """Set multinode configuration based on per-instance GPU placement needs."""
+    effective_gpu_count = _get_per_instance_gpus(worker_service) or gpu_count
+
+    if effective_gpu_count <= num_gpus_per_node:
         # Single node: remove multinode configuration if present
         if (
             hasattr(worker_service, "multinode")
@@ -230,8 +324,8 @@ def set_multinode_config(
         ):
             worker_service.multinode = None
     else:
-        # Multi-node: set nodeCount = math.ceil(gpu_count / num_gpus_per_node)
-        node_count = math.ceil(gpu_count / num_gpus_per_node)
+        # Multi-node: set nodeCount = math.ceil(per-instance GPUs / GPUs per node)
+        node_count = math.ceil(effective_gpu_count / num_gpus_per_node)
         if not hasattr(worker_service, "multinode") or worker_service.multinode is None:
             # Create multinode configuration if it doesn't exist
             worker_service.multinode = MultinodeConfig(nodeCount=node_count)

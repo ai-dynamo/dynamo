@@ -3,12 +3,17 @@
 
 """Unit tests for OmniConfig validation."""
 
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
 
 try:
-    from dynamo.vllm.omni.args import OmniConfig
+    from dynamo.vllm.omni.args import (
+        OmniConfig,
+        OmniDiffusionKwargs,
+        OmniParallelKwargs,
+    )
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -19,11 +24,25 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
+_DIFFUSION_FIELDS = {f.name for f in dataclasses.fields(OmniDiffusionKwargs)}
+_PARALLEL_FIELDS = {f.name for f in dataclasses.fields(OmniParallelKwargs)}
+
 
 def _make_omni_config(**overrides) -> OmniConfig:
-    """Build a minimal OmniConfig with valid defaults, applying overrides."""
-    defaults: dict = {
-        # DynamoRuntimeConfig fields
+    """Build a minimal OmniConfig with valid defaults, applying overrides.
+
+    Overrides for diffusion fields (e.g. boundary_ratio) and parallel fields
+    (e.g. ulysses_degree) are automatically routed to the correct nested struct.
+    """
+    diffusion_overrides = {k: v for k, v in overrides.items() if k in _DIFFUSION_FIELDS}
+    parallel_overrides = {k: v for k, v in overrides.items() if k in _PARALLEL_FIELDS}
+    flat_overrides = {
+        k: v
+        for k, v in overrides.items()
+        if k not in _DIFFUSION_FIELDS and k not in _PARALLEL_FIELDS
+    }
+
+    flat_defaults: dict = {
         "namespace": "dynamo",
         "component": "backend",
         "endpoint": None,
@@ -42,45 +61,36 @@ def _make_omni_config(**overrides) -> OmniConfig:
         "output_modalities": None,
         "media_output_fs_url": "file:///tmp/dynamo_media",
         "media_output_http_url": None,
-        # OmniConfig fields
         "model": "test-model",
         "served_model_name": None,
         "engine_args": SimpleNamespace(),
         "stage_configs_path": None,
         "default_video_fps": 16,
-        "enable_layerwise_offload": False,
-        "layerwise_num_gpu_layers": 1,
-        "vae_use_slicing": False,
-        "vae_use_tiling": False,
-        "boundary_ratio": 0.875,
-        "flow_shift": None,
-        "cache_backend": None,
-        "cache_config": None,
-        "enable_cache_dit_summary": False,
-        "enable_cpu_offload": False,
-        "enforce_eager": False,
-        "ulysses_degree": 1,
-        "ring_degree": 1,
-        "cfg_parallel_size": 1,
+        "tts_max_instructions_length": 500,
+        "tts_max_new_tokens_min": 1,
+        "tts_max_new_tokens_max": 4096,
+        "tts_ref_audio_timeout": 15,
+        "tts_ref_audio_max_bytes": 50 * 1024 * 1024,
         "stage_id": None,
         "omni_router": False,
     }
-    defaults.update(overrides)
+    flat_defaults.update(flat_overrides)
+
     obj = OmniConfig.__new__(OmniConfig)
-    for k, v in defaults.items():
+    for k, v in flat_defaults.items():
         setattr(obj, k, v)
+    obj.diffusion = dataclasses.replace(OmniDiffusionKwargs(), **diffusion_overrides)
+    obj.parallel = dataclasses.replace(OmniParallelKwargs(), **parallel_overrides)
     return obj
 
 
 def test_omni_config_valid_defaults():
-    """Config with valid defaults passes validation."""
     config = _make_omni_config()
-    config.validate()  # should not raise
+    config.validate()
 
 
 @pytest.mark.parametrize("fps", [0, -1, -100])
 def test_omni_config_invalid_video_fps(fps):
-    """Non-positive FPS must be rejected."""
     config = _make_omni_config(default_video_fps=fps)
     with pytest.raises(ValueError, match="--default-video-fps must be > 0"):
         config.validate()
@@ -88,7 +98,6 @@ def test_omni_config_invalid_video_fps(fps):
 
 @pytest.mark.parametrize("degree", [0, -1])
 def test_omni_config_invalid_ulysses_degree(degree):
-    """Non-positive ulysses_degree must be rejected."""
     config = _make_omni_config(ulysses_degree=degree)
     with pytest.raises(ValueError, match="--ulysses-degree must be > 0"):
         config.validate()
@@ -96,7 +105,6 @@ def test_omni_config_invalid_ulysses_degree(degree):
 
 @pytest.mark.parametrize("degree", [0, -1])
 def test_omni_config_invalid_ring_degree(degree):
-    """Non-positive ring_degree must be rejected."""
     config = _make_omni_config(ring_degree=degree)
     with pytest.raises(ValueError, match="--ring-degree must be > 0"):
         config.validate()
@@ -104,7 +112,6 @@ def test_omni_config_invalid_ring_degree(degree):
 
 @pytest.mark.parametrize("ratio", [0, -0.1, 1.01, 2.0])
 def test_omni_config_invalid_boundary_ratio(ratio):
-    """boundary_ratio outside (0, 1] must be rejected."""
     config = _make_omni_config(boundary_ratio=ratio)
     with pytest.raises(ValueError, match=r"--boundary-ratio must be in \(0, 1\]"):
         config.validate()
@@ -112,12 +119,8 @@ def test_omni_config_invalid_boundary_ratio(ratio):
 
 @pytest.mark.parametrize("ratio", [0.001, 0.5, 0.875, 1.0])
 def test_omni_config_valid_boundary_ratio(ratio):
-    """boundary_ratio within (0, 1] should pass."""
     config = _make_omni_config(boundary_ratio=ratio)
-    config.validate()  # should not raise
-
-
-# --- disaggregated stage flag validation ---
+    config.validate()
 
 
 def test_negative_stage_id_rejected():
@@ -150,22 +153,20 @@ def test_stage_id_with_stage_configs_path_valid(tmp_path):
     config = _make_omni_config(
         stage_id=0, stage_configs_path=str(tmp_path / "stages.yaml")
     )
-    config.validate()  # should not raise
+    config.validate()
 
 
 def test_omni_router_with_stage_configs_path_valid(tmp_path):
     config = _make_omni_config(
         omni_router=True, stage_configs_path=str(tmp_path / "stages.yaml")
     )
-    config.validate()  # should not raise
+    config.validate()
 
 
 # --- vllm_omni API compatibility guards ---
-# These tests catch regressions when vllm_omni is upgraded.
 
 
 def test_omni_engine_args_importable():
-    """vllm_omni.engine.arg_utils must export a usable engine args class."""
     from vllm_omni.engine.arg_utils import OmniEngineArgs
 
     assert hasattr(OmniEngineArgs, "add_cli_args")
@@ -173,21 +174,17 @@ def test_omni_engine_args_importable():
 
 
 def test_omni_engine_args_add_cli_args_no_extra_params():
-    """add_cli_args must accept a parser and no other required args."""
-
     from vllm_omni.engine.arg_utils import OmniEngineArgs
 
     try:
         from vllm.utils import FlexibleArgumentParser
     except ImportError:
         from vllm.utils.argparse_utils import FlexibleArgumentParser
-
     parser = FlexibleArgumentParser(add_help=False)
     OmniEngineArgs.add_cli_args(parser)
 
 
 def test_omni_config_imports_cleanly():
-    """OmniConfig and parse_omni_args must be importable without error."""
     from dynamo.vllm.omni.args import OmniConfig, parse_omni_args
 
     assert OmniConfig is not None

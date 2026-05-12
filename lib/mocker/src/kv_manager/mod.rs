@@ -3,8 +3,8 @@
 
 //! Pluggable KV cache block managers.
 
+pub mod kvbm_backend;
 pub mod sglang_backend;
-pub mod vllm_backend;
 
+pub use kvbm_backend::KvManager;
 pub use sglang_backend::SglangKvManager;
-pub use vllm_backend::KvManager;
