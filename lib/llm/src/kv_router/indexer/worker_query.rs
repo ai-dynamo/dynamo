@@ -338,8 +338,11 @@ impl WorkerQueryClient {
 
         worker_state.epoch += 1;
         for rank_state in worker_state.ranks.values_mut() {
+            let post_clear_max_seen = rank_state
+                .max_seen_live_id
+                .filter(|max_seen| *max_seen > clear_event_id);
             rank_state.cursor = rank_state.cursor.invalidate_by_barrier();
-            rank_state.max_seen_live_id = None;
+            rank_state.max_seen_live_id = post_clear_max_seen;
             rank_state.recovery_inflight = false;
         }
 
@@ -504,7 +507,6 @@ impl WorkerQueryClient {
 
         let mut new_cursor = rank_state.cursor;
         let mut successful_response = false;
-        let mut saw_clear = false;
 
         match result {
             Ok(WorkerKvQueryResponse::Events {
@@ -523,7 +525,6 @@ impl WorkerQueryClient {
                         self.apply_worker_clear_locked(&mut worker_state, event)
                             .await;
                         new_cursor = new_cursor.apply_barrier(event_id);
-                        saw_clear = true;
                         continue;
                     }
                     self.indexer.apply_event(event).await;
@@ -595,7 +596,6 @@ impl WorkerQueryClient {
             rank_state.clear_max_seen_if_caught_up(last_applied_id);
 
             if successful_response
-                && !saw_clear
                 && rank_state
                     .max_seen_live_id
                     .is_some_and(|max_seen| max_seen > last_applied_id)
@@ -1586,5 +1586,66 @@ mod tests {
         kv_indexer.flush().await;
         let events = kv_indexer.dump_events().await.unwrap();
         assert_eq!(stored_block_hashes(&events), vec![13, 14, 30]);
+    }
+
+    #[tokio::test]
+    async fn test_recovered_cleared_follows_coalesced_live_tail() {
+        let (client, transport, kv_indexer) = make_test_client("recovered-cleared-live-tail").await;
+        let key = (1, 0);
+
+        {
+            let worker_state = client.get_or_create_worker_state(key.0);
+            let mut worker_state = worker_state.lock().await;
+            worker_state.ranks.entry(key.1).or_default().cursor = CursorState::Live(10);
+        }
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: Some(started.clone()),
+                release: Some(release.clone()),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: vec![
+                        make_store_event(1, 0, 11),
+                        make_clear_event(1, 0, 12),
+                        make_store_event(1, 0, 13),
+                    ],
+                    last_event_id: 13,
+                }),
+            },
+        );
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: None,
+                release: None,
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: vec![make_store_event(1, 0, 14), make_store_event(1, 0, 15)],
+                    last_event_id: 15,
+                }),
+            },
+        );
+
+        client.handle_live_event(make_store_event(1, 0, 13)).await;
+        started.notified().await;
+        client.handle_live_event(make_store_event(1, 0, 15)).await;
+        release.notify_waiters();
+
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(15) && !state.recovery_inflight
+            })
+        })
+        .await;
+        assert_eq!(
+            transport.calls(),
+            vec![(key, Some(11), None), (key, Some(14), None)]
+        );
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert_eq!(stored_block_hashes(&events), vec![13, 14, 15]);
     }
 }

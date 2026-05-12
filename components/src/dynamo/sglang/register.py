@@ -10,11 +10,12 @@ import sglang as sgl
 from sglang.srt.environ import envs
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
 
 from dynamo._core import Endpoint
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
-from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_scheduler_info
+from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang.args import DynamoConfig
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"

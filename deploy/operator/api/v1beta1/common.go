@@ -40,6 +40,17 @@ const (
 	ComponentTypeEPP      ComponentType = "epp"
 )
 
+const (
+	DynamoGraphDeploymentConditionTypeAvailable            = "Available"
+	DynamoGraphDeploymentConditionTypeDynamoComponentReady = "DynamoComponentReady"
+
+	ConditionTypeTopologyLevelsAvailable      = "TopologyLevelsAvailable"
+	ConditionReasonAllTopologyLevelsAvailable = "AllTopologyLevelsAvailable"
+	ConditionReasonTopologyLevelsUnavailable  = "TopologyLevelsUnavailable"
+	ConditionReasonTopologyDefinitionNotFound = "TopologyDefinitionNotFound"
+	ConditionReasonTopologyConditionPending   = "TopologyConditionPending"
+)
+
 // CompilationCacheConfig configures a PVC-backed compilation cache for a component.
 // The operator handles backend-specific mount paths and environment variables so
 // users do not need to hand-wire them into the pod template.
