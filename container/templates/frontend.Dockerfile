@@ -15,7 +15,13 @@ FROM ${EPP_IMAGE} AS epp
 # instead of `epp`. The arm64 sub-build of multi-arch frontends would
 # otherwise fail with "/sbom-go.cdx.json: not found" because the arm64
 # EPP view doesn't carry that file.
-FROM --platform=linux/amd64 ${EPP_IMAGE} AS epp_sbom
+#
+# The platform value goes through an ARG (instead of a hardcoded
+# `--platform=linux/amd64`) so the dockerfile/1.10.0-labs frontend's
+# FromPlatformFlagConstDisallowed lint passes. The ARG default keeps
+# the behavior identical to a hardcoded value at runtime.
+ARG EPP_SBOM_PLATFORM=linux/amd64
+FROM --platform=${EPP_SBOM_PLATFORM} ${EPP_IMAGE} AS epp_sbom
 
 FROM ${FRONTEND_IMAGE} AS frontend_pre
 
