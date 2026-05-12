@@ -489,6 +489,20 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
+# Compliance source archival: vendor the workspace lockfile for the OSRB
+# bundle. Gated on ENABLE_SOURCE_ARCHIVAL so PR builds skip the ~200-400 MB
+# vendor pull. The vendor tree is consumed downstream by each runtime
+# template's sources_collect stage, which filters against the installed
+# wheels' embedded SBOMs to keep only the third-party crates we actually
+# ship. Stay scoped to one RUN layer (cache invalidation contained).
+ARG ENABLE_SOURCE_ARCHIVAL=false
+RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+        mkdir -p /tmp/dynamo-vendor-full && \
+        cd /opt/dynamo && \
+        cargo vendor --locked /tmp/dynamo-vendor-full > /dev/null && \
+        cp Cargo.toml Cargo.lock /tmp/dynamo-vendor-full/ ; \
+    fi
+
 {% else %}
 # Dev/local-dev targets do not have pre-built wheels or /workspace source code.
 # After you start the local-dev/dev container, you will need to build from source:

@@ -265,7 +265,7 @@ COPY --from=licenses /legal/ /
 FROM runtime_pre AS sources_collect
 
 USER root
-RUN mkdir -p /sources /opt/compliance /opt/native-sources
+RUN mkdir -p /sources /opt/compliance /opt/native-sources /opt/dynamo-vendor-full
 COPY --chown=root:0 container/compliance /opt/compliance
 ENV PYTHONPATH=/opt
 # Native source archives preserved by upstream builder stages land in
@@ -273,6 +273,10 @@ ENV PYTHONPATH=/opt
 # (or any stage that does `RUN git clone ... && tar -czf ...`) writes there.
 # Right now this directory may be empty — the wiring is structural.
 COPY --from=wheel_builder /tmp/native-sources/ /opt/native-sources/
+# Rust workspace vendor tree (cargo vendor --locked output) — produced by
+# wheel_builder's ENABLE_SOURCE_ARCHIVAL=true gated step. May not exist for
+# PR builds; the collect step handles missing-vendor gracefully.
+COPY --from=wheel_builder /tmp/dynamo-vendor-full/ /opt/dynamo-vendor-full/
 
 # The collect step itself is the only layer that needs to bust cache when
 # ENABLE_SOURCE_ARCHIVAL flips. Scope the ARG to immediately before this RUN
@@ -286,10 +290,12 @@ ARG ENABLE_SOURCE_ARCHIVAL=false
 ARG BASELINE_SBOM_FILE="{{ context[framework][device_key].baseline_sbom | default('') }}"
 RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
         python3 -m compliance.collect_sources \
-            --ecosystem dpkg --ecosystem native \
+            --ecosystem dpkg --ecosystem rust --ecosystem native \
             --output-zip /sources.zip \
             --sources-root /sources \
             --native-source-dir /opt/native-sources \
+            --rust-venv ${VIRTUAL_ENV} \
+            --rust-vendor-full /opt/dynamo-vendor-full \
             ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
             -v ; \
     else \
