@@ -14,7 +14,7 @@
 use anyhow::{Context, Result};
 use cudarc::nccl::sys::{
     ncclComm_t, ncclCommDestroy, ncclCommInitRankConfig, ncclConfig_t, ncclGetUniqueId,
-    ncclResult_t, ncclUniqueId,
+    ncclGetVersion, ncclResult_t, ncclUniqueId,
 };
 
 /// Check NCCL result and convert to anyhow::Result
@@ -162,6 +162,16 @@ impl NcclBootstrap {
         // We have to manually create it the same way the NCCL C++ macros do.
         let mut config: ncclConfig_t;
 
+        // Query runtime NCCL version instead of hardcoding — avoids
+        // ncclInvalidUsage when the container's NCCL version doesn't match.
+        let nccl_version = {
+            let mut v: std::ffi::c_int = 0;
+            let result = unsafe { ncclGetVersion(&mut v) };
+            check_nccl_result(result, "ncclGetVersion")?;
+            tracing::debug!("NCCL runtime version: {v}");
+            v as std::ffi::c_uint
+        };
+
         let max_ctas = std::env::var("DYN_KVBM_NCCL_MAX_CTAS")
             .ok()
             .and_then(|val| val.parse::<i32>().ok())
@@ -170,7 +180,7 @@ impl NcclBootstrap {
         config = ncclConfig_t {
             size: std::mem::size_of::<ncclConfig_t>(),
             magic: 0xcafebeef, // Required Magic Number
-            version: 22800, // NOTE: This needs to be updated whenever we update the NCCL version.
+            version: nccl_version,
             blocking: 1,
             cgaClusterSize: i32::MIN,
             minCTAs: 1,

@@ -75,7 +75,7 @@ class NvCreateImageRequest(BaseModel):
 class ImageData(BaseModel):
     """Individual image data in a response.
 
-    Matches the flattened Rust Image enum in lib/async-openai/src/types/image.rs.
+    Matches the flattened Rust Image enum in lib/protocols/src/types/mod.rs.
     """
 
     url: Optional[str] = None

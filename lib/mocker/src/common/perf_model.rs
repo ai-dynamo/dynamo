@@ -240,7 +240,7 @@ impl PerfModel {
     /// Predict decode time in milliseconds.
     ///
     /// Callers always pass all parameters; each variant uses what it needs:
-    /// - Polynomial: uses active_kv_tokens
+    /// - Polynomial: uses (active_kv_tokens, total_kv_tokens) as utilization
     /// - Interpolated: uses (active_kv_tokens, context_length)
     /// - Aiconfigurator: uses (batch_size, context_length)
     pub fn predict_decode_time(
@@ -248,13 +248,19 @@ impl PerfModel {
         batch_size: usize,
         active_kv_tokens: usize,
         context_length: usize,
+        total_kv_tokens: usize,
     ) -> f64 {
         if batch_size == 0 {
             return 0.0;
         }
         let time = match self {
             PerfModel::Polynomial => {
-                let active_perc = active_kv_tokens as f64 / 16384.0;
+                let active_perc = if total_kv_tokens > 0 {
+                    active_kv_tokens as f64 / total_kv_tokens as f64
+                } else {
+                    tracing::warn!("Total KV tokens is 0, using 1.0 as capacity");
+                    1.0
+                };
                 -25.74 * active_perc.powi(2) + 54.01 * active_perc + 5.74
             }
             PerfModel::Interpolated { decode_interp, .. } => decode_interp

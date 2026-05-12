@@ -468,7 +468,7 @@ async def main(args: argparse.Namespace) -> None:
         )
     logger.info("Using discovery backend: %s", discovery_backend)
     logger.info("Resolved worker namespace: %s", _get_worker_namespace())
-    runtime = DistributedRuntime(loop, discovery_backend, "tcp", False)
+    runtime = DistributedRuntime(loop, discovery_backend, "tcp")
     await backend_worker(runtime, args)
 
 

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Docker Compose override for Intel XPU observability.
+# Replaces NVIDIA DCGM with Intel XPU-SMI monitoring.
+#
+# Usage (XPU environment):
+#   # 1. Start the XPU exporter on the host (requires xpu-smi installed):
+#   python3 deploy/observability/xpu_smi_exporter.py --port 9966 &
+#
+#   # 2. Start base services:
+#   docker compose -f deploy/docker-compose.yml up -d
+#
+#   # 3. Start observability with XPU overlay:
+#   docker compose -f deploy/docker-observability.yml -f deploy/docker-observability-xpu.yml up -d
+
+services:
+  # Override Prometheus to use XPU-specific config and alert rules
+  prometheus:
+    volumes:
+      - ./observability/prometheus-xpu.yml:/etc/prometheus/prometheus.yml
+      - ./observability/xpu-alert-rules.yml:/etc/prometheus/xpu-alert-rules.yml

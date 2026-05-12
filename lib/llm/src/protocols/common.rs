@@ -18,6 +18,7 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use super::TokenIdType;
+use dynamo_protocols::types::StopReason;
 
 /// Maximum nesting depth allowed in guided_grammar EBNF strings.
 const MAX_GRAMMAR_NESTING_DEPTH: usize = 500;
@@ -55,7 +56,7 @@ pub enum FinishReason {
     #[serde(rename = "error")]
     Error(String),
 
-    #[serde(rename = "cancelled")]
+    #[serde(rename = "cancelled", alias = "abort")]
     Cancelled,
 
     #[serde(rename = "content_filter")]
@@ -83,7 +84,7 @@ impl std::str::FromStr for FinishReason {
             "eos" => Ok(FinishReason::EoS),
             "length" => Ok(FinishReason::Length),
             "stop" => Ok(FinishReason::Stop),
-            "cancelled" => Ok(FinishReason::Cancelled),
+            "cancelled" | "abort" => Ok(FinishReason::Cancelled),
             s if s.starts_with("error: ") => Ok(FinishReason::Error(s[7..].to_string())),
             _ => Err(anyhow::anyhow!("Invalid FinishReason variant: '{}'", s)),
         }
@@ -239,6 +240,10 @@ pub struct StopConditions {
 
     /// List of tokens that stop the generation when they are
     /// generated. The returned output will NOT contain the stop tokens.
+    pub stop_token_ids: Option<Vec<TokenIdType>>,
+
+    /// List of hidden/system tokens that stop generation when they are
+    /// generated. The returned output will NOT contain the stop tokens.
     pub stop_token_ids_hidden: Option<Vec<TokenIdType>>,
 
     /// The minimum number of tokens to generate
@@ -259,6 +264,7 @@ impl StopConditions {
     pub fn apply_ignore_eos(&mut self) {
         if self.ignore_eos.unwrap_or(false) {
             self.stop = None;
+            self.stop_token_ids = None;
             self.stop_token_ids_hidden = None;
         }
     }
@@ -514,6 +520,10 @@ pub struct OutputOptions {
     /// the tokenizer. This is useful for inspecting the behavior of prompt
     /// templates that are applied during the backend preprocessing.
     pub formatted_prompt: Option<bool>,
+
+    /// When true, logprob token fields are returned as "token_id:<id>"
+    /// instead of decoded text.
+    pub return_tokens_as_token_ids: Option<bool>,
 }
 
 // Struct for log probability information
@@ -603,6 +613,10 @@ pub struct Delta {
     pub is_complete: bool,
 
     pub finish_reason: Option<FinishReason>,
+
+    /// The stop string or token that triggered the stop condition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
 
     // new token_ids
     pub token_ids: Option<Vec<u32>>,

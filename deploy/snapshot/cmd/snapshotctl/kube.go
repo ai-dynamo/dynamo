@@ -95,18 +95,23 @@ func loadPod(manifestPath string) (*corev1.Pod, error) {
 	if kind := strings.TrimSpace(pod.Kind); kind != "" && kind != "Pod" {
 		return nil, fmt.Errorf("manifest %s is kind %q, expected Pod", manifestPath, kind)
 	}
-	if len(pod.Spec.Containers) != 1 {
+	if len(pod.Spec.Containers) == 0 {
 		return nil, fmt.Errorf(
-			"manifest %s has %d containers; snapshotctl requires exactly one worker container",
+			"manifest %s has no worker containers; snapshotctl requires at least one worker container",
 			manifestPath,
-			len(pod.Spec.Containers),
 		)
 	}
-	if strings.TrimSpace(pod.Spec.Containers[0].Image) == "" {
-		return nil, fmt.Errorf("manifest %s: worker container image is required", manifestPath)
-	}
+	// snapshotctl no longer guesses the workload container. Callers pass
+	// --container / --containers (or pre-stamp the
+	// nvidia.com/snapshot-target-containers annotation), which the protocol
+	// layer then validates against the pod spec.
 	if strings.TrimSpace(pod.Name) == "" {
 		return nil, fmt.Errorf("manifest %s: metadata.name is required", manifestPath)
+	}
+	for i := range pod.Spec.Containers {
+		if strings.TrimSpace(pod.Spec.Containers[i].Image) == "" {
+			return nil, fmt.Errorf("manifest %s: container %q image is required", manifestPath, pod.Spec.Containers[i].Name)
+		}
 	}
 
 	pod.Namespace = strings.TrimSpace(pod.Namespace)

@@ -8,7 +8,6 @@ use validator::Validate;
 mod aggregator;
 mod nvext;
 
-pub use aggregator::DeltaAggregator;
 pub use nvext::{NvExt, NvExtProvider};
 
 /// Image generation request with NVIDIA extensions.
@@ -42,6 +41,11 @@ impl NvImagesResponse {
             inner: dynamo_protocols::types::ImagesResponse {
                 created: 0,
                 data: vec![],
+                background: None,
+                output_format: None,
+                quality: None,
+                size: None,
+                usage: None,
             },
         }
     }

@@ -25,10 +25,32 @@ use std::sync::Arc;
 
 use crate::preprocessor::media::MediaDecoder;
 
+pub mod deepseek_common;
 pub mod deepseek_v32;
+pub mod deepseek_v4;
 mod template;
 
 pub use template::{ChatTemplate, ContextMixins};
+
+/// Shared helper: extract a boolean thinking toggle from `chat_template_args`.
+///
+/// Reads the two equivalent keys (`thinking`, `enable_thinking` — vLLM's
+/// canonical kwarg) in order and returns the first bool value found, or `None`
+/// if neither key is present (or neither carries a bool). Used by the V4
+/// formatter's `resolve_thinking_mode` and by the reasoning-parser gate in
+/// `OpenAIPreprocessor::is_reasoning_disabled_by_request` so both paths agree
+/// on the signal interpretation.
+pub(crate) fn thinking_bool_from_args(
+    args: Option<&HashMap<String, serde_json::Value>>,
+) -> Option<bool> {
+    let args = args?;
+    for key in ["thinking", "enable_thinking"] {
+        if let Some(v) = args.get(key).and_then(|x| x.as_bool()) {
+            return Some(v);
+        }
+    }
+    None
+}
 
 #[derive(Debug)]
 pub enum TokenInput {
@@ -89,11 +111,24 @@ pub trait OAIChatLikeRequest {
     fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
         None
     }
+
+    fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
+        None
+    }
 }
 
 pub trait OAIPromptFormatter: Send + Sync + 'static {
     fn supports_add_generation_prompt(&self) -> bool;
     fn render(&self, req: &dyn OAIChatLikeRequest) -> Result<String>;
+
+    /// Per-family image-placeholder template used when the chat template
+    /// requires string content and the request contains images. `{n}` in
+    /// the template is the 1-based image index. `None` when the
+    /// formatter has no flatten strategy — MM-aware routing falls back
+    /// to text-prefix routing for those families.
+    fn image_placeholder_template(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 #[derive(Clone)]

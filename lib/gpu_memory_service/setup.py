@@ -66,6 +66,7 @@ setup(
     packages=[
         "gpu_memory_service",
         "gpu_memory_service.cli",
+        "gpu_memory_service.cli.snapshot",
         "gpu_memory_service.common",
         "gpu_memory_service.common.protocol",
         "gpu_memory_service.server",
@@ -77,11 +78,14 @@ setup(
         "gpu_memory_service.integrations",
         "gpu_memory_service.integrations.common",
         "gpu_memory_service.integrations.sglang",
+        "gpu_memory_service.integrations.trtllm",
         "gpu_memory_service.integrations.vllm",
+        "gpu_memory_service.snapshot",
     ],
     package_dir={
         "gpu_memory_service": ".",
         "gpu_memory_service.cli": "cli",
+        "gpu_memory_service.cli.snapshot": "cli/snapshot",
         "gpu_memory_service.common": "common",
         "gpu_memory_service.common.protocol": "common/protocol",
         "gpu_memory_service.server": "server",
@@ -93,10 +97,18 @@ setup(
         "gpu_memory_service.integrations": "integrations",
         "gpu_memory_service.integrations.common": "integrations/common",
         "gpu_memory_service.integrations.sglang": "integrations/sglang",
+        "gpu_memory_service.integrations.trtllm": "integrations/trtllm",
         "gpu_memory_service.integrations.vllm": "integrations/vllm",
+        "gpu_memory_service.snapshot": "snapshot",
     },
     package_data={
         "gpu_memory_service.client.torch.extensions": ["*.cpp"],
+    },
+    entry_points={
+        "console_scripts": [
+            "gpu-memory-service=gpu_memory_service.cli.runner:main",
+            "gms-storage-client=gpu_memory_service.cli.storage_runner:main",
+        ]
     },
     ext_modules=_create_ext_modules(),
     cmdclass={"build_ext": BuildExtension},

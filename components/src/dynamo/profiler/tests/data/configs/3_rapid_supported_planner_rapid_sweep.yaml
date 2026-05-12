@@ -13,6 +13,7 @@ sla:
   itl: 50.0
 features:
   planner:
+    optimization_target: sla
     pre_deployment_sweeping_mode: rapid
     enable_throughput_scaling: true
     enable_load_scaling: false

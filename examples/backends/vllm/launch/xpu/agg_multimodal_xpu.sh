@@ -76,12 +76,13 @@ GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 # Start vLLM worker with vision model
 # --enforce-eager: Quick deployment (remove for production)
 # Extra args from command line come last to allow overrides
+ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0} \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0} python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME \
+    python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     --block-size "${BLOCK_SIZE:-64}" \
-    $GPU_MEM_ARGS $MODEL_EXTRA_ARGS "${EXTRA_ARGS[@]}"
+    $GPU_MEM_ARGS $MODEL_EXTRA_ARGS "${EXTRA_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit

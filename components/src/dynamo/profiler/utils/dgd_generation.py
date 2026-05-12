@@ -23,8 +23,19 @@ import numpy as np
 import yaml
 
 from dynamo.common.utils.paths import get_workspace_dir
-from dynamo.planner.config.backend_components import MockerComponentName
-from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
+from dynamo.planner.config.backend_components import (
+    MockerComponentName,
+    VllmComponentName,
+)
+from dynamo.planner.config.parallelization import (
+    PickedParallelConfig,
+    picked_to_aic_model_config_kwargs,
+)
+from dynamo.planner.config.planner_config import (
+    PlannerConfig,
+    PlannerPreDeploymentSweepMode,
+)
 from dynamo.profiler.utils.config import DgdPlannerServiceConfig, set_argument_value
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
@@ -64,13 +75,26 @@ def assemble_final_config(
     dgd_config: dict | None,
     best_prefill_config=None,
     best_decode_config=None,
+    aic_spec: Optional[AICInterpolationSpec] = None,
+    resolved_backend: Optional[str] = None,
 ) -> Any:
     """Apply Dynamo features to the picked DGD config via composable layers.
 
     1. **Mocker** — swap the base to the mocker DGD template if enabled.
-    2. **Planner** — inject the Planner service + planner-config ConfigMap.
-    3. **Profile data** — attach interpolation-data ConfigMap when mocker
-       or planner-throughput is enabled.
+    2. **vLLM self-benchmark** — when the resolved backend is vLLM, set
+       ``DYN_BENCHMARK_MODE`` on each worker so the ``get_perf_metrics``
+       endpoint is populated at runtime. The planner consumes this as
+       priority 1 of its bootstrap chain, superseding AIC and files.
+    3. **Planner** — inject the Planner service + planner-config ConfigMap.
+       When ``aic_spec`` is given (rapid mode), it is embedded in the
+       planner config so the planner runs AIC interpolation at bootstrap
+       if the endpoint is unavailable.
+    4. **Profile data** — attach interpolation-data ConfigMap when mocker
+       or planner-thorough is enabled. The ConfigMap is only emitted when
+       the picked config is disaggregated AND the interpolation NPZ files
+       were produced on disk; rapid-mode deployments never emit it (the
+       planner uses AIC in-process or ``get_perf_metrics`` instead), and
+       agg picks skip interpolation entirely.
     """
     if not dgd_config:
         return dgd_config
@@ -90,11 +114,17 @@ def assemble_final_config(
     # Step 1: choose base config
     if mocker:
         logger.info("Mocker enabled — using mocker DGD as base.")
-        base = generate_mocker_config(dgdr)
+        base = generate_mocker_config(dgdr, aic_spec=aic_spec)
     else:
         base = dgd_config
 
-    # Steps 2-3: layer features, collecting ConfigMaps
+    # Step 2: for vLLM deployments, turn on the per-worker self-benchmark so
+    # the get_perf_metrics endpoint is available to the planner. Mocker
+    # workers don't use DYN_BENCHMARK_MODE, so skip when mocker is active.
+    if not mocker and resolved_backend == "vllm":
+        enable_vllm_benchmark_mode(base)
+
+    # Steps 3-4: layer features, collecting ConfigMaps
     config_maps: list[dict] = []
 
     if planner:
@@ -103,6 +133,7 @@ def assemble_final_config(
             base,
             best_prefill_mapping=best_prefill_config,
             best_decode_mapping=best_decode_config,
+            aic_spec=aic_spec,
         )
         config_maps.append(planner_cm)
 
@@ -117,8 +148,63 @@ def assemble_final_config(
     return base
 
 
-def generate_mocker_config(dgdr) -> dict:
+def _vllm_worker_roles() -> dict[str, str]:
+    """Canonical DGD service name → DYN_BENCHMARK_MODE role.
+
+    Sourced from :class:`VllmComponentName` so we stay in sync with the
+    rest of the planner/profiler if the k8s service names are ever
+    renamed.
+    """
+    return {
+        VllmComponentName.prefill_worker_k8s_name: "prefill",
+        VllmComponentName.decode_worker_k8s_name: "decode",
+        VllmComponentName.agg_worker_k8s_name: "agg",
+    }
+
+
+def enable_vllm_benchmark_mode(config_dict: dict) -> None:
+    """Set ``DYN_BENCHMARK_MODE`` on every vLLM worker in *config_dict*.
+
+    Mutates ``config_dict`` in place. Each recognised worker service
+    (``VllmPrefillWorker`` / ``VllmDecodeWorker`` / ``VllmWorker``) gets the
+    mode matching its role so its startup self-benchmark publishes
+    ForwardPassMetrics via the ``get_perf_metrics`` endpoint.
+
+    Idempotent: if ``DYN_BENCHMARK_MODE`` is already set (e.g. via user
+    overrides) the existing entry is replaced with the role-correct value.
+    """
+    services = config_dict.get("spec", {}).get("services", {})
+    for svc_name, mode in _vllm_worker_roles().items():
+        svc = services.get(svc_name)
+        if svc is None:
+            continue
+        main_container = svc.setdefault("extraPodSpec", {}).setdefault(
+            "mainContainer", {}
+        )
+        env_list = main_container.setdefault("env", [])
+        # Strip any existing DYN_BENCHMARK_MODE; append canonical value.
+        env_list[:] = [
+            e
+            for e in env_list
+            if not (isinstance(e, dict) and e.get("name") == "DYN_BENCHMARK_MODE")
+        ]
+        env_list.append({"name": "DYN_BENCHMARK_MODE", "value": mode})
+        logger.info(
+            "Enabled vLLM self-benchmark on service %s (DYN_BENCHMARK_MODE=%s)",
+            svc_name,
+            mode,
+        )
+
+
+def generate_mocker_config(
+    dgdr, aic_spec: Optional[AICInterpolationSpec] = None
+) -> dict:
     """Load the mocker DGD template and apply DGDR images and model paths.
+
+    When ``aic_spec`` is provided (planner-rapid with an AIC-supported backend),
+    inject ``--aic-perf-model`` plus related flags onto the prefill/decode
+    workers so each mocker pod pulls its latency model directly from the
+    AIConfigurator SDK at runtime — no NPZ round-trip through the profiler.
 
     Returns:
         The mocker DGD config dict (no planner, no ConfigMaps).
@@ -140,6 +226,7 @@ def generate_mocker_config(dgdr) -> dict:
                 service_config["extraPodSpec"]["mainContainer"]["image"] = image
 
     model = dgdr.model
+    aic_workers = _mocker_aic_worker_picks(aic_spec)
     for worker_name in _mocker_worker_names():
         service_config = (
             mocker_config.get("spec", {}).get("services", {}).get(worker_name)
@@ -151,9 +238,54 @@ def generate_mocker_config(dgdr) -> dict:
             args_list = main_container.get("args", [])
             args_list = set_argument_value(args_list, "--model-path", model)
             args_list = set_argument_value(args_list, "--model-name", model)
+            pick = aic_workers.get(worker_name) if aic_workers else None
+            if pick is not None and aic_spec is not None:
+                args_list = _inject_mocker_aic_args(args_list, aic_spec, pick)
             main_container["args"] = args_list
 
     return mocker_config
+
+
+def _mocker_aic_worker_picks(
+    aic_spec: Optional[AICInterpolationSpec],
+) -> Optional[dict[str, PickedParallelConfig]]:
+    if aic_spec is None:
+        return None
+    return {
+        MockerComponentName.prefill_worker_k8s_name: aic_spec.prefill_pick,
+        MockerComponentName.decode_worker_k8s_name: aic_spec.decode_pick,
+    }
+
+
+def _inject_mocker_aic_args(
+    args_list: list,
+    aic_spec: AICInterpolationSpec,
+    pick: PickedParallelConfig,
+) -> list:
+    """Inject ``--aic-*`` flags onto a single mocker worker's args list.
+
+    The mocker simulates vllm/sglang scheduling; for trtllm AIC data we keep
+    the default ``--engine-type`` and only override ``--aic-backend`` so the
+    perf-model lookups point at the correct database.
+    """
+    kwargs = picked_to_aic_model_config_kwargs(pick)
+    if "--aic-perf-model" not in args_list:
+        args_list.append("--aic-perf-model")
+    args_list = set_argument_value(args_list, "--aic-backend", aic_spec.backend)
+    args_list = set_argument_value(args_list, "--aic-system", aic_spec.system)
+    args_list = set_argument_value(args_list, "--aic-tp-size", str(kwargs["tp_size"]))
+    args_list = set_argument_value(
+        args_list, "--aic-moe-tp-size", str(kwargs["moe_tp_size"])
+    )
+    args_list = set_argument_value(
+        args_list, "--aic-moe-ep-size", str(kwargs["moe_ep_size"])
+    )
+    args_list = set_argument_value(
+        args_list, "--aic-attention-dp-size", str(kwargs["attention_dp_size"])
+    )
+    if aic_spec.backend in ("vllm", "sglang"):
+        args_list = set_argument_value(args_list, "--engine-type", aic_spec.backend)
+    return args_list
 
 
 def add_planner_to_config(
@@ -161,6 +293,7 @@ def add_planner_to_config(
     config_dict: dict,
     best_prefill_mapping=None,
     best_decode_mapping=None,
+    aic_spec: Optional[AICInterpolationSpec] = None,
 ) -> dict:
     """Add a Planner service and its planner-config ConfigMap to *config_dict*.
 
@@ -173,11 +306,15 @@ def add_planner_to_config(
         config_dict: The base DGD config (real or mocker) — mutated in place.
         best_prefill_mapping: Picked prefill parallel config.
         best_decode_mapping: Picked decode parallel config.
+        aic_spec: AIC interpolation spec (rapid mode). When set, the planner
+            runs AIC in-process at bootstrap instead of reading NPZ files.
 
     Returns:
         The ``planner_config_cm`` ConfigMap dict.
     """
-    planner_cfg = _build_planner_config(dgdr, best_prefill_mapping, best_decode_mapping)
+    planner_cfg = _build_planner_config(
+        dgdr, best_prefill_mapping, best_decode_mapping, aic_spec
+    )
     planner_cfg.profile_results_dir = PROFILE_DATA_MOUNT
 
     planner_service = DgdPlannerServiceConfig()
@@ -343,6 +480,7 @@ def _build_planner_config(
     dgdr,
     best_prefill_mapping,
     best_decode_mapping,
+    aic_spec: Optional[AICInterpolationSpec] = None,
 ) -> PlannerConfig:
     """Build a PlannerConfig from the DGDR spec and picked parallel configs."""
     if dgdr.features and dgdr.features.planner:
@@ -356,7 +494,89 @@ def _build_planner_config(
     if best_decode_mapping is not None:
         planner_cfg.decode_engine_num_gpu = best_decode_mapping.num_gpus
 
+    if aic_spec is not None:
+        planner_cfg.aic_interpolation = aic_spec
+
     return planner_cfg
+
+
+def build_aic_interpolation_spec(
+    dgdr,
+    best_prefill_pick: Optional[PickedParallelConfig],
+    best_decode_pick: Optional[PickedParallelConfig],
+    isl: int,
+    osl: int,
+    sweep_max_context_length: int,
+    resolved_backend: str,
+    system: str,
+    prefill_interpolation_granularity: int,
+    decode_interpolation_granularity: int,
+) -> Optional[AICInterpolationSpec]:
+    """Build an ``AICInterpolationSpec`` for rapid-mode AIC consumers.
+
+    Consumed by both the planner (to bootstrap perf models in-process) and
+    the mocker (via ``--aic-perf-model`` flags injected into worker args).
+    Returns ``None`` when any of the following hold:
+
+    * no AIC consumer needs it — planner is disabled or has
+      ``enable_throughput_scaling=False``, **and** mocker is disabled
+    * ``pre_deployment_sweeping_mode`` is not ``Rapid``
+    * picks are missing
+    * ``resolved_backend`` is not one AIC supports
+
+    .. note::
+        The spec only carries ``prefill_pick`` + ``decode_pick``, so the
+        caller in ``profile_sla.py`` gates this on a disaggregated pick
+        (``is_disagg_config``). When rapid AIC picks an aggregated config
+        and the override to disagg fails, ``aic_spec`` is ``None`` and the
+        planner has no AIC fallback — it relies solely on the
+        ``get_perf_metrics`` endpoint (``DYN_BENCHMARK_MODE``).
+
+        TODO: extend ``AICInterpolationSpec`` with an ``agg_pick`` so
+        throughput-scaling on an aggregated deployment has a matching
+        AIC bootstrap path (planner + mocker + thorough NPZ). Tracking
+        via the wider agg+throughput-scaling rework.
+    """
+    planner = (
+        dgdr.features.planner  # type: ignore[union-attr]
+        if dgdr.features is not None and dgdr.features.planner is not None
+        else None
+    )
+    mocker_enabled = is_mocker_enabled(dgdr)
+    planner_needs_aic = (
+        is_planner_enabled(dgdr)
+        and planner is not None
+        and planner.enable_throughput_scaling
+    )
+    if not planner_needs_aic and not mocker_enabled:
+        return None
+    sweep_mode = planner.pre_deployment_sweeping_mode if planner is not None else None
+    if sweep_mode != PlannerPreDeploymentSweepMode.Rapid:
+        return None
+    if best_prefill_pick is None or best_decode_pick is None:
+        logger.info(
+            "Rapid mode but picks are missing; skipping aic_interpolation spec."
+        )
+        return None
+    if resolved_backend not in ("trtllm", "vllm", "sglang"):
+        logger.info(
+            "Rapid mode but backend %r is not supported by AIC; skipping spec.",
+            resolved_backend,
+        )
+        return None
+
+    return AICInterpolationSpec(
+        hf_id=dgdr.model,
+        system=system,
+        backend=resolved_backend,
+        isl=isl,
+        osl=osl,
+        sweep_max_context_length=sweep_max_context_length,
+        prefill_interpolation_granularity=prefill_interpolation_granularity,
+        decode_interpolation_granularity=decode_interpolation_granularity,
+        prefill_pick=best_prefill_pick,
+        decode_pick=best_decode_pick,
+    )
 
 
 def _load_profiling_data(output_dir: str) -> dict:

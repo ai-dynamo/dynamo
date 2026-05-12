@@ -26,7 +26,7 @@ A KV event consumer (router, cache coordinator) subscribes to a live stream of b
 | **Initial sync** | Not built in — consumer starts from live stream | Tree dump (request with `start_event_id=None`) |
 | **Authoritative state** | Buffer only | RadixTree (buffer is an optimization layer) |
 | **Compression / dedup** | Events stored as-is (pre-serialized) | RadixTree compresses shared prefixes across sequences |
-| **Pruning** | Implicit via `maxlen` eviction | TTL + size-based pruning via `PruneManager` |
+| **Expiration** | Implicit via `maxlen` eviction | TTL expiration via `PruneManager` |
 | **Transport** | ZMQ PUB/SUB + ROUTER/REQ | Dynamo service RPC (request/response) |
 | **Multi-rank** | Port offset per DP rank | Separate query endpoint per DP rank |
 | **Thread model** | Background thread with queue | Single-threaded tokio runtime on dedicated OS thread |
@@ -106,5 +106,6 @@ For deployments using Dynamo's KV-aware routing, the local indexer is used autom
 ## See Also
 
 - **[KV Router Index Data Structures](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/indexer/README.md)**: `RadixTree`, `ConcurrentRadixTree`, and `PositionalIndexer` internals
-- **[Router Guide](router-guide.md)**: Configuration, deployment, and tuning for KV-aware routing
+- **[Router Guide](router-guide.md)**: Deployment modes and quick start for KV-aware routing
+- **[Configuration and Tuning](router-configuration.md)**: Router flags and tuning details
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes

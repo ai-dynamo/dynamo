@@ -28,13 +28,16 @@ import (
 )
 
 type CheckpointInfo struct {
-	Enabled         bool
-	Exists          bool
-	Identity        *nvidiacomv1alpha1.DynamoCheckpointIdentity
-	Hash            string
-	ArtifactVersion string
-	CheckpointName  string
-	Ready           bool
+	Enabled          bool
+	Exists           bool
+	Identity         *nvidiacomv1alpha1.DynamoCheckpointIdentity
+	GPUMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec
+	Hash             string
+	ArtifactVersion  string
+	CheckpointName   string
+	Ready            bool
+	// Empty means the restore pod targets the default main container.
+	RestoreTargetContainers []string
 }
 
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {
@@ -44,13 +47,14 @@ func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*Checkp
 	}
 
 	return &CheckpointInfo{
-		Enabled:         true,
-		Exists:          true,
-		Identity:        &ckpt.Spec.Identity,
-		Hash:            hash,
-		ArtifactVersion: checkpointArtifactVersion(ckpt),
-		CheckpointName:  ckpt.Name,
-		Ready:           ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
+		Enabled:          true,
+		Exists:           true,
+		Identity:         &ckpt.Spec.Identity,
+		GPUMemoryService: ckpt.Spec.GPUMemoryService,
+		Hash:             hash,
+		ArtifactVersion:  checkpointArtifactVersion(ckpt),
+		CheckpointName:   ckpt.Name,
+		Ready:            ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
 	}, nil
 }
 
@@ -79,7 +83,14 @@ func ResolveCheckpointForService(
 			return nil, fmt.Errorf("failed to get referenced checkpoint %s: %w", *config.CheckpointRef, err)
 		}
 
-		return checkpointInfoFromObject(ckpt)
+		info, err := checkpointInfoFromObject(ckpt)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateResolvedGMSSnapshotGate(info); err != nil {
+			return nil, err
+		}
+		return info, nil
 	case config.Identity == nil:
 		return nil, fmt.Errorf("checkpoint enabled but no checkpointRef or identity provided")
 	}
@@ -105,6 +116,16 @@ func ResolveCheckpointForService(
 	if err != nil {
 		return nil, err
 	}
+	if err := validateResolvedGMSSnapshotGate(info); err != nil {
+		return nil, err
+	}
 	info.Identity = config.Identity
 	return info, nil
+}
+
+func validateResolvedGMSSnapshotGate(info *CheckpointInfo) error {
+	if info == nil {
+		return nil
+	}
+	return ValidateGMSSnapshotGate("checkpoint.gpuMemoryService", info.Enabled, info.GPUMemoryService)
 }

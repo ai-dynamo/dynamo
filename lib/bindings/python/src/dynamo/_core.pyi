@@ -32,6 +32,31 @@ def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
     ...
 
+async def parse_tool_call(
+    parser_name: str,
+    message: str,
+    tools_json: Optional[str] = None,
+) -> str:
+    """Parse tool calls from a model output string using the specified parser.
+
+    Args:
+        parser_name: Parser name (e.g. "kimi_k25"). Empty string falls back to default.
+        message:     Model output text to parse.
+        tools_json:  Optional JSON-serialized list of tool definitions in the form
+                     `[{"name": "...", "parameters": {...}}, ...]` (or OpenAI shape
+                     with `{"function": {...}}` wrapper). Used by parsers that need
+                     schema-aware coercion (e.g. XML family).
+
+    Returns:
+        JSON-serialized string `{"calls": [...], "normal_text": str | None}`.
+        Each entry in `calls` is `{"id", "type", "function": {"name", "arguments"}}`
+        with `arguments` itself a JSON-serialized string.
+
+    Raises:
+        ValueError on parser failure or malformed `tools_json`.
+    """
+    ...
+
 def run_kv_indexer(args: List[str]) -> None:
     """Run the KV indexer with the given arguments."""
     ...
@@ -51,7 +76,6 @@ class DistributedRuntime:
         event_loop: Any,
         discovery_backend: str,
         request_plane: str,
-        enable_nats: Optional[bool] = None,
     ) -> "DistributedRuntime":
         """
         Create a new DistributedRuntime.
@@ -60,9 +84,6 @@ class DistributedRuntime:
             event_loop: The asyncio event loop
             discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
             request_plane: Request plane transport ("tcp", "http", or "nats")
-            enable_nats: Whether to enable NATS for KV events. Defaults to True.
-                        If request_plane is "nats", NATS is always enabled.
-                        Pass False to disable NATS initialization (e.g., for approximate routing).
         """
         ...
 
@@ -674,8 +695,6 @@ class ApproxKvIndexer:
         endpoint: Endpoint,
         kv_block_size: int,
         router_ttl_secs: float = 120.0,
-        router_max_tree_size: int = 1048576,
-        router_prune_target_ratio: float = 0.8,
     ) -> None:
         """
         Create an `ApproxKvIndexer` object
@@ -684,8 +703,6 @@ class ApproxKvIndexer:
             component: The component to associate with this indexer
             kv_block_size: The KV cache block size
             router_ttl_secs: TTL for blocks in seconds (default: 120.0)
-            router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
-            router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
         """
         ...
 
@@ -839,6 +856,69 @@ class FpmEventRelay:
         ...
 
 
+class FpmDirectPublisher:
+    """
+    Direct Forward Pass Metrics publisher used by in-process producers such
+    as the TRT-LLM adapter. The underlying Rust publisher owns per-DP-rank
+    serialization tasks (each with its own 1s idle heartbeat timer) and a
+    single event-plane publisher task. Python callers do not manage
+    heartbeat: when ``publish`` is not called for ``IDLE_HEARTBEAT_INTERVAL``
+    (1.0s, matching vLLM's ``HEARTBEAT_INTERVAL``), the Rust side emits a
+    zeroed snapshot on that rank's channel.
+    """
+
+    def __init__(
+        self,
+        endpoint: Endpoint,
+        worker_id: str,
+        dp_size: int = 1,
+    ) -> None:
+        """
+        Create a publisher with ``dp_size`` per-DP-rank channels.
+
+        Args:
+            endpoint: Dynamo component endpoint (provides runtime + discovery).
+            worker_id: Unique worker identifier stamped on every emitted FPM.
+            dp_size: Number of DP ranks to allocate channels for. Use ``1``
+                when attention DP is disabled.
+        """
+        ...
+
+    def publish(
+        self,
+        *,
+        dp_rank: int,
+        scheduled_num_prefill_requests: int,
+        scheduled_sum_prefill_tokens: int,
+        scheduled_sum_prefill_kv_tokens: int,
+        scheduled_num_decode_requests: int,
+        scheduled_sum_decode_kv_tokens: int,
+        queued_num_prefill_requests: int,
+        queued_sum_prefill_tokens: int,
+        queued_num_decode_requests: int,
+        queued_sum_decode_kv_tokens: int,
+        wall_time_secs: float,
+    ) -> None:
+        """
+        Publish one iteration's FPM snapshot for the given DP rank.
+
+        All parameters are keyword-only on the Python side: adjacent ints
+        with similar units (``scheduled_*`` vs ``queued_*``, ``*_prefill_*``
+        vs ``*_decode_*``) cannot be distinguished by the type system, so
+        a transposition would silently corrupt every published snapshot.
+
+        Variance fields (var_prefill_length, var_decode_kv_tokens,
+        var_queued_prefill_length, var_queued_decode_kv_tokens) are defaulted
+        to 0.0 per the MVP scope; a follow-up PR can add Welford-based
+        variance computation.
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """Shut down the publisher and its per-rank serialization tasks."""
+        ...
+
+
 class FpmEventSubscriber:
     """
     Subscriber for ForwardPassMetrics from the Dynamo event plane.
@@ -907,6 +987,23 @@ class FpmEventSubscriber:
         Returns:
             dict mapping ``(worker_id, dp_rank)`` to raw msgspec bytes.
             Decode each value with ``forward_pass_metrics.decode(data)``.
+        """
+        ...
+
+    def get_model_cards(self) -> dict[str, str]:
+        """
+        Snapshot of model deployment cards keyed by worker id.
+
+        The snapshot is filtered against the known-workers set so entries
+        for already-removed workers are not returned.  Values are the raw
+        ``ModelDeploymentCard`` serialized as a JSON string; callers parse
+        whichever fields they need (e.g. ``runtime_config``,
+        ``display_name``).
+
+        Raises RuntimeError if ``start_tracking()`` has not been called.
+
+        Returns:
+            dict mapping ``worker_id`` to ``card_json`` (JSON string).
         """
         ...
 
@@ -1132,6 +1229,7 @@ class RouterMode:
     KV: "RouterMode"
     Direct: "RouterMode"
     LeastLoaded: "RouterMode"
+    DeviceAwareWeighted: "RouterMode"
     ...
 
 class RouterConfig:
@@ -1152,7 +1250,7 @@ class RouterConfig:
         Create a RouterConfig.
 
         Args:
-            mode: The router mode (RoundRobin, Random, KV, Direct, or LeastLoaded)
+            mode: The router mode (RoundRobin, Random, KV, Direct, LeastLoaded, or DeviceAwareWeighted)
             config: Optional KV router configuration (used when mode is KV)
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
@@ -1190,8 +1288,6 @@ class KvRouterConfig:
         router_snapshot_threshold: Optional[int] = 1000000,
         router_reset_states: bool = False,
         router_ttl_secs: float = 120.0,
-        router_max_tree_size: int = 1048576,
-        router_prune_target_ratio: float = 0.8,
         router_queue_threshold: Optional[float] = 4.0,
         router_event_threads: int = 4,
         router_queue_policy: str = "fcfs",
@@ -1221,14 +1317,13 @@ class KvRouterConfig:
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
             router_reset_states: Reset router state on startup (default: False)
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
-            router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
-            router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
             router_queue_threshold: Queue threshold fraction for prefill token capacity (default: 4.0).
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
-            router_event_threads: Number of event processing threads (default: 4).
-                When > 1, uses a concurrent radix tree with a thread pool.
+            router_event_threads: Number of KV indexer worker threads (default: 4).
+                When > 1, uses a concurrent radix tree with a thread pool,
+                including for approximate routing when KV events are disabled.
             router_queue_policy: Scheduling policy for the router queue (default: "fcfs").
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
@@ -1544,6 +1639,9 @@ def run_mocker_trace_replay(
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
     arrival_speedup_ratio: float = 1.0,
     trace_block_size: int = 512,
+    trace_format: Literal["mooncake", "applied_compute_agentic"] = "mooncake",
+    trace_shared_prefix_ratio: float = 0.0,
+    trace_num_prefix_groups: int = 0,
 ) -> Dict[str, Any]:
     """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs."""
     ...
@@ -1572,6 +1670,37 @@ def run_mocker_synthetic_trace_replay(
 ) -> Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file."""
     ...
+
+class PlannerReplayBridge:
+    """Step-based bridge for driving an offline replay with a Python planner."""
+
+    def __init__(
+        self,
+        trace_file: str | os.PathLike[str],
+        extra_engine_args: MockEngineArgs,
+        num_workers: int,
+        router_mode: str = "round_robin",
+        router_config: Optional[KvRouterConfig] = None,
+        arrival_speedup_ratio: float = 1.0,
+        trace_block_size: int = 512,
+    ) -> None: ...
+
+    @staticmethod
+    def create_disagg(
+        trace_file: str | os.PathLike[str],
+        prefill_engine_args: MockEngineArgs,
+        decode_engine_args: MockEngineArgs,
+        num_prefill_workers: int,
+        num_decode_workers: int,
+        router_mode: str = "round_robin",
+        router_config: Optional[KvRouterConfig] = None,
+        arrival_speedup_ratio: float = 1.0,
+        trace_block_size: int = 512,
+    ) -> "PlannerReplayBridge": ...
+
+    def advance_to(self, until_ms: float) -> Dict[str, Any]: ...
+    def apply_scaling(self, target_prefill: int, target_decode: int) -> None: ...
+    def finalize(self) -> Dict[str, Any]: ...
 
 class Layer:
     """
@@ -2152,3 +2281,75 @@ class StreamIncomplete(DynamoException):
     """The response stream was terminated before completion."""
 
     ...
+
+# ---------------------------------------------------------------------------
+# `dynamo._core.backend` submodule.
+#
+# Registered at import time by the pyo3 bindings via `sys.modules`, so it has
+# no filesystem layout that mypy can discover. Declaring it as a typed
+# namespace class lets `from dynamo._core import backend as _backend` resolve
+# and preserves attribute typing for the pyclasses it exposes.
+# ---------------------------------------------------------------------------
+
+class backend:
+    class EngineConfig:
+        def __init__(
+            self,
+            model: str,
+            served_model_name: Optional[str] = None,
+            context_length: Optional[int] = None,
+            kv_cache_block_size: Optional[int] = None,
+            total_kv_blocks: Optional[int] = None,
+            max_num_seqs: Optional[int] = None,
+            max_num_batched_tokens: Optional[int] = None,
+        ) -> None: ...
+        @property
+        def model(self) -> str: ...
+        @property
+        def served_model_name(self) -> Optional[str]: ...
+        @property
+        def context_length(self) -> Optional[int]: ...
+        @property
+        def kv_cache_block_size(self) -> Optional[int]: ...
+        @property
+        def total_kv_blocks(self) -> Optional[int]: ...
+        @property
+        def max_num_seqs(self) -> Optional[int]: ...
+        @property
+        def max_num_batched_tokens(self) -> Optional[int]: ...
+
+    class RuntimeConfig:
+        def __init__(
+            self,
+            discovery_backend: Optional[str] = None,
+            request_plane: Optional[str] = None,
+            event_plane: Optional[str] = None,
+        ) -> None: ...
+
+    class WorkerConfig:
+        def __init__(
+            self,
+            namespace: str,
+            component: str = ...,
+            endpoint: str = ...,
+            model_name: str = ...,
+            served_model_name: Optional[str] = None,
+            model_input: ModelInput = ...,
+            endpoint_types: str = ...,
+            custom_jinja_template: Optional[str] = None,
+            tool_call_parser: Optional[str] = None,
+            reasoning_parser: Optional[str] = None,
+            exclude_tools_when_tool_choice_none: bool = ...,
+            enable_local_indexer: bool = ...,
+            metrics_labels: List[Tuple[str, str]] = ...,
+            runtime: Optional["backend.RuntimeConfig"] = None,
+        ) -> None: ...
+
+    class Worker:
+        def __init__(
+            self,
+            engine: Any,
+            config: "backend.WorkerConfig",
+            event_loop: Any,
+        ) -> None: ...
+        def run(self) -> Awaitable[None]: ...

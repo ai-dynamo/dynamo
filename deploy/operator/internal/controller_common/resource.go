@@ -593,6 +593,16 @@ func GetResourcesConfig(resources *v1alpha1.Resources) (*corev1.ResourceRequirem
 			}
 			currentResources.Requests[corev1.ResourceMemory] = q
 		}
+		if resources.Requests.GPU != "" {
+			q, err := resource.ParseQuantity(resources.Requests.GPU)
+			if err != nil {
+				return nil, fmt.Errorf("parse requests gpu quantity: %w", err)
+			}
+			if currentResources.Requests == nil {
+				currentResources.Requests = make(corev1.ResourceList)
+			}
+			currentResources.Requests[getGPUResourceName(resources.Requests)] = q
+		}
 		for k, v := range resources.Requests.Custom {
 			q, err := resource.ParseQuantity(v)
 			if err != nil {

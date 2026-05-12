@@ -10,11 +10,14 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
+from gpu_memory_service.client.torch.module import register_module_tensors
+from gpu_memory_service.common.locks import RequestedLockType
 
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
 logger = logging.getLogger(__name__)
+GMS_TAGS = ("weights", "kv_cache")
 
 
 def get_gms_lock_mode(extra_config: dict):
@@ -22,8 +25,6 @@ def get_gms_lock_mode(extra_config: dict):
 
     Returns RO if gms_read_only=True, otherwise RW_OR_RO (default).
     """
-    from gpu_memory_service.common.types import RequestedLockType
-
     if extra_config.get("gms_read_only", False):
         logger.info("[GMS] gms_read_only=True, forcing RO mode")
         return RequestedLockType.RO
@@ -68,9 +69,6 @@ def finalize_gms_write(
     Returns:
         Total bytes committed.
     """
-    from gpu_memory_service.client.torch.module import register_module_tensors
-    from gpu_memory_service.common.types import RequestedLockType
-
     register_module_tensors(allocator, model)
     total_bytes = allocator.total_bytes
 

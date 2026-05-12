@@ -1,31 +1,53 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hybrid torch_memory_saver implementation for GPU Memory Service.
+"""torch_memory_saver implementation for GPU Memory Service.
 
-This module uses:
-1. GPU Memory Service for "weights" (shared RO/RW publish flow)
-2. GPU Memory Service for "kv_cache" (RW-only failover flow)
-3. torch_memory_saver for any remaining tags
+SGLang with GMS owns exactly two memory classes:
+1. "weights" via the shared RO/RW publish flow
+2. "kv_cache" via the RW failover flow
+
+Unsupported release/resume tags stay no-ops with a warning so the generic
+SGLang memory-control API can still pass broader tag sets without reintroducing
+the old torch-memory-saver fallback. `cuda_graph` is a hard error because the
+pauseable CUDA-graph path depends on the LD_PRELOAD torch allocator hooks that
+GMS intentionally does not use.
 """
 
 from __future__ import annotations
 
+import gc
 import logging
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import torch
-from gpu_memory_service import get_or_create_gms_client_memory_manager
-from gpu_memory_service.client.torch.allocator import gms_use_mem_pool
-from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
+from gpu_memory_service.client.torch.allocator import (
+    get_or_create_gms_client_memory_manager,
+    gms_use_mem_pool,
+)
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
-
-if TYPE_CHECKING:
-    from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
-    from torch_memory_saver.entrypoint import _TorchMemorySaverImpl
+from gpu_memory_service.integrations.common.utils import GMS_TAGS, finalize_gms_write
 
 logger = logging.getLogger(__name__)
+
+# Published weights must come back RO, while KV cache always resumes in a fresh
+# RW epoch so the restored engine can rebuild mutable cache state.
+_TAG_LOCK_TYPES = {"weights": RequestedLockType.RO, "kv_cache": RequestedLockType.RW}
+
+
+def _pause_resume_tags(tag: Optional[str]) -> tuple[str, ...]:
+    if tag is None:
+        return GMS_TAGS
+    if tag in _TAG_LOCK_TYPES:
+        return (tag,)
+    logger.warning(
+        "[GMS] Ignoring unsupported torch_memory_saver tag %r; supported tags are %s",
+        tag,
+        list(GMS_TAGS),
+    )
+    return ()
 
 
 def get_gms_memory_saver_impl() -> Optional["GMSMemorySaverImpl"]:
@@ -39,170 +61,128 @@ def get_gms_memory_saver_impl() -> Optional["GMSMemorySaverImpl"]:
 
 
 class GMSMemorySaverImpl:
-    """Hybrid implementation: GMS for weights and KV cache."""
+    """SGLang memory saver implementation backed only by GMS."""
 
     def __init__(
         self,
-        torch_impl: "_TorchMemorySaverImpl",
         device_index: int,
         mode=None,
     ):
-        self._torch_impl = torch_impl
-        self._device_index = device_index
-        self._requested_mode = mode
-        self._disabled = False
-        self._imported_weights_bytes: int = 0
-
-        self._weights_allocator: Optional["GMSClientMemoryManager"]
-        self._kv_cache_allocator: "GMSClientMemoryManager"
-        self._mode: str
-        (
-            self._weights_allocator,
-            self._kv_cache_allocator,
-            self._mode,
-        ) = self._init_allocators()
+        self._device = torch.device("cuda", device_index)
+        self.imported_weights_bytes = 0
+        requested_mode = mode or RequestedLockType.RW_OR_RO
+        self.allocators = {
+            tag: get_or_create_gms_client_memory_manager(
+                get_socket_path(device_index, tag),
+                device_index,
+                # weights follow the configured publish/import mode; kv_cache is
+                # always mutable and therefore always needs an RW session.
+                mode=requested_mode if tag == "weights" else RequestedLockType.RW,
+                tag=tag,
+            )
+            for tag in GMS_TAGS
+        }
 
         logger.info(
-            "[GMS] Initialized weights=%s mode, kv_cache=RW (device=%d)",
-            self._mode.upper(),
+            "[GMS] Initialized weights: requested=%s granted=%s (device=%d)",
+            requested_mode.name,
+            self.allocators["weights"].granted_lock_type.name,
             device_index,
         )
-
-    def _init_allocators(
-        self,
-    ) -> tuple[Optional["GMSClientMemoryManager"], "GMSClientMemoryManager", str,]:
-        """Create allocator with mode from config (default: RW_OR_RO)."""
-        mode = self._requested_mode or RequestedLockType.RW_OR_RO
-        weights_allocator = get_or_create_gms_client_memory_manager(
-            get_socket_path(self._device_index, "weights"),
-            self._device_index,
-            mode=mode,
-            tag="weights",
-        )
-        kv_cache_allocator = get_or_create_gms_client_memory_manager(
-            get_socket_path(self._device_index, "kv_cache"),
-            self._device_index,
-            mode=RequestedLockType.RW,
-            tag="kv_cache",
-        )
-        granted_mode = weights_allocator.granted_lock_type
-        if granted_mode == GrantedLockType.RW:
-            actual_mode = "write"
-        else:
-            actual_mode = "read"
-        logger.info(
-            "[GMS] Initialized in AUTO mode, granted=%s (device=%d)",
-            actual_mode.upper(),
-            self._device_index,
-        )
-        return weights_allocator, kv_cache_allocator, actual_mode
-
-    def _is_weights_tag(self, tag: Optional[str]) -> bool:
-        return tag in ("weights", "model_weights")
-
-    def get_mode(self) -> str:
-        return self._mode
-
-    def get_allocator(self) -> Optional["GMSClientMemoryManager"]:
-        return self._weights_allocator
 
     @contextmanager
     def region(self, tag: str, enable_cpu_backup: bool):
         """Mark allocation region with tag."""
-        if self._is_weights_tag(tag):
-            if self._mode == "read":
-                yield
-                return
+        if enable_cpu_backup:
+            raise ValueError(
+                "SGLang with GMS does not support CPU backup for allocations."
+            )
 
-            target_device = torch.device("cuda", self._device_index)
-            with gms_use_mem_pool("weights", target_device):
-                yield
+        if tag not in _TAG_LOCK_TYPES:
+            logger.warning(
+                "[GMS] Ignoring unsupported torch_memory_saver region tag %r; "
+                "supported tags are %s",
+                tag,
+                list(GMS_TAGS),
+            )
+            yield
             return
 
-        if tag == "kv_cache":
-            target_device = torch.device("cuda", self._device_index)
-            with gms_use_mem_pool("kv_cache", target_device):
-                yield
+        if (
+            tag == "weights"
+            and self.allocators["weights"].granted_lock_type == GrantedLockType.RO
+        ):
+            # Imported weights are already mapped and immutable in RO mode, so
+            # there is no allocator swap to install for this region.
+            yield
             return
 
-        with self._torch_impl.region(tag=tag, enable_cpu_backup=enable_cpu_backup):
+        allocator = self.allocators[tag]
+        if allocator.granted_lock_type != GrantedLockType.RW:
+            mode = (
+                allocator.granted_lock_type.name
+                if allocator.granted_lock_type is not None
+                else "DISCONNECTED"
+            )
+            # The server would reject writes on a non-RW session too, but we
+            # fail before entering the allocation path so SGLang never starts a
+            # partial region with the wrong lock state.
+            raise RuntimeError(
+                f"SGLang with GMS requires {tag!r} to be RW for allocations; got {mode}"
+            )
+
+        with gms_use_mem_pool(tag, self._device):
             yield
 
+    @contextmanager
+    def cuda_graph(
+        self,
+        cuda_graph,
+        pool,
+        stream,
+        capture_error_mode,
+        tag: str,
+        enable_cpu_backup: bool,
+    ):
+        # The old hybrid path could delegate this to torch_memory_saver, but
+        # strict GMS mode has no compatible pauseable CUDA-graph allocator hook.
+        raise RuntimeError(
+            "SGLang with GMS does not support pauseable CUDA graphs. "
+            "torch_memory_saver only supports cuda_graph in hook_mode=preload, "
+            "and GMS does not use the LD_PRELOAD path."
+        )
+
     def pause(self, tag: Optional[str] = None) -> None:
-        if self._disabled:
-            return
-        if tag is None or self._is_weights_tag(tag):
-            self._pause_weights()
-        if tag is None or tag == "kv_cache":
-            self._pause_kv_cache()
-        if tag is None or (not self._is_weights_tag(tag) and tag != "kv_cache"):
-            self._torch_impl.pause(tag=tag)
+        for target_tag in _pause_resume_tags(tag):
+            if self.allocators[target_tag].is_unmapped:
+                continue
+            logger.info("[GMS] Unmapping %s", target_tag)
+            self.allocators[target_tag].unmap_all_vas()
+            # abort() drops the current session after unmapping while keeping
+            # the VA reservation alive for the next resume().
+            self.allocators[target_tag].abort()
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def resume(self, tag: Optional[str] = None) -> None:
-        if self._disabled:
-            return
-        if tag is None or self._is_weights_tag(tag):
-            self._resume_weights()
-        if tag is None or tag == "kv_cache":
-            self._resume_kv_cache()
-        if tag is None or (not self._is_weights_tag(tag) and tag != "kv_cache"):
-            self._torch_impl.resume(tag=tag)
+        for target_tag in _pause_resume_tags(tag):
+            if not self.allocators[target_tag].is_unmapped:
+                continue
 
-    def _pause_weights(self) -> None:
-        if self._weights_allocator is None:
-            return
-        if self._weights_allocator.is_unmapped:
-            return
-        logger.info("[GMS] Unmapping weights (VA-stable)")
-        self._weights_allocator.unmap_all_vas()
-        self._weights_allocator.abort()
-
-    def _resume_weights(self) -> None:
-        if self._weights_allocator is None:
-            return
-        if not self._weights_allocator.is_unmapped:
-            return
-        logger.info("[GMS] Remapping weights (VA-stable)")
-        self._weights_allocator.connect(RequestedLockType.RO)
-        self._weights_allocator.remap_all_vas()
-
-    def _pause_kv_cache(self) -> None:
-        if self._kv_cache_allocator.is_unmapped:
-            return
-        logger.info("[GMS] Unmapping KV cache")
-        self._kv_cache_allocator.unmap_all_vas()
-        self._kv_cache_allocator.abort()
-
-    def _resume_kv_cache(self) -> None:
-        if not self._kv_cache_allocator.is_unmapped:
-            return
-        logger.info("[GMS] Remapping KV cache")
-        self._kv_cache_allocator.connect(RequestedLockType.RW)
-        self._kv_cache_allocator.reallocate_all_handles(tag="kv_cache")
-        self._kv_cache_allocator.remap_all_vas()
+            logger.info("[GMS] Remapping %s", target_tag)
+            self.allocators[target_tag].connect(_TAG_LOCK_TYPES[target_tag])
+            if target_tag == "kv_cache":
+                # KV cache resumes into a new RW layout epoch, so the handles
+                # must be re-created before the VA range is mapped again.
+                self.allocators[target_tag].reallocate_all_handles(tag=target_tag)
+            self.allocators[target_tag].remap_all_vas()
 
     def finalize_write_mode(self, model: torch.nn.Module) -> None:
         """Finalize write mode: register tensors, commit, and switch to read."""
-        if self._mode != "write":
+        if self.allocators["weights"].granted_lock_type != GrantedLockType.RW:
+            # Read-only import mode never republishes weights.
             return
-        if self._weights_allocator is None:
-            raise RuntimeError("Allocator is None in WRITE mode")
 
-        from gpu_memory_service.integrations.common.utils import finalize_gms_write
-
-        self._imported_weights_bytes = finalize_gms_write(
-            self._weights_allocator, model
+        self.imported_weights_bytes = finalize_gms_write(
+            self.allocators["weights"], model
         )
-        self._mode = "read"
-
-    def set_imported_weights_bytes(self, bytes_count: int) -> None:
-        self._imported_weights_bytes = bytes_count
-
-    def get_imported_weights_bytes(self) -> int:
-        return self._imported_weights_bytes
-
-    def disable(self) -> None:
-        self._disabled = True
-
-    def enable(self) -> None:
-        self._disabled = False

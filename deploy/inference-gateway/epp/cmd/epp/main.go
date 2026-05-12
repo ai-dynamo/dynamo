@@ -38,7 +38,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/gateway-api-inference-extension/cmd/epp/runner"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
+	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 
 	// Dynamo plugins
 	"github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/disagg"

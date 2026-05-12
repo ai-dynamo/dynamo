@@ -947,7 +947,6 @@ mod tests {
     fn create_mock_response_with_logprobs(
         token_logprobs: Vec<ChatCompletionTokenLogprob>,
     ) -> NvCreateChatCompletionStreamResponse {
-        #[expect(deprecated)]
         NvCreateChatCompletionStreamResponse {
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
@@ -964,7 +963,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: Some(FinishReason::Stop),
-                    stop_reason: None,
                     logprobs: Some(ChatChoiceLogprobs {
                         content: Some(token_logprobs),
                         refusal: None,
@@ -984,7 +982,6 @@ mod tests {
     fn create_mock_response_with_multiple_choices(
         choices_logprobs: Vec<Vec<ChatCompletionTokenLogprob>>,
     ) -> NvCreateChatCompletionStreamResponse {
-        #[expect(deprecated)]
         let choices = choices_logprobs
             .into_iter()
             .enumerate()
@@ -1001,7 +998,6 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
                 logprobs: Some(ChatChoiceLogprobs {
                     content: Some(token_logprobs),
                     refusal: None,
@@ -1339,7 +1335,6 @@ mod tests {
     #[test]
     fn test_logprob_extractor_with_missing_data() {
         // Test with choice that has no logprobs
-        #[expect(deprecated)]
         let response = NvCreateChatCompletionStreamResponse {
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test_id".to_string(),
@@ -1356,7 +1351,6 @@ mod tests {
                         reasoning_content: None,
                     },
                     finish_reason: Some(FinishReason::Stop),
-                    stop_reason: None,
                     logprobs: None, // No logprobs
                 }],
                 created: 1234567890,

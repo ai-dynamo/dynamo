@@ -12,6 +12,7 @@ aggregated and disaggregated determinism tests.
 import importlib.util
 import os
 import re
+import tempfile
 import time
 from collections import defaultdict
 from difflib import SequenceMatcher
@@ -528,6 +529,19 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
     params = getattr(request, "param", {})
     cpu_blocks = params.get("cpu_blocks", 100)
     gpu_blocks = params.get("gpu_blocks", 10)
+    block_size = int(params.get("block_size", 16))
+    max_model_len = params.get("max_model_len")
+    if max_model_len is None:
+        env_max_model_len = os.environ.get("KVBM_MAX_MODEL_LEN")
+        if env_max_model_len is not None:
+            max_model_len = int(env_max_model_len)
+        elif gpu_blocks is not None:
+            # vLLM 0.20.1 validates max_model_len against explicit KV block
+            # overrides during engine init. These tests intentionally use tiny
+            # GPU caches, so default the sequence limit to that cache budget.
+            max_model_len = int(gpu_blocks) * block_size
+        else:
+            max_model_len = 8000
     model = params.get(
         "model",
         os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
@@ -570,14 +584,14 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
         "vllm",
         "serve",
         "--block-size",
-        "16",
+        str(block_size),
         "--port",
         str(port),
         "--kv-transfer-config",
         '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}',
         model,
         "--max-model-len",
-        "8000",  # Required to fit on L4 GPU with smaller models
+        str(max_model_len),
     ]
 
     # GPU blocks override
@@ -734,9 +748,15 @@ class TestDeterminism:
         """
         import subprocess
 
-        model = os.environ.get(
-            "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-        )
+        model = llm_server.model_config.model_id
+        # NOTE: with large models (e.g. DeepSeek-V2-Lite), vllm bench decodes all
+        # prompts through the tokenizer before sending requests.  2000 x 4000-token
+        # prompts take ~160s to decode, exceeding KVBM_BENCH_STARTUP_WAIT (120s).
+        # Reduce via KVBM_BENCH_NUM_PROMPTS / KVBM_BENCH_INPUT_LEN if needed.
+        num_prompts = int(os.environ.get("KVBM_BENCH_NUM_PROMPTS", "2000"))
+        input_len = int(os.environ.get("KVBM_BENCH_INPUT_LEN", "4000"))
+        output_len = int(os.environ.get("KVBM_BENCH_OUTPUT_LEN", "180"))
+        concurrency = int(os.environ.get("KVBM_BENCH_CONCURRENCY", "7"))
         bench_cmd = [
             "vllm",
             "bench",
@@ -750,18 +770,20 @@ class TestDeterminism:
             "--dataset-name",
             "random",
             "--random-input-len",
-            "4000",
+            str(input_len),
             "--random-output-len",
-            "180",
+            str(output_len),
             "--max-concurrency",
-            "7",
+            str(concurrency),
             "--num-prompts",
-            "2000",
+            str(num_prompts),
         ]
 
         print(f"\nStarting vllm bench: {' '.join(bench_cmd)}")
-        bench_log = os.path.join(str(Path(".")), "vllm_bench_semantic.log")
-        bench_file = open(bench_log, "w")
+        bench_fd, bench_log = tempfile.mkstemp(
+            suffix=".log", prefix="vllm_bench_semantic_"
+        )
+        bench_file = os.fdopen(bench_fd, "w")
         bench_process = subprocess.Popen(
             bench_cmd,
             stdout=bench_file,

@@ -20,7 +20,7 @@ spec:
         apt update && apt install tmux wget curl jq -y
 
         # Install benchmarking tool
-        pip install aiperf
+        pip install aiperf==0.6.0
 
         # Wait for model to be ready
         echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models..."
