@@ -195,6 +195,48 @@ class _DeferredAbort:
         logging.debug("Deferred abort: background task completed, abort fired")
 
 
+# Fatal CUDA error patterns from PR #8342 — unrecoverable hardware/driver
+# state that should restart the worker rather than being swallowed as a
+# per-request WARN. cudaErrorMemoryAllocation (OOM) is intentionally NOT
+# listed: TRT-LLM aborts the offending request and frees KV, so the engine
+# stays healthy.
+FATAL_CUDA_ERROR_PATTERNS = re.compile(
+    "|".join(
+        [
+            r"cudaErrorNvlinkUncorrectable",
+            r"cudaErrorNoDevice",
+            r"cudaErrorECCUncorrectable",
+            r"cudaErrorIllegalAddress",
+            r"cudaErrorAssert",
+            r"cudaErrorUnknown",
+            r"cudaErrorLaunchTimeout",
+            r"cudaErrorMisalignedAddress",
+            r"cudaErrorHardwareStackError",
+        ]
+    ),
+    re.IGNORECASE,
+)
+
+# Fatal KV-cache-transfer error patterns. When TRT-LLM's NIXL/UCX cache
+# transfer buffer is poisoned by a mid-transfer prefill failure, every
+# subsequent buffer allocation raises this RequestError. Per TRT-LLM
+# source (cpp/tensorrt_llm/batch_manager/baseTransBuffer.cpp), the only
+# safe recovery is a process restart — so escalate it the same way as a
+# fatal CUDA error: cleanup + os._exit(1), let k8s/docker restart the
+# container.
+FATAL_KV_TRANSFER_ERROR_PATTERNS = re.compile(
+    "|".join(
+        [
+            r"Cannot assign cache transfer buffer.*poisoned",
+            r"previous transfer left the buffer pool poisoned",
+            r"Poisoned .* cache transfer buffer",
+            r"process must restart before these memory ranges",
+        ]
+    ),
+    re.IGNORECASE,
+)
+
+
 @dataclass
 class RequestHandlerConfig:
     """
@@ -898,6 +940,41 @@ class HandlerBase(BaseGenerativeHandler):
             logging.critical("Forcing process exit for restart")
             os._exit(1)
 
+    async def _handle_per_request_error(
+        self, error: "RequestError", request_id: str
+    ) -> "AsyncGenerator[dict, None]":
+        """Emit the error chunk for a TRT-LLM RequestError, escalating to
+        worker shutdown if the message matches FATAL_CUDA_ERROR_PATTERNS or
+        FATAL_KV_TRANSFER_ERROR_PATTERNS.
+
+        Modeled on ai-dynamo/dynamo PR #8342. Extended here to also escalate
+        TRT-LLM poisoned-cache-transfer-buffer errors, which TRT-LLM itself
+        documents as requiring a process restart.
+        """
+        error_msg = str(error)
+        fatal_cuda = FATAL_CUDA_ERROR_PATTERNS.search(error_msg) is not None
+        fatal_kv = FATAL_KV_TRANSFER_ERROR_PATTERNS.search(error_msg) is not None
+        if fatal_cuda or fatal_kv:
+            kind = "CUDA" if fatal_cuda else "KV cache transfer"
+            logging.error(
+                f"Fatal {kind} error in request {request_id} "
+                f"(caught as RequestError): {error_msg}",
+                exc_info=True,
+            )
+        else:
+            logging.warning(f"Request {request_id} error: {error_msg}")
+        try:
+            yield {"finish_reason": {"error": error_msg}, "token_ids": []}
+        except Exception as emit_err:  # noqa: BLE001
+            logging.debug(
+                "Failed to emit error chunk for request %s: %s",
+                request_id,
+                emit_err,
+            )
+        if fatal_cuda or fatal_kv:
+            await self._initiate_shutdown(error)
+
+
     async def generate_locally(
         self,
         request: dict,
@@ -1289,13 +1366,12 @@ class HandlerBase(BaseGenerativeHandler):
             return  # Just stop, no error response
 
         # 2. Per-request errors - send to client, don't shutdown
+        #    UNLESS the error indicates fatal/unrecoverable state
+        #    (CUDA hardware/driver fault or poisoned KV-cache transfer
+        #    buffer), in which case escalate to graceful shutdown.
         except RequestError as e:
-            error_msg = str(e)
-            logging.warning(f"Request {request_id} error: {error_msg}")
-            yield {
-                "finish_reason": {"error": error_msg},
-                "token_ids": [],
-            }
+            async for chunk in self._handle_per_request_error(e, request_id):
+                yield chunk
 
         # 3. EngineShutdown - let it propagate to the Rust bridge
         except EngineShutdown:
