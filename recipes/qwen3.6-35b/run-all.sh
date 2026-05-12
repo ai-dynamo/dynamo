@@ -14,8 +14,8 @@
 #   ./run-all.sh -n <namespace> --hw gb200         # GB200
 #   ./run-all.sh -n <namespace> --hw gb200 --skip-prep   # already PVC/download/dataset-ready
 #
-# Prep step (PVC + model download + data gen) runs once via the vllm-serve
-# wrapper before the first deploy unless --skip-prep is passed.
+# Prep step (PVC + model download + data gen) runs once before the first
+# deploy unless --skip-prep is passed.
 set -euo pipefail
 
 NAMESPACE=""
@@ -37,6 +37,9 @@ if [[ -z "$NAMESPACE" ]]; then
 fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+DRIVER="$HERE/run-benchmark.sh"
+CONFIGS=(vllm-serve dynamo-fd dynamo-fd-ec)
+
 TS_DIR="$(date +%m-%d)"
 SUMMARY_DIR="$HOME/workspace/dynamo-tmp/logs/${TS_DIR}/qwen36-fp8-${HW}"
 mkdir -p "$SUMMARY_DIR"
@@ -44,31 +47,21 @@ RUN_LOG="$SUMMARY_DIR/run-all.log"
 echo "[run-all] hw=$HW namespace=$NAMESPACE" | tee -a "$RUN_LOG"
 echo "[run-all] summary dir: $SUMMARY_DIR" | tee -a "$RUN_LOG"
 
-prep() {
-  echo "[prep] PVC + model-download + data-gen via vllm-serve wrapper" | tee -a "$RUN_LOG"
-  "$HERE/vllm-serve/run-benchmark.sh" -n "$NAMESPACE" --hw "$HW" --step pvc 2>&1 | tee -a "$RUN_LOG"
-  "$HERE/vllm-serve/run-benchmark.sh" -n "$NAMESPACE" --hw "$HW" --step download 2>&1 | tee -a "$RUN_LOG"
-  "$HERE/vllm-serve/run-benchmark.sh" -n "$NAMESPACE" --hw "$HW" --step dataset 2>&1 | tee -a "$RUN_LOG"
-}
-
-# $1 = config dir name (vllm-serve | dynamo-fd | dynamo-fd-ec)
-run_config() {
-  local cfg="$1"
-  echo "" | tee -a "$RUN_LOG"
-  echo "========== [$cfg] ==========" | tee -a "$RUN_LOG"
-  "$HERE/$cfg/run-benchmark.sh" -n "$NAMESPACE" --hw "$HW" --step deploy   2>&1 | tee -a "$RUN_LOG"
-  "$HERE/$cfg/run-benchmark.sh" -n "$NAMESPACE" --hw "$HW" --step bench    2>&1 | tee -a "$RUN_LOG"
-  "$HERE/$cfg/run-benchmark.sh" -n "$NAMESPACE" --hw "$HW" --step retrieve 2>&1 | tee -a "$RUN_LOG"
-  "$HERE/$cfg/run-benchmark.sh" -n "$NAMESPACE" --hw "$HW" --step clean    2>&1 | tee -a "$RUN_LOG"
-}
-
+# Prep is config-agnostic; pick any config to source so config.env loads cleanly.
 if [[ "$SKIP_PREP" != "1" ]]; then
-  prep
+  for step in pvc download dataset; do
+    echo "[prep] $step" | tee -a "$RUN_LOG"
+    "$DRIVER" -n "$NAMESPACE" --hw "$HW" --config vllm-serve --step "$step" 2>&1 | tee -a "$RUN_LOG"
+  done
 fi
 
-run_config vllm-serve
-run_config dynamo-fd
-run_config dynamo-fd-ec
+for cfg in "${CONFIGS[@]}"; do
+  echo "" | tee -a "$RUN_LOG"
+  echo "========== [$cfg] ==========" | tee -a "$RUN_LOG"
+  for step in deploy bench retrieve clean; do
+    "$DRIVER" -n "$NAMESPACE" --hw "$HW" --config "$cfg" --step "$step" 2>&1 | tee -a "$RUN_LOG"
+  done
+done
 
 echo "" | tee -a "$RUN_LOG"
 echo "[run-all] all three configs done." | tee -a "$RUN_LOG"

@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # aiperf benchmark pod for the dynamo-fd (frontend-decoding, no EC)
-# config. Identical to dynamo-serve/agg-h100-fd-ec/perf.yaml except
-# DGD name, ARTIFACT_BASE_DIR run-label, and pod labels.
+# config. Identical to dynamo-fd-ec/perf.yaml except FRONTEND service
+# name, RUN_DIR run-label, and pod metadata.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -81,7 +81,7 @@ spec:
             --extra-inputs "ignore_eos:true"
 
           # Drop the multi-GB inputs.json by default (KEEP_INPUTS_JSON=1
-          # overrides). Same rationale as vllm-serve/agg-h100/perf.yaml.
+          # overrides). Same rationale as vllm-serve/perf.yaml.
           if [[ "${KEEP_INPUTS_JSON:-}" != "1" ]]; then
             rm -fv "${RUN_DIR}/inputs.json" || true
           else

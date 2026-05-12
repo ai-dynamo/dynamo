@@ -38,12 +38,13 @@ kubectl get nodes -L kubernetes.io/arch -L nvidia.com/gpu.product \
   | awk '/arm64/ && /GB200/'
 ```
 
-Then pick a target with `--hw h100` or `--hw gb200`:
+Then pick a target with `--hw h100` or `--hw gb200`, and a config with
+`--config {vllm-serve,dynamo-fd,dynamo-fd-ec}`:
 
 ```bash
-./vllm-serve/run-benchmark.sh   -n "$NAMESPACE" --hw gb200
-./dynamo-fd/run-benchmark.sh    -n "$NAMESPACE" --hw gb200
-./dynamo-fd-ec/run-benchmark.sh -n "$NAMESPACE" --hw gb200
+./run-benchmark.sh -n "$NAMESPACE" --hw gb200 --config vllm-serve
+./run-benchmark.sh -n "$NAMESPACE" --hw gb200 --config dynamo-fd
+./run-benchmark.sh -n "$NAMESPACE" --hw gb200 --config dynamo-fd-ec
 ```
 
 Or run all three sequentially + cleanup between configs:
@@ -140,17 +141,18 @@ Our sliding-window dataset writes one row per `(user, turn)` with
 `session_id=user_<N>`; PR 824 is what makes aiperf's `single_turn`
 mode honor that ordering so prefix-cache hits across turns are real.
 
-The pin lives in `vllm-serve/agg-h100/perf.yaml` (`AIPERF_GIT_REF`
-env var). Bump when you want newer aiperf fixes.
+The pin lives in `<config>/perf.yaml` (`AIPERF_GIT_REF` env var, identical
+across all three configs). Bump when you want newer aiperf fixes.
 
 ## Directory layout
 
 ```text
 qwen3.6-35b/
 ├── README.md
+├── run-benchmark.sh            # Unified driver — branches on --config/--hw
 ├── run-all.sh                  # Sequential 3-config orchestrator
 ├── compare.py                  # 3-way comparison (throughput, TTFT, ITL)
-├── hw/                         # Shared across all three configs
+├── hw/                         # Hardware axis (shared across all configs)
 │   ├── h100.env
 │   └── gb200.env
 ├── model-cache/
@@ -159,17 +161,17 @@ qwen3.6-35b/
 ├── data-gen/
 │   └── generate-datasets-job.yaml
 ├── vllm-serve/
+│   ├── config.env              # Config-axis metadata (kind, names)
 │   ├── deploy.yaml             # Templated (image, nodeSelector, tolerations)
-│   ├── perf.yaml               # Templated
-│   └── run-benchmark.sh
+│   └── perf.yaml               # Templated
 ├── dynamo-fd/
+│   ├── config.env
 │   ├── deploy.yaml             # DynamoGraphDeployment, frontend-decoding ON
-│   ├── perf.yaml
-│   └── run-benchmark.sh
+│   └── perf.yaml
 └── dynamo-fd-ec/
+    ├── config.env
     ├── deploy.yaml             # DynamoGraphDeployment, FD + embedding cache
-    ├── perf.yaml
-    └── run-benchmark.sh
+    └── perf.yaml
 ```
 
 ## Quick start
@@ -190,12 +192,12 @@ python3 compare.py ~/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen36-fp8-${HW}/
 Or step-by-step for a single config:
 
 ```bash
-./vllm-serve/run-benchmark.sh   -n ${NAMESPACE} --hw ${HW}
-./dynamo-fd/run-benchmark.sh    -n ${NAMESPACE} --hw ${HW}
-./dynamo-fd-ec/run-benchmark.sh -n ${NAMESPACE} --hw ${HW}
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config vllm-serve
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd
+./run-benchmark.sh -n ${NAMESPACE} --hw ${HW} --config dynamo-fd-ec
 ```
 
-Each `run-benchmark.sh` accepts `--step {pvc|download|dataset|deploy|bench|retrieve|clean}` for granular control.
+`run-benchmark.sh` accepts `--step {pvc|download|dataset|deploy|bench|retrieve|clean}` for granular control. `pvc`, `download`, and `dataset` are config-agnostic (any `--config` works to run them once).
 
 ## Notes
 
