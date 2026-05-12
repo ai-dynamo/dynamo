@@ -99,6 +99,14 @@ spec:
             echo "KEEP_INPUTS_JSON=1 → retaining $(du -sh ${RUN_DIR}/inputs.json 2>/dev/null | cut -f1) inputs.json"
           fi
 
+          # Sentinel file consumed by run-benchmark.sh bench() to detect
+          # actual completion. Necessary because `kubectl logs -f` is
+          # not a reliable synchronization primitive — under transient
+          # teleport / network hiccups it can exit early, causing the
+          # driver to race past into retrieve+clean while aiperf is
+          # still mid-run and produce empty artifacts.
+          touch "${RUN_DIR}/.aiperf-done"
+
           echo "Run complete. Artifacts in ${RUN_DIR}"
           sleep 3600
       env:

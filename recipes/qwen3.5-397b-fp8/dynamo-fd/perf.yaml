@@ -89,6 +89,11 @@ spec:
             echo "KEEP_INPUTS_JSON=1 → retaining $(du -sh ${RUN_DIR}/inputs.json 2>/dev/null | cut -f1) inputs.json"
           fi
 
+          # See sibling vllm-serve/perf.yaml for the rationale: this
+          # sentinel is what run-benchmark.sh bench() polls instead of
+          # trusting `kubectl logs -f` to stay connected.
+          touch "${RUN_DIR}/.aiperf-done"
+
           echo "Run complete. Artifacts in ${RUN_DIR}"
           sleep 3600
       env:

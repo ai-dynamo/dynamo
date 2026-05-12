@@ -172,8 +172,28 @@ bench() {
   $K delete pod "$BENCH_POD" --ignore-not-found
   APPLY_TPL "$CONFIG_DIR/perf.yaml"
   $K wait --for=condition=Ready "pod/$BENCH_POD" --timeout=300s
-  echo "[bench] streaming logs — Ctrl-C to detach (the run continues in pod)"
-  $K logs -f "$BENCH_POD" || true
+  echo "[bench] pod Ready; polling for .aiperf-done sentinel (max ~50 min)"
+  # Don't trust `kubectl logs -f` as a synchronization primitive — under
+  # transient teleport / network hiccups it exits early and we'd race
+  # past into retrieve+clean with empty artifacts (lost a vllm-serve
+  # run that way once). The bench Pod writes a /perf-cache/artifacts/.../
+  # .aiperf-done sentinel after aiperf finishes and the inputs.json
+  # cleanup runs (see perf.yaml). Poll for it via `kubectl exec ls`.
+  local sentinel="/perf-cache/artifacts/qwen35_fp8/${CONFIG}/.aiperf-done"
+  local deadline=$((SECONDS + 3000))   # 50 min
+  while (( SECONDS < deadline )); do
+    if $K exec "$BENCH_POD" -- test -f "$sentinel" 2>/dev/null; then
+      echo "[bench] sentinel observed at $sentinel — aiperf done"
+      return 0
+    fi
+    # Surface progress every minute by tailing the pod's stdout. This
+    # is logging-only — the synchronization is the sentinel poll above.
+    $K logs "$BENCH_POD" --tail=3 2>/dev/null || true
+    sleep 60
+  done
+  echo "ERROR: bench sentinel $sentinel did not appear within 50 min." >&2
+  echo "       Pod is left running for inspection; not running retrieve." >&2
+  exit 2
 }
 
 retrieve() {
