@@ -158,10 +158,17 @@ runs:
           BASELINE_SBOM_FILE="cuda-dl-base@8315e245.cdx.json"
         fi
 
+        # Source archival mirrors shared-build-image.yml's pattern: only
+        # gather sources on push / release / workflow_dispatch (the events
+        # whose images we'd OSRB-submit), skip on PRs to keep build time
+        # bounded.
+        ENABLE_SOURCE_ARCHIVAL="${{ (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') && 'true' || 'false' }}"
+
         docker buildx build --push \
             --platform ${{ steps.settings.outputs.build_platforms }} \
             --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
             --build-arg BASELINE_SBOM_FILE="${BASELINE_SBOM_FILE}" \
+            --build-arg ENABLE_SOURCE_ARCHIVAL="${ENABLE_SOURCE_ARCHIVAL}" \
             --build-context snapshot=../snapshot \
             --build-context compliance=../../container/compliance \
             ${TARGET_FLAG} \
@@ -219,6 +226,35 @@ runs:
             --progress=plain \
             -f Dockerfile .
 
+    # /sources/ extraction: post-merge / RC / release only. PR builds skip
+    # to keep CI time bounded; the source archive is for OSRB submission at
+    # release boundaries, not per-PR.
+    - name: Extract /sources/ (post-merge / RC / release only)
+      if: ${{ (inputs.component == 'operator' || inputs.component == 'snapshot') && (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') }}
+      shell: bash
+      working-directory: ./deploy/${{ inputs.component }}
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        mkdir -p /tmp/sources
+        BASELINE_SBOM_FILE=""
+        if [[ "${{ inputs.component }}" == "operator" ]]; then
+          BASELINE_SBOM_FILE="go@e86c88d0.cdx.json"
+        elif [[ "${{ inputs.component }}" == "snapshot" ]]; then
+          BASELINE_SBOM_FILE="cuda-dl-base@8315e245.cdx.json"
+        fi
+        docker buildx build \
+            --platform ${{ steps.settings.outputs.lint_platform }} \
+            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            --build-arg BASELINE_SBOM_FILE="${BASELINE_SBOM_FILE}" \
+            --build-arg ENABLE_SOURCE_ARCHIVAL=true \
+            --build-context snapshot=../snapshot \
+            --build-context compliance=../../container/compliance \
+            --target sources_archive \
+            --output type=local,dest=/tmp/sources \
+            --progress=plain \
+            -f Dockerfile .
+
     - name: Upload /legal/ NOTICES artifact
       if: ${{ (inputs.component == 'operator' || inputs.component == 'snapshot') && always() }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -234,3 +270,11 @@ runs:
         name: compliance-${{ inputs.component }}-${{ inputs.image_tag }}-sboms
         path: /tmp/sboms/
         retention-days: 90
+
+    - name: Upload /sources/ tarball (post-merge / RC / release only)
+      if: ${{ (inputs.component == 'operator' || inputs.component == 'snapshot') && (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') && always() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: compliance-${{ inputs.component }}-${{ inputs.image_tag }}-sources
+        path: /tmp/sources/sources.zip
+        retention-days: 365   # OSRB submissions retain longer than NOTICES/SBOMs

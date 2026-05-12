@@ -361,5 +361,43 @@ FROM scratch AS legal
 COPY --from=licenses /legal/ /
 
 
+#######################################
+########## Compliance: sources ########
+#######################################
+#
+# Collects source archives for trtllm's third-party deps on top of the
+# trtllm-runtime baseline. Same shape as dynamo_runtime.Dockerfile's
+# sources_collect / sources_archive. Gated on ENABLE_SOURCE_ARCHIVAL.
+
+FROM runtime_pre AS sources_collect
+
+USER root
+RUN mkdir -p /sources /opt/compliance /opt/native-sources /opt/dynamo-vendor-full
+COPY --chown=root:0 container/compliance /opt/compliance
+ENV PYTHONPATH=/opt
+COPY --from=wheel_builder /tmp/native-sources/ /opt/native-sources/
+COPY --from=wheel_builder /tmp/dynamo-vendor-full/ /opt/dynamo-vendor-full/
+
+ARG ENABLE_SOURCE_ARCHIVAL=false
+ARG BASELINE_SBOM_FILE="{{ context[framework][device_key].baseline_sbom | default('') }}"
+RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+        python3 -m compliance.collect_sources \
+            --ecosystem dpkg --ecosystem rust --ecosystem native \
+            --output-zip /sources.zip \
+            --sources-root /sources \
+            --native-source-dir /opt/native-sources \
+            --rust-venv ${VIRTUAL_ENV} \
+            --rust-vendor-full /opt/dynamo-vendor-full \
+            ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
+            -v ; \
+    else \
+        : > /sources.zip ; \
+    fi
+
+
+FROM scratch AS sources_archive
+COPY --from=sources_collect /sources.zip /sources.zip
+
+
 FROM runtime_pre AS runtime
 COPY --from=licenses /legal /legal

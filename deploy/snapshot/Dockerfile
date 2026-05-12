@@ -87,6 +87,17 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
     git -c user.email=build@dynamo -c user.name=build commit -q -m sbom && \
     cyclonedx-gomod app -licenses -json -main ./cmd/agent -output /sbom-go.cdx.json .
 
+# Compliance source archival: vendor third-party Go modules. Same pattern
+# as operator's builder. First-party (github.com/ai-dynamo/) pruned later
+# in collect_sources.py.
+ARG ENABLE_SOURCE_ARCHIVAL=false
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+        go mod vendor -o /tmp/go-vendor ; \
+    else \
+        mkdir -p /tmp/go-vendor ; \
+    fi
+
 # =============================================================================
 # Stage: CUDA checkpoint helper builder
 # =============================================================================
@@ -259,6 +270,42 @@ COPY --from=licenses /sboms/ /
 # =============================================================================
 FROM scratch AS legal
 COPY --from=licenses /legal/ /
+
+
+# =============================================================================
+# Stage: Compliance: sources
+# =============================================================================
+# Collects third-party Go module sources + preserved native source tarballs
+# for OSRB submission. Output is a separate sources zip cross-referenced in
+# the OSRB bundle's build-provenance.json; never COPY'd into the runtime.
+FROM python:3.12-slim AS sources_collect
+WORKDIR /
+RUN mkdir -p /sources /opt/compliance /opt/go-vendor /opt/native-sources
+COPY --from=compliance . /opt/compliance
+ENV PYTHONPATH=/opt
+COPY --from=builder /tmp/go-vendor/ /opt/go-vendor/
+# Native source tarballs (CRIU sources from criu-builder, cuda-checkpoint
+# clone from criu-builder). Preserve them in /tmp/native-sources/ in the
+# respective builder stages so this COPY succeeds.
+COPY --from=criu-builder /tmp/criu/ /opt/native-sources/criu/
+COPY --from=criu-builder /tmp/cuda-checkpoint/ /opt/native-sources/cuda-checkpoint/
+
+ARG ENABLE_SOURCE_ARCHIVAL=false
+RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+        python3 -m compliance.collect_sources \
+            --ecosystem go --ecosystem native \
+            --output-zip /sources.zip \
+            --sources-root /sources \
+            --go-vendor-dir /opt/go-vendor \
+            --native-source-dir /opt/native-sources \
+            -v ; \
+    else \
+        : > /sources.zip ; \
+    fi
+
+
+FROM scratch AS sources_archive
+COPY --from=sources_collect /sources.zip /sources.zip
 
 
 # =============================================================================

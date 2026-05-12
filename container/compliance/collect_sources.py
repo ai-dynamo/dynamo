@@ -324,6 +324,65 @@ def collect_rust_sources(
     return copied
 
 
+# First-party Go module prefixes. Our own code; source public on GitHub.
+_FIRST_PARTY_GO_PREFIXES = ("github.com/ai-dynamo/",)
+
+
+def collect_go_sources(go_vendor_dir: Path, output_dir: Path) -> int:
+    """Copy third-party Go module sources from a `go mod vendor` tree.
+
+    The simplest correct approach: copy the entire vendor tree, then
+    delete any first-party subtrees. Avoids fragile module-root
+    detection heuristics — `go mod vendor` already produces a clean
+    directory structure where module paths map directly to filesystem
+    paths.
+
+    Operator + snapshot don't sit on a baseline that contains Go
+    modules (distroless/go and cuda-dl-base ship Go binaries, not
+    module sources), so the first-party filter is the only filter
+    needed.
+
+    Returns the number of top-level Go module-path prefixes copied
+    (approximate — used for logging).
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if not go_vendor_dir.is_dir():
+        logger.warning(
+            "Go vendor tree not found at %s. Did the Go builder run "
+            "`go mod vendor` with ENABLE_SOURCE_ARCHIVAL=true?",
+            go_vendor_dir,
+        )
+        return 0
+
+    if output_dir.exists() and any(output_dir.iterdir()):
+        # Defensive: shutil.copytree below requires the destination not
+        # to exist. We mkdir'd output_dir; clear it if a previous run
+        # left contents.
+        shutil.rmtree(output_dir)
+    shutil.copytree(go_vendor_dir, output_dir)
+
+    # Prune first-party subtrees. The first-party prefix is a directory
+    # path under output_dir — e.g. github.com/ai-dynamo/.
+    pruned = 0
+    for prefix in _FIRST_PARTY_GO_PREFIXES:
+        fp_root = output_dir / prefix.rstrip("/")
+        if fp_root.is_dir():
+            shutil.rmtree(fp_root)
+            pruned += 1
+
+    # Approximate count of remaining modules: every leaf directory
+    # under output_dir is one module's source tree. Cheap to compute,
+    # useful for logs.
+    module_dirs = [d for d in output_dir.rglob("*") if d.is_dir() and any(c.suffix == ".go" for c in d.iterdir() if c.is_file())]
+    logger.info(
+        "Go sources collected: ~%d module dirs (pruned %d first-party prefixes from %s)",
+        len(module_dirs),
+        pruned,
+        go_vendor_dir,
+    )
+    return len(module_dirs)
+
+
 def collect_native_sources(workspace_native_dir: Path, output_dir: Path) -> int:
     """Copy native source tarballs preserved by builder stages.
 
@@ -431,6 +490,16 @@ def main(argv: list[str] | None = None) -> int:
             "shipped-crates set to produce the third-party-only output."
         ),
     )
+    parser.add_argument(
+        "--go-vendor-dir",
+        type=Path,
+        default=Path("/opt/go-vendor"),
+        help=(
+            "Go vendor tree produced by `go mod vendor` in the Go builder "
+            "stage. First-party modules (github.com/ai-dynamo/...) are "
+            "pruned from the output; everything else is copied as-is."
+        ),
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -462,6 +531,10 @@ def main(argv: list[str] | None = None) -> int:
     if "rust" in ecosystems:
         counts["rust"] = collect_rust_sources(
             args.rust_venv, args.rust_vendor_full, args.sources_root / "rust"
+        )
+    if "go" in ecosystems:
+        counts["go"] = collect_go_sources(
+            args.go_vendor_dir, args.sources_root / "go"
         )
     if "native" in ecosystems:
         counts["native"] = collect_native_sources(
