@@ -32,6 +32,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
@@ -7572,6 +7573,14 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 				"engine clique %q main container must be shaped as a snapshot restore target", clique.Name)
 			assert.Equal(t, snapshotprotocol.GMSCompletionFileModeShared, clique.Annotations[snapshotprotocol.GMSCompletionFileModeAnnotation],
 				"engine clique %q must wait for the shared inter-pod GMS loader sentinel", clique.Name)
+			mountsByPath := map[string]corev1.VolumeMount{}
+			for _, mount := range mainContainer.VolumeMounts {
+				mountsByPath[mount.MountPath] = mount
+			}
+			assert.Contains(t, mountsByPath, gmsSharedMountPath,
+				"engine clique %q must mount the inter-pod GMS socket path", clique.Name)
+			assert.Contains(t, mountsByPath, gms.SharedMountPath,
+				"engine clique %q must preserve the checkpoint source GMS socket path", clique.Name)
 		}
 	}
 	assert.True(t, sawGMS, "test setup should produce at least one GMS clique")

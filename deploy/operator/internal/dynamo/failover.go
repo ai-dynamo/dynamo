@@ -233,6 +233,11 @@ func augmentEngineForGMS(podSpec *corev1.PodSpec, rank int32, isInterPodFailover
 	removeEnvVar(c, "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS")
 
 	applyGMSSharedResources(podSpec, c, rank)
+	// CRIU restores a process that was checkpointed with the intra-pod GMS
+	// socket path in its mount table and environment.
+	_, checkpointCompatMount := gmsSharedVolume(rank)
+	checkpointCompatMount.MountPath = gmsruntime.SharedMountPath
+	c.VolumeMounts = append(c.VolumeMounts, checkpointCompatMount)
 	if isInterPodFailover {
 		podSpec.RestartPolicy = corev1.RestartPolicyNever
 	}
