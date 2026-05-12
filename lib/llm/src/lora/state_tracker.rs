@@ -5,6 +5,29 @@
 //!
 //! Tracks the runtime state of LoRA adapters across workers by watching MDC discovery
 //! events. Maintains which LoRAs are loaded on which workers and per-worker LoRA capacity.
+//!
+//! ## MDC Event Model
+//!
+//! Each MDC entry corresponds to a single `(worker, lora_name)` pair carrying one
+//! `LoraInfo`. The tracker handles three discrete event types:
+//!
+//! - `handle_mdc_addition`: a worker registered (or re-published) a LoRA adapter.
+//! - `handle_mdc_removal`: a worker unregistered one specific LoRA adapter.
+//! - `handle_worker_removal`: a worker left the cluster (drops all of its LoRAs).
+//!
+//! `handle_mdc_addition` is purely additive and idempotent — re-publishing the same
+//! `(worker, lora_name)` updates the stored `LoraInfo` in place. State reconciliation
+//! when a worker drops an adapter is the responsibility of the corresponding removal
+//! event, not the addition handler.
+//!
+//! ## Worker Capacity Invariant
+//!
+//! `LoraInfo::max_gpu_lora_count` is a *worker-level* property (the engine's
+//! `--max-loras` setting, see DEP §9), but is duplicated into every `LoraInfo` a
+//! worker publishes for convenience. All `LoraInfo` values coming from the same
+//! worker MUST carry the same `max_gpu_lora_count`. If a mismatch is observed
+//! across updates, we log a warning and adopt the latest value — but this should
+//! never happen with a correctly-configured worker.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -42,8 +65,19 @@ impl LoraStateTracker {
         }
     }
 
-    /// Handle an MDC update event: a worker published an MDC with LoRA info.
-    pub fn handle_mdc_update(&self, worker: WorkerWithDpRank, lora: &LoraInfo) {
+    /// Handle an MDC addition event: a worker registered (or re-published) a LoRA adapter.
+    ///
+    /// Each MDC entry uniquely identifies a `(worker, lora_name)` pair, so this
+    /// function is purely additive and idempotent: re-publishing the same pair
+    /// updates the stored `LoraInfo` in place. State reconciliation when a worker
+    /// drops an adapter is handled by [`handle_mdc_removal`](Self::handle_mdc_removal),
+    /// and full worker departure by [`handle_worker_removal`](Self::handle_worker_removal).
+    ///
+    /// `lora.max_gpu_lora_count` is treated as a worker-level capacity: see the
+    /// "Worker Capacity Invariant" note in the module docs. A mismatch against a
+    /// previously-recorded capacity for the same worker is logged at warn level
+    /// and the latest value is adopted.
+    pub fn handle_mdc_addition(&self, worker: WorkerWithDpRank, lora: &LoraInfo) {
         let lora_name = lora.name.clone();
 
         self.loaded_locations
@@ -81,7 +115,7 @@ impl LoraStateTracker {
             dp_rank = worker.dp_rank,
             lora_name = lora.name,
             capacity = capacity,
-            "LoRA state tracker: MDC added"
+            "LoRA state tracker: MDC addition"
         );
     }
 
@@ -251,7 +285,7 @@ mod tests {
         let w1 = make_worker(1);
         let lora = make_lora_info("lora-math", Some(8));
 
-        tracker.handle_mdc_update(w1, &lora);
+        tracker.handle_mdc_addition(w1, &lora);
 
         assert!(!tracker.is_empty());
         assert_eq!(tracker.list_workers().len(), 1);
@@ -268,8 +302,8 @@ mod tests {
         let w2 = make_worker(2);
         let lora = make_lora_info("lora-code", Some(4));
 
-        tracker.handle_mdc_update(w1, &lora);
-        tracker.handle_mdc_update(w2, &lora);
+        tracker.handle_mdc_addition(w1, &lora);
+        tracker.handle_mdc_addition(w2, &lora);
 
         let loaded = tracker.get_loaded_workers("lora-code");
         assert_eq!(loaded.len(), 2);
@@ -284,7 +318,7 @@ mod tests {
         let w1 = make_worker(1);
         let lora = make_lora_info("lora-math", Some(4));
 
-        tracker.handle_mdc_update(w1, &lora);
+        tracker.handle_mdc_addition(w1, &lora);
         assert!(tracker.is_loaded("lora-math", &w1));
 
         tracker.handle_mdc_removal(w1, "lora-math");
@@ -299,8 +333,8 @@ mod tests {
         let lora1 = make_lora_info("lora-a", Some(4));
         let lora2 = make_lora_info("lora-b", Some(4));
 
-        tracker.handle_mdc_update(w1, &lora1);
-        tracker.handle_mdc_update(w1, &lora2);
+        tracker.handle_mdc_addition(w1, &lora1);
+        tracker.handle_mdc_addition(w1, &lora2);
 
         assert_eq!(tracker.loaded_count(&w1), 2);
         assert_eq!(tracker.free_slots(&w1), 2);
@@ -317,8 +351,8 @@ mod tests {
         let lora1 = make_lora_info("lora-a", Some(8));
         let lora2 = make_lora_info("lora-b", Some(8));
 
-        tracker.handle_mdc_update(w1, &lora1);
-        tracker.handle_mdc_update(w1, &lora2);
+        tracker.handle_mdc_addition(w1, &lora1);
+        tracker.handle_mdc_addition(w1, &lora2);
 
         let usage = tracker.get_worker_slot_usage();
         assert_eq!(usage.get(&w1), Some(&(2, 8)));
@@ -332,11 +366,11 @@ mod tests {
 
         // w1 has capacity 1, load 1 lora → 0 free slots
         let lora1 = make_lora_info("lora-a", Some(1));
-        tracker.handle_mdc_update(w1, &lora1);
+        tracker.handle_mdc_addition(w1, &lora1);
 
         // w2 has capacity 4, load 1 lora → 3 free slots
         let lora2 = make_lora_info("lora-b", Some(4));
-        tracker.handle_mdc_update(w2, &lora2);
+        tracker.handle_mdc_addition(w2, &lora2);
 
         let free = tracker.workers_with_free_slots();
         assert_eq!(free.len(), 1);
