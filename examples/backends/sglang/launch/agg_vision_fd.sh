@@ -16,6 +16,9 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 MODEL="Qwen/Qwen3-VL-2B-Instruct"
 CHAT_TEMPLATE=""
+# SGLang KV-cache page size. Default 16; must be 1 for hybrid Mamba models
+# (e.g. Qwen3.5-0.8B) whose MambaRadixCache asserts page_size == 1.
+PAGE_SIZE=16
 ENABLE_OTEL=false
 
 EXTRA_ARGS=()
@@ -29,6 +32,10 @@ while [[ $# -gt 0 ]]; do
             CHAT_TEMPLATE="$2"
             shift 2
             ;;
+        --page-size)
+            PAGE_SIZE="$2"
+            shift 2
+            ;;
         --enable-otel)
             ENABLE_OTEL=true
             shift
@@ -38,6 +45,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --model-path <name>      Specify model (default: $MODEL)"
             echo "  --chat-template <name>   Specify SGLang chat template (default: $CHAT_TEMPLATE)"
+            echo "  --page-size <n>          SGLang KV-cache page size (default: $PAGE_SIZE; must be 1 for Mamba)"
             echo "  --enable-otel            Enable OpenTelemetry tracing"
             echo "  -h, --help               Show this help message"
             echo ""
@@ -97,7 +105,7 @@ python3 -m dynamo.sglang \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   "${TEMPLATE_ARGS[@]}" \
-  --page-size 16 \
+  --page-size "$PAGE_SIZE" \
   --tp 1 \
   --trust-remote-code \
   --skip-tokenizer-init \
