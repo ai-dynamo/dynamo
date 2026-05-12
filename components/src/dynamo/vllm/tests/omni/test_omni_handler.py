@@ -82,7 +82,9 @@ class TestBuildEngineInputs:
         assert inputs.request_type == RequestType.CHAT_COMPLETION
         assert inputs.prompt["prompt"] == "hello"
         assert len(inputs.sampling_params_list) == 1
-        assert inputs.sampling_params_list[0].output_kind == RequestOutputKind.FINAL_ONLY
+        assert (
+            inputs.sampling_params_list[0].output_kind == RequestOutputKind.FINAL_ONLY
+        )
 
     @pytest.mark.asyncio
     async def test_text_audio_chat_completion_uses_vllm_omni_preprocessor(self):
@@ -110,7 +112,9 @@ class TestBuildEngineInputs:
         inputs = await handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)
 
         assert inputs.prompt["prompt"] == "<rendered>hello"
-        assert inputs.sampling_params_list[0].output_kind == RequestOutputKind.FINAL_ONLY
+        assert (
+            inputs.sampling_params_list[0].output_kind == RequestOutputKind.FINAL_ONLY
+        )
         handler._new_omni_chat_preprocessor.assert_called_once_with(
             handler.engine_client.model_config
         )
