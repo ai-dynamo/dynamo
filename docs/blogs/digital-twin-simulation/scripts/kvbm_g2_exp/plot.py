@@ -219,7 +219,7 @@ def main():
     add_title(
         fig,
         "Modeling KVBM's G2 Host-Memory Cache Tier",
-        sub_subtitle="B200 MiniMax-M2.5   TP=4   ISL/OSL 1K/1K   Mooncake trace, 1 worker offline",
+        sub_subtitle="B200 MiniMax-M2.5   TP=4   1 worker   Mooncake trace   offline replay",
     )
 
     out = os.path.abspath(args.out)
