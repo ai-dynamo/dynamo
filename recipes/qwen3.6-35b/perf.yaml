@@ -1,37 +1,36 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# aiperf benchmark pod for Qwen3.6-35B-A3B-FP8 vllm-serve baseline.
-# Installs aiperf from source pinned at AIPERF_GIT_REF — must include
-# https://github.com/ai-dynamo/aiperf/pull/824 ("add session_id to
-# single-turn for causal ordering"). Our sliding-window jsonl writes
-# session_id=user_<N> per row; PR 824 is what makes single_turn mode
-# honor that ordering so prefix-cache hits across the 8 turns of a
-# given user actually land.
+# Shared aiperf benchmark pod template for all 3 configs (vllm-serve,
+# dynamo-fd, dynamo-fd-ec). run-benchmark.sh exports the per-config
+# values (${BENCH_POD}, ${BENCH_FRONTEND}, ${BENCH_RUN_LABEL}) plus
+# the per-hardware ones (${HW_NODE_SELECTOR}, ${HW_TOLERATIONS}) and
+# pipes this file through `envsubst` before `kubectl apply`.
+#
+# AIPERF_GIT_REF must include https://github.com/ai-dynamo/aiperf/pull/824
+# ("add session_id to single-turn for causal ordering"). Our
+# sliding-window jsonl writes session_id=user_<N> per row; PR 824 is
+# what makes single_turn mode honor that ordering so prefix-cache
+# hits across the 8 turns of a given user actually land.
 apiVersion: v1
 kind: Pod
 metadata:
-  name: qwen36-bench
+  name: ${BENCH_POD}
   labels:
     app.kubernetes.io/name: qwen3.6-35b
     app.kubernetes.io/component: benchmark
     app.kubernetes.io/managed-by: dynamo-recipe
 spec:
   restartPolicy: Never
-  # Hostname pin + toleration come from hw/${HW}.env — same target as
-  # the vllm-serve Deployment so the bench pod sits on the same node
-  # (minimal TCP latency to the frontend).
+  # Hostname pin + toleration come from hw/${HW}.env — same target
+  # as the deploy target (vllm-serve Deployment, or DGD Frontend +
+  # Worker). That same-node guarantee is what we actually rely on;
+  # we deliberately do NOT add a podAffinity rule:
+  #   * vllm-serve vs DGD pods carry different label schemas, so a
+  #     single rule wouldn't cover all three configs.
+  #   * podAffinity would be a no-op anyway given the hostname pin.
   nodeSelector: ${HW_NODE_SELECTOR}
   tolerations: ${HW_TOLERATIONS}
-  # Belt-and-suspenders podAffinity (no-op given hostname pin).
-  affinity:
-    podAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        - labelSelector:
-            matchLabels:
-              app.kubernetes.io/name: qwen3.6-35b
-              app.kubernetes.io/component: vllm-serve
-          topologyKey: kubernetes.io/hostname
   containers:
     - name: benchmark
       image: python:3.11
@@ -45,8 +44,9 @@ spec:
 
           apt update && apt install -y --no-install-recommends curl jq git
 
-          # Pin to a recent aiperf main SHA that includes PR 824 + the
-          # PR 903 HF-image-byte-dict fix. Bump AIPERF_GIT_REF to roll forward.
+          # Pin to a recent aiperf main SHA that includes PR 824
+          # (session_id for single-turn) + PR 903 (HF image-byte-dict fix).
+          # Bump AIPERF_GIT_REF to roll forward.
           pip install --no-cache-dir "aiperf @ git+https://github.com/ai-dynamo/aiperf.git@${AIPERF_GIT_REF}"
           python -c "import aiperf, sys; print('aiperf', aiperf.__version__ if hasattr(aiperf,'__version__') else 'sha-pinned', 'OK')"
 
@@ -64,7 +64,7 @@ spec:
             exit 1
           fi
 
-          RUN_DIR="${ARTIFACT_BASE_DIR}/vllm-serve"
+          RUN_DIR="${ARTIFACT_BASE_DIR}/${RUN_LABEL}"
           mkdir -p "${RUN_DIR}"
           echo "Running benchmark; artifacts → ${RUN_DIR}"
 
@@ -88,12 +88,12 @@ spec:
             --extra-inputs "min_tokens:${MAX_TOKENS}" \
             --extra-inputs "ignore_eos:true"
 
-          # aiperf writes inputs.json containing every prompt + every base64
-          # image actually sent — ~4-12 GB for our multimodal datasets,
-          # vs ~30 MB of actual metric outputs. It's regenerable from the
-          # input jsonl + aiperf args, so we drop it by default. Set
-          # KEEP_INPUTS_JSON=1 to retain it for individual-request
-          # debugging.
+          # aiperf writes inputs.json containing every prompt + every
+          # base64 image actually sent — ~4-12 GB for our multimodal
+          # datasets, vs ~30 MB of actual metric outputs. It's
+          # regenerable from the input jsonl + aiperf args, so we drop
+          # it by default. Set KEEP_INPUTS_JSON=1 to retain it for
+          # individual-request debugging.
           if [[ "${KEEP_INPUTS_JSON:-}" != "1" ]]; then
             rm -fv "${RUN_DIR}/inputs.json" || true
           else
@@ -106,7 +106,9 @@ spec:
         - name: MODEL_NAME
           value: Qwen/Qwen3.6-35B-A3B-FP8
         - name: FRONTEND
-          value: qwen36-vllm-serve
+          value: ${BENCH_FRONTEND}
+        - name: RUN_LABEL
+          value: ${BENCH_RUN_LABEL}
         # Pin to current aiperf main HEAD; includes PR 824 + PR 903.
         # To roll back to PR 824's exact merge commit:
         #   fd7c2ad4abc43cc0c73079d27c016513e29309e7

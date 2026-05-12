@@ -43,21 +43,33 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 #   DEPLOY_KIND branches deploy() + clean():
 #     deployment → kubectl rollout status + delete Deployment+Service
 #     dgd        → kubectl wait on operator-stamped DGD pod labels + delete DGD
+#   BENCH_POD       — name of the aiperf Pod for this config.
+#   BENCH_FRONTEND  — service name the bench Pod hits at $FRONTEND:8000.
+#                     vllm-serve: a plain Service; DGDs: `<dgd-name>-frontend`
+#                     created automatically by the dynamo operator.
+#   BENCH_RUN_LABEL — sub-directory written under /perf-cache/artifacts/
+#                     so the 3 configs' aiperf artifacts don't collide.
 case "$CONFIG" in
   vllm-serve)
     DEPLOY_KIND="deployment"
     DEPLOY_NAME="qwen36-vllm-serve"
     BENCH_POD="qwen36-bench"
+    BENCH_FRONTEND="qwen36-vllm-serve"
+    BENCH_RUN_LABEL="vllm-serve"
     ;;
   dynamo-fd)
     DEPLOY_KIND="dgd"
     DEPLOY_NAME="qwen36-dynamo-fd"
     BENCH_POD="qwen36-fd-bench"
+    BENCH_FRONTEND="qwen36-dynamo-fd-frontend"
+    BENCH_RUN_LABEL="dynamo-fd"
     ;;
   dynamo-fd-ec)
     DEPLOY_KIND="dgd"
     DEPLOY_NAME="qwen36-dynamo-fd-ec"
     BENCH_POD="qwen36-fd-ec-bench"
+    BENCH_FRONTEND="qwen36-dynamo-fd-ec-frontend"
+    BENCH_RUN_LABEL="dynamo-fd-ec"
     ;;
   "")
     echo "ERROR: --config <name> required" >&2
@@ -68,6 +80,7 @@ case "$CONFIG" in
     echo "Available: vllm-serve dynamo-fd dynamo-fd-ec" >&2
     exit 2 ;;
 esac
+export BENCH_POD BENCH_FRONTEND BENCH_RUN_LABEL
 
 HW_ENV="$HERE/hw/${HW}.env"
 if [[ ! -f "$HW_ENV" ]]; then
@@ -88,9 +101,11 @@ echo "[hw]     $HW → image=$VLLM_IMAGE node=$HW_NODE_SELECTOR"
 echo "[config] $CONFIG → kind=$DEPLOY_KIND deploy=$DEPLOY_NAME bench-pod=$BENCH_POD"
 
 K="kubectl -n $NAMESPACE"
-# Limit envsubst to our own hw vars so embedded ${MODEL_NAME} /
-# ${KEEP_INPUTS_JSON:-} shell vars in perf.yaml's inline script stay literal.
-TPL_VARS='$VLLM_IMAGE $HW_NODE_SELECTOR $HW_TOLERATIONS'
+# Limit envsubst to our own template vars so embedded ${MODEL_NAME} /
+# ${KEEP_INPUTS_JSON:-} shell vars inside perf.yaml's inline bash stay
+# literal. $BENCH_* drive the shared perf.yaml; $VLLM_IMAGE / $HW_*
+# drive deploy.yaml + perf.yaml.
+TPL_VARS='$VLLM_IMAGE $HW_NODE_SELECTOR $HW_TOLERATIONS $BENCH_POD $BENCH_FRONTEND $BENCH_RUN_LABEL'
 APPLY_TPL() { envsubst "$TPL_VARS" <"$1" | $K apply -f -; }
 
 # ---------------- config-agnostic prep ----------------
@@ -156,7 +171,7 @@ deploy() {
 
 bench() {
   $K delete pod "$BENCH_POD" --ignore-not-found
-  APPLY_TPL "$CONFIG_DIR/perf.yaml"
+  APPLY_TPL "$HERE/perf.yaml"
   $K wait --for=condition=Ready "pod/$BENCH_POD" --timeout=300s
   echo "[bench] streaming logs — Ctrl-C to detach (the run continues in pod)"
   $K logs -f "$BENCH_POD" || true

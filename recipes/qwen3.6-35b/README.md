@@ -68,6 +68,7 @@ qwen3.6-35b/
 ├── README.md
 ├── run-benchmark.sh            # Unified driver — branches on --config/--hw
 ├── run-all-benchmarks.sh       # Sequential 3-config orchestrator
+├── perf.yaml                   # Single shared aiperf bench Pod template
 ├── hw/                         # Hardware axis (shared across all configs)
 │   ├── h100.env
 │   └── gb200.env
@@ -76,15 +77,17 @@ qwen3.6-35b/
 ├── data-gen/
 │   └── generate-datasets-job.yaml
 ├── vllm-serve/
-│   ├── deploy.yaml             # Templated (image, nodeSelector, tolerations)
-│   └── perf.yaml               # Templated
+│   └── deploy.yaml             # Plain Deployment + Service (baseline)
 ├── dynamo-fd/
-│   ├── deploy.yaml             # DynamoGraphDeployment, frontend-decoding ON
-│   └── perf.yaml
+│   └── deploy.yaml             # DynamoGraphDeployment, frontend-decoding ON
 └── dynamo-fd-ec/
-    ├── deploy.yaml             # DynamoGraphDeployment, FD + embedding cache
-    └── perf.yaml
+    └── deploy.yaml             # DynamoGraphDeployment, FD + embedding cache
 ```
+
+The three configs share one `perf.yaml` because the only deltas
+across them (pod name, frontend service, run-label) are exported as
+`${BENCH_POD}` / `${BENCH_FRONTEND}` / `${BENCH_RUN_LABEL}` by
+`run-benchmark.sh` and resolved via `envsubst` at apply time.
 
 ## Hardware targets
 
