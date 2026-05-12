@@ -1759,7 +1759,7 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 	if err != nil {
 		return corev1.PodTemplateSpec{}, fmt.Errorf("failed to generate base pod spec: %w", err)
 	}
-	if backendFramework == dynamo.BackendFrameworkVLLM && component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
+	if backendFramework == dynamo.BackendFrameworkVLLM && dynamo.GetGPUMemoryService(component) != nil {
 		foundMain := false
 		for i := range podSpec.Containers {
 			if podSpec.Containers[i].Name == consts.MainContainerName {
