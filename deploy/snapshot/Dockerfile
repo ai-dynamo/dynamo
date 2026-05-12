@@ -287,6 +287,14 @@ COPY --from=builder /tmp/go-vendor/ /opt/go-vendor/
 # Native source tarballs (CRIU sources from criu-builder, cuda-checkpoint
 # clone from criu-builder). Preserve them in /tmp/native-sources/ in the
 # respective builder stages so this COPY succeeds.
+#
+# These COPYs are unconditional (not gated on ENABLE_SOURCE_ARCHIVAL) by
+# design: sources_collect is its own stage that is NEVER COPY'd into the
+# runtime agent image — the runtime only consumes /sources.zip via the
+# `sources_archive` stage above. So copying the source trees in here costs
+# nothing in the shipped image. Gating these COPYs would risk archive
+# completeness (an ARG flip would silently drop CRIU+cuda-checkpoint from
+# the archive) for zero benefit.
 COPY --from=criu-builder /tmp/criu/ /opt/native-sources/criu/
 COPY --from=criu-builder /tmp/cuda-checkpoint/ /opt/native-sources/cuda-checkpoint/
 
