@@ -530,7 +530,11 @@ mod tests {
     use super::*;
     use crate::kv_router::indexer::test_util::store_event;
     use crate::kv_router::indexer::{LowerTierIndexers, SideIndexer};
-    use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
+    use std::time::Duration;
+
+    use dynamo_kv_router::indexer::{
+        KvIndexer, KvIndexerInterface, KvIndexerMetrics, pruning::PruneConfig,
+    };
     use dynamo_kv_router::protocols::{StorageTier, WorkerWithDpRank, compute_seq_hash_for_block};
     use tokio_util::sync::CancellationToken;
 
@@ -560,10 +564,14 @@ mod tests {
         let worker = WorkerWithDpRank::new(7, 0);
         let block_hashes = vec![LocalBlockHash(11), LocalBlockHash(12)];
         let sequence_hashes = compute_seq_hash_for_block(&block_hashes);
-        let side = KvIndexer::new(
+        let side = KvIndexer::new_with_frequency(
             CancellationToken::new(),
+            None,
             4,
             Arc::new(KvIndexerMetrics::new_unregistered()),
+            Some(PruneConfig {
+                ttl: Duration::from_secs(60),
+            }),
         );
         side.process_routing_decision_with_hashes(worker, block_hashes.clone(), sequence_hashes)
             .await
