@@ -24,7 +24,17 @@
 //! - **D2H** -- Device-to-host (download) via PCIe.
 //! - **D2Dx** -- Cross-device device-to-device (src on `--device`,
 //!   dst on `--dst-device`). Only `memcpy` backend is supported.
-//!   A `zeDeviceCanAccessPeer` probe is logged at startup.
+//!   A `zeDeviceCanAccessPeer` probe is logged at startup. When the probe
+//!   returns false, the bench falls back to an explicit pinned-host staging
+//!   path (`src -> host -> dst`). Two staging modes are selectable via
+//!   `--d2dx-staging`:
+//!   - `pipelined` (default, row label `d2dx-hsp`): K-slot staging ring
+//!     (depth set by `--d2dx-slots`, default 4). Each queue stays in-order
+//!     and the host bridges the `S_i -> D_i` handoff via `event.wait()`;
+//!     src runs ahead so subsequent S_{i+1} overlaps D_i on independent
+//!     PCIe links. Steady-state bandwidth approaches `min(H2D, D2H)`.
+//!   - `serial` (row label `d2dx-hs`): single buffer, full sync between
+//!     hops. Useful as a baseline.
 //!
 //! # Transfer patterns
 //!
@@ -132,7 +142,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use clap::Parser;
-use oneapi_rs::sycl::{SyclContext, SyclDevice, SyclQueue};
+use oneapi_rs::sycl::{SyclContext, SyclDevice, SyclEvent, SyclQueue};
 
 use kvbm_kernels::sycl_vectorized_copy;
 
@@ -200,6 +210,29 @@ struct Cli {
     /// Destination device ordinal (for cross-device D2D).
     #[arg(long, default_value = "1")]
     dst_device: usize,
+
+    /// Host-staging mode for `d2dx` when direct P2P is unavailable.
+    ///
+    /// - `pipelined` (default): K-slot ring (see `--d2dx-slots`), overlaps
+    ///   `src -> host` and `host -> dst` across chunks via host-polled
+    ///   events. Row labeled `d2dx-hsp`.
+    /// - `serial`: one buffer, synchronous between hops. Row labeled
+    ///   `d2dx-hs`. Useful as a baseline.
+    ///
+    /// Ignored when P2P is supported (direct cross-context memcpy is used
+    /// and the row is labeled `d2dx`).
+    #[arg(long, default_value = "pipelined")]
+    d2dx_staging: String,
+
+    /// Number of staging slots for `--d2dx-staging pipelined`. Larger
+    /// values give the pipeline more cushion when the dst hop runs slower
+    /// than the src hop, so the slot-reuse wait on `D_{i-K}` is already
+    /// complete by the time we need it. Peak pinned RAM = `slots *
+    /// copy_size`. Ignored in `serial` mode (always 1). When the transfer
+    /// is PCIe-bound (the common case) K=2 is typically sufficient; larger
+    /// K helps only under large src/dst rate imbalance.
+    #[arg(long, default_value = "4")]
+    d2dx_slots: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +366,37 @@ impl HostMemKind {
 
     fn all_labels() -> &'static str {
         "pinned (or pin), system (or sys/heap)"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D2Dx host-staging mode (only used when direct P2P is unavailable)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug)]
+enum D2DxStaging {
+    /// One stage buffer, full sync between hops. CSV label: `d2dx-hs`.
+    Serial,
+    /// K-slot staging ring (depth set by `--d2dx-slots`). Each queue stays
+    /// in-order; the host bridges the src->dst handoff via `event.wait()`.
+    /// CSV label: `d2dx-hsp`.
+    Pipelined,
+}
+
+impl D2DxStaging {
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "serial" | "seq" => Some(D2DxStaging::Serial),
+            "pipelined" | "pipeline" | "pp" => Some(D2DxStaging::Pipelined),
+            _ => None,
+        }
+    }
+
+    fn direction_label(self) -> &'static str {
+        match self {
+            D2DxStaging::Serial => "d2dx-hs",
+            D2DxStaging::Pipelined => "d2dx-hsp",
+        }
     }
 }
 
@@ -591,6 +655,131 @@ fn execute_memcpy(
     queue.synchronize().expect("sync after memcpy");
 }
 
+/// Cross-device host-staged memcpy, serial (no overlap).
+///
+/// Used when `zeDeviceCanAccessPeer` is false, explicitly bounce through
+/// pinned host memory.
+fn execute_memcpy_host_staged(
+    src_queue: &Arc<SyclQueue>,
+    dst_queue: &Arc<SyclQueue>,
+    stage_ptr: *mut c_void,
+    src_addrs: &[u64],
+    dst_addrs: &[u64],
+    copy_size: usize,
+    num_copies: usize,
+) {
+    for i in 0..num_copies {
+        unsafe {
+            src_queue.memcpy_raw_async(
+                stage_ptr,
+                src_addrs[i] as *const c_void,
+                copy_size,
+            ).expect("memcpy_raw_async src->host");
+        }
+        src_queue.synchronize().expect("sync after src->host");
+        unsafe {
+            dst_queue.memcpy_raw_async(
+                dst_addrs[i] as *mut c_void,
+                stage_ptr,
+                copy_size,
+            ).expect("memcpy_raw_async host->dst");
+        }
+        dst_queue.synchronize().expect("sync after host->dst");
+    }
+}
+
+/// Cross-device host-staged memcpy, pipelined with a K-slot host-polled ring.
+///
+/// Cross-queue `submit_barrier` with events from the other device's queue
+/// aborts inside Level Zero when `zeDeviceCanAccessPeer` is false. The dst
+/// queue's command list tries to resolve the src event's in-order counter
+/// allocation into its own residency list via `getCounterPeerAllocation`;
+/// without peer access this returns null and the compute-runtime's
+/// `UNRECOVERABLE_IF` fires (cmdlist_hw.inl, getCounterDeviceAllocForResidency).
+/// We therefore keep all barriers on-queue and bridge the two hops via
+/// host-side `event.wait()`:
+///
+///   1. Both queues are in-order, so on each queue the chunks run serially
+///      in issue order.
+///   2. Before overwriting slot `s = i % K`, host-block on `D_{i-K}` to make
+///      sure the last dst read of that slot is done. At steady state this
+///      wait is a no-op: D_{i-K} completed long ago.
+///   3. After enqueuing `S_i`, host-block on `S_i` before enqueuing `D_i`
+///      so the dst hop sees the filled slot. `D_i` is enqueued and returns
+///      immediately (dst_queue is async), so the host races on to iter
+///      `i+1` while `D_i` drains in the background.
+///
+/// The overlap mechanism: once `D_i` is enqueued, iter `i+1` submits
+/// `S_{i+1}` on src_queue; `S_{i+1}` starts executing on src's PCIe link
+/// while `D_i` is still executing on dst's PCIe link, because the two
+/// links are physically independent. The host's `W(S_{i+1})` blocks on src
+/// but not on dst, so dst continues uninterrupted on its in-order queue.
+///
+/// Steady-state bandwidth is governed by the slower of the two hops, i.e.
+/// close to `min(H2D, D2H)` -- on mixed-SKU pairs this is the narrower
+/// PCIe link's bandwidth.
+fn execute_memcpy_host_staged_pipelined(
+    src_queue: &Arc<SyclQueue>,
+    dst_queue: &Arc<SyclQueue>,
+    stage_ptrs: &[*mut c_void],
+    src_addrs: &[u64],
+    dst_addrs: &[u64],
+    copy_size: usize,
+    num_copies: usize,
+) {
+    let k = stage_ptrs.len();
+    assert!(k >= 1, "pipelined staging requires at least one slot");
+
+    // Only dst events need to outlive their iteration -- the host waits on
+    // D_{i-K} at iter i when reusing a slot, and on the trailing K dst
+    // events at drain time. src events are awaited inside each iteration
+    // and can be dropped immediately (their handles are destroyed on drop).
+    let mut dst_events: Vec<Option<SyclEvent>> = (0..num_copies).map(|_| None).collect();
+
+    for i in 0..num_copies {
+        let s = i % k;
+
+        // Slot reuse: wait for D_{i-K} to finish before overwriting stage[s].
+        if i >= k {
+            if let Some(prev_d) = dst_events[i - k].take() {
+                prev_d.wait().expect("wait D_{i-K} before slot reuse");
+            }
+        }
+
+        // Enqueue S_i on src. Runs in-order after S_{i-1}.
+        let s_event = unsafe {
+            src_queue.memcpy_raw_async_with_event(
+                stage_ptrs[s],
+                src_addrs[i] as *const c_void,
+                copy_size,
+            )
+        }
+        .expect("src->stage enqueue");
+
+        // Host-block on S_i so D_i sees the filled slot. With the pipeline
+        // warm, src runs ahead and this wait typically returns immediately.
+        s_event.wait().expect("wait on S_i");
+
+        // Enqueue D_i on dst. Runs in-order after D_{i-1}.
+        let d_event = unsafe {
+            dst_queue.memcpy_raw_async_with_event(
+                dst_addrs[i] as *mut c_void,
+                stage_ptrs[s],
+                copy_size,
+            )
+        }
+        .expect("stage->dst enqueue");
+        dst_events[i] = Some(d_event);
+    }
+
+    // Drain: wait on every dst event still outstanding.
+    for ev in dst_events.into_iter().flatten() {
+        ev.wait().expect("wait on trailing dst event");
+    }
+    // Belt-and-braces queue sync so host timing captures full completion.
+    dst_queue.synchronize().expect("dst drain");
+}
+
 // ---------------------------------------------------------------------------
 // Run one benchmark configuration
 // ---------------------------------------------------------------------------
@@ -607,6 +796,9 @@ fn run_benchmark(
     num_blocks: usize,
     warmup_iters: usize,
     timed_iters: usize,
+    d2dx_host_staged: bool,
+    d2dx_staging_mode: D2DxStaging,
+    d2dx_slots: usize,
 ) -> (f64, f64) {
     let inner = tokens_per_block * NUM_KV_HEADS * HEAD_DIM * ELEM_SIZE;
     let full_block_size = inner * OUTER_DIM * NUM_LAYERS;
@@ -660,6 +852,60 @@ fn run_benchmark(
         None
     };
 
+    // Pinned staging buffers for cross-device host-staged path.
+    // - Serial mode: 1 buffer, `src -> host -> dst` with full sync between
+    //   hops.
+    // - Pipelined mode: K-slot staging ring (`--d2dx-slots`). Source writes
+    //   slot `i % K`, destination drains slot `(i - 1) % K` (in-order on
+    //   dst queue); the host guards slot reuse by waiting on `D_{i-K}`.
+    //   Peak pinned RAM is `slots * copy_size`. Clamp against num_copies
+    //   since extra slots beyond the chunk count are unused.
+    let use_host_staging = matches!(direction, Direction::D2Dx)
+        && matches!(backend, Backend::Memcpy)
+        && d2dx_host_staged;
+    let stage_bufs: Vec<HostMem> = if use_host_staging {
+        let slots = match d2dx_staging_mode {
+            D2DxStaging::Serial => 1,
+            D2DxStaging::Pipelined => d2dx_slots.max(1).min(num_copies.max(1)),
+        };
+        (0..slots).map(|_| HostMem::new(queue, copy_size)).collect()
+    } else {
+        Vec::new()
+    };
+
+    let dispatch_memcpy = |src_addrs: &[u64], dst_addrs: &[u64]| {
+        if use_host_staging {
+            match d2dx_staging_mode {
+                D2DxStaging::Serial => {
+                    execute_memcpy_host_staged(
+                        queue,
+                        dst_queue,
+                        stage_bufs[0].ptr,
+                        src_addrs,
+                        dst_addrs,
+                        copy_size,
+                        num_copies,
+                    );
+                }
+                D2DxStaging::Pipelined => {
+                    let stage_ptrs: Vec<*mut c_void> =
+                        stage_bufs.iter().map(|b| b.ptr).collect();
+                    execute_memcpy_host_staged_pipelined(
+                        queue,
+                        dst_queue,
+                        &stage_ptrs,
+                        src_addrs,
+                        dst_addrs,
+                        copy_size,
+                        num_copies,
+                    );
+                }
+            }
+        } else {
+            execute_memcpy(queue, src_addrs, dst_addrs, copy_size, num_copies);
+        }
+    };
+
     // Warmup.
     for _ in 0..warmup_iters {
         match backend {
@@ -673,9 +919,7 @@ fn run_benchmark(
                 copy_size,
                 num_copies,
             ),
-            Backend::Memcpy => {
-                execute_memcpy(queue, &src_addrs, &dst_addrs, copy_size, num_copies)
-            }
+            Backend::Memcpy => dispatch_memcpy(&src_addrs, &dst_addrs),
         }
     }
 
@@ -694,9 +938,7 @@ fn run_benchmark(
                 copy_size,
                 num_copies,
             ),
-            Backend::Memcpy => {
-                execute_memcpy(queue, &src_addrs, &dst_addrs, copy_size, num_copies)
-            }
+            Backend::Memcpy => dispatch_memcpy(&src_addrs, &dst_addrs),
         }
         host_elapsed.push(t0.elapsed().as_micros() as f64);
     }
@@ -761,6 +1003,18 @@ fn parse_host_mem_kinds(raw: &[String]) -> Vec<HostMemKind> {
 fn main() {
     let cli = Cli::parse();
 
+    // Parse the d2dx-staging flag early so the fallback log line can name it.
+    let d2dx_staging_mode = D2DxStaging::from_str(&cli.d2dx_staging).unwrap_or_else(|| {
+        panic!(
+            "unknown --d2dx-staging '{}', expected: serial, pipelined",
+            cli.d2dx_staging
+        )
+    });
+    let staging_label: String = match d2dx_staging_mode {
+        D2DxStaging::Serial => "serial".to_string(),
+        D2DxStaging::Pipelined => format!("pipelined, slots={}", cli.d2dx_slots),
+    };
+
     // -- Initialize SYCL device -----------------------------------------------
     let device_count = oneapi_rs::sycl::SyclDevice::count()
         .expect("Failed to query SYCL device count");
@@ -794,6 +1048,7 @@ fn main() {
 
     // -- Cross-device D2D setup -----------------------------------------------
     let has_d2dx = cli.direction.iter().any(|s| s == "d2dx" || s == "cross");
+    let mut d2dx_host_staged = false;
     let (queue, dst_queue) = if has_d2dx {
         if device_count < 2 {
             eprintln!("ERROR: Cross-device D2D (d2dx) requires at least 2 devices.");
@@ -819,8 +1074,8 @@ fn main() {
         let dst_dev = SyclDevice::by_ordinal(cli.dst_device)
             .expect("Failed to get destination SYCL device");
 
-        // Probe direct P2P capability. Informational only — a negative or
-        // "unknown" result does not block the run.
+        // Probe direct P2P capability. When the Level Zero driver reports
+        // no peer access, fall back to pinned-host staging path.
         match src_dev.can_access_peer(&dst_dev) {
             Ok(true) => {
                 eprintln!(
@@ -840,12 +1095,22 @@ fn main() {
                     ),
                 }
             }
-            Ok(false) => eprintln!(
-                "  Direct P2P: NOT supported (zeDeviceCanAccessPeer=0).",
-            ),
-            Err(e) => eprintln!(
-                "  Direct P2P: probe unavailable ({e}).",
-            ),
+            Ok(false) => {
+                eprintln!(
+                    "  Direct P2P: NOT supported (zeDeviceCanAccessPeer=0). \
+                     Falling back to pinned-host staging for d2dx (mode: {}).",
+                    staging_label,
+                );
+                d2dx_host_staged = true;
+            }
+            Err(e) => {
+                eprintln!(
+                    "  Direct P2P: probe unavailable ({e}). \
+                     Falling back to pinned-host staging for d2dx (mode: {}).",
+                    staging_label,
+                );
+                d2dx_host_staged = true;
+            }
         }
 
         let shared_ctx = SyclContext::new_multi(&[Arc::clone(&src_dev), Arc::clone(&dst_dev)])
@@ -1000,11 +1265,22 @@ fn main() {
                                 host_mem.label()
                             };
 
+                            // When d2dx falls back to pinned-host staging,
+                            // label the row distinctly (serial vs pipelined)
+                            // so results are not conflated with direct-P2P
+                            // measurements.
+                            let direction_label =
+                                if matches!(direction, Direction::D2Dx) && d2dx_host_staged {
+                                    d2dx_staging_mode.direction_label()
+                                } else {
+                                    direction.label()
+                                };
+
                             eprint!(
                                 "  [{test_num}/{total_tests}] tpb={tpb} N={num_blocks:>3} \
-                                 {:<8} {:<6} {:<12} host={:<7} ... ",
+                                 {:<8} {:<8} {:<12} host={:<7} ... ",
                                 pattern.label(),
-                                direction.label(),
+                                direction_label,
                                 backend.label(),
                                 host_label,
                             );
@@ -1020,6 +1296,9 @@ fn main() {
                                 num_blocks,
                                 warmup_iters,
                                 timed_iters,
+                                d2dx_host_staged,
+                                d2dx_staging_mode,
+                                cli.d2dx_slots,
                             );
 
                             println!(
@@ -1027,7 +1306,7 @@ fn main() {
                                  {total_bytes},{inner},{copy_size},{num_copies},\
                                  {median_ms:.4},{bw:.2}",
                                 pattern.label(),
-                                direction.label(),
+                                direction_label,
                                 backend.label(),
                             );
                             eprintln!("{bw:.2} GB/s ({median_ms:.4} ms)");
