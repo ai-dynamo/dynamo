@@ -180,6 +180,8 @@ navigation:
             path: backends/trtllm/trtllm-diffusion.md
       - page: LoRA Adapters
         path: features/lora/README.md
+      - page: Fastokens Tokenizer
+        path: features/tokenizer/README.md
       - section: Agents
         slug: agents
         path: agents/README.md
