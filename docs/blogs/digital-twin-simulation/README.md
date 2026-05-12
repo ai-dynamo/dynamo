@@ -294,6 +294,21 @@ read, and placement decisions affect routing, scheduling, queueing, and future
 cache state, so they need to be registered as events on the same timeline as the
 rest of the serving harness.
 
+As a concrete example, the figure below shows what the mocker predicts when the
+G2 host-memory tier is enabled (sized at 32,768 blocks) on the same
+single-engine B200 MiniMax-M2.5 setup from §2.1, replaying the full
+23,608-request Mooncake trace:
+
+![Mocker simulation, baseline vs G2-enabled (32K blocks). Left: mean TTFT vs concurrency (log y), with 8.5–19.3% reduction across c=8 to c=64. Right: throughput-vs-interactivity Pareto; G2 weakly dominates the baseline at every concurrency.](./images/kvbm_g2_exp.png)
+
+Mean TTFT improves the most at c=32 (-19.3%), where prefill cost still
+dominates and host-memory KV hits skip prefill work; the benefit narrows at
+c=64 (-5.4%) as decode pressure starts to mask the prefill savings. On the
+steady-state throughput-vs-interactivity Pareto, G2 sits up-and-right of the
+baseline at every concurrency: throughput per GPU shifts modestly (+2–4%),
+while interactivity gains the most at c=64 where avoided prefill recompute
+frees decode capacity.
+
 Replay can also drive
 [NIXL (NVIDIA Inference tranXfer Library)](../../api/nixl-connect/README.md)
 reads and writes against a real distributed cache target. Those measurements
