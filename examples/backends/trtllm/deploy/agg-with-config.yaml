@@ -58,12 +58,14 @@ spec:
           resources:
             limits:
               nvidia.com/gpu: "1"
+          # Mount the ConfigMap key as the engine args file without masking /workspace.
           volumeMounts:
           - mountPath: /workspace/examples/backends/trtllm/engine_configs/qwen3/agg.yaml
             name: nvidia-config
             readOnly: true
             subPath: agg.yaml
           workingDir: /workspace/examples/backends/trtllm
+        # Declare the ConfigMap as a pod volume.
         volumes:
         - configMap:
             name: nvidia-config

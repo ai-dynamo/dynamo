@@ -38,6 +38,7 @@ spec:
             limits:
               nvidia.com/gpu: "1"
             requests:
+              # Increase this value for larger models.
               ephemeral-storage: 2Gi
           workingDir: /workspace/examples/backends/vllm
     replicas: 1

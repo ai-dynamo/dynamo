@@ -70,6 +70,13 @@ spec:
           - python3
           - -m
           - dynamo.planner
+          # Planner image selection:
+          #   Dynamo >= 1.1.0: use the dedicated planner image
+          #     nvcr.io/nvidia/ai-dynamo/dynamo-planner:<version>
+          #     (backend runtime images no longer ship planner runtime deps
+          #     such as kubernetes_asyncio, pmdarima, prophet, aiconfigurator).
+          #   Dynamo <  1.1.0: use the backend runtime image
+          #     nvcr.io/nvidia/ai-dynamo/vllm-runtime:<version>.
           image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
           name: main
           volumeMounts:
