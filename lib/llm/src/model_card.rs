@@ -985,12 +985,25 @@ impl ModelDeploymentCard {
                     })
                     .map_err(anyhow::Error::msg)
                     .with_context(|| p.display().to_string())?;
-
                 // Hold onto specials before any move of `hf`.
                 let specials: Vec<String> = if cache_enabled {
                     extract_hf_special_tokens(&hf)
                 } else {
                     Vec::new()
+                };
+
+                // Helper: wrap an HfTokenizer in the HuggingFaceTokenizer,
+                // merging sibling `tokenizer_config.json`'s `added_tokens_decoder`
+                // when a model_dir is available. Needed so models that declare
+                // special tokens only there (e.g. Qwen2-VL-2B's `<|image_pad|>`)
+                // tokenize the same way as HF Python's `AutoTokenizer.from_pretrained()`.
+                let wrap_hf = |hf: HfTokenizer| match p.parent() {
+                    Some(model_dir) => {
+                        crate::tokenizers::HuggingFaceTokenizer::from_tokenizer_with_model_dir(
+                            hf, model_dir,
+                        )
+                    }
+                    None => crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf),
                 };
 
                 // Pick the inner backend.
@@ -1006,9 +1019,7 @@ impl ModelDeploymentCard {
                                     %e,
                                     "Failed to load fastokens, falling back to HuggingFace"
                                 );
-                                Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(
-                                    hf,
-                                ))
+                                Arc::new(wrap_hf(hf))
                             }
                         }
                     } else {
@@ -1016,10 +1027,10 @@ impl ModelDeploymentCard {
                             path = %p.display(),
                             "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
                         );
-                        Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf))
+                        Arc::new(wrap_hf(hf))
                     }
                 } else {
-                    Arc::new(crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf))
+                    Arc::new(wrap_hf(hf))
                 };
 
                 if cache_enabled {
