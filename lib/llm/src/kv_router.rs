@@ -1260,6 +1260,7 @@ mod tests {
             None,
             false,
             shared_cache,
+            None,
         )
         .await
         .unwrap()
