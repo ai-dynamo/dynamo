@@ -189,11 +189,12 @@ ENV PYTHONPATH=/opt
 #   - go     : no Go binaries shipped (operator/snapshot/EPP only)
 #   - native : native_packages.yaml not yet on this branch
 #
-# BASELINE_SBOM_FILE (optional): the slim CycloneDX SBOM under
-# /opt/compliance/base_sboms/ to subtract before writing NOTICES. Empty
-# default = no subtraction. CI populates this from manifest.json once
-# the (from_image, baseline) pair for this template is captured.
-ARG BASELINE_SBOM_FILE=""
+# BASELINE_SBOM_FILE: the slim CycloneDX SBOM under /opt/compliance/base_sboms/
+# to subtract before writing NOTICES. Default is rendered from
+# context.yaml's dynamo.<device>.baseline_sbom (cuda-dl-base devel).
+# Empty for devices not yet captured — runtime build still works,
+# just without baseline subtraction.
+ARG BASELINE_SBOM_FILE="{{ context[framework][device_key].baseline_sbom | default('') }}"
 RUN python3 -m compliance.generators \
     --ecosystem python,rust,dpkg \
     --venv ${VIRTUAL_ENV} \

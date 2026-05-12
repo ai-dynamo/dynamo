@@ -138,9 +138,11 @@ ENV PYTHONPATH=/opt
 # Invoked ecosystems (rust today; python/dpkg are stubs that warn-but-don't-fail).
 # Excluded: go (no Go binaries), native (native_packages.yaml not yet on this branch).
 #
-# BASELINE_SBOM_FILE (optional, empty default): the slim CycloneDX SBOM
-# under /opt/compliance/base_sboms/ to subtract before writing NOTICES.
-ARG BASELINE_SBOM_FILE=""
+# BASELINE_SBOM_FILE: the slim CycloneDX SBOM under /opt/compliance/base_sboms/
+# to subtract before writing NOTICES. Default is rendered from
+# context.yaml's sglang.<device>.baseline_sbom (cuda 12.9.1-cudnn-devel
+# or 13.0.1-cudnn-devel — the actual upstream sglang FROM).
+ARG BASELINE_SBOM_FILE="{{ context[framework][device_key].baseline_sbom | default('') }}"
 RUN python3 -m compliance.generators \
     --ecosystem python,rust,dpkg \
     --site-packages "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \

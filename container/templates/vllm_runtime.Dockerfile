@@ -454,11 +454,12 @@ USER root
 RUN mkdir -p /legal /sboms
 COPY --chown=root:0 container/compliance /opt/compliance
 ENV PYTHONPATH=/opt
-# BASELINE_SBOM_FILE (optional, empty default): the slim CycloneDX SBOM
-# under /opt/compliance/base_sboms/ to subtract before writing NOTICES.
-# CI populates this from manifest.json once the (from_image, baseline)
-# pair for this template is captured.
-ARG BASELINE_SBOM_FILE=""
+# BASELINE_SBOM_FILE: the slim CycloneDX SBOM under /opt/compliance/base_sboms/
+# to subtract before writing NOTICES. Default is rendered from
+# context.yaml's vllm.<device>.baseline_sbom; empty for devices we
+# haven't captured yet (xpu, cpu) and that's fine — the licenses
+# stage just emits NOTICES for everything it sees, same as before.
+ARG BASELINE_SBOM_FILE="{{ context[framework][device_key].baseline_sbom | default('') }}"
 RUN python3 -m compliance.generators \
     --ecosystem python,rust,dpkg \
     --venv ${VIRTUAL_ENV} \

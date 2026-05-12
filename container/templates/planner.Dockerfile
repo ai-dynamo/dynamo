@@ -92,9 +92,10 @@ USER root
 RUN mkdir -p /legal /sboms
 COPY --chown=root:0 container/compliance /opt/compliance
 ENV PYTHONPATH=/opt
-# BASELINE_SBOM_FILE (optional, empty default): the slim CycloneDX SBOM
-# under /opt/compliance/base_sboms/ to subtract before writing NOTICES.
-ARG BASELINE_SBOM_FILE=""
+# BASELINE_SBOM_FILE: the slim CycloneDX SBOM under /opt/compliance/base_sboms/
+# to subtract before writing NOTICES. Default is rendered from
+# context.yaml's dynamo.planner_baseline_sbom (NVIDIA distroless/python).
+ARG BASELINE_SBOM_FILE="{{ context.dynamo.planner_baseline_sbom | default('') }}"
 RUN python3 -m compliance.generators \
     --ecosystem python,rust,dpkg \
     --venv ${VIRTUAL_ENV} \

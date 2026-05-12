@@ -13,15 +13,19 @@ dynamo:
   cuda12.9:
     base_image: nvcr.io/nvidia/cuda-dl-base
     base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
+    # baseline_sbom: not yet captured for the 25.06-cuda12.9-devel variant
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
+    baseline_sbom: cuda-dl-base@8315e245.cdx.json
   epp_image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v1.5.0-rc.2
   frontend_image: nvcr.io/nvidia/base/ubuntu:noble-20250619
+  frontend_baseline_sbom: ubuntu@7291df36.cdx.json
   planner_build_image: python
   planner_build_image_tag: 3.12-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
   planner_runtime_image_tag: 3.12-v4.0.3
+  planner_baseline_sbom: python@043085f9.cdx.json
   python_version: "3.12"
 
   nats_version: v2.10.28
@@ -44,24 +48,28 @@ vllm:
     runtime_image: nvcr.io/nvidia/cuda
     base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
     runtime_image_tag: 12.9.1-runtime-ubuntu24.04
+    baseline_sbom: cuda@1287141d.cdx.json
     vllm_ref: v0.20.1
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/cuda
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image_tag: 13.0.2-runtime-ubuntu24.04
+    baseline_sbom: cuda@6a0e31b5.cdx.json
     vllm_ref: v0.20.1
   xpu:
     base_image: intel/deep-learning-essentials
     runtime_image: intel/deep-learning-essentials
     base_image_tag: 2025.3.2-0-devel-ubuntu24.04
     runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
+    # baseline_sbom: not yet captured for xpu — runtime build runs without subtraction
     vllm_ref: v0.17.1
   cpu:
     base_image: ubuntu
     runtime_image: ubuntu
     base_image_tag: 24.04
     runtime_image_tag: 24.04
+    # baseline_sbom: not yet captured for cpu — runtime build runs without subtraction
     vllm_ref: v0.16.0
   flashinf_ref: v0.6.8.post1
   lmcache_ref: 0.4.4
@@ -80,11 +88,13 @@ sglang:
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
     runtime_image_tag: v0.5.10.post1-runtime
+    baseline_sbom: cuda@a2e1e236.cdx.json
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image_tag: v0.5.10.post1-cu130-runtime
+    baseline_sbom: cuda@8b2705ea.cdx.json
   # SGLang uses the NIXL stack from the upstream lmsysorg/sglang runtime image.
   # Do not add nixl_ref here: Dynamo does not build or install its NIXL wheel
   # for SGLang, and SGLang does not use Dynamo KVBM/block-manager at runtime.
@@ -98,6 +108,7 @@ trtllm:
     runtime_image: nvcr.io/nvidia/cuda-dl-base
     base_image_tag: 26.02-py3
     runtime_image_tag: 26.02-cuda13.1-runtime-ubuntu24.04
+    baseline_sbom: cuda-dl-base@a4f726df.cdx.json
   nixl_ref: 0.10.1
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"

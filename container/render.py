@@ -175,9 +175,18 @@ def _make_jinja_env(script_dir):
 
 
 def _render_context(args):
+    # device_key is the lookup key into context.yaml's per-device dict
+    # (e.g. "cuda12.9", "xpu"). Computed here so it's available to every
+    # included template — `{% set device_key = ... %}` inside an
+    # included file doesn't propagate to peer includes in Jinja's
+    # default scoping rules.
+    device_key = (
+        args.device + args.cuda_version if args.device == "cuda" else args.device
+    )
     return dict(
         framework=args.framework,
         device=args.device,
+        device_key=device_key,
         target=args.target,
         platform=args.platform,
         cuda_version=args.cuda_version,

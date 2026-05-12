@@ -144,9 +144,10 @@ ENV PYTHONPATH=/opt
 # the rendered NOTICES-Go.txt accurately reflects EPP's Go module set.
 COPY --from=epp /sbom-go.cdx.json /tmp/sbom-go-epp.cdx.json
 
-# BASELINE_SBOM_FILE (optional, empty default): the slim CycloneDX SBOM
-# under /opt/compliance/base_sboms/ to subtract before writing NOTICES.
-ARG BASELINE_SBOM_FILE=""
+# BASELINE_SBOM_FILE: the slim CycloneDX SBOM under /opt/compliance/base_sboms/
+# to subtract before writing NOTICES. Default is rendered from
+# context.yaml's dynamo.frontend_baseline_sbom (nvidia/base/ubuntu).
+ARG BASELINE_SBOM_FILE="{{ context.dynamo.frontend_baseline_sbom | default('') }}"
 RUN python3 -m compliance.generators \
     --ecosystem python,rust,dpkg,go \
     --venv ${VIRTUAL_ENV} \

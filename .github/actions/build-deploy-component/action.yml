@@ -147,9 +147,21 @@ runs:
           TARGET_FLAG="--target agent"
         fi
 
+        # Baseline SBOM file used by each component's licenses stage to
+        # subtract upstream-owned components from generated NOTICES.
+        # Mirrors container/context.yaml's per-template baseline_sbom
+        # field for the rendered runtime templates.
+        BASELINE_SBOM_FILE=""
+        if [[ "${{ inputs.component }}" == "operator" ]]; then
+          BASELINE_SBOM_FILE="go@e86c88d0.cdx.json"
+        elif [[ "${{ inputs.component }}" == "snapshot" ]]; then
+          BASELINE_SBOM_FILE="cuda-dl-base@8315e245.cdx.json"
+        fi
+
         docker buildx build --push \
             --platform ${{ steps.settings.outputs.build_platforms }} \
             --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            --build-arg BASELINE_SBOM_FILE="${BASELINE_SBOM_FILE}" \
             --build-context snapshot=../snapshot \
             --build-context compliance=../../container/compliance \
             ${TARGET_FLAG} \
@@ -175,11 +187,21 @@ runs:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
         mkdir -p /tmp/legal /tmp/sboms
+        # Baseline SBOM resolution: mirror the build-and-push step so the
+        # extracted NOTICES reflect subtraction the same way the pushed
+        # image does. Keep these two if-blocks in sync.
+        BASELINE_SBOM_FILE=""
+        if [[ "${{ inputs.component }}" == "operator" ]]; then
+          BASELINE_SBOM_FILE="go@e86c88d0.cdx.json"
+        elif [[ "${{ inputs.component }}" == "snapshot" ]]; then
+          BASELINE_SBOM_FILE="cuda-dl-base@8315e245.cdx.json"
+        fi
         # Extraction runs on a single platform (lint platform) — both /legal
         # and /sboms are platform-invariant for a Go-only build.
         docker buildx build \
             --platform ${{ steps.settings.outputs.lint_platform }} \
             --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            --build-arg BASELINE_SBOM_FILE="${BASELINE_SBOM_FILE}" \
             --build-context snapshot=../snapshot \
             --build-context compliance=../../container/compliance \
             --target legal \
@@ -189,6 +211,7 @@ runs:
         docker buildx build \
             --platform ${{ steps.settings.outputs.lint_platform }} \
             --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            --build-arg BASELINE_SBOM_FILE="${BASELINE_SBOM_FILE}" \
             --build-context snapshot=../snapshot \
             --build-context compliance=../../container/compliance \
             --target sboms \
