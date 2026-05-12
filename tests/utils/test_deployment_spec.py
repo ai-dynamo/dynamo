@@ -57,12 +57,11 @@ def test_deployment_spec_mutates_v1alpha1_services(tmp_path):
     spec = deployment.spec()["spec"]["services"]
     assert spec["Frontend"]["replicas"] == 2
     assert spec["VllmDecodeWorker"]["resources"]["limits"]["gpu"] == "4"
-    assert spec["VllmDecodeWorker"]["envs"] == [
-        {"name": "TEST_ENV", "value": "true"}
-    ]
-    assert "--max-model-len" in spec["VllmDecodeWorker"]["extraPodSpec"][
-        "mainContainer"
-    ]["args"]
+    assert spec["VllmDecodeWorker"]["envs"] == [{"name": "TEST_ENV", "value": "true"}]
+    assert (
+        "--max-model-len"
+        in spec["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"]["args"]
+    )
 
 
 def test_deployment_spec_mutates_v1beta1_components(tmp_path):
@@ -78,9 +77,7 @@ def test_deployment_spec_mutates_v1beta1_components(tmp_path):
                         "name": "Frontend",
                         "podTemplate": {
                             "spec": {
-                                "containers": [
-                                    {"name": "main", "image": "frontend:v1"}
-                                ]
+                                "containers": [{"name": "main", "image": "frontend:v1"}]
                             }
                         },
                         "replicas": 1,
@@ -127,9 +124,7 @@ def test_deployment_spec_mutates_v1beta1_components(tmp_path):
     deployment["VllmDecodeWorker"].tensor_parallel_size = 4
     deployment.set_service_env_var("VllmDecodeWorker", "TEST_ENV", "true")
     deployment.add_arg_to_service("VllmDecodeWorker", "--max-model-len", "1024")
-    deployment.set_frontend_sidecar_image(
-        "sidecar:v2", service_name="VllmDecodeWorker"
-    )
+    deployment.set_frontend_sidecar_image("sidecar:v2", service_name="VllmDecodeWorker")
 
     components = {
         component["name"]: component

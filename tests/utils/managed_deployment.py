@@ -427,9 +427,7 @@ class DeploymentSpec:
         ]
 
         if enable_jsonl:
-            spec["spec"][env_key].append(
-                {"name": "DYN_LOGGING_JSONL", "value": "true"}
-            )
+            spec["spec"][env_key].append({"name": "DYN_LOGGING_JSONL", "value": "true"})
 
         if log_level:
             spec["spec"][env_key].append({"name": "DYN_LOG", "value": log_level})
