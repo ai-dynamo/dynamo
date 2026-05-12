@@ -338,23 +338,20 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 			consts.KubeAnnotationEnableGrove, v.deployment.Annotations[consts.KubeAnnotationEnableGrove])
 	}
 
-	// The inter-pod GMS layout is currently implemented only for vLLM (the
-	// engine relies on vLLM-specific runtime hooks like --load-format gms and
-	// DYN_VLLM_GMS_SHADOW_MODE that activate the GMS client path). Fail fast
-	// at admission rather than producing a broken deployment when another or
-	// no backend is configured — an empty BackendFramework means the operator
-	// cannot confirm the engine speaks vLLM, which is a hard prerequisite for
-	// inter-pod GMS (both standalone and with failover).
-	if service.IsInterPodGMSEnabled() &&
+	// Inter-pod failover is currently implemented only for vLLM because the
+	// failover pod transform clones vLLM engines and injects vLLM-specific
+	// shadow-mode wiring. Standalone inter-pod GMS is backend-neutral at the
+	// operator layer; each backend still has to opt into its own GMS model loader.
+	if service.IsInterPodFailoverEnabled() &&
 		v.deployment.Spec.BackendFramework != backendFrameworkVLLM {
 		detected := v.deployment.Spec.BackendFramework
 		if detected == "" {
 			detected = "<unset>"
 		}
 		return nil, fmt.Errorf(
-			"spec.services[%s]: the inter-pod GMS layout (gpuMemoryService.mode=%q) is currently supported only for vLLM (detected: %s); "+
+			"spec.services[%s]: inter-pod GMS failover is currently supported only for vLLM (detected: %s); "+
 				"set spec.backendFramework=%q",
-			serviceName, nvidiacomv1alpha1.GMSModeInterPod, detected, backendFrameworkVLLM)
+			serviceName, detected, backendFrameworkVLLM)
 	}
 
 	// Validate service name length constraints for Grove PodCliqueSet naming
