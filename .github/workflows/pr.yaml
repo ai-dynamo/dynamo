@@ -58,22 +58,18 @@ jobs:
       - vllm-build
       - vllm-dev-build
       - vllm-test
-      - vllm-unified-test
       - vllm-multi-gpu-test
       - vllm-copy-to-acr
       - sglang-build
       - sglang-dev-build
       - sglang-test
-      - sglang-unified-test
       - sglang-multi-gpu-test
       - sglang-copy-to-acr
       - trtllm-build
       - trtllm-dev-build
       - trtllm-test
-      - trtllm-unified-test
       - trtllm-multi-gpu-test
       - trtllm-copy-to-acr
-      - sample-unified-test
       - planner-build
       - planner-test
       - frontend-build
@@ -185,7 +181,7 @@ jobs:
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files]
-    # `sample` is here because sample-unified-test piggybacks on this image.
+    # `sample` is here because sample tests piggyback on this image and run as part of vllm-test.
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
@@ -305,7 +301,7 @@ jobs:
   vllm-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
@@ -315,31 +311,13 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and vllm and gpu_0 and not unified
-      gpu_test_markers: pre_merge and vllm and gpu_1 and not unified
+      cpu_only_test_markers: pre_merge and vllm and gpu_0
+      gpu_test_markers: pre_merge and vllm and gpu_1
       gpu_test_timeout_minutes: 45
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
-    secrets: inherit
-
-  vllm-unified-test:
-    name: vllm-runtime # Share UI group with other vllm jobs
-    needs: [changed-files, vllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: vllm
-      test_type: Unified Test
-      amd_runner: prod-tester-amd-gpu-v2
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64"]' # Unified tests are GPU-only
-      run_sanity_check: false
-      run_cpu_only_tests: false
-      gpu_test_markers: pre_merge and vllm and gpu_1 and unified
-      gpu_test_timeout_minutes: 30
     secrets: inherit
 
   vllm-multi-gpu-test:
@@ -355,7 +333,7 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4) and not unified
+      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -372,31 +350,13 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and sglang and gpu_0 and not unified
-      gpu_test_markers: pre_merge and sglang and gpu_1 and not unified
+      cpu_only_test_markers: pre_merge and sglang and gpu_0
+      gpu_test_markers: pre_merge and sglang and gpu_1
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
-    secrets: inherit
-
-  sglang-unified-test:
-    name: sglang-runtime # Share UI group with other sglang jobs
-    needs: [changed-files, sglang-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: sglang
-      test_type: Unified Test
-      amd_runner: prod-tester-amd-gpu-v2
-      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64"]' # Unified tests are GPU-only
-      run_sanity_check: false
-      run_cpu_only_tests: false
-      gpu_test_markers: pre_merge and sglang and gpu_1 and unified
-      gpu_test_timeout_minutes: 30
     secrets: inherit
 
   sglang-multi-gpu-test:
@@ -412,7 +372,7 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and sglang and (gpu_2 or gpu_4) and not unified
+      gpu_test_markers: pre_merge and sglang and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -429,31 +389,13 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and trtllm and gpu_0 and not unified
-      gpu_test_markers: pre_merge and trtllm and gpu_1 and not unified
+      cpu_only_test_markers: pre_merge and trtllm and gpu_0
+      gpu_test_markers: pre_merge and trtllm and gpu_1
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
-    secrets: inherit
-
-  trtllm-unified-test:
-    name: trtllm-runtime # Share UI group with other trtllm jobs
-    needs: [changed-files, trtllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: trtllm
-      test_type: Unified Test
-      amd_runner: prod-tester-amd-gpu-v2
-      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
-      platform: '["amd64"]' # Unified tests are GPU-only
-      run_sanity_check: false
-      run_cpu_only_tests: false
-      gpu_test_markers: pre_merge and trtllm and gpu_1 and unified
-      gpu_test_timeout_minutes: 30
     secrets: inherit
 
   trtllm-multi-gpu-test:
@@ -469,30 +411,8 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and trtllm and (gpu_2 or gpu_4) and not unified
+      gpu_test_markers: pre_merge and trtllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 60
-    secrets: inherit
-
-  # Sample backend is framework-agnostic CPU-only; piggybacks on the vllm image
-  # (which has the dynamo runtime it needs). Runs the unified-backend sample test
-  # in its own job so it doesn't share a slot with GPU tests.
-  sample-unified-test:
-    name: sample-runtime # New UI group for sample-backend jobs
-    needs: [changed-files, vllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: sample
-      test_type: Unified Test
-      amd_runner: prod-tester-amd-v2
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]' # Sample is image-agnostic; one entry is enough
-      platform: '["amd64"]'
-      run_sanity_check: false
-      run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and gpu_0 and unified
-      cpu_only_test_timeout_minutes: 15
-      run_gpu_tests: false
     secrets: inherit
 
   planner-test:
@@ -613,13 +533,12 @@ jobs:
 
   vllm-copy-to-acr:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [changed-files, vllm-build, vllm-test, vllm-unified-test]
+    needs: [changed-files, vllm-build, vllm-test]
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
       needs.vllm-build.result == 'success' &&
-      (needs.vllm-test.result == 'success' || needs.vllm-test.result == 'skipped') &&
-      (needs.vllm-unified-test.result == 'success' || needs.vllm-unified-test.result == 'skipped')
+      (needs.vllm-test.result == 'success' || needs.vllm-test.result == 'skipped')
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -630,13 +549,12 @@ jobs:
 
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [changed-files, sglang-build, sglang-test, sglang-unified-test]
+    needs: [changed-files, sglang-build, sglang-test]
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true') &&
       needs.sglang-build.result == 'success' &&
-      (needs.sglang-test.result == 'success' || needs.sglang-test.result == 'skipped') &&
-      (needs.sglang-unified-test.result == 'success' || needs.sglang-unified-test.result == 'skipped')
+      (needs.sglang-test.result == 'success' || needs.sglang-test.result == 'skipped')
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
@@ -647,13 +565,12 @@ jobs:
 
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [changed-files, trtllm-build, trtllm-test, trtllm-unified-test]
+    needs: [changed-files, trtllm-build, trtllm-test]
     if: |
       always() && !cancelled() &&
       (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
       needs.trtllm-build.result == 'success' &&
-      (needs.trtllm-test.result == 'success' || needs.trtllm-test.result == 'skipped') &&
-      (needs.trtllm-unified-test.result == 'success' || needs.trtllm-unified-test.result == 'skipped')
+      (needs.trtllm-test.result == 'success' || needs.trtllm-test.result == 'skipped')
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
@@ -764,16 +681,12 @@ jobs:
       - operator
       - planner-test
       - vllm-copy-to-acr
-      - vllm-unified-test
       - vllm-multi-gpu-test
       - sglang-copy-to-acr
-      - sglang-unified-test
       - sglang-multi-gpu-test
       - trtllm-copy-to-acr
-      - trtllm-unified-test
       - trtllm-multi-gpu-test
       - dynamo-pipeline
-      - sample-unified-test
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -800,20 +713,16 @@ jobs:
       - operator
       - vllm-build
       - vllm-test
-      - vllm-unified-test
       - vllm-multi-gpu-test
       - vllm-copy-to-acr
       - sglang-build
       - sglang-test
-      - sglang-unified-test
       - sglang-multi-gpu-test
       - sglang-copy-to-acr
       - trtllm-build
       - trtllm-test
-      - trtllm-unified-test
       - trtllm-multi-gpu-test
       - trtllm-copy-to-acr
-      - sample-unified-test
       - deploy-test-vllm
       - deploy-test-sglang
       - deploy-test-trtllm
