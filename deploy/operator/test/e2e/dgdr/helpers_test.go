@@ -29,6 +29,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
@@ -69,6 +70,9 @@ func newDGDR(name string, opts ...func(*v1beta1.DynamoGraphDeploymentRequest)) *
 	// Inject mocker config when enabled
 	if useMocker() {
 		injectMockerConfig(dgdr)
+	} else {
+		// Real-GPU mode: apply CLI overrides for PVC, totalGpus, HF token.
+		injectRecipeOverrides(dgdr)
 	}
 	return dgdr
 }
@@ -128,6 +132,47 @@ func withFeatures(f v1beta1.FeaturesSpec) func(*v1beta1.DynamoGraphDeploymentReq
 	}
 }
 
+// injectRecipeOverrides applies CLI-provided real-GPU overrides to a DGDR:
+// PVC model cache, totalGpus, and HF token secret env injection on the profiling job.
+// Existing user-set values on the DGDR are preserved.
+func injectRecipeOverrides(d *v1beta1.DynamoGraphDeploymentRequest) {
+	if flagPVCName != "" && d.Spec.ModelCache == nil {
+		d.Spec.ModelCache = &v1beta1.ModelCacheSpec{
+			PVCName:      flagPVCName,
+			PVCModelPath: flagPVCModelPath,
+			PVCMountPath: flagPVCMountPath,
+		}
+	}
+	if flagTotalGPUs > 0 {
+		if d.Spec.Hardware == nil {
+			d.Spec.Hardware = &v1beta1.HardwareSpec{}
+		}
+		if d.Spec.Hardware.TotalGPUs == nil {
+			d.Spec.Hardware.TotalGPUs = ptr.To(int32(flagTotalGPUs))
+		}
+	}
+	if flagHFTokenSecret != "" {
+		if d.Spec.Overrides == nil {
+			d.Spec.Overrides = &v1beta1.OverridesSpec{}
+		}
+		if d.Spec.Overrides.ProfilingJob == nil {
+			d.Spec.Overrides.ProfilingJob = &batchv1.JobSpec{}
+		}
+		d.Spec.Overrides.ProfilingJob.Template.Spec.Containers = []corev1.Container{{
+			Name: "profiler",
+			Env: []corev1.EnvVar{{
+				Name: "HF_TOKEN",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: flagHFTokenSecret},
+						Key:                  "HF_TOKEN",
+					},
+				},
+			}},
+		}}
+	}
+}
+
 // injectMockerConfig mutates a DGDR for GPU-free testing.
 func injectMockerConfig(d *v1beta1.DynamoGraphDeploymentRequest) {
 	if d.Spec.Features == nil {
@@ -156,7 +201,21 @@ func injectMockerConfig(d *v1beta1.DynamoGraphDeploymentRequest) {
 }
 
 // uniqueName generates a K8s-safe test name with a timestamp suffix.
+// If --dgdr-name-prefix is set on the CLI, the prefix is combined with
+// a short per-test suffix derived from the It's prefix arg so multiple
+// tests in one suite invocation get distinct DGDR names while staying
+// under the 45-char pod naming limit (see profile_sla.py).
 func uniqueName(prefix string) string {
+	if flagNamePrefix != "" {
+		short := prefix
+		if i := strings.LastIndex(prefix, "-"); i >= 0 && i+1 < len(prefix) {
+			short = prefix[i+1:]
+		}
+		if len(short) > 4 {
+			short = short[:4]
+		}
+		return fmt.Sprintf("%s-%s", flagNamePrefix, short)
+	}
 	return fmt.Sprintf("dgdr-test-%s-%d", prefix, time.Now().UnixMilli()%100000)
 }
 

@@ -172,14 +172,6 @@ func DGDRLifecycleSpec(ctx context.Context, inputGetter func() DGDRLifecycleInpu
 	}
 }
 
-// defaultAutoApply returns the effective autoApply value, defaulting to true.
-func defaultAutoApply(v *bool) bool {
-	if v == nil {
-		return true
-	}
-	return *v
-}
-
 // Convenience for creating common inputs.
 
 // rapidLifecycleInput returns a DGDRLifecycleInput for a rapid profiling + deploy scenario.

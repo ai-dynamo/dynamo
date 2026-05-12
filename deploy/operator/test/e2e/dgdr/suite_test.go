@@ -44,6 +44,15 @@ var (
 	flagProfilingTimeout int
 	flagDeployTimeout    int
 	flagKubeconfig       string
+
+	// Real-GPU recipe-test flags. When set, helpers inject these into every DGDR
+	// so the suite can be re-run per recipe via CLI args.
+	flagPVCName       string
+	flagPVCModelPath  string
+	flagPVCMountPath  string
+	flagTotalGPUs     int
+	flagHFTokenSecret string
+	flagNamePrefix    string
 )
 
 // Package-level clients initialised in BeforeSuite.
@@ -63,6 +72,17 @@ func init() {
 	flag.IntVar(&flagProfilingTimeout, "dgdr-profiling-timeout", 3600, "Max seconds to wait for profiling")
 	flag.IntVar(&flagDeployTimeout, "dgdr-deploy-timeout", 600, "Max seconds to wait for deployment")
 	flag.StringVar(&flagKubeconfig, "kubeconfig", "", "Path to kubeconfig (uses default if empty)")
+
+	// Real-GPU recipe-test overrides
+	flag.StringVar(&flagPVCName, "dgdr-pvc-name", "", "Name of model-cache PVC (skips HF download when set)")
+	flag.StringVar(&flagPVCModelPath, "dgdr-pvc-model-path", "", "Path within PVC to the model snapshot dir")
+	flag.StringVar(&flagPVCMountPath, "dgdr-pvc-mount-path",
+		"/home/dynamo/.cache/huggingface", "Mount path for the model-cache PVC")
+	flag.IntVar(&flagTotalGPUs, "dgdr-total-gpus", 0, "Override hardware.totalGpus (0 = use default)")
+	flag.StringVar(&flagHFTokenSecret, "dgdr-hf-token-secret", "",
+		"Secret name to inject HF_TOKEN env from (for profiler)")
+	flag.StringVar(&flagNamePrefix, "dgdr-name-prefix", "",
+		"Override DGDR name prefix (kept short to fit 45-char pod naming limit)")
 }
 
 func useMocker() bool { return !flagNoMocker }
