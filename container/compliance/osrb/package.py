@@ -229,6 +229,30 @@ def copy_modifications(modifications_dir: Path, output_dir: Path) -> int:
 
 def write_attribution_base(base_keys: set[tuple[str, str, str]], base_image: str,
                            base_digest: str, output_path: Path) -> None:
+    """Write a human-readable pointer file summarizing what was inherited.
+
+    Reviewer-oriented: the per-package data is in manifest.csv; this file
+    lets a human opening the bundle see the shape of the inheritance at
+    a glance, with the per-ecosystem breakdown so they can sanity-check
+    that the right baseline was used (e.g., a Python-heavy framework
+    image should show most inherited packages on the Python row).
+    """
+    from collections import Counter
+    eco_counts = Counter(eco for (eco, _name, _ver) in base_keys)
+
+    # Render ecosystems in a stable, predictable order; surface any
+    # unexpected ecosystems at the end so they're noticeable.
+    ordered_ecosystems = ("dpkg", "python", "rust", "go", "native", "rpm")
+    breakdown_lines: list[str] = []
+    seen = set()
+    for eco in ordered_ecosystems:
+        if eco in eco_counts:
+            breakdown_lines.append(f"  {eco:8s} {eco_counts[eco]:>6d}")
+            seen.add(eco)
+    for eco in sorted(eco_counts.keys() - seen):
+        breakdown_lines.append(f"  {eco:8s} {eco_counts[eco]:>6d}")
+    breakdown = "\n".join(breakdown_lines) if breakdown_lines else "  (none)"
+
     output_path.write_text(
         f"""\
 ATTRIBUTION — base-image inherited components
@@ -240,6 +264,9 @@ OSRB review process directly; refer to NVIDIA NGC's separate OSRB
 submission for the base image for those packages' license analysis.
 
 Inherited package count: {len(base_keys)}
+
+Per-ecosystem breakdown:
+{breakdown}
 
 (Per-package list lives in manifest.csv; rows where came_from_base=yes
 are the ones inherited from the base.)
