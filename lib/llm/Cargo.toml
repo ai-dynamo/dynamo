@@ -31,6 +31,7 @@ integration = ["dynamo-runtime/integration"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
 bench = ["dynamo-kv-router/bench"]
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
+lightseek-mm = ["dep:llm-multimodal", "dep:llm-tokenizer"]
 
 [[bench]]
 name = "tokenizer_simple"
@@ -175,6 +176,19 @@ ndarray = { version = "0.16" }
 
 # Publishers
 rmp-serde = "1.3"
+
+# Pure-Rust per-VLM-family image preprocessor token-count, used by the
+# `lightseek-mm` feature for MM-aware KV routing. Pinned to an exact
+# version because per-image token-count math (lightseek's
+# `calculate_num_tokens`) can change between minor releases as new
+# models are added or smart-resize parameters are tuned. Bumping should
+# be a deliberate, reviewed step paired with re-running our golden
+# cross-check against `transformers`.
+llm-multimodal = { version = "=1.5.0", optional = true }
+# Companion to llm-multimodal: provides `HuggingFaceTokenizer` so the
+# model_dir's `tokenizer.json` can be passed to lightseek's
+# `ModelRegistry::lookup` for image-placeholder token-id resolution.
+llm-tokenizer = { version = "=1.3.2", optional = true }
 
 [dev-dependencies]
 approx = "0.5"

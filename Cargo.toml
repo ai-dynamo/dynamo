@@ -164,3 +164,10 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
+
+# Pin llm-multimodal + llm-tokenizer to the smg commit that switches
+# hf-hub from native-tls to rustls-tls (PR #1459, merged 2026-05-05).
+# Remove this block once llm-multimodal ≥1.6.0 is published on crates.io.
+[patch.crates-io]
+llm-multimodal = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
+llm-tokenizer = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
