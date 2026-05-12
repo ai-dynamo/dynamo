@@ -70,6 +70,16 @@
       "from_image": "nvcr.io/nvidia/cuda-dl-base",
       "from_tag": "26.02-cuda13.1-runtime-ubuntu24.04",
       "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1",
+      "baseline_image": "nvcr.io/nvidia/cuda-dl-base",
+      "baseline_sbom": "cuda-dl-base@8315e245.cdx.json",
+      "baseline_tag": "25.11-cuda13.0-devel-ubuntu24.04",
+      "from_digest": "sha256:8315e2455736c4f9b597f15c5fb4d31f834e798e0c6b66bbdbdbac491ce26bd1",
+      "from_image": "nvcr.io/nvidia/cuda-dl-base",
+      "from_tag": "25.11-cuda13.0-devel-ubuntu24.04",
+      "platform": "linux/amd64"
     }
   ],
   "entry_schema": {
@@ -84,6 +94,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 4 MB per file.",
-  "generated_at": "2026-05-12T00:49:15+00:00",
+  "generated_at": "2026-05-12T00:54:13+00:00",
   "schema_version": 2
 }
