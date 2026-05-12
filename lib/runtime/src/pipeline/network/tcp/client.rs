@@ -350,10 +350,8 @@ async fn handle_reader(
             }
         }
     }
-    if cancellation_seen {
-        if let Some(counter) = &cancellation_counter {
-            counter.inc();
-        }
+    if cancellation_seen && let Some(counter) = &cancellation_counter {
+        counter.inc();
     }
     framed_reader
 }
