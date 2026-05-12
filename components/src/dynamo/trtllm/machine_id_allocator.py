@@ -51,7 +51,7 @@ class DisaggMachineIdAllocator:
                 if slot not in allocated:
                     # Atomic slot file creation
                     try:
-                        fd = os.open(str(sf), os.O_CREAT | os.O_EXCL, 0o644)
+                        fd = os.open(str(sf), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
                         os.write(fd, str(slot).encode())
                         os.close(fd)
                     except FileExistsError:
