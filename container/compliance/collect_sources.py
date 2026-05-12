@@ -56,8 +56,12 @@ up to expose /var/cache/apt with deb-src configured.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import logging
+import os
 import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -65,26 +69,158 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def collect_dpkg_sources(base_sbom: Path | None, output_dir: Path) -> int:
-    """Diff installed dpkg state against base SBOM, fetch source for the deltas.
+def _enumerate_installed_dpkgs() -> set[str]:
+    """Return the set of installed dpkg package names."""
+    result = subprocess.run(
+        ["dpkg-query", "-W", "-f=${Package}\\n"],
+        check=True, capture_output=True, text=True,
+    )
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def _baseline_dpkg_names(baseline_sbom: Path) -> set[str]:
+    """Extract dpkg (name) tuples from a slim CycloneDX baseline SBOM.
+
+    Matches by name only — source-package versions diverge from binary-
+    package versions in Debian/Ubuntu (a single source package can produce
+    several binary versions; security updates rev the binary but the
+    upstream source is the same). Filtering by name gives us "what NGC's
+    baseline owns at the source-package level."
+    """
+    doc = json.loads(baseline_sbom.read_text(encoding="utf-8"))
+    out: set[str] = set()
+    for c in doc.get("components", []) or []:
+        purl = c.get("purl") or ""
+        if not purl.startswith("pkg:deb/"):
+            continue
+        name = c.get("name")
+        if name:
+            out.add(name)
+    return out
+
+
+@contextlib.contextmanager
+def _deb_src_enabled():
+    """Temporarily enable `deb-src` lines in /etc/apt/sources.list*.
+
+    Ubuntu's default cuda-dl-base apt config omits deb-src; `apt-get
+    source` needs them. Toggle on, `apt-get update`, do the work,
+    restore the originals so the runtime image's apt state is unchanged
+    after the sources stage exits.
+    """
+    sources_paths: list[Path] = [Path("/etc/apt/sources.list")]
+    sources_paths.extend(Path("/etc/apt/sources.list.d").glob("*.list"))
+    sources_paths.extend(Path("/etc/apt/sources.list.d").glob("*.sources"))
+    backups: dict[Path, bytes] = {}
+    try:
+        for p in sources_paths:
+            if not p.is_file():
+                continue
+            data = p.read_bytes()
+            backups[p] = data
+            text = data.decode("utf-8", errors="replace")
+            new = "\n".join(
+                # Uncomment `# deb-src` lines AND mirror `deb` → `deb-src`
+                # for lines we haven't already enabled.
+                _maybe_enable_src(line) for line in text.splitlines()
+            )
+            p.write_text(new, encoding="utf-8")
+        subprocess.run(["apt-get", "update"], check=True)
+        yield
+    finally:
+        for p, data in backups.items():
+            p.write_bytes(data)
+
+
+def _maybe_enable_src(line: str) -> str:
+    """Toggle a single sources.list line so deb-src is enabled.
+
+    Cases:
+      `# deb-src https://...`  →  uncomment
+      `deb https://...`        →  emit as-is, also append a sibling deb-src
+      anything else            →  unchanged
+    """
+    stripped = line.lstrip()
+    if stripped.startswith("# deb-src") or stripped.startswith("#deb-src"):
+        # uncomment
+        idx = line.find("#")
+        return line[:idx] + line[idx + 1 :].lstrip()
+    if stripped.startswith("deb ") or stripped.startswith("deb\t"):
+        # emit original AND a deb-src variant on the next line
+        src_variant = line.replace("deb ", "deb-src ", 1) if "deb " in line else line.replace("deb\t", "deb-src\t", 1)
+        return f"{line}\n{src_variant}"
+    return line
+
+
+def collect_dpkg_sources(baseline_sbom: Path | None, output_dir: Path) -> int:
+    """Diff installed dpkg state against the baseline, fetch source for the deltas.
 
     Returns the number of packages whose source was successfully fetched.
 
-    TODO: implement. Skeleton:
-      1. Run `dpkg-query -W -f='${Package}\t${Version}\n'` to enumerate.
-      2. If base_sbom: load it, extract `pkg:deb/...` (name, version) tuples.
-      3. delta = installed - base.
-      4. For each delta package:
-           apt-get source --only-source --download-only -d <pkg>
-           Move resulting *.dsc / *.tar.{xz,gz} into `output_dir`.
-           Skip silently on apt errors (proprietary repos with no source).
+    For each delta package, `apt-get source --download-only -d` fetches
+    the `.dsc` + `.tar.{xz,gz}` and (when present) `.debian.tar.{xz,gz}`
+    into the cwd. NVIDIA-proprietary packages from the cuda repos don't
+    have public source — we log and continue rather than failing the
+    build, matching how Debian's `non-free` repository handles the
+    same case.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    logger.warning(
-        "dpkg source collection not yet implemented. "
-        "Output will be empty until the dpkg pipeline lands."
-    )
-    return 0
+    try:
+        installed = _enumerate_installed_dpkgs()
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        logger.error("dpkg-query failed (is dpkg installed?): %s", exc)
+        return 0
+    logger.info("Installed dpkg packages: %d", len(installed))
+
+    if baseline_sbom is None:
+        delta_names = installed
+        logger.info(
+            "No baseline configured; will attempt source for every installed "
+            "package (%d total). This is intentional fallback for unconfigured "
+            "builds; usually a baseline should be specified.",
+            len(delta_names),
+        )
+    else:
+        baseline_names = _baseline_dpkg_names(baseline_sbom)
+        delta_names = installed - baseline_names
+        logger.info(
+            "Baseline owns %d dpkg packages; delta = %d packages to fetch source for.",
+            len(baseline_names),
+            len(delta_names),
+        )
+
+    if not delta_names:
+        return 0
+
+    fetched = 0
+    skipped: list[str] = []
+    with _deb_src_enabled():
+        for name in sorted(delta_names):
+            try:
+                subprocess.run(
+                    ["apt-get", "source", "--only-source", "--download-only", name],
+                    check=True,
+                    cwd=output_dir,
+                    env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
+                    capture_output=True,
+                )
+                fetched += 1
+            except subprocess.CalledProcessError:
+                # Most common cause: NVIDIA-proprietary repos don't publish
+                # source. Documented in the bundle README. Log so an auditor
+                # can see which packages were skipped and why.
+                skipped.append(name)
+                logger.debug("no public source for %s; skipping", name)
+
+    if skipped:
+        logger.warning(
+            "Skipped %d dpkg packages with no public source repo "
+            "(typically NVIDIA-proprietary; see bundle README): %s",
+            len(skipped),
+            ", ".join(skipped[:20]) + (" …" if len(skipped) > 20 else ""),
+        )
+    logger.info("dpkg sources collected: %d / %d", fetched, len(delta_names))
+    return fetched
 
 
 def collect_native_sources(workspace_native_dir: Path, output_dir: Path) -> int:
