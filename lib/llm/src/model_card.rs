@@ -816,9 +816,21 @@ impl ModelDeploymentCard {
                     })
                     .map_err(anyhow::Error::msg)
                     .with_context(|| p.display().to_string())?;
-                Ok(crate::tokenizers::Tokenizer::from(Arc::new(
-                    crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf),
-                )))
+                // Merge sibling `tokenizer_config.json`'s
+                // `added_tokens_decoder` so models that declare special
+                // tokens only there (e.g. Qwen2-VL-2B's `<|image_pad|>`)
+                // tokenize the same way they do under HF Python's
+                // `AutoTokenizer.from_pretrained()`. See the
+                // `from_tokenizer_with_model_dir` doc for context.
+                let wrapped = match p.parent() {
+                    Some(model_dir) => {
+                        crate::tokenizers::HuggingFaceTokenizer::from_tokenizer_with_model_dir(
+                            hf, model_dir,
+                        )
+                    }
+                    None => crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf),
+                };
+                Ok(crate::tokenizers::Tokenizer::from(Arc::new(wrapped)))
             }
             Some(TokenizerKind::TikTokenModel(checked_file)) => {
                 let p = checked_file.path().ok_or_else(|| {
