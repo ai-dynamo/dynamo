@@ -237,6 +237,8 @@ spec:
           - mountPath: /home/dynamo/.cache/huggingface/hub
             name: hf-model-cache
           workingDir: /workspace/examples/backends/vllm
+        imagePullSecrets:
+        - name: docker-imagepullsecret
         volumes:
         - name: hf-model-cache
           persistentVolumeClaim:
@@ -316,6 +318,8 @@ spec:
           - mountPath: /home/dynamo/.cache/huggingface/hub
             name: hf-model-cache
           workingDir: /workspace/examples/backends/vllm
+        imagePullSecrets:
+        - name: docker-imagepullsecret
         volumes:
         - name: hf-model-cache
           persistentVolumeClaim:
@@ -395,6 +399,8 @@ spec:
           - mountPath: /home/dynamo/.cache/huggingface/hub
             name: hf-model-cache
           workingDir: /workspace/examples/backends/vllm
+        imagePullSecrets:
+        - name: docker-imagepullsecret
         volumes:
         - name: hf-model-cache
           persistentVolumeClaim:

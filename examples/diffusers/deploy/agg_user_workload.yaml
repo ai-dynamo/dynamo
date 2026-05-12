@@ -17,7 +17,6 @@ spec:
           env:
           - name: DYN_DISCOVERY_BACKEND
             value: kubernetes
-          - name: LD_LIBRARY_PATH
           - name: TORCHINDUCTOR_CACHE_DIR
             value: /cache/torchinductor
           - name: TRITON_CACHE_DIR
