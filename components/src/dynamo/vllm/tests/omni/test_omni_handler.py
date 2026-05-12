@@ -85,23 +85,35 @@ class TestBuildEngineInputs:
         assert inputs.sampling_params_list[0].output_kind == RequestOutputKind.FINAL_ONLY
 
     @pytest.mark.asyncio
-    async def test_text_audio_chat_completion_uses_vllm_renderer(self):
-        """Non-image chat requests use the model-owned vLLM renderer."""
+    async def test_text_audio_chat_completion_uses_vllm_omni_preprocessor(self):
+        """Non-image chat requests delegate prompt rendering to vLLM-Omni."""
         handler = _make_handler(stage_types=("llm",))
         handler.config.output_modalities = ["text", "audio"]
-        raw = {"messages": [{"role": "user", "content": "hello"}]}
+        raw = {
+            "messages": [{"role": "user", "content": "hello"}],
+            "modalities": ["audio"],
+        }
 
-        async def render_chat_async(*args, **kwargs):
-            return (["conversation"],), ({"prompt": "<rendered>hello"},)
+        class FakeOmniChatPreprocessor:
+            async def _preprocess_chat(self, request, messages, **kwargs):
+                assert request.messages == messages
+                assert kwargs["renderer"] is handler.engine_client.renderer
+                assert kwargs["default_template_content_format"] == "auto"
+                return ["conversation"], [{"prompt": "<rendered>hello"}]
 
         handler.engine_client.renderer = MagicMock()
-        handler.engine_client.renderer.render_chat_async = render_chat_async
         handler.engine_client.model_config = MagicMock()
+        handler._new_omni_chat_preprocessor = MagicMock(
+            return_value=FakeOmniChatPreprocessor()
+        )
 
         inputs = await handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)
 
         assert inputs.prompt["prompt"] == "<rendered>hello"
         assert inputs.sampling_params_list[0].output_kind == RequestOutputKind.FINAL_ONLY
+        handler._new_omni_chat_preprocessor.assert_called_once_with(
+            handler.engine_client.model_config
+        )
 
     @pytest.mark.asyncio
     async def test_image_generation(self):
