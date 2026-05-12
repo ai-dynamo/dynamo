@@ -21,7 +21,6 @@ from typing import Any
 import sglang as sgl
 
 from dynamo._core import Context
-from dynamo.common.backend.abort import DeferredAbort
 from dynamo.common.backend.engine import (
     EngineConfig,
     GenerateChunk,
@@ -53,18 +52,6 @@ def _warmup_enabled() -> bool:
     return raw.strip().lower() not in ("1", "true", "yes", "on")
 
 
-class SglangDeferredAbort(DeferredAbort):
-    """`DeferredAbort` for `tokenizer_manager.abort_request(rid=...)`."""
-
-    def __init__(self, tokenizer_manager: Any, rid: str):
-        super().__init__()
-        self._tokenizer_manager = tokenizer_manager
-        self._rid = rid
-
-    async def _do_abort_now(self) -> None:
-        self._tokenizer_manager.abort_request(rid=self._rid, abort_all=False)
-
-
 class SglangLLMEngine(LLMEngine):
     def __init__(self, server_args, dynamo_args, serving_mode: DisaggregationMode):
         self.server_args = server_args
@@ -80,7 +67,6 @@ class SglangLLMEngine(LLMEngine):
         # Background drain tasks for prefill stream after the bootstrap
         # chunk yields (Completed path only). Cancelled in cleanup().
         self._prefill_consume_tasks: set[asyncio.Task[Any]] = set()
-        self._active_aborts: dict[str, SglangDeferredAbort] = {}
 
     @classmethod
     async def from_args(
@@ -205,62 +191,20 @@ class SglangLLMEngine(LLMEngine):
             task.add_done_callback(self._prefill_consume_tasks.discard)
             return
 
-        # Only decode has an in-flight NIXL pull to protect.
-        is_decode = self.serving_mode == DisaggregationMode.DECODE
-        rid = context.trace_id
-        tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
-        abort_guard: SglangDeferredAbort | None = None
-        if is_decode and rid is not None and tokenizer_manager is not None:
-            abort_guard = SglangDeferredAbort(tokenizer_manager, rid)
-            self._active_aborts[rid] = abort_guard
+        async for res in stream:
+            # SGLang sets index when n>1; default to 0 otherwise.
+            output_idx = res.get("index") or 0
+            out: GenerateChunk = {"token_ids": [], "index": output_idx}
+            meta_info = res["meta_info"]
+            finish_reason = meta_info["finish_reason"]
 
-        first_signalled = False
-        try:
-            async for res in stream:
-                if abort_guard is not None and not first_signalled:
-                    abort_guard.signal_first_token()
-                    first_signalled = True
-                # SGLang sets index when n>1; default to 0 otherwise.
-                output_idx = res.get("index") or 0
-                out: GenerateChunk = {"token_ids": [], "index": output_idx}
-                meta_info = res["meta_info"]
-                finish_reason = meta_info["finish_reason"]
-
-                output_ids = res.get("output_ids", [])
-                if not output_ids and not finish_reason:
-                    if context.is_stopped():
-                        prompt_tokens = meta_info.get("prompt_tokens", 0)
-                        completion_tokens = meta_info.get("completion_tokens", 0)
-                        yield {
-                            "token_ids": [],
-                            "index": output_idx,
-                            "finish_reason": "cancelled",
-                            "completion_usage": {
-                                "prompt_tokens": prompt_tokens,
-                                "completion_tokens": completion_tokens,
-                                "total_tokens": prompt_tokens + completion_tokens,
-                            },
-                        }
-                        break
-                    continue
-
-                out["token_ids"] = output_ids
-
-                if finish_reason:
-                    prompt_tokens = meta_info["prompt_tokens"]
-                    completion_tokens = meta_info["completion_tokens"]
-                    out["finish_reason"] = finish_reason["type"]
-                    out["completion_usage"] = {
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": prompt_tokens + completion_tokens,
-                    }
-
+            output_ids = res.get("output_ids", [])
+            if not output_ids and not finish_reason:
                 if context.is_stopped():
                     prompt_tokens = meta_info.get("prompt_tokens", 0)
                     completion_tokens = meta_info.get("completion_tokens", 0)
                     yield {
-                        "token_ids": output_ids,
+                        "token_ids": [],
                         "index": output_idx,
                         "finish_reason": "cancelled",
                         "completion_usage": {
@@ -270,30 +214,45 @@ class SglangLLMEngine(LLMEngine):
                         },
                     }
                     break
+                continue
 
-                yield out
-        finally:
-            # Pop the guard from the lookup map BEFORE closing it. A late
-            # abort() racing on a different task would otherwise observe a
-            # half-closed guard; popping first sends that abort() down the
-            # engine-direct path instead.
-            if abort_guard is not None and rid is not None:
-                self._active_aborts.pop(rid, None)
-                await abort_guard.close()
+            out["token_ids"] = output_ids
+
+            if finish_reason:
+                prompt_tokens = meta_info["prompt_tokens"]
+                completion_tokens = meta_info["completion_tokens"]
+                out["finish_reason"] = finish_reason["type"]
+                out["completion_usage"] = {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                }
+
+            if context.is_stopped():
+                prompt_tokens = meta_info.get("prompt_tokens", 0)
+                completion_tokens = meta_info.get("completion_tokens", 0)
+                yield {
+                    "token_ids": output_ids,
+                    "index": output_idx,
+                    "finish_reason": "cancelled",
+                    "completion_usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens,
+                    },
+                }
+                break
+
+            yield out
 
     async def abort(self, context: Context) -> None:
         rid = context.trace_id
         if self.engine is None or rid is None:
             return
         tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
-        if tokenizer_manager is None:
-            return
-        guard = self._active_aborts.get(rid)
-        if guard is not None:
-            guard.abort()
-        else:
+        if tokenizer_manager is not None:
             tokenizer_manager.abort_request(rid=rid, abort_all=False)
-        logger.debug("abort requested for %s", rid)
+            logger.debug("Aborted request %s", rid)
 
     async def drain(self) -> None:
         """Await background prefill consume tasks before cleanup (#7319)."""

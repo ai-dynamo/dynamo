@@ -5,18 +5,12 @@
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import MagicMock
-
 import pytest
 
 pytest.importorskip("sglang", reason="sglang not installed in this container")
 
 from dynamo.common.constants import DisaggregationMode  # noqa: E402
-from dynamo.sglang.llm_engine import (  # noqa: E402
-    SglangDeferredAbort,
-    SglangLLMEngine,
-)
+from dynamo.sglang.llm_engine import SglangLLMEngine  # noqa: E402
 
 pytestmark = [
     pytest.mark.unit,
@@ -63,15 +57,3 @@ def test_decode_bootstrap_raises_when_router_left_no_info():
     # leave the decode worker waiting on a phantom KV transfer.
     with pytest.raises(ValueError, match="bootstrap"):
         SglangLLMEngine._resolve_decode_bootstrap({"token_ids": [1, 2, 3]})
-
-
-@pytest.mark.asyncio
-async def test_sglang_deferred_abort_invokes_tokenizer_abort_request():
-    tokenizer_manager = MagicMock()
-    guard = SglangDeferredAbort(tokenizer_manager, "req-xyz")
-    guard.signal_first_token()
-    guard.abort()
-    await asyncio.sleep(0)
-    tokenizer_manager.abort_request.assert_called_once_with(
-        rid="req-xyz", abort_all=False
-    )
