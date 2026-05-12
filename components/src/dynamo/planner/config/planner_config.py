@@ -38,12 +38,12 @@ class PlannerPreDeploymentSweepMode(str, Enum):
 
 
 class ExternalPluginEntry(BaseModel):
-    """One entry in the static external-plugin registration list (W1).
+    """One entry in the static external-plugin registration list.
 
     The planner reads this list at startup and calls
     ``await registry.register(RegisterRequest(...))`` for each entry —
     same code path an external plugin would hit through the gRPC
-    gateway (W2), so behaviour is identical to dynamic registration.
+    gateway, so behaviour is identical to dynamic registration.
 
     Sourced from PlannerConfig (which itself comes from a ConfigMap in
     K8s). The plugin process must already be running and reachable at
@@ -148,7 +148,7 @@ class GatewayConfig(BaseModel):
         default=False,
         description=(
             "Open the gRPC gateway at ``listen``. Required for "
-            "self-registering plugins (W2). Static-config plugins (W1) "
+            "self-registering plugins. Static-config plugins"
             "registered via ``external_plugins`` do NOT need this."
         ),
     )
@@ -221,9 +221,9 @@ class SchedulingConfig(BaseModel):
     external_plugins: list[ExternalPluginEntry] = Field(
         default_factory=list,
         description=(
-            "Static external plugin registration list (W1). Each entry "
+            "Static external plugin registration list. Each entry "
             "is registered at planner startup via the same code path "
-            "the gRPC gateway (W2) would use — so behaviour is "
+            "the gRPC gateway would use — so behaviour is "
             "identical between static-config and self-register models. "
             "Per-entry register failures are logged but do not crash "
             "the planner. Only used when ``use_orchestrator=True``; "
@@ -233,7 +233,7 @@ class SchedulingConfig(BaseModel):
     gateway: GatewayConfig = Field(
         default_factory=GatewayConfig,
         description=(
-            "gRPC registration gateway config (W2). Default disabled. "
+            "gRPC registration gateway config. Default disabled. "
             "Only used when ``use_orchestrator=True``."
         ),
     )

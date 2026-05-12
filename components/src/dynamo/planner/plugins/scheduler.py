@@ -110,7 +110,7 @@ class PluginScheduler:
         circuit_breaker.on_open(self._on_circuit_open)
         # Expose cache_age to the server's list_plugins.
         registry.attach_cache_age_lookup(self.cache_age)
-        # Per-plugin tick scheduling metrics (family 6).
+        # Per-plugin tick scheduling metrics.
         # None = emission off; production path passes the orchestrator's
         # shared PluginFrameworkMetrics instance.
         self._metrics = metrics

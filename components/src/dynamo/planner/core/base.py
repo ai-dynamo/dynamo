@@ -792,39 +792,6 @@ class NativePlannerBase:
         """Override in subclasses to report metrics and apply scaling."""
         pass
 
-    def _wire_predicted_load_if_supported(self, effects: PlannerEffects) -> None:
-        """Call ``connector.set_predicted_load(...)`` on connectors that
-        expose it (currently only ``GlobalPlannerConnector``), using the
-        prediction fields the orchestrator adapter populates in
-        ``TickDiagnostics``.
-
-        Gated on ``scheduling.use_orchestrator=True``. The PSM path is
-        intentionally skipped — the legacy code path never called
-        ``set_predicted_load``, so enabling it in the PSM path would be
-        a behaviour change masquerading as a "fix". This wire is
-        delivered only on the orchestrator path; the PSM gap is left
-        for a separate change if/when someone wants to address it.
-        """
-        if not self.config.scheduling.use_orchestrator:
-            return
-        set_predicted = getattr(self.connector, "set_predicted_load", None)
-        if not callable(set_predicted):
-            # KubernetesConnector / VirtualConnector don't expose the hook;
-            # the DEP documents this as a connector-side no-op.
-            return
-        diag = effects.diagnostics
-        if (
-            diag.predicted_num_req is None
-            and diag.predicted_isl is None
-            and diag.predicted_osl is None
-        ):
-            return
-        set_predicted(
-            num_requests=diag.predicted_num_req,
-            isl=diag.predicted_isl,
-            osl=diag.predicted_osl,
-        )
-
     async def _apply_scaling_targets(
         self, targets: list[TargetReplica], blocking: bool = False
     ) -> None:

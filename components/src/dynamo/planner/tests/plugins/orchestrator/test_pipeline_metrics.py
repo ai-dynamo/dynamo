@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""End-to-end integration test for family-2 metric emissions.
+"""End-to-end integration test for plugin invocation metric emissions.
 
 Drives a real ``LocalPlannerOrchestrator`` through a tick with stub
-plugins and asserts the family-2 metrics land with the expected
-labels and counts.
+plugins and asserts the plugin invocation metrics land with the
+expected labels and counts.
 """
 
 from __future__ import annotations

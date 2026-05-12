@@ -129,28 +129,17 @@ class TickDiagnostics:
     throughput_decision_reason_prefill: Optional[str] = None
     throughput_decision_reason_decode: Optional[str] = None
 
-    # ------------------------------------------------------------------
-    # Plugin-era diagnostic fields.
-    #
-    # The numeric fields above (estimated_*_ms, engine_rps_*, predicted_*)
-    # are populated by the PSM path only; on the orchestrator path
-    # those values move to plugin-emitted Prometheus metrics to avoid
-    # cross-plugin coupling through a shared dataclass.  They stay here
-    # so the existing diagnostics_recorder + PSM fixtures keep working.
-    #
-    # The fields below are the new plugin-aware surface that orchestrator
-    # path populates.  PSM leaves them at their default (empty list / dict)
-    # so downstream consumers (log summary, Grafana dashboard, replay)
-    # must treat "empty" as "information not available on this path" and
-    # fall back to whichever source is populated.
-    # ------------------------------------------------------------------
+    # Plugin-era fields below. Orchestrator path populates these; PSM
+    # path leaves them empty. Numeric fields above are the opposite —
+    # PSM populates them, orchestrator emits the same data as plugin-
+    # owned Prometheus metrics instead. Downstream readers must treat
+    # "empty" as "not available on this path".
 
-    # Plugins that contributed a PROPOSE/RECONCILE/CONSTRAIN override in
-    # this tick.  Tuple: (plugin_id, stage, override_type, component_key,
-    # value).  override_type ∈ {"SET", "AT_LEAST", "AT_MOST", "REJECT"};
-    # component_key is ``f"{sub_component_type}/{component_name}"`` (or
-    # empty for global overrides); value is the integer replica target
-    # (``-1`` for REJECT, since the value is meaningless there).
+    # PROPOSE/RECONCILE/CONSTRAIN overrides contributed this tick.
+    # Tuple: (plugin_id, stage, override_type, component_key, value).
+    # override_type ∈ {"SET", "AT_LEAST", "AT_MOST", "REJECT"};
+    # component_key = ``f"{sub_component_type}/{component_name}"``
+    # (empty for global); value = replica target (``-1`` for REJECT).
     plugin_overrides: list[tuple[str, str, str, str, int]] = field(
         default_factory=list
     )

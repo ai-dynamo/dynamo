@@ -171,7 +171,7 @@ class PlannerPrometheusMetrics:
 
 
 # ---------------------------------------------------------------------------
-# Plugin-framework metrics (family 2)
+# Plugin-framework metrics
 # ---------------------------------------------------------------------------
 
 
@@ -187,7 +187,7 @@ CIRCUIT_STATE_OPEN = 1.0
 class PluginFrameworkMetrics:
     """Plugin-layer Prometheus metrics.
 
-    Separate from ``PlannerPrometheusMetrics`` because this family is
+    Separate from ``PlannerPrometheusMetrics`` because this set is
     about **plugin invocation mechanics** (eval count / latency / circuit
     state / HOLD_LAST cache / override contribution) rather than the
     planner's own decision outputs, and because callers construct it
@@ -269,7 +269,7 @@ class PluginFrameworkMetrics:
         MUST call ``reset_overrides(plugin_id, stage)`` at tick start
         (or the gauge will stay stuck at 1 from the previous tick)."""
 
-        # ----- RECONCILE / CONSTRAIN behaviour metrics (family 3) -----
+        # ----- RECONCILE / CONSTRAIN behaviour metrics -----
 
         self.reconcile_clamped_total = Counter(
             f"{PREFIX}_reconcile_clamped_total",
@@ -301,7 +301,7 @@ class PluginFrameworkMetrics:
             **kw,
         )
 
-        # ----- Tick scheduling metrics (family 6) -----
+        # ----- Tick scheduling metrics -----
         #
         # These describe the orchestrator's tick loop behaviour —
         # how often plugins get deferred, how much latency the cache

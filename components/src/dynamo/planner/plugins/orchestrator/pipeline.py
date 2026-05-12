@@ -114,8 +114,8 @@ class _PredictAdapter:
     way in and forwards the response unchanged.
 
     Emits ``plugin_evaluations_total`` + ``plugin_latency_seconds`` for
-    every PREDICT call so the family-2 metrics cover all 4 stages
-    uniformly; ``chain_augment`` is a separate dispatch path from
+    every PREDICT call so the plugin invocation metrics cover all 4
+    stages uniformly; ``chain_augment`` is a separate dispatch path from
     ``_run_fanout_stage`` and would otherwise silently bypass emission.
     """
 
@@ -282,7 +282,7 @@ async def _run_fanout_stage(
     circuit breaker, threads inherited HOLD_LAST results into the merge,
     and returns the ``type_aware_merge`` outcome.
 
-    When ``metrics`` is provided, emits the family-2 plugin metrics
+    When ``metrics`` is provided, emits the plugin invocation metrics
     (evaluations / latency / held_over / cache_age / circuit_state /
     override_active) at the appropriate points.  Passing ``None``
     disables emission for tests + replay that don't construct a
@@ -392,9 +392,9 @@ async def _run_fanout_stage(
 
 
 # ---------------------------------------------------------------------------
-# Family-2 metric helpers: classify plugin result → metric label, emit gauges.
-# Keeping these close to the fan-out helper so the metric vocabulary
-# stays in one place and matches what dashboards expect.
+# Plugin invocation metric helpers: classify plugin result → metric label,
+# emit gauges. Keeping these close to the fan-out helper so the metric
+# vocabulary stays in one place and matches what dashboards expect.
 # ---------------------------------------------------------------------------
 
 
@@ -551,7 +551,7 @@ def _emit_clamps_and_rejects(
     plugin_results: list,
 ) -> None:
     """Surface ``type_aware_merge`` clamp + reject events as
-    family-3 counters.
+    RECONCILE/CONSTRAIN behaviour counters.
 
     - ``reconcile_clamped_total`` / ``constrain_capped_total`` fire once
       per clamp event (one per ``(key, direction)`` tuple), labelled by

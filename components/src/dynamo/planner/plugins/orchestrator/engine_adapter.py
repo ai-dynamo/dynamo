@@ -391,9 +391,9 @@ class OrchestratorEngineAdapter:
             outcome, tick_input.worker_counts or WorkerCounts()
         )
 
-        # 7. Populate prediction fields on diagnostics. These wire
-        #    ``GlobalPlannerConnector.set_predicted_load`` in
-        #    ``NativePlannerBase.run()``.
+        # 7. Populate prediction fields on diagnostics. Consumed by the
+        #    diagnostics recorder for HTML reports + Prometheus
+        #    ``predicted_*`` gauges (mirrors PSM's behaviour).
         diagnostics = TickDiagnostics()
         if (
             outcome.predict_outcome is not None

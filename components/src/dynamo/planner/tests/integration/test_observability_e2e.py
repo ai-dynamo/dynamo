@@ -316,13 +316,13 @@ async def test_clamp_emits_metric_and_audit_can_describe_it(
 
 
 @pytest.mark.asyncio
-async def test_tick_emits_complete_family_2_and_5_surface(
+async def test_tick_emits_complete_metric_surface(
     ctx_factory, metrics
 ):
-    """A normal tick should populate all family-2 metrics for each
-    evaluated plugin AND family-6 ``tick_duration_seconds``. Reading
-    the merged Prometheus exposition catches any silent regressions
-    where one family stops firing."""
+    """A normal tick should populate all plugin invocation metrics for
+    each evaluated plugin AND ``tick_duration_seconds``. Reading the
+    merged Prometheus exposition catches any silent regressions where
+    one group stops firing."""
     stub = StubPlugin(
         propose=lambda req: ProposeStageResponse(
             result_kind="accept", accept=AcceptResult()

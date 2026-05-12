@@ -168,8 +168,8 @@ def type_aware_merge(
         # Clamp order: floor wins when floor > ceiling.
         result_replicas = max(floor, min(ceiling, recommendation))
 
-        # Record per-key clamps so the orchestrator emits
-        # the right family-3 counter.  Only report clamps that
+        # Record per-key clamps so the orchestrator emits the right
+        # RECONCILE/CONSTRAIN clamp counter.  Only report clamps that
         # actually changed the value — if recommendation was already
         # within [floor, ceiling] this key was un-clamped and the
         # bounds just confirmed it.

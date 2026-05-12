@@ -92,7 +92,7 @@ class MergeOutcome:
     - ``used_final_from`` non-empty → emit audit "final override applied"
     - ``set_dropped`` non-empty → emit Prometheus counter
       ``plugin_constrain_set_dropped_total{plugin_id}`` (CONSTRAIN only)
-    - ``clamped`` non-empty → emit family-3 counters
+    - ``clamped`` non-empty → emit clamp counters
       (``reconcile_clamped_total`` on RECONCILE,
       ``constrain_capped_total`` on CONSTRAIN). The tuple records the
       per-key reason (``"floor"`` when AT_LEAST raised the value,

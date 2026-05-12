@@ -5,7 +5,7 @@
 
 Extends existing ``type_aware_merge`` tests to verify the new
 ``clamped`` field accurately records which (key, direction, source)
-events should drive family-3 clamp counters.
+events should drive RECONCILE/CONSTRAIN clamp counters.
 """
 
 from __future__ import annotations
