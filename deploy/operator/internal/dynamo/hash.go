@@ -18,7 +18,6 @@
 package dynamo
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -51,7 +50,6 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 	}
 
 	dcds, err := GenerateDynamoComponentsDeployments(
-		context.Background(),
 		dgd.DeepCopy(),
 		nil,
 		nil,

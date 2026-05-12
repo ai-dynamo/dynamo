@@ -386,7 +386,7 @@ func TestLegacyAlphaHashCompatibility_NoOpUpgradeUsesExistingWorkerGeneration(t 
 	require.Equal(t, legacyHash, rollingCtx.NewWorkerHash)
 	require.False(t, rollingCtx.InProgress())
 
-	dcds, err := dynamo.GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, nil, rollingCtx)
+	dcds, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, rollingCtx)
 	require.NoError(t, err)
 	require.Equal(t, "qwen-vllmdecodeworker-"+legacyHash, dcds["VllmDecodeWorker"].Name)
 	require.NotEqual(t, "qwen-vllmdecodeworker-"+v2Hash, dcds["VllmDecodeWorker"].Name)

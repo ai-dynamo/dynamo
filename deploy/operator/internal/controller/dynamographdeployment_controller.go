@@ -1395,7 +1395,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 
 	// Generate all DCDs (handles both normal and rolling update cases)
 	dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(
-		ctx, dynamoDeployment, restartState, existingRestartAnnotations, rollingUpdateCtx,
+		dynamoDeployment, restartState, existingRestartAnnotations, rollingUpdateCtx,
 	)
 	if err != nil {
 		logger.Error(err, "failed to generate the DynamoComponentsDeployments")

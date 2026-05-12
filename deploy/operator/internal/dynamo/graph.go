@@ -254,7 +254,7 @@ func (s ServiceConfig) GetNamespace() *string {
 	return &s.Config.Dynamo.Namespace
 }
 
-func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeploymentConfig, error) {
+func ParseDynDeploymentConfig(jsonContent []byte) (DynDeploymentConfig, error) {
 	var config DynDeploymentConfig
 	err := json.Unmarshal(jsonContent, &config)
 	return config, err
@@ -278,7 +278,6 @@ type RollingUpdateContext struct {
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig.
 // The map key is the component name.
 func GenerateDynamoComponentsDeployments(
-	ctx context.Context,
 	parentDGD *v1beta1.DynamoGraphDeployment,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
@@ -295,7 +294,7 @@ func GenerateDynamoComponentsDeployments(
 		component := &parentDGD.Spec.Components[i]
 		componentName := component.ComponentName
 		dynamoNamespace := parentDGD.GetDynamoNamespaceForComponent(component)
-		dcd, err := generateSingleDCD(ctx, parentDGD, componentName, component, dynamoNamespace, backendFramework, restartState, existingRestartAnnotations, rollingUpdateCtx)
+		dcd, err := generateSingleDCD(parentDGD, componentName, component, dynamoNamespace, backendFramework, restartState, existingRestartAnnotations, rollingUpdateCtx)
 		if err != nil {
 			return nil, err
 		}
@@ -339,7 +338,6 @@ func GetDynamoNamespace(object metav1.Object, service *v1beta1.DynamoComponentDe
 
 // generateSingleDCD creates a DynamoComponentDeployment for a single service.
 func generateSingleDCD(
-	ctx context.Context,
 	parentDGD *v1beta1.DynamoGraphDeployment,
 	componentName string,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
@@ -394,7 +392,7 @@ func generateSingleDCD(
 		ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec).Spec.ServiceAccountName = commonconsts.PlannerServiceAccountName
 	}
 
-	if err := applyDynDeploymentConfig(ctx, deployment, commonconsts.DynamoServicePort); err != nil {
+	if err := applyDynDeploymentConfig(deployment, commonconsts.DynamoServicePort); err != nil {
 		return nil, err
 	}
 
@@ -467,7 +465,7 @@ func GetDGDComponentPreservedIngressSpec(dgd *v1beta1.DynamoGraphDeployment, com
 	return ingressSpec, true
 }
 
-func applyDynDeploymentConfig(ctx context.Context, dcd *v1beta1.DynamoComponentDeployment, frontendPort int) error {
+func applyDynDeploymentConfig(dcd *v1beta1.DynamoComponentDeployment, frontendPort int) error {
 	main := GetMainContainer(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 	if main == nil {
 		return nil
@@ -485,7 +483,7 @@ func applyDynDeploymentConfig(ctx context.Context, dcd *v1beta1.DynamoComponentD
 		setDynamoDeploymentConfig(main, updatedConfig)
 		rawConfig = updatedConfig
 	}
-	config, err := ParseDynDeploymentConfig(ctx, rawConfig)
+	config, err := ParseDynDeploymentConfig(rawConfig)
 	if err != nil {
 		return err
 	}
