@@ -217,7 +217,28 @@ clean() {
       $K delete service "$DEPLOY_NAME" --ignore-not-found
       ;;
     dgd)
-      $K delete dynamographdeployment "$DEPLOY_NAME" --ignore-not-found
+      # Use the fully-qualified resource path. The bare `dgd` /
+      # `dynamographdeployment` shortname resolves to whichever API
+      # version `kubectl` discovers first, which can be a not-yet-
+      # served v1beta1 on operators that announced v1beta1 in their
+      # APIService but haven't actually deployed it — `delete dgd`
+      # then returns "not found" while the resource still exists at
+      # v1alpha1 (observed on aws-dev-02 today, leaking an 8-GPU
+      # qwen35-dynamo-fd DGD that --ignore-not-found silently
+      # swallowed). Targeting v1alpha1 explicitly + verifying gone.
+      $K delete dynamographdeployments.v1alpha1.nvidia.com "$DEPLOY_NAME" --ignore-not-found --wait=false
+      # Verify the DGD actually went away — list via v1alpha1 path too.
+      for _ in 1 2 3 4 5 6; do
+        if ! $K get dynamographdeployments.v1alpha1.nvidia.com "$DEPLOY_NAME" >/dev/null 2>&1; then
+          echo "[clean] DGD $DEPLOY_NAME removed"
+          break
+        fi
+        sleep 5
+      done
+      if $K get dynamographdeployments.v1alpha1.nvidia.com "$DEPLOY_NAME" >/dev/null 2>&1; then
+        echo "ERROR: DGD $DEPLOY_NAME still present after delete — manual cleanup required." >&2
+        exit 2
+      fi
       ;;
   esac
   # Note: PVCs intentionally NOT deleted — that would force model re-download.
