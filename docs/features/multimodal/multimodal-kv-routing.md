@@ -53,7 +53,7 @@ supports.
 Frontend (Rust + lightseek llm-multimodal + KV router) → Backend Workers
         │
         ├─ Hash image (xxh3_64 of the raw URL — full-URL identity; use --frontend-decoding for content-addressed hashing)
-        ├─ Resolve image-token id (config.json / processor_config.json / vocab probe)
+        ├─ Resolve image-token id via lightseek's per-model ModelProcessorSpec
         ├─ Read (W, H) from a Range: 0-65535 header fetch (or in-memory data: bytes)
         ├─ lightseek::count_tokens(W, H) → expanded image-token count N
         ├─ Expand placeholder × N in routing_token_ids (worker token_ids unchanged)
@@ -64,7 +64,7 @@ Frontend (Rust + lightseek llm-multimodal + KV router) → Backend Workers
 ```
 
 1. The Rust frontend computes an `mm_hash` per image: `xxh3_64` of the decoded bytes for `data:` URIs (and for `http(s)://` when `media_decoder` is enabled on the model), otherwise `xxh3_64` of the full URL string. Two callers will share an `mm_hash` only when they send byte-identical URLs.
-2. The image-token id is resolved per model from `config.json` (`image_token_id` / `image_token_index` / `media_placeholder_token_id`), `processor_config.json` / `tokenizer_config.json` (`image_token` string), or a probe of common placeholder strings against the tokenizer vocab.
+2. The image-placeholder token id is resolved by delegating to lightseek's per-model `ModelProcessorSpec` (one spec per supported VLM family — Qwen3-VL, Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Phi-3-vision, Llama-4, Kimi-K2.5). Each spec reads the appropriate `config.json` field for its model family (`image_token_id`, `image_token_index`, or `media_placeholder_token_id`) and falls back to probing the tokenizer's vocab when only the placeholder string is registered. Models the registry doesn't recognise fall back to text-prefix-only routing.
 3. Per-image `(W, H)` is read from a 64KB `Range`-bounded header fetch (or from in-memory bytes for `data:` URIs); the lightseek `llm-multimodal` crate computes the per-image expanded token count.
 4. The single placeholder token is expanded to N copies in `routing_token_ids` (a router-only view); the worker still sees one placeholder per image in `token_ids`.
 5. Per-block MM metadata (`block_mm_infos`) is built from the expanded view; the KV router evaluates overlap across workers including image-bearing blocks.

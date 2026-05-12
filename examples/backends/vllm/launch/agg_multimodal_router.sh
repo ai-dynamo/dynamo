@@ -7,7 +7,10 @@
 # Architecture:
 #   HTTP client
 #     -> Rust frontend
-#          - resolves <|image_pad|> token id from HF JSON (3-tier resolver)
+#          - resolves the image-placeholder token id via lightseek's
+#            per-model ModelProcessorSpec (Qwen3-VL, Qwen2.5-VL, Qwen2-VL,
+#            LLaVA-NeXT, LLaVA-1.5, Phi-3-vision, Llama-4, Kimi-K2.5);
+#            each spec reads the appropriate config.json field
 #          - lightseek `calculate_num_tokens(W,H)` per image (header-only fetch)
 #          - expands placeholder -> N copies in routing_token_ids
 #          - hashes URL (xxh3) -> u64 -> 64-char hex -> extra_args["mm_hashes"]
