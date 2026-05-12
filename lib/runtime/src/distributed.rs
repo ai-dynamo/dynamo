@@ -827,7 +827,11 @@ impl std::str::FromStr for RequestPlaneMode {
             _ => Err(anyhow::anyhow!(
                 "Invalid request plane mode: '{}'. Valid options are: 'nats', 'http', 'tcp'{}",
                 s,
-                if cfg!(feature = "velo-transport") { ", 'velo'" } else { "" }
+                if cfg!(feature = "velo-transport") {
+                    ", 'velo'"
+                } else {
+                    ""
+                }
             )),
         }
     }

@@ -81,10 +81,24 @@ impl KvPeerDiscovery {
             .with_context(|| format!("inserting {by_inst} into {}", self.bucket))?;
 
         let uuid_value = peer_info.instance_id().as_uuid().to_string();
-        bucket
+        if let Err(err) = bucket
             .insert(&by_worker, uuid_value.into_bytes().into(), 0)
             .await
-            .with_context(|| format!("inserting {by_worker} into {}", self.bucket))?;
+        {
+            // Compensate the by-instance insert above so a partial write does
+            // not leave discovery half-registered (visible by-instance, missing
+            // by-worker). Surface the rollback failure in the error chain.
+            if let Err(rollback_err) = bucket.delete(&by_inst).await {
+                return Err(err)
+                    .with_context(|| {
+                        format!(
+                            "inserting {by_worker} into {} (rollback of {by_inst} also failed: {rollback_err:#})",
+                            self.bucket
+                        )
+                    });
+            }
+            return Err(err).with_context(|| format!("inserting {by_worker} into {}", self.bucket));
+        }
 
         Ok(KvPeerRegistrationGuard {
             kv: self.kv.clone(),
@@ -121,7 +135,11 @@ impl KvPeerDiscovery {
             .get(&worker_key(wid))
             .await
             .with_context(|| {
-                format!("fetching worker {} index from {}", wid.as_u64(), self.bucket)
+                format!(
+                    "fetching worker {} index from {}",
+                    wid.as_u64(),
+                    self.bucket
+                )
             })?
             .ok_or_else(|| anyhow!("worker {} not registered in {}", wid.as_u64(), self.bucket))?;
         let uuid_str = std::str::from_utf8(&id_bytes)
@@ -157,13 +175,36 @@ impl KvPeerRegistrationGuard {
             self.by_worker.take();
             return Ok(());
         };
-        if let Some(k) = self.by_inst.take() {
-            let _ = b.delete(&k).await;
+        // Only clear a key from `self` once its delete succeeds. If a delete
+        // fails we leave the key in place so the Drop-side retry path (and
+        // any caller that retries `unregister()`) still knows what's
+        // outstanding — i.e. don't disarm the guard on a failed cleanup.
+        let mut first_err: Option<anyhow::Error> = None;
+        if let Some(k) = self.by_inst.as_ref() {
+            match b.delete(k).await {
+                Ok(()) => {
+                    self.by_inst.take();
+                }
+                Err(e) => {
+                    first_err = Some(anyhow!("deleting {k} from {}: {e:#}", self.bucket));
+                }
+            }
         }
-        if let Some(k) = self.by_worker.take() {
-            let _ = b.delete(&k).await;
+        if let Some(k) = self.by_worker.as_ref() {
+            match b.delete(k).await {
+                Ok(()) => {
+                    self.by_worker.take();
+                }
+                Err(e) => {
+                    let err = anyhow!("deleting {k} from {}: {e:#}", self.bucket);
+                    first_err.get_or_insert(err);
+                }
+            }
         }
-        Ok(())
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 }
 
@@ -204,8 +245,8 @@ impl Drop for KvPeerRegistrationGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use ::velo::{PeerInfo, WorkerAddress};
+    use bytes::Bytes;
 
     fn dummy_peer() -> PeerInfo {
         let id = InstanceId::new_v4();

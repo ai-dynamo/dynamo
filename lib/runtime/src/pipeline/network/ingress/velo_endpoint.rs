@@ -51,11 +51,12 @@ impl VeloRequestPlaneServer {
         let handlers: Arc<DashMap<String, EndpointHandler>> = Arc::new(DashMap::new());
 
         let dispatch_handlers = handlers.clone();
-        let handler = Handler::unary_handler_async(REQUEST_PLANE_HANDLER, move |ctx: VeloContext| {
-            let handlers = dispatch_handlers.clone();
-            async move { dispatch(handlers, ctx).await }
-        })
-        .build();
+        let handler =
+            Handler::unary_handler_async(REQUEST_PLANE_HANDLER, move |ctx: VeloContext| {
+                let handlers = dispatch_handlers.clone();
+                async move { dispatch(handlers, ctx).await }
+            })
+            .build();
 
         velo.register_handler(handler)
             .map_err(|e| anyhow!("registering velo demux handler {REQUEST_PLANE_HANDLER}: {e}"))?;
@@ -102,7 +103,15 @@ async fn dispatch(
     let handler = handlers
         .get(&endpoint_key)
         .map(|entry| entry.service_handler.clone())
-        .ok_or_else(|| anyhow!("no handler registered for velo endpoint key {endpoint_key}"))?;
+        .ok_or_else(|| {
+            // Log on the server so operators can see misrouted / misspelled
+            // requests without having to correlate from the client error.
+            tracing::warn!(
+                endpoint_key = %endpoint_key,
+                "velo dispatch: no handler registered for endpoint key"
+            );
+            anyhow!("no handler registered for velo endpoint key {endpoint_key}")
+        })?;
 
     handler
         .handle_payload(ctx.payload, request_id)
@@ -181,9 +190,9 @@ impl RequestPlaneServer for VeloRequestPlaneServer {
     }
 
     fn is_healthy(&self) -> bool {
-        // The velo node is considered healthy as long as it has been built. velo
-        // itself does not currently expose a top-level health flag; if we add
-        // one in the future this is the place to wire it.
+        // TODO(KVBM-424 follow-up): velo does not yet expose a top-level health
+        // flag. When it does, wire it in here so liveness probes / LB gates
+        // reflect actual node state instead of unconditional `true`.
         true
     }
 }

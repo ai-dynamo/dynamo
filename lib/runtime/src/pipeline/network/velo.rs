@@ -33,8 +33,8 @@ use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-pub use ::velo::Velo;
 pub use ::velo::InstanceId;
+pub use ::velo::Velo;
 use ::velo::transports::tcp::TcpTransportBuilder;
 
 pub use self::kv_discovery::{KvPeerDiscovery, KvPeerRegistrationGuard, VELO_PEERS_BUCKET};

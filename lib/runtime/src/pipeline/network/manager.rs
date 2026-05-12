@@ -547,9 +547,7 @@ impl NetworkManager {
         let kv = self.velo_kv_manager()?;
         let cfg = self.velo_runtime_config();
         let handle = match tokio::runtime::Handle::try_current() {
-            Ok(h) => tokio::task::block_in_place(|| {
-                h.block_on(super::velo::global_velo(kv, cfg))
-            })?,
+            Ok(h) => tokio::task::block_in_place(|| h.block_on(super::velo::global_velo(kv, cfg)))?,
             Err(_) => {
                 return Err(anyhow::anyhow!(
                     "velo client creation must run within a tokio runtime"

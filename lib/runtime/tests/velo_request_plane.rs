@@ -28,9 +28,7 @@ use dynamo_runtime::pipeline::network::egress::unified_client::RequestPlaneClien
 use dynamo_runtime::pipeline::network::egress::velo_client::VeloRequestPlaneClient;
 use dynamo_runtime::pipeline::network::ingress::unified_server::RequestPlaneServer;
 use dynamo_runtime::pipeline::network::ingress::velo_endpoint::VeloRequestPlaneServer;
-use dynamo_runtime::pipeline::network::velo::{
-    KvPeerDiscovery, encode_velo_address,
-};
+use dynamo_runtime::pipeline::network::velo::{KvPeerDiscovery, encode_velo_address};
 use dynamo_runtime::storage::kv;
 
 /// Test handler that records every payload and request id it receives.
@@ -91,7 +89,10 @@ async fn build_velo_node(
         .await
         .expect("build velo");
 
-    let guard = disco.register(velo.peer_info()).await.expect("register peer");
+    let guard = disco
+        .register(velo.peer_info())
+        .await
+        .expect("register peer");
     (velo, guard)
 }
 
@@ -146,7 +147,11 @@ async fn velo_request_plane_round_trip() {
         .expect("send_request");
 
     // Empty ACK is the contract.
-    assert!(ack.is_empty(), "expected empty ACK, got {} bytes", ack.len());
+    assert!(
+        ack.is_empty(),
+        "expected empty ACK, got {} bytes",
+        ack.len()
+    );
 
     // Allow velo's spawn-by-default dispatch to land before we read the recording.
     let mut tries = 0;
@@ -169,12 +174,10 @@ async fn velo_two_nodes_can_discover_each_other_via_kv() {
     let (velo_b, _guard_b) = build_velo_node(disco.clone()).await;
 
     // Direct discovery hit.
-    let resolved = velo::discovery::PeerDiscovery::discover_by_instance_id(
-        &*disco,
-        velo_a.instance_id(),
-    )
-    .await
-    .expect("disco direct");
+    let resolved =
+        velo::discovery::PeerDiscovery::discover_by_instance_id(&*disco, velo_a.instance_id())
+            .await
+            .expect("disco direct");
     assert_eq!(resolved.instance_id(), velo_a.instance_id());
 
     // Velo's own discover_and_register_peer.
@@ -200,5 +203,8 @@ async fn velo_request_plane_unknown_endpoint_errors() {
     let res = client
         .send_request(address, Bytes::from_static(b"x"), HashMap::new())
         .await;
-    assert!(res.is_err(), "expected error for unknown endpoint, got {res:?}");
+    assert!(
+        res.is_err(),
+        "expected error for unknown endpoint, got {res:?}"
+    );
 }

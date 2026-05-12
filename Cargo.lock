@@ -5453,7 +5453,7 @@ version = "0.31.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d6d0705320c1e6ba1d912b5e37cf18071b6c2e9b7fa8215a1e8a7651966f5d3"
 dependencies = [
- "bitflags 2.11.0",
+ "bitflags 2.11.1",
  "cfg-if",
  "cfg_aliases",
  "libc",
@@ -9663,9 +9663,9 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "velo"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4535bc144abe1cd107feeafb200c340167bb2719a775fbbda889295ab4f8e5c"
+checksum = "0ad3374130e0580d8d7894dbd60f5736b4b6d33d2104145b04ee14c7cf10d3b9"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -9708,9 +9708,9 @@ dependencies = [
 
 [[package]]
 name = "velo-ext"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11619c5909a8d4cb1346dae5804dc5ed537931d38ff73cb848ebda469661f25e"
+checksum = "9bbf99f74c0202bd1bf6caaa8bb784f461b757df7beafe734273519caf65372e"
 dependencies = [
  "anyhow",
  "bytes",
