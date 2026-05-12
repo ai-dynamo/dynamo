@@ -20,7 +20,6 @@ These recipes compare Dynamo performance features with benchmark results, each i
 |-------|-----------|---------------|------|----------|
 | **[Qwen3-32B](qwen3-32b/)** | vLLM | Disagg + KV-Router | 16x H200 | **Disaggregated Serving + KV-Aware Routing** — benchmark comparison with real-world Mooncake traces |
 | **[DeepSeek-V3.2-NVFP4](deepseek-v32-fp4/)** | TensorRT-LLM | Agg + Disagg WideEP | 32x GB200 | **Disaggregated Serving + KV-Aware Routing** — benchmark comparison with Mooncake-based synthetic coding trace |
-| **[Qwen3-VL-30B-A3B-FP8](qwen3-vl-30b/)** | vLLM | Agg + Embedding Cache | 1x GB200 | **Multimodal Embedding Cache** — benchmark comparison showing +16% throughput, -28% TTFT |
 
 ### Aggregated & Disaggregated Recipes
 
