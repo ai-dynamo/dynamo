@@ -13,7 +13,7 @@ For the feature itself — what the embedding cache is, support across backends 
 
 ## Recipe
 
-The numbers below come from the [`qwen3.6-35b` recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.6-35b), which runs three configurations on the same single-GPU node so the only thing that varies is the Dynamo feature set:
+The numbers below come from the [`qwen3.6-35b` recipe](../../recipes/qwen3.6-35b/README.md), which runs three configurations on the same single-GPU node so the only thing that varies is the Dynamo feature set:
 
 | Config         | Stack          | Frontend-decoding | Embedding cache |
 |----------------|----------------|-------------------|-----------------|
@@ -66,8 +66,9 @@ See the recipe README for the full deploy, dataset generation, and `aiperf` invo
 
 ```bash
 cd recipes/qwen3.6-35b
-./run-all-benchmarks.sh -n <namespace> --hw h100     # or --hw gb200
-python3 compare.py ~/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen36-fp8-h100/
+HW=h100   # or gb200
+./run-all-benchmarks.sh -n <namespace> --hw "${HW}"
+python3 compare.py ~/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen36-fp8-"${HW}"/
 ```
 
-Full instructions and prerequisites live in [`recipes/qwen3.6-35b/README.md`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.6-35b).
+Full instructions and prerequisites live in [`recipes/qwen3.6-35b/README.md`](../../recipes/qwen3.6-35b/README.md).

@@ -64,7 +64,7 @@ spec:
             exit 1
           fi
 
-          RUN_DIR="${ARTIFACT_BASE_DIR}/agg-h100"
+          RUN_DIR="${ARTIFACT_BASE_DIR}/vllm-serve"
           mkdir -p "${RUN_DIR}"
           echo "Running benchmark; artifacts → ${RUN_DIR}"
 

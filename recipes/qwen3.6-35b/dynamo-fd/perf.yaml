@@ -60,7 +60,7 @@ spec:
             exit 1
           fi
 
-          RUN_DIR="${ARTIFACT_BASE_DIR}/agg-h100-fd"
+          RUN_DIR="${ARTIFACT_BASE_DIR}/dynamo-fd"
           mkdir -p "${RUN_DIR}"
           echo "Running benchmark; artifacts → ${RUN_DIR}"
 

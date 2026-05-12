@@ -156,7 +156,10 @@ bench() {
 }
 
 retrieve() {
-  local dest="$HOME/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen36-fp8-${HW}/${CONFIG}"
+  # Override the destination root via $BENCHMARK_RESULTS_DIR if your
+  # workspace layout differs from the default.
+  local base="${BENCHMARK_RESULTS_DIR:-$HOME/workspace/dynamo-tmp/logs}"
+  local dest="$base/$(date +%m-%d)/qwen36-fp8-${HW}/${CONFIG}"
   mkdir -p "$dest"
   $K exec "$BENCH_POD" -- \
       tar c --exclude='inputs.json' -C /perf-cache artifacts \

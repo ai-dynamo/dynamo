@@ -39,15 +39,26 @@ spec:
         - name: generate-datasets
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
           imagePullPolicy: IfNotPresent
+          # No privilege escalation, drop all Linux caps, default seccomp.
+          # runAsUser:0 is set at the pod level for PVC fsGroup writes —
+          # this container security context complements it without removing
+          # the root requirement.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
           env:
             # nvcr.io/.../vllm-runtime:1.1.0 was cut from a release branch
             # that predates dynamo PR 8201 (sliding-window strategy), so the
             # baked /workspace/benchmarks/multimodal/jsonl/main.py is the
-            # older single-turn-only version. Pull a recent main HEAD to get
+            # older single-turn-only version. Pull a pinned main SHA to get
             # the sliding-window subcommand. Bump DYNAMO_REF when you want
-            # newer generator fixes; pin to a SHA for strict reproducibility.
+            # newer generator fixes.
             - name: DYNAMO_REF
-              value: "main"
+              value: "e2f63d01e07b6deadf4c0912269564503846d204"
           command:
             - /bin/bash
             - -lc
@@ -55,8 +66,13 @@ spec:
               set -euo pipefail
               GEN_SRC=/tmp/dynamo-jsonl
               rm -rf "$GEN_SRC"
-              git clone --depth=1 --branch="$DYNAMO_REF" \
-                https://github.com/ai-dynamo/dynamo.git "$GEN_SRC"
+              # Shallow fetch a specific SHA (or ref). `git clone --branch`
+              # doesn't accept SHAs, so use init + fetch <sha> + checkout
+              # — works for both SHAs and branch names.
+              git init -q "$GEN_SRC"
+              git -C "$GEN_SRC" remote add origin https://github.com/ai-dynamo/dynamo.git
+              git -C "$GEN_SRC" fetch --depth=1 origin "$DYNAMO_REF"
+              git -C "$GEN_SRC" checkout -q FETCH_HEAD
               cd "$GEN_SRC/benchmarks/multimodal/jsonl"
               echo "[gen] using dynamo @ $(git -C $GEN_SRC rev-parse --short HEAD)"
               python3 main.py --help | head -3

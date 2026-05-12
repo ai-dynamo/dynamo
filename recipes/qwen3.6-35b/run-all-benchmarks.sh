@@ -41,7 +41,10 @@ DRIVER="$HERE/run-benchmark.sh"
 CONFIGS=(vllm-serve dynamo-fd dynamo-fd-ec)
 
 TS_DIR="$(date +%m-%d)"
-SUMMARY_DIR="$HOME/workspace/dynamo-tmp/logs/${TS_DIR}/qwen36-fp8-${HW}"
+# Override the summary root via $BENCHMARK_RESULTS_DIR — also picked up by
+# run-benchmark.sh's retrieve(), so the two paths stay in sync.
+BASE_DIR="${BENCHMARK_RESULTS_DIR:-$HOME/workspace/dynamo-tmp/logs}"
+SUMMARY_DIR="$BASE_DIR/${TS_DIR}/qwen36-fp8-${HW}"
 mkdir -p "$SUMMARY_DIR"
 RUN_LOG="$SUMMARY_DIR/run-all-benchmarks.log"
 echo "[run-all] hw=$HW namespace=$NAMESPACE" | tee -a "$RUN_LOG"
