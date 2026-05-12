@@ -594,7 +594,6 @@ def test_serve_deployment(
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
     predownload_models,
-    image_server,
 ):
     """
     Test dynamo serve deployments with different graph configurations.
