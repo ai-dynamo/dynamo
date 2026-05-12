@@ -8,6 +8,7 @@ LLM workers using TensorRT-LLM.
 """
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -80,6 +81,7 @@ DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
 
 def build_kv_connector_config(config: Config):
+    """Build a KvCacheConnectorConfig from the connector field in *config*, or None."""
     if config.connector:
         if config.connector[0] == "kvbm":
             return KvCacheConnectorConfig(
@@ -112,6 +114,61 @@ def _warn_override_collisions(target: dict, source: dict, path: str = "") -> Non
                 )
 
 
+def _normalize_arg_map_for_snapshot(arg_map: dict) -> dict:
+    """Return a deep-copyable dict snapshot of *arg_map*, converting KvCacheConfig to dict."""
+    result = {}
+    for k, v in arg_map.items():
+        if isinstance(v, KvCacheConfig):
+            result[k] = copy.deepcopy(v.model_dump(exclude_none=True))
+        elif isinstance(v, dict):
+            result[k] = copy.deepcopy(v)
+        else:
+            result[k] = v
+    return result
+
+
+def _audit_user_arg_clobbers(user_snapshot: dict, final_arg_map: dict) -> None:
+    """Warn whenever Dynamo internals overwrote a value that was user-supplied.
+
+    *user_snapshot* should be taken immediately after extra_engine_args and
+    override_engine_args are applied — it represents the user's intent.
+    Any key present in the snapshot whose value differs in *final_arg_map*
+    was silently mutated by Dynamo's own init logic and is flagged here.
+    """
+    normalized = _normalize_arg_map_for_snapshot(final_arg_map)
+    for key, user_val in user_snapshot.items():
+        if key not in normalized:
+            logging.warning(
+                "arg_map key %r was present after user config but is missing before LLM init.",
+                key,
+            )
+            continue
+        final_val = normalized[key]
+        if isinstance(user_val, dict) and isinstance(final_val, dict):
+            for sub_key, sub_user_val in user_val.items():
+                if sub_key not in final_val:
+                    logging.warning(
+                        "Dynamo internals dropped user-supplied %s.%s",
+                        key,
+                        sub_key,
+                    )
+                elif final_val[sub_key] != sub_user_val:
+                    logging.warning(
+                        "Dynamo internals replaced user-supplied %s.%s: %r -> %r",
+                        key,
+                        sub_key,
+                        sub_user_val,
+                        final_val[sub_key],
+                    )
+        elif final_val != user_val:
+            logging.warning(
+                "Dynamo internals replaced user-supplied %s: %r -> %r",
+                key,
+                user_val,
+                final_val,
+            )
+
+
 def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
     """Parse --model-loader-extra-config into a dict. Accepts a dict or a JSON string."""
     if raw is None or raw == "":
@@ -141,6 +198,7 @@ def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
 
 
 def _register_memory_routes(runtime, handler) -> None:
+    """Register release/resume memory occupation engine routes on *runtime*."""
     runtime.register_engine_route(
         "release_memory_occupation",
         handler.release_memory_occupation,
@@ -305,6 +363,10 @@ async def init_llm_worker(
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
 
+    # Snapshot arg_map here — after all user-supplied args are applied and
+    # before Dynamo's own init mutations run — so we can detect silent clobbers.
+    user_arg_snapshot = _normalize_arg_map_for_snapshot(arg_map)
+
     _sync_config_from_engine_args(config, arg_map)
 
     if config.publish_events_and_metrics:
@@ -374,6 +436,7 @@ async def init_llm_worker(
             exc_info=True,
         )
 
+    _audit_user_arg_clobbers(user_arg_snapshot, arg_map)
     logging.info(f"TensorRT-LLM engine args: {arg_map}")
     engine_args = arg_map
 
