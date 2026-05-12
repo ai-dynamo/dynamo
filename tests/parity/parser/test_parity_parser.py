@@ -173,7 +173,35 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
     ("sglang", "minimax_m2", "PARSER.batch.5"): _RECOVERY_CONTRACT,
     ("sglang", "deepseek_v3_1", "PARSER.batch.5"): _RECOVERY_CONTRACT,
     ("sglang", "harmony", "PARSER.batch.5"): _RECOVERY_CONTRACT,
+    # PARSER.batch.5 glm47 sub-cases — pin POST-#9355 Dynamo behavior. The fixture
+    # expected blocks match Dynamo on this branch; entries below capture where
+    # vllm/sglang still diverge after the fix.
+    # 5.c / 5.f / 5.g / 5.h: vllm + sglang already match post-#9355 Dynamo (calls=[],
+    # raw preserved) — NO divergence entries needed.
+    # 5.d (multi-call shallow): both peers drop the second call.
+    ("vllm", "glm47", "PARSER.batch.5.d"): _RECOVERY_CONTRACT,
+    ("sglang", "glm47", "PARSER.batch.5.d"): _RECOVERY_CONTRACT,
+    # 5.e (multi-call mid-value): sglang matches post-#9355 Dynamo bit-for-bit;
+    # vllm diverges by dropping the raw 2nd block from normal_text.
+    ("vllm", "glm47", "PARSER.batch.5.e"): _RECOVERY_CONTRACT,
+    # 5.i (intra-block partial): only Dynamo recovers the first complete pair;
+    # vllm and sglang both return calls=[] and raw text.
+    ("vllm", "glm47", "PARSER.batch.5.i"): _RECOVERY_CONTRACT,
+    ("sglang", "glm47", "PARSER.batch.5.i"): _RECOVERY_CONTRACT,
 }
+
+
+def _case_sort_key(case_id: str) -> tuple[int, str]:
+    """Sort key for case IDs that may carry a sub-letter.
+
+    `PARSER.batch.5`   → (5, "")
+    `PARSER.batch.5.c` → (5, "c")
+    `PARSER.batch.5.i` → (5, "i")
+    """
+    parts = case_id.split(".")
+    top = int(parts[2])
+    sub = parts[3] if len(parts) > 3 else ""
+    return (top, sub)
 
 
 def _load_fixtures() -> list[tuple[str, str, dict[str, Any]]]:
@@ -181,15 +209,16 @@ def _load_fixtures() -> list[tuple[str, str, dict[str, Any]]]:
 
     Schema: <family>/PARSER.<mode>.yaml holds
         {family: "...", mode: "batch", cases: {PARSER.batch.1: {...}, ...}}
-    Case keys are the full PARSER_CASES.md ID (e.g. `PARSER.batch.1`)
-    so they match KNOWN_DIVERGENCES keys and parametrize IDs directly.
+    Case keys are the full PARSER_CASES.md ID (e.g. `PARSER.batch.1` or
+    `PARSER.batch.5.c`) so they match KNOWN_DIVERGENCES keys and parametrize
+    IDs directly.
     """
     out = []
     for fp in sorted(FIXTURES_ROOT.glob("*/PARSER.*.yaml")):
         doc = yaml.safe_load(fp.read_text())
         for case_id, case in doc["cases"].items():
             out.append((doc["family"], case_id, case))
-    out.sort(key=lambda t: (t[0], int(t[1].rsplit(".", 1)[1])))
+    out.sort(key=lambda t: (t[0], *_case_sort_key(t[1])))
     return out
 
 

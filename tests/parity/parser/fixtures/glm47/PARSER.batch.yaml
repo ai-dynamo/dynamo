@@ -70,6 +70,185 @@ cases:
         arguments:
           location: NYC
       normal_text: null
+  # =====================================================================
+  # PARSER.batch.5 missing-end-token recovery — sub-cases.
+  #
+  # SPEC STATUS — there isn't one. The cited "spec" is the GLM-4.7 chat template
+  # https://huggingface.co/zai-org/GLM-4.7/blob/main/chat_template.jinja which
+  # specifies only:
+  #   (a) the system-prompt instruction telling the model what well-formed tool
+  #       calls look like: `<tool_call>{name}<arg_key>{k}</arg_key><arg_value>{v}</arg_value>...</tool_call>`
+  #   (b) the forward serialization (how prior tool_calls get rendered back into
+  #       context for the next turn).
+  # It does NOT specify what a parser should do with truncated / malformed model
+  # output. There is no upstream "correct answer" for any of the 5.* sub-cases
+  # below — each runtime (Dynamo, vLLM, SGLang) picks its own recovery contract.
+  #
+  # The spec is ambiguous on truncation. Therefore the behavior pinned in each
+  # `expected:` block below is a deliberate Dynamo-side choice — not "the right
+  # answer," just "what Dynamo does today." When vLLM or SGLang produce a different
+  # output, that's documented via KNOWN_DIVERGENCES in test_parity_parser.py rather
+  # than treated as a bug. If the GLM team publishes a recovery contract later, the
+  # `expected:` blocks here are the units of change. Until then: pin, document, and
+  # treat parity divergences as informational (so customers comparing engines see
+  # an explicit map, not a surprise).
+  #
+  # References:
+  #   - GLM-4.7 chat template (forward direction only):
+  #     https://huggingface.co/zai-org/GLM-4.7/blob/main/chat_template.jinja
+  #   - Dynamo parser source: lib/parsers/src/tool_calling/xml/glm47_parser.rs
+  #   - vLLM tool parser:     vllm/tool_parsers/glm4_moe_tool_parser.py (in vllm package)
+  #   - SGLang detector:      sglang.srt.function_call.function_call_parser:Glm47MoeDetector
+  #   - PR #9355: the has_args guard that flips 5.c/5.e/5.f/5.g/5.h Dynamo behavior
+  #     from "emit empty-args wrong call" to "reject, raw markup → normal_text"
+  #   - PR #9438: parallel-tool-calls streaming-jail fix (same author; not part of
+  #     this PR, but addresses the user-visible content leak in Ajay's report)
+  #   - GLM-5.1 prod leak report: Ajay Rajan in #nv-inference Slack, 2026-05-11
+  #     (curl request and verbatim response captured below under 5.e)
+  #
+  # Sub-letters parallel the canonical taxonomy that lands with #9363 (future).
+  # The bare `PARSER.batch.5` above is the 5.a-equivalent (single-call shallow,
+  # body complete, only </tool_call> missing); the entries below add the deeper
+  # truncation positions and the multi-call shapes.
+  #
+  # Each fixture pins **post-#9355 Dynamo behavior** (this branch carries the fix).
+  # Pre-#9355 outputs are documented in each comment block as a reference for what
+  # changed (and why the existing 5.* KNOWN_DIVERGENCES on bare `5` may need
+  # revisiting after #9355 lands on main).
+  #
+  # 5.d / 5.e correspond directly to Ajay Rajan's GLM-5.1 prod leak repro
+  # (#nv-inference, 2026-05-11). Request:
+  #
+  #   curl -s "https://inference-api.nvidia.com/v1/chat/completions" \
+  #     -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+  #     -d '{"model":"nvidia/zai-org/glm-5.1","messages":[
+  #       {"role":"system","content":"You are a helpful assistant. Use tools when appropriate. You must use the provided tools to answer questions."},
+  #       {"role":"user","content":"Search for the weather in Boston and New York, then send the forecast to admin@example.com"}],
+  #       "tools":[{"type":"function","function":{"name":"get_weather","description":"Get weather for a location",
+  #         "parameters":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}},
+  #         {"type":"function","function":{"name":"send_email","description":"Send an email",
+  #         "parameters":{"type":"object","properties":{"to":{"type":"string"},"subject":{"type":"string"},"body":{"type":"string"}},"required":["to","subject","body"]}}}],
+  #       "max_tokens":512,"stream":false}'
+  #
+  # Pre-#9355 response (the leak):
+  #   {"finish_reason":"tool_calls","index":0,"message":{
+  #     "content":"I'll start by fetching the weather for both Boston and New York at the same time!get_weatherlocationNew York",
+  #     "role":"assistant",
+  #     "tool_calls":[{"function":{"arguments":"{\"location\":\"Boston\"}","name":"get_weather"},
+  #                    "id":"0b19bf30-aefa-4273-a33d-4b69fd82ba46","type":"function"}]}}
+  #
+  # The "get_weatherlocationNew York" tail is the second tool_call's XML markup
+  # after downstream tag-stripping. #9355 stops the parser from generating a
+  # silent empty-args call but the raw markup still lands in normal_text →
+  # message.content unless the downstream pipeline is changed too.
+  # =====================================================================
+  PARSER.batch.5.c:
+    description: Truncation mid-arg_value (single call, body incomplete)
+    model_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>N
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>N
+    # Verified 2026-05-12:
+    #   dynamo PRE-#9355:  calls=[{name: get_weather, args: {}}], normal_text=""   ← the silent empty-args wrong call
+    #   dynamo POST-#9355: calls=[], normal_text="<tool_call>get_weather<arg_key>location</arg_key><arg_value>N"   (pinned above)
+    #   vllm   (glm4_moe):         calls=[], normal_text="<tool_call>get_weather<arg_key>location</arg_key><arg_value>N"   (matches post-#9355)
+    #   sglang (Glm47MoeDetector): calls=[], normal_text="<tool_call>get_weather<arg_key>location</arg_key><arg_value>N"   (matches post-#9355)
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only </tool_call> end marker (body complete). Shallow-truncation flavor of Ajay's GLM-5.1 prod repro.
+    model_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>Boston</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>New York</arg_value>
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: Boston
+      - name: get_weather
+        arguments:
+          location: New York
+      normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+    # Verified 2026-05-12 (unaffected by #9355 — has_args=true on second block):
+    #   dynamo PRE-#9355:  calls=[Boston, New York], normal_text="I'll start by fetching the weather for both Boston and New York at the same time!"   (same)
+    #   dynamo POST-#9355: calls=[Boston, New York], normal_text="I'll start by fetching the weather for both Boston and New York at the same time!"   (pinned above)
+    #   vllm:              calls=[Boston],           normal_text="I'll start by fetching the weather for both Boston and New York at the same time!"   (drops 2nd call AND its raw text)
+    #   sglang:            calls=[Boston],           normal_text="I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New York</arg_value>"   (drops 2nd call, preserves raw markup)
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value. Direct shape of Ajay's GLM-5.1 prod leak.
+    model_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>Boston</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>New York
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: Boston
+      normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New York
+    # Verified 2026-05-12:
+    #   dynamo PRE-#9355:  calls=[Boston, {args:{}}], normal_text="I'll start by fetching the weather for both Boston and New York at the same time!"   ← silent empty-args wrong call for 2nd
+    #   dynamo POST-#9355: calls=[Boston],            normal_text="I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New York"   (pinned above — 2nd rejected, raw preserved)
+    #   vllm:              calls=[Boston],            normal_text="I'll start by fetching the weather for both Boston and New York at the same time!"   (drops raw 2nd block too)
+    #   sglang:            calls=[Boston],            normal_text="I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New York"   (matches post-#9355 dynamo)
+    # In Ajay's prod response the downstream chat-pipeline tag-stripper turns the trailing
+    # `<tool_call>get_weather<arg_key>location</arg_key><arg_value>New York` in normal_text into
+    # `get_weatherlocationNew York` in message.content. The parser-level fix (#9355) is necessary
+    # but not sufficient — downstream still needs to handle the raw markup.
+  PARSER.batch.5.f:
+    description: Truncation mid-arg-key (single call, no </arg_key>)
+    model_text: <tool_call>get_weather<arg_key>loc
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: <tool_call>get_weather<arg_key>loc
+    # Verified 2026-05-12:
+    #   dynamo PRE-#9355:  calls=[{args:{}}], normal_text=""
+    #   dynamo POST-#9355: calls=[], normal_text="<tool_call>get_weather<arg_key>loc"   (pinned above)
+    #   vllm:              calls=[], normal_text="<tool_call>get_weather<arg_key>loc"   (matches post-#9355)
+    #   sglang:            calls=[], normal_text="<tool_call>get_weather<arg_key>loc"   (matches post-#9355)
+  PARSER.batch.5.g:
+    description: Truncation inside opening tag (single call, `<arg_val` instead of `<arg_value>`)
+    model_text: <tool_call>get_weather<arg_key>location</arg_key><arg_val
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: <tool_call>get_weather<arg_key>location</arg_key><arg_val
+    # Verified 2026-05-12:
+    #   dynamo PRE-#9355:  calls=[{args:{}}], normal_text=""
+    #   dynamo POST-#9355: calls=[], normal_text="<tool_call>get_weather<arg_key>location</arg_key><arg_val"   (pinned above)
+    #   vllm:              calls=[], normal_text="<tool_call>get_weather<arg_key>location</arg_key><arg_val"   (matches post-#9355)
+    #   sglang:            calls=[], normal_text="<tool_call>get_weather<arg_key>location</arg_key><arg_val"   (matches post-#9355)
+  PARSER.batch.5.h:
+    description: Truncation inside XML entity (single call, mid `&lt;` encoding)
+    model_text: <tool_call>get_weather<arg_key>query</arg_key><arg_value>x &lt
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: <tool_call>get_weather<arg_key>query</arg_key><arg_value>x &lt
+    # Verified 2026-05-12:
+    #   dynamo PRE-#9355:  calls=[{args:{}}], normal_text=""
+    #   dynamo POST-#9355: calls=[], normal_text="<tool_call>get_weather<arg_key>query</arg_key><arg_value>x &lt"   (pinned above)
+    #   vllm:              calls=[], normal_text="<tool_call>get_weather<arg_key>query</arg_key><arg_value>x &lt"   (matches post-#9355)
+    #   sglang:            calls=[], normal_text="<tool_call>get_weather<arg_key>query</arg_key><arg_value>x &lt"   (matches post-#9355)
+  PARSER.batch.5.i:
+    description: Intra-block partial recovery — single tool_call with TWO arg pairs, second truncated mid-value. Tests that completed inner pairs survive when subsequent ones are truncated.
+    model_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value><arg_key>unit</arg_key><arg_value>fah
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
+    # Verified 2026-05-12 (unaffected by #9355 — first pair's has_args=true survives):
+    #   dynamo PRE-#9355:  calls=[{location: NYC}], normal_text=""   (same)
+    #   dynamo POST-#9355: calls=[{location: NYC}], normal_text=""   (pinned above)
+    #   vllm:              calls=[], normal_text="<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value><arg_key>unit</arg_key><arg_value>fah"   (no intra-block recovery)
+    #   sglang:            calls=[], normal_text="<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value><arg_key>unit</arg_key><arg_value>fah"   (no intra-block recovery)
   PARSER.batch.6:
     description: Empty args (no-arg call)
     model_text: <tool_call>get_time</tool_call>
