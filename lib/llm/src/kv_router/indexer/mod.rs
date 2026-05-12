@@ -250,30 +250,12 @@ impl Indexer {
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<MatchDetails, KvRouterError> {
-        let (primary_details, approx) = match self {
-            Self::KvIndexer {
-                primary, approx, ..
-            } => (
-                primary.find_match_details(sequence.clone()).await?,
-                approx.as_ref(),
-            ),
-            Self::Concurrent {
-                primary, approx, ..
-            } => (
-                primary.backend().find_match_details_impl(&sequence, false),
-                approx.as_ref(),
-            ),
-            Self::Remote { primary, approx } => {
-                let tiered = primary
-                    .find_matches_by_tier(sequence.clone(), true)
-                    .await
-                    .map_err(|e| {
-                        tracing::warn!(error = %e, "Remote indexer query failed");
-                        KvRouterError::IndexerOffline
-                    })?;
-                (tiered.device, approx.as_ref())
-            }
-            Self::None => return Ok(MatchDetails::new()),
+        let primary_details = self.find_primary_match_details(sequence.clone()).await?;
+        let approx = match self {
+            Self::KvIndexer { approx, .. }
+            | Self::Concurrent { approx, .. }
+            | Self::Remote { approx, .. } => approx.as_ref(),
+            Self::None => None,
         };
 
         let Some(approx) = approx else {
@@ -289,6 +271,31 @@ impl Indexer {
                 Ok(primary_details)
             }
         }
+    }
+
+    pub(crate) async fn find_primary_match_details(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<MatchDetails, KvRouterError> {
+        let primary_details = match self {
+            Self::KvIndexer { primary, .. } => primary.find_match_details(sequence.clone()).await?,
+            Self::Concurrent { primary, .. } => {
+                primary.backend().find_match_details_impl(&sequence, false)
+            }
+            Self::Remote { primary, .. } => {
+                let tiered = primary
+                    .find_matches_by_tier(sequence.clone(), true)
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!(error = %e, "Remote indexer query failed");
+                        KvRouterError::IndexerOffline
+                    })?;
+                tiered.device
+            }
+            Self::None => return Ok(MatchDetails::new()),
+        };
+
+        Ok(primary_details)
     }
 
     pub(crate) async fn find_matches_by_tier(
@@ -327,6 +334,30 @@ impl Indexer {
                 }
                 Ok(tiered)
             }
+            Self::None => Ok(TieredMatchDetails::default()),
+        }
+    }
+
+    pub(crate) async fn find_primary_matches_by_tier(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        match self {
+            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                let device = self.find_primary_match_details(sequence.clone()).await?;
+                let lt = query_lower_tiers(lower_tier, &sequence, &device);
+                Ok(TieredMatchDetails {
+                    device,
+                    lower_tier: lt,
+                })
+            }
+            Self::Remote { primary, .. } => primary
+                .find_matches_by_tier(sequence.clone(), false)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "Remote indexer tiered query failed");
+                    KvRouterError::IndexerOffline
+                }),
             Self::None => Ok(TieredMatchDetails::default()),
         }
     }
