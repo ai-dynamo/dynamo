@@ -39,6 +39,15 @@ class _PreLabeledMetric:
     so that callers can keep using ``metric.set(...)`` /
     ``metric.labels(worker_id=..., dp_rank=...).set(...)`` without explicitly
     threading ``model_name`` through every callsite.
+
+    Mirrors prometheus_client's metric API (``labels``, ``set``, ``inc``,
+    ``dec``, ``observe``, ``state``, ``clear``) so callers can use either
+    positional or keyword forms.  If you add a new prometheus_client metric
+    type (``Histogram``, ``Summary``, ``Counter`` with custom methods) and
+    rely on a method not listed above, extend this wrapper so the static
+    label still propagates -- otherwise ``__getattr__`` would forward the
+    call straight to the underlying (unlabeled) metric and silently bypass
+    the static label.
     """
 
     __slots__ = ("_metric", "_static")
@@ -47,34 +56,56 @@ class _PreLabeledMetric:
         self._metric = metric
         self._static = static_labels
 
-    def labels(self, **kwargs: str) -> Any:
-        # Merge so the caller cannot accidentally override the static label.
-        merged = {**kwargs, **self._static}
-        return self._metric.labels(**merged)
+    def _labeled(self) -> Any:
+        return self._metric.labels(**self._static) if self._static else self._metric
+
+    def labels(self, *labelvalues: str, **labelkwargs: str) -> Any:
+        """Mirror prometheus_client's ``labels(*values, **kwargs)`` signature.
+
+        Positional calls match the metric's declared label order minus the
+        pre-bound static labels (which this wrapper injects).  Keyword
+        calls are merged with the static dict.  Mixed positional+keyword
+        calls are forwarded as-is and let prometheus_client raise.
+        """
+        if labelvalues and labelkwargs:
+            # prometheus_client itself rejects this; preserve its error.
+            return self._metric.labels(*labelvalues, **labelkwargs)
+        if not self._static:
+            return self._metric.labels(*labelvalues, **labelkwargs)
+        if labelvalues:
+            # Map positional values to the user-specified label names (i.e.
+            # the metric's declared labelnames minus our static keys), then
+            # forward everything by keyword so prometheus_client can splice
+            # in the static labels in the correct slots.
+            declared = list(self._metric._labelnames)
+            user_names = [n for n in declared if n not in self._static]
+            if len(labelvalues) != len(user_names):
+                raise ValueError(
+                    f"Expected {len(user_names)} positional label values "
+                    f"({user_names!r}), got {len(labelvalues)}"
+                )
+            merged = dict(zip(user_names, labelvalues))
+            merged.update(self._static)
+            return self._metric.labels(**merged)
+        return self._metric.labels(**labelkwargs, **self._static)
 
     def set(self, value: float) -> None:
-        if self._static:
-            self._metric.labels(**self._static).set(value)
-        else:
-            self._metric.set(value)
+        self._labeled().set(value)
 
     def inc(self, amount: float = 1) -> None:
-        if self._static:
-            self._metric.labels(**self._static).inc(amount)
-        else:
-            self._metric.inc(amount)
+        self._labeled().inc(amount)
 
     def dec(self, amount: float = 1) -> None:
-        if self._static:
-            self._metric.labels(**self._static).dec(amount)
-        else:
-            self._metric.dec(amount)
+        self._labeled().dec(amount)
+
+    def observe(self, amount: float) -> None:
+        # Forward-compat for Histogram / Summary.  No-op for Gauge/Enum since
+        # they don't define ``observe``; callers shouldn't be calling it on
+        # the wrong metric type.
+        self._labeled().observe(amount)
 
     def state(self, value: str) -> None:
-        if self._static:
-            self._metric.labels(**self._static).state(value)
-        else:
-            self._metric.state(value)
+        self._labeled().state(value)
 
     def clear(self) -> None:
         # Clears all child series, including those from other planner instances

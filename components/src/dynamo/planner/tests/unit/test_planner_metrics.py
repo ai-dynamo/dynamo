@@ -162,6 +162,73 @@ def test_pre_labeled_metric_forwards_inc_dec_clear(_isolated_registry):
     assert "dynamo_planner_engine_queued_prefill_tokens{" not in out
 
 
+def test_labels_accepts_positional_values(_isolated_registry):
+    # Mirror prometheus_client's labels(*values) signature so existing
+    # positional callers (and any future ones in the planner code base)
+    # keep working when model_name is configured.
+    pm = PlannerPrometheusMetrics(model_name="m")
+    # engine_queued_prefill_tokens declares user labels [worker_id, dp_rank];
+    # passing them positionally must produce the labeled child series.
+    pm.engine_queued_prefill_tokens.labels("w7", "3").set(42)
+    out = _scrape(_isolated_registry)
+    assert (
+        "dynamo_planner_engine_queued_prefill_tokens"
+        '{dp_rank="3",model_name="m",worker_id="w7"} 42.0'
+    ) in out
+
+
+def test_labels_positional_wrong_arity_raises(_isolated_registry):
+    pm = PlannerPrometheusMetrics(model_name="m")
+    with pytest.raises(ValueError, match="positional label values"):
+        # engine gauge needs 2 user labels (worker_id, dp_rank); 1 is wrong.
+        pm.engine_queued_prefill_tokens.labels("only-one")
+
+
+def test_labels_passthrough_when_no_static(_isolated_registry):
+    # With no model_name, the wrapper must not invent label ordering or
+    # arity checks -- forward to the underlying metric unchanged.
+    pm = PlannerPrometheusMetrics()
+    pm.engine_queued_prefill_tokens.labels("w1", "0").set(5)
+    pm.engine_queued_prefill_tokens.labels(worker_id="w2", dp_rank="1").set(6)
+    out = _scrape(_isolated_registry)
+    assert 'dp_rank="0",worker_id="w1"} 5.0' in out
+    assert 'dp_rank="1",worker_id="w2"} 6.0' in out
+
+
+def test_observe_forwards_through_static_label(_isolated_registry, monkeypatch):
+    # _PreLabeledMetric.observe() forwards Histogram/Summary observations
+    # through the labeled child so the static model_name label is preserved.
+    # Use a stub metric (no Prometheus registry interaction) since the
+    # planner doesn't ship any Histograms today; this guards future use.
+    from dynamo.planner.monitoring.planner_metrics import _PreLabeledMetric
+
+    class _StubLabeled:
+        def __init__(self):
+            self.observed: list[float] = []
+
+        def observe(self, amount: float) -> None:
+            self.observed.append(amount)
+
+    class _StubHistogram:
+        def __init__(self):
+            self.child = _StubLabeled()
+            self.unlabeled_observations: list[float] = []
+
+        def labels(self, **kwargs: str):
+            assert kwargs == {"model_name": "m"}
+            return self.child
+
+        def observe(self, amount: float) -> None:
+            self.unlabeled_observations.append(amount)
+
+    h = _StubHistogram()
+    wrapped = _PreLabeledMetric(h, model_name="m")
+    wrapped.observe(1.5)
+    assert h.child.observed == [1.5]
+    # Unlabeled path must not be touched when a static label is bound.
+    assert h.unlabeled_observations == []
+
+
 def test_pre_labeled_metric_isinstance_and_attr_passthrough(_isolated_registry):
     pm = PlannerPrometheusMetrics(model_name="m")
     # Wrapper exposes the underlying metric attributes via __getattr__.
