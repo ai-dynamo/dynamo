@@ -946,15 +946,15 @@ class Descriptor:
 
         # Data is `torch.Tensor`.
         if isinstance(data, torch.Tensor):
-            # XPU tensors must be contiguous for pointer+size registration.
-            if hasattr(data, "is_xpu") and data.is_xpu and not data.is_contiguous():
+            # NIXL registration uses pointer+size, so the underlying storage must be contiguous.
+            if not data.is_contiguous():
                 data = data.contiguous()
 
             self._data_ptr = data.data_ptr()
             self._data_size = data.numel() * data.element_size()
             if data.is_cuda:
                 self._data_device = Device((DeviceKind.CUDA, data.get_device()))
-            elif hasattr(data, "is_xpu") and data.is_xpu:
+            elif data.device.type == "xpu":
                 self._data_device = Device((DeviceKind.XPU, data.get_device()))
             self._data_ref = data
 
@@ -1165,16 +1165,7 @@ class Descriptor:
 
         # Register the memory with NIXL.
         if isinstance(self._data_ref, torch.Tensor):
-            if hasattr(self._data_ref, "is_xpu") and self._data_ref.is_xpu:
-                # XPU tensors: register via explicit pointer/size so NIXL maps
-                # them as device memory (ZE via UCX).
-                mem_type = "VRAM"
-                reg_list = [
-                    (self._data_ptr, self._data_size, self._data_device.id, mem_type)
-                ]
-                nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
-            else:
-                nixl_hndl = connection._nixl.register_memory(self._data_ref)
+            nixl_hndl = connection._nixl.register_memory(self._data_ref)
         else:
             mem_type = self._data_device.kind.nixl_mem_type
             reg_list = [

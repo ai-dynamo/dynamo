@@ -801,11 +801,12 @@ class NixlReadEmbeddingSender(AbstractEmbeddingSender):
             try:
                 readable_op = await self.connector.create_readable(descriptor)
             except Exception as exc:
-                # If NIXL registration fails for XPU, fall back to CPU staging.
-                if hasattr(transfer_buf, "is_xpu") and transfer_buf.is_xpu:
+                # If NIXL registration fails for a device tensor, fall back to CPU staging.
+                if not transfer_buf.device.type == "cpu":
                     logger.warning(
-                        "NIXL registration failed for XPU tensor, falling back "
+                        "NIXL registration failed for %s tensor, falling back "
                         "to CPU staging: %s",
+                        transfer_buf.device.type,
                         exc,
                     )
                     transfer_buf = transfer_buf.cpu()
