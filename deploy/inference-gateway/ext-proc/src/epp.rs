@@ -26,6 +26,15 @@ use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Name of the inference-serving HTTP port on a Dynamo worker pod.
+///
+/// Mirrors `commonconsts.DynamoContainerPortName` in
+/// `deploy/operator/internal/consts/consts.go`. Worker pods may have multiple
+/// containers (e.g. a `main` worker exposing metrics ports plus a
+/// `sidecar-frontend` exposing the HTTP inference port); we route to frontend sidecar
+/// container which exposes a port named `http`.
+const DYNAMO_CONTAINER_PORT_NAME: &str = "http";
+
 /// Holds all router state needed for request routing.
 ///
 /// This is the async-native equivalent of `RouterHandles` from the C bindings,
@@ -482,17 +491,33 @@ async fn fetch_preprocessor_from_discovery(
     })
 }
 
-/// Extract "ip:port" from a pod by reading its IP from status and its serving
-/// port from the container spec. Returns `None` if the pod has no IP or no
-/// container port defined — we never silently route to a guessed port.
+/// Extract "ip:port" from a pod by reading its IP from status and the
+/// container port named `http` (the Dynamo HTTP inference port) from the
+/// container spec.
+///
+/// Worker pods commonly have multiple containers exposing multiple HTTP
+/// ports: a `main` worker container exposing `system=9090` (probes +
+/// Prometheus metrics) and `nixl=19090` (NIXL telemetry), plus a
+/// `sidecar-frontend` container exposing `http=8000` (the OpenAI-compatible
+/// inference API — the port the InferencePool's `targetPort` resolves to).
+/// All three speak HTTP, but only the inference port is *named* `http` in
+/// the pod spec. Picking `containers.first().ports.first()` would land on
+/// `system=9090` and route inference traffic to the metrics endpoint; we
+/// instead scan all containers for the port named `http`, mirroring how
+/// Kubernetes resolves a string `targetPort`.
+///
+/// Returns `None` if the pod has no IP or no container exposes a port named
+/// `http` — we never silently route to a guessed port.
 fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String> {
     let ip = pod.status.as_ref()?.pod_ip.as_ref()?;
     let port = pod
         .spec
-        .as_ref()
-        .and_then(|spec| spec.containers.first())
-        .and_then(|c| c.ports.as_ref())
-        .and_then(|ports| ports.first())
+        .as_ref()?
+        .containers
+        .iter()
+        .filter_map(|c| c.ports.as_ref())
+        .flatten()
+        .find(|p| p.name.as_deref() == Some(DYNAMO_CONTAINER_PORT_NAME))
         .map(|p| p.container_port)?;
     Some(format!("{ip}:{port}"))
 }
@@ -748,13 +773,41 @@ impl EndpointPicker for Router {
             .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
 
         // Try prefill routing first (disaggregated mode).
-        // If the prefill router is not activated, this returns an error
-        // and we fall back to aggregated (decode-only) routing.
+        //
+        // If the prefill router is not activated (no prefill workers
+        // discovered yet, or the inner router has been deactivated), this
+        // returns an error. Behavior on that error depends on
+        // `DYN_ENFORCE_DISAGG`:
+        //
+        // * `enforce_disagg = false` (default): fall back to aggregated
+        //   (decode-only) routing — matches `PrefillRouter::generate`.
+        // * `enforce_disagg = true`: surface the error to Envoy and let the
+        //   request fail. Silently downgrading to aggregated would defeat
+        //   the operator's explicit "strict disagg" policy.
         let prefill_result = self
             .route_prefill(&tokens, priority_jump, allowed_worker_ids.clone())
             .await;
 
-        let is_disaggregated = prefill_result.is_ok();
+        let is_disaggregated = match &prefill_result {
+            Ok(_) => true,
+            Err(e) => {
+                if self.prefill_router.enforce_disagg() {
+                    tracing::warn!(
+                        error = %e,
+                        request_id = %req.request_id,
+                        "Prefill routing failed under DYN_ENFORCE_DISAGG=true; failing request"
+                    );
+                    return Err(PickError::RoutingFailed(format!(
+                        "prefill routing failed under enforce_disagg: {e}"
+                    )));
+                }
+                tracing::debug!(
+                    error = %e,
+                    "Prefill routing failed; falling back to aggregated mode"
+                );
+                false
+            }
+        };
 
         let (decode_worker, _overlap) = self
             .route_decode(&tokens, is_disaggregated, priority_jump, allowed_worker_ids)

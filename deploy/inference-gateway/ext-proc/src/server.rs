@@ -59,6 +59,11 @@ struct RequestContext {
     is_disaggregated: bool,
     prefill_complete_signaled: bool,
 
+    /// Set once we've validated the gateway's `ProtocolConfiguration`.
+    /// `protocol_config` may appear on every `ProcessingRequest`; we only
+    /// check it once per stream to keep the hot path cheap.
+    protocol_validated: bool,
+
     request_headers: Vec<(String, String)>,
     request_metadata: HashMap<String, prost_types::Struct>,
     response_headers: HashMap<String, String>,
@@ -87,6 +92,7 @@ impl RequestContext {
             model_server_streaming: false,
             is_disaggregated: false,
             prefill_complete_signaled: false,
+            protocol_validated: false,
             request_headers: Vec::new(),
             request_metadata: HashMap::new(),
             response_headers: HashMap::new(),
@@ -429,6 +435,10 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 pc.send_body_without_waiting_for_header_response,
                             "[PROTOCOL] ProtocolConfiguration from Envoy"
                         );
+                        if !ctx.protocol_validated {
+                            validate_protocol_config(pc)?;
+                            ctx.protocol_validated = true;
+                        }
                     }
 
                     match req.request {
@@ -554,6 +564,64 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 // ---------------------------------------------------------------------------
 // Request helpers (mirrors Go LW-EPP request.go)
 // ---------------------------------------------------------------------------
+
+/// Validate the gateway's `ProtocolConfiguration` against the protocol
+/// contract this EPP requires.
+///
+/// We build the `RequestHeaders` response only after receiving the request
+/// body, because:
+///   * The body holds the chat-completion prompt.
+///   * We tokenize it.
+///   * We feed those tokens to the KV-aware router to choose a worker.
+///   * The chosen worker becomes the value of `x-worker-instance-id` /
+///     `x-gateway-destination-endpoint` in the `RequestHeaders` response.
+///
+/// That ordering — header response *after* body — is only legal under
+/// `BodySendMode::FULL_DUPLEX_STREAMED` with
+/// `send_body_without_waiting_for_header_response = true`. Under any other
+/// mode Envoy waits for our header response before sending body chunks while
+/// we wait for body chunks before producing the header response, which
+/// silently deadlocks until the ext_proc timeout fires.
+///
+/// Failing fast with `Status::failed_precondition` here turns a multi-second
+/// hidden timeout into an immediate, self-explaining error visible in Envoy
+/// logs the first time the EPP is wired up behind a misconfigured gateway.
+///
+/// Older Envoy versions (pre-1.32) do not send `ProtocolConfiguration`; in
+/// that case the caller skips this validation entirely and trusts the
+/// operator to have configured the filter correctly.
+// `Status` is the tonic-mandated error type for this stream, so we can't box
+// it without rewriting the return path. The function is called once per
+// stream, so the size of the `Err` variant is not a hot-path concern.
+#[allow(clippy::result_large_err)]
+fn validate_protocol_config(
+    pc: &crate::proto::envoy::service::ext_proc::v3::ProtocolConfiguration,
+) -> Result<(), Status> {
+    use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
+
+    let request_mode = BodySendMode::try_from(pc.request_body_mode).ok();
+    let mode_ok = matches!(request_mode, Some(BodySendMode::FullDuplexStreamed));
+    let flag_ok = pc.send_body_without_waiting_for_header_response;
+
+    if mode_ok && flag_ok {
+        return Ok(());
+    }
+
+    let detail = format!(
+        "ext_proc filter must be configured with request_body_mode=FULL_DUPLEX_STREAMED \
+         and send_body_without_waiting_for_header_response=true; got \
+         request_body_mode={:?}, send_body_without_waiting_for_header_response={}. \
+         The Rust EPP defers its RequestHeaders response until after it has tokenized \
+         the body and selected a worker, so any other mode deadlocks Envoy.",
+        request_mode, flag_ok,
+    );
+    tracing::error!(
+        request_body_mode = pc.request_body_mode,
+        send_body_without_waiting = flag_ok,
+        "ProtocolConfiguration mismatch — failing stream"
+    );
+    Err(Status::failed_precondition(detail))
+}
 
 /// Inject pre-computed token IDs into the request body JSON as
 /// `nvext.token_data`. This lets the backend skip redundant tokenization.

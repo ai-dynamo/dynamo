@@ -129,14 +129,13 @@ pub fn build_request_header_response(
             continue;
         }
         tracing::debug!(key = %key, value = %value, "Adding header to ext_proc mutation");
-        set_headers.push(HeaderValueOption {
-            header: Some(HeaderValue {
-                key: key.clone(),
-                raw_value: value.as_bytes().to_vec(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
+        // OverwriteIfExistsOrAdd: these are gateway-owned routing headers
+        // (x-worker-instance-id, x-prefill-instance-id, x-dp-rank,
+        // x-dynamo-routing-mode, nvext.token_data, ...). The backend must
+        // treat the EPP's value as authoritative; appending to a
+        // client-supplied value would corrupt routing and let clients
+        // smuggle in spoofed routing intent.
+        set_headers.push(header_overwrite(key, value.as_bytes()));
     }
 
     tracing::debug!(
