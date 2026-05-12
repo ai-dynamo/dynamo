@@ -54,7 +54,7 @@ class VllmEngineMonitor:
         self._monitor_task.cancel()
         self._stats_task.cancel()
 
-    def _shutdown_engine(self):
+    async def _shutdown_engine(self):
         """
         Shutdown the vLLM engine on crash scenarios to free resources.
         """
@@ -67,7 +67,7 @@ class VllmEngineMonitor:
         signal.alarm(ENGINE_SHUTDOWN_TIMEOUT)
 
         try:
-            self.engine_client.shutdown()
+            await self.engine_client.shutdown()
         except Exception as e:
             logger.warning(f"vLLM engine shutdown failed: {e}")
         finally:
@@ -113,7 +113,7 @@ class VllmEngineMonitor:
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 logger.error(f"vLLM AsyncLLM health check failed: {e}")
                 logger.warning("Initiating Dynamo Runtime shutdown.")
-                self._shutdown_engine()
+                await self._shutdown_engine()
                 self.runtime.shutdown()
                 os._exit(1)
             except asyncio.CancelledError:
