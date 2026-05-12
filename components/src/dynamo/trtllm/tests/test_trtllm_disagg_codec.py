@@ -18,7 +18,9 @@ These tests exercise the codec without a GPU; they're gated on
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -134,3 +136,19 @@ def test_decode_handoff_rejects_request_without_disaggregated_params():
 
     with pytest.raises(ValueError, match="prefill_result"):
         TrtllmLLMEngine._decode_prefill_handoff({"disaggregated_params": {}})
+
+
+@pytest.mark.asyncio
+async def test_trtllm_deferred_abort_invokes_generation_result_abort():
+    """`TrtllmDeferredAbort._do_abort_now` forwards to
+    `GenerationResult.abort()`."""
+    # Project module imported in-function to match this file's pattern
+    # (others gate the same way; see file docstring on `tensorrt_llm`).
+    from dynamo.trtllm.llm_engine import TrtllmDeferredAbort
+
+    generation_result = MagicMock()
+    guard = TrtllmDeferredAbort(generation_result)
+    guard.signal_first_token()
+    guard.abort()
+    await asyncio.sleep(0)
+    generation_result.abort.assert_called_once()

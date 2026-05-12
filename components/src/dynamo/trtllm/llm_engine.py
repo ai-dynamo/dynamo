@@ -19,6 +19,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import asdict
 from typing import Any
 
+from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi import KvCacheConfig, SchedulerConfig
 from tensorrt_llm.llmapi.disagg_utils import get_global_disagg_request_id
@@ -28,6 +29,7 @@ from tensorrt_llm.sampling_params import GuidedDecodingParams
 from torch.cuda import device_count
 
 from dynamo._core import Context
+from dynamo.common.backend.abort import DeferredAbort
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.engine import (
     EngineConfig,
@@ -41,7 +43,6 @@ from dynamo.llm import ModelInput
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine
-from dynamo.trtllm.request_handlers.handler_base import _DeferredAbort
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
@@ -67,6 +68,28 @@ _TRTLLM_TO_COMMON_DISAGG = {
     DisaggregationMode.PREFILL: CommonDisaggregationMode.PREFILL,
     DisaggregationMode.DECODE: CommonDisaggregationMode.DECODE,
 }
+
+
+class TrtllmDeferredAbort(DeferredAbort):
+    """`DeferredAbort` for `GenerationResult.abort()`.
+
+    Reads first-token arrival directly from the result's `aqueue` so
+    the wait observes it even if the main `generate()` loop has been
+    cancelled.
+    """
+
+    def __init__(self, generation_result: GenerationResult):
+        super().__init__()
+        self._generation_result = generation_result
+
+    async def _wait_for_first_token(self) -> None:
+        # Pull one item from the result's aqueue — its arrival signals
+        # KV transfer complete.
+        async for _ in self._generation_result:
+            break
+
+    async def _do_abort_now(self) -> None:
+        self._generation_result.abort()
 
 
 class TrtllmLLMEngine(LLMEngine):
@@ -248,7 +271,7 @@ class TrtllmLLMEngine(LLMEngine):
 
         # Decode-only — defer abort until first token to avoid
         # orphaning the in-flight NIXL transfer on the prefill peer.
-        abort_guard = _DeferredAbort(generation_result) if is_decode else None
+        abort_guard = TrtllmDeferredAbort(generation_result) if is_decode else None
 
         request_id = context.id()
         if request_id is not None:
@@ -258,9 +281,11 @@ class TrtllmLLMEngine(LLMEngine):
             # TRT-LLM reports cumulative token_ids per choice; track the
             # emitted length per index so we can yield deltas (n>1 safe).
             output_tokens_per_choice: dict[int, int] = {}
+            first_signalled = False
             async for res in generation_result:
-                if abort_guard is not None:
+                if abort_guard is not None and not first_signalled:
                     abort_guard.signal_first_token()
+                    first_signalled = True
                 if not res.outputs and not res.finished:
                     yield {"finish_reason": "error", "token_ids": [], "index": 0}
                     break
@@ -356,7 +381,7 @@ class TrtllmLLMEngine(LLMEngine):
     async def abort(self, context: Context) -> None:
         request_id = context.id()
         if request_id is not None:
-            # Either GenerationResult (agg/prefill) or _DeferredAbort
+            # Either GenerationResult (agg/prefill) or TrtllmDeferredAbort
             # (decode); both expose .abort().
             abortable = self._active_requests.get(request_id)
             if abortable is not None:
