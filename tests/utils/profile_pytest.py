@@ -789,10 +789,15 @@ def _run_once(
     timed_out = False
     captured_stdout = ""
     try:
+        # Merge stderr into stdout so engine markers (e.g. SGLang's
+        # 'max_total_tokens=N', 'KV Cache is allocated. #tokens: N') reach the
+        # extractor — gpu_parallel writes them to stderr by design so pytest
+        # capture won't swallow them, but we still need to grep them.
         result = subprocess.run(
             pytest_cmd,
             env=env,
-            capture_output=capture,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.STDOUT if capture else None,
             text=capture or None,
             timeout=timeout,
         )
@@ -811,8 +816,6 @@ def _run_once(
         prefix = f"[{run_label}] "
         for line in captured_stdout.splitlines():
             print(f"{prefix}{line}")
-        for line in (result.stderr or "").splitlines():
-            print(f"{prefix}{line}", file=sys.stderr)
     sys.stdout.flush()
     wall_secs = time.monotonic() - t_start
     test_end = time.monotonic() - sampler._t0

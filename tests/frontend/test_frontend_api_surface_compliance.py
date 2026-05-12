@@ -368,8 +368,8 @@ def _claude_cli(_tools_cache, _node_bin) -> Path:
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.model(COMPLIANCE_MODEL)
-@pytest.mark.profiled_vram_gib(6.0)
-@pytest.mark.requested_sglang_kv_tokens(512)
+@pytest.mark.profiled_vram_gib(14.2)
+@pytest.mark.requested_sglang_kv_tokens(49152)
 # Budget: tool-install fixtures (~30-60s first session run, near-zero on
 # cache hit) + sglang cold start (30-60s) + bun compliance (up to 180s) +
 # codex exec (up to 180s) + claude exec (up to 180s) + two inter-suite

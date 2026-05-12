@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"maps"
 	"regexp"
 	"sort"
@@ -1001,6 +1002,47 @@ func expandMultinodeGMSRoles(serviceName string, numberOfNodes int32, totalEngin
 	return roles
 }
 
+// PCSNameForDGD computes the PodCliqueSet name for a DGD, auto-truncating if
+// the DGD name is too long to fit within Grove's combined resource name limit.
+//
+// For short DGD names the PCS name equals the DGD name (backwards compatible).
+// For long names, the PCS name is truncated with a deterministic 4-char hash
+// suffix to guarantee uniqueness and reconcile-loop stability.
+func PCSNameForDGD(dgdName string, services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) string {
+	maxServiceBudget := 0
+	for serviceName, svc := range services {
+		lowerName := strings.ToLower(serviceName)
+		var budget int
+		if svc != nil && svc.GetNumberOfNodes() > 1 {
+			// Multinode: PCSG = lowerName, PCLQ = lowerName + "-" + "ldr"
+			budget = len(lowerName) + len(lowerName) + 1 + len(commonconsts.GroveRoleSuffixLeader)
+		} else {
+			// Single-node: PCLQ = lowerName (no PCSG)
+			budget = len(lowerName)
+		}
+		if budget > maxServiceBudget {
+			maxServiceBudget = budget
+		}
+	}
+
+	pcsBudget := commonconsts.MaxCombinedGroveResourceNameLength - maxServiceBudget
+	// Clamp to a minimum so we always produce a usable name
+	const minPCSNameLength = 8
+	if pcsBudget < minPCSNameLength {
+		pcsBudget = minPCSNameLength
+	}
+
+	if len(dgdName) <= pcsBudget {
+		return dgdName
+	}
+
+	// Truncate with a deterministic hash suffix for uniqueness
+	hash := fnv.New32a()
+	hash.Write([]byte(dgdName))
+	suffix := fmt.Sprintf("%04x", hash.Sum32()&0xFFFF)
+	return dgdName[:pcsBudget-5] + "-" + suffix
+}
+
 // Define BackendFramework enum for sglang, vllm, trtllm
 
 type BackendFramework string
@@ -1585,7 +1627,7 @@ type cliqueParams struct {
 	restartState               *RestartState
 	existingRestartAnnotations map[string]string
 	validatedQueueName         string
-	kubeClient                 ctrlclient.Reader
+	kubeClient                 ctrlclient.Client
 	ctx                        context.Context
 }
 
@@ -1602,8 +1644,9 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 
 	// GMS weight servers load weights fresh from disk and are not CRIU targets.
 	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS {
-		if err := checkpoint.InjectCheckpointIntoPodSpec(
+		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
 			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
+			p.operatorConfig.Checkpoint.Storage,
 			p.operatorConfig.Checkpoint.EffectiveSeccompProfile(),
 		); err != nil {
 			return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", p.r.Name, err)
@@ -1682,7 +1725,9 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		return nil, fmt.Errorf("failed to generate annotations: %w", err)
 	}
 	if p.r.Role != RoleGMS {
-		checkpoint.ApplyRestorePodMetadata(labels, annotations, p.checkpointInfo)
+		if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(labels, annotations, p.checkpointInfo, p.operatorConfig.Checkpoint.Storage); err != nil {
+			return nil, fmt.Errorf("failed to apply checkpoint metadata for role %s: %w", p.r.Name, err)
+		}
 	}
 	annotations = applyRestartAnnotation(annotations, p.serviceName, p.restartState, p.existingRestartAnnotations)
 	clique.Annotations = annotations
@@ -1715,16 +1760,20 @@ func GenerateGrovePodCliqueSet(
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *controller_common.RuntimeConfig,
-	kubeClient ctrlclient.Reader,
+	kubeClient ctrlclient.Client,
 	secretsRetriever SecretsRetriever,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
 	checkpointInfoByService map[string]*checkpoint.CheckpointInfo, // Optional checkpoint info per service
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	gangSet := &grovev1alpha1.PodCliqueSet{}
-	gangSet.Name = dynamoDeployment.Name
+	gangSet.Name = PCSNameForDGD(dynamoDeployment.Name, dynamoDeployment.Spec.Services)
 	gangSet.Namespace = dynamoDeployment.Namespace
 	gangSet.Labels = maps.Clone(dynamoDeployment.Spec.Labels)
+	if gangSet.Labels == nil {
+		gangSet.Labels = make(map[string]string)
+	}
+	gangSet.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	gangSet.Annotations = maps.Clone(dynamoDeployment.Spec.Annotations)
 	gangSet.Spec.Replicas = 1
 	gangSet.Spec.Template.HeadlessServiceConfig = &grovev1alpha1.HeadlessServiceConfig{

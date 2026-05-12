@@ -212,7 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_maps_chunks_to_outputs() {
-        let (engine, _abort_ct) = MockEngine::new(vec![
+        let (engine, abort_ct) = MockEngine::new(vec![
             chunk::token(11),
             LLMEngineOutput::length()
                 .with_tokens(vec![22])
@@ -232,6 +232,11 @@ mod tests {
         let second = collected[1].data.as_ref().unwrap();
         assert_eq!(second.token_ids, vec![22]);
         assert!(matches!(second.finish_reason, Some(FinishReason::Length)));
+        assert_eq!(
+            abort_ct.load(Ordering::SeqCst),
+            0,
+            "clean completion must not call engine.abort"
+        );
     }
 
     #[tokio::test]
