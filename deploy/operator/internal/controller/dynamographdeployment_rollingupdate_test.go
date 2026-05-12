@@ -454,11 +454,12 @@ func TestLegacyAlphaHashCompatibility_V2OnlyChangeUsesNewV2Generation(t *testing
 	require.Equal(t, newV2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 }
 
-func TestUnsupportedPathwayV2OnlyChangeKeepsV2OnlyGeneration(t *testing.T) {
+func TestUnsupportedPathwayMigratesV1OnlyAndKeepsV2OnlyGeneration(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
 			ComponentType: consts.ComponentTypeWorker,
 			Envs:          []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
+			Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
 		},
 	})
 	dgd.Spec.BackendFramework = "vllm"
@@ -466,11 +467,20 @@ func TestUnsupportedPathwayV2OnlyChangeKeepsV2OnlyGeneration(t *testing.T) {
 	require.NoError(t, err)
 	v2Hash := betaDGDWorkersSpecHash(t, dgd)
 	dgd.Annotations = map[string]string{
-		consts.AnnotationCurrentWorkerHash:   legacyHash,
-		consts.AnnotationCurrentWorkerHashV2: v2Hash,
+		consts.AnnotationCurrentWorkerHash: legacyHash,
 	}
 
 	r := createTestReconcilerWithStatus(dgd)
+	require.False(t, r.supportsManagedRollingUpdate(dgd))
+
+	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
+	require.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
+	require.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
+
+	trigger, err := r.shouldTriggerRollingUpdate(dgd)
+	require.NoError(t, err)
+	require.False(t, trigger)
+
 	dgd.Spec.BackendFramework = "sglang"
 
 	newLegacyHash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
