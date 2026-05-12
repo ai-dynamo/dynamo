@@ -1,23 +1,21 @@
-# Qwen3.5-397B-A17B-FP8 — 3-way `vllm serve` vs Dynamo benchmark
+# Qwen3.5-397B-A17B-FP8 — `vllm serve` vs Dynamo frontend-decoding benchmark
 
 K8s recipe for benchmarking
 [`Qwen/Qwen3.5-397B-A17B-FP8`](https://huggingface.co/Qwen/Qwen3.5-397B-A17B-FP8)
-across three configs on a single 8×H100 node (TP=8, expert-parallel,
+across two configs on a single 8×H100 node (TP=8, expert-parallel,
 multimodal):
 
-| Config         | Stack         | Multimodal | Frontend-decoding | Embedding cache |
-|----------------|---------------|------------|-------------------|-----------------|
-| `vllm-serve`   | vanilla vLLM  | yes        | n/a               | n/a             |
-| `dynamo-fd`    | Dynamo + vLLM | on         | on                | off             |
-| `dynamo-fd-ec` | Dynamo + vLLM | on         | on                | 4 GiB/worker (32 GiB total at TP=8) |
+| Config         | Stack         | Multimodal | Frontend-decoding |
+|----------------|---------------|------------|-------------------|
+| `vllm-serve`   | vanilla vLLM  | yes        | n/a               |
+| `dynamo-fd`    | Dynamo + vLLM | on         | on                |
 
-Flags mirror the `dynamo-fd` / `dynamo-fd-ec` / `vllm-serve` configs in
+Flags mirror the `vllm-serve` and `dynamo-fd` configs in
 [PR 8235's sweep_397b.yaml](https://github.com/ai-dynamo/dynamo/pull/8235),
 with one deliberate divergence: **`--mm-processor-cache-gb` is set to
-30 GiB on all three** (PR 8235 mixes 60 GiB for `dynamo-fd` and 30 GiB
-for `dynamo-fd-ec`). Vision-sweep guidance is to keep the processor
-cache identical across configs so the only flag that differs between
-`fd` and `fd-ec` is the embedding-cache capacity.
+30 GiB on both** (PR 8235 uses 60 GiB on `dynamo-fd`). Matching the
+processor cache across configs makes the only delta `frontend-decoding`,
+which is what we're measuring.
 
 ## Pre-requisites
 
@@ -58,12 +56,12 @@ cache identical across configs so the only flag that differs between
 ```bash
 export NAMESPACE=<your-namespace>
 
-# Run all three configs sequentially (prep + deploy + bench + retrieve + clean
+# Run both configs sequentially (prep + deploy + bench + retrieve + clean
 # per config). Artifacts land under
-# ~/workspace/dynamo-tmp/logs/<MM-DD>/qwen35-fp8-h100/{vllm-serve,dynamo-fd,dynamo-fd-ec}/.
+# ~/workspace/dynamo-tmp/logs/<MM-DD>/qwen35-fp8-h100/{vllm-serve,dynamo-fd}/.
 ./run-all-benchmarks.sh -n ${NAMESPACE}
 
-# 3-way comparison:
+# 2-way comparison:
 python3 compare.py ~/workspace/dynamo-tmp/logs/$(date +%m-%d)/qwen35-fp8-h100/
 ```
 
@@ -72,7 +70,6 @@ Or step-by-step for a single config:
 ```bash
 ./run-benchmark.sh -n ${NAMESPACE} --hw h100 --config vllm-serve
 ./run-benchmark.sh -n ${NAMESPACE} --hw h100 --config dynamo-fd
-./run-benchmark.sh -n ${NAMESPACE} --hw h100 --config dynamo-fd-ec
 ```
 
 `run-benchmark.sh` accepts `--step {pvc|download|dataset|deploy|bench|retrieve|clean}` for granular control. `pvc`, `download`, and `dataset` are config-agnostic (any `--config` works to run them once).
@@ -83,10 +80,10 @@ Or step-by-step for a single config:
 qwen3.5-397b-fp8/
 ├── README.md
 ├── run-benchmark.sh            # Unified driver — branches on --config/--hw
-├── run-all-benchmarks.sh       # Sequential 3-config orchestrator
-├── compare.py                  # 3-way comparison (throughput, TTFT, ITL)
+├── run-all-benchmarks.sh       # Sequential 2-config orchestrator
+├── compare.py                  # 2-way comparison (throughput, TTFT, ITL)
 ├── hw/
-│   └── h100.env                # Hardware axis (8×H100, shared across all configs)
+│   └── h100.env                # Hardware axis (8×H100, shared across both configs)
 ├── model-cache/
 │   ├── model-cache.yaml
 │   └── model-download.yaml
@@ -95,17 +92,14 @@ qwen3.5-397b-fp8/
 ├── vllm-serve/
 │   ├── deploy.yaml             # Templated (image, nodeSelector, tolerations)
 │   └── perf.yaml               # Templated
-├── dynamo-fd/
-│   ├── deploy.yaml             # DynamoGraphDeployment, frontend-decoding ON
-│   └── perf.yaml
-└── dynamo-fd-ec/
-    ├── deploy.yaml             # DynamoGraphDeployment, FD + embedding cache
+└── dynamo-fd/
+    ├── deploy.yaml             # DynamoGraphDeployment, frontend-decoding ON
     └── perf.yaml
 ```
 
 ## Hardware target
 
-`hw/h100.env` is shared across all three configs. It exports three vars
+`hw/h100.env` is shared across both configs. It exports three vars
 the YAML templates substitute via `envsubst`:
 
 - `VLLM_IMAGE` — `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0`.
@@ -158,7 +152,7 @@ Our sliding-window dataset writes one row per `(user, turn)` with
 mode honor that ordering so prefix-cache hits across turns are real.
 
 The pin lives in `<config>/perf.yaml` (`AIPERF_GIT_REF` env var, identical
-across all three configs). Bump when you want newer aiperf fixes.
+across both configs). Bump when you want newer aiperf fixes.
 
 ## Naming & ownership
 

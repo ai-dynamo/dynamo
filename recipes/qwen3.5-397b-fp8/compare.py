@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""3-way comparison of vllm-serve vs dynamo-fd vs dynamo-fd-ec aiperf runs.
+"""2-way comparison of vllm-serve vs dynamo-fd aiperf runs.
 
 Reads each config's profile_export_aiperf.json from the retrieved
 artifact tree and prints request throughput, TTFT (avg/p50/p90/p99),
@@ -10,19 +10,18 @@ and ITL (avg/p50/p90/p99) side-by-side.
 Usage:
   python3 compare.py <results_dir>
 
-Where <results_dir> is the directory passed as --summary by run-all-benchmarks.sh,
+Where <results_dir> is the directory written by run-all-benchmarks.sh,
 e.g. ~/workspace/dynamo-tmp/logs/05-12/qwen35-fp8-h100/
 
 Expects:
   <results_dir>/vllm-serve/.../profile_export_aiperf.json
   <results_dir>/dynamo-fd/.../profile_export_aiperf.json
-  <results_dir>/dynamo-fd-ec/.../profile_export_aiperf.json
 """
 import json
 import sys
 from pathlib import Path
 
-CONFIGS = ["vllm-serve", "dynamo-fd", "dynamo-fd-ec"]
+CONFIGS = ["vllm-serve", "dynamo-fd"]
 
 
 def find_profile_json(config_dir: Path) -> Path | None:
@@ -89,21 +88,18 @@ def main() -> int:
     print()
     # Pct delta vs vllm-serve for the headline metrics.
     if loaded["vllm-serve"]:
-        print("Delta vs vllm-serve baseline (negative = faster / higher):")
-        print(f"{'metric':<28}{'dynamo-fd':>14}{'dynamo-fd-ec':>14}")
+        print("Delta dynamo-fd vs vllm-serve baseline (negative = faster / higher):")
+        print(f"{'metric':<28}{'dynamo-fd':>14}")
         for label, (k, sub), _ in rows:
             base = extract(loaded["vllm-serve"], k, sub)
             if base is None or base == 0:
                 continue
-            deltas = []
-            for cfg in ("dynamo-fd", "dynamo-fd-ec"):
-                v = extract(loaded[cfg], k, sub) if loaded[cfg] else None
-                if v is None:
-                    deltas.append("n/a")
-                else:
-                    pct = (v - base) / base * 100.0
-                    deltas.append(f"{pct:+.1f}%")
-            print(f"{label:<28}{deltas[0]:>14}{deltas[1]:>14}")
+            v = extract(loaded["dynamo-fd"], k, sub) if loaded["dynamo-fd"] else None
+            if v is None:
+                delta = "n/a"
+            else:
+                delta = f"{(v - base) / base * 100.0:+.1f}%"
+            print(f"{label:<28}{delta:>14}")
 
     return 0
 

@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Sequentially run all three configs (vllm-serve, dynamo-fd, dynamo-fd-ec)
-# against the same 8×H100 node and collect aiperf artifacts side-by-side
-# under one dated directory ready for the 3-way comparison.
+# Sequentially run both configs (vllm-serve, dynamo-fd) against the same
+# 8×H100 node and collect aiperf artifacts side-by-side under one dated
+# directory ready for the 2-way comparison.
 #
 # Order per config: deploy → bench → retrieve → clean. Cleaning between
 # configs frees the 8 GPUs for the next deployment so they share one node.
@@ -37,7 +37,7 @@ fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DRIVER="$HERE/run-benchmark.sh"
-CONFIGS=(vllm-serve dynamo-fd dynamo-fd-ec)
+CONFIGS=(vllm-serve dynamo-fd)
 
 TS_DIR="$(date +%m-%d)"
 # Override the summary root via $BENCHMARK_RESULTS_DIR — also picked up by

@@ -54,18 +54,13 @@ case "$CONFIG" in
     DEPLOY_NAME="qwen35-dynamo-fd"
     BENCH_POD="qwen35-fd-bench"
     ;;
-  dynamo-fd-ec)
-    DEPLOY_KIND="dgd"
-    DEPLOY_NAME="qwen35-dynamo-fd-ec"
-    BENCH_POD="qwen35-fd-ec-bench"
-    ;;
   "")
     echo "ERROR: --config <name> required" >&2
-    echo "Available: vllm-serve dynamo-fd dynamo-fd-ec" >&2
+    echo "Available: vllm-serve dynamo-fd" >&2
     exit 2 ;;
   *)
     echo "ERROR: unknown config: $CONFIG" >&2
-    echo "Available: vllm-serve dynamo-fd dynamo-fd-ec" >&2
+    echo "Available: vllm-serve dynamo-fd" >&2
     exit 2 ;;
 esac
 
