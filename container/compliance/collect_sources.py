@@ -56,7 +56,6 @@ up to expose /var/cache/apt with deb-src configured.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import shutil
 import sys
@@ -64,22 +63,6 @@ import zipfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_base_sbom(manifest_path: Path, framework: str, target: str, cuda_version: str) -> Path | None:
-    """Look up the base SBOM for this image's FROM in base_sboms/manifest.json."""
-    if not manifest_path.is_file():
-        return None
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    entries = manifest.get("entries", []) or []
-    if not entries:
-        return None
-    # TODO: refine matching once manifest.json carries explicit
-    # (framework, target, cuda) keys. For now, return the first entry.
-    sbom_name = entries[0].get("sbom")
-    if not sbom_name:
-        return None
-    return manifest_path.parent / sbom_name
 
 
 def collect_dpkg_sources(base_sbom: Path | None, output_dir: Path) -> int:
@@ -171,25 +154,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Working directory for collected sources.",
     )
     parser.add_argument(
-        "--base-sbom-manifest",
+        "--baseline-sbom",
         type=Path,
-        default=Path("/opt/compliance/base_sboms/manifest.json"),
-        help="Path to the base-SBOM manifest (used by dpkg diff-against-base).",
-    )
-    parser.add_argument(
-        "--framework",
-        default="",
-        help="Framework name (used by base-SBOM lookup).",
-    )
-    parser.add_argument(
-        "--target",
-        default="",
-        help="Image target (runtime/frontend/planner; used by base-SBOM lookup).",
-    )
-    parser.add_argument(
-        "--cuda-version",
-        default="",
-        help="CUDA version (used by base-SBOM lookup).",
+        default=None,
+        help=(
+            "Path to the slim CycloneDX baseline SBOM whose components we DON'T "
+            "ship source for (the upstream base owns redistribution for them). "
+            "Same file the runtime template's licenses stage subtracts at "
+            "NOTICES time. Pass via "
+            "`${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}}` "
+            "from the sources_collect Dockerfile stage; omit when no baseline "
+            "is configured (the dpkg collector then falls back to shipping "
+            "source for every installed package)."
+        ),
     )
     parser.add_argument(
         "--native-source-dir",
@@ -208,16 +185,19 @@ def main(argv: list[str] | None = None) -> int:
     ecosystems = args.ecosystem or ["dpkg", "native"]
 
     args.sources_root.mkdir(parents=True, exist_ok=True)
-    base_sbom: Path | None = None
+    base_sbom: Path | None = args.baseline_sbom
     if "dpkg" in ecosystems:
-        base_sbom = _resolve_base_sbom(
-            args.base_sbom_manifest, args.framework, args.target, args.cuda_version
-        )
         if base_sbom is None:
             logger.warning(
-                "No base-SBOM resolved; dpkg source collection will fetch sources for "
+                "No --baseline-sbom passed; dpkg source collection will fetch sources for "
                 "the entire installed package set rather than just additions on top of the base."
             )
+        elif not base_sbom.is_file():
+            logger.warning(
+                "--baseline-sbom %s does not exist; falling back to ship-everything dpkg mode.",
+                base_sbom,
+            )
+            base_sbom = None
 
     counts: dict[str, int] = {}
     if "dpkg" in ecosystems:

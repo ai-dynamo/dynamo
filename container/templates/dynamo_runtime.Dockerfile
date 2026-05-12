@@ -280,13 +280,17 @@ COPY --from=wheel_builder /tmp/native-sources/ /opt/native-sources/
 # stay cached across the PR-vs-post-merge boundary. Skipping when false also
 # means PR builds don't pay the apt-get source / vendor download cost.
 ARG ENABLE_SOURCE_ARCHIVAL=false
+# BASELINE_SBOM_FILE is rendered from context.yaml at template-time (same
+# value the licenses stage uses). When set, dpkg source collection scopes
+# to the delta against that baseline. Empty = ship-everything fallback.
+ARG BASELINE_SBOM_FILE="{{ context[framework][device_key].baseline_sbom | default('') }}"
 RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
         python3 -m compliance.collect_sources \
             --ecosystem dpkg --ecosystem native \
             --output-zip /sources.zip \
             --sources-root /sources \
             --native-source-dir /opt/native-sources \
-            --base-sbom-manifest /opt/compliance/base_sboms/manifest.json \
+            ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}} \
             -v ; \
     else \
         # Skipped: produce an empty tarball so the sources_archive stage's
