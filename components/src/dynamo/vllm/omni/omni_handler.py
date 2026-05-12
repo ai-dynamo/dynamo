@@ -10,6 +10,7 @@ import PIL.Image
 from fsspec.implementations.dirfs import DirFileSystem
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.sampling_params import SamplingParams
+from vllm_omni.entrypoints.openai.serving_chat import OmniOpenAIServingChat
 from vllm_omni.entrypoints.utils import coerce_param_message_types
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
@@ -34,6 +35,19 @@ from dynamo.vllm.omni.utils import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_VIDEO_FPS = 16
+
+
+class OmniChatPreprocessor(OmniOpenAIServingChat):
+    """Small adapter for vLLM-Omni's OpenAI chat preprocessing.
+
+    Full OmniOpenAIServingChat initialization wires the HTTP serving stack.
+    Dynamo only needs `_preprocess_chat`, which relies on model_config and
+    speaker-cache state while the renderer is passed per call.
+    """
+
+    def __init__(self, model_config: Any):
+        self.model_config = model_config
+        self._supported_speakers = None
 
 
 @dataclass
@@ -111,6 +125,9 @@ class OmniHandler(BaseOmniHandler):
             engine_client=self.engine_client,
             media_output_fs=media_output_fs,
             media_output_http_url=media_output_http_url,
+        )
+        self._omni_chat_preprocessor = OmniChatPreprocessor(
+            self.engine_client.model_config
         )
 
     async def generate(
@@ -322,8 +339,7 @@ class OmniHandler(BaseOmniHandler):
 
             chat_request = ChatCompletionRequest.model_validate(request)
 
-            omni_chat = self._new_omni_chat_preprocessor(model_config)
-            _, engine_prompts = await omni_chat._preprocess_chat(
+            _, engine_prompts = await self._omni_chat_preprocessor._preprocess_chat(
                 chat_request,
                 chat_request.messages,
                 default_template=chat_request.chat_template,
@@ -348,15 +364,6 @@ class OmniHandler(BaseOmniHandler):
                 exc_info=True,
             )
             return None
-
-    @staticmethod
-    def _new_omni_chat_preprocessor(model_config: Any) -> Any:
-        from vllm_omni.entrypoints.openai.serving_chat import OmniOpenAIServingChat
-
-        omni_chat = OmniOpenAIServingChat.__new__(OmniOpenAIServingChat)
-        omni_chat.model_config = model_config
-        omni_chat._supported_speakers = None
-        return omni_chat
 
     @staticmethod
     def _update_if_not_none(object: Any, key: str, val: Any) -> None:

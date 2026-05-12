@@ -105,18 +105,13 @@ class TestBuildEngineInputs:
 
         handler.engine_client.renderer = MagicMock()
         handler.engine_client.model_config = MagicMock()
-        handler._new_omni_chat_preprocessor = MagicMock(
-            return_value=FakeOmniChatPreprocessor()
-        )
+        handler._omni_chat_preprocessor = FakeOmniChatPreprocessor()
 
         inputs = await handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)
 
         assert inputs.prompt["prompt"] == "<rendered>hello"
         assert (
             inputs.sampling_params_list[0].output_kind == RequestOutputKind.FINAL_ONLY
-        )
-        handler._new_omni_chat_preprocessor.assert_called_once_with(
-            handler.engine_client.model_config
         )
 
     @pytest.mark.asyncio
