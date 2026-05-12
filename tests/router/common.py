@@ -670,7 +670,7 @@ def _test_python_router_bindings(
 
     Assumes engine_workers are already initialized. This test creates a KvRouter
     Python object and sends three test requests to verify:
-    1. Token streaming with full router config overrides (overlap_score_weight, router_temperature)
+    1. Token streaming with full router config overrides (overlap_score_credit, router_temperature)
     2. Token streaming without any overrides (uses default config)
     3. Token streaming with partial override (only router_temperature)
 
@@ -708,7 +708,7 @@ def _test_python_router_bindings(
 
     # Set up override parameters
     router_config_override = {
-        "overlap_score_weight": 0.5,  # Override the default weight
+        "overlap_score_credit": 0.5,  # Override the default credit
         "router_temperature": 0.5,  # Override the default temperature
     }
 

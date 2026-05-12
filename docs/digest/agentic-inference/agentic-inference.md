@@ -118,8 +118,8 @@ A research agent with a 200K context window needs workers with enough free KV ca
 loads = await router.get_potential_loads(token_ids)
 
 # Override routing config based on request properties
-# Long contexts benefit from heavier overlap weighting
-config = {"overlap_score_weight": 2.0} if len(token_ids) > 8192 else {}
+# Long contexts benefit from stronger overlap credit
+config = {"overlap_score_credit": 1.0} if len(token_ids) > 8192 else {}
 worker_id, dp_rank, overlap = await router.best_worker(
     token_ids,
     request_id="req-123",
