@@ -49,13 +49,38 @@ _ENDPOINT_HEALTH_CHECK_FACTORIES = (
 )
 
 
+def _is_multimodal_chat(payload: ChatPayload) -> bool:
+    # make_chat_health_check sends a text-only probe; multimodal endpoints
+    # (e.g. Qwen3-VL disagg/EPD) won't accept it, so the probe spins until
+    # pytest-timeout. Detect via OpenAI-style list content with any non-text
+    # part (image_url, video_url, input_audio, ...).
+    messages = (getattr(payload, "body", None) or {}).get("messages") or []
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") not in (None, "text"):
+                    return True
+    return False
+
+
+def _payload_eligible_for_check(payload: Any, payload_cls: type) -> bool:
+    if not isinstance(payload, payload_cls):
+        return False
+    if payload_cls is ChatPayload and _is_multimodal_chat(payload):
+        return False
+    return True
+
+
 def _with_endpoint_readiness_checks(
     config: EngineConfig, frontend_port: int
 ) -> EngineConfig:
     new_checks = [
         factory(frontend_port, config.model)
         for payload_cls, factory in _ENDPOINT_HEALTH_CHECK_FACTORIES
-        if any(isinstance(p, payload_cls) for p in config.request_payloads)
+        if any(
+            _payload_eligible_for_check(p, payload_cls) for p in config.request_payloads
+        )
     ]
     if not new_checks:
         return config
