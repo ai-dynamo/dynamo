@@ -477,12 +477,12 @@ impl Worker {
             self.engine.clone(),
             self.config.disaggregation_mode,
         )))
-            .map_err(|e| {
-                err(
-                    ErrorType::Backend(BackendError::Unknown),
-                    format!("ingress: {e}"),
-                )
-            })?;
+        .map_err(|e| {
+            err(
+                ErrorType::Backend(BackendError::Unknown),
+                format!("ingress: {e}"),
+            )
+        })?;
 
         let metrics_labels = if self.config.metrics_labels.is_empty() {
             None

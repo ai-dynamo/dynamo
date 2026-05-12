@@ -616,7 +616,9 @@ mod tests {
     async fn generate_before_start_is_an_error() {
         let engine = test_engine();
         let ctx = Context::new(());
-        let result = engine.generate(request(Some(1)), gen_ctx(ctx.context())).await;
+        let result = engine
+            .generate(request(Some(1)), gen_ctx(ctx.context()))
+            .await;
         let Err(err) = result else {
             panic!("expected generate() to fail before start()");
         };

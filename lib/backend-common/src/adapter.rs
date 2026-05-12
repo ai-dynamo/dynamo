@@ -378,8 +378,10 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_forwards_terminal_cancel_chunk_to_downstream() {
-        let adapter =
-            EngineAdapter::new(Arc::new(TerminalOnCancelEngine), DisaggregationMode::Aggregated);
+        let adapter = EngineAdapter::new(
+            Arc::new(TerminalOnCancelEngine),
+            DisaggregationMode::Aggregated,
+        );
         let input: Context<PreprocessedRequest> = Context::new(make_request(vec![1]));
         let ctrl = input.context();
         let mut stream = adapter.generate(input).await.unwrap();
@@ -452,8 +454,10 @@ mod tests {
 
     #[tokio::test]
     async fn adapter_forwards_typed_mid_stream_error_as_annotated_error() {
-        let adapter =
-            EngineAdapter::new(Arc::new(TypedMidStreamErrEngine), DisaggregationMode::Aggregated);
+        let adapter = EngineAdapter::new(
+            Arc::new(TypedMidStreamErrEngine),
+            DisaggregationMode::Aggregated,
+        );
         let input = Context::new(make_request(vec![1]));
         let mut stream = adapter.generate(input).await.unwrap();
 
