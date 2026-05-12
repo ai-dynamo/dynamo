@@ -22,12 +22,7 @@ except ImportError:
         ToolParserManager,
     )
 
-# `ChatCompletionToolsParam` is the Pydantic model FastAPI delivers to vLLM
-# in production. Passing the real type keeps `self.tools` past
-# `ToolParser.__init__`'s isinstance filter so schema-aware parsers see it.
-from vllm.entrypoints.openai.chat_completion.protocol import (  # type: ignore[import-untyped]
-    ChatCompletionToolsParam,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 
 from tests.parity.common import ParseResult, decode_arguments
 
@@ -96,14 +91,7 @@ def parse(
             error=f"UNAVAILABLE: vLLM has no parser for family={parser_family!r}"
         )
 
-    # Wrap flat tool defs as real `ChatCompletionToolsParam` Pydantic
-    # instances — the same type FastAPI delivers to vLLM in production.
-    # Plain dicts silently degrade vLLM's schema-aware coercion paths because
-    # (1) `ToolParser.__init__` filters `tools` by isinstance, collapsing
-    # `self.tools` to `[]`, and (2) per-call accessors like
-    # `qwen3coder_tool_parser._get_arguments_config` gate on
-    # `hasattr(config, "type")`, which dicts fail (`hasattr(dict, "type")` is
-    # False — dicts use `["type"]`).
+    # Wrap flat tool defs as real `ChatCompletionToolsParam` Pydantic instances
     wrapped_tools = (
         [
             ChatCompletionToolsParam.model_validate(
