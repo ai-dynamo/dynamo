@@ -171,8 +171,6 @@ cd $DYNAMO_HOME/examples/backends/sglang
 
 > **Performance caveat:** Qwen3-0.6B is small enough that the disaggregated pathway is dominated by transport overhead and will often look slower than aggregated. Use it for plumbing validation, not benchmarks. Switch to Qwen3-32B-FP8 or larger for realistic disagg numbers.
 
-> **Known race:** `examples/backends/sglang/launch/disagg.sh` can start the frontend before prefill and decode workers are fully ready, causing the first few requests to 503. Re-run after ~10 seconds. Tracked as an engineering follow-up.
-
 ### Multi-Node TP
 
 SGLang supports multi-node tensor parallelism via the native `--dist-init-addr`, `--nnodes`, and `--node-rank` flags. See [SGLang server arguments](https://docs.sglang.ai/advanced_features/server_arguments.html) for the canonical reference; the same flags work with `python -m dynamo.sglang`. For a Kubernetes deployment example, see [`disagg-multinode.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/disagg-multinode.yaml).
