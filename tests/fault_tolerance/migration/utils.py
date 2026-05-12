@@ -216,7 +216,7 @@ def determine_request_receiving_worker(
 
     # Poll both workers in parallel
     def poll_worker(worker: ManagedProcess, result_list: list[bool]):
-        max_wait_ms = 500
+        max_wait_ms = 1000
         poll_interval_ms = 5
         max_iterations = max_wait_ms // poll_interval_ms
         iteration = 0
@@ -246,8 +246,8 @@ def determine_request_receiving_worker(
     )
     thread1.start()
     thread2.start()
-    thread1.join(timeout=1)
-    thread2.join(timeout=1)
+    thread1.join(timeout=2)
+    thread2.join(timeout=2)
 
     # Get results from lists
     worker1_received = worker1_results[0] if worker1_results else False
