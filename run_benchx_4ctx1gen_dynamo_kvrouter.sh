@@ -8,18 +8,21 @@
 #SBATCH --error=bench/logs/run_benchx_4ctx1gen_dynamo_kvrouter_%j.err
 
 # =============================================================================
-# benchx (feat/bench_x sha 11e16c) — 4 ctx + 1 gen with ConversationRouter,
-# driven by dynamo.trtllm (etcd + nats + dynamo frontend) instead of
-# trtllm-serve disaggregated.
+# benchx (feat/bench_x sha 11e16c) — 4 ctx + 1 gen with kv router,
+# driven by dynamo.trtllm (etcd + nats + dynamo frontend).
 #
 # Layout:
-#   NODE0 — etcd + nats + dynamo frontend + 4 ctx workers (GPUs 0-3)
-#   NODE1 — 1 gen worker (GPU 0)
+#   NODE0 — etcd + nats + dynamo frontend + 4 ctx worker(s) (GPUs 0-3)
+#   NODE1 — 1 gen worker(s) (GPUs 0-0)
+#
+# Driven by dynamo.trtllm (etcd + nats + dynamo frontend) instead of
+# trtllm-serve disaggregated.
 #
 # RWLT sends X-Session-ID + X-Correlation-ID via send_conversation_routing_headers.
 #
 # Env:
-#   CONCURRENCY    — single concurrency (default 48)
+#   CONCURRENCY    — comma-separated concurrency sweep
+#                    (default: 1,2,3,6,8,10,16,32,48,64,80,96,112,128)
 #   HOSTCACHE      — 1 = enable kv_cache_config.host_cache_size: 80GB on ctx
 #                    0 = no host offloading (default)
 #   WORKER_METRICS — 1 = pass --publish-events-and-metrics to dynamo.trtllm workers
@@ -27,12 +30,14 @@
 #                    0 = neither (default; reduces publisher GIL pressure on workers)
 #
 # Submit:
+#   sbatch --export=ALL,HOSTCACHE=0,WORKER_METRICS=0 bench/run_benchx_4ctx1gen_dynamo_kvrouter.sh
 #   sbatch --export=ALL,CONCURRENCY=48,HOSTCACHE=0,WORKER_METRICS=0 bench/run_benchx_4ctx1gen_dynamo_kvrouter.sh
 # =============================================================================
 
 set -uo pipefail
 
-CONCURRENCY="${CONCURRENCY:-48}"
+CONCURRENCY="${CONCURRENCY:-1,2,3,6,8,10,16,32,48,64,80,96,112,128}"
+C_TAG=$(echo "$CONCURRENCY" | tr ',' '-')
 HOSTCACHE="${HOSTCACHE:-0}"
 WORKER_METRICS="${WORKER_METRICS:-0}"
 
@@ -45,7 +50,7 @@ else
 fi
 
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/core_dlfw_ci/rihuo/dynamo-trtllm-rihuo-arm64-1-2-0-0dd537-publisherfix.sqsh}"
-EXP_NAME="run_benchx_4ctx1gen_dynamo_kvrouter_${HCTAG}_c${CONCURRENCY}"
+EXP_NAME="run_benchx_4ctx1gen_dynamo_kvrouter_${HCTAG}_c${C_TAG}"
 
 HF_TOKEN="${HF_TOKEN:-}"
 REPO_DIR="${REPO_DIR:-/lustre/fsw/core_dlfw_ci/rihuo/artificial-analysis}"
@@ -69,7 +74,7 @@ DYN_SYS_PORT_CTX_0=8081
 DYN_SYS_PORT_CTX_1=8082
 DYN_SYS_PORT_CTX_2=8083
 DYN_SYS_PORT_CTX_3=8084
-DYN_SYS_PORT_GEN=8085
+DYN_SYS_PORT_GEN_0=8085
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RESULTS_DIR="$REPO_DIR/bench/results/dynamo/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
@@ -229,99 +234,18 @@ echo "Container: $CONTAINER_IMAGE"
 echo "Results: $RESULTS_DIR"
 echo "============================================"
 
-CTX_HCACHE_LINE=""
-if [ "$HOSTCACHE" = "1" ]; then CTX_HCACHE_LINE="  host_cache_size: 85899345920"; fi
+CTX_CONFIG_SRC="${REPO_DIR}/bench/ctx_config.yaml"
+GEN_CONFIG_SRC="${REPO_DIR}/bench/gen_config.yaml"
 
-cat > "$RESULTS_DIR/ctx.yaml" << EOF
-backend: pytorch
-tensor_parallel_size: 1
-pipeline_parallel_size: 1
-moe_expert_parallel_size: 1
-max_batch_size: 32
-max_num_tokens: 20000
-max_seq_len: 131072
-trust_remote_code: true
-disable_overlap_scheduler: true
-enable_chunked_prefill: true
-enable_attention_dp: false
-num_postprocess_workers: 4
-sampler_type: auto
-scheduler_config:
-  capacity_scheduler_policy: MAX_UTILIZATION
-  context_chunking_policy: FIRST_COME_FIRST_SERVED
-kv_cache_config:
-  event_buffer_max_size: 16384
-  dtype: fp8
-  free_gpu_memory_fraction: 0.90
-  enable_block_reuse: true
-${CTX_HCACHE_LINE}
-torch_compile_config:
-  enable_fullgraph: true
-  enable_piecewise_cuda_graph: true
-  enable_userbuffers: false
-  capture_num_tokens: [512, 768, 1024, 1280, 1536, 1792, 2048, 2304, 2560, 2816, 3072, 3328, 3584, 3840, 4096, 4352, 4608, 4864, 5120, 5376, 5632, 5888, 6144, 6400, 6656, 6912, 7168, 7424, 7680, 7936, 8192, 8704, 9216, 9728, 10240, 11264, 12288, 13312, 13914]
-moe_config:
-  backend: TRTLLM
-cuda_graph_config:
-  enable_padding: true
-  batch_sizes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512]
-cache_transceiver_config:
-  max_tokens_in_buffer: 131072
-  backend: DEFAULT
-speculative_config:
-  decoding_type: Eagle
-  max_draft_len: 3
-  speculative_model: /lustre/fsw/core_dlfw_ci/rihuo/nvidia_gpt-oss-120b-Eagle3-v3
-  eagle3_one_model: true
-  eagle3_layers_to_capture: [23, 29, 35]
-enable_iter_perf_stats: true
-enable_iter_req_stats: true
-print_iter_log: true
-EOF
+if [ ! -f "$CTX_CONFIG_SRC" ]; then echo "ERROR: ctx config not found at $CTX_CONFIG_SRC"; exit 1; fi
+if [ ! -f "$GEN_CONFIG_SRC" ]; then echo "ERROR: gen config not found at $GEN_CONFIG_SRC"; exit 1; fi
 
-cat > "$RESULTS_DIR/gen.yaml" << 'EOF'
-backend: pytorch
-tensor_parallel_size: 1
-pipeline_parallel_size: 1
-moe_expert_parallel_size: 1
-max_batch_size: 1024
-max_num_tokens: 20000
-max_seq_len: 131072
-trust_remote_code: true
-enable_chunked_prefill: true
-enable_attention_dp: false
-num_postprocess_workers: 4
-sampler_type: auto
-scheduler_config:
-  capacity_scheduler_policy: MAX_UTILIZATION
-  context_chunking_policy: FIRST_COME_FIRST_SERVED
-kv_cache_config:
-  event_buffer_max_size: 16384
-  dtype: fp8
-  free_gpu_memory_fraction: 0.90
-  enable_block_reuse: true
-torch_compile_config:
-  enable_fullgraph: true
-  enable_piecewise_cuda_graph: true
-  enable_userbuffers: false
-moe_config:
-  backend: TRTLLM
-cuda_graph_config:
-  enable_padding: true
-  batch_sizes: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-cache_transceiver_config:
-  max_tokens_in_buffer: 131072
-  backend: DEFAULT
-speculative_config:
-  decoding_type: Eagle
-  max_draft_len: 3
-  speculative_model: /lustre/fsw/core_dlfw_ci/rihuo/nvidia_gpt-oss-120b-Eagle3-v3
-  eagle3_one_model: true
-  eagle3_layers_to_capture: [23, 29, 35]
-enable_iter_perf_stats: true
-enable_iter_req_stats: true
-print_iter_log: true
-EOF
+cp "$CTX_CONFIG_SRC" "$RESULTS_DIR/ctx.yaml"
+cp "$GEN_CONFIG_SRC" "$RESULTS_DIR/gen.yaml"
+
+if [ "$HOSTCACHE" = "1" ]; then
+    sed -i '/^kv_cache_config:/a\  host_cache_size: 85899345920' "$RESULTS_DIR/ctx.yaml"
+fi
 
 COMMON_ENV="export TRTLLM_SERVER_DISABLE_GC=1 && \
 export TRTLLM_WORKER_DISABLE_GC=1 && \
@@ -389,24 +313,29 @@ echo "Infrastructure services are ready"
 # Stage 2: Start TRTLLM workers via dynamo.trtllm
 # ==============================================================================
 
-# --- gen worker on $NODE1 GPU 0 (decode) ---
-echo "[$(date +%H:%M:%S)] Starting gen worker on $NODE1 GPU 0..."
-start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE1 --mpi=pmix \
-  --output="$RESULTS_DIR/gen_worker.log" \
-  --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
-  --no-container-entrypoint \
-  --no-container-mount-home \
-  bash -c "cd $REPO_DIR && export CUDA_VISIBLE_DEVICES=0 && $COMMON_ENV && $DYNAMO_WORKER_ENV && \
-    export DYN_SYSTEM_PORT=${DYN_SYS_PORT_GEN} && \
-    trtllm-llmapi-launch python3 -m dynamo.trtllm \
-      --model-path $MODEL_PATH --served-model-name $MODEL \
-      --disaggregation-mode decode \
-      --extra-engine-args $RESULTS_DIR/gen.yaml \
-      --request-plane ${DYNAMO_REQUEST_PLANE} \
-      ${WORKER_METRICS_FLAG}"
-GEN_PID="${SRUN_PIDS[-1]}"
+# --- 1 gen worker(s) on $NODE1 GPUs 0-0 (decode) ---
+GEN_PIDS=()
+for GPU in 0; do
+  PORT_VAR="DYN_SYS_PORT_GEN_${GPU}"
+  GEN_PORT="${!PORT_VAR}"
+  echo "[$(date +%H:%M:%S)] Starting gen worker on $NODE1 GPU $GPU (DYN_SYSTEM_PORT=${GEN_PORT})..."
+  start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE1 --mpi=pmix \
+    --output="$RESULTS_DIR/gen_worker_g${GPU}.log" \
+    --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
+    --no-container-entrypoint \
+    --no-container-mount-home \
+    bash -c "cd $REPO_DIR && export CUDA_VISIBLE_DEVICES=${GPU} && $COMMON_ENV && $DYNAMO_WORKER_ENV && \
+      export DYN_SYSTEM_PORT=${GEN_PORT} && \
+      trtllm-llmapi-launch python3 -m dynamo.trtllm \
+        --model-path $MODEL_PATH --served-model-name $MODEL \
+        --disaggregation-mode decode \
+        --extra-engine-args $RESULTS_DIR/gen.yaml \
+        --request-plane ${DYNAMO_REQUEST_PLANE} \
+        ${WORKER_METRICS_FLAG}"
+  GEN_PIDS+=("${SRUN_PIDS[-1]}")
+done
 
-# --- 4 ctx workers on $NODE0 GPUs 0-3 (prefill) ---
+# --- 4 ctx worker(s) on $NODE0 GPUs 0-3 (prefill) ---
 CTX_PIDS=()
 for GPU in 0 1 2 3; do
   PORT_VAR="DYN_SYS_PORT_CTX_${GPU}"
@@ -428,7 +357,9 @@ for GPU in 0 1 2 3; do
   CTX_PIDS+=("${SRUN_PIDS[-1]}")
 done
 
-require_alive "${GEN_PID}" "GEN_PID"
+for i in "${!GEN_PIDS[@]}"; do
+  require_alive "${GEN_PIDS[$i]}" "GEN_PID_g${i}"
+done
 for i in "${!CTX_PIDS[@]}"; do
   require_alive "${CTX_PIDS[$i]}" "CTX_PID_g${i}"
 done
@@ -477,7 +408,7 @@ echo "[$(date +%H:%M:%S)] All workers healthy and model is serving"
 if [ "$WORKER_METRICS" = "1" ]; then
   echo "[$(date +%H:%M:%S)] Starting metrics capture sidecar (interval=2s)..."
   python3 "$REPO_DIR/bench/capture_metrics.py" \
-    --endpoints "${NODE0}:${DYN_SYS_PORT_CTX_0},${NODE0}:${DYN_SYS_PORT_CTX_1},${NODE0}:${DYN_SYS_PORT_CTX_2},${NODE0}:${DYN_SYS_PORT_CTX_3},${NODE1}:${DYN_SYS_PORT_GEN}" \
+    --endpoints "${NODE0}:8081,${NODE0}:8082,${NODE0}:8083,${NODE0}:8084,${NODE1}:8085" \
     --labels "ctx_g0,ctx_g1,ctx_g2,ctx_g3,gen_g0" \
     --output-dir "$RESULTS_DIR/metrics" \
     --interval 2 \
