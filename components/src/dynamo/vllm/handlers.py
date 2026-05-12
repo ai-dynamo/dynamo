@@ -584,6 +584,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     """
 
     _benchmark_results: Optional[dict] = None
+    # Class-level default so test doubles that bypass __init__ via
+    # __new__ still have a sane value; __init__ overrides this from
+    # hf_config.use_unified_vision_chunk on real instances.
+    _use_unified_vision_chunk: bool = False
 
     def __init__(
         self,
