@@ -121,9 +121,17 @@ jobs:
         #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
         HOME: /__w/dynamo/dynamo
         USER: dynamo
+        NATS_SERVER: nats://localhost:4222
+        ETCD_ENDPOINTS: http://localhost:2379
     permissions:
       contents: read
     services:
+      nats:
+        image: ${{ vars.RUNNERS_REGISTRY }}/dockerhub/library/nats:2.11.4
+      etcd:
+        image: ${{ vars.RUNNERS_REGISTRY }}/quay/coreos/etcd:v3.5.18
+        env:
+          ETCD_DATA_DIR: /tmp/etcd-data
       minio:
         image: ${{ vars.RUNNERS_REGISTRY }}/quay/minio/minio:latest
         env:
@@ -131,9 +139,6 @@ jobs:
           MINIO_ROOT_PASSWORD: minioadmin
           MINIO_VOLUMES: /tmp/minio-data
           MINIO_CONSOLE_ADDRESS: ':9001'
-        ports:
-          - 9000:9000
-          - 9001:9001
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

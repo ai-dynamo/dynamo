@@ -6,8 +6,10 @@ import logging
 import os
 import shutil
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator, Optional
+from urllib.parse import urlparse
 
 import pytest
 from filelock import FileLock
@@ -646,18 +648,24 @@ def pytest_collection_modifyitems(config, items):
 
 class EtcdServer(ManagedProcess):
     def __init__(self, request, port=2379, timeout=300):
-        # Allocate free ports if port is 0
-        use_random_port = port == 0
-        if use_random_port:
-            # Need two ports: client port and peer port for parallel execution
-            # Start from 2380 (etcd default 2379 + 1)
+        self._allocated_ports: list[int] = []
+        # Allocate free ports if port is 0. Etcd needs a separate peer port;
+        # configuring it explicitly avoids the default 2380 peer listener when
+        # the client port itself is dynamic.
+        if port == 0:
+            # Need two ports: client port and peer port for parallel execution.
+            # Start from 2380 (etcd default 2379 + 1).
             port, peer_port = allocate_ports(2, 2380)
+            self._allocated_ports.extend([port, peer_port])
+        elif port != 2379:
+            peer_port = allocate_port(2380)
+            self._allocated_ports.append(peer_port)
         else:
             peer_port = None
 
         self.port = port
         self.peer_port = peer_port  # Store for cleanup
-        self.use_random_port = use_random_port  # Track if we allocated the port
+        self.use_random_port = bool(self._allocated_ports)
         port_string = str(port)
         etcd_env = os.environ.copy()
         etcd_env["ALLOW_NONE_AUTHENTICATION"] = "yes"
@@ -696,7 +704,8 @@ class EtcdServer(ManagedProcess):
             command=command,
             timeout=timeout,
             display_output=False,
-            terminate_all_matching_process_names=not use_random_port,  # For distributed tests, do not terminate all matching processes
+            terminate_all_matching_process_names=port
+            == 2379,  # For distributed tests, do not terminate all matching processes
             health_check_ports=[port],
             data_dir=data_dir,
             log_dir=request.node.name,
@@ -705,12 +714,10 @@ class EtcdServer(ManagedProcess):
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Release allocated ports when server exits."""
         try:
-            # Only deallocate ports that were dynamically allocated (not default ports)
-            if self.use_random_port:
-                ports_to_release = [self.port]
-                if self.peer_port is not None:
-                    ports_to_release.append(self.peer_port)
-                deallocate_ports(ports_to_release)
+            # Only deallocate ports this object allocated itself.
+            if self._allocated_ports:
+                deallocate_ports(self._allocated_ports)
+                self._allocated_ports = []
         except Exception as e:
             logging.warning(f"Failed to release EtcdServer port: {e}")
 
@@ -962,6 +969,55 @@ class SharedNatsServer(SharedManagedProcess):
         return server
 
 
+class ExternalRuntimeService:
+    """Reference to a runtime service provided outside pytest."""
+
+    def __init__(self, endpoint: str, default_port: int):
+        parsed = urlparse(endpoint)
+        self.endpoint = endpoint
+        self.host = parsed.hostname or "localhost"
+        self.port = parsed.port or default_port
+
+
+def _configured_runtime_services(discovery_backend: str, request_plane: str):
+    """Return externally configured runtime services, if all required endpoints exist."""
+    needs_nats = request_plane == "nats"
+    needs_etcd = discovery_backend == "etcd"
+
+    nats_endpoint = os.environ.get("NATS_SERVER")
+    etcd_endpoint = os.environ.get("ETCD_ENDPOINTS")
+
+    if (needs_nats and not nats_endpoint) or (needs_etcd and not etcd_endpoint):
+        return None
+
+    nats = ExternalRuntimeService(nats_endpoint, 4222) if needs_nats else None
+    etcd = ExternalRuntimeService(etcd_endpoint, 2379) if needs_etcd else None
+    return nats, etcd
+
+
+@contextmanager
+def _runtime_service_env(nats_process=None, etcd_process=None):
+    """Expose dynamically-started runtime service endpoints to child processes."""
+    orig_nats = os.environ.get("NATS_SERVER")
+    orig_etcd = os.environ.get("ETCD_ENDPOINTS")
+
+    try:
+        if nats_process is not None:
+            os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
+        if etcd_process is not None:
+            os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
+        yield
+    finally:
+        if orig_nats is not None:
+            os.environ["NATS_SERVER"] = orig_nats
+        else:
+            os.environ.pop("NATS_SERVER", None)
+        if orig_etcd is not None:
+            os.environ["ETCD_ENDPOINTS"] = orig_etcd
+        else:
+            os.environ.pop("ETCD_ENDPOINTS", None)
+
+
 @pytest.fixture
 def discovery_backend(request):
     """
@@ -1016,20 +1072,29 @@ def runtime_services(request, discovery_backend, request_plane):
 
     - If discovery_backend != "etcd", etcd is not started (returns None)
     - If request_plane != "nats", NATS is not started (returns None)
+    - If NATS_SERVER/ETCD_ENDPOINTS are already set, those external services are reused.
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
+    configured_services = _configured_runtime_services(discovery_backend, request_plane)
+    if configured_services is not None:
+        yield configured_services
+        return
+
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
     if request_plane == "nats" and discovery_backend == "etcd":
-        with NatsServer(request) as nats_process:
-            with EtcdServer(request) as etcd_process:
-                yield nats_process, etcd_process
+        with NatsServer(request, port=0) as nats_process:
+            with EtcdServer(request, port=0) as etcd_process:
+                with _runtime_service_env(nats_process, etcd_process):
+                    yield nats_process, etcd_process
     elif request_plane == "nats":
-        with NatsServer(request) as nats_process:
-            yield nats_process, None
+        with NatsServer(request, port=0) as nats_process:
+            with _runtime_service_env(nats_process, None):
+                yield nats_process, None
     elif discovery_backend == "etcd":
-        with EtcdServer(request) as etcd_process:
-            yield None, etcd_process
+        with EtcdServer(request, port=0) as etcd_process:
+            with _runtime_service_env(None, etcd_process):
+                yield None, etcd_process
     else:
         yield None, None
 
@@ -1056,8 +1121,6 @@ def runtime_services_dynamic_ports(
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
-    import os
-
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
     # Always start NATS when etcd is used - KV events require NATS regardless of request_plane
     # When durable_kv_events=False (default), disable JetStream for faster startup
@@ -1066,36 +1129,14 @@ def runtime_services_dynamic_ports(
             request, port=0, disable_jetstream=not durable_kv_events
         ) as nats_process:
             with EtcdServer(request, port=0) as etcd_process:
-                # Save original env vars (may be set by session-scoped fixture)
-                orig_nats = os.environ.get("NATS_SERVER")
-                orig_etcd = os.environ.get("ETCD_ENDPOINTS")
-
-                # Set environment variables for this test's dynamic ports
-                os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
-                os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
-
-                yield nats_process, etcd_process
-
-                # Restore original env vars (or remove if they weren't set)
-                if orig_nats is not None:
-                    os.environ["NATS_SERVER"] = orig_nats
-                else:
-                    os.environ.pop("NATS_SERVER", None)
-                if orig_etcd is not None:
-                    os.environ["ETCD_ENDPOINTS"] = orig_etcd
-                else:
-                    os.environ.pop("ETCD_ENDPOINTS", None)
+                with _runtime_service_env(nats_process, etcd_process):
+                    yield nats_process, etcd_process
     elif request_plane == "nats":
         with NatsServer(
             request, port=0, disable_jetstream=not durable_kv_events
         ) as nats_process:
-            orig_nats = os.environ.get("NATS_SERVER")
-            os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
-            yield nats_process, None
-            if orig_nats is not None:
-                os.environ["NATS_SERVER"] = orig_nats
-            else:
-                os.environ.pop("NATS_SERVER", None)
+            with _runtime_service_env(nats_process, None):
+                yield nats_process, None
     else:
         yield None, None
 
