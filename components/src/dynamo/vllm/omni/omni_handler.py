@@ -359,6 +359,8 @@ class OmniHandler(BaseOmniHandler):
             if not engine_prompts:
                 return None
             return engine_prompts[0] if isinstance(engine_prompts[0], dict) else None
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.debug(
                 "Failed to render chat with vLLM renderer; falling back",
