@@ -86,9 +86,8 @@ python -m dynamo.vllm --model openai/gpt-oss-20b --dyn-tool-call-parser harmony
 python -m dynamo.frontend
 ```
 
-### Tool Calling Request Examples
+### Tool Calling Request Example
 
-- Example 1
 ```python
 from openai import OpenAI
 import json
@@ -122,95 +121,8 @@ response = client.chat.completions.create(
     tool_choice="auto",
     max_tokens=10000
 )
-print(f"{response}")
 tool_call = response.choices[0].message.tool_calls[0].function
 print(f"Function called: {tool_call.name}")
 print(f"Arguments: {tool_call.arguments}")
 print(f"Result: {tool_functions[tool_call.name](**json.loads(tool_call.arguments))}")
-```
-
-- Example 2
-```python
-
-# Use tools defined in example 1
-
-time_tool = {
-    "type": "function",
-    "function": {
-        "name": "get_current_time_nyc",
-        "description": "Get the current time in NYC.",
-        "parameters": {}
-    }
-}
-
-
-tools.append(time_tool)
-
-messages = [
-    {"role": "user", "content": "What's the current time in New York?"}
-]
-
-
-response = client.chat.completions.create(
-    model="openai/gpt-oss-20b", #client.models.list().data[1].id,
-    messages=messages,
-    tools=tools,
-    tool_choice="auto",
-    max_tokens=100,
-)
-print(f"{response}")
-tool_call = response.choices[0].message.tool_calls[0].function
-print(f"Function called: {tool_call.name}")
-print(f"Arguments: {tool_call.arguments}")
-```
-
-- Example 3
-
-
-```python
-
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_tourist_attractions",
-            "description": "Get a list of top tourist attractions for a given city.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "city": {
-                        "type": "string",
-                        "description": "The name of the city to find attractions for.",
-                    }
-                },
-                "required": ["city"],
-            },
-        },
-    },
-]
-
-def get_messages():
-    return [
-        {
-            "role": "user",
-            "content": (
-                "I'm planning a trip to Tokyo next week. what are some top tourist attractions in Tokyo? "
-            ),
-        },
-    ]
-
-
-messages = get_messages()
-
-response = client.chat.completions.create(
-    model="openai/gpt-oss-20b",
-    messages=messages,
-    tools=tools,
-    tool_choice="auto",
-    max_tokens=100,
-)
-print(f"{response}")
-tool_call = response.choices[0].message.tool_calls[0].function
-print(f"Function called: {tool_call.name}")
-print(f"Arguments: {tool_call.arguments}")
 ```
