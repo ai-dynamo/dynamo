@@ -2600,7 +2600,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled indicates if checkpoint functionality is enabled |  |  |
 | `seccomp` _[CheckpointSeccompConfiguration](#checkpointseccompconfiguration)_ | Seccomp controls the localhost seccomp profile applied to checkpoint and<br />restore pods. A nil value means "use the default profile"; set<br />Seccomp.Disabled=true to disable seccomp injection entirely. |  |  |
-| `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Deprecated: Storage is retained for compatibility and ignored by the<br />current snapshot flow. Snapshot storage is discovered from the<br />snapshot-agent DaemonSet instead. |  |  |
+| `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Storage optionally configures the namespace-local checkpoint PVC that<br />workload pods mount. When omitted, the operator preserves the legacy<br />behavior of discovering storage from a snapshot-agent DaemonSet in the<br />workload namespace. |  |  |
 
 
 #### CheckpointOCIConfig
@@ -2625,8 +2625,8 @@ _Appears in:_
 
 
 
-Deprecated: CheckpointPVCConfig is retained for compatibility and ignored by
-the current snapshot flow.
+CheckpointPVCConfig configures the namespace-local PVC mounted into
+checkpoint and restore workload pods.
 
 
 
@@ -2635,8 +2635,12 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `pvcName` _string_ | PVCName is the legacy PVC name. |  |  |
-| `basePath` _string_ | BasePath is the legacy base directory within the PVC. |  |  |
+| `pvcName` _string_ | PVCName is the PVC name in each workload namespace. |  |  |
+| `basePath` _string_ | BasePath is the mount path inside checkpoint and restore workload pods. |  |  |
+| `create` _boolean_ | Create tells the operator to create the PVC in workload namespaces when<br />it is missing. When false, the PVC must already exist. |  |  |
+| `size` _string_ | Size is the storage request used when Create is true. |  |  |
+| `storageClassName` _string_ | StorageClassName is the optional StorageClass name used when Create is true. |  |  |
+| `accessMode` _string_ | AccessMode is the PVC access mode used when Create is true. |  |  |
 
 
 #### CheckpointS3Config
@@ -2683,8 +2687,8 @@ _Appears in:_
 
 
 
-Deprecated: CheckpointStorageConfiguration is retained for compatibility and
-ignored by the current snapshot flow.
+CheckpointStorageConfiguration configures checkpoint storage for operator
+pod mutations. Only PVC storage is implemented today.
 
 
 
@@ -2693,10 +2697,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `type` _string_ | Type is the legacy storage backend type: pvc, s3, or oci. |  |  |
-| `pvc` _[CheckpointPVCConfig](#checkpointpvcconfig)_ | PVC configuration for legacy pvc-based settings. |  |  |
-| `s3` _[CheckpointS3Config](#checkpoints3config)_ | S3 configuration for legacy s3-based settings. |  |  |
-| `oci` _[CheckpointOCIConfig](#checkpointociconfig)_ | OCI configuration for legacy oci-based settings. |  |  |
+| `type` _string_ | Type is the storage backend type. Only pvc is implemented today. |  |  |
+| `pvc` _[CheckpointPVCConfig](#checkpointpvcconfig)_ | PVC configuration for pvc-based settings. |  |  |
+| `s3` _[CheckpointS3Config](#checkpoints3config)_ | Deprecated: S3 is retained for compatibility and ignored. |  |  |
+| `oci` _[CheckpointOCIConfig](#checkpointociconfig)_ | Deprecated: OCI is retained for compatibility and ignored. |  |  |
 
 
 #### DRAConfiguration

@@ -1627,7 +1627,7 @@ type cliqueParams struct {
 	restartState               *RestartState
 	existingRestartAnnotations map[string]string
 	validatedQueueName         string
-	kubeClient                 ctrlclient.Reader
+	kubeClient                 ctrlclient.Client
 	ctx                        context.Context
 }
 
@@ -1644,8 +1644,9 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 
 	// GMS weight servers load weights fresh from disk and are not CRIU targets.
 	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS {
-		if err := checkpoint.InjectCheckpointIntoPodSpec(
+		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
 			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
+			p.operatorConfig.Checkpoint.Storage,
 			p.operatorConfig.Checkpoint.EffectiveSeccompProfile(),
 		); err != nil {
 			return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", p.r.Name, err)
@@ -1724,7 +1725,9 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		return nil, fmt.Errorf("failed to generate annotations: %w", err)
 	}
 	if p.r.Role != RoleGMS {
-		checkpoint.ApplyRestorePodMetadata(labels, annotations, p.checkpointInfo)
+		if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(labels, annotations, p.checkpointInfo, p.operatorConfig.Checkpoint.Storage); err != nil {
+			return nil, fmt.Errorf("failed to apply checkpoint metadata for role %s: %w", p.r.Name, err)
+		}
 	}
 	annotations = applyRestartAnnotation(annotations, p.serviceName, p.restartState, p.existingRestartAnnotations)
 	clique.Annotations = annotations
@@ -1757,7 +1760,7 @@ func GenerateGrovePodCliqueSet(
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *controller_common.RuntimeConfig,
-	kubeClient ctrlclient.Reader,
+	kubeClient ctrlclient.Client,
 	secretsRetriever SecretsRetriever,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
