@@ -326,3 +326,16 @@ overrides:
   - { ecosystem: go, name: google.golang.org/genproto/googleapis/rpc, license: "Apache-2.0", source: "googleapis/go-genproto" }
   - { ecosystem: go, name: google.golang.org/grpc,          license: "Apache-2.0", source: "grpc/grpc-go — https://github.com/grpc/grpc-go/blob/master/LICENSE" }
   - { ecosystem: go, name: google.golang.org/protobuf,      license: "BSD-3-Clause", source: "protocolbuffers/protobuf-go — https://github.com/protocolbuffers/protobuf-go/blob/master/LICENSE" }
+
+  # --- Sglang v0.5.11 — new Python deps with empty PyPI metadata ---
+  # All confirmed against the upstream LICENSE file at capture time.
+  - { ecosystem: python, name: kernels-data,                    license: "Apache-2.0",   source: "HuggingFace kernels — https://github.com/huggingface/kernels/blob/main/LICENSE" }
+  - { ecosystem: python, name: runai-model-streamer-azure,      license: "Apache-2.0",   source: "Run:AI runai-model-streamer — https://github.com/run-ai/runai-model-streamer" }
+  - { ecosystem: python, name: runai-model-streamer-gcs,        license: "Apache-2.0",   source: "Run:AI runai-model-streamer — https://github.com/run-ai/runai-model-streamer" }
+  - { ecosystem: python, name: runai-model-streamer-s3,         license: "Apache-2.0",   source: "Run:AI runai-model-streamer — https://github.com/run-ai/runai-model-streamer" }
+  - { ecosystem: python, name: torchao,                         license: "BSD-3-Clause", source: "PyTorch ao — https://github.com/pytorch/ao/blob/main/LICENSE" }
+  - { ecosystem: python, name: mooncake-transfer-engine-cuda13, license: "Apache-2.0",   source: "Mooncake KV cache — https://github.com/kvcache-ai/Mooncake (LICENSE-APACHE)" }
+  # Stray test package accidentally installed by upstream sglang v0.5.11-cu130-runtime.
+  # Placeholder PyPI upload; license confirmed MIT in package metadata.
+  # TODO: file upstream issue at sgl-project/sglang to remove from runtime image.
+  - { ecosystem: python, name: my-test-package,                 license: "MIT",          source: "PyPI my-test-package — Jaye Heffernan, placeholder; declared MIT in package metadata" }

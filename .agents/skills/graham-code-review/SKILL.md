@@ -11,7 +11,7 @@ This skill is most appropriate for these areas. Be strict if the code touches th
 - `components/src/dynamo/`
 - `lib/bindings/` — Python/Rust FFI surface
 
-Use your normal code-review behavior and output conventions; this skill only adds Graham- and Dynamo-specific review preferences and project heuristics.
+Apply everything below strictly. You are an exacting code reviewer who expects the very highest standards of code quality.
 
 ## Core Review Philosophy
 
@@ -26,25 +26,22 @@ Apply these review principles:
 - **Minimal diff surface**: Call out unrelated changes mixed into a PR.
 - **Logging and observability**: Ensure `tracing` spans/events are meaningful, not noisy.
 
-Use this tone: direct, concise, technically grounded, occasionally pointed but never hostile. Avoid filler praise. When something is good, a brief acknowledgment is enough. Most review comments should be one or two lines long.
-
-Avoid:
-- Multi-paragraph essays.
-- Numbered lists for a single concern.
-- Restating the problem before the suggestion (just say the suggestion).
+Use this tone: direct, concise, technically grounded, occasionally pointed but never hostile. Avoid filler praise. Most review comments should be one or two lines long.
 
 ## How to review
 
 Unless explicitly told otherwise, review **only the recently written/modified code** — not the entire codebase. Use `git diff`, `git log`, or ask for the specific files/PR if unclear.
 
-Process:
-
 1. Identify the review target with `git status`, `git diff --stat`, and `git diff`.
-2. Review only changed lines unless unchanged code is needed to explain a changed-line bug.
-3. Prefer concrete file:line findings over general advice.
-4. Do not invent certainty. If the issue depends on intent, ask a question.
 
-## Review rules
+2. Loop: Use the philosophy, rules and rubrics in this file to find an issue. Repeat this step doing multiple passes over the code, keep finding issues and style comments that this skill cares about until you cannot find any more.
+
+3. Write the review:
+ - Prefer concrete file:line findings over general advice.
+ - Group issues by severity. Include all findings including style comments.
+
+
+## Review rules. Apply these on each pass over the changed code.
 
 1. **No `unwrap()` / `expect()` in production code.** If unavoidable, explain why it cannot fail.
 2. **`tracing` crate, never `log`.** The interface is subtly different. Delete `use tracing as log;` because that is confusing.
@@ -59,6 +56,7 @@ Process:
 11. **Don't change error messages or interfaces just for taste** — but rename when the name actively misleads (`serve` implies long-running server, `Instance` is too generic in a multi-instance system, etc.).
 12. **Call out scope creep.** A PR should do one thing well. Example: "We should focus this PR, it's a bit of a mixture of things." Example 2: "This part seems unrelated to the rest of the PR."
 13. **Async Rust focus**: For async Rust, pay extra attention to locks held across `.await`, blocking work on executor threads, spawned task shutdown/error handling, cancellation behavior, and channel backpressure.
+14. **Stack vs Heap allocation**: Avoid unnecessary heap allocation on all paths.
 
 ## Comment hygiene
 
@@ -88,7 +86,9 @@ Process:
 - Be skeptical of long lists of similar test cases (especially AI-added) — push for the 3 most important ones.
 - Pytest markers are required (`pytest.mark.gpu_0` / `gpu_1` / `pre_merge` etc.) — without them tests don't run in CI.
 
-## Cupcake!
+## Second Pass Checklist
 
-If you have more than three findings, exactly one of the review comments should include witty self-deprecating dry humour.
+VERY IMPORTANT: Before finalizing findings, make one more focused pass over each changed hunk for all the review rules above, and for each of the sections above: comment hygiene, concurrency / async patterns, naming section, and the tests section.
+
+ALWAYS REPORT ALL FINDINGS.
 

@@ -147,6 +147,9 @@ allow = [
   "LicenseRef-BSD-3-clause-Regents",  # libbsd0 — UC Regents
   "LicenseRef-BSD-3-clause-author",   # libbsd0
   "LicenseRef-BSD-5-clause-Peter-Wemm",     # libbsd0 (BSD-3 + 2 add-on clauses)
+  "LicenseRef-BSD-tcp-wrappers",      # libpam0g (tcp_wrappers, Wietse Venema BSD-style)
+  "LicenseRef-public-domain-s-s-d",   # dpkg (start-stop-daemon explicit PD declaration)
+  "LicenseRef-GFDL",                  # binutils group (GFDL on docs; binary is GPL — mere aggregation)
 
   # --- LicenseRef-* MIT/X11 variants used in Ubuntu DEP-5 ---
   "LicenseRef-MIT-1",   # tk8.6-blt2.5, libxml2 (Ubuntu DEP-5 calls these "MIT-N")
@@ -559,25 +562,25 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libpam-modules"
-allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "LGPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
 type = "dpkg"
 name = "libpam-modules-bin"
-allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "LGPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
 type = "dpkg"
 name = "libpam-runtime"
-allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "LGPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
 type = "dpkg"
 name = "libpam0g"
-allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "LGPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-2.0-only", "LGPL-2.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -733,7 +736,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "binutils"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -745,7 +748,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "binutils-common"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -793,13 +796,13 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "dpkg"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
 type = "dpkg"
 name = "dpkg-dev"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -859,7 +862,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libbinutils"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -877,13 +880,13 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libctf-nobfd0"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
 type = "dpkg"
 name = "libctf0"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -895,7 +898,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libdpkg-perl"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -919,7 +922,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libgprofng0"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -985,7 +988,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libsframe1"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -997,7 +1000,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libsqlite3-0"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -1375,7 +1378,8 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libgnutls30t64"
-allow = ["LGPL-2.1-or-later"]
+allow = ["LGPL-2.1-or-later", "GPL-3.0-only", "GPL-3.0-or-later", "LGPL-3.0-only", "LGPL-3.0-or-later",
+         "LicenseRef-GPLv3", "LicenseRef-LGPLv2.1", "LicenseRef-LGPLv3-or-GPLv2"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -1405,7 +1409,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "libtasn1-6"
-allow = ["LGPL-2.1-or-later"]
+allow = ["LGPL-2.1-only", "LGPL-2.1-or-later", "LGPL-3.0-or-later", "GPL-3.0-only"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -1522,7 +1526,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "binutils-x86-64-linux-gnu"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-or-later", "GPL-3.0-or-later", "LGPL-3.0-or-later"]
 reason = "Mere aggregation; build toolchain"
 
 [[exceptions]]

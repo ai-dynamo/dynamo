@@ -12,16 +12,6 @@
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:a2e1e2360c85298ac47ec2543b406ab1e8cec42e31ee47e4d32140ebc82e1067",
-      "baseline_image": "nvidia/cuda",
-      "baseline_sbom": "cuda@a2e1e236.cdx.json",
-      "baseline_tag": "12.9.1-cudnn-devel-ubuntu24.04",
-      "from_digest": "sha256:dd1814f838d9cabf785057c146fd311b2c8cfa18f20148b22d6f4baf3b55265b",
-      "from_image": "lmsysorg/sglang",
-      "from_tag": "v0.5.10.post1-runtime",
-      "platform": "linux/amd64"
-    },
-    {
       "baseline_digest": "sha256:e86c88d0910e71728d4e2b6def5230890009344eef1946c09b5519628c084968",
       "baseline_image": "nvcr.io/nvidia/distroless/go",
       "baseline_sbom": "go@e86c88d0.cdx.json",
@@ -82,13 +72,23 @@
       "platform": "linux/amd64"
     },
     {
+      "baseline_digest": "sha256:a2e1e2360c85298ac47ec2543b406ab1e8cec42e31ee47e4d32140ebc82e1067",
+      "baseline_image": "nvidia/cuda",
+      "baseline_sbom": "cuda@a2e1e236.cdx.json",
+      "baseline_tag": "12.9.1-cudnn-devel-ubuntu24.04",
+      "from_digest": "sha256:de2ac373c1b900639aad11d10fa51f8b6368aa72b369d275ae94aa9839f14ded",
+      "from_image": "lmsysorg/sglang",
+      "from_tag": "v0.5.11-cu129-runtime",
+      "platform": "linux/amd64"
+    },
+    {
       "baseline_digest": "sha256:8b2705ea7a8653ad3451b46ab835eced92d77b44e671b9cf3ad4f95fbb2efe5e",
       "baseline_image": "nvidia/cuda",
       "baseline_sbom": "cuda@8b2705ea.cdx.json",
       "baseline_tag": "13.0.1-cudnn-devel-ubuntu24.04",
-      "from_digest": "sha256:715c461258624eae38124dcb1e1f620cbe307594fd3403ab92caf1b7017afd0f",
+      "from_digest": "sha256:6f81caf1d2a24b2cfc212410900c14d633302bc16e6ec8379c0d382e625ab313",
       "from_image": "lmsysorg/sglang",
-      "from_tag": "v0.5.10.post1-cu130-runtime",
+      "from_tag": "v0.5.11-cu130-runtime",
       "platform": "linux/amd64"
     }
   ],
@@ -104,6 +104,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 4 MB per file.",
-  "generated_at": "2026-05-12T01:40:39+00:00",
+  "generated_at": "2026-05-12T13:30:19+00:00",
   "schema_version": 2
 }

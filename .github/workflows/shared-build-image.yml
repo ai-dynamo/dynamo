@@ -91,13 +91,19 @@ on:
         description: |
           Build with ENABLE_SOURCE_ARCHIVAL=true and extract /sources.zip
           as a workflow artifact. Off by default — top-level callers
-          opt-in (post-merge-ci.yml sets true for push events on main /
-          release branches; PR / nightly / on-demand callers leave it
-          false). Source archives are GB-scale; gathering them
-          per-build would balloon ECR/artifact storage.
+          opt-in (post-merge-ci.yml sets true for push to release/*.*.*
+          branches; nightly-ci.yml sets it true unconditionally; PR /
+          on-demand callers leave it false). Source archives are
+          GB-scale; gathering them per-build would balloon ECR/artifact
+          storage.
         required: false
         type: boolean
         default: false
+      source_ref:
+        description: 'Git ref/SHA to checkout and tag images with. Empty = caller SHA (github.sha).'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -140,6 +146,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
           lfs: true
       - name: Docker Login
         uses: ./.github/actions/docker-login
@@ -163,8 +170,9 @@ jobs:
             CUDA_MAJOR=${CUDA_VERSION%%.*}
             TAG_BUILDER+="-cuda${CUDA_MAJOR}"
           fi
-          IMAGE_TAG=${{ github.sha }}-${TAG_BUILDER}
-          TEST_IMAGE_TAG=${{ github.sha }}-${TAG_BUILDER}-test
+          SOURCE_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          IMAGE_TAG=${SOURCE_SHA}-${TAG_BUILDER}
+          TEST_IMAGE_TAG=${SOURCE_SHA}-${TAG_BUILDER}-test
 
           IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${IMAGE_TAG}"
           TEST_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TEST_IMAGE_TAG}"
@@ -235,7 +243,7 @@ jobs:
           set -x
           EPP_REPOSITORY="${{ env.IMAGE_REPOSITORY }}/dynamo-epp"
           EPP_IMAGE_REPO="${{ env.ECR_HOSTNAME }}/${EPP_REPOSITORY}"
-          EPP_IMAGE_TAG="${{ github.sha }}"
+          EPP_IMAGE_TAG="${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}"
           EPP_IMAGE_REF="${EPP_REPOSITORY}:${EPP_IMAGE_TAG}"
           echo "epp_image_uri=${{ env.ECR_HOSTNAME }}/${EPP_IMAGE_REF}" >> $GITHUB_OUTPUT
 
@@ -302,7 +310,7 @@ jobs:
           push_image: ${{ inputs.push_image }}
           no_load: ${{ inputs.no_load }}
           extra_build_args: |
-            DYNAMO_COMMIT_SHA=${{ github.sha }}
+            DYNAMO_COMMIT_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
             EPP_IMAGE=${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
             ENABLE_SOURCE_ARCHIVAL=${{ inputs.archive_sources }}
             ${{ inputs.extra_build_args }}
@@ -348,12 +356,17 @@ jobs:
           if [ "${{ inputs.no_cache }}" == "true" ]; then
             NO_CACHE_ARG="--no-cache"
           fi
+          TEST_TARGET="test_image"
+          if [ "${{ inputs.target }}" == "planner" ]; then
+            TEST_TARGET="test_distroless"
+          fi
 
           docker buildx build \
             --progress=plain \
             ${PUSH_ARGS} \
             ${NO_CACHE_ARG} \
             --platform ${{ inputs.platform }} \
+            --target ${TEST_TARGET} \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }} \
             -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
