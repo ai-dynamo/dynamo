@@ -57,6 +57,28 @@ Lower costs indicate better routing choices.
 `overlap_score_credit` is the device-local prefix-overlap credit multiplier, from 0.0 to 1.0.
 Higher values favor cache reuse (improving TTFT), while lower values prioritize even load distribution (improving ITL). `prefill_load_scale` controls the weight of the adjusted prompt-side load relative to decode blocks.
 
+### Active Load Modeling
+
+The `prefill_blocks` and `decode_blocks` terms include projected load for the new request plus active load already assigned to each worker.
+
+#### Prefill Load Modeling
+
+For prefill load, the router first estimates the uncached prompt work for each candidate worker:
+
+```text
+effective_isl = input_tokens - cached_tokens
+```
+
+By default, that effective prefill load remains charged at full value until the first output token marks prefill complete. With `--router-prefill-load-model aic`, the router also asks AIC for an expected prefill duration using the effective ISL and cached prefix length. The active load tracker then decays the oldest active prefill request on each worker over that predicted duration. This only changes router-side prompt load accounting; it does not change backend execution.
+
+#### Decode Load Modeling
+
+For decode load, the router tracks active KV blocks assigned to each worker. By default, this covers the prompt-side blocks that are already assigned to active requests and frees them when each request finishes.
+
+When `--router-track-output-blocks` is enabled, the router also adds placeholder output blocks as generation crosses block boundaries. If the request includes `nvext.agent_hints.osl`, those output blocks receive a fractional weight based on progress toward the expected output length. This expected OSL proxy lets requests near completion contribute less future decode load. Without an expected OSL, tracked output blocks count at full weight until the request finishes.
+
+For the flags that enable these models, see [Configuration and Tuning](router-configuration.md).
+
 ## Worker Selection
 
 The router selects the worker with the lowest cost. When `router_temperature` is set to a non-zero value, the router uses softmax sampling on the normalized cost logits to introduce randomness in the selection, which can help with load distribution.
