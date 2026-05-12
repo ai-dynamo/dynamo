@@ -77,6 +77,9 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
+      # Nightly serves as the continuous-compliance source-archival cadence
+      # (post-merge-ci skips main and only archives on release/*.*.* cuts).
+      archive_sources: true
     secrets: inherit
 
   sglang-build:
@@ -90,6 +93,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
+      archive_sources: true
     secrets: inherit
 
   trtllm-build:
@@ -103,6 +107,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 120
+      archive_sources: true
     secrets: inherit
 
   # ============================================================================
@@ -238,6 +243,7 @@ jobs:
       cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'
       dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
+      archive_sources: true
     secrets: inherit
 
   # ============================================================================

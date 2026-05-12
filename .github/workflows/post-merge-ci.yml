@@ -62,11 +62,11 @@ jobs:
       cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'
-      # Source archival: continuous on push to main / release/*.*.* (the
-      # workflow's push trigger already restricts to those branches), off
-      # for the workflow_dispatch path which is a manual rerun and inherits
-      # the artifacts from the original push.
-      archive_sources: ${{ github.event_name == 'push' }}
+      # Source archival: on for pushes to release/*.*.* branches (RC
+      # cuts need fresh-at-the-cut archives for OSRB). Off for main
+      # pushes — per-merge collection is too frequent; nightly-ci.yml
+      # picks up the continuous-compliance cadence at daily granularity.
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   # ============================================================================
@@ -95,7 +95,7 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-operator
-          archive_sources: ${{ github.event_name == 'push' }}
+          archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
 
 # ============================================================================
 # Snapshot Agent
@@ -121,7 +121,7 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
-          archive_sources: ${{ github.event_name == 'push' }}
+          archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
 
   # ============================================================================
   # BUILD JOBS
@@ -142,7 +142,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-runtime-{0}', github.sha) || '' }}
-      archive_sources: ${{ github.event_name == 'push' }}
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   vllm-dev-build:
@@ -179,7 +179,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-efa-{0}', github.sha) || '' }}
-      archive_sources: ${{ github.event_name == 'push' }}
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   sglang-build:
@@ -197,7 +197,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-runtime-{0}', github.sha) || '' }}
-      archive_sources: ${{ github.event_name == 'push' }}
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   sglang-dev-build:
@@ -232,7 +232,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-efa-{0}', github.sha) || '' }}
-      archive_sources: ${{ github.event_name == 'push' }}
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   trtllm-build:
@@ -250,7 +250,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-runtime-{0}', github.sha) || '' }}
-      archive_sources: ${{ github.event_name == 'push' }}
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   trtllm-dev-build:
@@ -287,7 +287,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
-      archive_sources: ${{ github.event_name == 'push' }}
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   planner-build:
@@ -304,7 +304,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-dynamo-planner' || '' }}
         ${{ github.ref_name == 'main' && format('main-dynamo-planner-{0}', github.sha) || '' }}
-      archive_sources: ${{ github.event_name == 'push' }}
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   frontend-build:
@@ -322,7 +322,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-dynamo-frontend' || '' }}
         ${{ github.ref_name == 'main' && format('main-dynamo-frontend-{0}', github.sha) || '' }}
-      archive_sources: ${{ github.event_name == 'push' }}
+      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
     secrets: inherit
 
   # ============================================================================
