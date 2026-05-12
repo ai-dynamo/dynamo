@@ -70,6 +70,7 @@ import hashlib
 import json
 import logging
 import os
+import re as _re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -185,8 +186,6 @@ def slim_cyclonedx(doc: dict) -> dict:
 def _component_key(c: dict) -> tuple[str, str]:
     return (c.get("name") or "", c.get("version") or "")
 
-
-import re as _re
 
 # Canonicalization map for the prose-form license names syft emits in the
 # CycloneDX `{"license": {"name": "..."}}` shape. Without this, every

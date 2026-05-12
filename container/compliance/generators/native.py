@@ -112,8 +112,7 @@ def collect_components(
         )
 
     logger.info(
-        "Native generator: %d components match image_filter=%r "
-        "(out of %d in YAML)",
+        "Native generator: %d components match image_filter=%r " "(out of %d in YAML)",
         len(out),
         image_filter,
         len(packages),

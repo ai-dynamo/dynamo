@@ -30,8 +30,8 @@ import logging
 import re
 from pathlib import Path
 
-from .common import UNKNOWN, Component, dedupe_by_name_version
 from .. import overrides as license_overrides
+from .common import UNKNOWN, Component, dedupe_by_name_version
 
 logger = logging.getLogger(__name__)
 
@@ -46,16 +46,46 @@ ECOSYSTEM = "python"
 # Source: PEP 639 + cross-reference with SPDX license-list-data.
 _CLASSIFIER_MAP: list[tuple[str, str]] = [
     ("License :: OSI Approved :: Apache Software License", "Apache-2.0"),
-    ("License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)", "AGPL-3.0-or-later"),
-    ("License :: OSI Approved :: GNU Affero General Public License v3 (AGPLv3)", "AGPL-3.0-only"),
-    ("License :: OSI Approved :: GNU General Public License v2 or later (GPLv2+)", "GPL-2.0-or-later"),
-    ("License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)", "GPL-3.0-or-later"),
-    ("License :: OSI Approved :: GNU General Public License v2 (GPLv2)", "GPL-2.0-only"),
-    ("License :: OSI Approved :: GNU General Public License v3 (GPLv3)", "GPL-3.0-only"),
-    ("License :: OSI Approved :: GNU Lesser General Public License v2 or later (LGPLv2+)", "LGPL-2.1-or-later"),
-    ("License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)", "LGPL-3.0-or-later"),
-    ("License :: OSI Approved :: GNU Lesser General Public License v2 (LGPLv2)", "LGPL-2.1-only"),
-    ("License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)", "LGPL-3.0-only"),
+    (
+        "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+        "AGPL-3.0-or-later",
+    ),
+    (
+        "License :: OSI Approved :: GNU Affero General Public License v3 (AGPLv3)",
+        "AGPL-3.0-only",
+    ),
+    (
+        "License :: OSI Approved :: GNU General Public License v2 or later (GPLv2+)",
+        "GPL-2.0-or-later",
+    ),
+    (
+        "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+        "GPL-3.0-or-later",
+    ),
+    (
+        "License :: OSI Approved :: GNU General Public License v2 (GPLv2)",
+        "GPL-2.0-only",
+    ),
+    (
+        "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+        "GPL-3.0-only",
+    ),
+    (
+        "License :: OSI Approved :: GNU Lesser General Public License v2 or later (LGPLv2+)",
+        "LGPL-2.1-or-later",
+    ),
+    (
+        "License :: OSI Approved :: GNU Lesser General Public License v3 or later (LGPLv3+)",
+        "LGPL-3.0-or-later",
+    ),
+    (
+        "License :: OSI Approved :: GNU Lesser General Public License v2 (LGPLv2)",
+        "LGPL-2.1-only",
+    ),
+    (
+        "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
+        "LGPL-3.0-only",
+    ),
     ("License :: OSI Approved :: ISC License (ISCL)", "ISC"),
     ("License :: OSI Approved :: MIT License", "MIT"),
     ("License :: OSI Approved :: MIT No Attribution License (MIT-0)", "MIT-0"),
@@ -65,7 +95,10 @@ _CLASSIFIER_MAP: list[tuple[str, str]] = [
     ("License :: OSI Approved :: zlib/libpng License", "Zlib"),
     ("License :: OSI Approved :: Universal Permissive License (UPL)", "UPL-1.0"),
     ("License :: OSI Approved :: The Unlicense (Unlicense)", "Unlicense"),
-    ("License :: OSI Approved :: Common Development and Distribution License 1.0 (CDDL-1.0)", "CDDL-1.0"),
+    (
+        "License :: OSI Approved :: Common Development and Distribution License 1.0 (CDDL-1.0)",
+        "CDDL-1.0",
+    ),
     ("License :: OSI Approved :: Eclipse Public License 1.0 (EPL-1.0)", "EPL-1.0"),
     ("License :: OSI Approved :: Eclipse Public License 2.0 (EPL-2.0)", "EPL-2.0"),
     ("License :: OSI Approved :: Boost Software License 1.0 (BSL-1.0)", "BSL-1.0"),
@@ -137,16 +170,45 @@ _FREE_FORM_MAP: list[tuple[str, str]] = [
 
 # Already-canonical SPDX IDs we should pass through as-is. Cuts noise on
 # packages that already publish a clean SPDX expression.
-_PASSTHROUGH_SPDX = frozenset({
-    "0BSD", "AGPL-3.0-only", "AGPL-3.0-or-later", "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause",
-    "BSL-1.0", "CC0-1.0", "CDDL-1.0", "CDLA-Permissive-2.0", "EPL-1.0",
-    "EPL-2.0", "EUPL-1.2", "GPL-2.0-only", "GPL-2.0-or-later",
-    "GPL-3.0-only", "GPL-3.0-or-later", "ISC", "LGPL-2.1-only",
-    "LGPL-2.1-or-later", "LGPL-3.0", "LGPL-3.0-only", "LGPL-3.0-or-later",
-    "MIT", "MIT-0", "MPL-2.0", "NCSA", "OpenSSL", "Python-2.0",
-    "Unicode-3.0", "Unicode-DFS-2016", "Unlicense", "WTFPL", "Zlib",
-})
+_PASSTHROUGH_SPDX = frozenset(
+    {
+        "0BSD",
+        "AGPL-3.0-only",
+        "AGPL-3.0-or-later",
+        "Apache-2.0",
+        "Apache-2.0 WITH LLVM-exception",
+        "BSD-2-Clause",
+        "BSD-3-Clause",
+        "BSL-1.0",
+        "CC0-1.0",
+        "CDDL-1.0",
+        "CDLA-Permissive-2.0",
+        "EPL-1.0",
+        "EPL-2.0",
+        "EUPL-1.2",
+        "GPL-2.0-only",
+        "GPL-2.0-or-later",
+        "GPL-3.0-only",
+        "GPL-3.0-or-later",
+        "ISC",
+        "LGPL-2.1-only",
+        "LGPL-2.1-or-later",
+        "LGPL-3.0",
+        "LGPL-3.0-only",
+        "LGPL-3.0-or-later",
+        "MIT",
+        "MIT-0",
+        "MPL-2.0",
+        "NCSA",
+        "OpenSSL",
+        "Python-2.0",
+        "Unicode-3.0",
+        "Unicode-DFS-2016",
+        "Unlicense",
+        "WTFPL",
+        "Zlib",
+    }
+)
 
 
 # An SPDX license ID is alphanumeric + dot + plus + hyphen (per the spec).
@@ -251,7 +313,9 @@ def _read_license_text(dist_info_dir: Path) -> str | None:
     return None
 
 
-def _extract_metadata_field(metadata_text: str) -> tuple[str | None, str | None, str | None, list[str], list[str]]:
+def _extract_metadata_field(
+    metadata_text: str,
+) -> tuple[str | None, str | None, str | None, list[str], list[str]]:
     """Return (name, version, license_expression, license_free_form_lines, classifiers).
 
     Uses email.parser to walk the METADATA file as RFC 822 — handles
@@ -344,12 +408,20 @@ def collect_components(search_paths: list[Path]) -> list[Component]:
             if not metadata_path.is_file():
                 continue
             try:
-                metadata_text = metadata_path.read_text(encoding="utf-8", errors="replace")
+                metadata_text = metadata_path.read_text(
+                    encoding="utf-8", errors="replace"
+                )
             except OSError as exc:
                 logger.warning("Could not read %s: %s", metadata_path, exc)
                 continue
 
-            name, version, license_expr, license_free, classifiers = _extract_metadata_field(metadata_text)
+            (
+                name,
+                version,
+                license_expr,
+                license_free,
+                classifiers,
+            ) = _extract_metadata_field(metadata_text)
             if not name or not version:
                 logger.warning("dist-info %s missing Name/Version", dist_info)
                 continue

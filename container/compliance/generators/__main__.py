@@ -140,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     subtract: set[tuple[str, str]] | None = None
     if args.subtract_sbom is not None:
         from . import common
+
         subtract = common.load_subtract_keys(args.subtract_sbom)
 
     failures: list[str] = []
@@ -153,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     continue
                 from . import rust as gen
+
                 gen.generate(search_paths, eco_out, subtract=subtract)
             elif eco == "python":
                 if not search_paths:
@@ -161,21 +163,27 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     continue
                 from . import python as gen  # type: ignore[no-redef]
+
                 gen.generate(search_paths, eco_out, subtract=subtract)
             elif eco == "dpkg":
                 from . import dpkg as gen  # type: ignore[no-redef]
+
                 gen.generate(eco_out, subtract=subtract)
             elif eco == "go":
                 if not args.go_sbom:
                     failures.append("go: at least one --go-sbom is required")
                     continue
                 from . import go as gen  # type: ignore[no-redef]
+
                 gen.generate(args.go_sbom, eco_out, subtract=subtract)
             elif eco == "native":
                 if args.native_yaml is None or args.native_image is None:
-                    failures.append("native: --native-yaml and --native-image are required")
+                    failures.append(
+                        "native: --native-yaml and --native-image are required"
+                    )
                     continue
                 from . import native as gen  # type: ignore[no-redef]
+
                 gen.generate(
                     args.native_yaml,
                     eco_out,

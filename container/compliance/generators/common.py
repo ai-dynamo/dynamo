@@ -73,9 +73,7 @@ def write_notices(
     """Write NOTICES-<Ecosystem>.txt under output_dir; return its path."""
     output_dir.mkdir(parents=True, exist_ok=True)
     notices_path = output_dir / f"NOTICES-{ecosystem.capitalize()}.txt"
-    notices_path.write_text(
-        render_notices(ecosystem, components), encoding="utf-8"
-    )
+    notices_path.write_text(render_notices(ecosystem, components), encoding="utf-8")
     return notices_path
 
 
@@ -164,10 +162,6 @@ def dedupe_by_name_version(components: list[Component]) -> list[Component]:
             continue
         if existing.spdx == UNKNOWN and c.spdx != UNKNOWN:
             by_key[key] = c
-        elif (
-            existing.spdx == c.spdx
-            and not existing.license_text
-            and c.license_text
-        ):
+        elif existing.spdx == c.spdx and not existing.license_text and c.license_text:
             by_key[key] = c
     return list(by_key.values())
