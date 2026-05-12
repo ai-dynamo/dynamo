@@ -791,6 +791,7 @@ class KvEventPublisher:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
         is_eagle: Optional[bool] = None,
+        storage_tier: Optional[str] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -808,10 +809,18 @@ class KvEventPublisher:
             lora_name: Optional LoRA adapter name for adapter-aware block hashing.
             is_eagle: Optional Eagle mode flag. When true, stored blocks are
                 reconstructed using overlapping `kv_block_size + 1` token windows.
+            storage_tier: Optional storage tier tag for the event. One of
+                "device", "host_pinned", "disk", "external". Defaults to "device"
+                when omitted. Used by routers that maintain per-tier prefix indexes
+                (e.g. for remote-G2 cross-instance reuse plan generation).
         """
         ...
 
-    def publish_removed(self, block_hashes: List[int]) -> None:
+    def publish_removed(
+        self,
+        block_hashes: List[int],
+        storage_tier: Optional[str] = None,
+    ) -> None:
         """
         Publish a KV removed event.
 

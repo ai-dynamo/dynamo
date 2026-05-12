@@ -35,6 +35,21 @@ fn depythonize_block_mm_infos(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Option<Blo
     depythonize(obj).map_err(to_pyerr)
 }
 
+fn parse_storage_tier(tier: Option<&str>) -> PyResult<Option<StorageTier>> {
+    let Some(tier) = tier else {
+        return Ok(None);
+    };
+    match tier.to_ascii_lowercase().as_str() {
+        "device" | "gpu" => Ok(Some(StorageTier::Device)),
+        "host_pinned" | "host" | "cpu_pinned" => Ok(Some(StorageTier::HostPinned)),
+        "disk" | "nvme" => Ok(Some(StorageTier::Disk)),
+        "external" | "remote" => Ok(Some(StorageTier::External)),
+        other => Err(to_pyerr(anyhow::anyhow!(
+            "unknown storage_tier {other:?}; expected one of: device, host_pinned, disk, external"
+        ))),
+    }
+}
+
 #[cfg(feature = "kv-indexer")]
 #[derive(Parser)]
 #[command(
@@ -276,7 +291,7 @@ impl KvEventPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None, is_eagle=None))]
+    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None, is_eagle=None, storage_tier=None))]
     fn publish_stored(
         &self,
         py: Python,
@@ -287,6 +302,7 @@ impl KvEventPublisher {
         block_mm_infos: Option<Bound<PyAny>>,
         lora_name: Option<String>,
         is_eagle: Option<bool>,
+        storage_tier: Option<&str>,
     ) -> PyResult<()> {
         let kv_block_size = self.kv_block_size as u32;
         let dp_rank = self.dp_rank;
@@ -299,6 +315,8 @@ impl KvEventPublisher {
             .as_ref()
             .map(depythonize_block_mm_infos)
             .transpose()?;
+
+        let tier = parse_storage_tier(storage_tier)?;
 
         py.allow_threads(|| {
             let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&h| h as u64).collect();
@@ -321,16 +339,28 @@ impl KvEventPublisher {
                 dp_rank,
             };
 
-            inner.publish(event).map_err(to_pyerr)
+            match tier {
+                Some(tier) => inner.publish_with_storage_tier(event, tier),
+                None => inner.publish(event),
+            }
+            .map_err(to_pyerr)
         })
     }
 
-    fn publish_removed(&self, py: Python, block_hashes: Vec<i64>) -> PyResult<()> {
+    #[pyo3(signature = (block_hashes, storage_tier=None))]
+    fn publish_removed(
+        &self,
+        py: Python,
+        block_hashes: Vec<i64>,
+        storage_tier: Option<&str>,
+    ) -> PyResult<()> {
         let dp_rank = self.dp_rank;
         let inner = self.inner.clone();
 
         // Use shared monotonic event_id counter from the inner publisher
         let event_id = inner.next_event_id();
+
+        let tier = parse_storage_tier(storage_tier)?;
 
         py.allow_threads(|| {
             let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
@@ -343,7 +373,11 @@ impl KvEventPublisher {
                 dp_rank,
             };
 
-            inner.publish(event).map_err(to_pyerr)
+            match tier {
+                Some(tier) => inner.publish_with_storage_tier(event, tier),
+                None => inner.publish(event),
+            }
+            .map_err(to_pyerr)
         })
     }
 
