@@ -110,7 +110,7 @@ export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
 /sbin/ldconfig
 ```
 
-For example, refer to the following from [`examples/deployments/GKE/vllm/disagg_gke.yaml`](./vllm/disagg_gke.yaml)
+For example, refer to the following from [`examples/deployments/GKE/vllm/disagg.yaml`](./vllm/disagg.yaml)
 
 ```yaml
 metadata:
@@ -146,7 +146,7 @@ spec:
 ```bash
 cd dynamo/examples/deployments/GKE/vllm
 
-kubectl apply -f disagg_gke.yaml -n ${NAMESPACE}
+kubectl apply -f disagg.yaml -n ${NAMESPACE}
 ```
 
 **Expected output after successful deployment**

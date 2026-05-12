@@ -16,14 +16,14 @@ spec:
         - name: prefill-filter
           parameters:
             allowsNoLabel: false
-            label: nvidia.com/dynamo-sub-component-type
+            label: nvidia.com/dynamo-component-type
             validValues:
             - prefill
           type: label-filter
         - name: decode-filter
           parameters:
             allowsNoLabel: false
-            label: nvidia.com/dynamo-sub-component-type
+            label: nvidia.com/dynamo-component-type
             validValues:
             - decode
           type: label-filter
@@ -81,7 +81,7 @@ spec:
             requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchExpressions:
-                - key: nvidia.com/dynamo-component-type
+                - key: nvidia.com/dynamo-component-class
                   operator: In
                   values:
                   - worker
@@ -140,7 +140,7 @@ spec:
             requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
                 matchExpressions:
-                - key: nvidia.com/dynamo-component-type
+                - key: nvidia.com/dynamo-component-class
                   operator: In
                   values:
                   - worker

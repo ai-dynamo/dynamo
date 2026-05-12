@@ -16,7 +16,7 @@ spec:
         - name: decode-filter
           parameters:
             allowsNoLabel: true
-            label: nvidia.com/dynamo-sub-component-type
+            label: nvidia.com/dynamo-component-type
             validValues:
             - decode
           type: label-filter
@@ -95,4 +95,4 @@ spec:
           name: sidecar-frontend
     replicas: 1
     sharedMemorySize: 2Gi
-    type: worker
+    type: decode

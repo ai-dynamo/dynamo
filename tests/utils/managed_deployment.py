@@ -1332,6 +1332,7 @@ class ManagedDGDR:
     DGDR_PLURAL = "dynamographdeploymentrequests"
 
     # CRD coordinates for DGD (for mocker cleanup)
+    DGD_VERSION = "v1beta1"
     DGD_PLURAL = "dynamographdeployments"
 
     DEFAULT_POLL_INTERVAL = 10  # seconds
@@ -1561,7 +1562,7 @@ class ManagedDGDR:
         try:
             await self._custom_api.delete_namespaced_custom_object(
                 group=self.DGDR_GROUP,
-                version="v1alpha1",
+                version=self.DGD_VERSION,
                 namespace=self.namespace,
                 plural=self.DGD_PLURAL,
                 name=name,
@@ -1578,7 +1579,7 @@ class ManagedDGDR:
         try:
             return await self._custom_api.get_namespaced_custom_object(
                 group=self.DGDR_GROUP,
-                version="v1alpha1",
+                version=self.DGD_VERSION,
                 namespace=self.namespace,
                 plural=self.DGD_PLURAL,
                 name=name,
