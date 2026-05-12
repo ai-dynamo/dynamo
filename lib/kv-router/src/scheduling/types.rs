@@ -45,6 +45,11 @@ pub struct SchedulingResponse {
     pub best_worker: WorkerWithDpRank,
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
+    /// Projected active decode blocks on the chosen worker (the `decode_block`
+    /// term in the selector cost equation). `None` for callers/selectors that
+    /// don't need it; populated by the default selector for cost-equation
+    /// policies (e.g. conditional-prefill).
+    pub chosen_worker_decode_blocks: Option<usize>,
 }
 
 pub struct SchedulingRequest {
@@ -138,6 +143,10 @@ impl SchedulingRequest {
         self.allowed_worker_ids
             .as_ref()
             .is_none_or(|ids| ids.contains(&worker_id))
+    }
+
+    pub(crate) fn decode_blocks_for(&self, worker: WorkerWithDpRank) -> usize {
+        self.decode_blocks.get(&worker).copied().unwrap_or(0)
     }
 
     pub(crate) fn prefill_tokens_for(&self, worker: WorkerWithDpRank) -> usize {

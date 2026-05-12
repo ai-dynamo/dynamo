@@ -8,10 +8,11 @@ use futures::StreamExt;
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
+use dynamo_kv_router::config::RouterConfigOverride;
 use dynamo_kv_router::protocols::{BlockExtraInfo, WorkerId, WorkerWithDpRank};
 use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
 
-use super::types::{ConditionalPrefillDecisionInput, ConditionalPrefillPolicy};
+use super::types::ConditionalPrefillDecisionInput;
 use super::{InnerPrefillRouter, PrefillError, PrefillResolveDecision, PrefillRouter};
 use crate::protocols::common::{
     llm_backend::PreprocessedRequest,
@@ -86,11 +87,11 @@ impl PrefillRouter {
                 block_mm_infos,
                 req.router_config_override.as_ref(),
                 false,
-                lora_name,
+                lora_name.clone(),
                 priority_jump,
                 expected_output_tokens,
                 pinned_worker,
-                allowed_worker_ids,
+                allowed_worker_ids.clone(),
             )
             .await?;
         let worker = details.worker;
@@ -98,9 +99,57 @@ impl PrefillRouter {
 
         let block_size = decode_router.block_size() as usize;
         let overlap_tokens = overlap_blocks as usize * block_size;
+        let prompt_tokens = routing_token_ids.len();
+
+        // Cost-equation RHS terms: only computed when the policy asks for them.
+        // Costs one extra prefill-router peek + one extra decode-router peek
+        // (overlap_weight=0) per request; both use update_states=false.
+        //
+        // Approximation: both peeks snapshot the routers at request arrival.
+        // The standard disagg path's decode re-pick actually happens after
+        // prefill completes (time T+Δ_prefill), by which point load may have
+        // shifted. We don't model that drift here. In steady state the
+        // distribution is roughly stable, and both LHS and RHS share the same
+        // snapshot bias, so the relative comparison stays meaningful.
+        let (prefill_min_logit_full, decode_pool_min_load_blocks) = if self
+            .conditional_prefill_policy
+            .needs_cost_terms()
+        {
+            let prefill = self
+                .query_prefill_min_logit_full(
+                    routing_token_ids,
+                    block_mm_infos,
+                    block_size,
+                    lora_name.clone(),
+                    priority_jump,
+                    expected_output_tokens,
+                    allowed_worker_ids.clone(),
+                )
+                .await;
+            let decode_pool_min = self
+                .query_decode_pool_min_load_blocks(
+                    decode_router,
+                    routing_token_ids,
+                    block_mm_infos,
+                    req.router_config_override.as_ref(),
+                    lora_name.clone(),
+                    priority_jump,
+                    expected_output_tokens,
+                    allowed_worker_ids.clone(),
+                )
+                .await;
+            (prefill, decode_pool_min)
+        } else {
+            (None, None)
+        };
+
         let input = ConditionalPrefillDecisionInput {
-            prompt_tokens: routing_token_ids.len(),
+            prompt_tokens,
             overlap_tokens,
+            block_size,
+            chosen_decode_blocks: details.chosen_worker_decode_blocks,
+            prefill_min_logit_full,
+            decode_pool_min_load_blocks,
         };
         let net_new_tokens = input.net_new_tokens();
 
@@ -121,9 +170,94 @@ impl PrefillRouter {
             dp_rank = worker.dp_rank,
             net_new_tokens,
             overlap_tokens,
-            "Conditional prefill token cap not met"
+            chosen_decode_blocks = ?details.chosen_worker_decode_blocks,
+            prefill_min_logit_full = ?prefill_min_logit_full,
+            decode_pool_min_load_blocks = ?decode_pool_min_load_blocks,
+            "Conditional prefill policy declined to bypass"
         );
         Ok(None)
+    }
+
+    /// Peek-query the prefill router for the best prefill worker and reconstruct
+    /// its `logit_full = potential_prefill_block(p) + decode_block(p)`. Returns
+    /// `None` if the prefill router isn't KV-mode, isn't activated, or the call
+    /// fails — the cost policy treats `None` as "term unavailable, don't bypass."
+    #[allow(clippy::too_many_arguments)]
+    async fn query_prefill_min_logit_full(
+        &self,
+        token_ids: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        block_size: usize,
+        lora_name: Option<String>,
+        priority_jump: f64,
+        expected_output_tokens: Option<u32>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+    ) -> Option<f64> {
+        let inner = self.prefill_router.get()?;
+        let kv = match inner {
+            InnerPrefillRouter::KvRouter(r) => r,
+            InnerPrefillRouter::SimpleRouter(_) => return None,
+        };
+        let details = kv
+            .chooser
+            .find_best_match_details(
+                None,
+                token_ids,
+                block_mm_infos,
+                None,
+                false,
+                lora_name,
+                priority_jump,
+                expected_output_tokens,
+                None,
+                allowed_worker_ids,
+            )
+            .await
+            .ok()?;
+        let decode_blocks = details.chosen_worker_decode_blocks? as f64;
+        let block_size_f = block_size.max(1) as f64;
+        let overlap_blocks = details.cache_hit.rounded_overlap_blocks() as f64;
+        let prompt_blocks = (token_ids.len() as f64) / block_size_f;
+        let potential_prefill_block = (prompt_blocks - overlap_blocks).max(0.0);
+        Some(potential_prefill_block + decode_blocks)
+    }
+
+    /// Peek-query the decode router with `overlap_score_weight = 0` to find
+    /// the least-loaded decode worker — the worker the standard disagg path
+    /// would re-pick after remote prefill — and return its projected
+    /// `decode_block`.
+    #[allow(clippy::too_many_arguments)]
+    async fn query_decode_pool_min_load_blocks(
+        &self,
+        decode_router: &super::super::KvRouter,
+        token_ids: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        existing_override: Option<&RouterConfigOverride>,
+        lora_name: Option<String>,
+        priority_jump: f64,
+        expected_output_tokens: Option<u32>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+    ) -> Option<usize> {
+        let load_only_override = RouterConfigOverride {
+            overlap_score_weight: Some(0.0),
+            ..existing_override.cloned().unwrap_or_default()
+        };
+        let details = decode_router
+            .find_best_match_details(
+                None,
+                token_ids,
+                block_mm_infos,
+                Some(&load_only_override),
+                false,
+                lora_name,
+                priority_jump,
+                expected_output_tokens,
+                None,
+                allowed_worker_ids,
+            )
+            .await
+            .ok()?;
+        details.chosen_worker_decode_blocks
     }
 
     /// Select a prefill worker and resolve its bootstrap connection info.

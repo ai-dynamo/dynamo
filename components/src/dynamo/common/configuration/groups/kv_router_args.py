@@ -40,6 +40,8 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "shared_cache_type",
     "conditional_prefill_enabled",
     "conditional_prefill_max_new_tokens",
+    "conditional_prefill_policy",
+    "conditional_prefill_transfer_cost_blocks",
 )
 
 
@@ -68,6 +70,8 @@ class KvRouterConfigBase(ConfigBase):
     shared_cache_type: str = "none"
     conditional_prefill_enabled: bool = False
     conditional_prefill_max_new_tokens: int = 5000
+    conditional_prefill_policy: str = "token_cap"
+    conditional_prefill_transfer_cost_blocks: int = 0
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
@@ -294,10 +298,41 @@ class KvRouterArgGroup(ArgGroup):
             default=5000,
             help=(
                 "KV Router: Maximum net-new prompt tokens allowed for conditional "
-                "local prefill on a decode worker."
+                "local prefill on a decode worker. Used by the 'token_cap' policy."
             ),
             arg_type=int,
             dest="conditional_prefill_max_new_tokens",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-prefill-policy",
+            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_POLICY",
+            default="token_cap",
+            help=(
+                "KV Router: Which conditional-prefill bypass policy to use. "
+                "'token_cap' (default): bypass when net-new prompt tokens are below "
+                "--router-conditional-prefill-max-new-tokens. Load-agnostic. "
+                "'cost': bypass when the selector cost equation says local prefill on "
+                "decode is cheaper than remote prefill + standard decode re-pick. "
+                "Consults observed prefill/decode pool load."
+            ),
+            arg_type=str,
+            choices=["token_cap", "cost"],
+            dest="conditional_prefill_policy",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-prefill-transfer-cost-blocks",
+            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_TRANSFER_COST_BLOCKS",
+            default=0,
+            help=(
+                "KV Router: Per-request KV transfer cost in block units, added to the "
+                "cost-equation policy's RHS. Stubbed at 0 for v1; will be modeled as "
+                "transfer_constant * num_transferred_blocks once per-backend "
+                "bandwidth calibration lands."
+            ),
+            arg_type=int,
+            dest="conditional_prefill_transfer_cost_blocks",
         )
         add_negatable_bool_argument(
             g,

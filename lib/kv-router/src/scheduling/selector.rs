@@ -241,6 +241,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 required_blocks: request_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                chosen_worker_decode_blocks: Some(request.decode_blocks_for(worker)),
             });
         }
 
@@ -332,6 +333,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 required_blocks: request_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                chosen_worker_decode_blocks: Some(request.decode_blocks_for(best_worker)),
             });
         }
 
@@ -361,6 +363,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             required_blocks: request_blocks,
             effective_overlap_blocks: best_overlap,
             cached_tokens: best_cached_tokens,
+            chosen_worker_decode_blocks: Some(request.decode_blocks_for(best_worker)),
         })
     }
 }

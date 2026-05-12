@@ -147,6 +147,14 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 )
         if self.conditional_prefill_max_new_tokens < 0:
             raise ValueError("--router-conditional-prefill-max-new-tokens must be >= 0")
+        if self.conditional_prefill_transfer_cost_blocks < 0:
+            raise ValueError(
+                "--router-conditional-prefill-transfer-cost-blocks must be >= 0"
+            )
+        if self.conditional_prefill_policy not in ("token_cap", "cost"):
+            raise ValueError(
+                "--router-conditional-prefill-policy must be 'token_cap' or 'cost'"
+            )
         if self.conditional_prefill_enabled and self.router_mode != "kv":
             raise ValueError("--router-conditional-prefill requires --router-mode=kv")
 

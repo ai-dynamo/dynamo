@@ -14,7 +14,7 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 
-use super::types::TokenCapConditionalPrefillPolicy;
+use super::types::make_conditional_prefill_policy;
 use super::{InnerPrefillRouter, PrefillRouter};
 use crate::{
     discovery::ModelManager,
@@ -40,7 +40,7 @@ impl PrefillRouter {
             cancel_token: tokio_util::sync::CancellationToken::new(),
             router_mode,
             enforce_disagg,
-            conditional_prefill_policy: TokenCapConditionalPrefillPolicy::default(),
+            conditional_prefill_policy: make_conditional_prefill_policy(None),
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
@@ -66,8 +66,7 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         let prefill_router = std::sync::OnceLock::new();
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        let conditional_prefill_policy =
-            TokenCapConditionalPrefillPolicy::from_config(kv_router_config.as_ref());
+        let conditional_prefill_policy = make_conditional_prefill_policy(kv_router_config.as_ref());
 
         let router = Arc::new(Self {
             prefill_router,

@@ -32,8 +32,7 @@ mod types;
 use inner::InnerPrefillRouter;
 pub use types::PrefillError;
 use types::{
-    ConditionalPrefillPolicy, PrefillOutcome, PrefillResolveDecision,
-    TokenCapConditionalPrefillPolicy, build_decode_router_override,
+    ConditionalPrefillPolicy, PrefillOutcome, PrefillResolveDecision, build_decode_router_override,
 };
 
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
@@ -52,7 +51,7 @@ pub struct PrefillRouter {
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     enforce_disagg: bool,
-    conditional_prefill_policy: TokenCapConditionalPrefillPolicy,
+    conditional_prefill_policy: Box<dyn ConditionalPrefillPolicy>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,

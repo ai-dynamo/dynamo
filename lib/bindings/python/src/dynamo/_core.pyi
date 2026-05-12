@@ -1295,6 +1295,8 @@ class KvRouterConfig:
         serve_indexer: bool = False,
         conditional_prefill_enabled: bool = False,
         conditional_prefill_max_new_tokens: int = 5000,
+        conditional_prefill_policy: str = "token_cap",
+        conditional_prefill_transfer_cost_blocks: int = 0,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1336,6 +1338,12 @@ class KvRouterConfig:
             serve_indexer: Serve this router's local indexer over the request plane (default: False).
             conditional_prefill_enabled: Enable conditional local prefill on decode workers (default: False).
             conditional_prefill_max_new_tokens: Net-new prompt token cap for conditional prefill (default: 5000).
+            conditional_prefill_policy: Which conditional-prefill bypass policy to use (default: "token_cap").
+                "token_cap": bypass when net-new prompt tokens <= conditional_prefill_max_new_tokens. Load-agnostic.
+                "cost": bypass when the selector cost equation says local prefill on decode is cheaper than
+                    remote prefill + standard decode re-pick. Uses observed prefill/decode pool load.
+            conditional_prefill_transfer_cost_blocks: KV transfer cost in block units, added to the cost-equation
+                RHS (default: 0). Stubbed at 0 in v1; will be modeled as transfer_constant * num_transferred_blocks.
         """
         ...
 

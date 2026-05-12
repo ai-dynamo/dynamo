@@ -109,6 +109,10 @@ struct CacheHitEstimates {
 pub(crate) struct BestMatchDetails {
     pub worker: WorkerWithDpRank,
     pub cache_hit: WorkerCacheHitEstimate,
+    /// Projected active decode blocks on the chosen worker — the `decode_block`
+    /// term in the selector cost equation. `None` from selectors that don't
+    /// surface it; populated by `DefaultWorkerSelector`.
+    pub chosen_worker_decode_blocks: Option<usize>,
 }
 
 fn cache_hit_weight_for_tier(
@@ -614,6 +618,7 @@ where
                 effective_overlap_blocks: response.effective_overlap_blocks,
                 cached_tokens: response.cached_tokens,
             },
+            chosen_worker_decode_blocks: response.chosen_worker_decode_blocks,
         })
     }
 
@@ -1027,6 +1032,7 @@ mod tests {
                 required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
                 effective_overlap_blocks: 0.0,
                 cached_tokens: 0,
+                chosen_worker_decode_blocks: None,
             })
         }
     }

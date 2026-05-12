@@ -329,7 +329,6 @@ fn mock_multi_choice_content_chunk(
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         })
         .collect();

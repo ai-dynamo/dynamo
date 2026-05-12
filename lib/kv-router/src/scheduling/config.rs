@@ -280,6 +280,47 @@ pub struct KvRouterConfig {
 
     /// Maximum net-new prompt tokens allowed for conditional local prefill on a decode worker.
     pub conditional_prefill_max_new_tokens: usize,
+
+    /// Which conditional-prefill policy to use when `conditional_prefill_enabled` is true.
+    /// Default: `TokenCap` (preserves prior behavior).
+    #[serde(default)]
+    pub conditional_prefill_policy: ConditionalPrefillPolicyKind,
+
+    /// Per-request KV transfer cost in block units, added to the cost-equation RHS.
+    /// Stubbed at 0 in v1; TODO: model as `transfer_constant * num_transferred_blocks`
+    /// once per-backend bandwidth calibration lands.
+    #[serde(default)]
+    pub conditional_prefill_transfer_cost_blocks: usize,
+}
+
+/// Identifies which `ConditionalPrefillPolicy` to instantiate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConditionalPrefillPolicyKind {
+    /// Bypass when `net_new_tokens <= max_new_tokens`. Ignores load.
+    #[default]
+    #[serde(rename = "token_cap")]
+    TokenCap,
+    /// Bypass when LHS < RHS using the selector cost equation. See
+    /// `lib/llm/src/kv_router/prefill_router/types.rs` for the formula.
+    #[serde(rename = "cost")]
+    CostEquation,
+}
+
+impl ConditionalPrefillPolicyKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConditionalPrefillPolicyKind::TokenCap => "token_cap",
+            ConditionalPrefillPolicyKind::CostEquation => "cost",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "token_cap" => Some(ConditionalPrefillPolicyKind::TokenCap),
+            "cost" => Some(ConditionalPrefillPolicyKind::CostEquation),
+            _ => None,
+        }
+    }
 }
 
 impl Default for KvRouterConfig {
@@ -310,6 +351,8 @@ impl Default for KvRouterConfig {
             shared_cache_type: SharedCacheType::default(),
             conditional_prefill_enabled: false,
             conditional_prefill_max_new_tokens: DEFAULT_CONDITIONAL_PREFILL_MAX_NEW_TOKENS,
+            conditional_prefill_policy: ConditionalPrefillPolicyKind::default(),
+            conditional_prefill_transfer_cost_blocks: 0,
         }
     }
 }
