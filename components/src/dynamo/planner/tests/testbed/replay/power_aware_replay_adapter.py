@@ -108,7 +108,9 @@ class PowerAwareReplayAdapter(ReplayPlannerAdapter):
                 break
 
             # Compute virtual tick index
-            vtick = int(next_tick.at_s / self._config.throughput_adjustment_interval)
+            vtick = int(
+                next_tick.at_s / self._config.throughput_adjustment_interval_seconds
+            )
             self._fake_prom.set_tick(vtick)
 
             # --- γ extension: overlay synthesises power from FPMs ---
