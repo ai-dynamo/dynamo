@@ -152,7 +152,8 @@ RUN git init /tmp/criu \
     && git fetch --depth 1 origin ${CRIU_REF} \
     && git checkout FETCH_HEAD \
     && make -j$(nproc) \
-    && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
+    && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin \
+    && git clean -fdx
 
 RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 
