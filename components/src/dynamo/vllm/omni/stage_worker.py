@@ -17,8 +17,8 @@ from typing import Any, AsyncGenerator
 import yaml
 from vllm.v1.request import EngineCoreRequest
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
-from vllm_omni.engine.orchestrator import build_engine_core_request_from_tokens
 from vllm_omni.engine.async_omni_engine import _apply_omni_final_stage_metadata
+from vllm_omni.engine.orchestrator import build_engine_core_request_from_tokens
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
 from vllm_omni.entrypoints.utils import (
@@ -775,12 +775,13 @@ def _iter_completion_outputs(engine_inputs: Any):
 def _accepts_source_outputs_processor(parameter_names: list[str]) -> bool:
     if len(parameter_names) < 3:
         return False
-    second = parameter_names[1].lstrip("_")
-    third = parameter_names[2].lstrip("_")
+    source_outputs_param_name = parameter_names[0]
+    prompt_param_name = parameter_names[1].lstrip("_")
+    requires_mm_param_name = parameter_names[2].lstrip("_")
     return (
-        parameter_names[0] == "source_outputs"
-        and second in {"original_prompt", "prompt"}
-        and third in {"requires_mm", "requires_multimodal_data"}
+        source_outputs_param_name == "source_outputs"
+        and prompt_param_name in {"original_prompt", "prompt"}
+        and requires_mm_param_name in {"requires_mm", "requires_multimodal_data"}
     )
 
 
