@@ -149,7 +149,7 @@ spec:
 
 [ModelExpress](https://github.com/ai-dynamo/modelexpress) is a model weight distribution service that integrates with vLLM's weight loading pipeline. It can publish model weights from one worker and let later workers pull those tensors from GPU memory over NIXL/RDMA instead of repeating a full storage download.
 
-ModelExpress can also use **ModelStreamer** as a loading strategy. ModelStreamer streams safetensors directly from object storage or a local filesystem path into GPU memory through [`runai-model-streamer`](https://github.com/run-ai/model-streamer). In that setup, the first worker can stream from storage and then publish ModelExpress metadata so later workers can use the P2P path.
+ModelExpress can also use **ModelStreamer** as a loading strategy. ModelStreamer streams safetensors directly from object storage or a local filesystem path into GPU memory through the `runai-model-streamer` package. In that setup, the first worker can stream from storage and then publish ModelExpress metadata so later workers can use the P2P path.
 
 Use this path when startup time or fleet-wide model rollout time matters more than the simplicity of a shared PVC.
 
