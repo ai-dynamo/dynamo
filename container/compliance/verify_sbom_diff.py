@@ -123,7 +123,9 @@ def parse_base_sbom(path: Path) -> set[PkgKey]:
 #   ## <name> <version>
 #   License: <SPDX>
 #   ...
-_NOTICE_HEADER_RE = re.compile(r"^## (.+?) (\S+)\s*$", re.MULTILINE)
+#   (optional license text wrapped in ``` ... ``` fenced blocks)
+_NOTICE_HEADER_RE = re.compile(r"^## (.+?) (\S+)\s*$")
+_FENCE_RE = re.compile(r"^```")
 
 
 def parse_notices(notices_dir: Path) -> set[PkgKey]:
@@ -131,6 +133,12 @@ def parse_notices(notices_dir: Path) -> set[PkgKey]:
 
     The ecosystem is inferred from the filename: NOTICES-Rust.txt → rust,
     NOTICES-Apt.txt → dpkg, etc. (matches the generator's lowercased ecosystem ID).
+
+    Section headers (`## <name> <version>`) live OUTSIDE fenced code blocks;
+    license text inside ``` ... ``` blocks can contain its own markdown
+    headers (e.g. `## Table of Contents` in long-form licenses) that would
+    spuriously match the header regex. Track fence state line-by-line and
+    only treat headers outside fences as real section markers.
     """
     out: set[PkgKey] = set()
     notices_files = sorted(notices_dir.rglob("NOTICES-*.txt"))
@@ -141,10 +149,17 @@ def parse_notices(notices_dir: Path) -> set[PkgKey]:
         # NOTICES-Rust.txt → "rust"; NOTICES-Apt.txt → "apt" (a.k.a. "dpkg")
         eco_label = path.stem.removeprefix("NOTICES-").lower()
         ecosystem = "dpkg" if eco_label == "apt" else eco_label
-        text = path.read_text(encoding="utf-8")
-        for m in _NOTICE_HEADER_RE.finditer(text):
-            name, version = m.group(1).strip(), m.group(2).strip()
-            out.add(PkgKey(ecosystem, name, version))
+        in_fence = False
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if _FENCE_RE.match(line):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            m = _NOTICE_HEADER_RE.match(line)
+            if m:
+                name, version = m.group(1).strip(), m.group(2).strip()
+                out.add(PkgKey(ecosystem, name, version))
     logger.info(
         "NOTICES: %d enumerated packages across %d files", len(out), len(notices_files)
     )
