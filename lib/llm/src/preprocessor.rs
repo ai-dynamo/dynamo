@@ -639,9 +639,15 @@ impl OpenAIPreprocessor {
         // Total `image_url` content parts in the request. Bumped at every
         // image part regardless of which fetch path handles it. Used at
         // `mm_hashes` forwarding time: if `mm_image_entries.len()` is
-        // smaller (i.e. some image failed dim resolution), we omit
-        // `mm_hashes` for the whole request rather than ship a partial /
-        // misaligned UUID list to vLLM.
+        // smaller, we omit `mm_hashes` for the whole request rather than
+        // ship a partial / misaligned UUID list to vLLM.
+        //
+        // The mismatch is only reachable on the URL-passthrough path
+        // (no media_loader): each `fetch_image_dims_uncached` failure logs
+        // a warn and skips its `mm_image_entries.push`, but doesn't abort
+        // the request. The decoded path (`has_media_loader`) propagates
+        // any dim-fetch failure via `?`, so the request errors out before
+        // mm_hashes forwarding is even considered.
         #[cfg(feature = "lightseek-mm")]
         let mut total_image_count: usize = 0;
         // For the URL-passthrough case (media_loader is None) we collect image
@@ -808,9 +814,20 @@ impl OpenAIPreprocessor {
                         });
                     }
                     Err(e) => {
+                        // Redact `data:` URIs to just the media-type prefix —
+                        // the comma-separated payload is the entire (base64)
+                        // image body and ships in logs would be log bloat /
+                        // potential PII spillage if logs are aggregated.
+                        let url_for_log = if url.starts_with("data:") {
+                            url.split_once(',')
+                                .map(|(p, _)| format!("{p},<redacted>"))
+                                .unwrap_or_else(|| "data:<redacted>".to_string())
+                        } else {
+                            url.to_string()
+                        };
                         tracing::warn!(
                             target: "mm_routing",
-                            url = %url,
+                            url = %url_for_log,
                             error = %e,
                             "lightseek: failed to fetch image dims; MM routing entry skipped"
                         );
