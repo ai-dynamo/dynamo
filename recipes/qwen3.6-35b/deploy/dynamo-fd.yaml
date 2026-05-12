@@ -4,8 +4,8 @@
 # Aggregated Dynamo on a single H100 with **frontend-decoding ON**,
 # **embedding cache OFF** — isolates the frontend-decoding effect from
 # the EC effect when compared against:
-#   - vllm-serve/agg-h100         : baseline (no Dynamo features)
-#   - dynamo-serve/agg-h100-fd-ec : Dynamo + frontend-decoding + EC
+#   - deploy/vllm-serve.yaml    : baseline (no Dynamo features)
+#   - deploy/dynamo-fd-ec.yaml  : Dynamo + frontend-decoding + EC
 #
 # Per-config flag diff:
 #                  fd        fd-ec        vllm-serve
@@ -41,7 +41,7 @@ spec:
           value: "200"
       extraPodSpec:
         # Hostname pin + image come from hw/${HW}.env (shared with
-        # vllm-serve, dynamo-fd-ec). See dynamo-fd-ec/deploy.yaml for
+        # vllm-serve, dynamo-fd-ec). See deploy/dynamo-fd-ec.yaml for
         # full rationale on why a hostname pin (not podAffinity).
         nodeSelector: ${HW_NODE_SELECTOR}
         tolerations: ${HW_TOLERATIONS}

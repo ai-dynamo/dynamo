@@ -29,7 +29,7 @@ deploy time via `--hw {h100,gb200}`. See [Hardware targets](#hardware-targets) b
 6. **HuggingFace token: not required.** `Qwen/Qwen3.6-35B-A3B-FP8` is
    public (`gated: false`), so neither the download Job nor `vllm serve`
    needs one. To swap in a gated model, uncomment the `hf-token-secret`
-   blocks in `model-download.yaml` + `<config>/deploy.yaml` and create:
+   blocks in `model-cache/model-download.yaml` + `deploy/<config>.yaml` and create:
    ```bash
    kubectl -n "$NAMESPACE" create secret generic hf-token-secret \
      --from-literal=HF_TOKEN="$HF_TOKEN"
