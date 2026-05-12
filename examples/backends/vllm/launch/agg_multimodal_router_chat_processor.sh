@@ -63,6 +63,15 @@ KV_EVENTS_PORT_BASE="${KV_EVENTS_PORT_BASE:-29080}"
 # ImageLoader cache size (number of images kept in-memory LRU)
 export DYN_MM_IMAGE_CACHE_SIZE="${DYN_MM_IMAGE_CACHE_SIZE:-32}"
 
+# DYNAMO_MM_TRANSFER selects how pre-rendered mm_kwargs are shipped from the
+# frontend (where vLLM's HF processor runs) to the selected backend worker.
+#   shm   — POSIX shared memory (/dev/shm). Default. Same-node only.
+#   nixl  — NIXL RDMA transfer. Required for cross-node deployments.
+# Set DYNAMO_DISABLE_NIXL_MM=1 to disable the transfer channel entirely; the
+# backend then re-downloads + reprocesses the image from the original URL.
+# See docs/features/multimodal/multimodal-kv-routing.md for details.
+export DYNAMO_MM_TRANSFER="${DYNAMO_MM_TRANSFER:-shm}"
+
 # Extra args (word-splitting is intentional for shell-style overrides)
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
 FRONTEND_EXTRA_ARGS="${FRONTEND_EXTRA_ARGS:-}"
@@ -101,6 +110,7 @@ echo "NUM_FRONTENDS=${NUM_FRONTENDS}"
 echo "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION}"
 echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
 echo "DYN_MM_IMAGE_CACHE_SIZE=${DYN_MM_IMAGE_CACHE_SIZE}"
+echo "DYNAMO_MM_TRANSFER=${DYNAMO_MM_TRANSFER}"
 echo "NATS_SERVER=${NATS_SERVER}"
 echo "ETCD_ENDPOINTS=${ETCD_ENDPOINTS}"
 echo "VLLM_SYSTEM_PORT_BASE=${VLLM_SYSTEM_PORT_BASE}"
