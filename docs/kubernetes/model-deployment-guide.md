@@ -107,17 +107,21 @@ The rapid strategy relies on AIC performance models. AIC currently supports:
 
 | Supported (rapid) | Not Yet Supported (use thorough) |
 |---|---|
-| H100 SXM | H100 PCIe |
-| H200 SXM | A100 PCIe |
-| A100 SXM | L4 |
-| B200 SXM | V100 (SXM/PCIe) |
-| GB200 SXM | T4 |
-| L40S | MI200, MI300 |
+| H100 SXM | V100 (SXM/PCIe) |
+| H100 PCIe | T4 |
+| H200 SXM | MI200, MI300 |
+| A100 SXM |  |
+| A100 PCIe |  |
+| A30 |  |
+| B200 SXM |  |
+| GB200 SXM |  |
+| L40S |  |
+| L4 |  |
 
 > [!NOTE]
-> If your GPU is not in the "Supported" column, rapid mode will fall back to a
-> naive config. Use `searchStrategy: thorough` for optimal results on
-> unsupported hardware.
+> Some rapid-mode SKUs use AIC estimate-only data until measured profiles are
+> available. Use `searchStrategy: thorough` when you need hardware-measured
+> profiling for an estimate-only or unsupported SKU.
 
 When specifying GPU SKUs manually, use lowercase underscore format (e.g.,
 `h100_sxm`, not `H100-SXM5-80GB`). See the

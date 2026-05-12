@@ -211,12 +211,12 @@ class NativePlannerBase:
         try:
             metrics = extract_metrics_from_mooncake(
                 self.config.load_predictor_warmup_trace,
-                self.config.throughput_adjustment_interval,
+                self.config.throughput_adjustment_interval_seconds,
             )
             self._state_machine.warm_load_predictors(
                 [
                     TrafficObservation(
-                        duration_s=self.config.throughput_adjustment_interval,
+                        duration_s=self.config.throughput_adjustment_interval_seconds,
                         num_req=float(m["request_count"]),
                         isl=float(m["avg_isl"]),
                         osl=float(m["avg_osl"]),
@@ -497,7 +497,7 @@ class NativePlannerBase:
     async def _collect_traffic(self) -> Optional[TrafficObservation]:
         """Pull traffic metrics from Prometheus over the throughput interval."""
         assert self.model_name is not None
-        interval_str = f"{self.config.throughput_adjustment_interval}s"
+        interval_str = f"{self.config.throughput_adjustment_interval_seconds}s"
         m = self._last_metrics
         m.ttft = (
             self.prometheus_traffic_client.get_avg_time_to_first_token(
@@ -537,7 +537,7 @@ class NativePlannerBase:
             self.prometheus_metrics.observed_ttft_ms.set(m.ttft)
             self.prometheus_metrics.observed_itl_ms.set(m.itl)
             self.prometheus_metrics.observed_requests_per_second.set(
-                m.num_req / self.config.throughput_adjustment_interval
+                m.num_req / self.config.throughput_adjustment_interval_seconds
             )
             self.prometheus_metrics.observed_request_duration_seconds.set(
                 m.request_duration
@@ -549,7 +549,7 @@ class NativePlannerBase:
             logger.info("Metrics contain None or NaN values, skipping")
             return None
         return TrafficObservation(
-            duration_s=self.config.throughput_adjustment_interval,
+            duration_s=self.config.throughput_adjustment_interval_seconds,
             num_req=m.num_req,
             isl=m.isl,
             osl=m.osl,
@@ -796,7 +796,7 @@ class NativePlannerBase:
         if self.prometheus_port == 0:
             return
         pm = self.prometheus_metrics
-        interval = self.config.throughput_adjustment_interval
+        interval = self.config.throughput_adjustment_interval_seconds
 
         pm.estimated_ttft_ms.set(diag.estimated_ttft_ms or 0)
         pm.estimated_itl_ms.set(diag.estimated_itl_ms or 0)
@@ -825,7 +825,7 @@ class NativePlannerBase:
 
     async def run(self) -> None:
         next_tick = self.state_machine.initial_tick(time.time())
-        poll_interval = self.config.load_adjustment_interval / 10
+        poll_interval = self.config.load_adjustment_interval_seconds / 10
 
         try:
             while True:

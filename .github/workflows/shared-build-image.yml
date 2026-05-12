@@ -324,12 +324,17 @@ jobs:
           if [ "${{ inputs.no_cache }}" == "true" ]; then
             NO_CACHE_ARG="--no-cache"
           fi
+          TEST_TARGET="test_image"
+          if [ "${{ inputs.target }}" == "planner" ]; then
+            TEST_TARGET="test_distroless"
+          fi
 
           docker buildx build \
             --progress=plain \
             ${PUSH_ARGS} \
             ${NO_CACHE_ARG} \
             --platform ${{ inputs.platform }} \
+            --target ${TEST_TARGET} \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }} \
             -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .

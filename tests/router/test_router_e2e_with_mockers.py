@@ -75,7 +75,7 @@ PLANNER_PROFILE_DATA_DIR = (
 ROUTER_AIC_CONFIG = {
     "aic_backend": "vllm",
     "aic_system": "h200_sxm",
-    "aic_backend_version": "0.12.0",
+    "aic_backend_version": "0.14.0",
     "aic_tp_size": 1,
     "aic_model_path": "Qwen/Qwen3-32B",
 }
