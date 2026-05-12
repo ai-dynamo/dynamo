@@ -318,8 +318,8 @@ class KvRouterArgGroup(ArgGroup):
             default=None,
             help=(
                 "KV Router: Enable predict-on-route with this TTL in seconds for entries "
-                "in the local side indexer. Omit to disable. Independent of "
-                "--router-ttl-secs, which covers pure approximate mode."
+                "in the local side indexer. Requires KV events; omit to disable. "
+                "Independent of --router-ttl-secs, which covers pure approximate mode."
             ),
             arg_type=float,
         )

@@ -98,14 +98,15 @@ impl SideIndexer {
     }
 }
 
-/// `approx` is the optional predict-on-route side indexer. Populated by
-/// routing decisions with a short TTL; the engine's KV events go to the
-/// primary only. `find_match_details` queries both and returns the
-/// per-worker max overlap. Keeping this separate from the primary avoids
-/// the sequence-hash mismatch problem: vLLM/SGLang salt their hashes with
+/// `approx` is the optional predict-on-route side indexer. It is always local
+/// to this router, even when the primary indexer is served or consumed
+/// remotely. Routing decisions populate it with a short TTL; engine KV events
+/// go to the primary only. `find_match_details` queries both and returns the
+/// per-worker max overlap. Keeping this separate from the primary avoids the
+/// sequence-hash mismatch problem: vLLM/SGLang salt their hashes with
 /// cryptographic digests the router can't reproduce, so writing
-/// router-computed hashes into the primary would key the same block under
-/// two hashes and pollute the tree.
+/// router-computed hashes into the primary would key the same block under two
+/// hashes and pollute the tree.
 #[derive(Clone)]
 pub enum Indexer {
     KvIndexer {
@@ -134,6 +135,13 @@ impl Indexer {
     ) -> Result<Self> {
         if kv_router_config.overlap_score_weight == 0.0 {
             return Ok(Self::None);
+        }
+
+        if kv_router_config.router_predicted_ttl_secs.is_some() && !kv_router_config.use_kv_events {
+            anyhow::bail!(
+                "router_predicted_ttl_secs requires use_kv_events=true; \
+                 do not combine a primary approximate indexer with a side approximate indexer"
+            );
         }
 
         if kv_router_config.use_remote_indexer {

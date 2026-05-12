@@ -1346,8 +1346,9 @@ class KvRouterConfig:
             shared_cache_type: External shared KV cache type. "none" disables shared-cache
                 scoring; "hicache" queries HiCache state (default: "none").
             router_predicted_ttl_secs: Enables predict-on-route when set. This TTL
-                applies to entries in the local side indexer. Set to None to disable.
-                Independent of router_ttl_secs, which covers pure approximate mode.
+                applies to entries in the local side indexer and requires
+                use_kv_events=True. Set to None to disable. Independent of
+                router_ttl_secs, which covers pure approximate mode.
         """
         ...
 
