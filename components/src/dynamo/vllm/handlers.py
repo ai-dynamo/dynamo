@@ -1903,7 +1903,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         forwarded_hashes = extra_args.get("mm_hashes")
         mm_uuids: dict[str, Any] | None = None
         if forwarded_hashes:
-            mm_uuids = {"image": forwarded_hashes}
+            # vLLM binds multi_modal_uuids by modality key string match.
+            # For models with use_unified_vision_chunk=True (e.g. Kimi-K2.5)
+            # images live under `vision_chunk`, not `image`; hardcoding
+            # `image` here would silently fail to bind and force vLLM back
+            # to its own content-derived hash, breaking router/worker
+            # cache-key alignment.
+            mm_modality_key = (
+                "vision_chunk" if self._use_unified_vision_chunk else "image"
+            )
+            mm_uuids = {mm_modality_key: forwarded_hashes}
         elif self.embedding_loader is None:
             mm_uuids = _compute_mm_uuids(multi_modal_data)
             if mm_uuids and multi_modal_data:
