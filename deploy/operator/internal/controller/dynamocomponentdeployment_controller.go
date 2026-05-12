@@ -184,27 +184,8 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		}
 	}
 
-	// Sync GMS ResourceClaimTemplate before creating workload resources
-	if r.RuntimeConfig.DRAEnabled {
-		componentName := dynamo.GetDCDComponentName(dynamoComponentDeployment)
-		spec := &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec
-		gpuCount, deviceClassName, err := dra.ExtractGPUParamsFromResourceRequirements(dynamo.GetGPUMemoryService(spec), dynamo.GetMainContainerResources(spec))
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("invalid GPU resource requirements for GMS ResourceClaimTemplate: %w", err)
-		}
-		parentName := dynamoComponentDeployment.GetParentGraphDeploymentName()
-		if parentName == "" {
-			parentName = dynamoComponentDeployment.Name
-		}
-		claimTemplateName := dra.ResourceClaimTemplateName(parentName, componentName)
-		_, _, err = commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
-			return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoComponentDeployment.Namespace, gpuCount, deviceClassName)
-		})
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate: %w", err)
-		}
-	} else if dynamo.GetGPUMemoryService(&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec) != nil {
-		return ctrl.Result{}, fmt.Errorf("gpuMemoryService requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available on this cluster (requires Kubernetes 1.32+)")
+	if err := r.reconcileGMSResourceClaimTemplate(ctx, dynamoComponentDeployment); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Create the appropriate workload resource based on deployment type
@@ -268,6 +249,37 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	}
 
 	return
+}
+
+func (r *DynamoComponentDeploymentReconciler) reconcileGMSResourceClaimTemplate(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) error {
+	spec := &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec
+	gmsSpec := dynamo.GetGPUMemoryService(spec)
+	if !r.RuntimeConfig.DRAEnabled {
+		if gmsSpec == nil {
+			return nil
+		}
+		return fmt.Errorf(
+			"gpuMemoryService requires DRA (Dynamic Resource Allocation), but the resource.k8s.io/v1 API " +
+				"is not available on this cluster (requires Kubernetes 1.34+)")
+	}
+
+	componentName := dynamo.GetDCDComponentName(dynamoComponentDeployment)
+	gpuCount, deviceClassName, err := dra.ExtractGPUParamsFromResourceRequirements(gmsSpec, dynamo.GetMainContainerResources(spec))
+	if err != nil {
+		return fmt.Errorf("invalid GPU resource requirements for GMS ResourceClaimTemplate: %w", err)
+	}
+	parentName := dynamoComponentDeployment.GetParentGraphDeploymentName()
+	if parentName == "" {
+		parentName = dynamoComponentDeployment.Name
+	}
+	claimTemplateName := dra.ResourceClaimTemplateName(parentName, componentName)
+	_, _, err = commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+		return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoComponentDeployment.Namespace, gpuCount, deviceClassName)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to sync GMS ResourceClaimTemplate: %w", err)
+	}
+	return nil
 }
 
 type ComponentReconcileResult struct {

@@ -34,6 +34,8 @@ import (
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	resourcev1 "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -54,6 +56,7 @@ func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme 
 		corev1.AddToScheme,
 		autoscalingv1.AddToScheme,
 		networkingv1.AddToScheme,
+		resourcev1.AddToScheme,
 		v1alpha1.AddToScheme,
 		v1beta1.AddToScheme,
 		grovev1alpha1.AddToScheme,
@@ -540,6 +543,76 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_DRAV
 			}
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 		})
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_ToleratesNonGMSComponents(t *testing.T) {
+	ctx := context.Background()
+	s := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "frontend",
+					ComponentType: v1beta1.ComponentTypeFrontend,
+				},
+				{
+					ComponentName: "decode",
+					ComponentType: v1beta1.ComponentTypeDecode,
+				},
+			},
+		},
+	}
+	r := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(dgd).
+			Build(),
+		Recorder:      record.NewFakeRecorder(100),
+		RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: true},
+	}
+
+	if err := r.reconcileGMSResourceClaimTemplates(ctx, dgd); err != nil {
+		t.Fatalf("reconcileGMSResourceClaimTemplates() returned error for non-GMS components: %v", err)
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_CleansStaleNonGMSResourceClaimTemplate(t *testing.T) {
+	ctx := context.Background()
+	s := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "decode",
+					ComponentType: v1beta1.ComponentTypeDecode,
+				},
+			},
+		},
+	}
+	templateName := "test-dgd-decode-gpu"
+	rct := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: templateName, Namespace: "default"},
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(dgd, rct).
+		Build()
+	r := &DynamoGraphDeploymentReconciler{
+		Client:        cl,
+		Recorder:      record.NewFakeRecorder(100),
+		RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: true},
+	}
+
+	if err := r.reconcileGMSResourceClaimTemplates(ctx, dgd); err != nil {
+		t.Fatalf("reconcileGMSResourceClaimTemplates() returned error: %v", err)
+	}
+	got := &resourcev1.ResourceClaimTemplate{}
+	err := cl.Get(ctx, client.ObjectKey{Name: templateName, Namespace: "default"}, got)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected stale ResourceClaimTemplate to be deleted, got %v", err)
 	}
 }
 

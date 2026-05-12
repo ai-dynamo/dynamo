@@ -852,9 +852,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 	return nil
 }
 
-// reconcileGMSResourceClaimTemplates syncs one ResourceClaimTemplate per
-// component when DRA is available, and otherwise fails fast if any component
-// needs DRA-backed GPU allocation.
+// reconcileGMSResourceClaimTemplates syncs ResourceClaimTemplates when DRA is
+// available, including deleting stale templates for components that no longer
+// use GMS. When DRA is unavailable, it fails fast if any component needs
+// DRA-backed GPU allocation.
 //
 // Both the GMS sidecar and inter-pod GMS
 // failover (failover.mode=interPod) allocate GPUs via DRA ResourceClaims.
@@ -869,7 +870,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGMSResourceClaimTemplates(ctx
 		for i := range dynamoDeployment.Spec.Components {
 			component := &dynamoDeployment.Spec.Components[i]
 			if dynamo.GetGPUMemoryService(component) != nil || component.IsInterPodFailoverEnabled() {
-				return fmt.Errorf("gpuMemoryService / inter-pod GMS failover requires DRA (Dynamic Resource Allocation), but DRA is not available (either the resource.k8s.io API group is not registered on this cluster, which requires Kubernetes 1.32+, or DRA has been explicitly disabled in the operator configuration)")
+				return fmt.Errorf(
+					"gpuMemoryService / inter-pod GMS failover requires DRA (Dynamic Resource Allocation), " +
+						"but DRA is not available (either the resource.k8s.io/v1 API is not registered on this cluster, " +
+						"which requires Kubernetes 1.34+, or DRA has been explicitly disabled in the operator configuration)")
 			}
 		}
 		return nil
@@ -877,8 +881,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGMSResourceClaimTemplates(ctx
 
 	for i := range dynamoDeployment.Spec.Components {
 		component := &dynamoDeployment.Spec.Components[i]
+		gmsSpec := dynamo.GetGPUMemoryService(component)
 		componentName := component.ComponentName
-		gpuCount, deviceClassName, err := dra.ExtractGPUParamsFromResourceRequirements(dynamo.GetGPUMemoryService(component), dynamo.GetMainContainerResources(component))
+		gpuCount, deviceClassName, err := dra.ExtractGPUParamsFromResourceRequirements(gmsSpec, dynamo.GetMainContainerResources(component))
 		if err != nil {
 			return fmt.Errorf("invalid GPU resource requirements for GMS ResourceClaimTemplate for %s: %w", componentName, err)
 		}

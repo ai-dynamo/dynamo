@@ -42,8 +42,11 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	resourcev1 "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
@@ -217,6 +220,89 @@ func TestIsDeploymentReady(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IsDeploymentReady(tt.args.deployment); got != tt.want {
 				t.Errorf("IsDeploymentReady() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDynamoComponentDeploymentReconciler_reconcileGMSResourceClaimTemplate_GuardsDRA(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name             string
+		runtime          *controller_common.RuntimeConfig
+		spec             v1beta1.DynamoComponentDeploymentSharedSpec
+		existingTemplate bool
+		wantDeleted      bool
+		wantError        string
+	}{
+		{
+			name:    "no gpu memory service skips ResourceClaimTemplate sync when DRA unavailable",
+			runtime: &controller_common.RuntimeConfig{DRAEnabled: false},
+			spec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+			},
+		},
+		{
+			name:    "no gpu memory service cleans up stale ResourceClaimTemplate when DRA available",
+			runtime: &controller_common.RuntimeConfig{DRAEnabled: true},
+			spec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+			},
+			existingTemplate: true,
+			wantDeleted:      true,
+		},
+		{
+			name:    "gpu memory service requires DRA v1",
+			runtime: &controller_common.RuntimeConfig{DRAEnabled: false},
+			spec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+				Experimental: &v1beta1.ExperimentalSpec{
+					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{},
+				},
+			},
+			wantError: "resource.k8s.io/v1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := runtime.NewScheme()
+			require.NoError(t, v1beta1.AddToScheme(s))
+			require.NoError(t, resourcev1.AddToScheme(s))
+			dcd := &v1beta1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dcd", Namespace: "default"},
+				Spec: v1beta1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: tt.spec,
+				},
+			}
+			templateName := "test-dcd-decode-gpu"
+			objects := []client.Object{dcd}
+			if tt.existingTemplate {
+				objects = append(objects, &resourcev1.ResourceClaimTemplate{
+					ObjectMeta: metav1.ObjectMeta{Name: templateName, Namespace: "default"},
+				})
+			}
+			cl := fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(objects...).
+				Build()
+			r := &DynamoComponentDeploymentReconciler{
+				Client:        cl,
+				Recorder:      record.NewFakeRecorder(100),
+				RuntimeConfig: tt.runtime,
+			}
+
+			err := r.reconcileGMSResourceClaimTemplate(ctx, dcd)
+			if tt.wantError != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.wantError)
+				return
+			}
+			require.NoError(t, err)
+			if tt.wantDeleted {
+				got := &resourcev1.ResourceClaimTemplate{}
+				err = cl.Get(ctx, client.ObjectKey{Name: templateName, Namespace: "default"}, got)
+				require.True(t, apierrors.IsNotFound(err), "expected stale ResourceClaimTemplate to be deleted, got %v", err)
 			}
 		})
 	}
