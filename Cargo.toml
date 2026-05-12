@@ -73,7 +73,7 @@ kvbm-hub = { path = "lib/kvbm-hub", version = "1.1.0" }
 # `velo_ext::{InstanceId, ...}`) that only exist in the local
 # checkout. CI builds that don't have the patched path will pin to
 # the crates.io versions below and surface a clean version mismatch.
-velo     = { version = "0.4.0" }
+velo     = { version = "0.4.1" }
 velo-ext = { version = "0.2.0" }
 
 
@@ -190,6 +190,6 @@ strip = false
 #   velo-ext = { path = "/your/path/to/velo/lib/velo-ext" }
 #
 # Bump the `rev` here when velo lands a needed fix.
-[patch.crates-io]
-velo     = { git = "https://github.com/ai-dynamo/velo", rev = "767908fca7dacbaa4b7e6a9d86618089d4f203da" }
-velo-ext = { git = "https://github.com/ai-dynamo/velo", rev = "767908fca7dacbaa4b7e6a9d86618089d4f203da" }
+#[patch.crates-io]
+#velo     = { git = "https://github.com/ai-dynamo/velo", rev = "767908fca7dacbaa4b7e6a9d86618089d4f203da" }
+#velo-ext = { git = "https://github.com/ai-dynamo/velo", rev = "767908fca7dacbaa4b7e6a9d86618089d4f203da" }

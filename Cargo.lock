@@ -9534,8 +9534,9 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "velo"
-version = "0.4.0"
-source = "git+https://github.com/ai-dynamo/velo?rev=767908fca7dacbaa4b7e6a9d86618089d4f203da#767908fca7dacbaa4b7e6a9d86618089d4f203da"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7e92b2164d6df7b21f2b91eaae6a9b53eb313c8f6d305a642e75733c911f8d4"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -9595,7 +9596,8 @@ dependencies = [
 [[package]]
 name = "velo-ext"
 version = "0.2.0"
-source = "git+https://github.com/ai-dynamo/velo?rev=767908fca7dacbaa4b7e6a9d86618089d4f203da#767908fca7dacbaa4b7e6a9d86618089d4f203da"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bbf99f74c0202bd1bf6caaa8bb784f461b757df7beafe734273519caf65372e"
 dependencies = [
  "anyhow",
  "bytes",
