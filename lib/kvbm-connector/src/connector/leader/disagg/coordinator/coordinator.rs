@@ -20,7 +20,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use dashmap::DashMap;
 use futures::StreamExt;
 use kvbm_disagg_protocol::{DISAGG_PROTOCOL_VERSION, RemotePrefillParams, RemotePrefillRequest};
@@ -266,6 +266,22 @@ impl ConditionalDisaggCoordinator {
 
     /// Commit forward-pass output blocks to the peer via the session's
     /// commit + availability streams.
+    ///
+    /// Session attachment is asynchronous in `run_setup`. The G1→G2
+    /// register observer (vLLM forward-pass + offload-pipeline lift)
+    /// can fire BEFORE `run_setup` has set `state.session` — common on
+    /// cold-cache R1 in asymmetric topologies (e.g. TP=2 decode +
+    /// TP=1 prefill, where prefill's lift wins the race against
+    /// velo's `factory.attach`). Rather than dropping those blocks
+    /// (which leaves decode stuck at `decode_commits_closed_short
+    /// seen=0`), buffer them in `bits.pending_output_commits`;
+    /// `run_setup` drains the buffer atomically when it sets
+    /// `state.session = Some(...)`.
+    ///
+    /// Lock order: acquire `state.session` first, then nest
+    /// `bits.pending_output_commits` inside it. Same order used in
+    /// `run_setup` so observer + attach can't interleave with the
+    /// buffer in an inconsistent state.
     pub fn commit_output_blocks(
         &self,
         request_id: &str,
@@ -275,18 +291,34 @@ impl ConditionalDisaggCoordinator {
             .state_for(request_id)
             .ok_or_else(|| anyhow!("commit_output_blocks: unknown request {}", request_id))?;
 
-        // Top-level session is the shared field for prefill (lazily attached).
-        let session = state.session.lock().clone().ok_or_else(|| {
-            anyhow!(
-                "commit_output_blocks: session not attached for {}",
-                request_id
-            )
-        })?;
+        let bits = state
+            .as_prefill()
+            .ok_or_else(|| anyhow!("commit_output_blocks: request {} is not prefill-role", request_id))?;
 
-        let hashes: Vec<SequenceHash> = blocks.iter().map(|b| b.sequence_hash()).collect();
-        session.commit(hashes)?;
-        session.make_available(blocks)?;
-        Ok(())
+        // Lock the session FIRST; buffer-or-commit decision happens
+        // inside this critical section so a concurrent `run_setup`
+        // attach can't transition session=None → Some between our
+        // check and the buffer append.
+        let session_opt = state.session.lock().clone();
+        match session_opt {
+            None => {
+                let buffered = blocks.len();
+                bits.pending_output_commits.lock().extend(blocks);
+                crate::audit!(
+                    "commit_output_blocks_buffered",
+                    role = "prefill",
+                    request_id,
+                    buffered
+                );
+                Ok(())
+            }
+            Some(session) => {
+                let hashes: Vec<SequenceHash> = blocks.iter().map(|b| b.sequence_hash()).collect();
+                session.commit(hashes)?;
+                session.make_available(blocks)?;
+                Ok(())
+            }
+        }
     }
 
     /// Surface a failed CD-bound prefill request to vLLM and tear down local
@@ -440,8 +472,34 @@ impl ConditionalDisaggCoordinator {
             .session_factory
             .attach(params.session_id, params.initiator_instance_id, endpoint)
             .await?;
-        // Store in the top-level shared session field.
-        *state.session.lock() = Some(Arc::clone(&session));
+        // Store in the top-level shared session field AND atomically
+        // drain any output blocks the observer buffered while session
+        // was None. The two operations must happen in the same
+        // critical section so a concurrent `commit_output_blocks`
+        // can't see session=Some and still try to append to the
+        // buffer (which would silently lose blocks).
+        let buffered_outputs: Vec<ImmutableBlock<G2>> = {
+            let mut session_slot = state.session.lock();
+            *session_slot = Some(Arc::clone(&session));
+            let mut pending = bits.pending_output_commits.lock();
+            std::mem::take(&mut *pending)
+        };
+        if !buffered_outputs.is_empty() {
+            crate::audit!(
+                "commit_output_blocks_drained",
+                role = "prefill",
+                request_id = %request_id,
+                drained = buffered_outputs.len()
+            );
+            let hashes: Vec<SequenceHash> =
+                buffered_outputs.iter().map(|b| b.sequence_hash()).collect();
+            session
+                .commit(hashes)
+                .context("draining buffered output commits after attach")?;
+            session
+                .make_available(buffered_outputs)
+                .context("draining buffered output availability after attach")?;
+        }
 
         // Spawn lifecycle watcher.
         let watcher_coord = self.weak_self.clone();
@@ -1212,6 +1270,7 @@ impl ConditionalDisaggCoordinator {
             observer_handle,
             pending_failure: Mutex::new(None),
             total_position_end_tokens,
+            pending_output_commits: Mutex::new(Vec::new()),
         };
 
         // Use the top-level CdRequest constructor.  `session_id` is

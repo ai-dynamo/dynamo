@@ -170,6 +170,24 @@ pub struct PrefillBits {
     /// `num_external_tokens = total_position_end_tokens - prefill_P`
     /// (clamped to [0, ..]).
     pub total_position_end_tokens: usize,
+    /// Buffer for output blocks that arrive from the G1→G2 register
+    /// observer BEFORE `run_setup` has attached the session.
+    ///
+    /// In the cold-cache R1 path on asymmetric topologies (TP=2 decode
+    /// or otherwise where vLLM's forward-pass + G1→G2 lift wins the
+    /// race against `factory.attach`), the observer's
+    /// `commit_output_blocks` callback fires while `state.session` is
+    /// still `None`. Without buffering, the blocks were dropped on the
+    /// floor and decode's `decode_commits_closed_short seen=0` watchdog
+    /// would eventually time out the request.
+    ///
+    /// Lock order: always acquire `CdRequest::session` BEFORE this
+    /// buffer to avoid races with `run_setup`. The two protected
+    /// regions are:
+    ///   1. observer commit (session=None) → append blocks to buffer
+    ///   2. run_setup attach (session=Some) → drain buffer, push via
+    ///      session.commit + make_available
+    pub pending_output_commits: Mutex<Vec<ImmutableBlock<G2>>>,
 }
 
 /// Per-position metadata for a remote-prefill block decode expects
