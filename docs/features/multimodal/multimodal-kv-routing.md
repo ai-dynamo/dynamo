@@ -171,9 +171,11 @@ cd $DYNAMO_HOME/examples/backends/trtllm/mm_router_worker
 
 See the [TRT-LLM MM Router README](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/mm_router_worker/README.md) for full setup instructions and configuration options.
 
-## Transfer Mode Details (vLLM only)
+## Transfer Mode Details (vLLM chat-processor variant only)
 
-On vLLM backends, the frontend runs the HF image processor and ships the pre-processed `mm_kwargs` to the selected backend worker so the backend can skip re-processing. The `DYNAMO_MM_TRANSFER` environment variable controls how that payload is transferred. (TRT-LLM does not use this path — its backend workers re-run their own preprocessing, so `DYNAMO_MM_TRANSFER` has no effect there.)
+Applies to the `--dyn-chat-processor=vllm` launch (`agg_multimodal_router_chat_processor.sh`), **not** the default Rust frontend path. In the chat-processor variant the frontend runs the HF image processor in-process and ships the pre-processed `mm_kwargs` to the selected backend worker so the backend can skip re-processing; the `DYNAMO_MM_TRANSFER` environment variable controls how that payload is transferred.
+
+The default Rust frontend path doesn't run the HF processor or pre-render `mm_kwargs` — it forwards only `mm_hashes`, and each worker re-processes the image itself. TRT-LLM backends similarly re-run their own preprocessing and don't honor `DYNAMO_MM_TRANSFER`.
 
 - **`shm`** (default): POSIX shared memory via a `/dev/shm` segment. Intended for same-node deployments, where frontend and backend share the host filesystem. If the backend can't access the segment (e.g., running on a different node), it falls back to re-processing the image from the URL.
 - **`nixl`**: NIXL RDMA transfer. Required for cross-node deployments where `/dev/shm` is not shared between frontend and backend. Works across nodes over InfiniBand or TCP (whichever UCX selects).
