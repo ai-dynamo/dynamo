@@ -8,37 +8,45 @@
 //! decode peer that pushed it a request, but the only identifier carried in
 //! `RemotePrefillRequest` is decode's `initiator_instance_id`. The hub holds
 //! the `PeerInfo` (registered at decode-startup time); this trait closes the
-//! loop by looking it up and feeding it to `messenger.register_peer`. The
+//! loop by looking it up and feeding it to `velo.register_peer`. The
 //! coordinator caches successful resolves locally so repeat requests for the
 //! same peer don't re-pay the round-trip.
+//!
+//! The trait itself lives in `kvbm_engine::disagg::session` because
+//! `VeloSessionFactory` also needs the hook (both the puller-side `attach`
+//! and the holder-side `Frame::Attach` receive path call `attach_anchor`,
+//! which fails if the peer isn't already in velo's streaming registry).
+//! We re-export it here so connector callers keep the canonical
+//! `crate::leader::disagg::peer_resolver::PeerResolver` import path.
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use futures::future::BoxFuture;
 use kvbm_hub::HubClient;
-use velo::{Messenger, discovery::PeerDiscovery};
+use velo::{Messenger, Velo, discovery::PeerDiscovery};
 
 use crate::InstanceId;
 
-pub trait PeerResolver: Send + Sync {
-    /// Resolve `instance_id` to `PeerInfo` and register it on the local
-    /// messenger. Implementations should be safe to call once per remote
-    /// peer; the coordinator de-duplicates upstream so repeat resolves
-    /// for the same peer never reach the implementation.
-    fn resolve_and_register(&self, instance_id: InstanceId) -> BoxFuture<'_, Result<()>>;
-}
+pub use kvbm_engine::disagg::session::PeerResolver;
 
 /// Production resolver: looks up `PeerInfo` via the kvbm-hub and registers
-/// it on the local messenger.
+/// it on the local Velo instance. Velo::register_peer populates BOTH the
+/// messenger registry AND the streaming-transport registry from a single
+/// PeerInfo (provided the PeerInfo's WorkerAddress carries the streaming
+/// endpoint — which `register_with_hub` ensures by using `velo.peer_info()`
+/// rather than `messenger.peer_info()` at hub-registration time).
+/// Calling `messenger.register_peer` directly would skip the streaming
+/// registry and surface as "TCP streaming: peer <worker_id> not registered"
+/// on the next `attach_anchor`.
 pub struct HubPeerResolver {
     hub: Arc<HubClient>,
-    messenger: Arc<Messenger>,
+    velo: Arc<Velo>,
 }
 
 impl HubPeerResolver {
-    pub fn new(hub: Arc<HubClient>, messenger: Arc<Messenger>) -> Arc<Self> {
-        Arc::new(Self { hub, messenger })
+    pub fn new(hub: Arc<HubClient>, velo: Arc<Velo>) -> Arc<Self> {
+        Arc::new(Self { hub, velo })
     }
 }
 
@@ -50,9 +58,9 @@ impl PeerResolver for HubPeerResolver {
                 .discover_by_instance_id(instance_id)
                 .await
                 .with_context(|| format!("hub lookup for instance {}", instance_id))?;
-            self.messenger
+            self.velo
                 .register_peer(peer_info)
-                .with_context(|| format!("messenger.register_peer({})", instance_id))?;
+                .with_context(|| format!("velo.register_peer({})", instance_id))?;
             Ok(())
         })
     }

@@ -34,7 +34,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::{
     AvailabilityDelta, AvailabilityStream, CommitDelta, CommitStream, CommittedBlock, Frame,
-    LifecycleEvent, LifecycleStream, Session, SessionFactory, SessionId,
+    LifecycleEvent, LifecycleStream, PeerResolver, Session, SessionFactory, SessionId,
 };
 use crate::disagg::SessionEndpoint;
 use crate::leader::InstanceLeader;
@@ -195,6 +195,11 @@ struct VeloSessionInner {
     /// factory expose an `active_session_count` gauge without
     /// holding strong refs into every live session.
     active_count: Arc<AtomicUsize>,
+
+    /// Optional resolver invoked on `Frame::Attach` receive before
+    /// `velo.attach_anchor`. Populates the local velo streaming
+    /// registry from the hub when the peer was not pre-registered.
+    peer_resolver: Option<Arc<dyn PeerResolver>>,
 }
 
 impl Drop for VeloSessionInner {
@@ -244,6 +249,7 @@ impl VeloSession {
         outbound_tx: mpsc::UnboundedSender<OutboundCommand>,
         outbound_install_tx: oneshot::Sender<velo::StreamSender<Frame>>,
         active_count: Arc<AtomicUsize>,
+        peer_resolver: Option<Arc<dyn PeerResolver>>,
     ) -> Arc<VeloSessionInner> {
         let prev = active_count.fetch_add(1, Ordering::AcqRel);
         crate::engine_audit!(
@@ -277,6 +283,7 @@ impl VeloSession {
             closed: Mutex::new(false),
             runtime,
             active_count,
+            peer_resolver,
         })
     }
 
@@ -430,6 +437,26 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
                         return;
                     }
                 };
+                // Resolve the puller's velo PeerInfo from the hub and
+                // register it on our local streaming registry before
+                // attach_anchor. Without this, the streaming registry
+                // is empty and `attach_anchor(handle)` fails with
+                // "TCP streaming: peer X not registered".
+                if let Some(resolver) = inner_for_attach.peer_resolver.clone() {
+                    if let Err(err) = resolver.resolve_and_register(instance_id).await {
+                        tracing::error!(
+                            peer_instance_id = %instance_id,
+                            error = ?err,
+                            "decode Attach peer resolution failed"
+                        );
+                        inner_for_attach
+                            .lifecycle_stream
+                            .push(LifecycleEvent::Failed {
+                                reason: format!("decode Attach resolve peer {instance_id}: {err}"),
+                            });
+                        return;
+                    }
+                }
                 let sender = match inner_for_attach.velo.attach_anchor::<Frame>(handle).await {
                     Ok(s) => s,
                     Err(err) => {
@@ -1199,6 +1226,13 @@ pub struct VeloSessionFactory {
     /// decrement without holding a back-reference to the
     /// factory.
     active_count: Arc<AtomicUsize>,
+    /// Optional peer-resolver hook invoked before `attach_anchor`
+    /// on both the puller (`attach`) and holder (`Frame::Attach`
+    /// receive) sides. Required in cross-process production where
+    /// peers are advertised via the hub but not pre-registered on
+    /// local velo streaming registries. Tests that explicitly call
+    /// `velo.register_peer` ahead of time leave this `None`.
+    peer_resolver: Option<Arc<dyn PeerResolver>>,
 }
 
 /// Cadence for the active-session gauge audit emission.
@@ -1209,12 +1243,36 @@ const ACTIVE_SESSION_GAUGE_INTERVAL: std::time::Duration = std::time::Duration::
 
 impl VeloSessionFactory {
     pub fn new(velo: Arc<velo::Velo>, leader: Arc<InstanceLeader>, runtime: Handle) -> Arc<Self> {
+        Self::build(velo, leader, runtime, None)
+    }
+
+    /// Build a factory whose `attach` and `Frame::Attach` paths
+    /// invoke `peer_resolver.resolve_and_register(peer)` before
+    /// `velo.attach_anchor`. Use this whenever peers are advertised
+    /// out-of-band (e.g. via the kvbm-hub) and are not guaranteed
+    /// to already be in the local velo streaming registry.
+    pub fn with_peer_resolver(
+        velo: Arc<velo::Velo>,
+        leader: Arc<InstanceLeader>,
+        runtime: Handle,
+        peer_resolver: Arc<dyn PeerResolver>,
+    ) -> Arc<Self> {
+        Self::build(velo, leader, runtime, Some(peer_resolver))
+    }
+
+    fn build(
+        velo: Arc<velo::Velo>,
+        leader: Arc<InstanceLeader>,
+        runtime: Handle,
+        peer_resolver: Option<Arc<dyn PeerResolver>>,
+    ) -> Arc<Self> {
         let active_count = Arc::new(AtomicUsize::new(0));
         let factory = Arc::new(Self {
             velo,
             leader,
             runtime: runtime.clone(),
             active_count: Arc::clone(&active_count),
+            peer_resolver,
         });
         // Spawn a background gauge emitter. Uses a Weak so the
         // factory can be dropped naturally (e.g. at process
@@ -1262,6 +1320,7 @@ impl VeloSessionFactory {
             outbound_tx,
             install_tx,
             Arc::clone(&self.active_count),
+            self.peer_resolver.clone(),
         );
         spawn_outbound_sender(outbound_rx, install_rx, Arc::clone(&inner), &self.runtime);
         spawn_monitor(Arc::clone(&inner), anchor, self.runtime.clone());
@@ -1292,6 +1351,7 @@ impl SessionFactory for VeloSessionFactory {
             outbound_tx,
             install_tx,
             Arc::clone(&self.active_count),
+            self.peer_resolver.clone(),
         );
         spawn_outbound_sender(outbound_rx, install_rx, Arc::clone(&inner), &self.runtime);
         spawn_monitor(Arc::clone(&inner), anchor, self.runtime.clone());
@@ -1313,7 +1373,20 @@ impl SessionFactory for VeloSessionFactory {
         let leader = Arc::clone(&self.leader);
         let runtime = self.runtime.clone();
         let active_count = Arc::clone(&self.active_count);
+        let peer_resolver = self.peer_resolver.clone();
         Box::pin(async move {
+            // The puller side intentionally does NOT call the
+            // peer-resolver here. In production the caller
+            // (kvbm-connector's prefill coordinator) has already
+            // resolved the peer at `coordinator.rs:422` before
+            // invoking this factory method, so calling the resolver
+            // again would be redundant and adds a network round-trip
+            // to the hot path. The resolver IS plumbed into
+            // `VeloSessionInner` so the holder-side `Frame::Attach`
+            // handler in `dispatch_frame` can use it — that's where
+            // production was hitting "peer X not registered" before
+            // this fix.
+
             // 1. Eager metadata exchange — ensures the peer is
             //    velo-registered (the unary AM call surfaces a
             //    clear error otherwise) AND that the holder's
@@ -1364,6 +1437,7 @@ impl SessionFactory for VeloSessionFactory {
                 outbound_tx,
                 install_tx,
                 active_count,
+                peer_resolver,
             );
             // Puller knows peer's identity out-of-band.
             *inner.peer_instance_id.lock() = Some(peer_instance_id);

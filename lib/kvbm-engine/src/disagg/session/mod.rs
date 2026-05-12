@@ -308,6 +308,31 @@ pub trait SessionFactory: Send + Sync {
 //   - `testing.rs` (feature `testing`) — `MockSession` + factory
 // ============================================================================
 
+// ============================================================================
+// Peer resolution hook
+// ============================================================================
+
+/// Resolves a remote velo peer by `InstanceId` and registers it on the
+/// local `velo::Velo` so the streaming-transport registry is populated
+/// before `attach_anchor` is called.
+///
+/// Velo 0.4 carries two parallel peer registries: one on the messenger
+/// transport (populated eagerly at startup via discovery) and one on
+/// each streaming transport (populated lazily by `velo.register_peer`
+/// when the WorkerAddress carries the streaming key). The CD session
+/// wire goes over streaming; `attach_anchor` and `Frame::Attach`
+/// reception both consult the streaming registry. Without this hook,
+/// cross-instance disagg fails with
+/// `transport bind failed: TCP streaming: peer X not registered`.
+///
+/// Production wires `kvbm_connector::leader::disagg::HubPeerResolver`
+/// (signature-identical) into the `VeloSessionFactory` so both the
+/// puller-side `attach` and the holder-side `Frame::Attach` handler
+/// resolve the remote peer before opening outbound streams.
+pub trait PeerResolver: Send + Sync {
+    fn resolve_and_register(&self, instance_id: InstanceId) -> BoxFuture<'_, Result<()>>;
+}
+
 pub mod velo;
 pub use velo::{SESSION_STREAM_SCHEMA, VeloSession, VeloSessionFactory};
 

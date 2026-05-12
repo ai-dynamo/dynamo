@@ -25,7 +25,7 @@ use anyhow::{Context, Result, anyhow};
 use kvbm_config::{DisaggConfig, DisaggregationRole};
 use kvbm_hub::{ConditionalDisaggClient, ConditionalDisaggRole, HubClient, HubClientBuilder};
 use url::Url;
-use velo::{InstanceId, Messenger};
+use velo::{InstanceId, Messenger, Velo};
 
 use crate::BlockId;
 use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
@@ -453,13 +453,14 @@ impl ConnectorLeaderApi for ConditionalDisaggLeader {
 
 pub async fn register_with_hub(
     config: &DisaggConfig,
-    messenger: Arc<Messenger>,
+    velo: Arc<Velo>,
 ) -> Result<(
     Arc<HubClient>,
     Arc<ConditionalDisaggClient>,
     Option<InstanceId>,
 )> {
     let hub = build_hub_client(&config.hub_url)?;
+    let messenger = velo.messenger().clone();
 
     hub.register_handlers_messenger(&messenger)
         .context("installing hub velo handlers on leader messenger")?;
@@ -468,7 +469,15 @@ pub async fn register_with_hub(
     let client =
         ConditionalDisaggClient::with_messenger(Arc::clone(&hub), messenger.clone(), cd_role);
 
-    let peer_info = messenger.peer_info();
+    // Use Velo::peer_info() (NOT Messenger::peer_info()) so the WorkerAddress
+    // we register with the hub carries the streaming-transport endpoint
+    // alongside the messenger transports. Without this, peers that later
+    // resolve our PeerInfo via the hub only see the messenger entries; their
+    // local `Velo::register_peer` then calls `stream_transport.register()`
+    // with a WorkerAddress that has no streaming key, which is swallowed at
+    // debug level — and the subsequent `attach_anchor` fails with
+    // `TCP streaming: peer <worker_id> not registered (call register_peer first)`.
+    let peer_info = velo.peer_info();
     let hub_velo_id = client
         .register(peer_info)
         .await

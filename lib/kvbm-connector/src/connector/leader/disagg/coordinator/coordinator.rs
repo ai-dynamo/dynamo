@@ -1260,7 +1260,7 @@ impl ConditionalDisaggCoordinator {
             if let Err(err) = setup_result {
                 tracing::error!(
                     request_id = request_id_owned,
-                    error = %err,
+                    error = ?err,
                     "prefill setup failed; surfacing to vLLM via cleanup_failed_request"
                 );
                 coord

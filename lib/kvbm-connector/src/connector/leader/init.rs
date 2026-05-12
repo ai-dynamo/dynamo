@@ -714,14 +714,21 @@ impl ConnectorLeader {
                 AlwaysRemote, CdBlockTransport, CdWorkerHook, ConditionalDisaggCoordinator,
                 ConditionalDisaggLeader, ConditionalDisaggPolicy, ConnectorLeaderApi,
                 ConnectorLeaderShim, DecodeDisaggLeader, EngineCdBlockTransport, HubPeerResolver,
-                HubRemotePrefillQueue, InnerLeaderShim, InnerLeaderWorkerHook, PrefillDisaggLeader,
-                RemotePrefillQueue,
+                HubRemotePrefillQueue, InnerLeaderShim, InnerLeaderWorkerHook, PeerResolver,
+                PrefillDisaggLeader, RemotePrefillQueue,
             };
             use kvbm_config::DisaggregationRole;
             use kvbm_engine::disagg::session::{SessionFactory, VeloSessionFactory};
 
             let (hub, client, hub_velo_id) =
-                super::disagg::register_with_hub(&disagg_cfg, self.runtime.messenger().clone())
+                super::disagg::register_with_hub(
+                    &disagg_cfg,
+                    Arc::clone(
+                        self.runtime
+                            .velo()
+                            .expect("velo not initialized on runtime"),
+                    ),
+                )
                     .await
                     .context("conditional-disagg hub registration failed")?;
             let _ = self.disagg_client.set(Arc::clone(&client));
@@ -746,8 +753,22 @@ impl ConnectorLeader {
             let worker_hook: Arc<dyn CdWorkerHook> = InnerLeaderWorkerHook::new(self.clone());
             let transport: Arc<dyn CdBlockTransport> =
                 EngineCdBlockTransport::new(Arc::clone(&leader));
-            let session_factory: Arc<dyn SessionFactory> =
-                VeloSessionFactory::new(velo_runtime, Arc::clone(&leader), tokio_handle.clone());
+            // One hub-backed peer-resolver shared by the coordinator (used
+            // when prefill receives an RPR and needs to register the
+            // initiator) AND the session factory (used when either side
+            // opens or accepts an Attach and needs the peer in the local
+            // velo streaming registry). Sharing one instance ensures the
+            // resolver's internal de-dup cache works across both paths.
+            let peer_resolver: Arc<HubPeerResolver> = HubPeerResolver::new(
+                Arc::clone(&hub),
+                Arc::clone(&velo_runtime),
+            );
+            let session_factory: Arc<dyn SessionFactory> = VeloSessionFactory::with_peer_resolver(
+                Arc::clone(&velo_runtime),
+                Arc::clone(&leader),
+                tokio_handle.clone(),
+                Arc::clone(&peer_resolver) as Arc<dyn kvbm_engine::disagg::session::PeerResolver>,
+            );
 
             // Construct the role-specific concrete leader (and, for
             // prefill, its coordinator).  We hold concrete `Arc<...>`
@@ -771,14 +792,12 @@ impl ConnectorLeader {
                     let policy: Arc<dyn ConditionalDisaggPolicy> = Arc::new(AlwaysRemote);
                     let queue: Arc<dyn RemotePrefillQueue> =
                         HubRemotePrefillQueue::new(Arc::clone(&client));
-                    let peer_resolver =
-                        HubPeerResolver::new(Arc::clone(&hub), self.runtime.messenger().clone());
                     let coord = ConditionalDisaggCoordinator::new_with_decode(
                         Arc::clone(&inner_shim),
                         Arc::clone(&transport),
                         Arc::clone(&worker_hook),
                         Arc::clone(&session_factory),
-                        peer_resolver,
+                        Arc::clone(&peer_resolver) as Arc<dyn PeerResolver>,
                         tokio_handle.clone(),
                         policy,
                         queue,
@@ -797,14 +816,12 @@ impl ConnectorLeader {
                     RoleSpecific::Decode(decode)
                 }
                 DisaggregationRole::Prefill => {
-                    let peer_resolver =
-                        HubPeerResolver::new(Arc::clone(&hub), self.runtime.messenger().clone());
                     let coord = ConditionalDisaggCoordinator::new(
                         Arc::clone(&inner_shim),
                         Arc::clone(&transport),
                         Arc::clone(&worker_hook),
                         Arc::clone(&session_factory),
-                        peer_resolver,
+                        Arc::clone(&peer_resolver) as Arc<dyn PeerResolver>,
                         tokio_handle.clone(),
                     );
 
