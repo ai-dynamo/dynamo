@@ -9,9 +9,6 @@ SPDX-License-Identifier: Apache-2.0
 
 [placeholder: final hero/lead image if needed]
 
-> Draft status: unpublished working draft. Keep this file out of `docs/index.yml`
-> and `docs/blogs/index.mdx` until the post is ready to publish.
-
 Before investing millions, or even billions, of dollars in data center
 infrastructure, teams want a clear view of the value that infrastructure is
 likely to produce. That is especially hard for modern LLM serving, where a
@@ -239,6 +236,13 @@ pre-allocate each request to a worker queue, run the single-engine simulations i
 parallel, and collect the results. Round-robin routing without feedback is the
 simple version of this world.
 
+For the concrete Router and KVBM results in this section, we use the same
+baseline replay setup unless noted otherwise: the full 23,608-request
+[Mooncake FAST25 toolagent trace](https://github.com/kvcache-ai/Mooncake/blob/main/FAST25-release/traces/toolagent_trace.jsonl),
+MiniMax-M2.5 FP8 on B200, vLLM 0.14.0 timing from AIC, TP=4, and offline
+replay. The Router experiment composes eight aggregated workers; the KVBM
+experiment uses one worker and toggles the G2 host-memory tier.
+
 The power of Dynamo, and any serious inference framework, comes from components
 that make online decisions from active system feedback. A Router may need current
 cache state and decode load. The Planner may need traffic, worker state, and SLA
@@ -265,23 +269,17 @@ else, while a route that balances load may give up a cache hit. The same event
 model can partially test fault-tolerance paths via random failure-mode
 injection: unavailable workers, replacement capacity, or request migration.
 
-#### Planner As A Feedback-Driven Component
+As a concrete routing example, the figure below compares round-robin routing
+with the KV Router. G2 offload is disabled, so the difference comes from routing
+and cache placement:
 
-Like the Router, the Planner makes decisions from feedback produced by the rest
-of the system: engine metrics, traffic, cache state, and worker state.
+![Mocker simulation, round-robin vs KV Router with 8 workers. Left: mean TTFT vs concurrency (log y), where KV Router reduces TTFT at every load point. Right: throughput-vs-interactivity Pareto; KV Router increases prefix reuse and shifts throughput per GPU upward while trading some per-user interactivity at higher concurrency.](./images/kv_router_exp.png)
 
-Planner framing:
-
-| Stage | Planner role |
-|---|---|
-| Inputs | Traffic observations, forward-pass metrics, worker state, capacity signals |
-| Decision | Scale workers, change allocation, or hold steady |
-| System effect | Future capacity, responsiveness, stability, routing pressure, and prefill/decode balance |
-
-Planner decisions are especially natural in DES because scale-up does not make
-capacity appear instantly. It schedules future state changes that interact with
-requests already in the system, router decisions still to come, and engine
-queues already forming.
+The KV Router raises prefix reuse from about 0.38 to 0.44-0.45. That produces
+higher throughput per GPU and much lower TTFT across the sweep: at c=256, 171
+vs. 151 TPS/GPU and 477 ms vs. 1.78 s TTFT; at c=512, 200 vs. 170 TPS/GPU and
+1.44 s vs. 5.15 s TTFT. The tradeoff is visible in TPOT and TPS/user, where
+cache-affine placement can increase decode pressure at high concurrency.
 
 #### KV Block Manager Simulation
 
@@ -294,10 +292,8 @@ read, and placement decisions affect routing, scheduling, queueing, and future
 cache state, so they need to be registered as events on the same timeline as the
 rest of the serving harness.
 
-As a concrete example, the figure below shows what the mocker predicts when the
-G2 host-memory tier is enabled (sized at 32,768 blocks) on the same
-single-engine B200 MiniMax-M2.5 setup from §2.1, replaying the full
-23,608-request Mooncake trace:
+The KVBM example below shows what the mocker predicts when the G2 host-memory
+tier is enabled and sized at 32,768 blocks:
 
 ![Mocker simulation, baseline vs G2-enabled (32K blocks). Left: mean TTFT vs concurrency (log y), with 8.5–19.3% reduction across c=8 to c=64. Right: throughput-vs-interactivity Pareto; G2 weakly dominates the baseline at every concurrency.](./images/kvbm_g2_exp.png)
 
@@ -314,6 +310,30 @@ Replay can also drive
 reads and writes against a real distributed cache target. Those measurements
 calibrate transfer cost, placement behavior, and contention, then feed back into
 the distributed cache model instead of relying only on hand-tuned assumptions.
+
+#### Planner As A Feedback-Driven Component
+
+Like the Router and KVBM, the Planner makes decisions from feedback produced by
+the rest of the system: engine metrics, traffic, cache state, and worker state.
+
+Planner framing:
+
+| Stage | Planner role |
+|---|---|
+| Inputs | Traffic observations, forward-pass metrics, worker state, capacity signals |
+| Decision | Scale workers, change allocation, or hold steady |
+| System effect | Future capacity, responsiveness, stability, routing pressure, and prefill/decode balance |
+
+Planner decisions are especially natural in DES because scale-up does not make
+capacity appear instantly. It schedules future state changes that interact with
+requests already in the system, router decisions still to come, and engine
+queues already forming.
+
+The Planner is also a component under active development and research, so
+Planner simulation is not a light switch that can simply be flicked on. It is a
+complex, dynamic part of the serving system. This section frames why it belongs
+in the event model; we defer a deeper discussion of Planner simulation results
+to the next major section.
 
 ## 3. Optimization And Discovery With The Twin
 
@@ -346,21 +366,19 @@ penalty instead of pretending the best infeasible result is acceptable.
 
 ### 3.1 Example Result: A Workload-Relative Candidate
 
-[placeholder: compact optimizer result table]
+The table below is one optimizer run on the full `toolagent_trace.jsonl` trace.
+The replay used trace speedup rather than a replay-concurrency cap, with two
+search rounds and eight parallel optimizer evaluations.
 
-[placeholder: confirm Qwen/Qwen3-32B result numbers before publication]
-
-Draft table shape:
-
-| Category | Draft value |
+| Category | Result |
 |---|---|
-| Workload | Qwen/Qwen3-32B, vLLM, H200, long-prefill shared-prefix replay |
+| Workload | `nvidia/Kimi-K2.5-NVFP4`, vLLM 0.19.0, B200-SXM, full 23,608-request `toolagent_trace.jsonl`, `arrival_speedup_ratio=2.0` |
 | Budget | 16 GPUs |
-| Objective | Throughput |
-| Winning layout | `prefill_tp=4`, `decode_tp=1`, `prefill_workers=3`, `decode_workers=4` |
+| Objective | Maximize output throughput subject to mean TTFT <= 5,000 ms, mean TPOT <= 75 ms, and mean end-to-end latency <= 20,000 ms |
+| Winning layout | `prefill_tp=2`, `decode_tp=1`, `prefill_workers=5`, `decode_workers=6` |
 | Router | `kv_router`, `overlap_score_weight=0.5` |
-| Key metrics | `output_throughput_tok_s=958.936306`, `prefix_cache_reused_ratio=0.4997`, `mean_ttft_ms=43442.98`, `mean_tpot_ms=35.16`, `mean_e2e_latency_ms=52409.77` |
-| Interpretation | This is a strong candidate for this workload, not a universal best layout. |
+| Key metrics | `output_throughput_tok_s=2406.46`, `prefix_cache_reused_ratio=0.5091`, `mean_ttft_ms=2268.87`, `mean_tpot_ms=32.97`, `mean_e2e_latency_ms=8135.19` |
+| Interpretation | This is a strong candidate for this workload and SLA, not a universal best layout. |
 
 The takeaway is not that one configuration is always best. It is that the twin
 can turn a large configuration space into a workload-specific deployment
@@ -390,10 +408,9 @@ traffic, and a misconfigured Planner can under-provision, miss SLA, or thrash
 workers. The twin lets us study those dynamics before paying for a full
 Kubernetes-scale experiment.
 
-The three experiments below use the Mooncake FAST25 `toolagent_trace`
-(~23,600 requests over 59 minutes, avg ISL 8.6k / OSL 182, ~6.7 rps) on
-Qwen3-32B at TP=2 on H200-SXM. All scripts and per-run reports are
-reproducible from `scripts/planner_exp_{1,2,3}/`.
+The three experiments below reuse the Mooncake FAST25 `toolagent_trace`
+introduced above, but switch the simulated engine profile to Qwen3-32B at TP=2
+on H200-SXM.
 
 **Setup tradeoffs: planner vs static, agg vs disagg.** For each topology we
 sweep static replica counts (no planner; fixed deployment) and overlay three
