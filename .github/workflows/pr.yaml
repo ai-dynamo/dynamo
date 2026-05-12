@@ -300,6 +300,13 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 45
+      # TEMP probe: bypass EPP :cache registry import. The frontend's
+      # compliance stage COPYs /sbom-go.cdx.json from the freshly-built
+      # EPP image; the persistent :cache tag may have imported a stage-2
+      # layer from a build that predated /sbom-go.cdx.json existing,
+      # making the file missing in the pushed EPP image. Revert after
+      # we confirm.
+      no_cache: true
     secrets: inherit
 
   # ============================================================================

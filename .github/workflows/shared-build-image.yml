@@ -248,9 +248,18 @@ jobs:
           echo "epp_image_uri=${{ env.ECR_HOSTNAME }}/${EPP_IMAGE_REF}" >> $GITHUB_OUTPUT
 
           CACHE_ARGS=""
-          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache "
-          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache,mode=max "
+          if [[ "${{ inputs.no_cache }}" == "true" ]]; then
+            # Probe: bypass the EPP :cache import too — the registry-mode
+            # cache for EPP may be importing a stage-2 layer from a build
+            # that predated the recent /sbom-go.cdx.json COPY addition,
+            # which would explain why the just-built EPP image is missing
+            # /sbom-go.cdx.json despite the Dockerfile clearly emitting it.
+            CACHE_ARGS+="--no-cache "
+          else
+            CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache "
+            if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+              CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache,mode=max "
+            fi
           fi
 
           make -C deploy/inference-gateway/epp image-multiarch-push \
