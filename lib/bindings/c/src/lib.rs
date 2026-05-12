@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use dynamo_kv_router::{
-    config::{KvRouterConfig, RouterConfigOverride},
+    config::{
+        KvRouterConfig, RouterConfigOverride, apply_deprecated_overlap_score_weight_override,
+    },
     protocols::*,
 };
 use dynamo_llm::kv_router::publisher::KvEventPublisher;
@@ -563,37 +565,25 @@ fn kv_router_config_from_env() -> KvRouterConfig {
             })
     }
 
-    let legacy_overlap_weight_envs = [
-        "DYN_OVERLAP_SCORE_WEIGHT",
-        "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
-    ];
-    let has_canonical_overlap_env = std::env::var_os("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT")
-        .is_some()
-        || std::env::var_os("DYN_ROUTER_PREFILL_LOAD_SCALE").is_some();
-    if has_canonical_overlap_env {
-        for key in legacy_overlap_weight_envs {
-            if std::env::var_os(key).is_some() {
-                tracing::warn!(
-                    "{key} is deprecated and ignored because a canonical router overlap env var is set"
-                );
-            }
-        }
-    } else {
-        for key in legacy_overlap_weight_envs {
-            if let Some(v) = env_f64(key) {
-                tracing::warn!("{key} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE");
-                cfg.prefill_load_scale = v;
-                if v == 0.0 {
-                    cfg.overlap_score_credit = 0.0;
-                }
-            }
-        }
-    }
     if let Some(v) = env_f64("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT") {
         cfg.overlap_score_credit = v;
     }
     if let Some(v) = env_f64("DYN_ROUTER_PREFILL_LOAD_SCALE") {
         cfg.prefill_load_scale = v;
+    }
+    for key in [
+        "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
+        "DYN_OVERLAP_SCORE_WEIGHT",
+    ] {
+        if let Some(v) = env_f64(key) {
+            tracing::warn!("{key} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE");
+            apply_deprecated_overlap_score_weight_override(
+                v,
+                &mut cfg.overlap_score_credit,
+                &mut cfg.prefill_load_scale,
+            );
+            break;
+        }
     }
     if let Some(v) = env_f64("DYN_ROUTER_TEMPERATURE") {
         cfg.router_temperature = v;

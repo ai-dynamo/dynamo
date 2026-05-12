@@ -1041,6 +1041,34 @@ def test_kv_router_config_positional_zero_preserves_no_overlap_behavior() -> Non
     assert config.overlap_score_weight == 0.0
 
 
+def test_kv_router_config_deprecated_weight_overrides_canonical_constructor_args() -> (
+    None
+):
+    config = KvRouterConfig(
+        2.0,
+        overlap_score_credit=0.5,
+        prefill_load_scale=3.0,
+    )
+
+    assert config.overlap_score_credit == 0.5
+    assert config.prefill_load_scale == 2.0
+    assert config.overlap_score_weight == 2.0
+
+
+def test_kv_router_config_deprecated_zero_overrides_canonical_constructor_args() -> (
+    None
+):
+    config = KvRouterConfig(
+        0.0,
+        overlap_score_credit=0.5,
+        prefill_load_scale=3.0,
+    )
+
+    assert config.overlap_score_credit == 0.0
+    assert config.prefill_load_scale == 0.0
+    assert config.overlap_score_weight == 0.0
+
+
 def test_kv_router_config_with_overrides_preserves_positional_weight_alias() -> None:
     config = KvRouterConfig(overlap_score_credit=0.5, prefill_load_scale=1.0)
 
@@ -1051,10 +1079,38 @@ def test_kv_router_config_with_overrides_preserves_positional_weight_alias() -> 
     assert updated.overlap_score_weight == 2.0
 
 
+def test_kv_router_config_with_overrides_deprecated_weight_wins() -> None:
+    config = KvRouterConfig(overlap_score_credit=1.0, prefill_load_scale=1.0)
+
+    updated = config.with_overrides(
+        2.0,
+        overlap_score_credit=0.5,
+        prefill_load_scale=3.0,
+    )
+
+    assert updated.overlap_score_credit == 0.5
+    assert updated.prefill_load_scale == 2.0
+    assert updated.overlap_score_weight == 2.0
+
+
 def test_kv_router_config_with_overrides_zero_preserves_no_overlap_behavior() -> None:
     config = KvRouterConfig(overlap_score_credit=1.0, prefill_load_scale=1.0)
 
     updated = config.with_overrides(0.0)
+
+    assert updated.overlap_score_credit == 0.0
+    assert updated.prefill_load_scale == 0.0
+    assert updated.overlap_score_weight == 0.0
+
+
+def test_kv_router_config_with_overrides_deprecated_zero_wins() -> None:
+    config = KvRouterConfig(overlap_score_credit=1.0, prefill_load_scale=1.0)
+
+    updated = config.with_overrides(
+        0.0,
+        overlap_score_credit=0.5,
+        prefill_load_scale=3.0,
+    )
 
     assert updated.overlap_score_credit == 0.0
     assert updated.prefill_load_scale == 0.0

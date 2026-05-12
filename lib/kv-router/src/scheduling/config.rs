@@ -75,7 +75,7 @@ fn validate_overlap_score_credit(value: f64) -> Result<(), ValidationError> {
     Err(error)
 }
 
-pub fn apply_overlap_score_weight_alias(
+pub fn apply_deprecated_overlap_score_weight_override(
     value: f64,
     overlap_score_credit: &mut f64,
     prefill_load_scale: &mut f64,
@@ -86,7 +86,7 @@ pub fn apply_overlap_score_weight_alias(
     }
 }
 
-fn apply_overlap_score_weight_override_alias(
+fn apply_deprecated_overlap_score_weight_override_option(
     value: f64,
     overlap_score_credit: &mut Option<f64>,
     prefill_load_scale: &mut Option<f64>,
@@ -265,13 +265,7 @@ impl TryFrom<RouterConfigOverrideSerde> for RouterConfigOverride {
         let mut prefill_load_scale = compat.prefill_load_scale;
 
         if let Some(overlap_score_weight) = compat.overlap_score_weight {
-            if overlap_score_credit.is_some() || prefill_load_scale.is_some() {
-                return Err(
-                    "overlap_score_weight cannot be combined with overlap_score_credit or prefill_load_scale"
-                        .to_string(),
-                );
-            }
-            apply_overlap_score_weight_override_alias(
+            apply_deprecated_overlap_score_weight_override_option(
                 overlap_score_weight,
                 &mut overlap_score_credit,
                 &mut prefill_load_scale,
@@ -501,7 +495,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
         let mut prefill_load_scale = compat.prefill_load_scale;
 
         if let Some(overlap_score_weight) = compat.overlap_score_weight {
-            apply_overlap_score_weight_alias(
+            apply_deprecated_overlap_score_weight_override(
                 overlap_score_weight,
                 &mut overlap_score_credit,
                 &mut prefill_load_scale,
@@ -766,6 +760,28 @@ mod tests {
     }
 
     #[test]
+    fn test_kv_router_config_deprecated_overlap_weight_overrides_canonical_fields() {
+        let config: KvRouterConfig = serde_json::from_str(
+            r#"{"overlap_score_weight":2.5,"overlap_score_credit":0.5,"prefill_load_scale":3.0}"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.overlap_score_credit, 0.5);
+        assert_eq!(config.prefill_load_scale, 2.5);
+    }
+
+    #[test]
+    fn test_kv_router_config_deprecated_overlap_weight_zero_overrides_credit() {
+        let config: KvRouterConfig = serde_json::from_str(
+            r#"{"overlap_score_weight":0.0,"overlap_score_credit":0.5,"prefill_load_scale":3.0}"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.overlap_score_credit, 0.0);
+        assert_eq!(config.prefill_load_scale, 0.0);
+    }
+
+    #[test]
     fn test_kv_router_config_deserialize_rejects_invalid_values() {
         let credit_error =
             serde_json::from_str::<KvRouterConfig>(r#"{"overlap_score_credit":1.1}"#)
@@ -798,20 +814,25 @@ mod tests {
     }
 
     #[test]
-    fn test_router_config_override_rejects_mixed_deprecated_and_canonical_overlap_fields() {
-        let credit_error = serde_json::from_str::<RouterConfigOverride>(
-            r#"{"overlap_score_weight":2.0,"overlap_score_credit":0.5}"#,
+    fn test_router_config_override_deprecated_overlap_weight_overrides_canonical_fields() {
+        let config: RouterConfigOverride = serde_json::from_str(
+            r#"{"overlap_score_weight":2.0,"overlap_score_credit":0.5,"prefill_load_scale":3.0}"#,
         )
-        .unwrap_err()
-        .to_string();
-        let scale_error = serde_json::from_str::<RouterConfigOverride>(
-            r#"{"overlap_score_weight":2.0,"prefill_load_scale":3.0}"#,
-        )
-        .unwrap_err()
-        .to_string();
+        .unwrap();
 
-        assert!(credit_error.contains("cannot be combined"));
-        assert!(scale_error.contains("cannot be combined"));
+        assert_eq!(config.overlap_score_credit, Some(0.5));
+        assert_eq!(config.prefill_load_scale, Some(2.0));
+    }
+
+    #[test]
+    fn test_router_config_override_deprecated_overlap_weight_zero_overrides_credit() {
+        let config: RouterConfigOverride = serde_json::from_str(
+            r#"{"overlap_score_weight":0.0,"overlap_score_credit":0.5,"prefill_load_scale":3.0}"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.overlap_score_credit, Some(0.0));
+        assert_eq!(config.prefill_load_scale, Some(0.0));
     }
 
     #[test]

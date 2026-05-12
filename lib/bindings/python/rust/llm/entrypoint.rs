@@ -12,7 +12,7 @@ use pyo3_async_runtimes::TaskLocals;
 
 use dynamo_kv_router::config::{
     KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
-    apply_overlap_score_weight_alias,
+    apply_deprecated_overlap_score_weight_override,
 };
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::ChatEngineFactoryCallback;
@@ -51,7 +51,7 @@ fn apply_deprecated_overlap_score_weight(
     prefill_load_scale: &mut f64,
 ) {
     warn_overlap_score_weight_deprecated();
-    apply_overlap_score_weight_alias(value, overlap_score_credit, prefill_load_scale);
+    apply_deprecated_overlap_score_weight_override(value, overlap_score_credit, prefill_load_scale);
 }
 
 #[pyclass(eq, eq_int)]
@@ -283,18 +283,18 @@ impl KvRouterConfig {
         prefill_load_scale: Option<f64>,
     ) -> PyResult<Self> {
         let mut inner = self.inner.clone();
+        if let Some(credit) = overlap_score_credit {
+            inner.overlap_score_credit = credit;
+        }
+        if let Some(scale) = prefill_load_scale {
+            inner.prefill_load_scale = scale;
+        }
         if let Some(weight) = overlap_score_weight {
             apply_deprecated_overlap_score_weight(
                 weight,
                 &mut inner.overlap_score_credit,
                 &mut inner.prefill_load_scale,
             );
-        }
-        if let Some(credit) = overlap_score_credit {
-            inner.overlap_score_credit = credit;
-        }
-        if let Some(scale) = prefill_load_scale {
-            inner.prefill_load_scale = scale;
         }
         validate_kv_router_config(&inner)?;
         Ok(Self { inner })

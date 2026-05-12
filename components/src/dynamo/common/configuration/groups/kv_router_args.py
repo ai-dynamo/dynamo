@@ -21,6 +21,7 @@ from dynamo.common.configuration.utils import add_argument, add_negatable_bool_a
 
 # Authoritative field list — used by kv_router_kwargs() to extract values.
 _KV_ROUTER_FIELDS: tuple[str, ...] = (
+    "overlap_score_weight",
     "overlap_score_credit",
     "prefill_load_scale",
     "router_temperature",
@@ -48,10 +49,6 @@ _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
     "router KV overlap score weight is deprecated; use "
     "--router-prefill-load-scale or DYN_ROUTER_PREFILL_LOAD_SCALE for equivalent behavior"
 )
-_CANONICAL_OVERLAP_ENV_VARS = (
-    "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT",
-    "DYN_ROUTER_PREFILL_LOAD_SCALE",
-)
 _LOAD_AWARE_KWARG_OVERRIDES = {
     "overlap_score_credit": 0.0,
     "use_kv_events": False,
@@ -72,13 +69,6 @@ class _DeprecatedOverlapScoreWeightAction(argparse.Action):
         setattr(namespace, self.dest, values)
 
 
-class _CanonicalOverlapScoreAction(argparse.Action):
-    def __call__(self, parser, namespace, values, option_string=None) -> None:
-        if hasattr(namespace, "overlap_score_weight"):
-            delattr(namespace, "overlap_score_weight")
-        setattr(namespace, self.dest, values)
-
-
 def _deprecated_overlap_score_weight_from_env() -> Optional[tuple[str, float]]:
     for env_var in ("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "DYN_OVERLAP_SCORE_WEIGHT"):
         if env_var in os.environ:
@@ -86,10 +76,10 @@ def _deprecated_overlap_score_weight_from_env() -> Optional[tuple[str, float]]:
     return None
 
 
-def _default_overlap_score_weight() -> float | str:
+def _default_overlap_score_weight() -> Optional[float]:
     legacy = _deprecated_overlap_score_weight_from_env()
     if legacy is None:
-        return argparse.SUPPRESS
+        return None
 
     env_var, value = legacy
     warnings.warn(
@@ -97,9 +87,6 @@ def _default_overlap_score_weight() -> float | str:
         FutureWarning,
         stacklevel=3,
     )
-
-    if any(env_var in os.environ for env_var in _CANONICAL_OVERLAP_ENV_VARS):
-        return argparse.SUPPRESS
 
     return value
 
@@ -111,6 +98,7 @@ def _default_prefill_load_scale() -> float:
 class KvRouterConfigBase(ConfigBase):
     """Mixin carrying the shared KvRouterConfig fields."""
 
+    overlap_score_weight: Optional[float] = None
     overlap_score_credit: float
     prefill_load_scale: float
     router_temperature: float
@@ -141,16 +129,10 @@ class KvRouterConfigBase(ConfigBase):
         for field, value in _LOAD_AWARE_KWARG_OVERRIDES.items():
             setattr(self, field, value)
 
-        if hasattr(self, "overlap_score_weight"):
-            delattr(self, "overlap_score_weight")
-
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
         self.apply_load_aware_preset()
-        kwargs = {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
-        if hasattr(self, "overlap_score_weight"):
-            kwargs["overlap_score_weight"] = self.overlap_score_weight
-        return kwargs
+        return {f: getattr(self, f) for f in _KV_ROUTER_FIELDS}
 
 
 class KvRouterArgGroup(ArgGroup):
@@ -185,7 +167,6 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="overlap_score_credit",
-            action=_CanonicalOverlapScoreAction,
         )
         g.add_argument(
             "--router-kv-overlap-score-weight",
@@ -207,7 +188,6 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="prefill_load_scale",
-            action=_CanonicalOverlapScoreAction,
         )
         add_argument(
             g,
