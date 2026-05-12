@@ -20,7 +20,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo._core import Context
-from dynamo.common.backend.abort import DeferredAbort
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.engine import (
     EngineConfig,
@@ -38,18 +37,6 @@ from .handlers import build_sampling_params
 logger = logging.getLogger(__name__)
 
 
-class VllmDeferredAbort(DeferredAbort):
-    """`DeferredAbort` for `AsyncLLM.abort(request_id)`."""
-
-    def __init__(self, engine_client: AsyncLLM, request_id: str):
-        super().__init__()
-        self._engine_client = engine_client
-        self._request_id = request_id
-
-    async def _do_abort_now(self) -> None:
-        await self._engine_client.abort(self._request_id)
-
-
 class VllmLLMEngine(LLMEngine):
     def __init__(self, engine_args, disaggregation_mode: DisaggregationMode):
         self.engine_args = engine_args
@@ -59,8 +46,6 @@ class VllmLLMEngine(LLMEngine):
         self._default_sampling_params: Any = None
         self._prometheus_temp_dir: tempfile.TemporaryDirectory[str] | None = None
         self._model_max_len: int | None = None
-        # Populated only in decode mode.
-        self._active_aborts: dict[str, VllmDeferredAbort] = {}
 
     @classmethod
     async def from_args(
@@ -191,82 +176,56 @@ class VllmLLMEngine(LLMEngine):
         gen = self.engine_client.generate(prompt, sampling_params, request_id)
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
-        is_decode = self.disaggregation_mode == DisaggregationMode.DECODE
-        # Only decode has an in-flight NIXL pull to protect.
-        abort_guard: VllmDeferredAbort | None = None
-        if is_decode and request_id is not None:
-            abort_guard = VllmDeferredAbort(self.engine_client, request_id)
-            self._active_aborts[request_id] = abort_guard
 
-        try:
-            num_output_tokens_so_far: dict[int, int] = {}
-            first_signalled = False
-            async for res in gen:
-                if abort_guard is not None and not first_signalled:
-                    abort_guard.signal_first_token()
-                    first_signalled = True
-                if not res.outputs:
-                    yield {
-                        "finish_reason": "error: No outputs from vLLM engine",
-                        "index": 0,
-                        "token_ids": [],
+        num_output_tokens_so_far: dict[int, int] = {}
+        async for res in gen:
+            if not res.outputs:
+                yield {
+                    "finish_reason": "error: No outputs from vLLM engine",
+                    "index": 0,
+                    "token_ids": [],
+                }
+                break
+
+            for output in res.outputs:
+                output_idx = getattr(output, "index", 0) or 0
+                previous_total = num_output_tokens_so_far.get(output_idx, 0)
+                next_total = len(output.token_ids)
+                out: GenerateChunk = {
+                    "index": output_idx,
+                    "token_ids": output.token_ids[previous_total:],
+                }
+
+                if output.finish_reason:
+                    out["finish_reason"] = str(output.finish_reason)
+                    prompt_tokens = (
+                        len(res.prompt_token_ids) if res.prompt_token_ids else 0
+                    )
+                    completion_tokens = sum(
+                        len(choice.token_ids) for choice in res.outputs
+                    )
+                    out["completion_usage"] = {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens,
                     }
-                    break
+                    # Stamp the connector's transfer handle on the
+                    # prefill terminal so PrefillRouter can forward it.
+                    if is_prefill:
+                        kv_transfer_params = getattr(res, "kv_transfer_params", None)
+                        if kv_transfer_params is not None:
+                            out["disaggregated_params"] = {
+                                "kv_transfer_params": kv_transfer_params,
+                            }
 
-                for output in res.outputs:
-                    output_idx = getattr(output, "index", 0) or 0
-                    previous_total = num_output_tokens_so_far.get(output_idx, 0)
-                    next_total = len(output.token_ids)
-                    out: GenerateChunk = {
-                        "index": output_idx,
-                        "token_ids": output.token_ids[previous_total:],
-                    }
-
-                    if output.finish_reason:
-                        out["finish_reason"] = str(output.finish_reason)
-                        prompt_tokens = (
-                            len(res.prompt_token_ids) if res.prompt_token_ids else 0
-                        )
-                        completion_tokens = sum(
-                            len(choice.token_ids) for choice in res.outputs
-                        )
-                        out["completion_usage"] = {
-                            "prompt_tokens": prompt_tokens,
-                            "completion_tokens": completion_tokens,
-                            "total_tokens": prompt_tokens + completion_tokens,
-                        }
-                        # Stamp the connector's transfer handle on the
-                        # prefill terminal so PrefillRouter can forward it.
-                        if is_prefill:
-                            kv_transfer_params = getattr(
-                                res, "kv_transfer_params", None
-                            )
-                            if kv_transfer_params is not None:
-                                out["disaggregated_params"] = {
-                                    "kv_transfer_params": kv_transfer_params,
-                                }
-
-                    yield out
-                    num_output_tokens_so_far[output_idx] = next_total
-        finally:
-            # Pop the guard from the lookup map BEFORE closing it. A late
-            # abort() racing on a different task would otherwise observe a
-            # half-closed guard; popping first sends that abort() down the
-            # engine-direct path instead.
-            if abort_guard is not None and request_id is not None:
-                self._active_aborts.pop(request_id, None)
-                await abort_guard.close()
+                yield out
+                num_output_tokens_so_far[output_idx] = next_total
 
     async def abort(self, context: Context) -> None:
         request_id = context.id()
-        if self.engine_client is None or request_id is None:
-            return
-        guard = self._active_aborts.get(request_id)
-        if guard is not None:
-            guard.abort()
-        else:
+        if self.engine_client is not None and request_id is not None:
             await self.engine_client.abort(request_id)
-        logger.debug("abort requested for %s", request_id)
+            logger.debug("Aborted request %s", request_id)
 
     async def cleanup(self) -> None:
         try:

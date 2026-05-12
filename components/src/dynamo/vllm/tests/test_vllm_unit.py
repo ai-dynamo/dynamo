@@ -3,7 +3,6 @@
 
 """Unit tests for vLLM backend components."""
 
-import asyncio
 import json
 import re
 import socket
@@ -11,7 +10,7 @@ import sys
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -25,7 +24,6 @@ from dynamo.vllm.args import (
     parse_args,
 )
 from dynamo.vllm.constants import DisaggregationMode
-from dynamo.vllm.llm_engine import VllmDeferredAbort
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
@@ -725,14 +723,3 @@ class TestBenchmarkGrid:
         total_kv = 100 * 16
         for ctx_len, bs in points:
             assert ctx_len <= total_kv
-
-
-@pytest.mark.asyncio
-async def test_vllm_deferred_abort_invokes_engine_abort():
-    """`VllmDeferredAbort._do_abort_now` forwards to `AsyncLLM.abort(rid)`."""
-    engine_client = AsyncMock()
-    guard = VllmDeferredAbort(engine_client, "req-abc")
-    guard.signal_first_token()
-    guard.abort()
-    await asyncio.sleep(0)
-    engine_client.abort.assert_awaited_once_with("req-abc")
