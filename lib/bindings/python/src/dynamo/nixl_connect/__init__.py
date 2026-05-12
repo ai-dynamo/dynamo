@@ -1165,7 +1165,18 @@ class Descriptor:
 
         # Register the memory with NIXL.
         if isinstance(self._data_ref, torch.Tensor):
-            nixl_hndl = connection._nixl.register_memory(self._data_ref)
+            # TODO: Remove the following WA when default NIXL version with dynamo is updated to > v1.0.1
+            # XPU tensors passed before https://github.com/ai-dynamo/nixl/pull/1534 fix need the following WA:
+            if self._data_ref.device.type == "xpu":
+                mem_type = "VRAM"
+                reg_list = [
+                    (self._data_ptr, self._data_size, self._data_device.id, mem_type)
+                ]
+                nixl_hndl = connection._nixl.register_memory(reg_list, mem_type)
+            else:
+                nixl_hndl = connection._nixl.register_memory(self._data_ref)
+            # After NIXL is updated we can simply use this one-line instead:
+            # nixl_hndl = connection._nixl.register_memory(self._data_ref)
         else:
             mem_type = self._data_device.kind.nixl_mem_type
             reg_list = [
