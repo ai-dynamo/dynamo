@@ -220,8 +220,6 @@ to the gRPC port could try to call.
 
 ## References
 
-- `DEP-XXXX_Dynamo_Planner_Plugin_Architecture_zh.md` — full design (v11)
-- `DEP-XXXX_PR2_Detailed_zh.md` — PR 2 sub-task breakdown
-- `dynamo/planner/plugins/proto/v1/` — plugin proto schema (PR 1)
+- `dynamo/planner/plugins/proto/v1/` — plugin proto schema
 - `tests/plugins/transport/test_transport_contract.py` — 50-case acceptance
 - `tests/plugins/clock/test_clocks.py` — Clock unit tests

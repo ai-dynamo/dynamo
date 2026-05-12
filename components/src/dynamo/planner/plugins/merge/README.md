@@ -61,10 +61,7 @@ rejection is infeasible. v11 § 4.3.2 resolves this as "drop + audit".
 The 9 worked-example cases (single-component SET/AT_LEAST/AT_MOST,
 multi-component, hierarchical pools, final override) are the **source of
 truth** for the algorithm. They live in
-[`tests/plugins/merge/test_type_aware_worked_examples.py`](../../tests/plugins/merge/test_type_aware_worked_examples.py)
-and mirror the table in `DEP-XXXX_Dynamo_Planner_Plugin_Architecture_zh.md`
-v11 PROPOSE section verbatim. **Any edit to the main doc table MUST come
-with a matching edit to that test file**, and vice versa.
+[`tests/plugins/merge/test_type_aware_worked_examples.py`](../../tests/plugins/merge/test_type_aware_worked_examples.py).
 
 ### Complexity
 
@@ -178,12 +175,6 @@ counter `predict_chain_final_at_non_lowest_priority_total{plugin_id}`
 | `test_type_aware_short_circuit.py` | REJECT matrix + final priority matrix + final-in-CONSTRAIN. |
 | `test_type_aware_worked_examples.py` | 9-case lock-step vs main doc worked-example table. |
 | `test_chain_augment.py` | 4 usage patterns (replace / patch / augment / passthrough) + final break + misuse runtime detection. |
-| `test_type_aware_properties.py` | Hypothesis invariants (clamp, baseline preserve, REJECT dominance, final dominance, AT_LEAST monotone, idempotency). |
-| `test_chain_augment_properties.py` | Hypothesis invariants (input-order independence, final break, passthrough preservation). |
-
-Property tests require the `hypothesis` package (dev extra per Q4 decision
-in `DEP-XXXX_PR4_Detailed_zh.md`); they auto-skip via `pytest.importorskip`
-when unavailable.
 
 ---
 

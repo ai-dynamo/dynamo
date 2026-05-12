@@ -193,5 +193,3 @@ capability that the default `static_secret` source doesn't need.
 | Scheduler + cache 6-row table | `../scheduler.py` |
 | Config schema + factories | `config.py` |
 | Integration tests | `../../tests/plugins/registry/test_integration.py` |
-| Full design | `DEP-XXXX_Dynamo_Planner_Plugin_Architecture_zh.md` v11 |
-| PR 3 detailed breakdown | `DEP-XXXX_PR3_Detailed_zh.md` v1.2 |

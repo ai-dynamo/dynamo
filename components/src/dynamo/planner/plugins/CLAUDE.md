@@ -1,11 +1,8 @@
 # Planner Plugin Architecture
 
-This directory implements **DEP-XXXX Dynamo Planner Plugin Architecture** (v11).
-All new plugin-related code lives here; existing `core/` is read-only
-until PR 11 cleanup.
-
-**👉 First, read `DEP-XXXX_HANDOFF.md` at the repo root for state and
-workflow.** This file is the module-local convention summary.
+This directory implements the Dynamo Planner Plugin Architecture.
+All new plugin-related code lives here; existing `core/` (the PSM
+path) is read-only until the eventual cleanup that retires it.
 
 ## Module layout
 
@@ -158,10 +155,6 @@ python -m pytest dynamo/planner/tests/ -m "pre_merge and planner and gpu_0" -q \
 
 | Topic | Doc |
 |---|---|
-| Full design | `DEP-XXXX_Dynamo_Planner_Plugin_Architecture_zh.md` v11 (repo root) |
-| Implementation plan + cross-check | `DEP-XXXX_Implementation_Breakdown_zh.md` v2 |
-| Per-PR sub-task tables | `DEP-XXXX_PR{1..8}_Detailed_zh.md` |
-| Resume work | `DEP-XXXX_HANDOFF.md` |
 | Orchestrator rollout runbook | `docs/components/planner/orchestrator-rollout.md` |
 | Schema details | `proto/v1/README.md` |
 | Transport decision tree + Threat Model | `transport/README.md` |

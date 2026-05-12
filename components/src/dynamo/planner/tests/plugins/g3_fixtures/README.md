@@ -1,8 +1,7 @@
 # G3 Behavior Parity Fixtures
 
 Golden output fixtures for the **G3 行为等价矩阵** (Behavior Parity Test
-Matrix) — see [`DEP-XXXX_Dynamo_Planner_Plugin_Architecture_zh.md`](../../../../../../../DEP-XXXX_Dynamo_Planner_Plugin_Architecture_zh.md)
-v10 「实现层映射 → G3 验收标准」 and [`DEP-XXXX_PR6_Detailed_zh.md`](../../../../../../../DEP-XXXX_PR6_Detailed_zh.md) v1.3 「6-8 G3 行为等价矩阵完整 sweep」.
+Matrix).
 
 ## Purpose
 

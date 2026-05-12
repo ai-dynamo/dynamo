@@ -188,8 +188,6 @@ encoding is a registry-side concern, not a proto change.
 
 ## References
 
-- `DEP-XXXX_Dynamo_Planner_Plugin_Architecture_zh.md` — full design (v11)
-- `DEP-XXXX_PR1_Detailed_zh.md` — PR 1 sub-task breakdown
 - `dynamo/planner/plugins/types.py` — Pydantic v2 mirror
 - `dynamo/planner/plugins/_proto_bridge.py` — bidirectional converter
 - `tests/plugins/proto/test_round_trip.py` — equivalence + lock-step tests

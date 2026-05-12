@@ -113,8 +113,6 @@ python -m pytest dynamo/planner/tests/plugins/orchestrator -q
 | Orchestrator + regression accessors | `orchestrator.py` |
 | Module-level `register_internal` | `internal_register.py` |
 | In-process plugin config loader | `in_process_loader.py` |
-| PR 3 `PluginRegistryServer` | `../registry/server.py` |
-| PR 3 `PluginScheduler` + cache table | `../scheduler.py` |
-| PR 4 merge algorithms | `../merge/README.md` |
-| Full DEP | `DEP-XXXX_Dynamo_Planner_Plugin_Architecture_zh.md` v11 |
-| PR 5 detailed breakdown | `DEP-XXXX_PR5_Detailed_zh.md` v1.4 |
+| `PluginRegistryServer` | `../registry/server.py` |
+| `PluginScheduler` + cache table | `../scheduler.py` |
+| Merge algorithms | `../merge/README.md` |
