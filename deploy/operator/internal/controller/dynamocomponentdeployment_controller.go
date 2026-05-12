@@ -923,6 +923,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	podLabels := dynamo.GetDCDKubeLabels(dcd)
 	podAnnotations := dynamo.GetDCDKubeAnnotations(dcd)
 	kubeName := dcd.Name
+	resourceAnnotations := getResourceAnnotations(dcd)
 
 	// Convert user-provided metrics annotation into controller-managed label
 	// By default (no annotation), metrics are enabled

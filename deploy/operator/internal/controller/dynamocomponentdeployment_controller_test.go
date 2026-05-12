@@ -1683,7 +1683,10 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("ComputeIdentityHash failed: %v", err)
 		}
 		dcd := makeDCD(checkpointName)
-		dcd.Spec.Annotations = map[string]string{
+		if dcd.Spec.PodTemplate == nil {
+			dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{}
+		}
+		dcd.Spec.PodTemplate.Annotations = map[string]string{
 			snapshotprotocol.RestoreModeAnnotation: " manual ",
 		}
 		ckpt := &v1alpha1.DynamoCheckpoint{
