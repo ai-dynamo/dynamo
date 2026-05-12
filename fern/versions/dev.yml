@@ -176,6 +176,8 @@ navigation:
             path: ../pages-dev/backends/trtllm/trtllm-diffusion.md
       - page: LoRA Adapters
         path: ../pages-dev/features/lora/README.md
+      - page: Fastokens Tokenizer
+        path: ../pages-dev/features/tokenizer/README.md
       - section: Agents
         slug: agents
         path: ../pages-dev/agents/README.md
