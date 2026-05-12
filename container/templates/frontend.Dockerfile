@@ -11,16 +11,11 @@ FROM ${EPP_IMAGE} AS epp
 # Compliance pipeline needs EPP's CycloneDX Go SBOM (/sbom-go.cdx.json),
 # which is only emitted in the upstream EPP image's amd64 builder. The
 # SBOM is architecture-independent JSON, so pin a dedicated amd64 stage
-# and have compliance.Dockerfile's licenses stage COPY from THIS stage
-# instead of `epp`. The arm64 sub-build of multi-arch frontends would
-# otherwise fail with "/sbom-go.cdx.json: not found" because the arm64
+# (via the global EPP_SBOM_PLATFORM ARG declared in args.Dockerfile) and
+# have compliance.Dockerfile's licenses stage COPY from THIS stage
+# instead of `epp`. Without the pin, the arm64 sub-build of multi-arch
+# frontends fails with "/sbom-go.cdx.json: not found" because the arm64
 # EPP view doesn't carry that file.
-#
-# The platform value goes through an ARG (instead of a hardcoded
-# `--platform=linux/amd64`) so the dockerfile/1.10.0-labs frontend's
-# FromPlatformFlagConstDisallowed lint passes. The ARG default keeps
-# the behavior identical to a hardcoded value at runtime.
-ARG EPP_SBOM_PLATFORM=linux/amd64
 FROM --platform=${EPP_SBOM_PLATFORM} ${EPP_IMAGE} AS epp_sbom
 
 FROM ${FRONTEND_IMAGE} AS frontend_pre

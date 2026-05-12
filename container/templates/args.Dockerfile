@@ -78,6 +78,11 @@ ARG FRAMEWORK={{ framework }}
 {% if target == "frontend" %}
 ARG EPP_IMAGE={{ context.dynamo.epp_image }}
 ARG FRONTEND_IMAGE={{ context.dynamo.frontend_image }}
+# Platform pin for the EPP SBOM-only stage in frontend.Dockerfile. Declared
+# here in the global ARG scope (before any FROM) so the `FROM --platform=…`
+# of the `epp_sbom` stage can expand it. EPP's /sbom-go.cdx.json is only
+# emitted in the amd64 builder, so the SBOM stage must always be amd64.
+ARG EPP_SBOM_PLATFORM=linux/amd64
 {% endif %}
 
 {% if target == "planner" %}
