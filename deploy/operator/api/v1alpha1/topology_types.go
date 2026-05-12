@@ -91,8 +91,8 @@ const (
 	NoMatchPolicyFallback NoMatchPolicy = "fallback"
 )
 
-// KvTransferPolicy constrains KV-cache transfers between prefill and decode
-// workers to the same topology domain.
+// KvTransferPolicy configures topology-aware routing for KV-cache transfers
+// between prefill and decode workers.
 type KvTransferPolicy struct {
 	// LabelKey is a raw pod label key (e.g. "topology.kubernetes.io/zone")
 	// used to identify the topology domain of each worker pod.
