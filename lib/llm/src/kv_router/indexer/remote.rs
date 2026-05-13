@@ -198,6 +198,10 @@ impl RemoteIndexer {
 
         Ok(())
     }
+
+    pub(super) fn use_kv_events(&self) -> bool {
+        self.use_kv_events
+    }
 }
 
 fn cached_instance_ids(client: &Client) -> HashSet<u64> {
@@ -440,14 +444,16 @@ impl AsyncEngine<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryResponse>, a
                 // overlap; saves server-side CPU and wire bytes.
                 let result: Result<TieredMatchDetails, _> = if request.device_only {
                     indexer
-                        .find_match_details(request.block_hashes)
+                        .find_primary_match_details(request.block_hashes)
                         .await
                         .map(|device| TieredMatchDetails {
                             device,
                             lower_tier: HashMap::new(),
                         })
                 } else {
-                    indexer.find_matches_by_tier(request.block_hashes).await
+                    indexer
+                        .find_primary_matches_by_tier(request.block_hashes)
+                        .await
                 };
                 match result {
                     Ok(tiered) => IndexerQueryResponse::TieredScores((&tiered).into()),
@@ -522,10 +528,14 @@ fn service_key(component: &Component) -> ServiceKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv_router::indexer::LowerTierIndexers;
     use crate::kv_router::indexer::test_util::store_event;
-    use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
-    use dynamo_kv_router::protocols::{StorageTier, WorkerWithDpRank};
+    use crate::kv_router::indexer::{LowerTierIndexers, SideIndexer};
+    use std::time::Duration;
+
+    use dynamo_kv_router::indexer::{
+        KvIndexer, KvIndexerInterface, KvIndexerMetrics, pruning::PruneConfig,
+    };
+    use dynamo_kv_router::protocols::{StorageTier, WorkerWithDpRank, compute_seq_hash_for_block};
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
@@ -549,6 +559,70 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn query_engine_does_not_serve_side_indexer_matches() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let block_hashes = vec![LocalBlockHash(11), LocalBlockHash(12)];
+        let sequence_hashes = compute_seq_hash_for_block(&block_hashes);
+        let side = KvIndexer::new_with_frequency(
+            CancellationToken::new(),
+            None,
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            Some(PruneConfig {
+                ttl: Duration::from_secs(60),
+            }),
+        );
+        side.process_routing_decision_with_hashes(worker, block_hashes.clone(), sequence_hashes)
+            .await
+            .unwrap();
+        let _ = side.flush().await;
+
+        let indexer = Indexer::KvIndexer {
+            primary: KvIndexer::new(
+                CancellationToken::new(),
+                4,
+                Arc::new(KvIndexerMetrics::new_unregistered()),
+            ),
+            lower_tier: LowerTierIndexers::new(1, 4),
+            approx: Some(SideIndexer::KvIndexer(side)),
+        };
+
+        assert_eq!(
+            indexer
+                .find_match_details(block_hashes.clone())
+                .await
+                .unwrap()
+                .overlap_scores
+                .scores
+                .get(&worker)
+                .copied(),
+            Some(2),
+            "local router queries should still use the side indexer"
+        );
+
+        let bindings = Arc::new(RwLock::new(HashMap::from([("m".to_string(), indexer)])));
+        let engine = ServedIndexerQueryEngine { bindings };
+        let mut stream = engine
+            .generate(SingleIn::new(IndexerQueryRequest {
+                model_name: "m".to_string(),
+                block_hashes,
+                device_only: false,
+            }))
+            .await
+            .unwrap();
+
+        let Some(IndexerQueryResponse::TieredScores(wire)) = stream.next().await else {
+            panic!("expected TieredScores response");
+        };
+
+        assert!(
+            wire.device.scores.iter().all(|(w, _)| *w != worker),
+            "served indexer queries must expose only the primary indexer, got {:?}",
+            wire.device.scores
+        );
+    }
+
     /// Verifies the served query engine returns a tiered payload with populated
     /// lower-tier hits, and that the wire value round-trips through the client
     /// conversion back to native `TieredMatchDetails`.
@@ -562,6 +636,7 @@ mod tests {
                 Arc::new(KvIndexerMetrics::new_unregistered()),
             ),
             lower_tier: LowerTierIndexers::new(1, 4),
+            approx: None,
         };
 
         // Worker owns [11, 12] on device and [11, 12, 13] on host-pinned.
@@ -582,6 +657,7 @@ mod tests {
         let Indexer::KvIndexer {
             primary,
             lower_tier,
+            ..
         } = &indexer
         else {
             unreachable!()
@@ -658,6 +734,7 @@ mod tests {
                 Arc::new(KvIndexerMetrics::new_unregistered()),
             ),
             lower_tier: LowerTierIndexers::new(1, 4),
+            approx: None,
         };
 
         indexer
@@ -677,6 +754,7 @@ mod tests {
         let Indexer::KvIndexer {
             primary,
             lower_tier,
+            ..
         } = &indexer
         else {
             unreachable!()

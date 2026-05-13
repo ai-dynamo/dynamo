@@ -2874,6 +2874,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -2906,6 +2907,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -2943,6 +2945,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
 
@@ -2967,6 +2970,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -2990,6 +2994,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -3013,6 +3018,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -3038,6 +3044,7 @@ mod tests {
                 .unwrap(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -3061,6 +3068,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -3092,6 +3100,7 @@ mod tests {
                 "session": {"id": "session-1", "timestamp": 1640995200}
             })
             .into(),
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
 
@@ -3122,6 +3131,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
 
@@ -3152,6 +3162,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3181,6 +3192,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3210,6 +3222,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3241,6 +3254,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3270,6 +3284,7 @@ mod tests {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3745,7 +3760,6 @@ mod tests {
                 reasoning_content: reasoning.map(|s| s.to_string()),
             },
             finish_reason: finish,
-            stop_reason: None,
             logprobs: None,
         }
     }
@@ -3777,7 +3791,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         }
     }
@@ -3879,7 +3892,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 
@@ -3951,7 +3963,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 
@@ -3988,7 +3999,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 

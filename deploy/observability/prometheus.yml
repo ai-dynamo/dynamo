@@ -43,10 +43,13 @@ scrape_configs:
 
   # Launch via: DYN_SYSTEM_PORT=8081 dynamo.<backend> ...
   # If you want to update the scrape_interval, you may want to also update component.rs's MAX_DELAY
+  # Multi-worker launches (e.g. agg_router.sh, _test_agg.sh) put a second worker on 8082.
   - job_name: 'dynamo-backend'
     scrape_interval: 6s
     static_configs:
-      - targets: ['host.docker.internal:8081']
+      - targets:
+        - 'host.docker.internal:8081'
+        - 'host.docker.internal:8082'
 
   # NIXL Prometheus metrics (requires env on the worker: NIXL_TELEMETRY_ENABLE=y,
   # NIXL_TELEMETRY_EXPORTER=prometheus, NIXL_TELEMETRY_PROMETHEUS_PORT=19090).

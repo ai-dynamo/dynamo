@@ -40,6 +40,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
         nvext: None,
         chat_template_args: None,
         media_io_kwargs: None,
+        return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -490,7 +491,6 @@ fn make_text_chunk(
                 } else {
                     None
                 },
-                stop_reason: None,
                 logprobs: None,
             }],
             created: 1234567890,

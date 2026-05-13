@@ -6,7 +6,7 @@ below names one decision the preprocessor takes; the **per-parser truth
 table** at the bottom records what each parser expects.
 
 This is the preprocessor-layer counterpart to
-[`lib/parsers/TEST_CASES.md`](../parsers/TEST_CASES.md). Parsers are
+[`lib/parsers/PARSER_CASES.md`](../parsers/PARSER_CASES.md). Parsers are
 unit-tested for output correctness on input shapes (CASE.\*); the
 preprocessor is unit-tested for *whether the right config knob fires for
 the right (parser, request) pair* (PRE.\*). Most preprocessor bugs are
@@ -47,8 +47,8 @@ Some parsers should be turned **off** based on `chat_template_args` in
 the request. The exact arg name and value varies per family:
 
 - `kimi_k25` — `thinking: false`
-- `nemotron_nano` / `nemotron3` — `enable_thinking: false` OR
-  `force_nonempty_content: true`
+- `nemotron_nano` / `nemotron3` / `nemotron_v3` —
+  `enable_thinking: false` OR `force_nonempty_content: true`
 - `deepseek_r1` / `deepseek_v4` — `thinking: false` OR
   `thinking_mode: "chat"` (matches V4 formatter's `resolve_thinking_mode`
   convention; keeps parser and prompt synchronized)
@@ -110,6 +110,26 @@ When `ignore_eos = true` the preprocessor does not propagate the model's
 EOS token ids; otherwise it does. Universal — not parser-specific —
 included here as a baseline reminder that the preprocessor owns this.
 
+## PRE.6 — Disabled Nemotron leading `<think>` strip
+
+**Function:** `OpenAIPreprocessor::strip_leading_reasoning_start_from_stream`
+
+When PRE.2 disables a Nemotron force-reasoning parser, Dynamo must not
+run the reasoning parser. However, vLLM-compatible Nemotron templates can
+still produce a leading `<think>` in disabled-thinking modes such as
+`force_nonempty_content=true`. The preprocessor strips only that leading
+marker, buffers split prefixes like `"<thi"` + `"nk>answer"`, tracks
+state per streamed choice, and emits the remaining bytes as normal
+`content`.
+
+This path is specific to `nemotron_nano` / `nemotron3` /
+`nemotron_v3`, and is skipped when `tool_choice=required|named` already
+forces guided JSON.
+
+**Wrong value silently produces:** a leaked leading `<think>` in
+`content`, or dropped content when the prefix is split across stream
+chunks / choices.
+
 ---
 
 ## Per-parser truth table
@@ -117,25 +137,25 @@ included here as a baseline reminder that the preprocessor owns this.
 Walk this table when adding a new parser. **`?`** means unverified —
 if you know the answer, fill it in.
 
-| Parser | PRE.1 needs special tokens | PRE.2 reasoning gate | PRE.3 force-reasoning override on tool-continuation | Notes |
-|---|---|---|---|---|
-| `harmony` (tool) / `gpt_oss` (reasoning) | **YES** | — | — | Channels: `<\|channel\|>analysis<\|message\|>...<\|end\|>`. gpt-oss-20B/120B. |
-| `gemma4` (tool + reasoning) | **YES** | `enable_thinking=false` | — | `<\|think\|>...<\|/think\|>`. |
-| `kimi_k25` (reasoning) | ? — markers are `<\|tool_calls_section_*\|>`, likely YES | `thinking=false` | OFF when last_is_tool (currently global) | Special-token markers in K2/K2.5/K2.6. |
-| `deepseek_v3` (tool) | ? — Unicode markers (`<｜tool_calls_section_begin｜>`); likely YES | — | — | DSv3 grammar. |
-| `deepseek_v3_2` / `deepseek_v4` (DSML) | ? — DSML markers (`<｜DSML｜tool_calls>`); likely YES | `thinking=false` / `thinking_mode=chat` | **NEEDS ON** even when last_is_tool (V4 formatter seeds `<think>`); see #8901 | DSv3.2 / DSv4 grammar. |
-| `deepseek_r1` (reasoning) | NO (uses plain `<think>`) | `thinking=false` | — | DeepSeek-R1. |
-| `nemotron_deci` (tool) / `nemotron_nano` / `nemotron3` (reasoning) | ? | `enable_thinking=false` / `force_nonempty_content=true` (nano/n3 only) | — | Nemotron family. |
-| `llama3_json` (tool) | ? — `<\|python_tag\|>` is a special token, likely YES | — | — | Llama 3.x. |
-| `hermes` (tool) | NO | — | — | Plain XML `<tool_call>...</tool_call>`. |
-| `qwen3_coder` (tool) | NO | — | — | Plain XML `<tool_call><function=...>`. |
-| `pythonic` (tool) | NO | — | — | Python list literal. |
-| `mistral` (tool) | NO | — | — | `[TOOL_CALLS]` plain text. |
-| `phi4` (tool) | NO | — | — | `functools[...]` plain text. |
-| `minimax_m2` (tool) / `minimax_append_think` (reasoning) | NO | — | OFF on `tool_choice=required/named` (universal, PRE.4) | XML markers, plain text. |
-| `glm47` (tool) | NO | — | — | Plain XML. |
-| `jamba` (tool) | NO | — | — | `<tool_calls>` plain text wrapper. |
-| `qwen` (reasoning, basic `<think>`) | NO | — | — | Plain `<think>...</think>`. |
+| Parser | PRE.1 needs special tokens | PRE.2 reasoning gate | PRE.6 disabled-Nemotron leading `<think>` strip | PRE.3 force-reasoning override on tool-continuation | Notes |
+|---|---|---|---|---|---|
+| `harmony` (tool) / `gpt_oss` (reasoning) | **YES** | — | — | — | Channels: `<\|channel\|>analysis<\|message\|>...<\|end\|>`. gpt-oss-20B/120B. |
+| `gemma4` (tool + reasoning) | **YES** | `enable_thinking=false` | — | — | `<\|think\|>...<\|/think\|>`. |
+| `kimi_k25` (reasoning) | ? — markers are `<\|tool_calls_section_*\|>`, likely YES | `thinking=false` | — | OFF when last_is_tool (currently global) | Special-token markers in K2/K2.5/K2.6. |
+| `deepseek_v3` (tool) | ? — Unicode markers (`<｜tool_calls_section_begin｜>`); likely YES | — | — | — | DSv3 grammar. |
+| `deepseek_v3_2` / `deepseek_v4` (DSML) | ? — DSML markers (`<｜DSML｜tool_calls>`); likely YES | `thinking=false` / `thinking_mode=chat` | — | **NEEDS ON** even when last_is_tool (V4 formatter seeds `<think>`); see #8901 | DSv3.2 / DSv4 grammar. |
+| `deepseek_r1` (reasoning) | NO (uses plain `<think>`) | `thinking=false` | — | — | DeepSeek-R1. |
+| `nemotron_deci` (tool) / `nemotron_nano` / `nemotron3` / `nemotron_v3` (reasoning) | ? | `enable_thinking=false` / `force_nonempty_content=true` (nano/n3/v3 only) | YES when PRE.2 disables reasoning | — | Nemotron family; `nemotron_v3` is the vLLM-compatible alias. |
+| `llama3_json` (tool) | ? — `<\|python_tag\|>` is a special token, likely YES | — | — | — | Llama 3.x. |
+| `hermes` (tool) | NO | — | — | — | Plain XML `<tool_call>...</tool_call>`. |
+| `qwen3_coder` (tool) | NO | — | — | — | Plain XML `<tool_call><function=...>`. |
+| `pythonic` (tool) | NO | — | — | — | Python list literal. |
+| `mistral` (tool) | NO | — | — | — | `[TOOL_CALLS]` plain text. |
+| `phi4` (tool) | NO | — | — | — | `functools[...]` plain text. |
+| `minimax_m2` (tool) / `minimax_append_think` (reasoning) | NO | — | — | OFF on `tool_choice=required/named` (universal, PRE.4) | XML markers, plain text. |
+| `glm47` (tool) | NO | — | — | — | Plain XML. |
+| `jamba` (tool) | NO | — | — | — | `<tool_calls>` plain text wrapper. |
+| `qwen` (reasoning, basic `<think>`) | NO | — | — | — | Plain `<think>...</think>`. |
 
 ---
 
@@ -151,16 +171,19 @@ if you know the answer, fill it in.
    gate emission of the parser's markers on a flag like `enable_thinking`
    / `thinking` / `thinking_mode`? If yes, add the case to
    `is_reasoning_disabled_by_request`.
-3. PRE.3: when the previous turn is a tool call, does the model
+3. PRE.6: if PRE.2 disables the parser, can the backend still emit a
+   leading reasoning marker that should become normal content? If yes,
+   add an explicit strip/pass-through case and stream test coverage.
+4. PRE.3: when the previous turn is a tool call, does the model
    re-enter reasoning (DSv4) or skip straight to answer (Kimi K2.5)?
    Document explicitly in this table; current code uses a global gate
    that may need to become parser-specific (see #8901).
-4. PRE.4: confirm `tool_choice = required/named` doesn't conflict with
+5. PRE.4: confirm `tool_choice = required/named` doesn't conflict with
    the parser's behavior. Universal default is to disable reasoning
    parsing in this case.
-5. Add a row to the truth table above with explicit values. `N/A` is
+6. Add a row to the truth table above with explicit values. `N/A` is
    acceptable but must be stated, not omitted.
-6. Add a unit test in `lib/llm/src/preprocessor.rs`'s `#[cfg(test)] mod`
+7. Add a unit test in `lib/llm/src/preprocessor.rs`'s `#[cfg(test)] mod`
    that asserts `parser_requires_special_tokens(...)` returns the
    expected value for the new parser. Table-driven, one row per parser
    in this doc.

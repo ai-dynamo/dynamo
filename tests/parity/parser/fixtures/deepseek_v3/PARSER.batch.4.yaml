@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3
+mode: batch
+cases:
+  PARSER.batch.4.a:
+    description: Garbage between calls fences
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L322
+    model_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls: []
+      normal_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: None
+  PARSER.batch.4.b:
+    description: Missing close brace inside fenced JSON
+    ref: dynamo
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+      ```json
+      {"location": "NYC"
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: |-
+        <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+        ```json
+        {"location": "NYC"
+        ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: [{'name': 'get_weather', 'arguments': '{"location": "NYC"'}]
+    #   normal_text: None
+  PARSER.batch.4.c:
+    description: Missing function name token
+    ref: dynamo
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>
+      ```json
+      {"location": "NYC"}
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: |-
+        <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>
+        ```json
+        {"location": "NYC"}
+        ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: [{'name': '', 'arguments': {'location': 'NYC'}}]
+    #   normal_text: None
+  PARSER.batch.4.d:
+    description: Missing fenced JSON block (no ```json)
+    ref: dynamo
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+      {"location": "NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: None
