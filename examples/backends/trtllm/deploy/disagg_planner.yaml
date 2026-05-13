@@ -44,52 +44,41 @@ data:
       "max_kv_tokens": 32768
     }
 ---
-apiVersion: nvidia.com/v1beta1
+apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: trtllm-disagg-planner
 spec:
-  components:
-  - name: Frontend
-    podTemplate:
-      spec:
-        containers:
-        - args:
-          - -m
-          - dynamo.frontend
-          - --http-port
-          - "8000"
-          - --kv-cache-block-size
-          - "128"
-          - --router-mode
-          - kv
-          - --router-kv-overlap-score-credit
-          - "0.0"
-          - --router-temperature
-          - "0.0"
-          - --no-kv-events
-          command:
-          - python3
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
           image: my-registry/tensorrtllm-runtime:my-tag
-          name: main
           workingDir: /workspace/examples/backends/trtllm
-    replicas: 1
-    type: frontend
-  - name: Planner
-    podTemplate:
-      spec:
-        containers:
-        - args:
-          - -m
-          - dynamo.planner
-          - --config
-          - '{"environment": "kubernetes", "backend": "trtllm", "throughput_adjustment_interval_seconds":
-            60, "profile_results_dir": "/workspace/profiling_results"}'
           command:
-          - python3
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
+            - python3
+          args:
+            - -m
+            - dynamo.frontend
+            - --http-port
+            - "8000"
+            - --kv-cache-block-size
+            - "128"
+            - --router-mode
+            - kv
+            - --router-kv-overlap-score-credit
+            - "0.0"
+            - --router-temperature
+            - "0.0"
+            - --no-kv-events
+    Planner:
+      envFromSecret: hf-token-secret
+      componentType: planner
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
           # Planner image selection:
           #   Dynamo >= 1.1.0: use the dedicated planner image
           #     <registry>/dynamo-planner:<version>
@@ -98,89 +87,87 @@ spec:
           #   Dynamo <  1.1.0: use the backend runtime image
           #     <registry>/tensorrtllm-runtime:<version>.
           image: my-registry/dynamo-planner:my-tag
-          name: main
           ports:
-          - containerPort: 9085
-            name: metrics
+            - name: metrics
+              containerPort: 9085
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.planner
+            - --config
+            - '{"environment": "kubernetes", "backend": "trtllm", "throughput_adjustment_interval_seconds": 60, "profile_results_dir": "/workspace/profiling_results"}'
           volumeMounts:
-          - mountPath: /workspace/profiling_results
-            name: planner-profile-data
-            readOnly: true
+            - name: planner-profile-data
+              mountPath: /workspace/profiling_results
+              readOnly: true
         volumes:
-        - configMap:
-            name: planner-profile-data
-          name: planner-profile-data
-    replicas: 1
-    type: planner
-  - name: decode
-    podTemplate:
-      spec:
-        containers:
-        - args:
-          - -m
-          - dynamo.trtllm
-          - --model-path
-          - Qwen/Qwen3-0.6B
-          - --served-model-name
-          - Qwen/Qwen3-0.6B
-          - --extra-engine-args
-          - ./examples/backends/trtllm/engine_configs/qwen3/decode.yaml
-          - --disaggregation-mode
-          - decode
-          command:
-          - python3
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
-          image: my-registry/tensorrtllm-runtime:my-tag
-          livenessProbe:
-            failureThreshold: 1
-            httpGet:
-              path: /live
-              port: 9090
-            periodSeconds: 5
-            timeoutSeconds: 30
-          name: main
-          readinessProbe:
-            failureThreshold: 60
-            httpGet:
-              path: /health
-              port: 9090
-            periodSeconds: 10
-            timeoutSeconds: 30
-          resources:
-            limits:
-              nvidia.com/gpu: "1"
-          workingDir: /workspace/
+          - name: planner-profile-data
+            configMap:
+              name: planner-profile-data
+    decode:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      livenessProbe:
+        httpGet:
+          path: /live
+          port: 9090
+        periodSeconds: 5
+        timeoutSeconds: 30
+        failureThreshold: 1
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 9090
+        periodSeconds: 10
+        timeoutSeconds: 30
+        failureThreshold: 60
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
         terminationGracePeriodSeconds: 600
-    replicas: 1
-    type: decode
-  - name: prefill
-    podTemplate:
-      spec:
-        containers:
-        - args:
-          - -m
-          - dynamo.trtllm
-          - --model-path
-          - Qwen/Qwen3-0.6B
-          - --served-model-name
-          - Qwen/Qwen3-0.6B
-          - --extra-engine-args
-          - ./examples/backends/trtllm/engine_configs/qwen3/prefill.yaml
-          - --disaggregation-mode
-          - prefill
-          command:
-          - python3
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
+        mainContainer:
           image: my-registry/tensorrtllm-runtime:my-tag
-          name: main
-          resources:
-            limits:
-              nvidia.com/gpu: "1"
           workingDir: /workspace/
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.trtllm
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --extra-engine-args
+            - ./examples/backends/trtllm/engine_configs/qwen3/decode.yaml
+            - --disaggregation-mode
+            - decode
+    prefill:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
         terminationGracePeriodSeconds: 600
-    replicas: 1
-    type: prefill
+        mainContainer:
+          image: my-registry/tensorrtllm-runtime:my-tag
+          workingDir: /workspace/
+          command:
+            - python3
+          args:
+            - -m
+            - dynamo.trtllm
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --extra-engine-args
+            - ./examples/backends/trtllm/engine_configs/qwen3/prefill.yaml
+            - --disaggregation-mode
+            - prefill

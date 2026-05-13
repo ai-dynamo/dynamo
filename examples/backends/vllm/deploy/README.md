@@ -2,6 +2,8 @@
 
 This directory contains Kubernetes Custom Resource Definition (CRD) templates for deploying vLLM inference graphs using the **DynamoGraphDeployment** resource.
 
+The top-level `deploy/*.yaml` templates use `nvidia.com/v1alpha1` for compatibility with existing tooling. Equivalent `nvidia.com/v1beta1` templates are available under [`v1beta1/`](./v1beta1/).
+
 ## Available Deployment Patterns
 
 ### 1. **Aggregated Deployment** (`agg.yaml`)
@@ -58,53 +60,46 @@ Hardware-specific aggregated/disaggregated deployment using Kubernetes Dynamic R
 All templates use the **DynamoGraphDeployment** CRD:
 
 ```yaml
-apiVersion: nvidia.com/v1beta1
+apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: <deployment-name>
 spec:
-  components:
-    - name: <component-name>
-      type: <frontend|worker|prefill|decode|planner|epp>
-      # Component configuration
+  services:
+    <ServiceName>:
+      # Service configuration
 ```
 
 ### Key Configuration Options
 
 **Resource Management:**
 ```yaml
-podTemplate:
-  spec:
-    containers:
-      - name: main
-        resources:
-          requests:
-            cpu: "10"
-            memory: "20Gi"
-            nvidia.com/gpu: "1"
-          limits:
-            cpu: "10"
-            memory: "20Gi"
-            nvidia.com/gpu: "1"
+resources:
+  requests:
+    cpu: "10"
+    memory: "20Gi"
+    gpu: "1"
+  limits:
+    cpu: "10"
+    memory: "20Gi"
+    gpu: "1"
 ```
 
 **Container Configuration:**
 ```yaml
-podTemplate:
-  spec:
-    containers:
-      - name: main
-        image: my-registry/vllm-runtime:my-tag
-        workingDir: /workspace/examples/backends/vllm
-        args:
-          - "python3"
-          - "-m"
-          - "dynamo.vllm"
-          - "--model"
-          - "Qwen/Qwen3-0.6B"
-          # Optional: Enable prompt embeddings feature
-          # - "--enable-prompt-embeds"
-          # Other model-specific arguments
+extraPodSpec:
+  mainContainer:
+    image: my-registry/vllm-runtime:my-tag
+    workingDir: /workspace/examples/backends/vllm
+    args:
+      - "python3"
+      - "-m"
+      - "dynamo.vllm"
+      - "--model"
+      - "Qwen/Qwen3-0.6B"
+      # Optional: Enable prompt embeddings feature
+      # - "--enable-prompt-embeds"
+      # Other model-specific arguments
 ```
 
 **Common vLLM Flags:**
@@ -120,7 +115,7 @@ Before using these templates, ensure you have:
 1. **Dynamo Kubernetes Platform installed** - See [Quickstart Guide](../../../../docs/kubernetes/README.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for vLLM runtime images (optional for default NGC CUDA images - `nvcr.io/nvidia/ai-dynamo/*` images are publicly accessible; Intel XPU users should build custom images with `--device xpu`)
-4. **HuggingFace token secret** (referenced from `podTemplate.spec.containers[].envFrom`)
+4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
 
 ### Container Images
 
@@ -219,7 +214,7 @@ To use a custom dynamo frameworks image for vLLM, you can update the deployment 
 export DEPLOYMENT_FILE=agg.yaml
 export FRAMEWORK_RUNTIME_IMAGE=<vllm-image>
 
-yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' $DEPLOYMENT_FILE  > $DEPLOYMENT_FILE.generated
+yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE  > $DEPLOYMENT_FILE.generated
 kubectl apply -f $DEPLOYMENT_FILE.generated -n $NAMESPACE
 ```
 
@@ -240,7 +235,7 @@ To change `DYN_LOG` level, edit the yaml file by adding:
 ```yaml
 ...
 spec:
-  env:
+  envs:
     - name: DYN_LOG
       value: "debug" # or other log levels
   ...

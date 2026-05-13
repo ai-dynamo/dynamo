@@ -62,7 +62,6 @@ data:
     cache_transceiver_config:
       backend: DEFAULT
 ---
-
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -74,126 +73,110 @@ spec:
     requests:
       storage: 100Gi
 ---
-apiVersion: nvidia.com/v1beta1
+apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: trtllm-disagg-tp8
 spec:
   backendFramework: trtllm
-  components:
-  - name: Frontend
-    podTemplate:
-      spec:
-        containers:
-        - args:
-          - --http-port
-          - "8000"
+  pvcs:
+    - name: models
+  envs:
+    - name: OMPI_ALLOW_RUN_AS_ROOT
+      value: "1"
+    - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
+      value: "1"
+    - name: HF_HOME
+      value: "/models"
+  services:
+    Frontend:
+      volumeMounts:
+        - name: models
+          mountPoint: /models
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/tensorrtllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/trtllm
           command:
           - python3
           - -m
           - dynamo.frontend
-          image: my-registry/tensorrtllm-runtime:my-tag
-          name: main
-          volumeMounts:
-          - mountPath: /models
-            name: models
-          workingDir: /workspace/examples/backends/trtllm
-        volumes:
+          args:
+            - --http-port
+            - "8000"
+    prefill:
+      volumeMounts:
         - name: models
-          persistentVolumeClaim:
-            claimName: models
-    replicas: 1
-    type: frontend
-  - multinode:
-      nodeCount: 2
-    name: decode
-    podTemplate:
-      spec:
-        containers:
-        - args:
-          - --model-path
-          - Qwen/Qwen3-0.6B
-          - --served-model-name
-          - Qwen/Qwen3-0.6B
-          - --extra-engine-args
-          - /workspace/decode.yaml
-          - --disaggregation-mode
-          - decode
+          mountPoint: /models
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "4"
+      extraPodSpec:
+        volumes:
+          - name: nvidia-config
+            configMap:
+              name: nvidia-config
+        mainContainer:
+          volumeMounts:
+            - name: nvidia-config
+              mountPath: /workspace/
+              readOnly: true
+          image: my-registry/tensorrtllm-runtime:my-tag
+          workingDir: /workspace/
           command:
           - python3
           - -m
           - dynamo.trtllm
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
-          image: my-registry/tensorrtllm-runtime:my-tag
-          name: main
-          resources:
-            limits:
-              nvidia.com/gpu: "4"
-          volumeMounts:
-          - mountPath: /models
-            name: models
-          - mountPath: /workspace/
-            name: nvidia-config
-            readOnly: true
-          workingDir: /workspace/
-        volumes:
+          args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --extra-engine-args
+            - /workspace/prefill.yaml
+            - --disaggregation-mode
+            - prefill
+    decode:
+      volumeMounts:
         - name: models
-          persistentVolumeClaim:
-            claimName: models
-        - configMap:
-            name: nvidia-config
-          name: nvidia-config
-    replicas: 1
-    type: worker
-  - multinode:
-      nodeCount: 2
-    name: prefill
-    podTemplate:
-      spec:
-        containers:
-        - args:
-          - --model-path
-          - Qwen/Qwen3-0.6B
-          - --served-model-name
-          - Qwen/Qwen3-0.6B
-          - --extra-engine-args
-          - /workspace/prefill.yaml
-          - --disaggregation-mode
-          - prefill
+          mountPoint: /models
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "4"
+      extraPodSpec:
+        volumes:
+          - name: nvidia-config
+            configMap:
+              name: nvidia-config
+        mainContainer:
+          volumeMounts:
+            - name: nvidia-config
+              mountPath: /workspace/
+              readOnly: true
+          image: my-registry/tensorrtllm-runtime:my-tag
+          workingDir: /workspace/
           command:
           - python3
           - -m
           - dynamo.trtllm
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
-          image: my-registry/tensorrtllm-runtime:my-tag
-          name: main
-          resources:
-            limits:
-              nvidia.com/gpu: "4"
-          volumeMounts:
-          - mountPath: /models
-            name: models
-          - mountPath: /workspace/
-            name: nvidia-config
-            readOnly: true
-          workingDir: /workspace/
-        volumes:
-        - name: models
-          persistentVolumeClaim:
-            claimName: models
-        - configMap:
-            name: nvidia-config
-          name: nvidia-config
-    replicas: 1
-    type: worker
-  env:
-  - name: OMPI_ALLOW_RUN_AS_ROOT
-    value: "1"
-  - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
-    value: "1"
-  - name: HF_HOME
-    value: /models
+          args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --served-model-name
+            - Qwen/Qwen3-0.6B
+            - --extra-engine-args
+            - /workspace/decode.yaml
+            - --disaggregation-mode
+            - decode

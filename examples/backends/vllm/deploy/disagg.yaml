@@ -1,73 +1,67 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-apiVersion: nvidia.com/v1beta1
+apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-disagg
 spec:
-  components:
-  - name: Frontend
-    podTemplate:
-      spec:
-        containers:
-        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          name: main
-    replicas: 1
-    type: frontend
-  - name: VllmDecodeWorker
-    podTemplate:
-      spec:
-        containers:
-        - args:
-          - --model
-          - Qwen/Qwen3-0.6B
-          - --disaggregation-mode
-          - decode
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
           command:
           - python3
           - -m
           - dynamo.vllm
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --disaggregation-mode
+            - decode
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          name: main
-          resources:
-            limits:
-              nvidia.com/gpu: "1"
-            requests:
-              # Increase this value for larger models.
-              ephemeral-storage: 2Gi
           workingDir: /workspace/examples/backends/vllm
-    replicas: 1
-    type: decode
-  - name: VllmPrefillWorker
-    podTemplate:
-      spec:
-        containers:
-        - args:
-          - --model
-          - Qwen/Qwen3-0.6B
-          - --disaggregation-mode
-          - prefill
-          - --kv-transfer-config
-          - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
           command:
           - python3
           - -m
           - dynamo.vllm
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          name: main
-          resources:
-            limits:
-              nvidia.com/gpu: "1"
-            requests:
-              # Increase this value for larger models.
-              ephemeral-storage: 2Gi
-          workingDir: /workspace/examples/backends/vllm
-    replicas: 1
-    type: prefill
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --disaggregation-mode
+            - prefill
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'

@@ -1,45 +1,38 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-apiVersion: nvidia.com/v1beta1
+apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-agg
 spec:
-  components:
-  - name: Frontend
-    podTemplate:
-      spec:
-        containers:
-        - envFrom:
-          - secretRef:
-              name: hf-token-secret
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          name: main
-    replicas: 1
-    type: frontend
-  - name: VllmDecodeWorker
-    podTemplate:
-      spec:
-        containers:
-        - args:
-          - --model
-          - Qwen/Qwen3-0.6B
-          command:
-          - python3
-          - -m
-          - dynamo.vllm
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          name: main
-          resources:
-            limits:
-              nvidia.com/gpu: "1"
-            requests:
-              # Increase this value for larger models.
-              ephemeral-storage: 2Gi
           workingDir: /workspace/examples/backends/vllm
-    replicas: 1
-    type: worker
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
