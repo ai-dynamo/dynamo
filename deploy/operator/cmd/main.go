@@ -712,6 +712,16 @@ func registerControllers(
 		}
 	}
 
+	if err = (&controller.TopologyLabelReconciler{
+		Client:        mgr.GetClient(),
+		NodeReader:    mgr.GetAPIReader(),
+		Config:        operatorCfg,
+		RuntimeConfig: runtimeConfig,
+		Recorder:      mgr.GetEventRecorderFor("topology-label"),
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create TopologyLabel controller: %w", err)
+	}
+
 	setupLog.Info("Controllers registered successfully")
 	return nil
 }
