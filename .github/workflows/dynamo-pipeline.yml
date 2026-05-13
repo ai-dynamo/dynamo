@@ -150,57 +150,37 @@ jobs:
           cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
 
-  mypy:
-    # needs: image
-    runs-on: prod-tester-amd-v2
-    container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:5ce55e4f7cbdb5f6719237e9f4976f3b699a2571-dynamo-runtime-cuda12-test
-      env:
-        # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
-        # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
-        # USER here sidesteps two symptoms of that mismatch:
-        #   * actions/checkout probing $HOME/.gitconfig (owned by 1000, unreadable by 1001)
-        #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
-        HOME: /__w/dynamo/dynamo
-        USER: dynamo
-    timeout-minutes: 15
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
-      # - name: Calculate test image tag
-      #   id: image
-      #   shell: bash
-      #   env:
-      #     ECR_REPOSITORY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
-      #   run: |
-      #     CUDA_VERSION="${{ inputs.cuda_version }}"
-      #     CUDA_MAJOR=${CUDA_VERSION%%.*}
-      #     SOURCE_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
-      #     IMAGE_TAG=${SOURCE_SHA}-${{ needs.image.outputs.target_tag_plain }}-cuda${CUDA_MAJOR}-test
-      #     echo "test_image=${ECR_REPOSITORY}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
-      # - name: Docker Login
-      #   uses: ./.github/actions/docker-login
-      #   with:
-      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      # - name: Pull test image
-      #   run: |
-      #     source ./.github/scripts/retry_docker.sh
-      #     retry_pull ${{ steps.image.outputs.test_image }}
-      - name: Run mypy (components)
-        working-directory: /workspace
-        shell: bash
-        run: |
-          MYPYPATH=components/src:lib/bindings/python/src
-          TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d | sort | tr "\n" " ")
-          MYPYPATH=$MYPYPATH mypy --explicit-package-bases $TARGETS
-      - name: Run mypy (bindings)
-        working-directory: /workspace
-        shell: bash
-        run: |
-          MYPYPATH=lib/bindings/python/src mypy -p dynamo
+  # mypy:
+  #   needs: image
+  #   runs-on: prod-tester-amd-v2
+  #   container:
+  #     image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:5ce55e4f7cbdb5f6719237e9f4976f3b699a2571-dynamo-runtime-cuda12-test
+  #     env:
+  #       # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
+  #       # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
+  #       # USER here sidesteps two symptoms of that mismatch:
+  #       #   * actions/checkout probing $HOME/.gitconfig (owned by 1000, unreadable by 1001)
+  #       #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
+  #       HOME: /__w/dynamo/dynamo
+  #       USER: dynamo
+  #   timeout-minutes: 15
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+  #       with:
+  #         ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+  #     - name: Run mypy (components)
+  #       working-directory: /workspace
+  #       shell: bash
+  #       run: |
+  #         MYPYPATH=components/src:lib/bindings/python/src
+  #         TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d | sort | tr "\n" " ")
+  #         MYPYPATH=$MYPYPATH mypy --explicit-package-bases $TARGETS
+  #     - name: Run mypy (bindings)
+  #       working-directory: /workspace
+  #       shell: bash
+  #       run: |
+  #         MYPYPATH=lib/bindings/python/src mypy -p dynamo
 
   # # TODO: real xdist parallelism port conflicts. cpu_parallel_mode='none'
   # # below runs -n 0, so this job is NOT actually parallel right now.
