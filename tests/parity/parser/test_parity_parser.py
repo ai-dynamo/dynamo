@@ -60,6 +60,27 @@ _HARMONY_REQUIRES_ASSISTANT_PREFIX = (
 _RECOVERY_CONTRACT = "impl-defined recovery contract (see PARSER_CASES.md)"
 
 KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
+    # vLLM and SGLang both truncate normal_text at the *end* of the tool-call
+    # wrapper for these parser families. Only Dynamo preserves text after
+    # the closing wrapper token.
+    #
+    # kimi_k2 PARSER.batch.8 sub-cases (SGLang has no kimi_k2 detector → skips):
+    #   .a (pre-text only)   — vLLM preserves trailing whitespace; Dynamo trims
+    #   .b (post-text only)  — vLLM drops the trailing text entirely
+    #   .c (sandwich)        — vLLM preserves leading text but drops trailing
+    #   .d (between calls)   — vLLM drops inter-call text after first close
+    (
+        "vllm",
+        "kimi_k2",
+        "PARSER.batch.8.a",
+    ): "preserves trailing space; Dynamo trims it",
+    ("vllm", "kimi_k2", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "kimi_k2", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "kimi_k2", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "glm47", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "glm47", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "glm47", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
+    ("vllm", "glm47", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
     # SGLang's GptOssDetector requires a strict '<|start|>assistant<|channel|>commentary'
     # bot_token; bare '<|channel|>commentary' variants (PARSER.batch.1, .6, .13)
     # are not detected at all.
