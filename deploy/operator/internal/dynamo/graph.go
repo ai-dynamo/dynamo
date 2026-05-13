@@ -1736,9 +1736,6 @@ func GeneratePodSpecForComponent(
 		operatorConfig = &configv1alpha1.OperatorConfiguration{}
 	}
 
-	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
-	propagateDGDSpecMetadata(dynamoDeployment.Spec.Annotations, dynamoDeployment.Spec.Labels, component)
-
 	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo, deployerOverride, dynamoDeployment.Spec.KvTransferPolicy)
 	if err != nil {
 		return nil, err
