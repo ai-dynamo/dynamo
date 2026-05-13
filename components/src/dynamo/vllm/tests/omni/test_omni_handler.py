@@ -2,13 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+import inspect
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 try:
     from PIL import Image
     from vllm.sampling_params import RequestOutputKind, SamplingParams
+    from vllm_omni.entrypoints.openai.serving_chat import OmniOpenAIServingChat
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
     from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
@@ -73,6 +75,19 @@ class TestEngineInputs:
 
 
 class TestBuildEngineInputs:
+    def test_vllm_omni_preprocess_chat_uses_pinned_0200_contract(self):
+        """Guard the vLLM-Omni 0.20.0 chat preprocessing API Dynamo calls."""
+        signature = inspect.signature(OmniOpenAIServingChat._preprocess_chat)
+        assert list(signature.parameters)[:5] == [
+            "self",
+            "request",
+            "messages",
+            "default_template",
+            "default_template_content_format",
+        ]
+        assert "renderer" in signature.parameters
+        assert "tokenizer" not in signature.parameters
+
     @pytest.mark.asyncio
     async def test_chat_completion(self):
         """Chat request extracts text prompt with no sampling params."""
@@ -95,24 +110,18 @@ class TestBuildEngineInputs:
             "messages": [{"role": "user", "content": "hello"}],
             "modalities": ["audio"],
         }
-        tokenizer = MagicMock()
 
         class FakeOmniChatPreprocessor:
-            async def _preprocess_chat(
-                self, request, tokenizer_arg, messages, **kwargs
-            ):
-                assert tokenizer_arg is tokenizer
+            async def _preprocess_chat(self, request, messages, **kwargs):
                 assert request.messages == messages
-                assert kwargs["chat_template_content_format"] == "auto"
-                assert "renderer" not in kwargs
-                return (
-                    ["conversation"],
-                    ["request_prompt"],
-                    [{"prompt": "<rendered>hello"}],
-                )
+                assert kwargs["default_template"] == request.chat_template
+                assert kwargs["default_template_content_format"] == "auto"
+                assert kwargs["renderer"] is handler.engine_client.renderer
+                assert "tokenizer" not in kwargs
+                return ["conversation"], [{"prompt": "<rendered>hello"}]
 
+        handler.engine_client.renderer = MagicMock()
         handler.engine_client.model_config = MagicMock()
-        handler.engine_client.get_tokenizer = AsyncMock(return_value=tokenizer)
         handler._omni_chat_preprocessor = FakeOmniChatPreprocessor()
 
         inputs = await handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)
