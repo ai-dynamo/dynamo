@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+// jemalloc as the Rust global allocator. Issue #9466 traced FE saturation to
+// glibc malloc's per-arena mutex under tokenizer + bytes::Bytes drop churn;
+// jemalloc's per-thread tcaches sidestep the arena lock. Linux + macOS only —
+// jemalloc upstream doesn't support Windows.
+#[cfg(all(feature = "jemalloc", any(target_os = "linux", target_os = "macos")))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use dynamo_llm::local_model::LocalModel;
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::kv;
