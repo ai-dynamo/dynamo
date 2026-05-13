@@ -37,10 +37,17 @@ The reference example is the **mocker backend** at
 — a small, complete, pure-Rust implementation. Read it alongside this
 guide.
 
-The authoritative contract lives in the
-[`LLMEngine` trait doc comments](../../lib/backend-common/src/engine.rs)
-and the [`backend-common` design notes](../../lib/backend-common/CLAUDE.md).
-This guide is the on-ramp.
+**Where to look for what:**
+
+- This guide — step-by-step walkthrough for someone starting a new
+  backend from scratch.
+- [`LLMEngine` trait doc comments](../../lib/backend-common/src/engine.rs)
+  — authoritative method-by-method contract.
+- [Crate README](../../lib/backend-common/README.md) — in-tree
+  reference: architecture, file index, disaggregation contract,
+  error taxonomy, conformance kit.
+- [`backend-common` design notes](../../lib/backend-common/CLAUDE.md)
+  — rationale, invariants, phase plans.
 
 ## What you're building
 
@@ -711,6 +718,8 @@ Before shipping:
 
 ## See also
 
+- [Crate README](../../lib/backend-common/README.md) — in-tree
+  reference (architecture, file index, contracts at a glance).
 - [`LLMEngine` trait](../../lib/backend-common/src/engine.rs) — authoritative contract.
 - [Design notes](../../lib/backend-common/CLAUDE.md) — rationale,
   invariants, phase-2 PyO3 plans.
@@ -720,3 +729,5 @@ Before shipping:
 - [Conformance kit](../../lib/backend-common/src/testing.rs) —
   `run_conformance`, `mock_context`, `cancelling_context`.
 - [Mocker backend](../backends/mocker_backend/README.md) — example user guide.
+- [Python sibling](../../components/src/dynamo/common/backend/README.md)
+  — Python ABC layered over this crate.
