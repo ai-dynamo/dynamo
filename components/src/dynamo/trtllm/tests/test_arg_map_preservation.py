@@ -131,6 +131,15 @@ class TestSnapshotAndAudit:
             )
         assert any("event_buffer_max_size" in r.message for r in caplog.records)
 
+    def test_warns_on_late_skip_tokenizer_init_clobber(self, caplog):
+        """Late tokenizer init mutations are surfaced when audit runs before engine init."""
+        arg_map = {"skip_tokenizer_init": True}
+        snapshot = _normalize_arg_map_for_snapshot(arg_map)
+        arg_map["skip_tokenizer_init"] = False
+        with caplog.at_level(logging.WARNING):
+            _audit_user_arg_clobbers(snapshot, arg_map)
+        assert any("skip_tokenizer_init" in r.message for r in caplog.records)
+
 
 # ---- Regression pins for the six historically-fragile fields (#9288) ----
 

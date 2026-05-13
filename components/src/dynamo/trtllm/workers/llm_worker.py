@@ -436,8 +436,6 @@ async def init_llm_worker(
             exc_info=True,
         )
 
-    _audit_user_arg_clobbers(user_arg_snapshot, arg_map)
-    logging.info(f"TensorRT-LLM engine args: {arg_map}")
     engine_args = arg_map
 
     # Populate default sampling params from the model
@@ -526,6 +524,9 @@ async def init_llm_worker(
         model_name=model_name_for_metrics,
         component_name=config.component,
     )
+
+    _audit_user_arg_clobbers(user_arg_snapshot, engine_args)
+    logging.info(f"TensorRT-LLM engine args: {engine_args}")
 
     async with get_llm_engine(
         engine_args,
