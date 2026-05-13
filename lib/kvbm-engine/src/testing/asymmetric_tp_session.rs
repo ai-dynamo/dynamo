@@ -98,12 +98,12 @@ fn build_layout_config(tp: usize) -> LayoutConfig {
 
 async fn new_velo() -> Result<Arc<velo::Velo>> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
-    let transport: Arc<dyn Transport> =
-        Arc::new(TcpTransportBuilder::new().from_listener(listener)?.build()?);
-    velo::Velo::builder()
-        .add_transport(transport)
-        .build()
-        .await
+    let transport: Arc<dyn Transport> = Arc::new(
+        TcpTransportBuilder::new()
+            .from_listener(listener)?
+            .build()?,
+    );
+    velo::Velo::builder().add_transport(transport).build().await
 }
 
 // Default `create_fc_layout_with_config` leaves `KvBlockLayout::Unknown`,
@@ -225,8 +225,11 @@ async fn build_side(
             .build(),
     );
 
-    let template =
-        ParallelismTemplate::from_layout_config(&layout_config, ParallelismMode::TensorParallel, tp)?;
+    let template = ParallelismTemplate::from_layout_config(
+        &layout_config,
+        ParallelismMode::TensorParallel,
+        tp,
+    )?;
 
     let leader = InstanceLeader::builder()
         .messenger(velo.messenger().clone())
@@ -469,12 +472,12 @@ mod tests {
             .drain(..)
             .zip(token_seq.blocks().iter())
             .map(|(m, tb)| {
-                m.complete(tb).map_err(|e| anyhow!("holder: complete: {e:?}"))
+                m.complete(tb)
+                    .map_err(|e| anyhow!("holder: complete: {e:?}"))
             })
             .collect::<Result<Vec<_>>>()?;
         let h_immutables: Vec<ImmutableBlock<G2>> = holder.g2_manager.register_blocks(completes);
-        let h_hashes: Vec<SequenceHash> =
-            h_immutables.iter().map(|b| b.sequence_hash()).collect();
+        let h_hashes: Vec<SequenceHash> = h_immutables.iter().map(|b| b.sequence_hash()).collect();
         anyhow::ensure!(
             h_hashes.len() == INITIAL_BLOCKS,
             "register_blocks dropped some blocks: got {}",
@@ -596,7 +599,8 @@ mod tests {
             .into_iter()
             .zip(token_seq.blocks().iter())
             .map(|(m, tb)| {
-                m.complete(tb).map_err(|e| anyhow!("puller: complete: {e:?}"))
+                m.complete(tb)
+                    .map_err(|e| anyhow!("puller: complete: {e:?}"))
             })
             .collect::<Result<Vec<_>>>()?;
         for (i, c) in p_completes.iter().enumerate() {
@@ -607,8 +611,7 @@ mod tests {
                 h_hashes[i]
             );
         }
-        let p_immutables: Vec<ImmutableBlock<G2>> =
-            puller.g2_manager.register_blocks(p_completes);
+        let p_immutables: Vec<ImmutableBlock<G2>> = puller.g2_manager.register_blocks(p_completes);
         anyhow::ensure!(
             p_immutables.len() == INITIAL_BLOCKS,
             "puller register_blocks: dropped some"
@@ -714,11 +717,7 @@ mod tests {
         // -----------------------------------------------------------
         // Phase 9: per-worker byte equality vs CAPTURED baselines
         // -----------------------------------------------------------
-        let rt_ids: Vec<BlockId> = rt_w1_ids
-            .iter()
-            .chain(rt_w2_ids.iter())
-            .copied()
-            .collect();
+        let rt_ids: Vec<BlockId> = rt_w1_ids.iter().chain(rt_w2_ids.iter()).copied().collect();
         anyhow::ensure!(
             rt_ids.len() == INITIAL_BLOCKS,
             "rt_ids count {} != {INITIAL_BLOCKS}",

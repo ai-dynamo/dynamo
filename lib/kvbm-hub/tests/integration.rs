@@ -15,10 +15,10 @@ use kvbm_hub::protocol::{
     peers_by_worker,
 };
 use kvbm_hub::{ConditionalDisaggClient, ConditionalDisaggManager, HubClientBuilder, HubServer};
-use velo::discovery::PeerDiscovery;
-use velo_ext::{InstanceId, PeerInfo, WorkerAddress};
 use velo::Transport;
+use velo::discovery::PeerDiscovery;
 use velo::transports::tcp::TcpTransportBuilder;
+use velo_ext::{InstanceId, PeerInfo, WorkerAddress};
 
 // ---- fixtures ---------------------------------------------------------------
 

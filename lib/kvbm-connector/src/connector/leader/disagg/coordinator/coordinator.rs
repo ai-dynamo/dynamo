@@ -291,9 +291,12 @@ impl ConditionalDisaggCoordinator {
             .state_for(request_id)
             .ok_or_else(|| anyhow!("commit_output_blocks: unknown request {}", request_id))?;
 
-        let bits = state
-            .as_prefill()
-            .ok_or_else(|| anyhow!("commit_output_blocks: request {} is not prefill-role", request_id))?;
+        let bits = state.as_prefill().ok_or_else(|| {
+            anyhow!(
+                "commit_output_blocks: request {} is not prefill-role",
+                request_id
+            )
+        })?;
 
         // Lock the session FIRST; buffer-or-commit decision happens
         // inside this critical section so a concurrent `run_setup`

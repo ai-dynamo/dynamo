@@ -809,8 +809,7 @@ impl LayoutRegistry {
         // Treating the duplicate as a no-op matches the function's
         // `ensure_*` semantic and is what every caller already wanted.
         if self.loaded_remotes.contains(&remote_key) {
-            let handles: Vec<LayoutHandle> =
-                inner.layouts.iter().map(|l| l.handle).collect();
+            let handles: Vec<LayoutHandle> = inner.layouts.iter().map(|l| l.handle).collect();
             return Ok(handles);
         }
 

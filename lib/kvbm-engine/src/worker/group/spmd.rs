@@ -296,8 +296,7 @@ impl WorkerTransfers for SpmdParallelWorkers {
                         // future must be awaited before SPMD declares
                         // the connect complete, otherwise the next
                         // caller can race the still-in-flight import.
-                        connect_responses
-                            .push(worker.connect_remote(instance_id, vec![repacked])?);
+                        connect_responses.push(worker.connect_remote(instance_id, vec![repacked])?);
                     }
                 }
             }

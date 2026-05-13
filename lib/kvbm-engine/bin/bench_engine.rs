@@ -1508,8 +1508,8 @@ fn validate_config(config: &BenchConfig) -> Result<()> {
     // `LayoutConfig.num_heads` so the planner can derive head_dim and
     // dispatch the right transform kernel. Refuse to start instead of
     // letting the layout builder fail later with a less obvious error.
-    let needs_num_heads = config.g1_layout.requires_num_heads()
-        || config.g2_layout.requires_num_heads();
+    let needs_num_heads =
+        config.g1_layout.requires_num_heads() || config.g2_layout.requires_num_heads();
     if needs_num_heads {
         ensure!(
             config.num_heads.is_some(),

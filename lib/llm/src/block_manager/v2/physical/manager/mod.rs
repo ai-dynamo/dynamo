@@ -387,8 +387,7 @@ impl LayoutRegistry {
         // Idempotent: if already loaded return the handles from the metadata.
         // Mirrors the same fix in kvbm-physical's LayoutRegistry::import_metadata.
         if self.loaded_remotes.contains(&remote_key) {
-            let handles: Vec<LayoutHandle> =
-                inner.layouts.iter().map(|l| l.handle).collect();
+            let handles: Vec<LayoutHandle> = inner.layouts.iter().map(|l| l.handle).collect();
             return Ok(handles);
         }
 

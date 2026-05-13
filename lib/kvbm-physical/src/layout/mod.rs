@@ -31,10 +31,10 @@ pub use config::{BlockDimension, LayoutConfig};
 // Re-export `TensorDataType` (which `LayoutConfig.dtype` consumes
 // under `permute_kernels`) so downstream crates can populate it
 // without taking a direct `kvbm-kernels` dep.
-#[cfg(feature = "permute_kernels")]
-pub use kvbm_kernels::TensorDataType;
 pub(crate) use fully_contiguous::FullyContiguousLayout;
 pub use kv_block_layout::{BlockDim, InnerShape, KvBlockLayout};
+#[cfg(feature = "permute_kernels")]
+pub use kvbm_kernels::TensorDataType;
 pub(crate) use layer_separate::LayerSeparateLayout;
 pub use physical::NixlMetadata;
 pub use physical::PhysicalLayout;

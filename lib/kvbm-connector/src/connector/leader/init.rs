@@ -720,17 +720,16 @@ impl ConnectorLeader {
             use kvbm_config::DisaggregationRole;
             use kvbm_engine::disagg::session::{SessionFactory, VeloSessionFactory};
 
-            let (hub, client, hub_velo_id) =
-                super::disagg::register_with_hub(
-                    &disagg_cfg,
-                    Arc::clone(
-                        self.runtime
-                            .velo()
-                            .expect("velo not initialized on runtime"),
-                    ),
-                )
-                    .await
-                    .context("conditional-disagg hub registration failed")?;
+            let (hub, client, hub_velo_id) = super::disagg::register_with_hub(
+                &disagg_cfg,
+                Arc::clone(
+                    self.runtime
+                        .velo()
+                        .expect("velo not initialized on runtime"),
+                ),
+            )
+            .await
+            .context("conditional-disagg hub registration failed")?;
             let _ = self.disagg_client.set(Arc::clone(&client));
 
             // Resolve runtime components needed by CD wiring.
@@ -759,10 +758,8 @@ impl ConnectorLeader {
             // opens or accepts an Attach and needs the peer in the local
             // velo streaming registry). Sharing one instance ensures the
             // resolver's internal de-dup cache works across both paths.
-            let peer_resolver: Arc<HubPeerResolver> = HubPeerResolver::new(
-                Arc::clone(&hub),
-                Arc::clone(&velo_runtime),
-            );
+            let peer_resolver: Arc<HubPeerResolver> =
+                HubPeerResolver::new(Arc::clone(&hub), Arc::clone(&velo_runtime));
             let session_factory: Arc<dyn SessionFactory> = VeloSessionFactory::with_peer_resolver(
                 Arc::clone(&velo_runtime),
                 Arc::clone(&leader),
