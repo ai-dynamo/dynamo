@@ -3,8 +3,8 @@
 
 [package]
 name = "dynamo-tokenizers"
-description = "Standalone tokenizer implementations (HuggingFace, tiktoken, FastTokenizers) for LLM inference serving."
 readme = "README.md"
+description = "Standalone tokenizer implementations (HuggingFace, tiktoken, FastTokenizers) for LLM inference serving."
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

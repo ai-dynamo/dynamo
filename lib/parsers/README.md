@@ -8,7 +8,7 @@ Given a token stream from any inference engine (vLLM, SGLang, etc.), extract str
 
 Two top-level modules, each with its own parser registry:
 
-```
+```text
 src/
 ├── tool_calling/        ← tool-call extraction (18 registered parsers)
 │   ├── parsers.rs         — registry + dispatch (detect_and_parse_tool_call)
@@ -31,7 +31,7 @@ src/
 
 ## How a request flows through the crate
 
-```
+```text
   token stream from engine
             │
             ▼
@@ -85,7 +85,7 @@ Reasoning parsers:
 | **Append-think** | `<think>...</think>` left inline as text, with `<think>` prefix on first chunk | `reasoning/minimax_append_think_parser.rs` | MiniMax M2 |
 | **Harmony channel** | Hidden `analysis` channel | `reasoning/gpt_oss_parser.rs` (wraps external `openai_harmony`) | gpt-oss-20B / 120B |
 | **Granite** | Custom start/end tokens | `reasoning/granite_parser.rs` | IBM Granite |
-| **Gemma 4 channel** | `<\|channel>thought\n...<channel|>` with role-label prefix stripped | `reasoning/gemma4_parser.rs` | Google Gemma 4 thinking models |
+| **Gemma 4 channel** | `<\|channel>thought\n...<channel\|>` with role-label prefix stripped | `reasoning/gemma4_parser.rs` | Google Gemma 4 thinking models |
 
 ## Adding a new parser
 
