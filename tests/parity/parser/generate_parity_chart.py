@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import html as html_lib
+import json
 import re
 import zoneinfo
 from pathlib import Path
@@ -315,7 +316,228 @@ def render_markdown(
     return "\n".join(lines)
 
 
-_IMPL_DISPLAY = {"vllm": "vLLM", "sglang": "SGLang"}
+_IMPL_DISPLAY = {"dynamo": "Dynamo", "vllm": "vLLM", "sglang": "SGLang"}
+
+
+def _format_output_block_html(block) -> str:
+    """HTML rendering of an `expected.<impl>` block for tooltips.
+    Applies _colorize_xml to `normal_text` so raw model output the engine
+    failed to parse shows the same tag coloring as the input."""
+    if not isinstance(block, dict):
+        return html_lib.escape("(no expectation)")
+    if block.get("unavailable"):
+        return html_lib.escape("(unavailable)")
+    if "error" in block:
+        return html_lib.escape(f"error matching {block['error']!r}")
+    nt = block.get("normal_text", "") or ""
+    calls = block.get("calls") or []
+    if calls:
+        rendered = ", ".join(
+            f"{c.get('name', '?')}({json.dumps(c.get('arguments', {}), ensure_ascii=False)})"
+            for c in calls
+        )
+        calls_line = html_lib.escape(f"calls=[{rendered}]")
+    else:
+        calls_line = "calls=[]"
+    nt_line = f"normal_text='{_colorize_xml(nt)}'"
+    return f"{nt_line}\n{calls_line}"
+
+
+# Matches both `<...>` and the Mistral-style `[NAME]`/`[/NAME]` form.
+# Brackets only match ALL-CAPS-underscore names so JSON arrays
+# (e.g. `[{...}]`, `[1, 2]`) don't get false-matched as tags.
+_TAG_RE = re.compile(r"<[^<>]+>|\[/?[A-Z][A-Z0-9_]*\]")
+
+# Stable name→palette-class mapping across the whole HTML run. First-seen
+# order assigns the next color; same name gets the same color everywhere.
+_PAIRED_PALETTE_SIZE = 8
+_paired_classes: dict[str, str] = {}
+
+
+def _paired_class_for(name: str) -> str:
+    cls = _paired_classes.get(name)
+    if cls is None:
+        cls = f"tt-c{len(_paired_classes) % _PAIRED_PALETTE_SIZE}"
+        _paired_classes[name] = cls
+    return cls
+
+
+_PIPES = ("|", "｜")  # ASCII and FULLWIDTH VERTICAL LINE (U+FF5C)
+_BEGIN_SUFFIXES = (
+    "_begin",
+    "▁begin",
+)  # ASCII underscore and LOWER ONE EIGHTH BLOCK (U+2581)
+_END_SUFFIXES = ("_end", "▁end")
+
+# Harmony (gpt-oss) tokens are linear state-machine delimiters. Turn-boundary
+# tokens form pseudo-pairs: `<|start|>` opens a turn; `<|end|>`, `<|return|>`,
+# or `<|call|>` closes it. Each closer flavor gets its own paired color so a
+# tool-call turn (start→call) is visually distinct from a normal turn (start→end)
+# or a final turn (start→return). Section markers stay as same-colored singletons.
+_HARMONY_TURN_OPEN = "start"
+_HARMONY_TURN_CLOSE = frozenset({"end", "return", "call"})
+_HARMONY_SECTION_MARKERS = frozenset({"channel", "constrain", "message"})
+
+
+def _strip_suffix(s: str, suffixes: tuple[str, ...]) -> str | None:
+    for suf in suffixes:
+        if s.endswith(suf) and len(s) > len(suf):
+            return s[: -len(suf)]
+    return None
+
+
+def _tag_kind_and_name(inner: str) -> tuple[str | None, str, str | None]:
+    """Classify `<...>` tag inner text into an open/close/singleton kind.
+
+    Returns (kind, pair_id, color_override):
+      * kind: 'open' | 'close' | 'singleton' | None
+      * pair_id: name used to match open against close on the stack
+      * color_override: when set, the paired span uses this name for the
+        color class instead of pair_id (lets `<|start|>...<|call|>` color
+        differently from `<|start|>...<|end|>` despite sharing pair_id).
+    """
+
+    def _name_of(s: str) -> str:
+        if not s:
+            return ""
+        return re.split(r"[\s/>]", s, 1)[0].rstrip("|")
+
+    if inner.startswith("/"):
+        return ("close", _name_of(inner[1:]), None)
+    starts_pipe = inner[:1] in _PIPES
+    ends_pipe = inner[-1:] in _PIPES
+    if starts_pipe and ends_pipe and len(inner) >= 2:
+        middle = inner[1:-1]
+        stripped = _strip_suffix(middle, _BEGIN_SUFFIXES)
+        if stripped is not None:
+            return ("open", stripped, None)
+        stripped = _strip_suffix(middle, _END_SUFFIXES)
+        if stripped is not None:
+            return ("close", stripped, None)
+        if middle == _HARMONY_TURN_OPEN:
+            return ("open", "__harmony_turn", None)
+        if middle in _HARMONY_TURN_CLOSE:
+            # Color the pair by which closer flavor was used.
+            return ("close", "__harmony_turn", f"__harmony_pair_{middle}")
+        if middle in _HARMONY_SECTION_MARKERS:
+            return ("singleton", "__harmony_section", None)
+        return (None, "", None)
+    if starts_pipe and inner[:1] == "|":
+        return ("open", _name_of(inner[1:]), None)
+    if ends_pipe and inner[-1:] == "|":
+        return ("close", _name_of(inner[:-1]), None)
+    return ("open", _name_of(inner), None)
+
+
+def _colorize_xml(text: str) -> str:
+    """HTML-escape `text` and wrap each `<...>` token in a span.
+    Paired open/close (stack match by tag name) → class 'tt-paired'.
+    Unmatched close, or open that never closes → class 'tt-orphan'.
+
+    Pairs standard XML (`<X>...</X>`) AND alt pipe-marker conventions:
+      `<|X>...<X|>`          (boundary ASCII pipes)
+      `<|X_begin|>...<|X_end|>`  (both-side pipes with _begin/_end suffix)
+    Lenient pop-through: a close looks down the stack for the nearest
+    name-match; anything un-closed above it is marked orphan. Lets
+    no-close singletons (e.g. `<|tool_call_argument_begin|>`) localize
+    their orphan-ness without poisoning the surrounding pairs.
+    """
+    pieces: list[str] = []
+    stack: list[tuple[str, int]] = []
+    last = 0
+    for m in _TAG_RE.finditer(text):
+        if m.start() > last:
+            pieces.append(html_lib.escape(text[last : m.start()]))
+        tok = m.group(0)
+        kind, pair_id, color_override = _tag_kind_and_name(tok[1:-1])
+        esc = html_lib.escape(tok)
+        if kind is None:
+            pieces.append(f'<span class="tt-orphan">{esc}</span>')
+        elif kind == "singleton":
+            cls = _paired_class_for(pair_id)
+            pieces.append(f'<span class="{cls}">{esc}</span>')
+        elif kind == "close":
+            match_at = -1
+            for i in range(len(stack) - 1, -1, -1):
+                if stack[i][0] == pair_id:
+                    match_at = i
+                    break
+            if match_at >= 0:
+                for _, unmatched_idx in stack[match_at + 1 :]:
+                    pieces[
+                        unmatched_idx
+                    ] = f'<span class="tt-orphan">{pieces[unmatched_idx]}</span>'
+                open_idx = stack[match_at][1]
+                # Closer's color_override (if any) wins, so the same
+                # `<|start|>` opener can recolor by its closer flavor.
+                cls = _paired_class_for(color_override or pair_id)
+                pieces[open_idx] = f'<span class="{cls}">{pieces[open_idx]}</span>'
+                pieces.append(f'<span class="{cls}">{esc}</span>')
+                del stack[match_at:]
+            else:
+                pieces.append(f'<span class="tt-orphan">{esc}</span>')
+        else:
+            pieces.append(esc)
+            stack.append((pair_id, len(pieces) - 1))
+        last = m.end()
+    for _, idx in stack:
+        pieces[idx] = f'<span class="tt-orphan">{pieces[idx]}</span>'
+    if last < len(text):
+        pieces.append(html_lib.escape(text[last:]))
+    return "".join(pieces)
+
+
+def _build_tooltip_html(case: dict, dyn) -> str:
+    """Rich HTML hover tooltip: head, input (colorized), per-engine output,
+    divergence reasons. Returns the full `<div class="ttip">...</div>`."""
+    case_id = case.get("__case_id", "")
+    desc = case.get("description") or ""
+    head = f"{case_id} — {desc}" if (case_id and desc) else (case_id or desc)
+
+    parts: list[str] = ['<div class="ttip">']
+    if head:
+        parts.append(f'<div class="ttip-head">{html_lib.escape(head)}</div>')
+
+    model_text = case.get("model_text")
+    if isinstance(model_text, str) and model_text:
+        parts.append('<div class="ttip-section">Input:</div>')
+        parts.append(f'<pre class="ttip-pre">{_colorize_xml(model_text)}</pre>')
+
+    expected = case.get("expected") or {}
+
+    def _norm(b):
+        return {
+            "calls": b.get("calls") or [],
+            "normal_text": b.get("normal_text") or "",
+        }
+
+    n_dyn = _norm(dyn) if isinstance(dyn, dict) else None
+    all_parity = isinstance(dyn, dict) and all(
+        isinstance(expected.get(i), dict)
+        and not expected[i].get("unavailable")
+        and "error" not in expected[i]
+        and _norm(expected[i]) == n_dyn
+        for i in ("dynamo", "vllm", "sglang")
+    )
+
+    if all_parity:
+        parts.append('<div class="ttip-section">All engines parity:</div>')
+        parts.append(f'<pre class="ttip-pre">{_format_output_block_html(dyn)}</pre>')
+    else:
+        for impl in ("dynamo", "vllm", "sglang"):
+            block = expected.get(impl)
+            parts.append(f'<div class="ttip-section">{_IMPL_DISPLAY[impl]}:</div>')
+            parts.append(
+                f'<pre class="ttip-pre">{_format_output_block_html(block)}</pre>'
+            )
+
+    reasons = _tooltip_for(case, dyn) if isinstance(dyn, dict) else ""
+    if reasons:
+        parts.append('<div class="ttip-section">Divergence:</div>')
+        parts.append(f'<pre class="ttip-pre">{html_lib.escape(reasons)}</pre>')
+
+    parts.append("</div>")
+    return "".join(parts)
 
 
 def _tooltip_for(case: dict, dyn: dict) -> str:
@@ -381,20 +603,13 @@ def render_cell_html(case: dict | None) -> str:
         return f'<td class="cell {cls}">{text}</td>'
 
     fp = case.get("__fixture_path", "")
-    case_id = case.get("__case_id", "")
-    desc = case.get("description") or ""
-
-    tooltip_lines = [f"{case_id} — {desc}"] if desc else [case_id] if case_id else []
-    reasons = _tooltip_for(case, dyn)
-    if reasons:
-        tooltip_lines.append("")
-        tooltip_lines.append(reasons)
-    title = html_lib.escape("\n".join(tooltip_lines)) if tooltip_lines else ""
-
+    # Case id + description live in the rich CSS tooltip head — don't also
+    # set `title=` on the link, or browsers stack a native tooltip on top.
+    ttip = _build_tooltip_html(case, dyn)
     if not fp:
-        return f'<td class="cell {cls}" title="{title}">{text}</td>'
+        return f'<td class="cell {cls}">{text}{ttip}</td>'
     href = html_lib.escape(fp)
-    return f'<td class="cell {cls}"><a href="{href}" title="{title}">{text}</a></td>'
+    return f'<td class="cell {cls}"><a href="{href}">{text}</a>{ttip}</td>'
 
 
 def _parser_cell_html(
@@ -516,9 +731,91 @@ td.cell a { color: inherit; text-decoration: none; display: block; }
 td.cell a:hover { background: #ffd; }
 tr.section td { background: #eef; font-weight: bold; text-align: left; }
 .legend span { font-family: ui-monospace, monospace; }
+.stats { font-size: 13px; margin-top: 0.4em; }
+.stats span { font-family: ui-monospace, monospace; font-weight: bold; }
 .generated { color: #888; font-size: 12px; margin-top: -0.5em; }
 table.glossary { margin-top: 0.5em; }
 table.glossary td.sub { white-space: nowrap; font-weight: bold; }
+
+/* CSS hover tooltip on cells (replaces native title= for cells).
+ * 500ms delay on appear; instant disappear when the cursor leaves. */
+td.cell { position: relative; }
+.ttip {
+    visibility: hidden;
+    opacity: 0;
+    position: absolute;
+    left: 0;
+    top: 100%;
+    z-index: 100;
+    background: #1f2937;
+    color: #e5e7eb;
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    line-height: 1.4;
+    max-width: 80vw;
+    min-width: 280px;
+    width: max-content;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+    text-align: left;
+    pointer-events: none;
+    white-space: normal;
+}
+td.cell:hover .ttip {
+    visibility: visible;
+    opacity: 1;
+    transition: opacity 0s 500ms, visibility 0s 500ms;
+}
+.ttip-head { font-weight: bold; margin-bottom: 4px; color: #fbbf24; }
+.ttip-section { font-weight: bold; margin-top: 6px; color: #93c5fd; }
+.ttip-pre { margin: 2px 0 0 0; white-space: pre-wrap; word-break: break-word; font-family: inherit; color: #e5e7eb; }
+/* Paired-tag palette: each distinct tag name gets a unique color (cycles
+ * if more names than colors). Orphans get the red-background treatment. */
+.tt-c0 { color: #34d399; }
+.tt-c1 { color: #60a5fa; }
+.tt-c2 { color: #fbbf24; }
+.tt-c3 { color: #f472b6; }
+.tt-c4 { color: #a78bfa; }
+.tt-c5 { color: #fb923c; }
+.tt-c6 { color: #22d3ee; }
+.tt-c7 { color: #f87171; }
+.tt-orphan { background: #7f1d1d; color: #fecaca; padding: 0 2px; border-radius: 2px; }
+"""
+
+# Clamps `.ttip` into the viewport on hover. Pure CSS can't know each
+# cell's screen position, so we shift the tooltip's `left` (and flip it
+# above the cell if it would overflow the bottom) on mouseenter.
+_HTML_SCRIPT = r"""
+(function () {
+  const margin = 8;
+  function place(cell) {
+    const ttip = cell.querySelector('.ttip');
+    if (!ttip) return;
+    ttip.style.left = '0px';
+    ttip.style.top = '100%';
+    ttip.style.right = 'auto';
+    ttip.style.bottom = 'auto';
+    ttip.style.maxWidth = (window.innerWidth - 2 * margin) + 'px';
+    const cellRect = cell.getBoundingClientRect();
+    const tipRect = ttip.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let shiftX = 0;
+    const overflowRight = (cellRect.left + tipRect.width) - (vw - margin);
+    if (overflowRight > 0) shiftX = -overflowRight;
+    const absLeft = cellRect.left + shiftX;
+    if (absLeft < margin) shiftX += (margin - absLeft);
+    ttip.style.left = shiftX + 'px';
+    if (cellRect.bottom + tipRect.height > vh - margin
+        && cellRect.top - tipRect.height > margin) {
+      ttip.style.top = 'auto';
+      ttip.style.bottom = '100%';
+    }
+  }
+  document.querySelectorAll('td.cell').forEach(function (cell) {
+    cell.addEventListener('mouseenter', function () { place(cell); });
+  });
+})();
 """
 
 _LEGEND_HTML = (
@@ -538,6 +835,56 @@ _LEGEND_HTML = (
     "<strong>§</strong> (parser column) = no SGLang peer parser for this family."
     "</p>"
 )
+
+
+def _compute_stats(
+    cases: dict, sub_cases: list[str], families: list[str]
+) -> dict[str, int]:
+    """Aggregate cell outcomes across the (family × sub_case) grid."""
+    s = {
+        "families": len(families),
+        "sub_cases": len(sub_cases),
+        "slots": len(families) * len(sub_cases),
+        "real": 0,
+        "parity": 0,
+        "documented": 0,
+        "research": 0,
+        "errors": 0,
+        "na": 0,
+    }
+    for fam in families:
+        for sub in sub_cases:
+            case = cases.get((fam, sub))
+            text = cell_for(case)
+            if case is None or text == "n/a":
+                s["na"] += 1
+                continue
+            s["real"] += 1
+            if text == "=":
+                s["parity"] += 1
+            elif "!" in text:
+                s["errors"] += 1
+            elif "?" in text:
+                s["research"] += 1
+            else:
+                s["documented"] += 1
+    return s
+
+
+def _stats_html(s: dict[str, int]) -> str:
+    return (
+        '<p class="stats">'
+        f"Stats: {s['families']} families × {s['sub_cases']} sub-cases "
+        f"= {s['slots']} grid slots ({s['na']} n/a). "
+        f"<strong>{s['real']}</strong> real cases: "
+        f'<span style="color:#0a7d2c">{s["parity"]} full parity</span> · '
+        f'<span style="color:#0a7d2c">{s["documented"]} documented divergences</span> '
+        "(have <code>reason:</code>) · "
+        f'<span style="color:#c63">{s["research"]} research-needed</span> '
+        "(no <code>reason:</code> yet) · "
+        f'<span style="color:#b00">{s["errors"]} expected-errors</span>.'
+        "</p>"
+    )
 
 
 def render_html(
@@ -570,6 +917,9 @@ def render_html(
             render_row_html(model, fam, cases, sub_cases, refs, no_vllm, no_sglang)
         )
 
+    all_families = [fam for _, fam in top_n] + [fam for _, fam in others]
+    stats = _compute_stats(cases, sub_cases, all_families)
+
     table_html = (
         "<table>"
         f"<thead><tr>{fixed_headers}{sub_headers}</tr></thead>"
@@ -583,12 +933,14 @@ def render_html(
     return (
         "<!DOCTYPE html>\n"
         '<html lang="en">\n'
-        '<head><meta charset="utf-8"><title>Parser parity chart</title>'
+        '<head><meta charset="utf-8"><title>Dynamo parser parity chart</title>'
         f"<style>{_HTML_STYLE}</style></head>\n"
         "<body>\n"
-        "<h1>Parser parity chart</h1>\n"
+        "<h1>Dynamo parser parity chart</h1>\n"
         f'<p class="generated">Auto-generated on {html_lib.escape(stamp)} '
-        "from <code>tests/parity/parser/fixtures/**/PARSER.*.yaml</code>.</p>\n"
+        f"from <code>tests/parity/parser/fixtures/**/PARSER.*.yaml</code>: "
+        f"<code>python3 tests/parity/parser/generate_parity_chart.py --html "
+        f"&gt; tests/parity/parser/PARITY.html</code></p>\n"
         "<p>Parser column links to the family's Rust config / parser. "
         "Sub-case column headers link to "
         '<a href="../../../lib/parsers/PARSER_CASES.md">PARSER_CASES.md</a> '
@@ -597,7 +949,9 @@ def render_html(
         "the divergence reason.</p>\n"
         f"{table_html}\n"
         f"{_LEGEND_HTML}\n"
+        f"{_stats_html(stats)}\n"
         f"{_glossary_html(descriptions, sub_cases)}\n"
+        f"<script>{_HTML_SCRIPT}</script>\n"
         "</body></html>\n"
     )
 
