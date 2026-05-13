@@ -119,7 +119,9 @@ OpenAI-compatible `tool_calls` entries on the response:
     {
       "index": 0,
       "message": {
+        "role": "assistant",
         "content": null,
+        "reasoning_content": "The user is asking about the weather in two cities: San Francisco and New York. I need to call the get_weather function for each city. I'll make two separate function calls to get the weather information for both locations.\n",
         "tool_calls": [
           {
             "id": "call-56223a95-3d14-4433-a94e-011f106c0e40",
@@ -137,9 +139,7 @@ OpenAI-compatible `tool_calls` entries on the response:
               "arguments": "{\"location\":\"New York\"}"
             }
           }
-        ],
-        "role": "assistant",
-        "reasoning_content": "The user is asking about the weather in two cities: San Francisco and New York. I need to call the get_weather function for each city. I'll make two separate function calls to get the weather information for both locations.\n"
+        ]
       },
       "finish_reason": "tool_calls",
       "logprobs": null
