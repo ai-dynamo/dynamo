@@ -370,16 +370,20 @@ search rounds and eight parallel optimizer evaluations.
 
 | Category | Result |
 |---|---|
-| Workload | `nvidia/Kimi-K2.5-NVFP4`, vLLM 0.19.0, B200-SXM, full 23,608-request `toolagent_trace.jsonl`, `arrival_speedup_ratio=2.0` |
+| Workload | `nvidia/Kimi-K2.5-NVFP4`, vLLM 0.19.0, B200-SXM, full 23,608-request `toolagent_trace.jsonl`, `arrival_speedup_ratio=3.0` |
+| Engine config | `block_size=512`, `num_gpu_blocks=16384`, `max_num_batched_tokens=16384` |
 | Budget | 16 GPUs |
-| Objective | Maximize output throughput subject to mean TTFT <= 5,000 ms, mean TPOT <= 75 ms, and mean end-to-end latency <= 20,000 ms |
+| Objective | Maximize output throughput subject to mean TTFT <= 2,500 ms, mean TPOT <= 75 ms, and mean end-to-end latency <= 20,000 ms |
 | Winning layout | `prefill_tp=2`, `decode_tp=1`, `prefill_workers=5`, `decode_workers=6` |
-| Router | `kv_router`, `overlap_score_weight=0.5` |
-| Key metrics | `output_throughput_tok_s=2406.46`, `prefix_cache_reused_ratio=0.5091`, `mean_ttft_ms=2268.87`, `mean_tpot_ms=32.97`, `mean_e2e_latency_ms=8135.19` |
+| Router | `kv_router`, `overlap_score_weight=1.0` |
+| Key metrics | `output_throughput_tok_s=3574.86`, `prefix_cache_reused_ratio=0.5127`, `mean_ttft_ms=1695.40`, `mean_tpot_ms=44.68`, `mean_e2e_latency_ms=9683.02` |
 
 The takeaway is not that one configuration is always best. It is that the twin
 can turn a large configuration space into a workload-specific deployment
-shortlist.
+shortlist. In this run, the highest-throughput infeasible state was close:
+`prefill_tp=1`, `decode_tp=1`, `prefill_workers=8`, and `decode_workers=8`
+reached `output_throughput_tok_s=3580.95`, but missed the TTFT SLA with
+`mean_ttft_ms=2535.70`.
 
 ### 3.2 Discovery Examples Beyond The Current Optimizer
 
