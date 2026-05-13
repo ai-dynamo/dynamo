@@ -100,7 +100,6 @@ explicitly future work, not part of v0.
 | `--acting-decay-tau-seconds` | `DYN_THUNDERAGENT_ACTING_DECAY_TAU_SECONDS` | 1.0 | Tau for exponential decay of ACTING tokens in the **resume-side** working set. |
 | `--scheduler-interval-seconds` | `DYN_THUNDERAGENT_SCHEDULER_INTERVAL_SECONDS` | 5.0 | Scheduler tick period. |
 | `--scheduling-disabled` | `DYN_THUNDERAGENT_SCHEDULING_DISABLED` | false | Record lifecycle state but skip pause/resume/soft-demote. Useful for attribution. |
-| `--kv-aware-resume-enabled` | `DYN_THUNDERAGENT_KV_AWARE_RESUME_ENABLED` | false | Experimental override; leave at default. |
 | `--model-name` | `DYN_THUNDERAGENT_MODEL_NAME` | – | Frontend-visible model name. Triggers `register_model`. |
 | `--model-path` | `DYN_THUNDERAGENT_MODEL_PATH` | – | Path or HF repo ID for tokenizer + model card. |
 
@@ -291,8 +290,8 @@ non-agentic traffic sharing the same workers.
 pytest components/src/dynamo/thunderagent_router/tests/test_router.py
 ```
 
-The unit tests exercise admission, after-request token accounting, the
-default BFD-on-resume path, and the opt-in KV-aware-override path.
+The unit tests exercise admission, after-request token accounting, and
+the default BFD-on-resume path.
 
 ---
 

@@ -4,8 +4,8 @@
 """Unit tests for KvThunderAgentRouter that don't need a Dynamo runtime.
 
 These mock out KvRouter and FpmCapacityProvider so we can validate the v0
-scheduler primitives (pause/resume gating, soft demotion, KV-aware resume
-selection) deterministically.
+scheduler primitives (pause/resume gating, soft demotion, sticky worker
+placement) deterministically.
 """
 
 from __future__ import annotations
@@ -78,11 +78,9 @@ async def test_after_request_records_real_tokens():
         "p1",
         prompt_tokens=120,
         completion_tokens=30,
-        last_prefix_token_ids=[1, 2, 3, 4],
     )
     program = router._table.programs["p1"]
     assert program.token_total == 150
-    assert program.last_prefix_token_ids == [1, 2, 3, 4]
     assert program.status == ProgramStatus.ACTING
 
 
@@ -96,49 +94,21 @@ async def test_before_request_records_exact_prompt_estimate_before_admission():
 
 
 @pytest.mark.asyncio
-async def test_kv_aware_resume_default_off_does_not_override_bfd():
-    """Default (kv_aware_resume_enabled=False): select_worker stays out of the
-    way on resume and lets BFD's worker assignment from _greedy_resume stand.
-    Empirically the override loses 6-11% spm on 2xTP4 / 128 agents."""
+async def test_select_worker_returns_none_when_no_sticky_assignment():
+    """Without a prior sticky assignment, select_worker returns None so the
+    KvRouter picks freely from current token_ids."""
     router, _, kv = make_router(kv_response=(42, 0, 7))
     await router.before_request("p1")
     await router.after_request(
         "p1",
         prompt_tokens=100,
         completion_tokens=10,
-        last_prefix_token_ids=[10, 11, 12],
     )
     worker_id = await router.select_worker(
         "p1", token_ids=[10, 11, 12, 13, 14], was_paused=True
     )
     assert worker_id is None
     assert kv.calls == []
-
-
-@pytest.mark.asyncio
-async def test_kv_aware_resume_when_enabled_consults_kv_router_with_last_prefix():
-    """Opt-in ablation path: with kv_aware_resume_enabled=True, select_worker
-    overrides BFD's worker assignment with KvRouter.best_worker(last_prefix)."""
-    cfg = ThunderAgentConfig(
-        scheduler_interval_seconds=0.05,
-        resume_timeout_seconds=2.0,
-        pause_threshold=0.95,
-        soft_demote_threshold=0.80,
-        kv_aware_resume_enabled=True,
-    )
-    router, _, kv = make_router(kv_response=(42, 0, 7), config=cfg)
-    await router.before_request("p1")
-    await router.after_request(
-        "p1",
-        prompt_tokens=100,
-        completion_tokens=10,
-        last_prefix_token_ids=[10, 11, 12],
-    )
-    worker_id = await router.select_worker(
-        "p1", token_ids=[10, 11, 12, 13, 14], was_paused=True
-    )
-    assert worker_id == 42
-    assert kv.calls == [[10, 11, 12]]
 
 
 @pytest.mark.asyncio
@@ -149,7 +119,6 @@ async def test_select_worker_falls_through_when_not_paused():
         "p1",
         prompt_tokens=100,
         completion_tokens=10,
-        last_prefix_token_ids=[10, 11, 12],
     )
     worker_id = await router.select_worker(
         "p1", token_ids=[10, 11, 12, 13], was_paused=False
@@ -317,7 +286,7 @@ async def test_scheduling_disabled_passthrough_records_lifecycle():
     assert decision.priority_jump == 0.0
     assert decision.was_soft_demoted is False
 
-    # Lifecycle is still recorded so KV-aware resume / analysis stays usable.
+    # Lifecycle is still recorded so analysis stays usable.
     program = router._table.programs["p1"]
     assert program.step_count == 1
     assert program.lifecycle == ProgramLifecycle.ACTIVE
@@ -329,10 +298,8 @@ async def test_scheduling_disabled_passthrough_records_lifecycle():
         "p1",
         prompt_tokens=120,
         completion_tokens=30,
-        last_prefix_token_ids=[1, 2, 3, 4],
     )
     assert program.token_total == 150
-    assert program.last_prefix_token_ids == [1, 2, 3, 4]
     assert program.lifecycle == ProgramLifecycle.ACTIVE  # not PAUSED
 
     # Soft-demote tick still safe to call; with scheduling_disabled the start()

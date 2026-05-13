@@ -40,17 +40,14 @@ def test_begin_request_increments_step_and_resets_acting_since():
     assert p.status == ProgramStatus.REASONING
 
 
-def test_end_request_records_real_token_totals_and_prefix():
+def test_end_request_records_real_token_totals():
     table = ProgramTable()
     table.begin_request("p1")
-    p = table.end_request(
-        "p1", prompt_tokens=120, completion_tokens=30, last_prefix_token_ids=[1, 2, 3]
-    )
+    p = table.end_request("p1", prompt_tokens=120, completion_tokens=30)
     assert p is not None
     assert p.last_prompt_tokens == 120
     assert p.last_completion_tokens == 30
     assert p.token_total == 150
-    assert p.last_prefix_token_ids == [1, 2, 3]
     assert p.status == ProgramStatus.ACTING
 
 

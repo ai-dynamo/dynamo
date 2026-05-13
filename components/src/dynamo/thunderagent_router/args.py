@@ -33,7 +33,6 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
     acting_decay_tau_seconds: float
     scheduler_interval_seconds: float
     scheduling_disabled: bool
-    kv_aware_resume_enabled: bool
     model_name: Optional[str] = None
     model_path: Optional[str] = None
 
@@ -50,7 +49,6 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
             acting_decay_tau_seconds=self.acting_decay_tau_seconds,
             scheduler_interval_seconds=self.scheduler_interval_seconds,
             scheduling_disabled=self.scheduling_disabled,
-            kv_aware_resume_enabled=self.kv_aware_resume_enabled,
         )
 
     def validate(self) -> None:  # type: ignore[override]
@@ -187,17 +185,6 @@ class ThunderAgentArgGroup(ArgGroup):
             help="When set, the router records lifecycle state but does not "
             "pause / resume / soft-demote. Used as the 'TR off' arm to "
             "isolate scheduling value vs program-aware passthrough.",
-            arg_type=bool,
-        )
-        add_argument(
-            g,
-            flag_name="--kv-aware-resume-enabled",
-            env_var="DYN_THUNDERAGENT_KV_AWARE_RESUME_ENABLED",
-            default=False,
-            help="Experimental override on resume worker selection; leave "
-            "at default (False). When True, select_worker uses "
-            "KvRouter.best_worker(last_prefix) instead of BFD's load "
-            "assignment. Kept for ablation reproducibility.",
             arg_type=bool,
         )
         add_argument(

@@ -146,8 +146,8 @@ class ThunderAgentRouterHandler:
             self._capacity.stop()
 
     async def generate(self, request: dict[str, Any]):
-        """Wrap KvRouter.generate_from_request with ThunderAgent admission +
-        KV-aware resume placement + token accounting."""
+        """Wrap KvRouter.generate_from_request with ThunderAgent admission,
+        sticky-worker pinning, and real-token accounting."""
         if self._kv_router is None or self._scheduler is None:
             raise RuntimeError("ThunderAgentRouterHandler not initialized")
 
@@ -189,8 +189,9 @@ class ThunderAgentRouterHandler:
             program_id, estimated_prompt_tokens=estimated_prompt_tokens
         )
 
-        # Item 2: KV-aware resume placement. If the scheduler thinks this
-        # turn is a resume, ask the KV router for the warmest-prefix worker.
+        # Sticky worker pin: if the program already has an assigned worker
+        # (from a prior turn or BFD resume), pin the request there. Returns
+        # None to let the KV router pick freely.
         worker_pin = await self._scheduler.select_worker(
             program_id, token_ids, decision.was_paused
         )
@@ -215,8 +216,8 @@ class ThunderAgentRouterHandler:
             routing["priority_jump"] = float(existing) + decision.priority_jump
             preprocessed["routing"] = routing
 
-        # Apply soft worker pin only when KV-aware resume returned a target.
-        # Otherwise let the KV router pick freely from the indexer.
+        # Apply the sticky worker pin if select_worker resolved one;
+        # otherwise let the KV router pick freely from the indexer.
         if worker_pin is not None:
             routing = preprocessed.get("routing") or {}
             routing["backend_instance_id"] = worker_pin
@@ -275,9 +276,6 @@ class ThunderAgentRouterHandler:
                 program_id,
                 prompt_tokens_seen,
                 completion_tokens_seen,
-                last_prefix_token_ids=token_ids
-                if isinstance(token_ids, list)
-                else None,
             )
 
     async def stats(self, _request: Any):

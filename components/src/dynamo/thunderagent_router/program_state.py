@@ -3,14 +3,10 @@
 
 """Program lifecycle data model.
 
-Mirrors ``ThunderAgent/program/state.py`` semantics with two intentional
-differences for v0:
-
-* ``token_total`` comes from real ``prompt_tokens + completion_tokens`` reported
-  on the chat-completions response, not a ``chars / 5`` heuristic.
-* ``last_prefix_token_ids`` is captured at request_end and made available to
-  ``KvRouter.best_worker`` when the opt-in ``kv_aware_resume_enabled`` flag
-  is set. Default-off; see router.py for the rationale.
+Mirrors ``ThunderAgent/program/state.py`` semantics with one intentional
+difference for v0: ``token_total`` comes from real
+``prompt_tokens + completion_tokens`` reported on the chat-completions
+response, not a ``chars / 5`` heuristic.
 """
 
 from __future__ import annotations
@@ -70,11 +66,6 @@ class Program:
     token_total: int = 0
     last_prompt_tokens: int = 0
     last_completion_tokens: int = 0
-
-    # KV-aware resume hint. Captured at the end of each turn so the next-turn
-    # before_request can ask KvRouter.best_worker(last_prefix) for a placement
-    # that lands on the warmest worker.
-    last_prefix_token_ids: Optional[list[int]] = None
 
     step_count: int = 0
     marked_for_pause: bool = False
@@ -136,18 +127,14 @@ class ProgramTable:
         program_id: str,
         prompt_tokens: int,
         completion_tokens: int,
-        last_prefix_token_ids: Optional[list[int]] = None,
     ) -> Optional[Program]:
-        """Transition program -> ACTING; record real token accounting and the
-        last-turn prefix for KV-aware resume placement."""
+        """Transition program -> ACTING and record real token accounting."""
         program = self.programs.get(program_id)
         if program is None:
             return None
         program.last_prompt_tokens = prompt_tokens
         program.last_completion_tokens = completion_tokens
         program.token_total = prompt_tokens + completion_tokens
-        if last_prefix_token_ids is not None:
-            program.last_prefix_token_ids = list(last_prefix_token_ids)
         program.status = ProgramStatus.ACTING
         program.acting_since = time.time()
         return program

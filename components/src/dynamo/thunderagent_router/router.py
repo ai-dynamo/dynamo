@@ -93,10 +93,10 @@ class ThunderAgentConfig:
     reference proxy when v0 ablations replicate prior numbers."""
 
     scheduling_disabled: bool = False
-    """When true, the router records lifecycle state (begin/end_request,
-    last_prefix capture) but does NOT pause, resume, or soft-demote. The
-    scheduler tick is also skipped. Used as the 'TR off' arm to isolate
-    scheduling value from program-aware passthrough."""
+    """When true, the router records lifecycle state (begin/end_request)
+    but does NOT pause, resume, or soft-demote. The scheduler tick is also
+    skipped. Used as the 'TR off' arm to isolate scheduling value from
+    program-aware passthrough."""
 
     resume_hysteresis: float = 0.10
     """How far below ``pause_threshold`` the working set must drop before
@@ -134,12 +134,6 @@ class ThunderAgentConfig:
 
     buffer_per_program: int = DEFAULT_BUFFER_PER_PROGRAM
     """Headroom reserved per program when BFD-packing during resume."""
-
-    kv_aware_resume_enabled: bool = False
-    """Experimental override on resume worker selection. When True,
-    ``select_worker`` uses ``KvRouter.best_worker(last_prefix)`` instead of
-    BFD's load assignment. Default False; kept for ablation
-    reproducibility."""
 
 
 class KvThunderAgentRouter:
@@ -232,9 +226,9 @@ class KvThunderAgentRouter:
         before forwarding to the KV router queue.
         """
         if self._cfg.scheduling_disabled:
-            # Passthrough: still record lifecycle so KV-aware resume + analysis
-            # have program_id-aware data, but skip the admission gate and
-            # priority adjustment.
+            # Passthrough: still record lifecycle so analysis has
+            # program_id-aware data, but skip the admission gate and priority
+            # adjustment.
             async with self._lock:
                 self._table.begin_request(program_id, estimated_prompt_tokens)
             return PauseDecision(program_id=program_id)
@@ -346,41 +340,15 @@ class KvThunderAgentRouter:
     ) -> Optional[int]:
         """Resolve a worker for this turn.
 
-        Item 2 (KV-aware resume): if the program was paused, prefer the worker
-        with the warmest KV for the program's last-turn prefix. Otherwise fall
-        through to the KV router's normal best_worker for the current
-        ``token_ids`` (which is what the frontend would have done anyway).
-
-        Returns ``None`` to indicate "let the KV router pick" -- the handler
-        forwards the request without a pinned ``worker_id``.
+        ThunderAgent keeps a program sticky to its assigned backend until it is
+        paused/resumed. Pin to the assigned worker when known; otherwise return
+        ``None`` so the KvRouter picks from current ``token_ids`` (which is what
+        the frontend would have done anyway).
         """
         async with self._lock:
             program = self._table.programs.get(program_id)
-            prefix = program.last_prefix_token_ids if program else None
             assigned_worker_id = program.assigned_worker_id if program else None
 
-        if was_paused and prefix and self._cfg.kv_aware_resume_enabled:
-            try:
-                worker_id, _dp_rank, _overlap = await self._kv_router.best_worker(
-                    prefix
-                )
-                logger.debug(
-                    "ThunderAgent KV-aware resume: program=%s prefix_len=%d -> worker=%d",
-                    program_id,
-                    len(prefix),
-                    worker_id,
-                )
-                return worker_id
-            except Exception as exc:
-                logger.warning(
-                    "best_worker failed during KV-aware resume for %s: %s; falling back",
-                    program_id,
-                    exc,
-                )
-
-        # ThunderAgent keeps a program sticky to its assigned backend until it
-        # is paused/resumed. Pin to the assigned worker when known; otherwise
-        # let the KvRouter pick from current token_ids.
         if assigned_worker_id is not None:
             return assigned_worker_id
         return None
@@ -403,17 +371,14 @@ class KvThunderAgentRouter:
         program_id: str,
         prompt_tokens: int,
         completion_tokens: int,
-        last_prefix_token_ids: Optional[list[int]] = None,
     ) -> None:
-        """Transition program -> ACTING, record real token accounting (item 1)
-        and the prefix used for KV-aware resume placement (item 2)."""
+        """Transition program -> ACTING and record real token accounting."""
         do_pause = False
         async with self._lock:
             program = self._table.end_request(
                 program_id,
                 prompt_tokens,
                 completion_tokens,
-                last_prefix_token_ids,
             )
             if program is None:
                 return
