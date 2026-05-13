@@ -629,6 +629,7 @@ class SglangEngineFactory:
         self,
         instance_id: ModelCardInstanceId,
         mdc: ModelDeploymentCard,
+        routed_engine: Any | None,
     ) -> PythonAsyncEngine:
         """Called by Rust when a model is discovered."""
         model_type = mdc.model_type()
