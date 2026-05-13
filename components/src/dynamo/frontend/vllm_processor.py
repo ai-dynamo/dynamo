@@ -629,7 +629,7 @@ class VllmProcessor:
             else:
                 with _nvtx.annotate("mm_frontend:client_generate", color="red"):
                     dynamo_stream = await self.router.generate(
-                        dynamo_preproc, annotated=False
+                        dynamo_preproc, annotated=False, context=context
                     )
 
             rng_stream = _nvtx.start_range(
