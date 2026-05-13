@@ -334,3 +334,101 @@ fn mm_info_conversion_roundtrip() {
     let back: RequestMmObjectInfo = t.into();
     assert_eq!(r, back);
 }
+
+// -----------------------------------------------------------------------------
+// Producer's block_hash matches the router's LocalBlockHash for default requests
+// -----------------------------------------------------------------------------
+//
+// The kvbm-consolidator's vLLM/TRT-LLM ingestion path (`lib/kvbm-consolidator/src/tracker.rs`)
+// routes through `Request::into_blocks()` to compute block_hash + PLH. The kv-router's
+// indexer recomputes `tokens_hash` from token_ids via `compute_block_hash_for_seq`
+// (`lib/kv-router/src/protocols.rs:70-125`) using `XXH3_SEED = 1337` as the base seed
+// (plus `xxh3_64(lora_name)` when lora is set). For the indexer's lookup to find a
+// match, the producer's `salt_hash` for a default request must equal that seed.
+#[test]
+fn producer_block_hash_matches_router_local_block_hash_default() {
+    use dynamo_tokens::compute_hash_v2;
+
+    const ROUTER_XXH3_SEED: u64 = 1337;
+    let tokens: Vec<Token> = (1u32..=16).collect();
+    let block_size: u32 = 4;
+
+    let producer = req(tokens.clone(), None, None, vec![])
+        .block_hashes(block_size)
+        .expect("block_hashes");
+
+    let token_bytes: Vec<u8> = tokens.iter().flat_map(|t| t.to_le_bytes()).collect();
+    let router: Vec<u64> = token_bytes
+        .chunks_exact((block_size as usize) * std::mem::size_of::<u32>())
+        .map(|chunk| compute_hash_v2(chunk, ROUTER_XXH3_SEED))
+        .collect();
+
+    assert_eq!(
+        producer, router,
+        "producer block_hash (default request) must equal the router's LocalBlockHash"
+    );
+}
+
+// Same check with a LoRA adapter set: producer seeds with
+// `XXH3_SEED + xxh3_64(lora_name)`, matching `compute_block_hash_for_seq`'s lora path.
+#[test]
+fn producer_block_hash_matches_router_local_block_hash_lora() {
+    use dynamo_tokens::compute_hash_v2;
+
+    const ROUTER_XXH3_SEED: u64 = 1337;
+    let lora = "alpha-7b";
+    let tokens: Vec<Token> = (1u32..=16).collect();
+    let block_size: u32 = 4;
+
+    let producer = req(tokens.clone(), Some(lora), None, vec![])
+        .block_hashes(block_size)
+        .expect("block_hashes");
+
+    let router_seed = ROUTER_XXH3_SEED.wrapping_add(compute_hash_v2(lora.as_bytes(), 0));
+    let token_bytes: Vec<u8> = tokens.iter().flat_map(|t| t.to_le_bytes()).collect();
+    let router: Vec<u64> = token_bytes
+        .chunks_exact((block_size as usize) * std::mem::size_of::<u32>())
+        .map(|chunk| compute_hash_v2(chunk, router_seed))
+        .collect();
+
+    assert_eq!(
+        producer, router,
+        "producer block_hash with lora must equal compute_block_hash_for_seq with the same lora"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Chain step is delegated to dynamo_tokens::compute_next_sequence_hash
+// -----------------------------------------------------------------------------
+//
+// The producer's per-block sequence_hash chain and the kv-router's request-side chain
+// must agree, or the positional indexer's chain re-validation (which composes
+// `compute_next_seq_hash(prev_seq, local_hash)` against the stored event's `block_hash`)
+// drains at position 1+ and the radix-tree silently keeps walking by tokens_hash.
+// Both sides now route through `dynamo_tokens::compute_next_sequence_hash`; verify
+// the producer's `Request::sequence_hashes()` matches a manual chain built with it.
+#[test]
+fn request_sequence_hashes_match_canonical_chain() {
+    use dynamo_tokens::compute_next_sequence_hash;
+
+    let tokens: Vec<Token> = (1u32..=20).collect();
+    let block_size: u32 = 4;
+
+    let request = req(tokens, None, None, vec![]);
+    let block_hashes = request.block_hashes(block_size).unwrap();
+    let sequence_hashes = request.sequence_hashes(block_size).unwrap();
+    assert_eq!(block_hashes.len(), sequence_hashes.len());
+    assert!(block_hashes.len() >= 3);
+
+    // First block: sequence_hash == block_hash.
+    assert_eq!(sequence_hashes[0], block_hashes[0]);
+
+    // Every subsequent step uses the canonical chain helper.
+    for i in 1..block_hashes.len() {
+        let expected = compute_next_sequence_hash(sequence_hashes[i - 1], block_hashes[i]);
+        assert_eq!(
+            sequence_hashes[i], expected,
+            "chain step at position {i} must use compute_next_sequence_hash"
+        );
+    }
+}

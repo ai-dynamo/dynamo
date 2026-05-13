@@ -40,8 +40,9 @@ pub type SaltHash = u64;
 pub type BlockHash = u64;
 
 /// A 64-bit sequence-aware hash. Equals the [`BlockHash`] at position 0 and
-/// `xxh3([prev_seq, block_hash], 0)` at every subsequent position. Salt propagates
-/// through `seq_hash[0]` since `block_hash[0]` already encodes it.
+/// [`compute_next_sequence_hash(prev_seq, block_hash)`](compute_next_sequence_hash)
+/// at every subsequent position. Salt propagates through `seq_hash[0]` since
+/// `block_hash[0]` already encodes it.
 pub type SequenceHash = u64;
 
 /// Computes a hash of the data using the given seed (raw u64).
@@ -50,6 +51,35 @@ pub type SequenceHash = u64;
 /// construction; this raw-u64 form is kept for low-level callers.
 pub fn compute_hash_v2(data: &[u8], seed: u64) -> u64 {
     xxhash_rust::xxh3::xxh3_64_with_seed(data, seed)
+}
+
+/// Canonical XXH3 seed used by every chain-step `(parent_seq, child_block_hash) → next_seq`
+/// in this codebase. Must match `dynamo_kv_router::protocols::XXH3_SEED` — the router's
+/// `compute_seq_hash_for_block` and the `PositionalIndexer`'s chain re-computation both
+/// route through [`compute_next_sequence_hash`] (or equivalently seeded helpers in
+/// `kv-router`), so changing this constant requires all of them to flip in lockstep.
+pub const CHAIN_XXH3_SEED: u64 = 1337;
+
+/// Chain-step for sequence hashing: returns the [`SequenceHash`] at `position + 1`
+/// given the parent's `SequenceHash` and the child block's [`BlockHash`].
+///
+/// This is the single source of truth for the chain recurrence used by:
+/// - [`PositionalLineageHash::extend`]
+/// - [`TokenBlock::from_chunk`]
+/// - `dynamo_kv_router::protocols::compute_next_seq_hash` (request side)
+/// - `dynamo_kv_router::indexer::PositionalIndexer` (chain re-validation)
+///
+/// Salt is already mixed into `block_hash[0]` and propagates through every parent, so
+/// the per-step seed is a constant: re-feeding salt at each step would be redundant.
+/// Any constant seed preserves PLH composability — the value is set to
+/// [`CHAIN_XXH3_SEED`] to match the router's existing wire format.
+#[inline]
+pub fn compute_next_sequence_hash(
+    parent_sequence_hash: SequenceHash,
+    child_block_hash: BlockHash,
+) -> SequenceHash {
+    let combined = [parent_sequence_hash, child_block_hash];
+    compute_hash_v2(cast_slice(&combined), CHAIN_XXH3_SEED)
 }
 
 /// Custom serde codec that encodes a `u128` as a 16-byte big-endian byte sequence.
@@ -564,17 +594,17 @@ impl PositionalLineageHash {
 
     /// Extends this lineage by one block, producing the child PLH.
     ///
-    /// The chain recurrence is `xxh3([parent_seq_u64, child_block_hash], 0)`. Salt does
-    /// not seed the per-step xxh3: `BlockHash` is already `xxh3(tokens, salt_hash)`, so
-    /// salt is mixed into `seq_hash[0]` and propagates through every parent. Re-feeding
-    /// it at each step would be redundant.
+    /// The chain recurrence is [`compute_next_sequence_hash`]. Salt does not seed the
+    /// per-step xxh3: `BlockHash` is already `xxh3(tokens, salt_hash)`, so salt is mixed
+    /// into `seq_hash[0]` and propagates through every parent. Re-feeding it at each step
+    /// would be redundant.
     ///
     /// # Panics
     ///
     /// Panics if `self.position() + 1 >= 2^24`.
     pub fn extend(&self, child_block_hash: BlockHash) -> Self {
         let parent_seq = self.current_sequence_hash();
-        let child_seq = compute_hash_v2(cast_slice(&[parent_seq, child_block_hash]), 0);
+        let child_seq = compute_next_sequence_hash(parent_seq, child_block_hash);
         Self::new(child_seq, Some(parent_seq), self.position() + 1)
     }
 
@@ -1090,14 +1120,7 @@ impl TokenBlock {
         position: usize,
     ) -> Self {
         let sequence_hash = match parent_sequence_hash {
-            Some(parent) => {
-                // Combine parent sequence hash and current block hash. Salt is already
-                // mixed into block_hash via xxh3(tokens, salt_hash) and into seq_hash[0],
-                // so it propagates through every parent. Re-feeding it as the per-step
-                // seed would be redundant; using a constant 0 seed lets PLH::extend
-                // reproduce the chain from (parent_plh, child_block_hash) alone.
-                compute_hash_v2(cast_slice(&[parent, chunk.block_hash]), 0)
-            }
+            Some(parent) => compute_next_sequence_hash(parent, chunk.block_hash),
             None => {
                 // First block: sequence hash is just the block hash
                 chunk.block_hash
@@ -1881,9 +1904,9 @@ mod tests {
     const HASH_1_4: BlockHash = 14643705804678351452; // hash([1,2,3,4], 1337)
     const SEQ_HASH_1_4: SequenceHash = HASH_1_4;
     const HASH_5_8: BlockHash = 16777012769546811212; // hash([5,6,7,8], 1337)
-    const SEQ_HASH_5_8: SequenceHash = 13257339816715102022; // hash([SEQ_HASH_1_4, HASH_5_8], 0)
+    const SEQ_HASH_5_8: SequenceHash = 4945711292740353085; // hash([SEQ_HASH_1_4, HASH_5_8], CHAIN_XXH3_SEED)
     const HASH_9_12: BlockHash = 483935686894639516; // hash([9,10,11,12], 1337)
-    const SEQ_HASH_9_12: SequenceHash = 18362646011897812054; // hash([SEQ_HASH_5_8, HASH_9_12], 0)
+    const SEQ_HASH_9_12: SequenceHash = 12583592247330656132; // hash([SEQ_HASH_5_8, HASH_9_12], CHAIN_XXH3_SEED)
 
     impl PartialTokenBlock {
         /// Attempts to remove the last token from the block.
@@ -1916,8 +1939,8 @@ mod tests {
         let tokens_5_8 = &[5u32, 6, 7, 8];
         let computed_hash_5_8 = compute_block_hash(cast_slice(tokens_5_8), salt);
         assert_eq!(computed_hash_5_8, HASH_5_8, "Mismatch for HASH_5_8");
-        // Chain step uses constant seed 0; salt is already mixed into block_hash.
-        let computed_seq_hash_5_8 = compute_hash_v2(cast_slice(&[SEQ_HASH_1_4, HASH_5_8]), 0);
+        // Chain step uses the shared CHAIN_XXH3_SEED; salt is already mixed into block_hash.
+        let computed_seq_hash_5_8 = compute_next_sequence_hash(SEQ_HASH_1_4, HASH_5_8);
         assert_eq!(
             computed_seq_hash_5_8, SEQ_HASH_5_8,
             "Mismatch for SEQ_HASH_5_8"
@@ -1927,7 +1950,7 @@ mod tests {
         let tokens_9_12 = &[9u32, 10, 11, 12];
         let computed_hash_9_12 = compute_block_hash(cast_slice(tokens_9_12), salt);
         assert_eq!(computed_hash_9_12, HASH_9_12, "Mismatch for HASH_9_12");
-        let computed_seq_hash_9_12 = compute_hash_v2(cast_slice(&[SEQ_HASH_5_8, HASH_9_12]), 0);
+        let computed_seq_hash_9_12 = compute_next_sequence_hash(SEQ_HASH_5_8, HASH_9_12);
         assert_eq!(
             computed_seq_hash_9_12, SEQ_HASH_9_12,
             "Mismatch for SEQ_HASH_9_12"
@@ -2190,10 +2213,10 @@ mod tests {
         assert_eq!(plh1.as_u128(), blk1.positional_lineage_hash().as_u128());
         assert_eq!(plh2.as_u128(), blk2.positional_lineage_hash().as_u128());
 
-        // Chain definition: extended.current_sequence_hash == xxh3([parent, child_block_hash], 0)
+        // Chain definition: extended.current_sequence_hash == compute_next_sequence_hash(parent, child)
         assert_eq!(
             plh1.current_sequence_hash(),
-            compute_hash_v2(cast_slice(&[plh0.current_sequence_hash(), bh[1]]), 0),
+            compute_next_sequence_hash(plh0.current_sequence_hash(), bh[1]),
         );
 
         // Salt propagation: changing salt changes block_hash[0] and therefore every
