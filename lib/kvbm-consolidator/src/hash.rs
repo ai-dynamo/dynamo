@@ -19,8 +19,6 @@ use kvbm_logical::SequenceHash;
 /// boundaries.
 #[must_use]
 pub fn router_block_hash(hash: SequenceHash) -> u64 {
-#[must_use]
-pub fn router_block_hash(hash: SequenceHash) -> u64 {
     hash.parent_fragment_for_child_position(hash.position() + 1)
 }
 
