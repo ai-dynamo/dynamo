@@ -7,3 +7,11 @@
 # Ignore placeholder URLs in docs templates
 ^https://\.\.\./
 ^https://github\.com/\.\.\.
+
+# OpenAI's docs CDN intermittently returns 404 for these canonical endpoint
+# reference paths (the workflow already accepts 403 from anti-bot, but 404 is
+# rejected and bypasses retries when the CDN is in a bad state). The URLs are
+# the right thing for humans to follow; mute them for the link checker.
+# Referenced from docs/development/backend-guide.md.
+^https://platform\.openai\.com/docs/api-reference/chat/completions$
+^https://platform\.openai\.com/docs/api-reference/completions$
