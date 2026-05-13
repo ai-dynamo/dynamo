@@ -152,6 +152,22 @@ navigation:
         path: ../pages-dev/components/router/router-guide.md
       - page: KV Cache Offloading
         path: ../pages-dev/components/kvbm/kvbm-guide.md
+      - section: Tool Calling
+        slug: tool-calling
+        path: ../pages-dev/tool-calling/README.md
+        contents:
+          - page: Tool Call Parsing (Dynamo)
+            path: ../pages-dev/tool-calling/dynamo.md
+          - page: Tool Call Parsing (Engine Fallback)
+            path: ../pages-dev/tool-calling/engine-fallback.md
+      - section: Reasoning
+        slug: reasoning
+        path: ../pages-dev/reasoning/README.md
+        contents:
+          - page: Reasoning Parsing (Dynamo)
+            path: ../pages-dev/reasoning/dynamo.md
+          - page: Reasoning Parsing (Engine Fallback)
+            path: ../pages-dev/reasoning/engine-fallback.md
       - section: Multimodal
         path: ../pages-dev/features/multimodal/README.md
         contents:
@@ -186,12 +202,6 @@ navigation:
             path: ../pages-dev/agents/agent-tracing.md
           - page: Agent Hints
             path: ../pages-dev/agents/agent-hints.md
-          - page: Chat Processors
-            path: ../pages-dev/agents/chat-processor-options.md
-          - page: Tool Calling
-            path: ../pages-dev/agents/tool-calling.md
-          - page: Reasoning
-            path: ../pages-dev/agents/reasoning.md
           - page: SGLang for Agentic Workloads
             path: ../pages-dev/backends/sglang/agents.md
       - section: Observability (Local)
@@ -240,7 +250,7 @@ navigation:
         contents:
           - page: Reference Guide
             path: ../pages-dev/backends/sglang/sglang-reference-guide.md
-          - page: Chat Processor
+          - page: Frontend Processor Fallback
             path: ../pages-dev/backends/sglang/sglang-chat-processor.md
           - page: Examples
             path: ../pages-dev/backends/sglang/sglang-examples.md
@@ -270,6 +280,8 @@ navigation:
         contents:
           - page: Reference Guide
             path: ../pages-dev/backends/vllm/vllm-reference-guide.md
+          - page: Frontend Processor Fallback
+            path: ../pages-dev/backends/vllm/vllm-chat-processor.md
           - page: Examples
             path: ../pages-dev/backends/vllm/vllm-examples.md
           - page: KV Cache Offloading
@@ -286,6 +298,8 @@ navigation:
         contents:
           - page: Frontend Guide
             path: ../pages-dev/components/frontend/frontend-guide.md
+          - page: Configuration Reference
+            path: ../pages-dev/components/frontend/configuration.md
           - page: Tokenizer
             path: ../pages-dev/components/frontend/Tokenizer.md
       - section: Router
