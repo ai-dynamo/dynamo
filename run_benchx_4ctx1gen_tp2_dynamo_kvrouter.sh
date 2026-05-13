@@ -22,7 +22,7 @@
 #
 # Env:
 #   CONCURRENCY    — comma-separated concurrency sweep
-#                    (default: 1,2,3,6,8,10,16,32,48,64,80,96,112,128)
+#                    (default: 1,2,3,6,8,10,16,32,48,64,80,96,112,128,144,160)
 #   HOSTCACHE      — 1 = enable kv_cache_config.host_cache_size: 80GB on ctx
 #                    0 = no host offloading (default)
 #   WORKER_METRICS — 1 = pass --publish-events-and-metrics to dynamo.trtllm workers
@@ -36,7 +36,7 @@
 
 set -uo pipefail
 
-CONCURRENCY="${CONCURRENCY:-1,2,3,6,8,10,16,32,48,64,80,96,112,128}"
+CONCURRENCY="${CONCURRENCY:-1,2,3,6,8,10,16,32,48,64,80,96,112,128,144,160}"
 C_TAG=$(echo "$CONCURRENCY" | tr ',' '-')
 HOSTCACHE="${HOSTCACHE:-0}"
 WORKER_METRICS="${WORKER_METRICS:-0}"

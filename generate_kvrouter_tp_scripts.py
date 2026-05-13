@@ -149,6 +149,16 @@ done"""
         f"# benchx (feat/bench_x sha 11e16c) — {p} ctx TP1 + {dc} gen TP{dtp} with kv router,",
     )
 
+    # Extend default concurrency sweep up to 160
+    tpl = tpl.replace(
+        'CONCURRENCY="${CONCURRENCY:-1,2,3,6,8,10,16,32,48,64,80,96,112,128}"',
+        'CONCURRENCY="${CONCURRENCY:-1,2,3,6,8,10,16,32,48,64,80,96,112,128,144,160}"',
+    )
+    tpl = tpl.replace(
+        "#                    (default: 1,2,3,6,8,10,16,32,48,64,80,96,112,128)",
+        "#                    (default: 1,2,3,6,8,10,16,32,48,64,80,96,112,128,144,160)",
+    )
+
     # Top comment block: replace the 5-line layout
     old_layout = """# Layout:
 #   NODE0 — etcd + nats + dynamo frontend + 1 ctx worker(s) (GPUs 0-0)
