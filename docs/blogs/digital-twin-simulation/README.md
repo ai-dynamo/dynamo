@@ -358,6 +358,14 @@ Planner scaling parameters, KVBM/offload policies, distributed cache placement,
 and topology-aware movement strategies can be inserted as additional coordinates
 or as richer algorithmic policies.
 
+More interestingly, the replay loop is not limited to structured knobs. In the
+style of [Karpathy's autoresearch](https://github.com/karpathy/autoresearch), an
+agentic harness can propose a nontrivial code change, rebuild Dynamo, rerun the
+same trace, and keep only changes that improve the objective. That turns replay
+into a bounded research loop for router cost functions, Planner heuristics, and
+cache policies that are awkward to express as a small parameter grid. Section
+3.3 shows one example of that loop finding a production routing idea.
+
 The default objective is throughput. Latency-oriented objectives, such as mean
 TTFT or mean end-to-end latency, can be scored as negative values so the search
 still maximizes a single score. Feasible states are ranked by the selected
@@ -389,8 +397,6 @@ reached `output_throughput_tok_s=3580.95`, but missed the TTFT SLA with
 
 The same simulation loop can be used for research, not just configuration search.
 Some experiments tune exposed parameters. Others change the algorithm itself.
-
-[placeholder: router discovery experiment examples and owners]
 
 Router discovery examples:
 
@@ -485,20 +491,42 @@ how it can be explored cheaply. Other natural questions for the same loop:
 These are natural twin questions: hold the workload fixed, change one component
 policy, and measure the system-level effect before going to a real cluster.
 
-[placeholder: agentic algorithm discovery workflow and owner]
+### 3.3 Simulation In The Production Routing Loop
 
-Today, this kind of algorithm discovery is still mostly human-driven: engineers
-choose a policy change, implement it, run replay, inspect the metrics, and decide
-what to try next. A natural next step is to hook agentic harnesses into the same
-replay loop. In that workflow, agents could propose nontrivial exploratory code
-changes to router policies, Planner heuristics, or cache/offload strategies, run
-the replay harness, compare against baselines, and surface promising candidates
-for human review.
+One router discovery path from the list above has a production-facing version:
+put the timing model directly into the Router's live decision loop.
 
-That would turn the digital twin into more than an optimizer over fixed knobs. It
-would become a testbed for algorithm discovery, where humans still own the
-system direction and validation bar, but agents can help explore the design space
-between real-cluster experiments.
+The same timing model can also move from offline replay into the live request
+path. A production Router already chooses among candidate engines for each
+request. Instead of scoring only from coarse block counts or static weights, it
+can run a lightweight simulation of "what happens if this request lands on this
+worker?" using current cache state, active prefill/decode load, and engine
+timing.
+
+The first version is prefill-load modeling. With the
+[AIC prefill-load model](../../components/router/router-guide.md#aic-prefill-load-model),
+the Router can estimate the prefill time for each candidate worker from request
+shape, cached prefix, and worker state, then route to the engine with the best
+projected TTFT. On the same Kimi/toolagent setup above, enabling router-side AIC
+prefill-load modeling on the fixed winning layout reduced mean TTFT from
+`1695.40 ms` to `1390.86 ms`, a `304.54 ms` or `18.0%` reduction; that
+router-side path can also be validated with live engines before becoming a
+production policy.
+
+This makes admission control more principled too. If every candidate projects
+past the TTFT threshold, the Router can queue, defer, or reject early instead of
+accepting work that is unlikely to meet the SLA. The same idea can extend to
+decode: an AIC-backed ITL model over active decode blocks could route by
+projected decode pressure, and priority decode pools in the
+[GlobalRouter/GlobalPlanner deployment pattern](../../components/planner/global-planner.md)
+would give the system a place to send latency-sensitive decode work.
+
+A useful closing-the-loop result came out of the development process itself.
+While an agentic code-change, compile, and replay cycle searched for better
+routing algorithms, it proposed this router-side timing model: the twin found
+that a small amount of simulation inside the live Router could improve serving
+behavior. That is more than configuration scoring; it is policy discovery
+feeding back into Dynamo itself.
 
 ## 4. Simulation As The Inner Loop
 
