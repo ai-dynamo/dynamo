@@ -5,7 +5,7 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Optional
 
-from dynamo._core import Context
+from dynamo._core import Context, fire_activity_notifier, register_activity_notifier
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
@@ -99,6 +99,7 @@ class PrefillHandler(HandlerBase):
     ):
         super().__init__(config)
         self._encoder_cache = encoder_cache
+        register_activity_notifier("kv_transfer")
 
     async def remote_encode_with_nixl(self, request: dict, context=None):
         """
@@ -137,7 +138,7 @@ class PrefillHandler(HandlerBase):
         Frontend routes to decode workers automatically.
         """
         logging.debug(f"Prefill Request ID: {context.id()}")
-        logging.debug(f"PrefillHandler.generate received request: {request}")
+        fire_activity_notifier("kv_transfer")
         embeddings_tensor = None
         ep_disaggregated_params = None
 

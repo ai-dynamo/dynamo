@@ -827,6 +827,28 @@ impl DistributedRuntime {
         Ok(())
     }
 
+    /// Register an activity notifier with the given name.
+    /// Idempotent: subsequent calls with the same name are no-ops.
+    fn register_activity_notifier(&self, name: String) -> PyResult<()> {
+        self.inner
+            .system_health()
+            .lock()
+            .register_activity_notifier(&name, Arc::new(tokio::sync::Notify::new()));
+        Ok(())
+    }
+
+    /// Fire the activity notifier with the given name (wake its Waiter).
+    /// Returns true if the notifier was found and fired, false if not registered (no-op).
+    fn fire_activity_notifier(&self, name: String) -> PyResult<bool> {
+        let health = self.inner.system_health().lock();
+        if let Some(notifier) = health.get_endpoint_activity_check_notifier(&name) {
+            notifier.notify_one();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
     // to the KVBM bindings, since KVBM cannot directly use the struct from this cdylib.
     // TODO: Create a separate crate "dynamo-python" so that all binding crates can import
