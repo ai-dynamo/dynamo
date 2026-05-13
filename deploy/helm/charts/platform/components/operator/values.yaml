@@ -134,9 +134,10 @@ etcdAddr: ""
 
 modelExpressURL: ""
 
-# Checkpoint configuration for fast pod restore
-# NOTE: The checkpoint infrastructure (PVC + DaemonSet) must be installed separately
-# using the snapshot Helm chart in each namespace where checkpointing is needed.
+# Checkpoint configuration for fast pod restore.
+# In legacy agentMount mode, install the snapshot chart in each workload
+# namespace. In podMount mode, install one shared snapshot-agent DaemonSet and
+# configure storage below so the operator mounts/ensures namespace-local PVCs.
 checkpoint:
   # Enable checkpoint/restore functionality
   enabled: false
@@ -149,6 +150,23 @@ checkpoint:
   seccomp:
     disabled: false
     profile: profiles/block-iouring.json
+  # Optional PVC storage used when the snapshot-agent is installed outside
+  # workload namespaces with snapshot.storage.accessMode=podMount. Set
+  # create=true for operator-managed namespace PVCs, or omit/create=false to
+  # require an already-present PVC with the configured name.
+  # Example:
+  # storage:
+  #   type: pvc
+  #   pvc:
+  #     pvcName: snapshot-pvc
+  #     basePath: /checkpoints
+  #     create: true
+  #     size: 1Ti
+  #     storageClassName: ""
+  #     # ReadWriteMany is safest. ReadWriteOnce can be used with podMount for
+  #     # sequential checkpoint/restore on suitable storage backends.
+  #     accessMode: ReadWriteMany
+  storage: {}
 
 # Webhook configuration
 webhook:

@@ -49,7 +49,8 @@ class TokenspeedLLMEngine(LLMEngine):
         )
         return engine, worker_config
 
-    async def start(self) -> EngineConfig:
+    async def start(self, worker_id: int) -> EngineConfig:
+        del worker_id  # tokenspeed has no cluster-wide ID needs
         # The Dynamo response layer expects per-chunk token deltas.
         self.server_args.stream_output = True
         self.engine = _tokenspeed_engine_cls()(server_args=self.server_args)
