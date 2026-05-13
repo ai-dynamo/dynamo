@@ -95,13 +95,14 @@ class OmniStageWorker:
         original_prompt = req.original_prompt
         # JSON sends dict keys as strings; normalize to int for stage_connector_refs.
         stage_connector_refs = _int_keyed(req.stage_connector_refs)
-        final_stage_id = req.final_stage_id
+        final_stage_id: int | None = None
 
         # --- Resolve engine inputs ---
         sampling_params_list_override: dict | None = None
         if stage_connector_refs:
             # Stage N > 0: fetch previous stage outputs from connectors, run pre-processor.
             sampling_params_list_override = req.sampling_params_list
+            final_stage_id = req.final_stage_id
             try:
                 stage_list = self._fetch_stage_inputs(stage_connector_refs, request_id)
             except RuntimeError as e:
@@ -142,7 +143,7 @@ class OmniStageWorker:
                     prompt = upstream
         elif req.request_id is not None:
             # Stage 0 via router: raw request forwarded with request_id — parse it.
-            final_stage_id = self._resolve_final_stage_id(request, final_stage_id)
+            final_stage_id = self._resolve_final_stage_id(request, None)
             parsed = await parse_omni_request(
                 request,
                 self._output_modalities,
@@ -154,7 +155,7 @@ class OmniStageWorker:
             sampling_params_list_override = parsed["sampling_params_list"]
         else:
             # Direct frontend → stage (single-stage, no router).
-            final_stage_id = self._resolve_final_stage_id(request, final_stage_id)
+            final_stage_id = self._resolve_final_stage_id(request, None)
             prompt = request
 
         logger.debug(

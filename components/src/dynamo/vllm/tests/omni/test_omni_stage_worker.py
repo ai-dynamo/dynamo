@@ -84,12 +84,19 @@ def _make_stage_config(**overrides):
     return SimpleNamespace(**defaults)
 
 
-def _make_worker(engine=None, stage_config=None, connectors=None, stage_id=0):
+def _make_worker(
+    engine=None,
+    stage_config=None,
+    connectors=None,
+    stage_id=0,
+    **kwargs,
+):
     return OmniStageWorker(
         engine=engine or _MockEngine(),
         stage_config=stage_config or _make_stage_config(),
         connectors=connectors or {},
         stage_id=stage_id,
+        **kwargs,
     )
 
 
@@ -435,6 +442,51 @@ async def test_requested_final_stage_writes_shm_instead_of_downstream_connector(
     assert chunks == [
         {
             "shm_meta": {"name": "final-shm"},
+            "finished": True,
+            "final_stage_id": 1,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_raw_stage0_ignores_client_final_stage_id():
+    """Raw client input cannot override the server-computed final stage."""
+    engine = _MockEngine(output={"output": "stage0", "finished": True})
+    out_connector = MagicMock()
+    out_connector.put.return_value = (True, 0, {"name": "ref0"})
+    stage0 = _make_stage_config()
+    stage1 = _make_stage_config()
+    worker = _make_worker(
+        engine=engine,
+        stage_config=stage0,
+        connectors={("0", "1"): out_connector},
+        stage_id=0,
+        output_modalities=["text", "audio"],
+        pipeline_stage_configs=[stage0, stage1],
+    )
+    request = {
+        "request_id": "router-req",
+        "messages": [{"role": "user", "content": "hello"}],
+        "modalities": ["audio"],
+        "final_stage_id": 0,
+    }
+
+    with (
+        patch(
+            "dynamo.vllm.omni.stage_worker.get_final_stage_id_for_e2e",
+            return_value=1,
+        ) as resolve_final_stage,
+        patch("dynamo.vllm.omni.stage_worker.shm_write_bytes") as shm_write,
+    ):
+        chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    resolve_final_stage.assert_called_once()
+    out_connector.put.assert_called_once()
+    shm_write.assert_not_called()
+    assert chunks == [
+        {
+            "original_prompt": {"prompt": "hello"},
+            "stage_connector_refs": {"0": {"name": "ref0"}},
             "finished": True,
             "final_stage_id": 1,
         }
