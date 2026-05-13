@@ -69,7 +69,9 @@ async def started_engine():
 
     engine, _ = await TrtllmLLMEngine.from_args(_BASE_ARGV)
     try:
-        engine_config = await engine.start()
+        # Worker_id 0 is fine for tests — `disagg_machine_id` is derived
+        # from worker_id but unused outside disagg PREFILL/DECODE roles.
+        engine_config = await engine.start(0)
         yield engine, engine_config
     finally:
         await engine.cleanup()
@@ -124,3 +126,70 @@ async def test_abort_unknown_request_on_running_engine(started_engine):
     request id is silently ignored rather than raised."""
     engine, _ = started_engine
     await engine.abort(cast(object, _FakeContext("never-submitted")))  # type: ignore[arg-type]
+
+
+# ----------------------------------------------------------------------
+# Drain unit tests — exercised on the engine instance directly without
+# starting a real engine. The fixture stubs `engine.llm.get_stats_async`
+# so we don't need a GPU to assert the drain contract.
+# ----------------------------------------------------------------------
+
+
+class _StubLLM:
+    """Minimal ``engine.llm`` stand-in. Each ``get_stats_async()`` call
+    returns the next pre-canned stat dict from a queue."""
+
+    def __init__(self, stats_sequence: list[dict]) -> None:
+        self._stats = list(stats_sequence)
+
+    def get_stats_async(self, timeout: float):  # noqa: ARG002
+        async def _gen():
+            if not self._stats:
+                # No more stats: pretend the engine timed out the poll.
+                # The drain loop swallows this and re-polls.
+                raise RuntimeError("no stats")
+            yield self._stats.pop(0)
+
+        return _gen()
+
+
+class _StubInner:
+    """Stand-in for the wrapped TensorRTLLMEngine — exposes only `llm`."""
+
+    def __init__(self, llm: _StubLLM) -> None:
+        self.llm = llm
+
+
+def _engine_with_stub(disagg_mode, stats_sequence: list[dict]):
+    """Bypass __init__ so we don't need real TRT-LLM state."""
+    from dynamo.trtllm.llm_engine import TrtllmLLMEngine
+
+    engine = TrtllmLLMEngine.__new__(TrtllmLLMEngine)
+    engine.disaggregation_mode = disagg_mode
+    engine._engine = _StubInner(_StubLLM(stats_sequence))
+    return engine
+
+
+async def test_drain_is_noop_for_aggregated_workers():
+    """Drain only matters on prefill workers (in-flight NIXL transfers).
+    Aggregated/decode workers exit immediately so shutdown isn't gated
+    on an unnecessary stats poll."""
+    from dynamo.trtllm.constants import DisaggregationMode as TrtDisagg
+
+    engine = _engine_with_stub(TrtDisagg.AGGREGATED, [{"numActiveRequests": 5}])
+    await engine.drain()  # must return without consuming a stat
+
+
+async def test_drain_returns_when_engine_idle():
+    """Polls until active+queued == 0, then returns. The drain loop must
+    not hang once the engine reports idle."""
+    from dynamo.trtllm.constants import DisaggregationMode as TrtDisagg
+
+    engine = _engine_with_stub(
+        TrtDisagg.PREFILL,
+        [
+            {"numActiveRequests": 2, "numQueuedRequests": 1},
+            {"numActiveRequests": 0, "numQueuedRequests": 0},
+        ],
+    )
+    await engine.drain()

@@ -55,7 +55,7 @@ If you're running a single model on a single GPU, your inference engine alone is
 | [**SLA-Based Planner**](https://docs.nvidia.com/dynamo/components/planner/planner-guide) | ✅ | ✅ | ✅ |
 | [**KVBM**](https://docs.nvidia.com/dynamo/components/kvbm) | 🚧 | ✅ | ✅ |
 | [**Multimodal**](https://docs.nvidia.com/dynamo/user-guides/multimodal) | ✅ | ✅ | ✅ |
-| [**Tool Calling**](https://docs.nvidia.com/dynamo/user-guides/agents/tool-calling) | ✅ | ✅ | ✅ |
+| [**Tool Calling**](docs/tool-calling/README.md) | ✅ | ✅ | ✅ |
 
 > **[Full Feature Matrix →](https://docs.nvidia.com/dynamo/resources/feature-matrix)** — LoRA, request migration, speculative decoding, and feature interactions.
 
@@ -267,4 +267,4 @@ To quickly setup both: `docker compose -f deploy/docker-compose.yml up -d`
 [kvbm]: docs/components/kvbm/README.md
 [migration]: docs/fault-tolerance/request-migration.md
 [lora]: examples/backends/vllm/deploy/lora/README.md
-[tools]: docs/agents/tool-calling.md
+[tools]: docs/tool-calling/README.md

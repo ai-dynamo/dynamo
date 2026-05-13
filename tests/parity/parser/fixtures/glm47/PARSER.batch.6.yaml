@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: glm47
+mode: batch
+cases:
+  PARSER.batch.6.a:
+    description: Function-only call (no arg keys)
+    ref: dynamo
+    model_text: <tool_call>get_time</tool_call>
+    tools:
+    - &id001
+      name: get_time
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      calls:
+      - name: get_time
+        arguments: {}
+      normal_text: ''
+  PARSER.batch.6.b:
+    description: Function-only with whitespace
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_glm47_moe_tool_parser.py#L68
+    model_text: <tool_call>get_time </tool_call>
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_time
+        arguments: {}
+      normal_text: ''
