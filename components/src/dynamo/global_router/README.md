@@ -90,8 +90,8 @@ All options can be set via CLI flags or environment variables. CLI flags take pr
 | `--model-name` | Yes | `DYN_GLOBAL_ROUTER_MODEL_NAME` | - | Model name for registration (must match workers) |
 | `--namespace` | No | `DYN_NAMESPACE` | "dynamo" | Namespace for global router |
 | `--component-name` | No | `DYN_GLOBAL_ROUTER_COMPONENT_NAME` | "global_router" | Component name |
-| `--default-ttft-target` | No | `DYN_GLOBAL_ROUTER_DEFAULT_TTFT_TARGET` | None | Default TTFT target (ms) for prefill pool selection |
-| `--default-itl-target` | No | `DYN_GLOBAL_ROUTER_DEFAULT_ITL_TARGET` | None | Default ITL target (ms) for pool selection |
+| `--default-ttft-target-ms` | No | `DYN_GLOBAL_ROUTER_DEFAULT_TTFT_TARGET_MS` | None | Default TTFT target (ms) for prefill pool selection |
+| `--default-itl-target-ms` | No | `DYN_GLOBAL_ROUTER_DEFAULT_ITL_TARGET_MS` | None | Default ITL target (ms) for pool selection |
 
 ## Configuration
 
@@ -111,8 +111,8 @@ The configuration file format depends on the mode. The `mode` field determines w
         "isl_min": <int>,
         "isl_max": <int>,
         "isl_resolution": <int>,
-        "ttft_min": <float>,
-        "ttft_max": <float>,
+        "ttft_min_ms": <float>,
+        "ttft_max_ms": <float>,
         "ttft_resolution": <int>,
         "prefill_pool_mapping": [[]],     // 2D array [isl_resolution][ttft_resolution] -> pool index
         "priority_overrides": []          // Optional
@@ -122,8 +122,8 @@ The configuration file format depends on the mode. The `mode` field determines w
         "context_length_min": <int>,
         "context_length_max": <int>,
         "context_length_resolution": <int>,
-        "itl_min": <float>,
-        "itl_max": <float>,
+        "itl_min_ms": <float>,
+        "itl_max_ms": <float>,
         "itl_resolution": <int>,
         "decode_pool_mapping": [[]],      // 2D array [context_length_resolution][itl_resolution] -> pool index
         "priority_overrides": []          // Optional
@@ -140,11 +140,11 @@ The configuration file format depends on the mode. The `mode` field determines w
     "agg_pool_dynamo_namespaces": [],
 
     "agg_pool_selection_strategy": {
-        "ttft_min": <float>,              // Minimum TTFT target (ms)
-        "ttft_max": <float>,              // Maximum TTFT target (ms)
+        "ttft_min_ms": <float>,              // Minimum TTFT target (ms)
+        "ttft_max_ms": <float>,              // Maximum TTFT target (ms)
         "ttft_resolution": <int>,         // Number of grid rows for TTFT dimension
-        "itl_min": <float>,              // Minimum ITL target (ms)
-        "itl_max": <float>,              // Maximum ITL target (ms)
+        "itl_min_ms": <float>,              // Minimum ITL target (ms)
+        "itl_max_ms": <float>,              // Maximum ITL target (ms)
         "itl_resolution": <int>,          // Number of grid columns for ITL dimension
         "agg_pool_mapping": [[]],         // 2D array [ttft_resolution][itl_resolution] -> pool index
         "priority_overrides": []          // Optional
@@ -172,10 +172,10 @@ The pool selection uses a 2D grid lookup. Each dimension is divided into buckets
 **Prefill Pool Selection** (disagg mode, based on ISL and TTFT target):
 
 1. Compute `isl_step = (isl_max - isl_min) / isl_resolution`
-2. Compute `ttft_step = (ttft_max - ttft_min) / ttft_resolution`
+2. Compute `ttft_step_ms = (ttft_max_ms - ttft_min_ms) / ttft_resolution`
 3. For a request with input sequence length `ISL` and target TTFT:
    - `isl_idx = clamp((ISL - isl_min) / isl_step, 0, isl_resolution - 1)`
-   - `ttft_idx = clamp((ttft_target - ttft_min) / ttft_step, 0, ttft_resolution - 1)`
+   - `ttft_idx = clamp((ttft_target_ms - ttft_min_ms) / ttft_step_ms, 0, ttft_resolution - 1)`
 4. Lookup pool: `pool_index = prefill_pool_mapping[isl_idx][ttft_idx]`
 
 **Decode Pool Selection** (disagg mode, based on context length and ITL target):

@@ -5,7 +5,7 @@ title: Model Caching
 subtitle: Download models once and share across all pods in a Kubernetes cluster
 ---
 
-Large language models can take minutes to download. Without caching, every pod downloads the full model independently, wasting bandwidth and delaying startup. Dynamo supports two approaches to ensure models are downloaded once and shared across the cluster.
+Large language models can take minutes to download. Without caching, every pod downloads the full model independently, wasting bandwidth and delaying startup. Dynamo supports a simple shared-storage path and a ModelExpress path for faster weight distribution across larger clusters.
 
 ## Option 1: PVC + Download Job (Recommended)
 
@@ -145,15 +145,31 @@ spec:
           mountPoint: /home/dynamo/.cache/vllm
 ```
 
-## Option 2: Model Express (P2P Distribution)
+## Option 2: ModelExpress (P2P Distribution)
 
-[Model Express](https://github.com/ai-dynamo/modelexpress) is a P2P model distribution server that downloads a model once and serves it to all pods over the network. It integrates directly with vLLM's weight loading pipeline via custom load formats.
+[ModelExpress](https://github.com/ai-dynamo/modelexpress) is a model weight distribution service that integrates with vLLM's weight loading pipeline. It can publish model weights from one worker and let later workers pull those tensors from GPU memory over NIXL/RDMA instead of repeating a full storage download.
+
+ModelExpress can also use **ModelStreamer** as a loading strategy. ModelStreamer streams safetensors directly from object storage or a local filesystem path into GPU memory through the `runai-model-streamer` package. In that setup, the first worker can stream from storage and then publish ModelExpress metadata so later workers can use the P2P path.
+
+Use this path when startup time or fleet-wide model rollout time matters more than the simplicity of a shared PVC.
 
 ### How It Works
 
-1. A Model Express server runs in the cluster and caches model weights
-2. Workers use `--load-format=mx-source` or `--load-format=mx-target` to load from the server
-3. The K8s operator injects `MODEL_EXPRESS_URL` into all pods automatically
+1. A ModelExpress server runs in the cluster and stores metadata for available sources.
+2. vLLM workers use the ModelExpress loader (`--load-format mx` on newer ModelExpress images, or `mx-source` / `mx-target` on older split-loader images).
+3. If a compatible source is already serving the model, a new worker pulls model tensors from that source over NIXL/RDMA.
+4. If no source is available, the worker falls back to storage. When `MX_MODEL_URI` is set, ModelStreamer can stream safetensors from S3, GCS, Azure Blob Storage, or a local path.
+5. The Kubernetes operator can inject `MODEL_EXPRESS_URL` into all Dynamo pods from the platform `modelExpressURL` setting.
+
+### What To Configure
+
+| Layer | What to configure | Notes |
+|-------|-------------------|-------|
+| Runtime image | Include the `modelexpress` Python package and, for ModelStreamer, `runai-model-streamer` plus the object-storage dependencies. | Dynamo or vLLM raises an import error if the worker uses a ModelExpress load format but the package is missing. |
+| ModelExpress server | Deploy the server with Redis or Kubernetes CRD metadata backend. | See the [ModelExpress deployment guide](https://github.com/ai-dynamo/modelexpress/blob/main/docs/DEPLOYMENT.md). |
+| Dynamo platform | Set `dynamo-operator.modelExpressURL`. | The operator injects `MODEL_EXPRESS_URL` into pods. |
+| vLLM worker | Set the ModelExpress load format and point at the server. | Newer ModelExpress images use `--load-format mx`; older Dynamo images may use `mx-source` / `mx-target`. |
+| ModelStreamer | Set `MX_MODEL_URI` to the storage location. | Supported URI forms include `s3://...`, `gs://...`, `az://...`, an absolute local path, or a Hugging Face model ID resolved from the local cache. |
 
 ### Setup
 
@@ -165,29 +181,91 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
   --set "dynamo-operator.modelExpressURL=http://model-express-server.model-express.svc.cluster.local:8080"
 ```
 
-**Configure workers to use Model Express:**
+**Configure workers to use ModelExpress:**
 
 ```yaml
 services:
   VllmWorker:
-    envs:
-      - name: VLLM_LOAD_FORMAT
-        value: mx-target
+    extraPodSpec:
+      mainContainer:
+        image: <vllm-runtime-image-with-modelexpress>
+        command: ["python3", "-m", "dynamo.vllm"]
+        args:
+          - --model
+          - meta-llama/Llama-3.1-70B-Instruct
+          - --load-format
+          - mx
+          - --model-express-url
+          - http://model-express-server.model-express.svc.cluster.local:8080
+        env:
+          - name: VLLM_PLUGINS
+            value: modelexpress
 ```
 
-When `MODEL_EXPRESS_URL` is configured in the operator, it is automatically injected as an environment variable into all component pods. Workers using `mx-source` or `mx-target` load formats will connect to the server for model weight distribution.
+When `MODEL_EXPRESS_URL` is configured in the operator, it is automatically injected as an environment variable into all component pods. Passing `--model-express-url` explicitly is still useful in examples because the worker validates that a server URL is available when using the older `mx-source` / `mx-target` load formats.
 
-### When to Use Model Express
+<Note>
+Use the load format supported by your runtime image. ModelExpress v0.3 and newer document the unified `mx` loader. Some Dynamo images still expose the older split `mx-source` and `mx-target` loader names; those require the same server URL but separate source and target roles.
+</Note>
+
+### ModelStreamer From Object Storage
+
+Set `MX_MODEL_URI` when the first worker should stream safetensors directly from storage instead of reading a PVC or relying on a prior source worker.
+
+```yaml
+services:
+  VllmWorker:
+    extraPodSpec:
+      mainContainer:
+        image: <vllm-runtime-image-with-modelexpress-and-modelstreamer>
+        command: ["python3", "-m", "dynamo.vllm"]
+        args:
+          - --model
+          - meta-llama/Llama-3.1-70B-Instruct
+          - --load-format
+          - mx
+          - --model-express-url
+          - http://model-express-server.model-express.svc.cluster.local:8080
+        env:
+          - name: VLLM_PLUGINS
+            value: modelexpress
+          - name: MX_MODEL_URI
+            value: s3://my-model-bucket/meta-llama/Llama-3.1-70B-Instruct
+          - name: RUNAI_STREAMER_CONCURRENCY
+            value: "8"
+```
+
+ModelStreamer relies on the underlying cloud SDK credentials:
+
+| Storage backend | `MX_MODEL_URI` example | Credential options |
+|-----------------|------------------------|--------------------|
+| S3 or S3-compatible storage | `s3://bucket/path/to/model` | IRSA / workload identity, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`, and optional `AWS_ENDPOINT_URL` |
+| Google Cloud Storage | `gs://bucket/path/to/model` | GKE Workload Identity, Application Default Credentials, or `GOOGLE_APPLICATION_CREDENTIALS` |
+| Azure Blob Storage | `az://container/path/to/model` | Managed Identity, service principal env vars, or `AZURE_ACCOUNT_NAME` / `AZURE_ACCOUNT_KEY` |
+| Local filesystem or PVC | `/models/meta-llama/Llama-3.1-70B-Instruct` | Mount the path into the worker pod |
+
+Credentials are consumed by the storage SDKs in the worker pod. They do not flow through the ModelExpress server.
+
+### Relationship To Shadow Engine Failover
+
+ModelExpress and ModelStreamer are model loading and distribution paths. They are not required for [Shadow Engine Failover](shadow-engine-failover.md), and enabling them does not create standby engines.
+
+Use Shadow Engine Failover only when you specifically need an active/shadow recovery topology backed by GPU Memory Service (GMS), DRA, and a backend load format such as `--load-format gms`. Keep the ModelExpress / ModelStreamer configuration separate unless you have validated a combined workflow for your runtime image and cluster.
+
+### When to Use ModelExpress
 
 | Scenario | Recommended Approach |
 |----------|---------------------|
 | Small cluster, simple setup | PVC + Download Job |
-| Large cluster, many nodes | Model Express |
+| Large cluster, many nodes | ModelExpress P2P |
 | Models already on shared storage (NFS) | PVC |
-| Frequent model updates across fleet | Model Express |
+| Models in S3, GCS, Azure Blob Storage, or local safetensors paths | ModelExpress + ModelStreamer |
+| Frequent model updates across fleet | ModelExpress P2P, optionally seeded by ModelStreamer |
 
 ## See Also
 
 - [Managing Models with DynamoModel](deployment/dynamomodel-guide.md) — declarative model management CRD
-- [Detailed Installation Guide](installation-guide.md) — Helm chart configuration including Model Express
+- [Detailed Installation Guide](installation-guide.md) — Helm chart configuration including ModelExpress
+- [Shadow Engine Failover](shadow-engine-failover.md) — GMS-backed active/shadow engine recovery, separate from model distribution
+- [ModelExpress deployment guide](https://github.com/ai-dynamo/modelexpress/blob/main/docs/DEPLOYMENT.md) — server, P2P, and ModelStreamer configuration
 - [LoRA Adapters](../features/lora/README.md) — dynamic adapter loading (separate from base model caching)

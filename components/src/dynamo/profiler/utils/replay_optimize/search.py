@@ -14,11 +14,11 @@ The descent dimensions are:
      the budget.
   2. Worker split: `(prefill_workers, decode_workers)` probed only among states
      that maximize GPU usage for the current TP shape.
-  3. Router settings: `(router_mode, overlap_score_weight)`.
+  3. Router settings: `(router_mode, overlap_score_credit, prefill_load_scale)`.
 - Aggregated replay:
   1. TP size: `tp` probed at the maximum worker count that fits the budget.
   2. Worker count: `workers` for the incumbent `tp`.
-  3. Router settings: `(router_mode, overlap_score_weight)`.
+  3. Router settings: `(router_mode, overlap_score_credit, prefill_load_scale)`.
 
 This is a budget-focused heuristic, not an exact optimizer over all feasible
 replay states.
@@ -40,14 +40,21 @@ from .specs import ReplayOptimizeSpec, RouterMode
 def _router_states(
     *,
     router_mode: RouterMode,
-    overlap_score_weights: Sequence[float],
-) -> list[tuple[str, float]]:
+    overlap_score_credits: Sequence[float],
+    prefill_load_scales: Sequence[float],
+) -> list[tuple[str, float, float]]:
     if router_mode is RouterMode.ROUND_ROBIN:
-        return [("round_robin", 0.0)]
+        return [("round_robin", 0.0, 1.0)]
     if router_mode is RouterMode.KV_ROUTER:
-        return [("kv_router", float(weight)) for weight in overlap_score_weights]
-    return [("round_robin", 0.0)] + [
-        ("kv_router", float(weight)) for weight in overlap_score_weights
+        return [
+            ("kv_router", float(credit), float(scale))
+            for credit in overlap_score_credits
+            for scale in prefill_load_scales
+        ]
+    return [("round_robin", 0.0, 1.0)] + [
+        ("kv_router", float(credit), float(scale))
+        for credit in overlap_score_credits
+        for scale in prefill_load_scales
     ]
 
 
@@ -60,7 +67,8 @@ def _iter_budget_edge_worker_states(
     prefill_tp: int,
     decode_tp: int,
     router_mode: Literal["kv_router", "round_robin"],
-    overlap_score_weight: float,
+    overlap_score_credit: float,
+    prefill_load_scale: float,
     max_total_gpus: int,
 ) -> list[DenseReplayState]:
     states: list[DenseReplayState] = []
@@ -75,8 +83,9 @@ def _iter_budget_edge_worker_states(
                 decode_tp=decode_tp,
                 prefill_workers=prefill_workers,
                 decode_workers=decode_workers,
-                overlap_score_weight=overlap_score_weight,
+                overlap_score_credit=overlap_score_credit,
                 router_mode=router_mode,
+                prefill_load_scale=prefill_load_scale,
             )
             if total_gpus_used > max_gpus_used:
                 max_gpus_used = total_gpus_used
@@ -91,7 +100,8 @@ def _iter_agg_worker_states(
     *,
     tp: int,
     router_mode: Literal["kv_router", "round_robin"],
-    overlap_score_weight: float,
+    overlap_score_credit: float,
+    prefill_load_scale: float,
     max_total_gpus: int,
 ) -> list[DenseAggReplayState]:
     return [
@@ -99,7 +109,8 @@ def _iter_agg_worker_states(
             tp=tp,
             workers=workers,
             router_mode=router_mode,
-            overlap_score_weight=overlap_score_weight,
+            overlap_score_credit=overlap_score_credit,
+            prefill_load_scale=prefill_load_scale,
         )
         for workers in range(1, max_total_gpus // tp + 1)
         if _supports_agg_router_mode(workers=workers, router_mode=router_mode)
@@ -111,7 +122,8 @@ def _iter_tp_states_with_equal_workers(
     prefill_tps: Sequence[int],
     decode_tps: Sequence[int],
     router_mode: Literal["kv_router", "round_robin"],
-    overlap_score_weight: float,
+    overlap_score_credit: float,
+    prefill_load_scale: float,
     max_total_gpus: int,
 ) -> list[DenseReplayState]:
     states: list[DenseReplayState] = []
@@ -126,8 +138,9 @@ def _iter_tp_states_with_equal_workers(
                     decode_tp=decode_tp,
                     prefill_workers=max_equal_workers,
                     decode_workers=max_equal_workers,
-                    overlap_score_weight=overlap_score_weight,
+                    overlap_score_credit=overlap_score_credit,
                     router_mode=router_mode,
+                    prefill_load_scale=prefill_load_scale,
                 )
             )
     return states
@@ -137,7 +150,8 @@ def _iter_agg_tp_states_with_max_workers(
     *,
     tps: Sequence[int],
     router_mode: Literal["kv_router", "round_robin"],
-    overlap_score_weight: float,
+    overlap_score_credit: float,
+    prefill_load_scale: float,
     max_total_gpus: int,
 ) -> list[DenseAggReplayState]:
     states: list[DenseAggReplayState] = []
@@ -150,7 +164,8 @@ def _iter_agg_tp_states_with_max_workers(
                 tp=tp,
                 workers=workers,
                 router_mode=router_mode,
-                overlap_score_weight=overlap_score_weight,
+                overlap_score_credit=overlap_score_credit,
+                prefill_load_scale=prefill_load_scale,
             )
         )
     return states
@@ -160,14 +175,15 @@ def _select_initial_state(
     *,
     prefill_tps: Sequence[int],
     decode_tps: Sequence[int],
-    overlap_score_weight: float,
+    overlap_score_credit: float,
     max_total_gpus: int,
 ) -> DenseReplayState:
     initial_states = _iter_tp_states_with_equal_workers(
         prefill_tps=prefill_tps,
         decode_tps=decode_tps,
         router_mode="round_robin",
-        overlap_score_weight=overlap_score_weight,
+        overlap_score_credit=overlap_score_credit,
+        prefill_load_scale=1.0,
         max_total_gpus=max_total_gpus,
     )
     if initial_states:
@@ -187,7 +203,8 @@ def _select_initial_agg_state(
     states = _iter_agg_tp_states_with_max_workers(
         tps=tps,
         router_mode="round_robin",
-        overlap_score_weight=0.0,
+        overlap_score_credit=0.0,
+        prefill_load_scale=1.0,
         max_total_gpus=max_total_gpus,
     )
     if states:
@@ -205,8 +222,9 @@ def _record_to_state(record: Mapping[str, float | int]) -> DenseReplayState:
         decode_tp=int(record["decode_tp"]),
         prefill_workers=int(record["prefill_workers"]),
         decode_workers=int(record["decode_workers"]),
-        overlap_score_weight=float(record["overlap_score_weight"]),
+        overlap_score_credit=float(record["overlap_score_credit"]),
         router_mode=str(record.get("router_mode", "kv_router")),
+        prefill_load_scale=float(record.get("prefill_load_scale", 1.0)),
     )
 
 
@@ -217,7 +235,8 @@ def _record_to_agg_state(
         tp=int(record["tp"]),
         workers=int(record["workers"]),
         router_mode=str(record["router_mode"]),
-        overlap_score_weight=float(record["overlap_score_weight"]),
+        overlap_score_credit=float(record["overlap_score_credit"]),
+        prefill_load_scale=float(record.get("prefill_load_scale", 1.0)),
     )
 
 
@@ -235,7 +254,7 @@ def optimize_dense_disagg_with_replay(
     1. `(prefill_tp, decode_tp)` at equal worker counts that fit the budget.
     2. `(prefill_workers, decode_workers)` on the budget edge for the incumbent TP
        shape.
-    3. `(router_mode, overlap_score_weight)`.
+    3. `(router_mode, overlap_score_credit, prefill_load_scale)`.
 
     Returned "best" records are best among visited states, not a global optimum.
     """
@@ -255,7 +274,8 @@ def optimize_dense_disagg_with_replay(
 
     backend = spec.engine.backend.value
     system = str(spec.hardware.gpuSku)
-    overlap_weights = spec.router.effectiveOverlapWeights
+    overlap_credits = spec.router.effectiveOverlapCredits
+    prefill_load_scales = spec.router.effectivePrefillLoadScales
     max_parallel_evals = max(1, int(spec.maxParallelEvals))
     prefill_tps, decode_tps = aic._enumerate_dense_tp_candidates(backend, system)
     if not prefill_tps or not decode_tps:
@@ -267,7 +287,7 @@ def optimize_dense_disagg_with_replay(
     incumbent = _select_initial_state(
         prefill_tps=prefill_tps,
         decode_tps=decode_tps,
-        overlap_score_weight=overlap_weights[0],
+        overlap_score_credit=overlap_credits[0],
         max_total_gpus=spec.hardware.totalGpus,
     )
 
@@ -284,7 +304,8 @@ def optimize_dense_disagg_with_replay(
                 prefill_tps=prefill_tps,
                 decode_tps=decode_tps,
                 router_mode=incumbent.router_mode,
-                overlap_score_weight=incumbent.overlap_score_weight,
+                overlap_score_credit=incumbent.overlap_score_credit,
+                prefill_load_scale=incumbent.prefill_load_scale,
                 max_total_gpus=spec.hardware.totalGpus,
             )
             tp_records = evaluate._evaluate_states(
@@ -300,7 +321,8 @@ def optimize_dense_disagg_with_replay(
                 prefill_tp=incumbent.prefill_tp,
                 decode_tp=incumbent.decode_tp,
                 router_mode=incumbent.router_mode,
-                overlap_score_weight=incumbent.overlap_score_weight,
+                overlap_score_credit=incumbent.overlap_score_credit,
+                prefill_load_scale=incumbent.prefill_load_scale,
                 max_total_gpus=spec.hardware.totalGpus,
             )
             worker_records = evaluate._evaluate_states(
@@ -319,12 +341,14 @@ def optimize_dense_disagg_with_replay(
                         decode_tp=incumbent.decode_tp,
                         prefill_workers=incumbent.prefill_workers,
                         decode_workers=incumbent.decode_workers,
-                        overlap_score_weight=weight,
+                        overlap_score_credit=credit,
                         router_mode=mode,
+                        prefill_load_scale=scale,
                     )
-                    for mode, weight in _router_states(
+                    for mode, credit, scale in _router_states(
                         router_mode=spec.router.mode,
-                        overlap_score_weights=overlap_weights,
+                        overlap_score_credits=overlap_credits,
+                        prefill_load_scales=prefill_load_scales,
                     )
                 ],
                 spec=spec,
@@ -353,7 +377,7 @@ def optimize_dense_agg_with_replay(
     bounds in `spec.sla`. The descended dimensions are:
     1. `tp` at the maximum worker count that fits the budget.
     2. `workers` for the incumbent `tp`.
-    3. `(router_mode, overlap_score_weight)`.
+    3. `(router_mode, overlap_score_credit, prefill_load_scale)`.
 
     Returned "best" records are best among visited states, not a global optimum.
     """
@@ -367,7 +391,8 @@ def optimize_dense_agg_with_replay(
 
     backend = spec.engine.backend.value
     system = str(spec.hardware.gpuSku)
-    overlap_weights = spec.router.effectiveOverlapWeights
+    overlap_credits = spec.router.effectiveOverlapCredits
+    prefill_load_scales = spec.router.effectivePrefillLoadScales
     max_parallel_evals = max(1, int(spec.maxParallelEvals))
     tps, _ = aic._enumerate_dense_tp_candidates(backend, system)
     if not tps:
@@ -392,7 +417,8 @@ def optimize_dense_agg_with_replay(
             tp_states = _iter_agg_tp_states_with_max_workers(
                 tps=tps,
                 router_mode=incumbent.router_mode,
-                overlap_score_weight=incumbent.overlap_score_weight,
+                overlap_score_credit=incumbent.overlap_score_credit,
+                prefill_load_scale=incumbent.prefill_load_scale,
                 max_total_gpus=spec.hardware.totalGpus,
             )
             tp_records = evaluate._evaluate_agg_states(
@@ -407,7 +433,8 @@ def optimize_dense_agg_with_replay(
             worker_states = _iter_agg_worker_states(
                 tp=incumbent.tp,
                 router_mode=incumbent.router_mode,
-                overlap_score_weight=incumbent.overlap_score_weight,
+                overlap_score_credit=incumbent.overlap_score_credit,
+                prefill_load_scale=incumbent.prefill_load_scale,
                 max_total_gpus=spec.hardware.totalGpus,
             )
             worker_records = evaluate._evaluate_agg_states(
@@ -425,11 +452,13 @@ def optimize_dense_agg_with_replay(
                         tp=incumbent.tp,
                         workers=incumbent.workers,
                         router_mode=mode,
-                        overlap_score_weight=weight,
+                        overlap_score_credit=credit,
+                        prefill_load_scale=scale,
                     )
-                    for mode, weight in _router_states(
+                    for mode, credit, scale in _router_states(
                         router_mode=spec.router.mode,
-                        overlap_score_weights=overlap_weights,
+                        overlap_score_credits=overlap_credits,
+                        prefill_load_scales=prefill_load_scales,
                     )
                     if _supports_agg_router_mode(
                         workers=incumbent.workers,
