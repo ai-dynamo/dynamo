@@ -38,15 +38,18 @@ func EnsureGMSRestoreSidecars(
 		return
 	}
 
-	podSpec.InitContainers = removeGMSManagedContainers(podSpec.InitContainers, gms.ServerContainerName)
-	podSpec.Containers = removeGMSManagedContainers(podSpec.Containers, GMSLoaderContainer)
 	gms.EnsureServerSidecar(podSpec, mainContainer)
 	snapshotprotocol.InjectCheckpointVolume(podSpec, storage.PVCName)
+
+	for _, c := range podSpec.Containers {
+		if c.Name == GMSLoaderContainer {
+			return
+		}
+	}
 
 	loader := gms.Container(GMSLoaderContainer, gmsCheckpointLoaderModule, mainContainer.Image)
 	loader.VolumeMounts = append(loader.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
 	loader.Env = append(loader.Env, corev1.EnvVar{Name: envCheckpointDir, Value: resolveGMSArtifactDir(storage)})
-
 	podSpec.Containers = append(podSpec.Containers, loader)
 }
 
@@ -87,19 +90,4 @@ func resolveGMSArtifactDir(storage snapshotprotocol.Storage) string {
 	artifactVersion := filepath.Base(storage.Location)
 	checkpointID := filepath.Base(filepath.Dir(filepath.Dir(storage.Location)))
 	return filepath.Join(storage.BasePath, "gms", checkpointID, "versions", artifactVersion)
-}
-
-func removeGMSManagedContainers(containers []corev1.Container, names ...string) []corev1.Container {
-	managed := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		managed[name] = struct{}{}
-	}
-	filtered := containers[:0]
-	for _, c := range containers {
-		if _, ok := managed[c.Name]; ok {
-			continue
-		}
-		filtered = append(filtered, c)
-	}
-	return filtered
 }
