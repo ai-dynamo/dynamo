@@ -79,7 +79,7 @@ jobs:
       target: runtime
       cuda_version: '["${{ inputs.cuda_version }}"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: ${{ inputs.builder_name }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }} # ${{ inputs.builder_name }}
       fresh_builder: false # ${{ inputs.fresh_builder }} # TODO: restore
       no_cache: false # ${{ inputs.no_cache }} # TODO: restore
       build_timeout_minutes: 30 # ${{ inputs.build_timeout_minutes }} # TODO: restore
