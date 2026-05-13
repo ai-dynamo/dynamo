@@ -1394,7 +1394,7 @@ mod tests {
         // verify it doesn't fail at the transport resolution stage by checking
         // that the error (if any) is a transport/network error, not
         // "Instance not found".
-        let request = SingleIn::new(42);
+        let request = SingleIn::new(42u64);
         let result = router.generate(request).await;
 
         // The request may fail at the network level (no actual worker), but it
@@ -1440,7 +1440,7 @@ mod tests {
         let stale_id = 99999;
         client.override_instance_avail(vec![stale_id]);
 
-        let request = SingleIn::new(42);
+        let request = SingleIn::new(42u64);
         let result = router.generate(request).await;
 
         assert!(result.is_err());

@@ -1452,7 +1452,7 @@ mod tests {
         let mut mgr = make_mgr(10, 16);
         let uuid = Uuid::new_v4();
         use_partial(&mut mgr, uuid);
-        mgr.process(&MoveBlock::Promote(uuid, 42, None, 0u64, plh(500), None));
+        mgr.process(&MoveBlock::Promote(uuid, 42, None, 0, plh(500), None));
         assert_eq!(mgr.num_active_blocks(), 1);
         assert!(mgr.active_partial.is_empty());
         assert!(mgr.active_full.contains_key(&42));
@@ -1466,7 +1466,7 @@ mod tests {
             Uuid::new_v4(),
             42,
             None,
-            0u64,
+            0,
             plh(500),
             None,
         ));
