@@ -132,6 +132,8 @@ impl Args {
                 "--help" | "-h" => {
                     println!(
                         "kvbm_g3pb_worker_smoke
+  note: requires kvbm_g3pb_backend to be running and discoverable
+  note: ETCD_ENDPOINTS must be set so the worker can find the backend
   --worker-id <id>                local worker id (default 11)
   --device-id <id>                CUDA device id (default 0)
   --num-device-blocks <n>         local worker device blocks (default 8)
@@ -374,6 +376,9 @@ fn build_transfer_context(
     )?))
 }
 
+// This smoke exercises the worker side only. A separate `kvbm_g3pb_backend`
+// process must already be running, and `ETCD_ENDPOINTS` must be set so
+// discovery can resolve the backend endpoint.
 async fn app(runtime: Runtime) -> Result<()> {
     let args = Args::parse()?;
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
