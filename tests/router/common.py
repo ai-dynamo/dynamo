@@ -670,7 +670,7 @@ def _test_python_router_bindings(
 
     Assumes engine_workers are already initialized. This test creates a KvRouter
     Python object and sends three test requests to verify:
-    1. Token streaming with full router config overrides (overlap_score_weight, router_temperature)
+    1. Token streaming with full router config overrides (overlap_score_credit, router_temperature)
     2. Token streaming without any overrides (uses default config)
     3. Token streaming with partial override (only router_temperature)
 
@@ -708,7 +708,7 @@ def _test_python_router_bindings(
 
     # Set up override parameters
     router_config_override = {
-        "overlap_score_weight": 0.5,  # Override the default weight
+        "overlap_score_credit": 0.5,  # Override the default credit
         "router_temperature": 0.5,  # Override the default temperature
     }
 
@@ -1362,8 +1362,9 @@ async def _zmq_replay_cycle(
     indexer_url: str,
     engine_workers,
     send_requests_to_router,
+    model_name: str,
 ):
-    """Pause indexer listeners → send gap requests → resume → send to trigger replay."""
+    """Pause indexer listeners, create gaps, then force each stream to reveal them."""
     await asyncio.sleep(1)
     worker_ids = list(engine_workers.worker_id_to_zmq_ports.keys())
     dp_size = getattr(engine_workers, "dp_size", None) or 1
@@ -1399,13 +1400,38 @@ async def _zmq_replay_cycle(
                         resp.status == 200
                     ), f"Resume {wid}:{dp_rank} failed: {await resp.text()}"
 
-    logger.info("Sending 5 requests after resume (triggers gap detection + replay)")
-    successful_post = await send_requests_to_router(
-        router, 5, f"{router_name} (post-resume)", endpoint
+    replay_targets = [
+        (wid, dp_rank) for wid in worker_ids for dp_rank in range(dp_size)
+    ]
+    logger.info(
+        "Sending %s targeted requests after resume (triggers gap detection + replay)",
+        len(replay_targets),
     )
-    assert (
-        successful_post == 5
-    ), f"Expected 5 requests post-resume, got {successful_post}"
+    post_resume_tasks = []
+    for wid, dp_rank in replay_targets:
+        request_tokens = [random.randint(1, 10000) for _ in range(30)]
+        post_resume_tasks.append(
+            asyncio.create_task(
+                send_request_via_python_kv_router(
+                    kv_python_router=router,
+                    model_name=model_name,
+                    token_ids=request_tokens,
+                    stop_conditions={
+                        "ignore_eos": True,
+                        "max_tokens": 10,
+                    },
+                    worker_id=wid,
+                    dp_rank=dp_rank,
+                )
+            )
+        )
+
+    post_resume_results = await asyncio.gather(*post_resume_tasks)
+    successful_post = sum(1 for result in post_resume_results if result)
+    assert successful_post == len(replay_targets), (
+        f"Expected {len(replay_targets)} targeted post-resume requests, "
+        f"got {successful_post}"
+    )
     await asyncio.sleep(2)
 
 
@@ -1571,6 +1597,7 @@ def _test_router_indexers_sync(
                 standalone_indexer_url,
                 engine_workers,
                 send_requests_to_router,
+                model_name,
             )
 
         # Wait for snapshot to be available before creating second router.
@@ -1677,6 +1704,7 @@ def _test_router_indexers_sync(
                 standalone_indexer_url,
                 engine_workers,
                 send_requests_to_router,
+                model_name,
             )
 
         # Wait for internal synchronization and ZMQ event propagation
@@ -1761,51 +1789,61 @@ def _test_router_indexers_sync(
 
         # Verify standalone HTTP indexers build the same tree (via ZMQ)
         if standalone_indexer_url:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{standalone_indexer_url}/dump") as resp:
-                    assert resp.status == 200, f"GET /dump failed: {resp.status}"
-                    dump_a = await resp.json()
-
             # /dump returns {model:tenant -> {"block_size": N, "events": [...]}}
             expected_key = f"{model_name}:default"
-            assert expected_key in dump_a, (
-                f"Expected dump key '{expected_key}', "
-                f"got keys={list(dump_a.keys())}"
-            )
-            for k, v in dump_a.items():
-                assert (
-                    isinstance(v, dict) and "events" in v
-                ), f"Dump key '{k}' returned unexpected format: {v}"
-            sorted_standalone_a = sorted(dump_a[expected_key]["events"], key=sort_key)
-            logger.info(f"Standalone Indexer A has {len(sorted_standalone_a)} events")
 
-            assert_event_dumps_equal(
-                sorted_state1, sorted_standalone_a, "Router 1", "Standalone A"
+            async def fetch_standalone_events(session, indexer_url, indexer_label):
+                async with session.get(f"{indexer_url}/dump") as resp:
+                    assert resp.status == 200, f"GET /dump failed: {resp.status}"
+                    dump = await resp.json()
+
+                assert expected_key in dump, (
+                    f"{indexer_label} missing dump key '{expected_key}', "
+                    f"got keys={list(dump.keys())}"
+                )
+                for k, v in dump.items():
+                    assert (
+                        isinstance(v, dict) and "events" in v
+                    ), f"{indexer_label} dump key '{k}' returned unexpected format: {v}"
+                return sorted(dump[expected_key]["events"], key=sort_key)
+
+            async def wait_for_standalone_events(
+                indexer_url, expected_events, expected_label, actual_label
+            ):
+                last_error = None
+                async with aiohttp.ClientSession() as session:
+                    for attempt in range(50):
+                        actual_events = await fetch_standalone_events(
+                            session, indexer_url, actual_label
+                        )
+                        logger.info(
+                            f"{actual_label} has {len(actual_events)} events "
+                            f"(attempt {attempt + 1})"
+                        )
+                        try:
+                            assert_event_dumps_equal(
+                                expected_events,
+                                actual_events,
+                                expected_label,
+                                actual_label,
+                            )
+                            return actual_events
+                        except AssertionError as exc:
+                            last_error = exc
+                            await asyncio.sleep(0.2)
+
+                assert last_error is not None
+                raise last_error
+
+            sorted_standalone_a = await wait_for_standalone_events(
+                standalone_indexer_url, sorted_state1, "Router 1", "Standalone A"
             )
             logger.info("Standalone A matches Router 1")
 
             if standalone_indexer_b_url:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(f"{standalone_indexer_b_url}/dump") as resp:
-                        assert (
-                            resp.status == 200
-                        ), f"GET /dump from Indexer B failed: {resp.status}"
-                        dump_b = await resp.json()
-
-                assert expected_key in dump_b, (
-                    f"Indexer B missing dump key '{expected_key}', "
-                    f"got keys={list(dump_b.keys())}"
-                )
-                sorted_standalone_b = sorted(
-                    dump_b[expected_key]["events"], key=sort_key
-                )
-                logger.info(
-                    f"Standalone Indexer B has {len(sorted_standalone_b)} events"
-                )
-
-                assert_event_dumps_equal(
+                await wait_for_standalone_events(
+                    standalone_indexer_b_url,
                     sorted_standalone_a,
-                    sorted_standalone_b,
                     "Standalone A",
                     "Standalone B",
                 )

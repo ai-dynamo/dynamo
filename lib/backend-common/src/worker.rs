@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use dynamo_llm::local_model::LocalModel;
 use dynamo_llm::local_model::LocalModelBuilder;
-use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
+use dynamo_llm::local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig};
 use dynamo_llm::model_type::{ModelInput, ModelType};
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -22,6 +22,7 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 use tokio_util::sync::CancellationToken;
 
 use crate::adapter::EngineAdapter;
+use crate::disagg::DisaggregationMode;
 use crate::engine::{EngineConfig, LLMEngine};
 use crate::error::{BackendError, DynamoError, ErrorType};
 
@@ -121,6 +122,14 @@ pub struct WorkerConfig {
     /// Per-endpoint Prometheus metric labels appended to every metric.
     /// Common labels: `("model", "<served-name>")`.
     pub metrics_labels: Vec<(String, String)>,
+    /// Disaggregation role for this worker.
+    ///
+    /// `Aggregated` (default) registers the model with the parsed
+    /// `endpoint_types`. `Prefill` registers with `ModelType::Prefill` so the
+    /// frontend's prefill router targets it. `Decode` keeps `endpoint_types`
+    /// but force-disables the local KV indexer because decode workers do not
+    /// host the indexer endpoint.
+    pub disaggregation_mode: DisaggregationMode,
     /// Runtime / transport overrides applied via env vars before the
     /// `DistributedRuntime` is constructed.
     pub runtime: RuntimeConfig,
@@ -142,6 +151,7 @@ impl Default for WorkerConfig {
             exclude_tools_when_tool_choice_none: true,
             enable_local_indexer: true,
             metrics_labels: Vec::new(),
+            disaggregation_mode: DisaggregationMode::Aggregated,
             runtime: RuntimeConfig::default(),
         }
     }
@@ -155,8 +165,11 @@ enum LifecycleState {
     Init,
     /// `engine.start()` returned successfully; `engine.cleanup()` is owed.
     Running,
-    /// Cleanup done, never started, or start failed. `engine.cleanup()`
-    /// will not be called again.
+    /// `engine.start()` raised. The engine may have allocated partial
+    /// state (inner LLM, sockets, background tasks) before failing, so
+    /// `engine.cleanup()` is still owed exactly once.
+    StartFailed,
+    /// Cleanup done. `engine.cleanup()` will not be called again.
     Stopped,
 }
 
@@ -339,8 +352,17 @@ impl Worker {
             return Ok(());
         }
 
-        let engine_config = self.start_engine().await?;
-        tracing::debug!(model = %engine_config.model, "engine.start() complete");
+        // Pull the worker's unique runtime ID from the DRT before handing it
+        // to the engine. Backed by `discovery_client.instance_id()` so it is
+        // unique-per-replica by construction; engines see only an opaque
+        // `worker_id`.
+        let worker_id = drt.connection_id();
+        let engine_config = self.start_engine(worker_id).await?;
+        tracing::debug!(
+            model = %engine_config.model,
+            worker_id,
+            "engine.start() complete"
+        );
 
         // Mid-start signal: engine.start() ran to completion but a signal
         // arrived during it. Skip the serve loop and run the orchestrator
@@ -370,7 +392,7 @@ impl Worker {
 
     /// Start the engine exactly once. `Worker::run` consumes `self`, so all
     /// lifecycle transitions are single-threaded and do not need a mutex.
-    async fn start_engine(&mut self) -> Result<EngineConfig, DynamoError> {
+    async fn start_engine(&mut self, worker_id: u64) -> Result<EngineConfig, DynamoError> {
         // `start_engine` is called once from `run_inner`, which consumes
         // `self`. Hitting any other state is a programmer error worth
         // panicking over in release as well as debug builds.
@@ -380,13 +402,17 @@ impl Worker {
             "start_engine called in unexpected state {:?}",
             self.state
         );
-        match self.engine.start().await {
+        match self.engine.start(worker_id).await {
             Ok(cfg) => {
                 self.state = LifecycleState::Running;
                 Ok(cfg)
             }
             Err(e) => {
-                self.state = LifecycleState::Stopped;
+                // Engine.cleanup() still owed: start() may have built up
+                // partial state (inner LLM, sockets, background tasks)
+                // before raising, and the contract requires cleanup to be
+                // safe against that. cleanup_once() picks up StartFailed.
+                self.state = LifecycleState::StartFailed;
                 Err(e)
             }
         }
@@ -396,12 +422,13 @@ impl Worker {
     async fn cleanup_once(&mut self) {
         match self.state {
             LifecycleState::Init | LifecycleState::Stopped => {
-                // Pre-start shutdown, already cleaned up, or start failed —
-                // nothing engine-side to do.
+                // Pre-start shutdown, or cleanup already ran. Nothing
+                // engine-side to do — `engine.start()` either never ran
+                // or its allocations have already been released.
                 self.state = LifecycleState::Stopped;
                 return;
             }
-            LifecycleState::Running => {}
+            LifecycleState::Running | LifecycleState::StartFailed => {}
         }
         match self.engine.cleanup().await {
             Ok(()) => tracing::info!("Engine cleanup complete"),
@@ -421,7 +448,7 @@ impl Worker {
         endpoint: dynamo_runtime::component::Endpoint,
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
-        let model_type = parse_endpoint_types(&self.config.endpoint_types)?;
+        let model_type = resolve_model_type(&self.config)?;
 
         let mut local_model = build_local_model(&self.config, engine_config).await?;
         tracing::debug!("local model built");
@@ -446,13 +473,16 @@ impl Worker {
             self.config.endpoint
         );
 
-        let ingress = Ingress::for_engine(Arc::new(EngineAdapter::new(self.engine.clone())))
-            .map_err(|e| {
-                err(
-                    ErrorType::Backend(BackendError::Unknown),
-                    format!("ingress: {e}"),
-                )
-            })?;
+        let ingress = Ingress::for_engine(Arc::new(EngineAdapter::new(
+            self.engine.clone(),
+            self.config.disaggregation_mode,
+        )))
+        .map_err(|e| {
+            err(
+                ErrorType::Backend(BackendError::Unknown),
+                format!("ingress: {e}"),
+            )
+        })?;
 
         let metrics_labels = if self.config.metrics_labels.is_empty() {
             None
@@ -618,6 +648,17 @@ fn resolve_served_name(config: &WorkerConfig, engine_config: &EngineConfig) -> O
         .or_else(|| engine_config.served_model_name.clone())
 }
 
+/// Pick the `ModelType` to register with based on the worker's disaggregation
+/// role. `DisaggregationMode::Prefill` short-circuits to `ModelType::Prefill`
+/// regardless of `endpoint_types`; everything else falls back to the parsed
+/// `endpoint_types` so existing callers see no change.
+fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
+    if config.disaggregation_mode.is_prefill() {
+        return Ok(ModelType::Prefill);
+    }
+    parse_endpoint_types(&config.endpoint_types)
+}
+
 fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
     let mut out = ModelType::empty();
     let mut any = false;
@@ -674,6 +715,34 @@ async fn build_local_model(
         .or_else(|| Some(engine_config.model.clone()))
         .filter(|s| !s.is_empty());
 
+    // Decode workers don't host the WorkerKvQuery endpoint, so they must not
+    // advertise the local indexer regardless of the operator-supplied flag.
+    // Mirrors the legacy non-unified vLLM path (worker_factory.py).
+    let enable_local_indexer =
+        config.enable_local_indexer && !config.disaggregation_mode.is_decode();
+
+    // Publish the disaggregated bootstrap endpoint when the engine
+    // returned one. Only meaningful for prefill workers — decode/agg
+    // engines leave both fields `None`. The frontend's `PrefillRouter`
+    // reads this from `model_manager.get_disaggregated_endpoint(...)` to
+    // take its optimised "Bootstrap path" (route decode concurrent with
+    // prefill instead of waiting for prefill to drain).
+    let disaggregated_endpoint = match (&engine_config.bootstrap_host, engine_config.bootstrap_port)
+    {
+        (Some(host), Some(port)) => {
+            tracing::info!(
+                bootstrap_host = %host,
+                bootstrap_port = port,
+                "Publishing disaggregated_endpoint for prefill worker"
+            );
+            Some(DisaggregatedEndpoint {
+                bootstrap_host: Some(host.clone()),
+                bootstrap_port: Some(port),
+            })
+        }
+        _ => None,
+    };
+
     let rt_cfg = ModelRuntimeConfig {
         total_kv_blocks: engine_config.total_kv_blocks,
         max_num_seqs: engine_config.max_num_seqs,
@@ -681,7 +750,8 @@ async fn build_local_model(
         tool_call_parser: config.tool_call_parser.clone(),
         reasoning_parser: config.reasoning_parser.clone(),
         exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
-        enable_local_indexer: config.enable_local_indexer,
+        enable_local_indexer,
+        disaggregated_endpoint,
         ..ModelRuntimeConfig::default()
     };
 
@@ -825,6 +895,126 @@ mod tests {
         assert!(!runtime_config.enable_local_indexer);
     }
 
+    #[test]
+    fn resolve_model_type_aggregated_uses_endpoint_types() {
+        let config = WorkerConfig {
+            endpoint_types: "chat,completions".to_string(),
+            disaggregation_mode: DisaggregationMode::Aggregated,
+            ..WorkerConfig::default()
+        };
+        assert_eq!(
+            resolve_model_type(&config).unwrap(),
+            ModelType::Chat | ModelType::Completions,
+        );
+    }
+
+    #[test]
+    fn resolve_model_type_decode_uses_endpoint_types() {
+        // Decode workers register with the chat/completions surface; only
+        // prefill workers short-circuit to ModelType::Prefill.
+        let config = WorkerConfig {
+            endpoint_types: "chat".to_string(),
+            disaggregation_mode: DisaggregationMode::Decode,
+            ..WorkerConfig::default()
+        };
+        assert_eq!(resolve_model_type(&config).unwrap(), ModelType::Chat);
+    }
+
+    #[test]
+    fn resolve_model_type_prefill_overrides_endpoint_types() {
+        // The operator may have left endpoint_types at the default
+        // "chat,completions"; --disaggregation-mode prefill forces the
+        // registration to ModelType::Prefill regardless.
+        let config = WorkerConfig {
+            endpoint_types: "chat,completions".to_string(),
+            disaggregation_mode: DisaggregationMode::Prefill,
+            ..WorkerConfig::default()
+        };
+        assert_eq!(resolve_model_type(&config).unwrap(), ModelType::Prefill);
+    }
+
+    #[tokio::test]
+    async fn build_local_model_decode_disables_local_indexer() {
+        let config = WorkerConfig {
+            enable_local_indexer: true,
+            disaggregation_mode: DisaggregationMode::Decode,
+            ..WorkerConfig::default()
+        };
+        let engine_config = EngineConfig {
+            model: "test/model".to_string(),
+            ..EngineConfig::default()
+        };
+
+        let local_model = build_local_model(&config, &engine_config).await.unwrap();
+        // Decode workers cannot host the local indexer endpoint, so the
+        // worker forces it off even when the operator-supplied flag is true.
+        assert!(!local_model.runtime_config().enable_local_indexer);
+    }
+
+    #[tokio::test]
+    async fn build_local_model_aggregated_keeps_local_indexer() {
+        let config = WorkerConfig {
+            enable_local_indexer: true,
+            disaggregation_mode: DisaggregationMode::Aggregated,
+            ..WorkerConfig::default()
+        };
+        let engine_config = EngineConfig {
+            model: "test/model".to_string(),
+            ..EngineConfig::default()
+        };
+
+        let local_model = build_local_model(&config, &engine_config).await.unwrap();
+        assert!(local_model.runtime_config().enable_local_indexer);
+    }
+
+    #[tokio::test]
+    async fn build_local_model_publishes_disaggregated_endpoint_when_engine_provides_it() {
+        // Prefill engines populate `EngineConfig.bootstrap_host/port` in
+        // `start()`; `build_local_model` must surface that on the
+        // `ModelRuntimeConfig` so the frontend's PrefillRouter can take
+        // its optimised Bootstrap path.
+        let config = WorkerConfig {
+            disaggregation_mode: DisaggregationMode::Prefill,
+            ..WorkerConfig::default()
+        };
+        let engine_config = EngineConfig {
+            model: "test/model".to_string(),
+            bootstrap_host: Some("10.0.0.5".to_string()),
+            bootstrap_port: Some(12345),
+            ..EngineConfig::default()
+        };
+
+        let local_model = build_local_model(&config, &engine_config).await.unwrap();
+        let endpoint = local_model
+            .runtime_config()
+            .disaggregated_endpoint
+            .as_ref()
+            .expect("disaggregated_endpoint must be published");
+        assert_eq!(endpoint.bootstrap_host.as_deref(), Some("10.0.0.5"));
+        assert_eq!(endpoint.bootstrap_port, Some(12345));
+    }
+
+    #[tokio::test]
+    async fn build_local_model_skips_disaggregated_endpoint_when_engine_omits_it() {
+        // Aggregated/decode workers don't have a bootstrap address —
+        // leaving both fields None on EngineConfig must keep the
+        // disaggregated_endpoint slot empty so the router doesn't try to
+        // route prefill traffic to them.
+        let config = WorkerConfig::default();
+        let engine_config = EngineConfig {
+            model: "test/model".to_string(),
+            ..EngineConfig::default()
+        };
+
+        let local_model = build_local_model(&config, &engine_config).await.unwrap();
+        assert!(
+            local_model
+                .runtime_config()
+                .disaggregated_endpoint
+                .is_none()
+        );
+    }
+
     // -------------------------------------------------------------------
     // Lifecycle state machine tests
     // -------------------------------------------------------------------
@@ -854,7 +1044,7 @@ mod tests {
 
     #[async_trait]
     impl LLMEngine for StateMockEngine {
-        async fn start(&self) -> Result<EngineConfig, DynamoError> {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
             if self.start_should_fail {
                 Err(err(
                     ErrorType::Backend(BackendError::EngineShutdown),
@@ -871,7 +1061,7 @@ mod tests {
         async fn generate(
             &self,
             _request: PreprocessedRequest,
-            _ctx: Arc<dyn crate::engine::AsyncEngineContext>,
+            _ctx: crate::engine::GenerateContext,
         ) -> Result<
             BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
             DynamoError,
@@ -893,23 +1083,44 @@ mod tests {
     async fn start_engine_init_to_running_on_success() {
         let (engine, _) = StateMockEngine::new(false);
         let mut worker = worker_with(engine);
-        let cfg = worker.start_engine().await.expect("start");
+        let cfg = worker.start_engine(0).await.expect("start");
         assert_eq!(cfg.model, "mock");
         assert_eq!(worker.state, LifecycleState::Running);
     }
 
     #[tokio::test]
-    async fn start_engine_init_to_stopped_on_failure() {
+    async fn start_engine_init_to_start_failed_on_failure() {
+        let (engine, _) = StateMockEngine::new(true);
+        let mut worker = worker_with(engine);
+        let res = worker.start_engine(0).await;
+        assert!(res.is_err(), "start should fail");
+        // start() may have allocated partial state before raising; the
+        // state machine keeps cleanup() owed by parking in StartFailed.
+        assert_eq!(worker.state, LifecycleState::StartFailed);
+    }
+
+    #[tokio::test]
+    async fn cleanup_once_runs_engine_cleanup_after_failed_start() {
+        // Regression: previously, cleanup_once short-circuited on
+        // `Stopped` after a failed start and engines were forced to
+        // wrap their own start() in try/except to release partial
+        // state. The state machine now owns the call.
         let (engine, cleanup_calls) = StateMockEngine::new(true);
         let mut worker = worker_with(engine);
-        let res = worker.start_engine().await;
-        assert!(res.is_err(), "start should fail");
+        let _ = worker.start_engine(0).await; // intentional failure
+
+        worker.cleanup_once().await;
+        assert_eq!(
+            cleanup_calls.load(Ordering::SeqCst),
+            1,
+            "engine.cleanup() must run exactly once after a failed start \
+             so engines don't have to re-implement the guard"
+        );
         assert_eq!(worker.state, LifecycleState::Stopped);
 
-        // cleanup_once is a no-op after a failed start: the state machine
-        // skips engine.cleanup() because the engine never became running.
+        // And still idempotent: a second call doesn't re-enter cleanup.
         worker.cleanup_once().await;
-        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
         assert_eq!(worker.state, LifecycleState::Stopped);
     }
 
@@ -917,7 +1128,7 @@ mod tests {
     async fn cleanup_once_is_idempotent() {
         let (engine, cleanup_calls) = StateMockEngine::new(false);
         let mut worker = worker_with(engine);
-        worker.start_engine().await.unwrap();
+        worker.start_engine(0).await.unwrap();
 
         worker.cleanup_once().await;
         worker.cleanup_once().await;
@@ -973,7 +1184,7 @@ mod tests {
 
     #[async_trait]
     impl LLMEngine for OrderingMockEngine {
-        async fn start(&self) -> Result<EngineConfig, DynamoError> {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
             self.log.lock().unwrap().push("start");
             Ok(EngineConfig {
                 model: "mock".to_string(),
@@ -984,7 +1195,7 @@ mod tests {
         async fn generate(
             &self,
             _request: PreprocessedRequest,
-            _ctx: Arc<dyn crate::engine::AsyncEngineContext>,
+            _ctx: crate::engine::GenerateContext,
         ) -> Result<
             BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
             DynamoError,
@@ -1016,7 +1227,7 @@ mod tests {
         // process-global env var (which would race other parallel tests).
         let (engine, log) = OrderingMockEngine::new(false);
         let mut worker = worker_with(engine);
-        worker.start_engine().await.unwrap();
+        worker.start_engine(0).await.unwrap();
 
         worker.run_engine_shutdown_steps_with_grace(0.0).await;
 
@@ -1032,7 +1243,7 @@ mod tests {
     async fn shutdown_steps_drain_failure_does_not_block_cleanup() {
         let (engine, log) = OrderingMockEngine::new(true); // drain fails
         let mut worker = worker_with(engine);
-        worker.start_engine().await.unwrap();
+        worker.start_engine(0).await.unwrap();
 
         worker.run_engine_shutdown_steps_with_grace(0.0).await;
 
@@ -1223,7 +1434,7 @@ mod tests {
     async fn timeout_alone_starves_drain_cleanup_when_grace_meets_timeout() {
         let (engine, log) = OrderingMockEngine::new(false);
         let mut worker = worker_with(engine);
-        worker.start_engine().await.unwrap();
+        worker.start_engine(0).await.unwrap();
 
         let timeout = Duration::from_secs(5);
         let grace = 5.1;
@@ -1252,7 +1463,7 @@ mod tests {
     async fn shutdown_deadline_reserves_grace_so_drain_cleanup_complete() {
         let (engine, log) = OrderingMockEngine::new(false);
         let mut worker = worker_with(engine);
-        worker.start_engine().await.unwrap();
+        worker.start_engine(0).await.unwrap();
 
         let timeout = Duration::from_secs(5);
         let grace = 5.1;

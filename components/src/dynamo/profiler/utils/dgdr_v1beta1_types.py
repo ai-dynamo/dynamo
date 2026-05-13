@@ -65,6 +65,7 @@ class GPUSKUType(str, Enum):
     H100PCIe = "h100_pcie"
     A100SXM = "a100_sxm"
     A100PCIe = "a100_pcie"
+    A30 = "a30"
     L40S = "l40s"
     L40 = "l40"
     L4 = "l4"

@@ -214,7 +214,7 @@ Set up a `ReadWriteMany` PVC so all pods share downloaded model weights instead 
 - [EKS — EFS](cloud-providers/eks/efs.md)
 - GKE — Cloud Filestore (see [GKE guide](cloud-providers/gke/gke.md))
 
-For large clusters with frequent model updates, consider [Model Express](model-caching.md#option-2-model-express-p2p-distribution) for P2P model distribution. See [Model Caching](model-caching.md) for the full walkthrough including the download Job and mount configuration.
+For large clusters with frequent model updates, consider [ModelExpress](model-caching.md#option-2-modelexpress-p2p-distribution) for P2P model distribution and ModelStreamer for direct streaming from object storage. See [Model Caching](model-caching.md) for the full walkthrough including the download Job, mount configuration, and ModelExpress setup.
 
 ## Step 4: Pre-Deployment Check
 
@@ -318,4 +318,4 @@ helm install dynamo-platform ./platform/ \
 - [Helm Chart Configuration](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/charts/platform/README.md)
 - [Create Custom Deployments](./deployment/create-deployment.md)
 - [Dynamo Operator Details](./dynamo-operator.md)
-- [Model Express Server](https://github.com/ai-dynamo/modelexpress)
+- [ModelExpress Server](https://github.com/ai-dynamo/modelexpress)
