@@ -51,19 +51,15 @@ def build_nixl_kv_transfer_config_json() -> str:
     return json.dumps(build_nixl_kv_transfer_config())
 
 
-def get_gpu_memory_utilization(num_workers: int = 1, single_gpu: bool = False) -> float:
+def get_gpu_memory_utilization() -> float:
     """Get device-aware GPU memory utilization ratio for vLLM tests.
-
-    Args:
-        num_workers: Number of vLLM worker processes
-        single_gpu: If True, all workers share the same GPU (requires lower utilization)
 
     Returns:
         GPU memory utilization ratio (0.0-1.0)
 
     Notes:
         - CUDA (e.g., L40S 48GB): 0.45 per worker is safe in current CI coverage
-        - XPU (e.g., Intel 23GB): 0.3 is used for both shared-GPU and general cases
+        - XPU (e.g., Intel 23GB): 0.4 is used for general cases
     """
     device = detect_target_device()
 
