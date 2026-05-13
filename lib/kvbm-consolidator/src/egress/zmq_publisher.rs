@@ -13,8 +13,8 @@
 //!
 //! Wave1-D implements this body.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -58,24 +58,23 @@ fn sort_for_emission(events: Vec<ConsolidatedEvent>) -> Vec<ConsolidatedEvent> {
     let mut run: Vec<ConsolidatedEvent> = Vec::new();
     let mut run_kind: Option<Kind> = None;
 
-    let flush_run = |out: &mut Vec<ConsolidatedEvent>,
-                     run: &mut Vec<ConsolidatedEvent>,
-                     k: Option<Kind>| {
-        match k {
-            Some(Kind::Store) => run.sort_by_key(|e| match e {
-                ConsolidatedEvent::Store { seq_hash, .. } => seq_hash.position(),
-                _ => unreachable!(),
-            }),
-            Some(Kind::Remove) => run.sort_by_key(|e| match e {
-                ConsolidatedEvent::Remove { seq_hash, .. } => {
-                    std::cmp::Reverse(seq_hash.position())
-                }
-                _ => unreachable!(),
-            }),
-            _ => {}
-        }
-        out.extend(run.drain(..));
-    };
+    let flush_run =
+        |out: &mut Vec<ConsolidatedEvent>, run: &mut Vec<ConsolidatedEvent>, k: Option<Kind>| {
+            match k {
+                Some(Kind::Store) => run.sort_by_key(|e| match e {
+                    ConsolidatedEvent::Store { seq_hash, .. } => seq_hash.position(),
+                    _ => unreachable!(),
+                }),
+                Some(Kind::Remove) => run.sort_by_key(|e| match e {
+                    ConsolidatedEvent::Remove { seq_hash, .. } => {
+                        std::cmp::Reverse(seq_hash.position())
+                    }
+                    _ => unreachable!(),
+                }),
+                _ => {}
+            }
+            out.extend(run.drain(..));
+        };
 
     for ev in events {
         let k = kind(&ev);
@@ -200,7 +199,10 @@ fn consolidated_to_event(ev: ConsolidatedEvent) -> anyhow::Result<Event> {
                 medium: None,
             })
         }
-        ConsolidatedEvent::Remove { seq_hash, source: _ } => Ok(Event::BlockRemoved {
+        ConsolidatedEvent::Remove {
+            seq_hash,
+            source: _,
+        } => Ok(Event::BlockRemoved {
             block_hashes: vec![router_block_hash(seq_hash)],
             medium: None,
         }),

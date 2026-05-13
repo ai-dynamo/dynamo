@@ -145,7 +145,10 @@ async fn lora_name_passthrough() {
 
         let consolidator = ConsolidatorBuilder::new(&egress_ep, EventSource::Vllm)
             .zmq_in(&pub_handle.endpoint)
-            .kvbm_events(tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|r| futures::future::ready(r.ok())))
+            .kvbm_events(
+                tokio_stream::wrappers::BroadcastStream::new(rx)
+                    .filter_map(|r| futures::future::ready(r.ok())),
+            )
             .poll_interval(Duration::from_millis(20))
             .build()
             .await
@@ -181,10 +184,7 @@ async fn lora_name_passthrough() {
             .handle_kvbm_store(seq_hash, tokens, 4, Some(lora.clone()))
             .await;
 
-        let msgs = sub
-            .recv_n(5, Duration::from_secs(3))
-            .await
-            .expect("recv_n");
+        let msgs = sub.recv_n(5, Duration::from_secs(3)).await.expect("recv_n");
         let stores: Vec<&EventMirror> = msgs
             .iter()
             .flat_map(|(_, b)| b.1.iter())
@@ -245,22 +245,18 @@ async fn different_dp_ranks_collapse_to_zero() {
 
         for (rank, hash) in [(Some(0i32), 100u64), (Some(1), 200), (Some(2), 300)] {
             let tokens: Vec<u32> = vec![hash as u32; 4];
-            let batch = TestBatch(
-                1.0,
-                vec![bs(hash, None, tokens, 4)],
-                rank,
-            );
+            let batch = TestBatch(1.0, vec![bs(hash, None, tokens, 4)], rank);
             pub_handle.send_batch(&batch).await.expect("send");
         }
 
-        let msgs = sub
-            .recv_n(5, Duration::from_secs(3))
-            .await
-            .expect("recv_n");
+        let msgs = sub.recv_n(5, Duration::from_secs(3)).await.expect("recv_n");
 
         // All egress batches containing STOREs must have dp_rank == Some(0).
         for (_, batch) in &msgs {
-            let has_store = batch.1.iter().any(|e| matches!(e, EventMirror::BlockStored { .. }));
+            let has_store = batch
+                .1
+                .iter()
+                .any(|e| matches!(e, EventMirror::BlockStored { .. }));
             if has_store {
                 assert_eq!(
                     batch.2,

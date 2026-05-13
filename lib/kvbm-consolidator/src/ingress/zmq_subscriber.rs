@@ -96,7 +96,9 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
             ..
         } => {
             if block_size == 0 {
-                tracing::warn!("Invalid block_size 0 (must be positive), skipping event to avoid chunks() panic");
+                tracing::warn!(
+                    "Invalid block_size 0 (must be positive), skipping event to avoid chunks() panic"
+                );
                 return;
             }
 

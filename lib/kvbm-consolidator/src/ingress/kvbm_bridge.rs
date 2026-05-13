@@ -29,7 +29,11 @@ use crate::tracker::Tracker;
 
 /// Spawn the bridge task. Returns a `JoinHandle` that completes when `cancel` fires or
 /// the upstream stream ends.
-pub fn spawn<S>(stream: S, tracker: Arc<RwLock<Tracker>>, cancel: CancellationToken) -> JoinHandle<()>
+pub fn spawn<S>(
+    stream: S,
+    tracker: Arc<RwLock<Tracker>>,
+    cancel: CancellationToken,
+) -> JoinHandle<()>
 where
     S: Stream<Item = KvCacheEvent> + Send + 'static,
 {

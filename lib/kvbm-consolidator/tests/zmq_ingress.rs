@@ -92,10 +92,7 @@ async fn zmq_ingress_roundtrip() {
         pub_handle.send_batch(&batch).await.expect("send_batch");
 
         // Collect events — the publisher drains every 20ms, so we wait up to 3s.
-        let msgs = sub
-            .recv_n(1, Duration::from_secs(3))
-            .await
-            .expect("recv_n");
+        let msgs = sub.recv_n(1, Duration::from_secs(3)).await.expect("recv_n");
 
         // We may get 1 or more batches; flatten all events.
         let all_events: Vec<&EventMirror> = msgs.iter().flat_map(|(_, b)| b.1.iter()).collect();
@@ -105,7 +102,11 @@ async fn zmq_ingress_roundtrip() {
             .copied()
             .collect();
 
-        assert_eq!(stores.len(), 3, "expected 3 BlockStored events, got: {all_events:?}");
+        assert_eq!(
+            stores.len(),
+            3,
+            "expected 3 BlockStored events, got: {all_events:?}"
+        );
 
         // The first block should have no parent.
         let hashes_and_parents: Vec<(u64, Option<u64>)> = stores
@@ -178,12 +179,7 @@ async fn zmq_multipart_parsing() {
         // 4-frame (bad).
         let good_payload = TestBatch(0.0, vec![RawKvEvent::AllBlocksCleared], None).encode();
         pub_handle
-            .send_frames(vec![
-                vec![],
-                vec![0u8; 8],
-                good_payload.clone(),
-                vec![0u8],
-            ])
+            .send_frames(vec![vec![], vec![0u8; 8], good_payload.clone(), vec![0u8]])
             .await
             .expect("send 4-frame");
 
@@ -204,7 +200,10 @@ async fn zmq_multipart_parsing() {
             vec![bs_event(vec![222], None, vec![5, 6, 7, 8], 4, None)],
             None,
         );
-        pub_handle.send_batch(&valid_3f).await.expect("send 3-frame");
+        pub_handle
+            .send_batch(&valid_3f)
+            .await
+            .expect("send 3-frame");
 
         // We should receive exactly 2 STOREs from the 2-frame and 3-frame batches.
         let msgs = sub
@@ -216,7 +215,10 @@ async fn zmq_multipart_parsing() {
             .flat_map(|(_, b)| b.1.iter())
             .filter(|e| matches!(e, EventMirror::BlockStored { .. }))
             .count();
-        assert!(stores >= 2, "expected ≥2 stores from good batches, got {stores}");
+        assert!(
+            stores >= 2,
+            "expected ≥2 stores from good batches, got {stores}"
+        );
 
         consolidator.shutdown().await;
     })
@@ -263,10 +265,7 @@ async fn malformed_msgpack_is_logged_not_fatal() {
         );
         pub_handle.send_batch(&valid).await.expect("send valid");
 
-        let msgs = sub
-            .recv_n(1, Duration::from_secs(3))
-            .await
-            .expect("recv_n");
+        let msgs = sub.recv_n(1, Duration::from_secs(3)).await.expect("recv_n");
         let stores: usize = msgs
             .iter()
             .flat_map(|(_, b)| b.1.iter())

@@ -83,7 +83,10 @@ async fn cross_source_dedup() {
 
         let consolidator = ConsolidatorBuilder::new(&egress_ep, EventSource::Vllm)
             .zmq_in(&pub_handle.endpoint)
-            .kvbm_events(tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|r| futures::future::ready(r.ok())))
+            .kvbm_events(
+                tokio_stream::wrappers::BroadcastStream::new(rx)
+                    .filter_map(|r| futures::future::ready(r.ok())),
+            )
             .poll_interval(Duration::from_millis(20))
             .build()
             .await
@@ -110,7 +113,8 @@ async fn cross_source_dedup() {
         pub_handle.send_batch(&batch).await.expect("send zmq");
 
         // Inject same block via KVBM broadcast.
-        tx.send(KvCacheEvent::Create(seq_hash)).expect("kvbm create");
+        tx.send(KvCacheEvent::Create(seq_hash))
+            .expect("kvbm create");
 
         // Collect — allow time for both sources to be processed.
         let msgs = sub
@@ -127,7 +131,11 @@ async fn cross_source_dedup() {
             .filter(|e| matches!(e, EventMirror::BlockRemoved { .. }))
             .collect();
 
-        assert_eq!(stores.len(), 1, "exactly 1 STORE expected from 2 sources, got: {all:?}");
+        assert_eq!(
+            stores.len(),
+            1,
+            "exactly 1 STORE expected from 2 sources, got: {all:?}"
+        );
         assert_eq!(removes.len(), 0, "no REMOVE yet");
 
         // Remove from vLLM only (external hash is the seq u64 as string, used by
@@ -140,11 +148,7 @@ async fn cross_source_dedup() {
 
         let handle = consolidator.handle();
         // Step 1: trigger vLLM Remove via ZMQ. Use the same opaque external hash we stored.
-        let rmv = TestBatch(
-            2.0,
-            vec![br_event(vec![0xA11Cu64])],
-            None,
-        );
+        let rmv = TestBatch(2.0, vec![br_event(vec![0xA11Cu64])], None);
         pub_handle.send_batch(&rmv).await.expect("send remove");
 
         let msgs2 = sub
@@ -174,7 +178,11 @@ async fn cross_source_dedup() {
             .flat_map(|(_, b)| b.1.iter())
             .filter(|e| matches!(e, EventMirror::BlockRemoved { .. }))
             .collect();
-        assert_eq!(removes3.len(), 1, "REMOVE expected after last source dropped");
+        assert_eq!(
+            removes3.len(),
+            1,
+            "REMOVE expected after last source dropped"
+        );
 
         consolidator.shutdown().await;
     })
@@ -231,10 +239,7 @@ async fn parent_chain_resolution() {
         );
         pub_handle.send_batch(&batch).await.expect("send");
 
-        let msgs = sub
-            .recv_n(5, Duration::from_secs(3))
-            .await
-            .expect("recv_n");
+        let msgs = sub.recv_n(5, Duration::from_secs(3)).await.expect("recv_n");
         let all: Vec<&EventMirror> = msgs.iter().flat_map(|(_, b)| b.1.iter()).collect();
 
         let stores: Vec<_> = all
@@ -343,19 +348,19 @@ async fn clear_all_propagates() {
             .recv_n(1, Duration::from_millis(800))
             .await
             .expect("recv clear");
-        let has_clear = msgs2.iter().flat_map(|(_, b)| b.1.iter()).any(|e| {
-            matches!(e, EventMirror::AllBlocksCleared {})
-        });
+        let has_clear = msgs2
+            .iter()
+            .flat_map(|(_, b)| b.1.iter())
+            .any(|e| matches!(e, EventMirror::AllBlocksCleared {}));
         assert!(has_clear, "expected AllBlocksCleared on egress");
 
         // Store the same tokens again — tracker has been wiped, must produce 3 new STOREs.
         let tokens2: Vec<u32> = (1u32..=12).collect();
-        let batch2 = TestBatch(
-            3.0,
-            vec![bs_event(seqs, None, tokens2, 4, None)],
-            None,
-        );
-        pub_handle.send_batch(&batch2).await.expect("send re-stores");
+        let batch2 = TestBatch(3.0, vec![bs_event(seqs, None, tokens2, 4, None)], None);
+        pub_handle
+            .send_batch(&batch2)
+            .await
+            .expect("send re-stores");
 
         let msgs3 = sub
             .recv_n(1, Duration::from_millis(800))

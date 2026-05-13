@@ -1953,7 +1953,10 @@ mod tests {
         let computed_hash_1_4 = compute_block_hash(cast_slice(tokens_1_4), salt);
         assert_eq!(computed_hash_1_4, HASH_1_4, "Mismatch for HASH_1_4");
         // First block's sequence hash is its block hash
-        assert_eq!(computed_hash_1_4.0, SEQ_HASH_1_4, "Mismatch for SEQ_HASH_1_4");
+        assert_eq!(
+            computed_hash_1_4.0, SEQ_HASH_1_4,
+            "Mismatch for SEQ_HASH_1_4"
+        );
 
         // Block 2: [5, 6, 7, 8]
         let tokens_5_8 = &[5u32, 6, 7, 8];
@@ -2211,11 +2214,8 @@ mod tests {
         ];
 
         // Direct construction via TokenBlock
-        let blk0 = TokenBlock::from_chunk(
-            TokenBlockChunk::from_tokens(&[1, 2, 3, 4], salt),
-            None,
-            0,
-        );
+        let blk0 =
+            TokenBlock::from_chunk(TokenBlockChunk::from_tokens(&[1, 2, 3, 4], salt), None, 0);
         let blk1 = TokenBlock::from_chunk(
             TokenBlockChunk::from_tokens(&[5, 6, 7, 8], salt),
             Some(blk0.sequence_hash()),
@@ -2248,8 +2248,7 @@ mod tests {
         let alt_bh0 = compute_block_hash(cast_slice(&[1u32, 2, 3, 4]), alt_salt);
         assert_ne!(alt_bh0, bh[0]);
         let alt_plh0 = PositionalLineageHash::root(alt_bh0);
-        let alt_plh1 =
-            alt_plh0.extend(compute_block_hash(cast_slice(&[5u32, 6, 7, 8]), alt_salt));
+        let alt_plh1 = alt_plh0.extend(compute_block_hash(cast_slice(&[5u32, 6, 7, 8]), alt_salt));
         assert_ne!(alt_plh0.as_u128(), plh0.as_u128());
         assert_ne!(alt_plh1.as_u128(), plh1.as_u128());
     }

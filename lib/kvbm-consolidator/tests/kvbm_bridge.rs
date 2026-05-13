@@ -10,7 +10,9 @@ use futures::StreamExt;
 
 use std::time::Duration;
 
-use common::{EventMirror, TestBatch, ZmqPubHandle, ZmqSubHandle, init_tracing, sync_pulse, wait_for};
+use common::{
+    EventMirror, TestBatch, ZmqPubHandle, ZmqSubHandle, init_tracing, sync_pulse, wait_for,
+};
 use dynamo_kv_hashing::Request;
 use dynamo_tokens::PositionalLineageHash;
 use kvbm_consolidator::wire::vllm_in::{BlockHashValue, RawKvEvent};
@@ -107,7 +109,8 @@ async fn kvbm_bridge_plumbing() {
         let expected_block_hash = kvbm_consolidator::hash::router_block_hash(seq_hash);
 
         // 1. KVBM bridge sees Create first → registered but NOT published.
-        tx.send(KvCacheEvent::Create(seq_hash)).expect("send create");
+        tx.send(KvCacheEvent::Create(seq_hash))
+            .expect("send create");
         // Give the publisher a tick to confirm no Store leaks.
         tokio::time::sleep(Duration::from_millis(80)).await;
         let drained = drain(&mut sub);
@@ -161,7 +164,8 @@ async fn kvbm_bridge_plumbing() {
         );
 
         // 4. KVBM Remove → last source, Remove publishes.
-        tx.send(KvCacheEvent::Remove(seq_hash)).expect("send remove");
+        tx.send(KvCacheEvent::Remove(seq_hash))
+            .expect("send remove");
         let msgs = sub
             .recv_n(1, Duration::from_secs(3))
             .await
@@ -193,7 +197,10 @@ async fn registry_presence_after_kvbm_store() {
         let registry = BlockRegistry::new();
 
         let consolidator = ConsolidatorBuilder::new(&egress_ep, EventSource::Kvbm)
-            .kvbm_events(tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|r| futures::future::ready(r.ok())))
+            .kvbm_events(
+                tokio_stream::wrappers::BroadcastStream::new(rx)
+                    .filter_map(|r| futures::future::ready(r.ok())),
+            )
             .registry(registry.clone())
             .poll_interval(Duration::from_millis(20))
             .build()
@@ -203,14 +210,18 @@ async fn registry_presence_after_kvbm_store() {
         let tokens: Vec<u32> = vec![10, 20, 30, 40];
         let seq_hash = canonical_chain(&tokens, 4)[0];
 
-        tx.send(KvCacheEvent::Create(seq_hash)).expect("send create");
+        tx.send(KvCacheEvent::Create(seq_hash))
+            .expect("send create");
 
         // Wait until the registry records the hash.
         let found = wait_for(Duration::from_secs(4), || {
             registry.match_sequence_hash(seq_hash, false).is_some()
         })
         .await;
-        assert!(found, "registry should know about seq_hash after KVBM Create");
+        assert!(
+            found,
+            "registry should know about seq_hash after KVBM Create"
+        );
 
         consolidator.shutdown().await;
     })

@@ -399,7 +399,14 @@ mod tests {
     #[test]
     fn tracker_first_store_from_any_source_emits_store_event() {
         let mut t = tracker();
-        let ret = t.handle_store(EventSource::Vllm, "h1".into(), None, vec![1, 2, 3, 4], 4, None);
+        let ret = t.handle_store(
+            EventSource::Vllm,
+            "h1".into(),
+            None,
+            vec![1, 2, 3, 4],
+            4,
+            None,
+        );
         assert!(ret);
         let events = t.drain_events();
         assert_eq!(events.len(), 1);
@@ -415,9 +422,23 @@ mod tests {
     #[test]
     fn tracker_repeat_store_same_source_and_hash_is_noop() {
         let mut t = tracker();
-        t.handle_store(EventSource::Vllm, "h1".into(), None, vec![1, 2, 3, 4], 4, None);
+        t.handle_store(
+            EventSource::Vllm,
+            "h1".into(),
+            None,
+            vec![1, 2, 3, 4],
+            4,
+            None,
+        );
         t.drain_events();
-        let ret = t.handle_store(EventSource::Vllm, "h1".into(), None, vec![1, 2, 3, 4], 4, None);
+        let ret = t.handle_store(
+            EventSource::Vllm,
+            "h1".into(),
+            None,
+            vec![1, 2, 3, 4],
+            4,
+            None,
+        );
         assert!(!ret);
         assert_eq!(t.drain_events().len(), 0);
         assert_eq!(t.num_blocks(), 1);
@@ -426,7 +447,14 @@ mod tests {
     #[test]
     fn tracker_second_source_store_for_same_seq_hash_is_silent() {
         let mut t = tracker();
-        t.handle_store(EventSource::Vllm, "v1".into(), None, vec![1, 2, 3, 4], 4, None);
+        t.handle_store(
+            EventSource::Vllm,
+            "v1".into(),
+            None,
+            vec![1, 2, 3, 4],
+            4,
+            None,
+        );
         t.drain_events();
         let ret = t.handle_store(
             EventSource::Trtllm,
@@ -446,14 +474,7 @@ mod tests {
         let mut t = tracker();
         let tokens = vec![10u32, 20, 30, 40];
 
-        t.handle_store(
-            EventSource::Vllm,
-            "v".into(),
-            None,
-            tokens.clone(),
-            4,
-            None,
-        );
+        t.handle_store(EventSource::Vllm, "v".into(), None, tokens.clone(), 4, None);
         t.handle_store(
             EventSource::Trtllm,
             "r".into(),
@@ -482,7 +503,14 @@ mod tests {
     #[test]
     fn tracker_remove_from_last_source_emits_remove_event() {
         let mut t = tracker();
-        t.handle_store(EventSource::Vllm, "h1".into(), None, vec![1, 2, 3, 4], 4, None);
+        t.handle_store(
+            EventSource::Vllm,
+            "h1".into(),
+            None,
+            vec![1, 2, 3, 4],
+            4,
+            None,
+        );
         t.drain_events();
         let ret = t.handle_remove(EventSource::Vllm, "h1");
         assert!(ret);
@@ -497,14 +525,7 @@ mod tests {
         let mut t = tracker();
         let tokens = vec![1u32, 2, 3, 4];
 
-        t.handle_store(
-            EventSource::Vllm,
-            "v".into(),
-            None,
-            tokens.clone(),
-            4,
-            None,
-        );
+        t.handle_store(EventSource::Vllm, "v".into(), None, tokens.clone(), 4, None);
         t.handle_store(
             EventSource::Trtllm,
             "r".into(),
@@ -683,7 +704,14 @@ mod tests {
         let mut t = tracker();
         let tokens = vec![1u32, 2, 3, 4];
 
-        t.handle_store(EventSource::Vllm, "p0".into(), None, tokens.clone(), 4, None);
+        t.handle_store(
+            EventSource::Vllm,
+            "p0".into(),
+            None,
+            tokens.clone(),
+            4,
+            None,
+        );
         t.drain_events();
 
         t.handle_store(
@@ -704,7 +732,14 @@ mod tests {
     #[test]
     fn tracker_external_to_seq_cleaned_after_full_remove() {
         let mut t = tracker();
-        t.handle_store(EventSource::Vllm, "h1".into(), None, vec![1, 2, 3, 4], 4, None);
+        t.handle_store(
+            EventSource::Vllm,
+            "h1".into(),
+            None,
+            vec![1, 2, 3, 4],
+            4,
+            None,
+        );
         t.drain_events();
         assert_eq!(t.num_external_mappings(), 1);
         t.handle_remove(EventSource::Vllm, "h1");

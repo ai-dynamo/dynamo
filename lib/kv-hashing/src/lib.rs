@@ -30,6 +30,5 @@ pub use request::{Request, RequestBuilder, RequestMmObjectInfo};
 pub use dynamo_tokens::{
     BlockHash, MM_SLOT_TAG_PLACEHOLDER, MM_SLOT_TAG_TOKEN, MmInfoError, PositionalLineageHash,
     SaltHash, SequenceHash, Token, TokenBlockMmInfo, compute_block_bytes_with_mm,
-    compute_block_hash, compute_hash_v2, compute_salt_hash_from_bytes,
-    validate_and_sort_mm_info,
+    compute_block_hash, compute_hash_v2, compute_salt_hash_from_bytes, validate_and_sort_mm_info,
 };

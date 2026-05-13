@@ -64,9 +64,9 @@ fn make_synthetic_payload_blobs() -> Vec<Vec<u8>> {
                 medium: None,
                 block_mm_infos: None,
                 is_eagle: None,
-        group_idx: None,
-        kv_cache_spec_kind: None,
-        kv_cache_spec_sliding_window: None,
+                group_idx: None,
+                kv_cache_spec_kind: None,
+                kv_cache_spec_sliding_window: None,
             }],
             Some(0),
         ),
@@ -82,9 +82,9 @@ fn make_synthetic_payload_blobs() -> Vec<Vec<u8>> {
                 medium: None,
                 block_mm_infos: None,
                 is_eagle: None,
-        group_idx: None,
-        kv_cache_spec_kind: None,
-        kv_cache_spec_sliding_window: None,
+                group_idx: None,
+                kv_cache_spec_kind: None,
+                kv_cache_spec_sliding_window: None,
             }],
             Some(0),
         ),
@@ -94,9 +94,9 @@ fn make_synthetic_payload_blobs() -> Vec<Vec<u8>> {
             vec![RawKvEvent::BlockRemoved {
                 block_hashes: vec![BlockHashValue::Unsigned(1)],
                 medium: None,
-        group_idx: None,
-        kv_cache_spec_kind: None,
-        kv_cache_spec_sliding_window: None,
+                group_idx: None,
+                kv_cache_spec_kind: None,
+                kv_cache_spec_sliding_window: None,
             }],
             Some(0),
         ),
@@ -175,9 +175,13 @@ fn convert_event(e: common::EventMirror) -> SnapEvent {
             lora_name,
             medium,
         },
-        common::EventMirror::BlockRemoved { block_hashes, medium } => {
-            SnapEvent::BlockRemoved { block_hashes, medium }
-        }
+        common::EventMirror::BlockRemoved {
+            block_hashes,
+            medium,
+        } => SnapEvent::BlockRemoved {
+            block_hashes,
+            medium,
+        },
         common::EventMirror::AllBlocksCleared {} => SnapEvent::AllBlocksCleared {},
     }
 }

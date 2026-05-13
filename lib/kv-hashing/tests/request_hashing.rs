@@ -283,7 +283,8 @@ fn extension_consistency() {
     for i in 1..h_full.len() {
         let extended = h_full[i - 1].plh.extend(h_full[i].block_hash);
         assert_eq!(
-            extended, h_full[i].plh,
+            extended,
+            h_full[i].plh,
             "PLH::extend should reproduce block {i} from block {}",
             i - 1
         );

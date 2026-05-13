@@ -194,7 +194,10 @@ fn check_parent_chain(emitted: &[ConsolidatedEvent]) -> Result<(), TestCaseError
 
     for ev in emitted {
         if let ConsolidatedEvent::Store { seq_hash, .. } = ev {
-            ever_stored.insert(kvbm_consolidator::hash::router_block_hash(*seq_hash), *seq_hash);
+            ever_stored.insert(
+                kvbm_consolidator::hash::router_block_hash(*seq_hash),
+                *seq_hash,
+            );
         }
     }
 

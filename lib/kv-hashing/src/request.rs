@@ -119,11 +119,10 @@ impl RequestBuilder {
         let mut request = self.build_internal()?;
         // Validate against the actual token length, sort by offset, and write back.
         // No clones: we move out of `request.mm_info`, transform via Into, and replace.
-        let token_mm: Vec<TokenBlockMmInfo> =
-            std::mem::take(&mut request.mm_info)
-                .into_iter()
-                .map(Into::into)
-                .collect();
+        let token_mm: Vec<TokenBlockMmInfo> = std::mem::take(&mut request.mm_info)
+            .into_iter()
+            .map(Into::into)
+            .collect();
         let validated = validate_and_sort_mm_info(&token_mm, request.tokens.len())?;
         request.mm_info = validated.into_iter().map(Into::into).collect();
         Ok(request)

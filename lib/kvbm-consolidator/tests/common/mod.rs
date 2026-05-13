@@ -19,8 +19,8 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures::StreamExt as _;
-use kvbm_consolidator::zmq_util::{SharedPubSocket, bind_pub_socket, connect_sub_socket};
 use kvbm_consolidator::wire::vllm_in::RawKvEvent;
+use kvbm_consolidator::zmq_util::{SharedPubSocket, bind_pub_socket, connect_sub_socket};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
