@@ -89,7 +89,7 @@ RUN git clone ${SGLANG_GIT_URL} sglang && \
     cp pyproject_xpu.toml pyproject.toml && \
     pip3 install --no-build-isolation --extra-index-url https://download.pytorch.org/whl/xpu ".[diffusion]" && \
     pip3 install "xgrammar==0.1.33" --no-deps && \
-    pip3 install msgspec blake3 py-cpuinfo compressed_tensors gguf partial_json_parser einops tabulate
+    pip3 install msgspec blake3 py-cpuinfo compressed_tensors gguf partial_json_parser einops tabulate ftfy
 
 # Multimodal + accelerate runtime deps that pyproject_xpu.toml does NOT pull in
 # via the `[diffusion]` extra above:
