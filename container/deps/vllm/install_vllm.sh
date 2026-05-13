@@ -278,7 +278,24 @@ elif [ -d "$PATCH_DIR" ] && compgen -G "$PATCH_DIR/*.patch" > /dev/null; then
     VLLM_SITE_PACKAGES=$(cd / && python3 -c "import vllm, os; print(os.path.dirname(os.path.dirname(vllm.__file__)))")
     for p in "$PATCH_DIR"/*.patch; do
         echo "  $(basename "$p")"
-        patch -p1 -d "$VLLM_SITE_PACKAGES" < "$p"
+        # --batch: suppress interactive prompts. Without it, an unmatched
+        #          file path in a hunk produces `File to patch:` on stdin
+        #          and hangs `docker build`.
+        # --forward: skip patches that already appear applied or reversed —
+        #          benign for re-runs and for wheels that already carry
+        #          the fix (e.g. a v0.20.1.post1 hotfix).
+        #
+        # GNU patch exit codes: 0 = clean apply, 1 = hunks rejected or
+        # skipped via --forward, >=2 = fatal. Accept rc=1 (so the patches
+        # block doesn't become a brittle build gate); propagate >=2.
+        rc=0
+        patch -p1 --batch --forward -d "$VLLM_SITE_PACKAGES" < "$p" || rc=$?
+        if [ "$rc" -ge 2 ]; then
+            echo "    fatal: patch exited $rc"
+            exit "$rc"
+        elif [ "$rc" -eq 1 ]; then
+            echo "    (already applied or partial; continuing)"
+        fi
     done
     echo "✓ vLLM patches applied"
 fi
