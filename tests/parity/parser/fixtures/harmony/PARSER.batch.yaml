@@ -21,22 +21,6 @@ cases:
         arguments:
           location: NYC
       normal_text: ''
-  PARSER.batch.2:
-    description: Multiple tool calls (back-to-back commentary blocks)
-    model_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-      to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|>
-    tools:
-    - *id001
-    - name: get_time
-      parameters:
-        type: object
-        properties:
-          timezone:
-            type: string
-    expected:
-      calls: []
-      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-        to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|>
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
@@ -45,55 +29,6 @@ cases:
     expected:
       calls: []
       normal_text: Hello, how can I help you today?
-  PARSER.batch.4:
-    description: Malformed (truncated JSON args)
-    model_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>
-    tools:
-    - *id001
-    expected:
-      calls: []
-      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>
-  PARSER.batch.5:
-    description: Missing <|call|> end marker (bare envelope)
-    model_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
-    tools:
-    - *id001
-    expected:
-      calls: []
-      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
-  PARSER.batch.6:
-    description: Empty args (no-arg call)
-    model_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{}
-    tools:
-    - name: get_time
-      parameters:
-        type: object
-        properties: {}
-    expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
-  PARSER.batch.7:
-    description: Complex args (multi-parameter)
-    model_text: <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary
-      to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC","unit":"fahrenheit"}<|call|>
-    tools:
-    - name: get_weather
-      parameters:
-        type: object
-        properties:
-          location:
-            type: string
-          unit:
-            type: string
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-          unit: fahrenheit
-      normal_text: Need to use function get_weather.
   PARSER.batch.9:
     description: Empty input
     model_text: ''

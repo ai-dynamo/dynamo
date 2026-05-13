@@ -64,6 +64,7 @@ class EngineConfig:
     timeout: int = 600
     delayed_start: int = 0
     health_check_workers: bool = False
+    health_check_funcs: List[Any] = field(default_factory=list)
     env: Dict[str, str] = field(default_factory=dict)
     stragglers: list[str] = field(default_factory=list)
 
@@ -224,6 +225,7 @@ class EngineProcess(ManagedProcess):
             working_dir=config.directory,
             health_check_ports=[],
             health_check_urls=health_urls,
+            health_check_funcs=list(config.health_check_funcs),
             delayed_start=delayed,
             # Must stay False: command[0] is "bash", so True would kill every
             # bash process system-wide.  Stale cleanup relies on stragglers list

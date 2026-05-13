@@ -441,6 +441,7 @@ def _test_remote_indexer_decisions(
     test_dp_rank: bool = True,
     request_plane: str = "nats",
     store_backend: str = "etcd",
+    router_predicted_ttl_secs: Optional[float] = None,
 ):
     """Validate remote-indexer-backed routing decisions using direct KvRouter instances."""
 
@@ -493,13 +494,19 @@ def _test_remote_indexer_decisions(
         )
         expected_num_instances = engine_workers.num_workers
 
-        async def make_router(*, serve_indexer: bool, use_remote_indexer: bool):
+        async def make_router(
+            *,
+            serve_indexer: bool,
+            use_remote_indexer: bool,
+            router_predicted_ttl_secs: Optional[float] = None,
+        ):
             kv_router_config = KvRouterConfig(
                 router_snapshot_threshold=20,
                 use_kv_events=use_kv_events,
                 router_track_prefill_tokens=True,
                 serve_indexer=serve_indexer,
                 use_remote_indexer=use_remote_indexer,
+                router_predicted_ttl_secs=router_predicted_ttl_secs,
             )
             last_error: Exception | None = None
             for _ in range(60):
@@ -553,7 +560,9 @@ def _test_remote_indexer_decisions(
         )
 
         _, consumer_endpoint, consumer_router = await make_router(
-            serve_indexer=False, use_remote_indexer=True
+            serve_indexer=False,
+            use_remote_indexer=True,
+            router_predicted_ttl_secs=router_predicted_ttl_secs,
         )
 
         worker_ids = await wait_for_worker_ids(
@@ -2260,6 +2269,7 @@ def _test_router_decisions(
     router_event_threads: int = 4,
     standalone_indexer_url: Optional[str] = None,
     router_aic_config: Optional[dict[str, Any]] = None,
+    router_predicted_ttl_secs: Optional[float] = None,
 ):
     """Validate cross-worker routing decisions based on longest prefix match.
 
@@ -2310,6 +2320,7 @@ def _test_router_decisions(
             router_prefill_load_model=(
                 "aic" if router_aic_config is not None else "none"
             ),
+            router_predicted_ttl_secs=router_predicted_ttl_secs,
         )
         aic_perf_config = (
             AicPerfConfig(**router_aic_config)

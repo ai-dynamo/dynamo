@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: qwen25
+mode: batch
+cases:
+  PARSER.batch.4.a:
+    description: Tool_call wrapper with non-JSON garbage
+    ref: dynamo
+    model_text: <tool_call>not even json</tool_call>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls: []
+      normal_text: <tool_call>not even json</tool_call>
+  PARSER.batch.4.b:
+    description: Missing close brace in JSON body
+    ref: dynamo
+    model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"</tool_call>'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
+  PARSER.batch.4.c:
+    description: Missing name key
+    ref: dynamo
+    model_text: '<tool_call>{"arguments": {"location": "NYC"}}</tool_call>'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: '<tool_call>{"arguments": {"location": "NYC"}}</tool_call>'
+  PARSER.batch.4.d:
+    description: Missing </tool_call> close
+    ref: dynamo
+    model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''

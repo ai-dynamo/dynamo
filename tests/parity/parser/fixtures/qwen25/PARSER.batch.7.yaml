@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: qwen25
+mode: batch
+cases:
+  PARSER.batch.7.a:
+    description: Standard scalar types
+    ref: dynamo
+    model_text: '<tool_call>{"name": "book_flight", "arguments": {"destination": "Paris", "passengers": 2, "first_class":
+      true}}</tool_call>'
+    tools:
+    - name: book_flight
+      parameters:
+        type: object
+        properties:
+          destination:
+            type: string
+          passengers:
+            type: integer
+          first_class:
+            type: boolean
+    expected:
+      calls:
+      - name: book_flight
+        arguments:
+          destination: Paris
+          passengers: 2
+          first_class: true
+      normal_text: ''
+  PARSER.batch.7.b:
+    description: Unicode + escaped chars
+    ref: dynamo
+    model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "Tōkyō \"central\""}}</tool_call>'
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: Tōkyō "central"
+      normal_text: ''
+  PARSER.batch.7.c:
+    description: Schema mismatch — string value where schema declares integer
+    ref: dynamo
+    model_text: '<tool_call>{"name": "set_temperature", "arguments": {"celsius": "20"}}</tool_call>'
+    tools:
+    - name: set_temperature
+      parameters:
+        type: object
+        properties:
+          celsius:
+            type: integer
+    expected:
+      calls:
+      - name: set_temperature
+        arguments:
+          celsius: '20'
+      normal_text: ''
+  PARSER.batch.7.d:
+    description: Nested object + array
+    ref: dynamo
+    model_text: '<tool_call>{"name": "process_data", "arguments": {"items": [1,2,3], "config": {"nested": true}}}</tool_call>'
+    tools:
+    - name: process_data
+      parameters:
+        type: object
+        properties:
+          items:
+            type: array
+          config:
+            type: object
+    expected:
+      calls:
+      - name: process_data
+        arguments:
+          items:
+          - 1
+          - 2
+          - 3
+          config:
+            nested: true
+      normal_text: ''

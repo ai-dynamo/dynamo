@@ -70,7 +70,16 @@ Optional AIC knobs:
 ## KV Indexer / Approx KV Indexer
 
 - `--router-ttl-secs`: Time-to-live in seconds for blocks in the router's local cache predictions. Defaults to 120.0 seconds when `--no-router-kv-events` is used.
-- `--router-event-threads`: Number of KV indexer worker threads (default: 4). Values greater than 1 use the concurrent radix tree for both event-driven routing and approximate routing with `--no-router-kv-events`; set this to 1 to force the single-threaded indexer.
+- `--router-event-threads`: Number of KV indexer worker threads (default: 4). Values greater than 1 use the concurrent radix tree for event-driven routing, approximate routing with `--no-router-kv-events`, and the predict-on-route side indexer.
+- `--router-predicted-ttl-secs`: Enables predict-on-route with this TTL in seconds for entries in a local side indexer. Requires KV events; omit to disable. When enabled, the router feeds each routing decision into the side indexer and scores each worker with the larger overlap from the primary indexer and the local side indexer. Independent of `--router-ttl-secs`; kept short so decisions the engine never confirms (cancelled requests, prefill failures) age out quickly.
+
+### When to use `--router-predicted-ttl-secs`
+
+Without this setting, an event-driven router depends entirely on engine KV events to learn which worker now holds which prefix. That works for steady-state traffic, but creates a race when many sibling requests arrive in a single batch — for example, 16 problems × 4 samples each with a shared system prompt, or any parallel-sampling / best-of-N workload. No engine has emitted a "block stored" event yet, so the router scores every sibling with zero overlap and round-robins them across workers. The prefix then gets prefilled on every worker instead of being reused.
+
+Setting `--router-predicted-ttl-secs 5` makes the router record each routing decision into a secondary, short-TTL approximate indexer. When the next sibling is scored, the router queries both indexers and takes the per-worker max overlap, so siblings see the first sibling's prefix immediately and pin to the same worker. The primary event-driven indexer is untouched — engines compute their sequence hashes with salts and cryptographic digests the router cannot reproduce, so inserting router-computed hashes into the primary would key the same physical block under two different hashes and pollute the tree. Running the two trees in parallel sidesteps that entirely; the side tree has a short TTL and its entries simply expire once the primary takes over.
+
+Do not combine this setting with `--no-router-kv-events`, including when the approximate primary is remote: approximate mode already inserts on routing decisions by construction, and running a second approximate side indexer is redundant. With `--use-remote-indexer` and KV events enabled, the side indexer remains local to the consumer router while the remote indexer remains the shared primary view. If a router also serves an indexer for other routers, the side indexer is still local only; it is never served or consumed as the remote primary.
 
 To implement KV event publishing for custom inference engines, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
 For details on per-request agent hints (`priority`, `osl`, `speculative_prefill`), see [NVIDIA Request Extensions (`nvext`)](../frontend/nvext.md#agent-hints).
@@ -97,6 +106,8 @@ If an older config used overlap score weight above 1.0 to make the router care m
 Use `--router-prefill-load-scale` when prompt-side load should count more or less than decode-side block load after cache-hit credits are applied. The final score is `prefill_load_scale * adjusted_prefill_blocks + decode_blocks`.
 
 Use `--no-router-kv-events` when you are not confident that your backend engine emits KV events correctly. In this mode the router falls back to approximate routing, predicting cache state from its own routing decisions with TTL-based expiration.
+
+Use `--router-predicted-ttl-secs 5` when the workload fires bursts of sibling requests with shared prefixes — parallel sampling, best-of-N, agent fan-out. It closes the window between the routing decision and the engine's first "block stored" event so siblings co-locate on the worker the first sibling picked. See the configuration section above for the side-indexer mechanics.
 
 Use `--no-router-assume-kv-reuse` in disaggregated setups where the decode worker does not reuse transferred KV cache blocks. Without this flag, the router undercounts decode blocks when duplicates exist, leading to inaccurate load estimates.
 
