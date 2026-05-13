@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: glm47
+mode: batch
+cases:
+  PARSER.batch.4.a:
+    description: Tool_call wrapper with no function name
+    ref: dynamo
+    model_text: <tool_call><arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls: []
+      normal_text: <tool_call><arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: [{'name': '<arg_key>location</arg_key><arg_value>NYC</arg_value>', 'arguments': {}}]
+    #   normal_text: None
+  PARSER.batch.4.d:
+    description: Missing </arg_value> end tag
+    ref: dynamo
+    model_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</tool_call>
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments: {}
+      normal_text: ''

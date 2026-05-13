@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3
+mode: batch
+cases:
+  PARSER.batch.7.a:
+    description: Standard scalar types
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L220
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>book_flight
+      ```json
+      {"destination": "Paris", "passengers": 2, "first_class": true}
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - name: book_flight
+      parameters:
+        type: object
+        properties:
+          destination:
+            type: string
+          passengers:
+            type: integer
+          first_class:
+            type: boolean
+    expected:
+      calls:
+      - name: book_flight
+        arguments:
+          destination: Paris
+          passengers: 2
+          first_class: true
+      normal_text: ''
+  PARSER.batch.7.b:
+    description: Unicode + escaped chars
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L302
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+      ```json
+      {"location": "Tōkyō \"central\""}
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: Tōkyō "central"
+      normal_text: ''
+  PARSER.batch.7.c:
+    description: Schema mismatch — string value where schema declares integer
+    ref: dynamo
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>set_temperature
+      ```json
+      {"celsius": "20"}
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - name: set_temperature
+      parameters:
+        type: object
+        properties:
+          celsius:
+            type: integer
+    expected:
+      calls:
+      - name: set_temperature
+        arguments:
+          celsius: '20'
+      normal_text: ''
+  PARSER.batch.7.d:
+    description: Nested object + array (existing)
+    ref: dynamo
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>process_data
+      ```json
+      {"items": [1, 2, 3], "config": {"nested": true}}
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - name: process_data
+      parameters:
+        type: object
+        properties:
+          items:
+            type: array
+          config:
+            type: object
+    expected:
+      calls:
+      - name: process_data
+        arguments:
+          items:
+          - 1
+          - 2
+          - 3
+          config:
+            nested: true
+      normal_text: ''
