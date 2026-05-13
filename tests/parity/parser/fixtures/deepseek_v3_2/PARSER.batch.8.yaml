@@ -6,7 +6,7 @@ mode: batch
 cases:
   PARSER.batch.8.a:
     description: Narration before tool call only
-    ref: inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_deepseekv32_tool_parser.py#L158
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_deepseekv32_tool_parser.py#L158
     model_text: |-
       I will check the weather. <｜DSML｜function_calls>
       <｜DSML｜invoke name="get_weather">
