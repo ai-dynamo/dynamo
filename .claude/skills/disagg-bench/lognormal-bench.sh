@@ -108,8 +108,9 @@ echo "=== AIPerf START (n=$N c=$CONCURRENCY isl=$ISL osl=$OSL) ==="
 # concurrency*2 if --request-count is not given.
 # Note: Qwen3-8B thinking mode produces empty streaming chunks for ~14% of requests
 # at c=1 (InvalidInferenceResultError). Use a non-thinking model or add:
-#   --extra-inputs enable_thinking:false
-# to suppress thinking mode for cleaner benchmark results.
+#   --extra-inputs enable_thinking:false --extra-inputs ignore_eos:true
+# ignore_eos:true forces the model to generate exactly --osl tokens, eliminating
+# InvalidInferenceResultError from short outputs (~11% of requests otherwise).
 aiperf profile \
   --url "http://127.0.0.1:$DECODE_PORT" \
   --model-names "$MODEL" \
@@ -118,6 +119,8 @@ aiperf profile \
   --concurrency "$CONCURRENCY" \
   --isl "$ISL" \
   --osl "$OSL" \
+  --extra-inputs enable_thinking:false \
+  --extra-inputs ignore_eos:true \
   --streaming \
   2>&1 | tee "$EXP_DIR/aiperf.log"
 AIPERF_RC=${PIPESTATUS[0]}
