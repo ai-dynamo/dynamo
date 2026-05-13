@@ -14,8 +14,10 @@ title: Writing a Rust Unified Backend
 > same way.
 >
 > **Beta — actively under development.** The Rust native backend
-> surface is beta quality, does not yet cover the full Dynamo feature
-> set, and may change without backwards compatibility between releases.
+> surface is beta quality and may change without backwards
+> compatibility between releases. See [Feature gaps](#feature-gaps)
+> below for what the unified path covers today versus the existing
+> (non-unified) backend paths.
 
 This guide walks through building a Rust unified backend for an
 inference engine that plugs into Dynamo's distributed runtime. A
@@ -32,6 +34,13 @@ git or path dependency. The steps below assume you're starting a fresh
 crate in your own repo; an optional note in Step 1 covers the in-tree
 variant for contributors landing a backend inside `ai-dynamo/dynamo`.
 
+For a Python engine, use
+[Writing a Python Unified Backend](python-backend-guide.md) — same
+contract, lighter setup. The non-unified fallback for feature gaps
+(multimodal, LoRA, logprobs, etc.) is Python-only; see
+[Writing Python Workers](backend-guide.md) if you need one of those
+today.
+
 The reference example is the **mocker backend** at
 [`lib/backend-common/examples/mocker`](../../lib/backend-common/examples/mocker/)
 — a small, complete, pure-Rust implementation. Read it alongside this
@@ -47,7 +56,53 @@ guide.
   reference: architecture, file index, disaggregation contract,
   error taxonomy, conformance kit.
 - [`backend-common` design notes](../../lib/backend-common/CLAUDE.md)
-  — rationale, invariants, phase plans.
+  — rationale and invariants.
+
+## Feature gaps
+
+The unified backend is in beta and does not yet cover the full feature
+set of Dynamo's existing (non-unified) backend paths. The summary
+below is the common contract — what every engine on the unified path
+gets, whether written in Rust directly or plugged in from Python via
+the PyO3 `Worker` shim. Per-engine gaps (vLLM, SGLang, TRT-LLM
+specifics like LoRA, diffusion, attention DP scheduling) live in the
+[Python package README](../../components/src/dynamo/common/backend/README.md#feature-gaps).
+
+**Supported today**
+
+- Aggregated token-in-token-out inference
+- Disaggregated serving (`Aggregated` / `Prefill` / `Decode`) with
+  bootstrap (SGLang) or internal KV transport (vLLM, TRT-LLM); the
+  Rust [mocker example](../../lib/backend-common/examples/mocker/)
+  exercises the same wire format CPU-only
+- Model registration with discovery and endpoint types
+- Request cancellation via in-stream `ctx.is_stopped()` polling plus
+  the framework's out-of-band `abort()` monitor
+- Typed `DynamoError` with `ErrorType::Backend(BackendError::X)`
+- Graceful shutdown with signal handling, `drain()` hook, and 3-phase
+  distributed-runtime teardown
+- Debug-build stream validator and the `testing::run_conformance` kit
+
+**Not yet on the unified path**
+
+| Feature | What's missing |
+|---------|----------------|
+| Metrics & Prometheus | Engine-level metrics, KV utilization gauges, multiprocess registry |
+| KV event publishing | Prefix cache events (BlockStored / Removed) to router via ZMQ or NATS |
+| Health check payloads | Per-engine custom health probes |
+| Logprobs | Selected + top-k logprob extraction and streaming |
+| Guided decoding | JSON schema, regex, grammar, choice constraints |
+| OpenTelemetry tracing | Trace headers, request perf metrics, OTEL propagation |
+| Engine routes | Profiling, memory release/resume, weight updates (disk/tensor/distributed/IPC) |
+| Data-parallel routing | DP rank extraction, DP-aware scheduling |
+| Text-in-text-out mode | `ModelInput::Text` is rejected at startup — `Tokens` only |
+| Custom Jinja chat templates | Plumbed through `WorkerConfig` but not yet honored end-to-end |
+| Snapshot/checkpoint | CRIU-based engine state save/restore |
+| Multimodal | Images, video, embeddings, separate encode workers |
+| LoRA adapters | Dynamic load/unload, per-adapter serialization |
+
+If you need one of these features today, keep that workload on the
+existing per-engine entry point until the unified path catches up.
 
 ## What you're building
 
@@ -730,8 +785,8 @@ Before shipping:
 - [Crate README](../../lib/backend-common/README.md) — in-tree
   reference (architecture, file index, contracts at a glance).
 - [`LLMEngine` trait](../../lib/backend-common/src/engine.rs) — authoritative contract.
-- [Design notes](../../lib/backend-common/CLAUDE.md) — rationale,
-  invariants, phase-2 PyO3 plans.
+- [Design notes](../../lib/backend-common/CLAUDE.md) — rationale and
+  invariants.
 - [`Worker`](../../lib/backend-common/src/worker.rs) — runtime
   lifecycle internals (signal handling, graceful shutdown, model
   registration).

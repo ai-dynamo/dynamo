@@ -12,13 +12,17 @@ title: Writing a Python Unified Backend
 > a shared `LLMEngine` ABC that vLLM, SGLang, TRT-LLM, and a sample
 > engine already implement, and that any custom Python engine can plug
 > into the same way. For the Rust version of the same contract see
-> [Writing a Rust Unified Backend](rust-backend-guide.md).
+> [Writing a Rust Unified Backend](rust-backend-guide.md). For the
+> older lower-level Python worker path (`register_model` +
+> `serve_endpoint`) — still the right choice for features the unified
+> backend does not yet cover — see
+> [Writing Python Workers](backend-guide.md).
 >
 > **Beta — actively under development.** The unified backend surface
-> is beta quality, currently supports minimal aggregated inference
-> (see "Feature gaps" in the
-> [package README](../../components/src/dynamo/common/backend/README.md)),
-> and may change without backwards compatibility between releases.
+> is beta quality and may change without backwards compatibility
+> between releases. See [Feature gaps](#feature-gaps) below for what
+> the unified path covers today versus the existing (non-unified)
+> backend paths.
 
 This guide walks through building a Python backend for an inference
 engine that plugs into Dynamo's distributed runtime via
@@ -47,7 +51,49 @@ alongside this guide.
   — in-tree reference: `GenerateRequest` / `GenerateChunk` field
   definitions, per-engine cancellation cookbook (vLLM / SGLang /
   TRT-LLM), full `DynamoException` table, file index, and the
-  current feature-gap matrix.
+  per-engine feature-gap matrix.
+
+## Feature gaps
+
+The unified backend is in beta and does not yet cover the full feature
+set of Dynamo's existing (non-unified) backend paths. The summary
+below is the common contract — what every engine on the unified path
+gets. Per-engine gaps (vLLM, SGLang, TRT-LLM specifics like LoRA,
+diffusion, attention DP scheduling) live in the
+[package README](../../components/src/dynamo/common/backend/README.md#feature-gaps).
+
+**Supported today**
+
+- Aggregated token-in-token-out inference
+- Disaggregated serving (`agg` / `prefill` / `decode`) with bootstrap
+  (SGLang) or internal KV transport (vLLM, TRT-LLM)
+- Model registration with discovery and endpoint types
+- Request cancellation via `abort()` + `context.is_stopped()`
+- `DynamoException` error chain wrapping
+- Graceful shutdown with signal handling
+- Finish reason normalization (handled by the Rust layer)
+
+**Not yet on the unified path**
+
+| Feature | What's missing |
+|---------|----------------|
+| Metrics & Prometheus | Engine-level metrics, KV utilization gauges, multiprocess registry |
+| KV event publishing | Prefix cache events (BlockStored / Removed) to router via ZMQ or NATS |
+| Health check payloads | Per-engine custom health probes (BOS token probe, etc.) |
+| Logprobs | Selected + top-k logprob extraction and streaming |
+| Guided decoding | JSON schema, regex, grammar, choice constraints |
+| OpenTelemetry tracing | Trace headers, request perf metrics, OTEL propagation |
+| Engine routes | Profiling, memory release/resume, weight updates (disk/tensor/distributed/IPC) |
+| Data-parallel routing | DP rank extraction, DP-aware scheduling |
+| Text-in-text-out mode | OpenAI-compatible chat/completion with engine-side tokenization |
+| Custom Jinja chat templates | `--custom-jinja-template` for model-specific prompt formatting |
+| Snapshot/checkpoint | CRIU-based engine state save/restore |
+| Multimodal | Images, video, embeddings, separate encode workers |
+| LoRA adapters | Dynamic load/unload, ModelDeploymentCard publishing, per-adapter serialization |
+
+If you need one of these features today, keep that workload on the
+existing per-engine entry point (`dynamo.<backend>.main`) until the
+unified path catches up.
 
 ## What you're building
 
