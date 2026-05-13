@@ -5,6 +5,24 @@ title: Observability (Local)
 subtitle: Monitor Dynamo deployments with metrics, logging, and tracing
 ---
 
+## Required environment variables
+
+Set these on every Dynamo process (frontend, router, workers) for metrics, traces, and logs to flow:
+
+| Variable | Purpose | Required |
+|---|---|---|
+| `DYN_SYSTEM_PORT=8081` | Unified system port (metrics + health). | Yes for metrics. |
+| `OTEL_EXPORT_ENABLED=true` | Enable OpenTelemetry export. **Without this, traces and logs never leave the process** — Loki and Tempo will show nothing even if they are healthy. | Yes for traces/logs. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for traces (e.g. `http://tempo:4317`). Must be a gRPC listener — Dynamo's exporter does not speak OTLP/HTTP, even though the OTel Collector also listens on `:4318`. | Yes for traces. |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | OTLP gRPC endpoint for logs (e.g. `http://loki-otlp:4317`). Same gRPC-only constraint as the traces endpoint above. | Yes for logs. |
+| `DYN_LOGGING_JSONL=true` | Structured JSON log output (recommended for Loki). | Optional. |
+
+Source of truth: [`lib/runtime/src/logging.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/logging.rs) `setup_logging()`.
+
+Passing `--enable-metrics` on an individual backend only exposes metrics *per backend*. The unified frontend metrics surface (scraped by Prometheus) requires `DYN_SYSTEM_PORT` to be set on the frontend process as well — setting it on workers alone is not enough.
+
+Prometheus metric families in Dynamo are registered lazily: each label set is created the first time it fires, so a freshly-started process shows empty metric families until the first relevant request. This is expected — an idle cluster does not mean scraping is broken.
+
 ## Getting Started Quickly
 
 This is an example to get started quickly on a single machine.

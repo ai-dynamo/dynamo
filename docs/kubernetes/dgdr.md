@@ -86,15 +86,24 @@ When providing hardware configuration manually, use lowercase underscore format:
 | `h100_sxm` | `H100-SXM5-80GB` |
 | `h200_sxm` | `H200-SXM-141GB` |
 | `a100_sxm` | `A100-SXM4-80GB` |
+| `a30` | `A30` |
 | `l40s` | `L40S` |
 
 All supported values: `gb200_sxm`, `b200_sxm`, `h200_sxm`, `h100_sxm`,
-`h100_pcie`, `a100_sxm`, `a100_pcie`, `l40s`, `l40`, `l4`, `v100_sxm`,
-`v100_pcie`, `t4`, `mi200`, `mi300`.
+`h100_pcie`, `a100_sxm`, `a100_pcie`, `a30`, `l40s`, `l40`, `l4`,
+`v100_sxm`, `v100_pcie`, `t4`, `mi200`, `mi300`.
 
 > [!NOTE]
 > Not all SKUs are supported by the AIC profiler for `rapid` mode. See
 > [AIC Support Matrix](model-deployment-guide.md#aic-support-matrix) for details.
+
+> [!IMPORTANT]
+> **PCIe variants not yet supported by profiler.** The CRD admits PCIe SKUs
+> (`h100_pcie`, `a100_pcie`, `v100_pcie`), but the profiler does not currently
+> ship training data for them. You can submit a DGDR with a PCIe value; the
+> operator will accept it but profiler-assisted sizing will fall back to
+> defaults. Profiler support for PCIe SKUs is tracked as an engineering
+> follow-up.
 
 ## Lifecycle
 
@@ -155,6 +164,14 @@ kubectl get dgdr my-model -n $NAMESPACE \
   `dgdr.nvidia.com/namespace`.
 - Additional resources (planner ConfigMaps) are created in the same namespace
   and labeled with `dgdr.nvidia.com/name`.
+
+## Known Issues
+
+- **`pareto_analysis.py` produces NaN for some configurations.** Tracked as an
+  engineering follow-up. Workaround: re-run with a narrower sweep; narrow
+  sweeps bypass the NaN path in practice.
+- **PCIe profiler data not yet available.** See the PCIe callout under
+  [SKU Format](#sku-format).
 
 ## Further Reading
 

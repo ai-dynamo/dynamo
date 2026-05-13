@@ -82,6 +82,7 @@ chrono = { version = "0.4", default-features = false, features = [
 ] }
 cudarc = { version = "=0.19.3", features = ["cuda-version-from-build-system", "fallback-latest"] }
 dashmap = { version = "6.1" }
+moka = { version = "0.12", features = ["future"] }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
@@ -165,3 +166,10 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
+
+# Pin llm-multimodal + llm-tokenizer to the smg commit that switches
+# hf-hub from native-tls to rustls-tls (PR #1459, merged 2026-05-05).
+# Remove this block once llm-multimodal ≥1.6.0 is published on crates.io.
+[patch.crates-io]
+llm-multimodal = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
+llm-tokenizer = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }

@@ -78,7 +78,8 @@ async def started_engine():
 
     engine, _ = await VllmLLMEngine.from_args(_BASE_ARGV)
     try:
-        engine_config = await engine.start()
+        # Worker_id 0 is fine for tests — the engine doesn't use it.
+        engine_config = await engine.start(0)
         yield engine, engine_config
     finally:
         await engine.cleanup()
@@ -140,3 +141,41 @@ async def test_abort_unknown_request_on_running_engine(started_engine):
     id the engine has never seen must not raise."""
     engine, _ = started_engine
     await engine.abort(cast(object, _FakeContext("never-submitted")))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "mode_arg, expected",
+    [
+        ("agg", "AGGREGATED"),
+        ("prefill", "PREFILL"),
+        ("decode", "DECODE"),
+    ],
+)
+async def test_from_args_propagates_disaggregation_mode_to_worker_config(
+    mode_arg, expected
+):
+    """``--disaggregation-mode`` must flow from CLI through to the
+    ``WorkerConfig`` the unified Worker sees, and onto the engine instance
+    so ``generate()`` can branch on it. Without this hookup the prefill
+    role would silently degrade to aggregated."""
+    from dynamo.common.constants import DisaggregationMode
+    from dynamo.vllm.llm_engine import VllmLLMEngine
+
+    extra_args: list[str] = []
+    # vLLM rejects --disaggregation-mode prefill without an explicit
+    # --kv-transfer-config; supply NixlConnector to satisfy the validator.
+    if mode_arg == "prefill":
+        extra_args = [
+            "--kv-transfer-config",
+            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+        ]
+
+    engine, worker_config = await VllmLLMEngine.from_args(
+        [*_BASE_ARGV, "--disaggregation-mode", mode_arg, *extra_args]
+    )
+    try:
+        expected_mode = getattr(DisaggregationMode, expected)
+        assert engine.disaggregation_mode is expected_mode
+        assert worker_config.disaggregation_mode is expected_mode
+    finally:
+        await engine.cleanup()

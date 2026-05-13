@@ -17,7 +17,11 @@ from dynamo.sglang.health_check import (
     SglangHealthCheckPayload,
     VideoGenerationHealthCheckPayload,
 )
-from dynamo.sglang.publisher import handle_non_leader_node, setup_sgl_metrics
+from dynamo.sglang.publisher import (
+    handle_non_leader_node,
+    set_forward_pass_metrics_worker_id,
+    setup_sgl_metrics,
+)
 from dynamo.sglang.register import (
     register_image_diffusion_model,
     register_model_with_readiness_gate,
@@ -51,11 +55,12 @@ async def init_llm_diffusion(
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
 
-    engine = sgl.Engine(server_args=server_args)
-
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
+    set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
+
+    engine = sgl.Engine(server_args=server_args)
 
     shutdown_endpoints[:] = [generate_endpoint]
 
