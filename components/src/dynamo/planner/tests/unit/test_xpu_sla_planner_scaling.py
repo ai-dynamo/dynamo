@@ -19,12 +19,10 @@ from unittest.mock import Mock, patch
 import pytest
 
 from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core.adapters import DecodePlanner, PrefillPlanner
 from dynamo.planner.core.budget import _initialize_gpu_counts
-from dynamo.planner.core.decode import DecodePlanner
-from dynamo.planner.core.prefill import PrefillPlanner
 from dynamo.planner.core.state import PlannerSharedState
 from dynamo.planner.errors import DeploymentValidationError
-from dynamo.planner.offline.dryrun import run_sla_planner_dryrun
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -451,64 +449,3 @@ class TestXpuInitializeGpuCounts:
             )
 
         assert len(exc_info.value.errors) == 2
-
-
-# ── XPU Dryrun GPU Defaults Tests ───────────────────────────────────
-
-
-class TestXpuDryrunGpuDefaults:
-    @staticmethod
-    def _build_dryrun_config(**overrides) -> PlannerConfig:
-        defaults = dict(
-            throughput_adjustment_interval=60,
-            prefill_engine_num_gpu=1,
-            decode_engine_num_gpu=1,
-            min_endpoint=1,
-            max_gpu_budget=-1,
-            ttft=1000.0,
-            itl=50.0,
-            backend="vllm",
-            no_operation=True,
-            no_correction=True,
-            metric_pulling_prometheus_endpoint="http://localhost:9090",
-            metric_reporting_prometheus_port=0,
-            load_predictor="constant",
-            load_predictor_warmup_trace=None,
-            load_predictor_log1p=False,
-            profile_results_dir=B60_PROFILE_DIR,
-            environment="kubernetes",
-            namespace="test-namespace",
-            mode="disagg",
-            enable_throughput_scaling=True,
-            enable_load_scaling=False,
-        )
-        defaults.update(overrides)
-        return PlannerConfig.model_construct(**defaults)
-
-    def test_xpu_dryrun_defaults_gpu_counts_when_none(self):
-        """Test that dryrun sets default GPU counts of 1 when None on XPU"""
-        config = self._build_dryrun_config(
-            prefill_engine_num_gpu=None, decode_engine_num_gpu=None
-        )
-
-        try:
-            run_sla_planner_dryrun(config, dataset="nonexistent.jsonl")
-        except (FileNotFoundError, ValueError):
-            pass
-
-        assert config.prefill_engine_num_gpu == 1
-        assert config.decode_engine_num_gpu == 1
-
-    def test_xpu_dryrun_preserves_cli_gpu_counts(self):
-        """Test that dryrun preserves GPU counts provided via config on XPU"""
-        config = self._build_dryrun_config(
-            prefill_engine_num_gpu=2, decode_engine_num_gpu=4
-        )
-
-        try:
-            run_sla_planner_dryrun(config, dataset="nonexistent.jsonl")
-        except (FileNotFoundError, ValueError):
-            pass
-
-        assert config.prefill_engine_num_gpu == 2
-        assert config.decode_engine_num_gpu == 4
