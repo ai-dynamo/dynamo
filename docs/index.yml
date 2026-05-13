@@ -126,6 +126,8 @@ navigation:
             contents:
               - page: EKS Setup
                 path: kubernetes/cloud-providers/eks/eks.md
+              - page: EFA (RDMA over AWS Fabric)
+                path: kubernetes/cloud-providers/eks/efa.md
               - page: EFS
                 path: kubernetes/cloud-providers/eks/efs.md
               - page: ECS
