@@ -34,7 +34,7 @@ use dynamo_runtime::{
     component::Client,
     engine::{AsyncEngineStream, Data},
     pipeline::{
-        Context, ManyOut, Operator, PipelineOperator, PushRouter, RouterMode, SegmentSource,
+        Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource,
         ServiceBackend, ServiceEngine, ServiceFrontend, SingleIn, Source,
     },
 };
@@ -42,18 +42,11 @@ use std::sync::Arc;
 
 type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
-type PrefillOp = PipelineOperator<
-    SingleIn<PreprocessedRequest>,
-    ManyOut<Annotated<LLMEngineOutput>>,
-    SingleIn<PreprocessedRequest>,
-    ManyOut<Annotated<LLMEngineOutput>>,
->;
-
 #[derive(Clone)]
 pub struct PreprocessedRouting {
-    backend:
-        Arc<ServiceBackend<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>,
-    prefill_op: Arc<PrefillOp>,
+    backend_engine:
+        ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
+    prefill_router: Arc<PrefillRouter>,
 }
 
 pub struct PreparedEngine {
@@ -117,32 +110,28 @@ fn router_client(
     }
 }
 
-#[allow(clippy::type_complexity)]
-fn preprocessed_backend(
+fn preprocessed_backend_engine(
     router: LlmPushRouter,
     router_mode: RouterMode,
     chooser: Option<Arc<KvRouter>>,
-) -> anyhow::Result<
-    Arc<ServiceBackend<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>,
-> {
-    let backend = match router_mode {
-        RouterMode::Direct => {
-            ServiceBackend::from_engine(Arc::new(DirectRoutingRouter::new(router)))
-        }
+) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
+{
+    let engine: ServiceEngine<_, _> = match router_mode {
+        RouterMode::Direct => Arc::new(DirectRoutingRouter::new(router)),
         RouterMode::Random
         | RouterMode::RoundRobin
         | RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
-        | RouterMode::DeviceAwareWeighted => ServiceBackend::from_engine(Arc::new(router)),
+        | RouterMode::DeviceAwareWeighted => Arc::new(router),
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            ServiceBackend::from_engine(Arc::new(KvPushRouter::new(router, chooser)))
+            Arc::new(KvPushRouter::new(router, chooser))
         }
     };
 
-    Ok(backend)
+    Ok(engine)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -175,12 +164,11 @@ pub async fn build_preprocessed_routing(
     let prefill_router = prefill_chooser
         .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, enforce_disagg));
 
-    let backend = preprocessed_backend(router, router_mode, chooser)?;
-    let prefill_op = prefill_router.into_operator();
+    let backend_engine = preprocessed_backend_engine(router, router_mode, chooser)?;
 
     Ok(PreprocessedRouting {
-        backend,
-        prefill_op,
+        backend_engine,
+        prefill_router,
     })
 }
 
@@ -355,14 +343,16 @@ impl PreprocessedRouting {
         let token_backend = Backend::from_tokenizer(tokenizer).into_operator();
         let migration = Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics)
             .into_operator();
+        let prefill_op = self.prefill_router.into_operator();
+        let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
         let engine = frontend
             .link(preprocessor_op.forward_edge())?
             .link(migration.forward_edge())?
             .link(token_backend.forward_edge())?
-            .link(self.prefill_op.clone().forward_edge())?
-            .link(self.backend.clone())?
-            .link(self.prefill_op.clone().backward_edge())?
+            .link(prefill_op.forward_edge())?
+            .link(backend)?
+            .link(prefill_op.backward_edge())?
             .link(token_backend.backward_edge())?
             .link(migration.backward_edge())?
             .link(preprocessor_op.backward_edge())?
@@ -380,11 +370,13 @@ impl PreprocessedRouting {
             SingleIn<PreprocessedRequest>,
             ManyOut<Annotated<LLMEngineOutput>>,
         >::new();
+        let prefill_op = self.prefill_router.into_operator();
+        let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
         let engine = frontend
-            .link(self.prefill_op.clone().forward_edge())?
-            .link(self.backend.clone())?
-            .link(self.prefill_op.clone().backward_edge())?
+            .link(prefill_op.forward_edge())?
+            .link(backend)?
+            .link(prefill_op.backward_edge())?
             .link(frontend)?;
 
         Ok(engine)
