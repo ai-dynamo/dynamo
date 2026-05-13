@@ -9,7 +9,8 @@ Order (highest → lowest):
     3. File fallback (NPZ / JSON under ``profile_results_dir``)
 """
 
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -44,6 +45,21 @@ def _make_spec() -> AICInterpolationSpec:
 def _fpm():
     """Opaque sentinel FPM — identity comparison is enough for these tests."""
     return object()
+
+
+class _OneItemStream:
+    def __init__(self, item):
+        self._item = item
+        self._sent = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._sent:
+            raise StopAsyncIteration
+        self._sent = True
+        return self._item
 
 
 class TestPriorityChain:
@@ -175,3 +191,50 @@ class TestPriorityChain:
                     aic_spec=None,
                 )
         mock_aic.assert_not_called()
+
+
+class TestEndpointDiscoveryWait:
+    @pytest.mark.asyncio
+    async def test_waits_for_endpoint_instance_before_round_robin(self):
+        endpoint_fpms = [_fpm()]
+        response = MagicMock()
+        response.data.return_value = {"results": []}
+
+        client = MagicMock()
+        client.instance_ids.return_value = []
+        client.wait_for_instances = AsyncMock(return_value=[123])
+        client.round_robin = AsyncMock(return_value=_OneItemStream(response))
+
+        endpoint = MagicMock()
+        endpoint.client = AsyncMock(return_value=client)
+        runtime = MagicMock()
+        runtime.endpoint.return_value = endpoint
+
+        with patch.object(
+            pm, "_extract_fpms_from_benchmark", return_value=endpoint_fpms
+        ):
+            got = await pm._try_endpoint(
+                runtime=runtime,
+                namespace="dynamo",
+                worker_info=MagicMock(component_name="backend"),
+                component_type=SubComponentType.DECODE,
+            )
+
+        assert got is endpoint_fpms
+        client.wait_for_instances.assert_awaited_once()
+        client.round_robin.assert_awaited_once_with(None)
+
+    @pytest.mark.asyncio
+    async def test_endpoint_wait_timeout_returns_empty(self):
+        class NeverReadyClient:
+            def instance_ids(self):
+                return []
+
+            async def wait_for_instances(self):
+                await asyncio.sleep(1)
+
+        got = await pm._wait_for_endpoint_instances(
+            NeverReadyClient(), "dynamo.backend.get_perf_metrics", timeout_s=0.001
+        )
+
+        assert got is False
