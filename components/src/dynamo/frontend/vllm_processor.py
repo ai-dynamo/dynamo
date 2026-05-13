@@ -770,6 +770,9 @@ class EngineFactory:
             )
         loop = asyncio.get_running_loop()
 
+        # TODO(gh-8749): consume mdc.model_info.path()'s parent (slug_dir)
+        # instead of re-running fetch_model. The MDC cache already has
+        # blake3-verified copies; this path duplicates the download.
         source_path = mdc.source_path()
         if not os.path.exists(source_path):
             await fetch_model(source_path, ignore_weights=True)

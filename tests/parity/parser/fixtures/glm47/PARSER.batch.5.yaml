@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: glm47
+mode: batch
+cases:
+  PARSER.batch.5.a:
+    description: Missing </tool_call> end marker
+    ref: dynamo
+    model_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: '<tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>'
+  PARSER.batch.5.b:
+    description: Closing </tool_call> without matching <tool_call> open
+    ref: dynamo
+    model_text: get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
+  PARSER.batch.5.c:
+    description: Truncation mid-arg_value
+    ref: dynamo
+    model_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>N
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments: {}
+      normal_text: ''
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: '<tool_call>get_weather<arg_key>location</arg_key><arg_value>N'

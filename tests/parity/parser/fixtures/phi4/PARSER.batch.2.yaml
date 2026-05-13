@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: phi4
+mode: batch
+cases:
+  PARSER.batch.2.a:
+    description: Parallel calls in JSON array
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L185
+    model_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_time", "arguments": {"timezone":
+      "EST"}}]'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    - &id002
+      name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_time
+        arguments:
+          timezone: EST
+      normal_text: ''
+  PARSER.batch.2.c:
+    description: With surrounding narration
+    ref: dynamo
+    model_text: 'Both: functools[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_time", "arguments":
+      {"timezone": "EST"}}] Done.'
+    tools:
+    - *id001
+    - *id002
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_time
+        arguments:
+          timezone: EST
+      normal_text: 'Both:'
+    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
+    # vllm produces:
+    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}, {'name': 'get_time', 'arguments': {'timezone': 'EST'}}]
+    #   normal_text: None
+  PARSER.batch.2.d:
+    description: Same-name twice
+    ref: dynamo
+    model_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_weather", "arguments":
+      {"location": "LA"}}]'
+    tools:
+    - *id001
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_weather
+        arguments:
+          location: LA
+      normal_text: ''

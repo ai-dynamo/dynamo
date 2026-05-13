@@ -12,6 +12,15 @@ We recommend using the [latest stable release](https://github.com/ai-dynamo/dyna
 
 Dynamo SGLang integrates [SGLang](https://github.com/sgl-project/sglang) engines into Dynamo's distributed runtime, enabling disaggregated serving, KV-aware routing, and request cancellation while maintaining full compatibility with SGLang's native engine arguments. It supports LLM inference, embedding models, multimodal vision models, and diffusion-based generation (LLM, image, video).
 
+## Prerequisites
+
+- **CUDA toolkit headers** for bare-metal builds (e.g. `nvcc`, `cuda_runtime.h`). See [CUDA Requirements](../../getting-started/local-installation.md#system-requirements). Not required when running the pre-built `sglang-runtime` container.
+- **`HF_TOKEN`** for gated models. Export it on every node that pulls the model weights, and accept the model license on the Hugging Face model page before launch:
+
+  ```bash
+  export HF_TOKEN=hf_...
+  ```
+
 ## Installation
 
 ### Install Latest Release
@@ -49,9 +58,27 @@ This is the ideal way for agents to develop. You can provide the path to both re
 
 ### Docker
 
-<Accordion title="Development installation inside SGLang container">
+Two paths are supported. Pick the one that matches how you plan to develop.
 
-Pull and launch the SGLang runtime image:
+#### Pre-built Dynamo SGLang container (recommended)
+
+Pull and launch the published `sglang-runtime` image from NGC. See [release artifacts](../../reference/release-artifacts.md) for the current tag and CUDA variants.
+
+```bash
+docker run --gpus all -it --rm \
+    --network host --shm-size=10G \
+    --ulimit memlock=-1 --ulimit stack=67108864 \
+    --ulimit nofile=65536:65536 \
+    --cap-add CAP_SYS_PTRACE --ipc host \
+    -v $HOME/.cache/huggingface:/home/dynamo/.cache/huggingface \
+    nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1
+```
+
+Mount the host Hugging Face cache (`-v $HOME/.cache/huggingface:/home/dynamo/.cache/huggingface`) so each container restart doesn't re-download model weights. The container runs as user `dynamo` (UID 1000), which is why the in-container path is `/home/dynamo/.cache/huggingface`.
+
+#### Build from source inside upstream SGLang container
+
+Pull and launch the upstream SGLang image, then build Dynamo from source inside it:
 
 ```bash
 docker run --gpus all -it --rm \
@@ -62,7 +89,7 @@ docker run --gpus all -it --rm \
     lmsysorg/sglang:v{sglang_version}
 ```
 
-Inside the container, install build dependencies and Rust:
+Install build dependencies and Rust inside the container:
 
 ```bash
 apt-get update -qq && apt-get install -y -qq \
@@ -88,8 +115,6 @@ pip install /tmp/ai_dynamo_runtime*.whl
 cd /sgl-workspace/dynamo/
 pip install -e .
 ```
-
-</Accordion>
 
 ## Feature Support Matrix
 
@@ -135,6 +160,21 @@ curl localhost:8000/v1/chat/completions \
     "max_tokens": 30
   }'
 ```
+### Disaggregated Serving
+
+Launch a disaggregated Qwen3-0.6B deployment (smallest model, useful for plumbing validation):
+
+```bash
+cd $DYNAMO_HOME/examples/backends/sglang
+./launch/disagg.sh
+```
+
+> **Performance caveat:** Qwen3-0.6B is small enough that the disaggregated pathway is dominated by transport overhead and will often look slower than aggregated. Use it for plumbing validation, not benchmarks. Switch to Qwen3-32B-FP8 or larger for realistic disagg numbers.
+
+### Multi-Node TP
+
+SGLang supports multi-node tensor parallelism via the native `--dist-init-addr`, `--nnodes`, and `--node-rank` flags. See [SGLang server arguments](https://docs.sglang.ai/advanced_features/server_arguments.html) for the canonical reference; the same flags work with `python -m dynamo.sglang`. For a Kubernetes deployment example, see [`disagg-multinode.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/disagg-multinode.yaml).
+
 ### Kubernetes Deployment
 
 You can deploy SGLang with Dynamo on Kubernetes using a `DynamoGraphDeployment`. For more details, see the [SGLang Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy).
