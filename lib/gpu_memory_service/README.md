@@ -611,4 +611,5 @@ To change how long a sleeping/restored engine waits for the published weights la
 --model-loader-extra-config '{"gms_ro_connect_timeout_ms": 300000}'
 ```
 
-The default is `30000` ms. Set the value to `null` to wait indefinitely.
+The default is `null`, which waits indefinitely. Set an integer value to fail
+after that many milliseconds.

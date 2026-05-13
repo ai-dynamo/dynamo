@@ -140,8 +140,6 @@ func buildCheckpointJob(
 		if err != nil {
 			return nil, err
 		}
-		podTemplate.Annotations[snapshotprotocol.GMSCheckpointDirAnnotation] = checkpoint.ResolveGMSArtifactDir(storage)
-		podTemplate.Annotations[snapshotprotocol.GMSCompletionFileModeAnnotation] = snapshotprotocol.GMSCompletionFileModePodUID
 		if err := checkpoint.EnsureGMSCheckpointJobSidecars(&podTemplate.Spec, mainContainer, storage); err != nil {
 			return nil, err
 		}

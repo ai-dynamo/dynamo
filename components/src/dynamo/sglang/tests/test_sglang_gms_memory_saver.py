@@ -141,7 +141,7 @@ def test_pause_resume_routes_only_managed_tags(build_impl):
     assert weights.calls == [
         "unmap_all_vas",
         "abort",
-        ("connect", RequestedLockType.RO, 30_000),
+        ("connect", RequestedLockType.RO, None),
         "remap_all_vas",
     ]
     assert kv_cache.calls == [

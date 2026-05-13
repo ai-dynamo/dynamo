@@ -7585,8 +7585,6 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 				"engine clique %q must carry checkpoint-id label (selected by snapshot-agent restore informer)", clique.Name)
 			assert.Equal(t, []string{"sleep", "infinity"}, mainContainer.Command,
 				"engine clique %q main container must be shaped as a snapshot restore target", clique.Name)
-			assert.Equal(t, snapshotprotocol.GMSCompletionFileModeShared, clique.Annotations[snapshotprotocol.GMSCompletionFileModeAnnotation],
-				"engine clique %q must wait for the shared inter-pod GMS loader sentinel", clique.Name)
 			mountsByPath := map[string]corev1.VolumeMount{}
 			for _, mount := range mainContainer.VolumeMounts {
 				mountsByPath[mount.MountPath] = mount

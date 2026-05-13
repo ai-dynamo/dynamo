@@ -869,36 +869,14 @@ func TestApplyRestorePodMetadata_FailoverTargets(t *testing.T) {
 	assert.Equal(t, "engine-0,engine-1", annotations[snapshotprotocol.TargetContainersAnnotation])
 }
 
-func TestApplyRestorePodMetadata_GMSArtifactDir(t *testing.T) {
-	labels := map[string]string{}
-	annotations := map[string]string{}
-	ApplyRestorePodMetadata(labels, annotations, &CheckpointInfo{
-		Enabled: true,
-		Ready:   true,
-		Hash:    testHash,
-		GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-			Enabled: true,
-		},
-		GMSArtifactDir: "/checkpoints/gms/" + testHash + "/versions/1",
-	})
-	assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", annotations[snapshotprotocol.GMSCheckpointDirAnnotation])
-	assert.Equal(t, snapshotprotocol.GMSCompletionFileModePodUID, annotations[snapshotprotocol.GMSCompletionFileModeAnnotation])
-}
-
 func TestApplyRestorePodMetadata_DisabledClearsAnnotation(t *testing.T) {
 	labels := map[string]string{}
 	annotations := map[string]string{
-		snapshotprotocol.TargetContainersAnnotation:      "stale",
-		snapshotprotocol.GMSCheckpointDirAnnotation:      "stale",
-		snapshotprotocol.GMSCompletionFileModeAnnotation: "stale",
+		snapshotprotocol.TargetContainersAnnotation: "stale",
 	}
 	ApplyRestorePodMetadata(labels, annotations, &CheckpointInfo{Enabled: false})
 	_, ok := annotations[snapshotprotocol.TargetContainersAnnotation]
 	assert.False(t, ok, "target-containers annotation must be cleared when checkpoint disabled")
-	_, ok = annotations[snapshotprotocol.GMSCheckpointDirAnnotation]
-	assert.False(t, ok, "gms checkpoint dir annotation must be cleared when checkpoint disabled")
-	_, ok = annotations[snapshotprotocol.GMSCompletionFileModeAnnotation]
-	assert.False(t, ok, "gms completion file mode annotation must be cleared when checkpoint disabled")
 }
 
 // findContainer is a test helper that locates a container by name across both

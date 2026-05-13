@@ -72,8 +72,6 @@ func ApplyRestorePodMetadataWithStorageConfig(
 		delete(annotations, snapshotprotocol.TargetContainersAnnotation)
 		delete(annotations, snapshotprotocol.CheckpointStorageTypeAnnotation)
 		delete(annotations, snapshotprotocol.CheckpointStorageBasePathAnnotation)
-		delete(annotations, snapshotprotocol.GMSCheckpointDirAnnotation)
-		delete(annotations, snapshotprotocol.GMSCompletionFileModeAnnotation)
 	}
 	if !enabled {
 		return nil
@@ -86,17 +84,6 @@ func ApplyRestorePodMetadataWithStorageConfig(
 	annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targets)
 	if ok {
 		snapshotprotocol.ApplyCheckpointStorageMetadata(annotations, storage)
-	}
-	if checkpointInfo.GPUMemoryService != nil && checkpointInfo.GPUMemoryService.Enabled && checkpointInfo.GMSArtifactDir != "" {
-		annotations[snapshotprotocol.GMSCheckpointDirAnnotation] = checkpointInfo.GMSArtifactDir
-		if checkpointInfo.GPUMemoryService.Mode == nvidiacomv1alpha1.GMSModeInterPod {
-			annotations[snapshotprotocol.GMSCompletionFileModeAnnotation] = snapshotprotocol.GMSCompletionFileModeShared
-		} else {
-			annotations[snapshotprotocol.GMSCompletionFileModeAnnotation] = snapshotprotocol.GMSCompletionFileModePodUID
-		}
-	} else {
-		delete(annotations, snapshotprotocol.GMSCheckpointDirAnnotation)
-		delete(annotations, snapshotprotocol.GMSCompletionFileModeAnnotation)
 	}
 	return nil
 }

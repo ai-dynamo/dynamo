@@ -404,8 +404,6 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 		saverEnv[env.Name] = env.Value
 	}
 	assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", saverEnv["GMS_CHECKPOINT_DIR"])
-	assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", job.Spec.Template.Annotations[snapshotprotocol.GMSCheckpointDirAnnotation])
-	assert.Equal(t, snapshotprotocol.GMSCompletionFileModePodUID, job.Spec.Template.Annotations[snapshotprotocol.GMSCompletionFileModeAnnotation])
 }
 
 func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {

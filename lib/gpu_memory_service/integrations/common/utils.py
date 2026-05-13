@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 GMS_TAGS = ("weights", "kv_cache")
-DEFAULT_GMS_RO_CONNECT_TIMEOUT_MS = 30_000
+DEFAULT_GMS_RO_CONNECT_TIMEOUT_MS = None
 
 
 def get_gms_lock_mode(extra_config: dict):
