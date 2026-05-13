@@ -17,6 +17,49 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+// Default jemalloc tuning baked in so wheels ship with the recommended
+// configuration without operators needing to set MALLOC_CONF. This knob
+// carries ~75% of the cumulative TTFT p50 improvement at the saturation
+// cliff in the #9466 repro (344 ms → 85 ms; jemalloc alone with defaults
+// plateaus near 344 ms).
+//
+// Only CPU-count-independent knobs are baked in here, so this stays safe
+// from a 4-CPU pod up to a 64-CPU host:
+//
+// - `tcache:true` — explicit per-thread cache (default, kept for clarity).
+// - `lg_tcache_max:15` — per-thread cache covers allocations up to 32 KB
+//   (default 8 KB), keeping bytes::Bytes and HF tokenizer mid-sized allocs
+//   lock-free instead of routing through an arena. Scales with threads.
+// - `dirty_decay_ms:5000`, `muzzy_decay_ms:5000` — halve default decay
+//   times (10 s → 5 s) so dirty pages return to the OS faster. Avoids the
+//   OOMKill-after-32-minutes failure mode the issue reporter described
+//   under sustained load.
+//
+// `narenas` is intentionally NOT set: jemalloc's default of `4 * ncpu`
+// scales correctly across hardware sizes. The issue reporter's
+// `narenas:32` recommendation happened to match the default for an 8-CPU
+// pod and shouldn't be baked in for arbitrary deployments.
+//
+// Per jemalloc's documented precedence (build flag < `malloc_conf` global <
+// /etc/malloc.conf < `MALLOC_CONF` env var), operators can still override
+// any of these at runtime via the `MALLOC_CONF` environment variable.
+#[cfg(all(
+    feature = "jemalloc",
+    any(
+        all(target_os = "linux", not(target_env = "musl")),
+        target_os = "macos"
+    )
+))]
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static malloc_conf: Option<&'static core::ffi::CStr> = Some(
+    c"\
+tcache:true,\
+lg_tcache_max:15,\
+dirty_decay_ms:5000,\
+muzzy_decay_ms:5000",
+);
+
 use dynamo_llm::local_model::LocalModel;
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
 use dynamo_runtime::storage::kv;
