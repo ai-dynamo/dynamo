@@ -125,9 +125,20 @@ pub(crate) enum SlotState<T: BlockMetadata> {
         inner: Weak<ImmutableBlockInner<T>>,
     },
     /// Idle, evictable, registered. In the inactive index under `seq_hash`.
+    ///
+    /// `reset_on_release` is the per-block "reset on last drop" override
+    /// captured from the dropping `ImmutableBlockInner` at the moment of
+    /// `release_primary`. It is preserved across the
+    /// `Primary → Inactive → Primary` cache-hit cycle: resurrection (via
+    /// `acquire_for_hash` / `promote_inactive`) constructs the new
+    /// `ImmutableBlockInner` with this stored value rather than the
+    /// store-wide default. The flag is discarded when the slot leaves
+    /// `Inactive` via eviction (`Inactive → Mutable`); a future fresh
+    /// registration on the same `BlockId` reads the store default again.
     Inactive {
         seq_hash: SequenceHash,
         handle: BlockRegistrationHandle,
+        reset_on_release: bool,
     },
 }
 
@@ -186,6 +197,13 @@ pub(crate) struct BlockStore<T: BlockMetadata> {
     block_size: usize,
     total_blocks: usize,
     metrics: Arc<BlockPoolMetrics>,
+    /// Default value of `ImmutableBlockInner::reset_on_release` for every
+    /// fresh `Primary`/`Duplicate` Inner constructed by this store. When
+    /// `true`, every primary release bypasses the inactive pool and goes
+    /// straight to `Reset` (mirrors `release_duplicate`). Individual
+    /// holders can still override per-block via
+    /// `ImmutableBlock::set_evict_on_reset`.
+    default_reset_on_release: bool,
     /// Test-only hook to deterministically widen the
     /// "Arc strong=0 but `release_primary` not yet run" race window.
     /// `release_primary` acquires this gate *before* taking the store
@@ -213,6 +231,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         block_size: usize,
         inactive: Box<dyn InactiveIndex>,
         metrics: Arc<BlockPoolMetrics>,
+        default_reset_on_release: bool,
     ) -> Arc<Self> {
         let mut slots = Vec::with_capacity(total_blocks);
         let mut free = VecDeque::with_capacity(total_blocks);
@@ -234,11 +253,20 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             block_size,
             total_blocks,
             metrics,
+            default_reset_on_release,
             #[cfg(test)]
             release_primary_gate: Mutex::new(()),
             #[cfg(test)]
             release_primary_arrivals: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// Default value for the per-Inner `reset_on_release` flag. Read by
+    /// `ImmutableBlockInner::new_primary` / `new_duplicate` at
+    /// construction. `true` makes the store discard registered blocks on
+    /// release instead of caching them in the inactive pool.
+    pub(crate) fn default_reset_on_release(&self) -> bool {
+        self.default_reset_on_release
     }
 
     /// Stable, process-unique identifier of this store. See
@@ -383,7 +411,9 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         let mut evicted = Vec::with_capacity(from_inactive);
         let mut handles = Vec::with_capacity(from_inactive);
         for (seq_hash, block_id) in evicted_pairs {
-            let handle = take_inactive_handle(&mut inner.slots[block_id], block_id);
+            // Eviction discards the override; the slot leaves Inactive.
+            let (handle, _reset_on_release) =
+                take_inactive_handle(&mut inner.slots[block_id], block_id);
             inner.slots[block_id].state = SlotState::Mutable;
             let block_size = inner.slots[block_id].block_size;
             blocks.push(MutableBlock::from_store(self.clone(), block_id, block_size));
@@ -415,7 +445,9 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         let mut handles = Vec::with_capacity(count);
         let mut out = Vec::with_capacity(count);
         for (_seq_hash, block_id) in drained {
-            let handle = take_inactive_handle(&mut inner.slots[block_id], block_id);
+            // Eviction discards the override; the slot leaves Inactive.
+            let (handle, _reset_on_release) =
+                take_inactive_handle(&mut inner.slots[block_id], block_id);
             inner.slots[block_id].state = SlotState::Mutable;
             handles.push(handle);
             let block_size = inner.slots[block_id].block_size;
@@ -497,9 +529,17 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         // backends) instead of allocating a one-element slice + Vec.
         let block_id = inner.inactive.find_match(seq_hash, touch)?.1;
         self.metrics.dec_inactive_pool_size();
-        let handle = take_inactive_handle(&mut inner.slots[block_id], block_id);
-        let inner_arc =
-            ImmutableBlockInner::new_primary(self.clone(), block_id, seq_hash, handle.clone());
+        let (handle, reset_on_release) =
+            take_inactive_handle(&mut inner.slots[block_id], block_id);
+        // Resurrection: preserve any per-block override the previous
+        // holder stored when releasing into the inactive index.
+        let inner_arc = ImmutableBlockInner::new_primary_resurrected(
+            self.clone(),
+            block_id,
+            seq_hash,
+            handle.clone(),
+            reset_on_release,
+        );
         inner.slots[block_id].state = SlotState::Primary {
             seq_hash,
             handle,
@@ -625,7 +665,16 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             SlotState::Primary { handle, .. } => handle.clone(),
             other => panic!("eager_primary_to_inactive: slot {block_id} was {other:?}"),
         };
-        slot.state = SlotState::Inactive { seq_hash, handle };
+        // The dropping `ImmutableBlockInner` is on another thread mid-Drop;
+        // its `Arc` is at strong=0 so the per-block `reset_on_release`
+        // override is unreachable from here. Fall back to the store-wide
+        // default. This is a best-effort race window documented on
+        // `ImmutableBlock::set_evict_on_reset`.
+        slot.state = SlotState::Inactive {
+            seq_hash,
+            handle,
+            reset_on_release: self.default_reset_on_release,
+        };
         inner.inactive.insert(seq_hash, block_id);
         inner.active_by_hash.remove(&seq_hash);
         self.metrics.inc_inactive_pool_size();
@@ -672,12 +721,17 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         matched
             .into_iter()
             .map(|(seq_hash, block_id)| {
-                let handle = take_inactive_handle(&mut inner.slots[block_id], block_id);
-                let inner_arc = ImmutableBlockInner::new_primary(
+                let (handle, reset_on_release) =
+                    take_inactive_handle(&mut inner.slots[block_id], block_id);
+                // Resurrection: preserve any per-block override the
+                // previous holder stored when releasing into the
+                // inactive index.
+                let inner_arc = ImmutableBlockInner::new_primary_resurrected(
                     self.clone(),
                     block_id,
                     seq_hash,
                     handle.clone(),
+                    reset_on_release,
                 );
                 inner.slots[block_id].state = SlotState::Primary {
                     seq_hash,
@@ -734,11 +788,25 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         self.metrics.inc_reset_pool_size();
     }
 
-    /// Drop transition for the last clone of a primary `ImmutableBlockInner`:
-    /// `Primary` → `Inactive`, but only if the slot still references this
-    /// specific Inner. If a concurrent `acquire_for_hash` already eagerly
-    /// transitioned the slot, this is a no-op.
-    pub(crate) fn release_primary(&self, block_id: BlockId, self_ptr: *const ()) {
+    /// Drop transition for the last clone of a primary `ImmutableBlockInner`.
+    ///
+    /// Identity-checked against `self_ptr`. If a concurrent
+    /// `acquire_for_hash` already eagerly transitioned the slot (or the
+    /// slot has since been resurrected to a different Inner), this is a
+    /// no-op.
+    ///
+    /// `reset_on_release` selects the destination:
+    /// - `false` (default) → `SlotState::Inactive` + insert into the
+    ///   inactive index, available for cache hits and cold eviction.
+    /// - `true` → `SlotState::Reset` + push to free list +
+    ///   `handle.mark_absent::<T>()`. Mirrors `release_duplicate`. The
+    ///   block is *not* cached and cannot be matched/resurrected later.
+    pub(crate) fn release_primary(
+        &self,
+        block_id: BlockId,
+        self_ptr: *const (),
+        reset_on_release: bool,
+    ) {
         // Test-only deterministic race-window widening:
         //   1. Bump the arrival counter so a coordinating test can
         //      observe "the drop has entered release_primary" without
@@ -752,26 +820,52 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
             .fetch_add(1, std::sync::atomic::Ordering::Release);
         #[cfg(test)]
         let _gate = self.release_primary_gate.lock();
-        let mut inner = self.inner.lock();
-        let slot = &mut inner.slots[block_id];
-        let (seq_hash, handle) = match &slot.state {
-            SlotState::Primary {
-                seq_hash,
-                handle,
-                inner: weak,
-            } if weak.as_ptr() as *const () == self_ptr => (*seq_hash, handle.clone()),
-            // Eager lookup-driven transition already ran, OR this slot has
-            // since been resurrected to a different Inner. No-op.
-            _ => {
-                self.metrics.inc_release_primary_noop();
-                return;
+        let handle_to_mark_absent = {
+            let mut inner = self.inner.lock();
+            let (seq_hash, handle) = match &inner.slots[block_id].state {
+                SlotState::Primary {
+                    seq_hash,
+                    handle,
+                    inner: weak,
+                } if weak.as_ptr() as *const () == self_ptr => (*seq_hash, handle.clone()),
+                // Eager lookup-driven transition already ran, OR this slot has
+                // since been resurrected to a different Inner. No-op.
+                _ => {
+                    self.metrics.inc_release_primary_noop();
+                    return;
+                }
+            };
+            if reset_on_release {
+                self.reset_slot_locked(&mut inner, block_id);
+                // Only the primary owns the `active_by_hash` mapping;
+                // duplicates have a different `block_id` under the same
+                // hash and must never clear it.
+                inner.active_by_hash.remove(&seq_hash);
+                tracing::trace!(?seq_hash, block_id, "Primary released to reset pool");
+                Some(handle)
+            } else {
+                // Carry the dropping Inner's `reset_on_release` into the
+                // `Inactive` slot so a future resurrection inherits it.
+                // This is what makes a per-block `set_evict_on_reset`
+                // override sticky across the cache-hit cycle.
+                inner.slots[block_id].state = SlotState::Inactive {
+                    seq_hash,
+                    handle,
+                    reset_on_release,
+                };
+                inner.inactive.insert(seq_hash, block_id);
+                inner.active_by_hash.remove(&seq_hash);
+                self.metrics.inc_inactive_pool_size();
+                tracing::trace!(?seq_hash, block_id, "Block stored in inactive pool");
+                None
             }
         };
-        slot.state = SlotState::Inactive { seq_hash, handle };
-        inner.inactive.insert(seq_hash, block_id);
-        inner.active_by_hash.remove(&seq_hash);
-        self.metrics.inc_inactive_pool_size();
-        tracing::trace!(?seq_hash, block_id, "Block stored in inactive pool");
+        // mark_absent takes the attachments lock; lock-order
+        // (attachments → store) is satisfied because the store lock has
+        // already been released. Matches the `release_duplicate` pattern.
+        if let Some(handle) = handle_to_mark_absent {
+            handle.mark_absent::<T>();
+        }
     }
 
     /// Drop transition for the last clone of a duplicate `ImmutableBlockInner`:
@@ -779,8 +873,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
     pub(crate) fn release_duplicate(&self, block_id: BlockId, self_ptr: *const ()) {
         let handle = {
             let mut inner = self.inner.lock();
-            let slot = &mut inner.slots[block_id];
-            let handle = match &slot.state {
+            let handle = match &inner.slots[block_id].state {
                 SlotState::Duplicate {
                     handle,
                     inner: weak,
@@ -794,12 +887,26 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
                     return;
                 }
             };
-            slot.state = SlotState::Reset;
-            inner.free.push_back(block_id);
-            self.metrics.inc_reset_pool_size();
+            // Duplicates do NOT clear `active_by_hash` — that mapping
+            // belongs to the primary, which has a different `block_id`
+            // and is kept alive by `_primary_keepalive` until this drop.
+            self.reset_slot_locked(&mut inner, block_id);
             handle
         };
         handle.mark_absent::<T>();
+    }
+
+    /// Slot transition shared by `release_primary` (when
+    /// `reset_on_release = true`) and `release_duplicate`:
+    /// `*` → `SlotState::Reset`, push to the free list, bump the
+    /// reset-pool gauge. Does **not** touch `active_by_hash` — callers
+    /// that own that mapping (the primary release path) must clear it
+    /// themselves. Callers must invoke `handle.mark_absent::<T>()`
+    /// *after* the store lock is released.
+    fn reset_slot_locked(&self, inner: &mut BlockStoreInner<T>, block_id: BlockId) {
+        inner.slots[block_id].state = SlotState::Reset;
+        inner.free.push_back(block_id);
+        self.metrics.inc_reset_pool_size();
     }
 }
 
@@ -816,12 +923,22 @@ impl<T: BlockMetadata> std::fmt::Debug for BlockStore<T> {
 
 /// Clone the [`BlockRegistrationHandle`] out of an `Inactive` slot. The
 /// caller must overwrite `slot.state` before releasing the store lock.
+/// Read the `(handle, reset_on_release)` pair out of an `Inactive` slot
+/// without consuming the slot itself. Resurrection callers pass
+/// `reset_on_release` to `ImmutableBlockInner::new_primary_resurrected`
+/// so the per-block override survives the cache hit; eviction callers
+/// (Inactive → Mutable) simply discard the bool. The caller must
+/// overwrite `slot.state` before releasing the store lock.
 fn take_inactive_handle<T: BlockMetadata>(
     slot: &mut BlockSlot<T>,
     block_id: BlockId,
-) -> BlockRegistrationHandle {
+) -> (BlockRegistrationHandle, bool) {
     match &slot.state {
-        SlotState::Inactive { handle, .. } => handle.clone(),
+        SlotState::Inactive {
+            handle,
+            reset_on_release,
+            ..
+        } => (handle.clone(), *reset_on_release),
         other => panic!("expected Inactive state for slot {block_id}, got {other:?}"),
     }
 }

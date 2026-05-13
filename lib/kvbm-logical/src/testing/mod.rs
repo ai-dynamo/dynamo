@@ -58,6 +58,7 @@ pub const TEST_SALT: u64 = 42;
 // pub items — usable by downstream crates via the testing feature
 pub use managers::{
     create_test_manager, create_test_manager_metered, create_test_manager_with_block_size,
+    create_test_manager_with_default_reset_on_release,
 };
 pub use sequences::BlockSequenceBuilder;
 pub use token_blocks::{
