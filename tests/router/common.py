@@ -1547,14 +1547,14 @@ def _test_router_indexers_sync(
             last_error = None
             async with aiohttp.ClientSession() as session:
                 for attempt in range(50):
-                    actual_events = await fetch_standalone_events(
-                        session, indexer_url, actual_label
-                    )
-                    logger.info(
-                        f"{actual_label} has {len(actual_events)} events "
-                        f"(attempt {attempt + 1})"
-                    )
                     try:
+                        actual_events = await fetch_standalone_events(
+                            session, indexer_url, actual_label
+                        )
+                        logger.info(
+                            f"{actual_label} has {len(actual_events)} events "
+                            f"(attempt {attempt + 1})"
+                        )
                         assert_event_dumps_equal(
                             expected_events,
                             actual_events,
@@ -1562,7 +1562,7 @@ def _test_router_indexers_sync(
                             actual_label,
                         )
                         return actual_events
-                    except AssertionError as exc:
+                    except (AssertionError, aiohttp.ClientError) as exc:
                         last_error = exc
                         await asyncio.sleep(0.2)
 
