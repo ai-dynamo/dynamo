@@ -143,6 +143,50 @@ impl FromStr for SharedCacheType {
     }
 }
 
+/// Which worker-selection algorithm to use when scoring candidates during
+/// admission. See [`crate::DefaultWorkerSelector`] and
+/// [`crate::VllmDPLBSelector`] for the algorithms.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectorKind {
+    /// Cache-aware logit scoring: `prefill_load * adjusted_prefill_blocks + decode_blocks`,
+    /// with per-tier overlap credits and softmax sampling at non-zero temperature.
+    #[default]
+    Default,
+    /// Pure load-balancing port of vLLM's `DPLBAsyncMPClient` engine selection:
+    /// `score = waiting * waiting_weight + running`, rotated tie-break, no
+    /// KV-cache awareness.
+    VllmDplb,
+}
+
+impl fmt::Display for SelectorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Default => f.write_str("default"),
+            Self::VllmDplb => f.write_str("vllm_dplb"),
+        }
+    }
+}
+
+impl FromStr for SelectorKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "default" => Ok(Self::Default),
+            "vllm_dplb" | "vllm-dplb" => Ok(Self::VllmDplb),
+            _ => Err(format!(
+                "unknown selector kind: {s:?}, expected 'default' or 'vllm_dplb'"
+            )),
+        }
+    }
+}
+
+const fn default_vllm_dplb_waiting_weight() -> u32 {
+    // vLLM's DPLB uses `score = waiting * 4 + running` (see core_client.py).
+    4
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RouterQueuePolicy {
@@ -312,6 +356,10 @@ struct KvRouterConfigSerde {
     shared_cache_multiplier: f64,
     shared_cache_type: SharedCacheType,
     router_predicted_ttl_secs: Option<f64>,
+    #[serde(default)]
+    selector_kind: SelectorKind,
+    #[serde(default = "default_vllm_dplb_waiting_weight")]
+    vllm_dplb_waiting_weight: u32,
 }
 
 impl Default for KvRouterConfigSerde {
@@ -344,6 +392,8 @@ impl Default for KvRouterConfigSerde {
             shared_cache_multiplier: config.shared_cache_multiplier,
             shared_cache_type: config.shared_cache_type,
             router_predicted_ttl_secs: config.router_predicted_ttl_secs,
+            selector_kind: config.selector_kind,
+            vllm_dplb_waiting_weight: config.vllm_dplb_waiting_weight,
         }
     }
 }
@@ -466,6 +516,17 @@ pub struct KvRouterConfig {
     #[serde(default)]
     #[validate(range(min = 0.0))]
     pub router_predicted_ttl_secs: Option<f64>,
+
+    /// Worker-selection algorithm. `default` keeps cache-aware logit scoring;
+    /// `vllm_dplb` uses vLLM's load-only `waiting * w + running` algorithm.
+    #[serde(default)]
+    pub selector_kind: SelectorKind,
+
+    /// `waiting` multiplier when `selector_kind = vllm_dplb`. Ignored
+    /// otherwise. vLLM's upstream default is 4.
+    #[serde(default = "default_vllm_dplb_waiting_weight")]
+    #[validate(range(min = 1))]
+    pub vllm_dplb_waiting_weight: u32,
 }
 
 impl Default for KvRouterConfig {
@@ -496,6 +557,8 @@ impl Default for KvRouterConfig {
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
             router_predicted_ttl_secs: None,
+            selector_kind: SelectorKind::default(),
+            vllm_dplb_waiting_weight: default_vllm_dplb_waiting_weight(),
         }
     }
 }
@@ -541,6 +604,8 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
             router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
+            selector_kind: compat.selector_kind,
+            vllm_dplb_waiting_weight: compat.vllm_dplb_waiting_weight,
         })
     }
 }

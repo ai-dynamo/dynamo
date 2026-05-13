@@ -626,6 +626,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.request_index.active_lora_counts()
     }
 
+    /// Look up the worker a tracked request was admitted to. Returns `None` if
+    /// the request was never admitted or has already been freed.
+    ///
+    /// Scope: scheduler-side observability hooks (e.g. `WorkerSelector::on_running`
+    /// / `on_finish`) need the worker associated with a request_id so they can
+    /// maintain per-worker load counters that are external to `ActiveSequences`.
+    /// This is a read-only lookup; it does not expose routing-load projection.
+    pub fn worker_for_request(&self, request_id: &RequestId) -> Option<WorkerWithDpRank> {
+        self.request_index.worker_for(request_id)
+    }
+
     /// Force expire stale requests across all workers (one-shot).
     ///
     /// This is necessary because worker expiration otherwise only runs as a side-effect

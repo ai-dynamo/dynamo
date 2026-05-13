@@ -61,7 +61,7 @@ pub use sticky_sessions::StickySessionRouter;
 use crate::{
     discovery::RuntimeConfigWatch,
     kv_router::{
-        scheduler::{DefaultWorkerSelector, KvScheduler, PotentialLoad},
+        scheduler::{KvScheduler, PotentialLoad},
         sequence::{SequenceError, SequenceRequest},
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -285,7 +285,7 @@ pub fn router_discovery_query(namespace: String, component: String) -> Discovery
 
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
-pub struct KvRouter<Sel = DefaultWorkerSelector>
+pub struct KvRouter<Sel = dynamo_kv_router::AnyWorkerSelector>
 where
     Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
 {

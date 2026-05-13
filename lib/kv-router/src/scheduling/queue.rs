@@ -112,6 +112,14 @@ impl<
         }
     }
 
+    /// Read-only access to the worker selector. Higher-level schedulers
+    /// (e.g. `LocalScheduler`) use this to forward lifecycle events
+    /// (`on_running`, `on_finish`, `on_forget_worker`) into selectors that
+    /// maintain per-worker load state.
+    pub fn selector(&self) -> &Sel {
+        &self.selector
+    }
+
     /// Register externally-provided workers in the slot tracker.
     ///
     /// Looks up DP rank/size from the discovery watch channel; defaults to
@@ -262,6 +270,11 @@ impl<
             effective_overlap_blocks: selection.effective_overlap_blocks,
             cached_tokens: selection.cached_tokens,
         }));
+
+        // Notify the selector that a request was admitted. Selectors that
+        // maintain per-worker load (e.g. `VllmDPLBSelector`) bump their
+        // waiting counter here. Default no-op for stateless selectors.
+        self.selector.on_admit(selection.worker);
 
         if !request.update_states {
             return;

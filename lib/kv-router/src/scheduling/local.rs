@@ -228,14 +228,26 @@ where
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
+        let request_id_owned = request_id.to_string();
+        // Capture the worker before the state transition so the selector hook
+        // sees the same worker even if a later teardown clears the mapping.
+        let worker = self.slots.worker_for_request(&request_id_owned);
         self.slots
-            .mark_prefill_completed(&request_id.to_string(), Instant::now())?;
+            .mark_prefill_completed(&request_id_owned, Instant::now())?;
+        if let Some(worker) = worker {
+            self.queue.selector().on_running(worker);
+        }
         self.queue.update().await;
         Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.slots.free(&request_id.to_string(), Instant::now())?;
+        let request_id_owned = request_id.to_string();
+        let worker = self.slots.worker_for_request(&request_id_owned);
+        self.slots.free(&request_id_owned, Instant::now())?;
+        if let Some(worker) = worker {
+            self.queue.selector().on_finish(worker);
+        }
         self.queue.update().await;
         Ok(())
     }

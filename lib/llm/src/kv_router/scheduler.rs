@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub struct KvScheduler<Sel = DefaultWorkerSelector>
+pub struct KvScheduler<Sel = dynamo_kv_router::AnyWorkerSelector>
 where
     Sel: WorkerSelectorTrait<ModelRuntimeConfig>,
 {

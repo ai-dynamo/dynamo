@@ -44,6 +44,8 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "shared_cache_multiplier",
     "shared_cache_type",
     "router_predicted_ttl_secs",
+    "selector_kind",
+    "vllm_dplb_waiting_weight",
 )
 
 _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
@@ -123,6 +125,8 @@ class KvRouterConfigBase(ConfigBase):
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
     router_predicted_ttl_secs: Optional[float] = None
+    selector_kind: str = "default"
+    vllm_dplb_waiting_weight: int = 4
     load_aware: bool = False
 
     def apply_load_aware_preset(self) -> None:
@@ -423,4 +427,32 @@ class KvRouterArgGroup(ArgGroup):
                 "Independent of --router-ttl-secs, which covers pure approximate mode."
             ),
             arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--router-selector-kind",
+            env_var="DYN_ROUTER_SELECTOR_KIND",
+            default="default",
+            help=(
+                "KV Router: Worker-selection algorithm. "
+                "'default' (default): cache-aware logit scoring with overlap credits and softmax. "
+                "'vllm_dplb': port of vLLM's DPLB algorithm — score = waiting * weight + running, "
+                "rotated tie-break, no KV-cache awareness. Use when load-only balancing is preferred."
+            ),
+            arg_type=str,
+            choices=["default", "vllm_dplb"],
+            dest="selector_kind",
+        )
+        add_argument(
+            g,
+            flag_name="--router-vllm-dplb-waiting-weight",
+            env_var="DYN_ROUTER_VLLM_DPLB_WAITING_WEIGHT",
+            default=4,
+            help=(
+                "KV Router: `waiting` multiplier when --router-selector-kind=vllm_dplb. "
+                "Score = waiting * weight + running. vLLM's upstream default is 4. "
+                "Ignored for other selector kinds."
+            ),
+            arg_type=int,
+            dest="vllm_dplb_waiting_weight",
         )

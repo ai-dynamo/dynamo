@@ -20,6 +20,22 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
+
+    /// Called after a successful `select_worker` to record that a request was
+    /// admitted to `worker`. Selectors that track per-worker load (vLLM-style
+    /// `waiting`/`running` counts) override this to bump their waiting counter.
+    fn on_admit(&self, _worker: WorkerWithDpRank) {}
+
+    /// Called when a request transitions from prefill (waiting) into the
+    /// running batch on `worker`.
+    fn on_running(&self, _worker: WorkerWithDpRank) {}
+
+    /// Called when a request finishes on `worker` (completion, abort, or error).
+    fn on_finish(&self, _worker: WorkerWithDpRank) {}
+
+    /// Called when `worker_id` leaves the fleet so selectors can drop any
+    /// per-worker state they may hold.
+    fn on_forget_worker(&self, _worker_id: WorkerId) {}
 }
 
 /// Helper function for softmax sampling.

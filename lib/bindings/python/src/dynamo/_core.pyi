@@ -1305,6 +1305,8 @@ class KvRouterConfig:
         shared_cache_multiplier: float = 0.0,
         shared_cache_type: str = "none",
         router_predicted_ttl_secs: Optional[float] = None,
+        selector_kind: str = "default",
+        vllm_dplb_waiting_weight: int = 4,
         *,
         overlap_score_credit: float = 1.0,
         prefill_load_scale: float = 1.0,

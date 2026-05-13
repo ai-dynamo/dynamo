@@ -18,10 +18,7 @@ use dynamo_runtime::{
 };
 
 use crate::{
-    kv_router::{
-        KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector,
-        shared_cache::HicacheSharedKvCache,
-    },
+    kv_router::{KvRouter, router_endpoint_id, shared_cache::HicacheSharedKvCache},
     local_model::runtime_config::DisaggregatedEndpoint,
     model_card::ModelDeploymentCard,
     types::{
@@ -625,7 +622,13 @@ impl ModelManager {
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
 
-        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), worker_type);
+        // Pick the selector implementation requested by `kv_router_config.selector_kind`.
+        // Default keeps the cache-aware logit scoring; `vllm_dplb` uses vLLM's
+        // load-only `waiting * w + running` algorithm.
+        let selector = dynamo_kv_router::AnyWorkerSelector::from_config(
+            kv_router_config.clone().unwrap_or_default(),
+            worker_type,
+        );
 
         // Build shared cache client based on shared_cache_type.
         let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> = match kv_router_config
