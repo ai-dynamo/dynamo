@@ -870,9 +870,9 @@ mod proptest_tracker {
                     trtllm_stored.insert(*idx);
                 }
                 Op::StoreKvbm { idx } => {
-                    for ancestor in 0..=*idx {
+                    for (ancestor, seq_hash) in cat.iter().enumerate().take(*idx + 1) {
                         if !kvbm_stored.contains(&ancestor) {
-                            t.handle_kvbm_store(cat[ancestor], vec![ancestor as u32], 1, None);
+                            t.handle_kvbm_store(*seq_hash, vec![ancestor as u32], 1, None);
                             kvbm_stored.insert(ancestor);
                         }
                     }

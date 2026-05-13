@@ -73,7 +73,7 @@ fn sort_for_emission(events: Vec<ConsolidatedEvent>) -> Vec<ConsolidatedEvent> {
                 }),
                 _ => {}
             }
-            out.extend(run.drain(..));
+            out.append(run);
         };
 
     for ev in events {
@@ -86,86 +86,6 @@ fn sort_for_emission(events: Vec<ConsolidatedEvent>) -> Vec<ConsolidatedEvent> {
     }
     flush_run(&mut out, &mut run, run_kind);
     out
-}
-
-#[cfg(test)]
-mod sort_tests {
-    use super::*;
-    use crate::source::EventSource;
-    use dynamo_tokens::PositionalLineageHash;
-
-    fn s(pos: u64) -> ConsolidatedEvent {
-        ConsolidatedEvent::Store {
-            seq_hash: PositionalLineageHash::new(pos.wrapping_add(0x100), None, pos),
-            token_ids: vec![],
-            block_size: 0,
-            lora_name: None,
-            source: EventSource::Vllm,
-        }
-    }
-    fn r(pos: u64) -> ConsolidatedEvent {
-        ConsolidatedEvent::Remove {
-            seq_hash: PositionalLineageHash::new(pos.wrapping_add(0x100), None, pos),
-            source: EventSource::Vllm,
-        }
-    }
-    fn kind_of(e: &ConsolidatedEvent) -> &'static str {
-        match e {
-            ConsolidatedEvent::Store { .. } => "S",
-            ConsolidatedEvent::Remove { .. } => "R",
-            ConsolidatedEvent::ClearAll => "C",
-        }
-    }
-
-    /// `[Remove A, Store A]` must NOT be reordered — the second Store re-introduces a
-    /// block that the Remove just retired.
-    #[test]
-    fn remove_then_store_preserves_lifecycle_order() {
-        let out = sort_for_emission(vec![r(0), s(0)]);
-        let kinds: Vec<_> = out.iter().map(kind_of).collect();
-        assert_eq!(kinds, vec!["R", "S"]);
-    }
-
-    #[test]
-    fn store_run_sorts_ascending_by_position() {
-        let out = sort_for_emission(vec![s(5), s(1), s(3)]);
-        let positions: Vec<u64> = out
-            .iter()
-            .map(|e| match e {
-                ConsolidatedEvent::Store { seq_hash, .. } => seq_hash.position(),
-                _ => unreachable!(),
-            })
-            .collect();
-        assert_eq!(positions, vec![1, 3, 5]);
-    }
-
-    #[test]
-    fn remove_run_sorts_descending_by_position() {
-        let out = sort_for_emission(vec![r(1), r(5), r(3)]);
-        let positions: Vec<u64> = out
-            .iter()
-            .map(|e| match e {
-                ConsolidatedEvent::Remove { seq_hash, .. } => seq_hash.position(),
-                _ => unreachable!(),
-            })
-            .collect();
-        assert_eq!(positions, vec![5, 3, 1]);
-    }
-
-    #[test]
-    fn clearall_is_a_barrier() {
-        let out = sort_for_emission(vec![s(2), s(1), ConsolidatedEvent::ClearAll, s(4), s(3)]);
-        let kinds: Vec<_> = out.iter().map(kind_of).collect();
-        assert_eq!(kinds, vec!["S", "S", "C", "S", "S"]);
-    }
-
-    #[test]
-    fn type_runs_alternate() {
-        // S S R R S → sort within each run, never across.
-        let out = sort_for_emission(vec![s(2), s(1), r(3), r(4), s(0)]);
-        let kinds: Vec<_> = out.iter().map(kind_of).collect();
-        assert_eq!(kinds, vec!["S", "S", "R", "R", "S"]);
-    }
 }
 
 fn consolidated_to_event(ev: ConsolidatedEvent) -> anyhow::Result<Event> {
@@ -276,4 +196,84 @@ pub async fn spawn(
     });
 
     Ok(handle)
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+    use crate::source::EventSource;
+    use dynamo_tokens::PositionalLineageHash;
+
+    fn s(pos: u64) -> ConsolidatedEvent {
+        ConsolidatedEvent::Store {
+            seq_hash: PositionalLineageHash::new(pos.wrapping_add(0x100), None, pos),
+            token_ids: vec![],
+            block_size: 0,
+            lora_name: None,
+            source: EventSource::Vllm,
+        }
+    }
+    fn r(pos: u64) -> ConsolidatedEvent {
+        ConsolidatedEvent::Remove {
+            seq_hash: PositionalLineageHash::new(pos.wrapping_add(0x100), None, pos),
+            source: EventSource::Vllm,
+        }
+    }
+    fn kind_of(e: &ConsolidatedEvent) -> &'static str {
+        match e {
+            ConsolidatedEvent::Store { .. } => "S",
+            ConsolidatedEvent::Remove { .. } => "R",
+            ConsolidatedEvent::ClearAll => "C",
+        }
+    }
+
+    /// `[Remove A, Store A]` must NOT be reordered — the second Store re-introduces a
+    /// block that the Remove just retired.
+    #[test]
+    fn remove_then_store_preserves_lifecycle_order() {
+        let out = sort_for_emission(vec![r(0), s(0)]);
+        let kinds: Vec<_> = out.iter().map(kind_of).collect();
+        assert_eq!(kinds, vec!["R", "S"]);
+    }
+
+    #[test]
+    fn store_run_sorts_ascending_by_position() {
+        let out = sort_for_emission(vec![s(5), s(1), s(3)]);
+        let positions: Vec<u64> = out
+            .iter()
+            .map(|e| match e {
+                ConsolidatedEvent::Store { seq_hash, .. } => seq_hash.position(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(positions, vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn remove_run_sorts_descending_by_position() {
+        let out = sort_for_emission(vec![r(1), r(5), r(3)]);
+        let positions: Vec<u64> = out
+            .iter()
+            .map(|e| match e {
+                ConsolidatedEvent::Remove { seq_hash, .. } => seq_hash.position(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(positions, vec![5, 3, 1]);
+    }
+
+    #[test]
+    fn clearall_is_a_barrier() {
+        let out = sort_for_emission(vec![s(2), s(1), ConsolidatedEvent::ClearAll, s(4), s(3)]);
+        let kinds: Vec<_> = out.iter().map(kind_of).collect();
+        assert_eq!(kinds, vec!["S", "S", "C", "S", "S"]);
+    }
+
+    #[test]
+    fn type_runs_alternate() {
+        // S S R R S → sort within each run, never across.
+        let out = sort_for_emission(vec![s(2), s(1), r(3), r(4), s(0)]);
+        let kinds: Vec<_> = out.iter().map(kind_of).collect();
+        assert_eq!(kinds, vec!["S", "S", "R", "R", "S"]);
+    }
 }
