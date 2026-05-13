@@ -1758,15 +1758,17 @@ func applyDGDTemplateDefaults(
 	// Bake KV transfer policy env vars into worker pod templates so they
 	// survive DGD → DCD materialization (the DCD controller lacks the parent DGD).
 	// Workers publish these in their MDC so the router reads policy per-worker.
-	if shouldApplyKvTransferPolicyEnvVarsToWorkerComponent(component, dynamoDeployment) {
-		applyKvTransferPolicyEnvVarsToWorkerComponent(component, dynamoDeployment.Spec.Experimental.KvTransferPolicy)
+	if shouldApplyKvTransferPolicyToWorkerComponent(component, dynamoDeployment) {
+		kvt := dynamoDeployment.Spec.Experimental.KvTransferPolicy
+		applyKvTransferPolicyEnvVarsToWorkerComponent(component, kvt)
+		applyWorkerTopologyProjectionToWorkerComponent(component, kvt)
 	}
 
 	propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
 	propagateDGDSpecMetadata(dynamoDeployment.Spec.Annotations, dynamoDeployment.Spec.Labels, component)
 }
 
-func shouldApplyKvTransferPolicyEnvVarsToWorkerComponent(
+func shouldApplyKvTransferPolicyToWorkerComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 ) bool {
@@ -1801,6 +1803,29 @@ func applyKvTransferPolicyEnvVarsToWorkerComponent(
 		})
 	}
 	main.Env = MergeEnvs(policyEnvs, main.Env)
+}
+
+func applyWorkerTopologyProjectionToWorkerComponent(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	kvt *v1beta1.KvTransferPolicy,
+) {
+	if component == nil || kvt == nil {
+		return
+	}
+	podTemplate := ensurePodTemplate(component)
+	main := ensureMainContainer(podTemplate)
+	main.Env = MergeEnvs(WorkerTopologyEnvVars(), main.Env)
+	main.VolumeMounts = append(main.VolumeMounts, TopologyLabelVolumeMount())
+	podTemplate.Spec.Volumes = appendVolumeIfAbsent(podTemplate.Spec.Volumes, TopologyLabelVolume(kvt))
+}
+
+func appendVolumeIfAbsent(volumes []corev1.Volume, vol corev1.Volume) []corev1.Volume {
+	for _, v := range volumes {
+		if v.Name == vol.Name {
+			return volumes
+		}
+	}
+	return append(volumes, vol)
 }
 
 // dgdPropagatedAnnotationKeys lists DGD metadata annotations that are propagated

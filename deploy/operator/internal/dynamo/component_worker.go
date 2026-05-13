@@ -7,7 +7,9 @@ package dynamo
 
 import (
 	"fmt"
+	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -123,4 +125,56 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 	}
 
 	return container, nil
+}
+
+const (
+	topologyVolumeName = "topology-labels"
+	topologyMountPath  = "/etc/dynamo/topology"
+)
+
+// TopologyLabelVolume returns a Downward API volume that projects a pod label
+// into a file. The volume updates dynamically when the label is added or
+// changed, so the runtime can poll until the file has content.
+func TopologyLabelVolume(policy *v1beta1.KvTransferPolicy) corev1.Volume {
+	domain := strings.ToLower(string(policy.Domain))
+	return corev1.Volume{
+		Name: topologyVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			DownwardAPI: &corev1.DownwardAPIVolumeSource{
+				Items: []corev1.DownwardAPIVolumeFile{
+					{
+						Path: domain,
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: fmt.Sprintf("metadata.labels['%s']", policy.LabelKey),
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// TopologyLabelVolumeMount returns the volume mount for the topology label volume.
+func TopologyLabelVolumeMount() corev1.VolumeMount {
+	return corev1.VolumeMount{
+		Name:      topologyVolumeName,
+		MountPath: topologyMountPath,
+		ReadOnly:  true,
+	}
+}
+
+// WorkerTopologyEnvVars returns env vars that signal topology awareness to
+// the worker runtime. The runtime discovers topology domains by listing files
+// under the Downward API volume mount path.
+func WorkerTopologyEnvVars() []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{
+			Name:  commonconsts.EnvTopologyEnabled,
+			Value: "true",
+		},
+		{
+			Name:  commonconsts.EnvTopologyMountPath,
+			Value: topologyMountPath,
+		},
+	}
 }
