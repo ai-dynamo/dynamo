@@ -110,7 +110,6 @@ impl SchedulerState {
         self.waiting_members.remove(&uuid);
     }
 
-    #[cfg_attr(feature = "profile", inline(never))]
     fn next_waiting_uuid(&mut self) -> Option<Uuid> {
         loop {
             let uuid = *self.waiting.front()?;
@@ -170,7 +169,6 @@ impl SchedulerState {
             .map(|request| &mut request.sequence)
     }
 
-    #[cfg_attr(feature = "profile", inline(never))]
     fn preempt(&mut self, mode: PreemptionMode) -> Option<PreemptedRequest> {
         let uuid = loop {
             let candidate = match mode {

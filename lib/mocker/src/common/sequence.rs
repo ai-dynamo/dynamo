@@ -122,7 +122,6 @@ impl ActiveSequence {
     /// Build a `MoveBlock::Use` signal for blocks up to `cumulative_tokens`
     /// without updating internal state. Returns `None` if no new blocks are needed.
     /// Call `commit_allocation` after the signal is successfully processed.
-    #[cfg_attr(feature = "profile", inline(never))]
     pub fn prepare_allocation(&self, cumulative_tokens: usize) -> Option<MoveBlock> {
         let prev_blocks = self
             .num_allocated_tokens
@@ -323,7 +322,6 @@ impl ActiveSequence {
         signals
     }
 
-    #[cfg_attr(feature = "profile", inline(never))]
     fn free_signal_for_tokens(&self, active_tokens: usize) -> Vec<MoveBlock> {
         let active_blocks = active_tokens
             .div_ceil(self.block_size)
