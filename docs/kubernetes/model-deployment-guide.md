@@ -479,7 +479,7 @@ spec:
 - [DGDR Examples](../components/profiler/profiler-examples.md) — Ready-to-use YAML for various scenarios
 - [Profiler Guide](../components/profiler/profiler-guide.md) — Profiling algorithms, picking modes, gate checks
 - [Planner Guide](../components/planner/planner-guide.md) — Scaling modes, PlannerConfig reference
-- [Model Caching](model-caching.md) — PVC setup and Model Express
+- [Model Caching](model-caching.md) — PVC setup, ModelExpress, and ModelStreamer
 - [Creating Deployments](deployment/create-deployment.md) — Manual DGD spec for hand-crafted configs
 - [Multinode Deployments](deployment/multinode-deployment.md) — Grove, LWS, and multinode details
 - [Disaggregated Communication](disagg-communication-guide.md) — NIXL, RDMA, and networking
