@@ -71,13 +71,14 @@ on:
       HF_TOKEN:
         required: false
 
+
 jobs:
   image:
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
       target: runtime
-      cuda_version: '["${{ inputs.cuda_version }}"]'
+      cuda_version:  '["12.9"]'  # '["${{ inputs.cuda_version }}"]' # TODO: restore
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }} # ${{ inputs.builder_name }}
       fresh_builder: false # ${{ inputs.fresh_builder }} # TODO: restore
