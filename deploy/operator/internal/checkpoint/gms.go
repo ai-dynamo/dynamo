@@ -12,7 +12,6 @@ import (
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 const (
@@ -51,8 +50,9 @@ func EnsureGMSRestoreSidecars(
 	podSpec.Containers = append(podSpec.Containers, loader)
 }
 
-// EnsureGMSCheckpointJobSidecars adds GMS server (init) + saver containers
-// to the pod spec for a checkpoint job.
+// EnsureGMSCheckpointJobSidecars adds the GMS server init sidecar and saver
+// as a regular Job container. Saver is a regular container (not init+sleep)
+// so Job completion gates on tensor write.
 func EnsureGMSCheckpointJobSidecars(
 	podSpec *corev1.PodSpec,
 	mainContainer *corev1.Container,
@@ -76,11 +76,7 @@ func EnsureGMSCheckpointJobSidecars(
 	saver := gms.Container(GMSSaverContainer, gmsCheckpointSaverModule, mainContainer.Image)
 	saver.VolumeMounts = append(saver.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
 	saver.Env = append(saver.Env, corev1.EnvVar{Name: envCheckpointDir, Value: gmsArtifactDir})
-	// The saver is an init sidecar (restartPolicy=Always) so it doesn't
-	// affect pod Ready (only the worker's probe matters) and doesn't block
-	// Job completion. It saves, then sleeps until the pod terminates.
-	saver.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
-	podSpec.InitContainers = append(podSpec.InitContainers, saver)
+	podSpec.Containers = append(podSpec.Containers, saver)
 	return nil
 }
 
