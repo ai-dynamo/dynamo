@@ -31,7 +31,8 @@ The following table shows the backend framework versions included with each Dyna
 
 | **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
-| **main (ToT)** | `0.5.10.post1` | `1.3.0rc14` | `0.20.1` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
+| **main (ToT)** | `0.5.11` | `1.3.0rc14` | `0.20.1` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
+| **v1.2.0** *(in progress)* | `0.5.11` | `1.3.0rc14` | `0.20.1` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
 | **v1.2.0-deepseek-v4-dev.3** *(experimental, partial)* | upstream DSv4 preview | — | `0.20.1` | `0.10.1` |
 | **v1.2.0-deepseek-v4-dev.2** *(experimental, partial)* | upstream DSv4 preview | — | `0.20.0` | `0.10.1` |
 | **v1.1.1** | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` (TRT-LLM, vLLM); `1.0.1` (SGLang) |
@@ -75,6 +76,11 @@ Dynamo container images include CUDA toolkit libraries. The host machine must ha
 
 | Dynamo Version | Backend | CUDA Toolkit | Min Driver | Notes |
 | :--- | :--- | :--- | :--- | :--- |
+| **1.2.0** *(in progress)* | **SGLang** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | |
+| | **TensorRT-LLM** | 13.1 | 580.xx+ | |
+| | **vLLM** | 12.9 | 575.xx+ | |
+| | | 13.0 | 580.xx+ | |
 | **1.1.1** | **SGLang** | 12.9 | 575.xx+ | |
 | | | 13.0 | 580.xx+ | |
 | | **TensorRT-LLM** | 13.1 | 580.xx+ | |
