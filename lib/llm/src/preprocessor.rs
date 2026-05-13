@@ -634,13 +634,13 @@ impl OpenAIPreprocessor {
         let tokenize_start = Instant::now();
         let (token_ids, annotations) = {
             let _nvtx = dynamo_nvtx_range!("preprocess.tokenize");
-            self.gather_tokens(request, formatted_prompt.clone(), tracker)
+            self.gather_tokens(request, formatted_prompt.as_deref(), tracker)
                 .with_context(|| "Failed to gather tokens")?
         };
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
 
         let _mm_image_entries = self
-            .gather_multi_modal_data(request, &mut builder, formatted_prompt.clone())
+            .gather_multi_modal_data(request, &mut builder, formatted_prompt.as_deref())
             .await
             .with_context(|| "Failed to gather multimodal data")?;
 
@@ -827,7 +827,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
-        formatted_prompt: Option<String>,
+        formatted_prompt: Option<&str>,
     ) -> Result<Vec<MmImageEntry>> {
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
@@ -1055,8 +1055,12 @@ impl OpenAIPreprocessor {
                 Self::strip_inline_data_urls(&mut extra_args["messages"]);
             }
 
-            if let Some(ref prompt) = formatted_prompt {
-                extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
+            if let Some(prompt) = formatted_prompt {
+                // Clone here is the single owned allocation we actually need:
+                // the prompt is inserted into the request's `extra_args` JSON.
+                // The caller still holds the original `String`; passing
+                // `Option<&str>` keeps text-only requests (no MM) clone-free.
+                extra_args["formatted_prompt"] = serde_json::Value::String(prompt.to_string());
             }
 
             // Forward routing-side mm_hashes as `multi_modal_uuids` so vLLM
@@ -1549,7 +1553,7 @@ impl OpenAIPreprocessor {
     >(
         &self,
         request: &R,
-        formatted_prompt: Option<String>,
+        formatted_prompt: Option<&str>,
         tracker: Option<&RequestTracker>,
     ) -> Result<(Vec<crate::protocols::TokenIdType>, HashMap<String, String>)> {
         let mut annotations = HashMap::new();
@@ -1582,15 +1586,17 @@ impl OpenAIPreprocessor {
                 if let Some(text_input) = request.extract_text() {
                     match text_input {
                         TextInput::Single(raw_prompt) => {
-                            if let Some(f) = formatted_prompt.as_ref()
+                            if let Some(f) = formatted_prompt
                                 && request.has_annotation(ANNOTATION_FORMATTED_PROMPT)
                             {
                                 annotations
                                     .insert(ANNOTATION_FORMATTED_PROMPT.to_string(), f.to_string());
                             }
 
-                            // Completions will use raw_prompt, no template
-                            let prompt = formatted_prompt.unwrap_or(raw_prompt);
+                            // Completions will use raw_prompt, no template.
+                            // Borrow either input — no allocation needed; the
+                            // tokenizer accepts `&str`.
+                            let prompt: &str = formatted_prompt.unwrap_or(raw_prompt.as_str());
 
                             // If nvext.token_data is present, use the pre-computed tokens
                             // directly and skip tokenization.  This avoids redundant
@@ -1620,10 +1626,10 @@ impl OpenAIPreprocessor {
                                 tracing::warn!(
                                     "backend_instance_id provided but no token_data; tokenizing prompt"
                                 );
-                                let encoding = self.encode_with_timing(&prompt, tracker)?;
+                                let encoding = self.encode_with_timing(prompt, tracker)?;
                                 (encoding.token_ids().to_vec(), false)
                             } else {
-                                let encoding = self.encode_with_timing(&prompt, tracker)?;
+                                let encoding = self.encode_with_timing(prompt, tracker)?;
                                 (encoding.token_ids().to_vec(), false)
                             };
 
