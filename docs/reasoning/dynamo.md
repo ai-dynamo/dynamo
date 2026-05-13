@@ -72,3 +72,45 @@ Some models need both parsers configured together. Common pairings include:
 ## Tool Calling Interplay
 
 Reasoning parsing happens before tool call parsing. If a model emits both reasoning content and tool calls, configure both parsers so Dynamo can first separate reasoning text and then parse tool calls from the remaining assistant output.
+
+## Examples
+
+### Launch Dynamo Frontend and Backend
+
+```bash
+# launch backend worker (or dynamo.vllm)
+python -m dynamo.sglang --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3
+
+# launch frontend worker
+python -m dynamo.frontend
+```
+
+### Reasoning Request Example
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3.5-4B",
+    "messages": [{"role": "user", "content": "If a train leaves at 3pm going 60 mph and another leaves at 4pm going 80 mph, when does the second catch up?"}]
+  }'
+```
+
+Dynamo splits the model output so the chain-of-thought lands in
+`reasoning_content` and the user-facing answer stays in `content`:
+
+```json
+{
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "reasoning_content": "The first train has a 1-hour head start at 60 mph, so it is 60 miles ahead at 4pm. The second train closes the gap at 80 - 60 = 20 mph. 60 / 20 = 3 hours after 4pm.",
+        "content": "The second train catches up at 7pm."
+      },
+      "finish_reason": "stop"
+    }
+  ]
+}
+```
