@@ -1,251 +1,137 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Branch-based prefix sharding over `ThreadPoolIndexer<T>`.
+//! Branch-sharded routing-trie sharding over `ThreadPoolIndexer<T>`.
 //!
-//! [`BranchShardedIndexer`] partitions the prefix space by building an explicit
-//! routing table that maps branch keys (FNV-1a hash of first `prefix_depth`
-//! block hashes) to shard indices.  Unlike [`PrefixShardedIndexer`] which uses
-//! `hash % N`, new branches are assigned to the **least-loaded shard** at first
-//! insertion time, so load is balanced regardless of hash distribution.
-//!
-//! ## Key properties
-//!
-//! - **Single-shard `find_matches`**: a query routes to exactly one shard — no
-//!   scatter-gather.  Read throughput scales linearly with shard count.
-//! - **Least-loaded branch assignment**: each new branch key is assigned to the
-//!   shard with the fewest branches, ensuring balanced distribution even when
-//!   the underlying hash values cluster.
-//! - **Stable shard assignment**: once a branch is assigned, it never migrates.
-//!   CRTC-internal splits stay within the owning shard — no migration protocol
-//!   needed.  The shard assignment is keyed on the *sequence prefix* (first K
-//!   blocks), not on tree nodes, so splits are transparent to this layer.
-//! - **Unknown-branch fast path**: if a query's branch key is not in the routing
-//!   table, no worker has ever stored that prefix.  `find_matches` returns empty
-//!   scores immediately without dispatching to any shard.
-//!
-//! ## Remove routing
-//!
-//! Two strategies are used in combination:
-//!
-//! 1. **Mapping (primary)**: each `block_hash` is looked up in a
-//!    `block_to_shard` index (populated at Stored time) and routed to its
-//!    owning shard only.
-//! 2. **Broadcast fallback**: if a block hash is absent from the index (evicted,
-//!    out-of-order event, or index overflow), the Remove is broadcast to all
-//!    shards.  Each shard's CRTC handles a missing block as a no-op. Shared
-//!    sharded-indexer metrics track how often this occurs.
+//! This implementation owns a bounded routing prefix tree that can answer
+//! shallow drained reads and route depth-boundary suffixes through explicit
+//! backend anchors.
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 #[cfg(feature = "bench")]
 use std::time::Instant;
 
 use async_trait::async_trait;
-use dashmap::DashMap;
-use rustc_hash::FxBuildHasher;
+use dashmap::{DashMap, DashSet};
+use rustc_hash::{FxBuildHasher, FxHashSet};
 
 #[cfg(feature = "bench")]
 use super::ShardedIndexerMetrics;
-use super::{KvIndexerInterface, KvRouterError, ShardSizeSnapshot, SyncIndexer, ThreadPoolIndexer};
+use super::{
+    AnchorCapableSyncIndexer, AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError,
+    ShardSizeSnapshot, ThreadPoolIndexer,
+};
 use crate::protocols::*;
 
-// ---------------------------------------------------------------------------
-// Per-shard read thread pool (kept for potential future use)
-// ---------------------------------------------------------------------------
+type WorkerRoutingLookup = DashMap<ExternalSequenceBlockHash, BlockRoutingEntry, FxBuildHasher>;
+type DumpedBlockSet = FxHashSet<(WorkerWithDpRank, ExternalSequenceBlockHash)>;
 
-/// A bounded pool of OS threads dedicated to `find_matches` requests for one
-/// shard.  Mirrors the equivalent struct in `prefix_sharded.rs`.
-///
-/// Not currently used by [`BranchShardedIndexer`] — reads run inline on the
-/// caller's thread.  Retained here as a building block if dedicated read
-/// isolation is needed in the future.
-#[allow(dead_code)]
-struct ShardReadPool {
-    sender: flume::Sender<(
-        Vec<LocalBlockHash>,
-        tokio::sync::oneshot::Sender<OverlapScores>,
-    )>,
-    _threads: Vec<std::thread::JoinHandle<()>>,
+struct RoutingNode {
+    key: Option<LocalBlockHash>,
+    external_hash: Option<ExternalSequenceBlockHash>,
+    depth: usize,
+    shard: AtomicUsize,
+    children: DashMap<LocalBlockHash, Arc<RoutingNode>, FxBuildHasher>,
+    create_lock: Mutex<()>,
+    live_workers: DashSet<WorkerWithDpRank, FxBuildHasher>,
 }
 
-#[allow(dead_code)]
-impl ShardReadPool {
-    fn new<T: SyncIndexer>(backend: Arc<T>, num_threads: usize) -> Self {
-        let (tx, rx) = flume::unbounded();
-        let mut threads = Vec::with_capacity(num_threads);
-        for _ in 0..num_threads {
-            let backend = Arc::clone(&backend);
-            let rx: flume::Receiver<(
-                Vec<LocalBlockHash>,
-                tokio::sync::oneshot::Sender<OverlapScores>,
-            )> = rx.clone();
-            threads.push(std::thread::spawn(move || {
-                while let Ok((seq, resp_tx)) = rx.recv() {
-                    let result = backend.find_matches(&seq, false);
-                    let _ = resp_tx.send(result);
-                }
-            }));
-        }
+impl RoutingNode {
+    fn root() -> Self {
         Self {
-            sender: tx,
-            _threads: threads,
+            key: None,
+            external_hash: None,
+            depth: 0,
+            shard: AtomicUsize::new(0),
+            children: DashMap::with_hasher(FxBuildHasher),
+            create_lock: Mutex::new(()),
+            live_workers: DashSet::with_hasher(FxBuildHasher),
         }
     }
-}
 
-// ---------------------------------------------------------------------------
-// FNV-1a constants
-// ---------------------------------------------------------------------------
-
-const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
-const FNV_PRIME: u64 = 1099511628211;
-
-/// Fold one `u64` value into an FNV-1a accumulator.
-#[inline(always)]
-fn fnv_fold(state: u64, value: u64) -> u64 {
-    let mut h = state;
-    for b in value.to_le_bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(FNV_PRIME);
+    fn new(
+        key: LocalBlockHash,
+        external_hash: ExternalSequenceBlockHash,
+        depth: usize,
+        shard: usize,
+    ) -> Self {
+        Self {
+            key: Some(key),
+            external_hash: Some(external_hash),
+            depth,
+            shard: AtomicUsize::new(shard),
+            children: DashMap::with_hasher(FxBuildHasher),
+            create_lock: Mutex::new(()),
+            live_workers: DashSet::with_hasher(FxBuildHasher),
+        }
     }
-    h
+
+    fn shard(&self) -> usize {
+        self.shard.load(Ordering::Relaxed)
+    }
 }
 
-// ---------------------------------------------------------------------------
-// BranchShardedIndexer
-// ---------------------------------------------------------------------------
+#[derive(Clone)]
+struct BlockRoutingEntry {
+    shard_idx: usize,
+    routing_node: Arc<RoutingNode>,
+    sequence_depth: usize,
+    affects_router_node: bool,
+}
+
+struct StoreRouteDecision {
+    shard_idx: usize,
+    anchor: Option<AnchorRef>,
+    anchor_block_offset: usize,
+    rewrite_for_anchor: bool,
+    skip_backend: bool,
+}
 
 /// Branch-sharded wrapper over N [`ThreadPoolIndexer<T>`] instances.
-///
-/// Construct with [`BranchShardedIndexer::new`].
-pub struct BranchShardedIndexer<T: SyncIndexer> {
+pub struct BranchShardedIndexer<T: AnchorCapableSyncIndexer> {
     shards: Vec<Arc<ThreadPoolIndexer<T>>>,
     num_shards: usize,
-
-    /// Number of leading blocks used to identify a branch.  Default: 2.
-    prefix_depth: usize,
-
-    /// Routing table: FNV-1a(first `prefix_depth` `LocalBlockHash`) → shard index.
-    ///
-    /// Populated lazily at first `Stored` event for each distinct branch.
-    branch_to_shard: DashMap<u64, usize, FxBuildHasher>,
-
-    /// Number of branches assigned to each shard (for observability).
-    branch_counts: Mutex<Vec<usize>>,
-
-    /// Eagerly-updated block count per shard.
-    ///
-    /// Incremented synchronously in `apply_event` (before the event is dispatched
-    /// to the async worker thread) so that `assign_shard` always sees an up-to-date
-    /// load estimate even when the CRTC backend has not yet processed the event.
-    /// This prevents every branch from being assigned to the same shard during
-    /// burst startup, when all CRTC node counts are still zero.
-    shard_block_counts: Vec<AtomicUsize>,
-
-    /// Remove index: `ExternalSequenceBlockHash.0` → `(shard_index, ref_count)`.
-    ///
-    /// Written on `Stored` (ref_count incremented), decremented on `Removed`.
-    /// The entry is deleted only when ref_count reaches zero — i.e. every worker
-    /// that stored the block has since evicted it.
-    ///
-    /// Note: `block_to_shard` entries are content-addressed — the same
-    /// `ExternalSequenceBlockHash` can be shared by multiple workers (identical
-    /// token sequences).  Without ref-counting, the first worker to evict a
-    /// shared block would delete the entry, causing all subsequent workers'
-    /// Removed events for that block to fall through to broadcast.  Ref-counting
-    /// keeps the entry alive until the last holder evicts it.
-    ///
-    /// A `Cleared` event does NOT touch this map because doing so would break
-    /// routing for other workers whose continuations reference the same parent
-    /// hashes.  Only `Removed` events (which carry explicit block hashes)
-    /// decrement the ref-count.
-    ///
-    /// Note: parent-hash inheritance via this map is only used once a chain tail
-    /// has reached `prefix_depth` blocks (depth ≥ prefix_depth).  Shallower
-    /// tails are tracked in `block_to_fnv_state` and route by FNV accumulation.
-    block_to_shard: DashMap<u64, (usize, usize), FxBuildHasher>,
-
-    /// FNV accumulator for chain tails that have not yet reached `prefix_depth` blocks.
-    ///
-    /// Maps the `ExternalSequenceBlockHash.0` of the **last stored block** in a
-    /// shallow chain to `(accumulated_fnv, depth)`, where `depth < prefix_depth`.
-    ///
-    /// # Why this exists
-    ///
-    /// For workloads with a shared prefix shorter than `prefix_depth` (e.g. a
-    /// 15-block system prompt with `prefix_depth = 17`), all root events produce
-    /// the **same** partial FNV hash, collapsing every conversation onto a single
-    /// shard.  By carrying the accumulated FNV forward into continuation events,
-    /// each conversation extends the hash with its own unique blocks (positions
-    /// 15 and 16) and thereby receives a distinct, balanced shard assignment.
-    ///
-    /// # CRTC chain / lookup notes
-    ///
-    /// When a continuation's finalized FNV routes it to a different shard than its
-    /// parent, the CRTC on the new shard will not find the parent and will drop the
-    /// event.  Fixing this fully requires replaying the shallow prefix to the new
-    /// shard ("shallow chain replay"), which is left as a future improvement.  For
-    /// now the routing table is correct — `find_matches` routes to the right shard —
-    /// but the underlying CRTC may have no data there until replay is implemented.
-    ///
-    /// Separately, `find_matches` hashes only the available prefix
-    /// (`min(prefix_depth, len)`). A query shorter than `prefix_depth` would
-    /// therefore probe with a shorter key than the key registered by a root
-    /// `Stored` event. This is addressed by `register_prefix_keys`, which
-    /// records intermediate FNV values (depths 1 … prefix_depth) at store time
-    /// so short queries route to the correct shard instead of receiving a false
-    /// miss.
-    ///
-    /// Like `block_to_shard`, entries are content-addressed and are NOT removed by
-    /// `Cleared` events; only `Removed` events prune them.
-    block_to_fnv_state: DashMap<u64, (u64, usize), FxBuildHasher>,
-
+    max_routing_depth: usize,
     kv_block_size: u32,
-
+    root: Arc<RoutingNode>,
+    worker_block_index: DashMap<WorkerWithDpRank, WorkerRoutingLookup, FxBuildHasher>,
+    installed_worker_anchors: DashSet<(usize, WorkerWithDpRank, u64), FxBuildHasher>,
     #[cfg(feature = "bench")]
     metrics: ShardedIndexerMetrics,
 }
 
-impl<T: SyncIndexer> BranchShardedIndexer<T> {
-    /// Create a branch-sharded indexer from pre-built [`ThreadPoolIndexer`] shards.
-    ///
-    /// # Arguments
-    ///
-    /// * `shards` - One `ThreadPoolIndexer` per shard.
-    /// * `prefix_depth` - Number of prefix blocks to hash for routing.  Clamped
-    ///   to ≥ 1.  K=2 is the recommended default (depth=1 gives too few distinct
-    ///   branch keys on many workloads).
-    /// * `kv_block_size` - Block size for KV cache.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `shards` is empty.
+/// Compatibility alias for the previous implementation name.
+#[deprecated(note = "use BranchShardedIndexer instead")]
+pub type AnchorAwareBranchShardedIndexer<T> = BranchShardedIndexer<T>;
+
+impl<T: AnchorCapableSyncIndexer> BranchShardedIndexer<T> {
+    /// Create a branch-sharded indexer from pre-built shards.
     pub fn new(shards: Vec<ThreadPoolIndexer<T>>, prefix_depth: usize, kv_block_size: u32) -> Self {
         assert!(!shards.is_empty(), "Must provide at least one shard");
         let num_shards = shards.len();
-
-        let shards: Vec<Arc<ThreadPoolIndexer<T>>> = shards.into_iter().map(Arc::new).collect();
+        let shards = shards.into_iter().map(Arc::new).collect();
 
         Self {
             shards,
             num_shards,
-            prefix_depth: prefix_depth.max(1),
-            branch_to_shard: DashMap::with_hasher(FxBuildHasher),
-            branch_counts: Mutex::new(vec![0usize; num_shards]),
-            shard_block_counts: (0..num_shards).map(|_| AtomicUsize::new(0)).collect(),
-            block_to_shard: DashMap::with_hasher(FxBuildHasher),
-            block_to_fnv_state: DashMap::with_hasher(FxBuildHasher),
+            max_routing_depth: prefix_depth.max(1),
             kv_block_size,
+            root: Arc::new(RoutingNode::root()),
+            worker_block_index: DashMap::with_hasher(FxBuildHasher),
+            installed_worker_anchors: DashSet::with_hasher(FxBuildHasher),
             #[cfg(feature = "bench")]
             metrics: ShardedIndexerMetrics::new(),
         }
     }
 
-    /// Alias for [`BranchShardedIndexer::new`], kept for call-site compatibility.
+    /// Alias for [`BranchShardedIndexer::new`].
     pub fn new_with_options(
         shards: Vec<ThreadPoolIndexer<T>>,
         prefix_depth: usize,
@@ -254,178 +140,415 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
         Self::new(shards, prefix_depth, kv_block_size)
     }
 
-    // --- branch key computation ---
+    fn static_divergent_shard(
+        &self,
+        parent_shard: usize,
+        parent: &RoutingNode,
+        block: &KvCacheStoredBlockData,
+    ) -> usize {
+        if self.num_shards == 1 {
+            return 0;
+        }
 
-    /// FNV-1a hash of the first `min(prefix_depth, len)` `LocalBlockHash` values.
-    ///
-    /// Used by `find_matches` to compute the branch key for an incoming query.
-    fn branch_key_for_local_hashes(&self, hashes: &[LocalBlockHash]) -> u64 {
-        let k = self.prefix_depth.min(hashes.len());
-        hashes[..k]
-            .iter()
-            .fold(FNV_OFFSET_BASIS, |h, block| fnv_fold(h, block.0))
+        // TODO: Static hashing still cannot split one very hot branch after it
+        // lands on a shard. If real traces remain imbalanced, add adaptive or
+        // deeper hot-branch splitting on top of this deterministic baseline.
+        let parent_seq_hash = parent.external_hash.map(|hash| hash.0).unwrap_or(0);
+        let hash = compute_next_seq_hash(parent_seq_hash, block.tokens_hash);
+        let slot = (hash as usize) % (self.num_shards - 1);
+        if slot >= parent_shard { slot + 1 } else { slot }
     }
 
-    /// FNV-1a hash of the first `min(prefix_depth, len)` `tokens_hash` values
-    /// from a `Stored` event's block list.
-    fn branch_key_for_stored_blocks(&self, blocks: &[KvCacheStoredBlockData]) -> u64 {
-        let k = self.prefix_depth.min(blocks.len());
-        blocks[..k].iter().fold(FNV_OFFSET_BASIS, |h, block| {
-            fnv_fold(h, block.tokens_hash.0)
+    fn anchor_for_parent(&self, parent: &RoutingNode) -> Option<AnchorRef> {
+        if parent.depth == 0 {
+            return None;
+        }
+        let anchor_id = parent.external_hash?;
+        Some(AnchorRef {
+            anchor_id,
+            anchor_local_hash: parent.key.unwrap_or(LocalBlockHash(anchor_id.0)),
+            anchor_depth: parent.depth,
         })
     }
 
-    // --- routing table operations ---
-
-    fn lookup_shard(&self, branch_key: u64) -> Option<usize> {
-        self.branch_to_shard.get(&branch_key).map(|v| *v)
-    }
-
-    /// Get or create a shard assignment for a branch key.
-    ///
-    /// Fast path if already assigned; otherwise acquires the lock, picks the
-    /// least-loaded shard, and inserts atomically.
-    ///
-    /// Load is measured by **live block count** in each shard (an O(1) atomic
-    /// read).  Block count is a better proxy than branch count when conversation
-    /// lengths vary widely — long conversations contribute many more blocks than
-    /// short ones even though both count as one branch.  Branch count is used as
-    /// a tiebreaker when block counts are equal (e.g. at startup before any
-    /// events have been processed).
-    fn assign_shard(&self, branch_key: u64) -> usize {
-        if let Some(shard_idx) = self.branch_to_shard.get(&branch_key).map(|v| *v) {
-            return shard_idx;
-        }
-        let mut counts = self.branch_counts.lock().unwrap();
-        if let Some(shard_idx) = self.branch_to_shard.get(&branch_key).map(|v| *v) {
-            return shard_idx;
-        }
-        let selected = self
-            .shard_block_counts
-            .iter()
-            .enumerate()
-            .min_by(|(i, a), (j, b)| {
-                a.load(Ordering::Relaxed)
-                    .cmp(&b.load(Ordering::Relaxed))
-                    .then(counts[*i].cmp(&counts[*j]))
-            })
-            .unwrap()
-            .0;
-        counts[selected] += 1;
-        drop(counts);
-        self.branch_to_shard.insert(branch_key, selected);
-        selected
-    }
-
-    /// Register shorter prefix keys for the same shard without affecting
-    /// branch-count accounting.
-    ///
-    /// This supports short queries (`len < prefix_depth`) that should still
-    /// route to the shard containing a longer cached prefix and obtain a
-    /// shallower overlap score instead of an immediate false miss.
-    fn register_prefix_keys<I>(&self, shard_idx: usize, branch_keys: I)
-    where
-        I: IntoIterator<Item = u64>,
-    {
-        for branch_key in branch_keys {
-            self.branch_to_shard.entry(branch_key).or_insert(shard_idx);
-        }
-    }
-
-    /// Compute cumulative FNV prefix keys for the first `limit` stored blocks,
-    /// starting from `initial_state`.
-    fn prefix_keys_for_stored_blocks_from_state(
-        initial_state: u64,
-        blocks: &[KvCacheStoredBlockData],
-        limit: usize,
-    ) -> Vec<u64> {
-        let mut keys = Vec::with_capacity(limit);
-        let mut state = initial_state;
-        for block in blocks.iter().take(limit) {
-            state = fnv_fold(state, block.tokens_hash.0);
-            keys.push(state);
-        }
-        keys
-    }
-
-    // -----------------------------------------------------------------------
-    // Private event handlers (called from apply_event)
-    // -----------------------------------------------------------------------
-
-    /// Compute the target shard and (if still shallow) the updated FNV
-    /// accumulator state for a `Stored` event.
-    ///
-    /// Shard assignment uses accumulated FNV until the chain reaches
-    /// `prefix_depth` blocks, then switches to parent-hash inheritance.
-    ///
-    /// Three cases:
-    ///
-    /// A. Parent tail found in `block_to_fnv_state` (depth < prefix_depth):
-    ///    Extend the FNV accumulator with leading blocks from this batch.
-    ///    Once the accumulated depth reaches `prefix_depth`, call
-    ///    `assign_shard` with the finalized key so that distinct
-    ///    continuations receive distinct shard assignments.
-    ///    Record the updated state on the last block of this batch if the
-    ///    chain is still shallow after processing.
-    ///
-    /// B. Parent tail found in `block_to_shard` (depth >= prefix_depth):
-    ///    Inherit the shard — the branch was already decided.
-    ///
-    /// C. No parent (root) or OOO (parent not in either map):
-    ///    Compute FNV from this batch's own blocks.  For root events
-    ///    shorter than `prefix_depth` this is a partial key; a future
-    ///    continuation in case A will extend it to the full depth.
-    ///
-    /// Returns `(shard_idx, Option<(fnv, depth)>)`.  A `Some` state means
-    /// the chain has not yet reached `prefix_depth` blocks; the caller should
-    /// record it on the last block of the batch so the next continuation can
-    /// extend it.
-    fn compute_stored_routing(
+    fn get_or_create_child(
         &self,
-        store_data: &KvCacheStoreData,
-    ) -> (usize, Option<(u64, usize)>) {
-        if let Some(parent_hash) = &store_data.parent_hash {
-            if let Some(entry) = self.block_to_fnv_state.get(&parent_hash.0) {
-                // Case A: parent is shallow — extend FNV accumulator.
-                let (parent_fnv, parent_depth) = *entry;
-                drop(entry);
-                let remaining = self.prefix_depth - parent_depth;
-                let to_process = remaining.min(store_data.blocks.len());
-                let prefix_keys = Self::prefix_keys_for_stored_blocks_from_state(
-                    parent_fnv,
-                    &store_data.blocks,
-                    to_process,
-                );
-                let fnv = prefix_keys.last().copied().unwrap_or(parent_fnv);
-                let new_depth = parent_depth + to_process;
-                let shard = self.assign_shard(fnv);
-                if new_depth >= self.prefix_depth {
-                    self.register_prefix_keys(shard, prefix_keys);
-                }
-                let state = (new_depth < self.prefix_depth).then_some((fnv, new_depth));
-                (shard, state)
-            } else if let Some(shard) = self.block_to_shard.get(&parent_hash.0).map(|v| v.0) {
-                // Case B: deep chain — inherit shard.
-                (shard, None)
-            } else {
-                // Case C (OOO): parent not in either map; best-effort key from this batch.
-                let key = self.branch_key_for_stored_blocks(&store_data.blocks);
-                (self.assign_shard(key), None)
-            }
+        parent: &Arc<RoutingNode>,
+        block: &KvCacheStoredBlockData,
+    ) -> Arc<RoutingNode> {
+        if let Some(child) = parent.children.get(&block.tokens_hash) {
+            return child.clone();
+        }
+
+        let _guard = parent.create_lock.lock().unwrap();
+
+        if let Some(child) = parent.children.get(&block.tokens_hash) {
+            return child.clone();
+        }
+
+        let parent_shard = parent.shard();
+        let shard = if parent.children.is_empty() {
+            parent_shard
         } else {
-            // Case C (root): start FNV accumulation from scratch.
-            let to_process = self.prefix_depth.min(store_data.blocks.len());
-            let prefix_keys = Self::prefix_keys_for_stored_blocks_from_state(
-                FNV_OFFSET_BASIS,
-                &store_data.blocks,
-                to_process,
-            );
-            let fnv = prefix_keys.last().copied().unwrap_or(FNV_OFFSET_BASIS);
-            let depth = to_process;
-            let shard = self.assign_shard(fnv);
-            self.register_prefix_keys(shard, prefix_keys);
-            let state = (depth < self.prefix_depth).then_some((fnv, depth));
-            (shard, state)
+            self.static_divergent_shard(parent_shard, parent, block)
+        };
+
+        let child = Arc::new(RoutingNode::new(
+            block.tokens_hash,
+            block.block_hash,
+            parent.depth + 1,
+            shard,
+        ));
+        parent.children.insert(block.tokens_hash, child.clone());
+        child
+    }
+
+    fn worker_lookup(
+        &self,
+        worker: WorkerWithDpRank,
+    ) -> dashmap::mapref::one::RefMut<'_, WorkerWithDpRank, WorkerRoutingLookup> {
+        self.worker_block_index
+            .entry(worker)
+            .or_insert_with(|| DashMap::with_hasher(FxBuildHasher))
+    }
+
+    fn route_stored(
+        &self,
+        worker: WorkerWithDpRank,
+        store_data: &KvCacheStoreData,
+    ) -> StoreRouteDecision {
+        let mut start_depth = 0usize;
+        let mut node = self.root.clone();
+
+        let parent_entry = store_data.parent_hash.and_then(|parent_hash| {
+            self.worker_block_index
+                .get(&worker)
+                .and_then(|lookup| lookup.get(&parent_hash).map(|entry| entry.clone()))
+        });
+        if let Some(entry) = parent_entry {
+            node = entry.routing_node.clone();
+            start_depth = entry.sequence_depth;
+        }
+
+        let lookup = self.worker_lookup(worker);
+
+        for (offset, block) in store_data.blocks.iter().enumerate() {
+            let sequence_depth = start_depth + offset + 1;
+            if node.depth < self.max_routing_depth {
+                node = self.get_or_create_child(&node, block);
+                node.live_workers.insert(worker);
+                lookup.entry(block.block_hash).or_insert(BlockRoutingEntry {
+                    shard_idx: node.shard(),
+                    routing_node: node.clone(),
+                    sequence_depth,
+                    affects_router_node: true,
+                });
+            } else {
+                lookup.entry(block.block_hash).or_insert(BlockRoutingEntry {
+                    shard_idx: node.shard(),
+                    routing_node: node.clone(),
+                    sequence_depth,
+                    affects_router_node: false,
+                });
+            }
+        }
+        drop(lookup);
+
+        let shard_idx = node.shard();
+        let router_owned_blocks = self
+            .max_routing_depth
+            .saturating_sub(start_depth)
+            .min(store_data.blocks.len());
+        let needs_boundary_anchor =
+            start_depth <= self.max_routing_depth && router_owned_blocks < store_data.blocks.len();
+        let anchor = needs_boundary_anchor
+            .then(|| self.anchor_for_parent(&node))
+            .flatten();
+        let (anchor_block_offset, rewrite_for_anchor) = if anchor.is_some() {
+            (router_owned_blocks, true)
+        } else {
+            (0, false)
+        };
+        let skip_backend =
+            start_depth <= self.max_routing_depth && router_owned_blocks >= store_data.blocks.len();
+
+        StoreRouteDecision {
+            shard_idx,
+            anchor,
+            anchor_block_offset,
+            rewrite_for_anchor,
+            skip_backend,
+        }
+    }
+
+    fn add_active_scores(
+        scores: &mut OverlapScores,
+        active: &FxHashSet<WorkerWithDpRank>,
+        depth: usize,
+    ) {
+        let score = depth as u32;
+        for &worker in active {
+            let entry = scores.scores.entry(worker).or_insert(0);
+            *entry = (*entry).max(score);
+        }
+    }
+
+    fn collect_live_workers(node: &RoutingNode) -> FxHashSet<WorkerWithDpRank> {
+        node.live_workers.iter().map(|worker| *worker).collect()
+    }
+
+    fn reconcile_active_workers(
+        scores: &mut OverlapScores,
+        active: &mut FxHashSet<WorkerWithDpRank>,
+        node: &RoutingNode,
+        drop_depth: usize,
+    ) {
+        if active
+            .iter()
+            .all(|worker| node.live_workers.contains(worker))
+        {
+            return;
+        }
+        let score = drop_depth as u32;
+        active.retain(|worker| {
+            if node.live_workers.contains(worker) {
+                true
+            } else {
+                let entry = scores.scores.entry(*worker).or_insert(0);
+                *entry = (*entry).max(score);
+                false
+            }
+        });
+    }
+
+    async fn dispatch_read(
+        &self,
+        node: Arc<RoutingNode>,
+        sequence: Vec<LocalBlockHash>,
+        mut scores: OverlapScores,
+        active: FxHashSet<WorkerWithDpRank>,
+    ) -> Result<OverlapScores, KvRouterError> {
+        if active.is_empty() {
+            return Ok(scores);
+        }
+        let shard_idx = node.shard();
+        #[cfg(feature = "bench")]
+        self.metrics
+            .counters
+            .find_match_dispatches
+            .fetch_add(1, Ordering::Relaxed);
+        let Some(anchor) = self.anchor_for_parent(&node) else {
+            return Ok(scores);
+        };
+        let suffix = if anchor.anchor_depth <= sequence.len() {
+            sequence[anchor.anchor_depth..].to_vec()
+        } else {
+            Vec::new()
+        };
+        let shard = Arc::clone(&self.shards[shard_idx]);
+        let mut shard_scores = tokio::task::spawn_blocking(move || {
+            shard.backend().find_matches_from_anchor(anchor, &suffix)
+        })
+        .await
+        .map_err(|_| KvRouterError::IndexerOffline)??;
+        for (worker, shard_score) in shard_scores.scores.drain() {
+            if !active.contains(&worker) {
+                continue;
+            }
+            let entry = scores.scores.entry(worker).or_insert(0);
+            *entry = (*entry).max(shard_score);
+        }
+        Ok(scores)
+    }
+
+    fn ensure_worker_anchor(&self, shard_idx: usize, worker: WorkerWithDpRank, anchor: AnchorRef) {
+        let key = (shard_idx, worker, anchor.anchor_id.0);
+        if self.installed_worker_anchors.contains(&key) {
+            #[cfg(feature = "bench")]
+            self.metrics
+                .counters
+                .anchor_reuses
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+
+        let task = AnchorTask {
+            anchor_id: anchor.anchor_id,
+            anchor_local_hash: anchor.anchor_local_hash,
+            anchor_depth: anchor.anchor_depth,
+        };
+        // Anchor installs are deduped per worker queue, not globally. Each
+        // dependent worker carries its own Anchor-before-Stored FIFO edge,
+        // while backend anchor application is idempotent by anchor_id.
+        match self.shards[shard_idx].enqueue_anchor(worker, task) {
+            Ok(()) => {
+                if self.installed_worker_anchors.insert(key) {
+                    #[cfg(feature = "bench")]
+                    self.metrics
+                        .counters
+                        .anchor_installs
+                        .fetch_add(1, Ordering::Relaxed);
+                } else {
+                    #[cfg(feature = "bench")]
+                    self.metrics
+                        .counters
+                        .anchor_reuses
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(?error, shard_idx, ?worker, "Failed to enqueue anchor");
+            }
+        }
+    }
+
+    fn remove_worker_anchor_entries(&self, worker: WorkerWithDpRank) {
+        let keys: Vec<_> = self
+            .installed_worker_anchors
+            .iter()
+            .filter_map(|entry| {
+                let key = *entry.key();
+                (key.1 == worker).then_some(key)
+            })
+            .collect();
+        for key in keys {
+            self.installed_worker_anchors.remove(&key);
+        }
+    }
+
+    fn tracked_workers_for_worker_id(&self, worker_id: WorkerId) -> FxHashSet<WorkerWithDpRank> {
+        let mut workers: FxHashSet<_> = self
+            .worker_block_index
+            .iter()
+            .filter(|entry| entry.key().worker_id == worker_id)
+            .map(|entry| *entry.key())
+            .collect();
+        workers.extend(self.installed_worker_anchors.iter().filter_map(|entry| {
+            let worker = entry.key().1;
+            (worker.worker_id == worker_id).then_some(worker)
+        }));
+        workers
+    }
+
+    fn rewritten_store_event(
+        &self,
+        mut event: RouterEvent,
+        decision: &StoreRouteDecision,
+    ) -> Option<RouterEvent> {
+        let anchor = decision.anchor?;
+        let KvCacheEventData::Stored(store_data) = &mut event.event.data else {
+            return None;
+        };
+        if decision.anchor_block_offset > store_data.blocks.len() {
+            return None;
+        }
+        let blocks = store_data.blocks.split_off(decision.anchor_block_offset);
+        if blocks.is_empty() {
+            return None;
+        }
+        store_data.parent_hash = Some(anchor.anchor_id);
+        store_data.blocks = blocks;
+        Some(event)
+    }
+
+    fn remove_worker_entries(&self, worker: WorkerWithDpRank) {
+        self.remove_worker_anchor_entries(worker);
+        let Some((_, lookup)) = self.worker_block_index.remove(&worker) else {
+            return;
+        };
+        let mut seen_nodes = FxHashSet::default();
+        for (_, entry) in lookup {
+            if entry.affects_router_node {
+                let ptr = Arc::as_ptr(&entry.routing_node) as usize;
+                if seen_nodes.insert(ptr) {
+                    entry.routing_node.live_workers.remove(&worker);
+                }
+            }
+        }
+    }
+
+    fn dump_router_events(&self) -> (Vec<RouterEvent>, DumpedBlockSet) {
+        // TODO: Static shard routing treats the first structural child under a
+        // parent as special. This dump is replayable, but it does not yet make
+        // sibling traversal canonical by original creation order, so byte-stable
+        // dump -> replay -> dump comparisons are not guaranteed for siblings.
+        let mut events = Vec::new();
+        let mut dumped_blocks = FxHashSet::default();
+        let mut event_id = 0u64;
+        let mut queue = VecDeque::new();
+
+        for child in self.root.children.iter() {
+            queue.push_back((child.clone(), None, None::<FxHashSet<WorkerWithDpRank>>));
+        }
+
+        while let Some((node, parent_hash, parent_live_workers)) = queue.pop_front() {
+            let node_workers = Self::collect_live_workers(&node);
+            let live_workers = match parent_live_workers {
+                Some(parent_workers) => node_workers
+                    .intersection(&parent_workers)
+                    .copied()
+                    .collect::<FxHashSet<_>>(),
+                None => node_workers,
+            };
+            if live_workers.is_empty() {
+                continue;
+            }
+
+            let tokens_hash = node.key.expect("non-root routing node must have key");
+            let block_hash = node
+                .external_hash
+                .expect("non-root routing node must have external hash");
+            let block = KvCacheStoredBlockData {
+                tokens_hash,
+                block_hash,
+                mm_extra_info: None,
+            };
+
+            for worker in &live_workers {
+                events.push(RouterEvent::new(
+                    worker.worker_id,
+                    KvCacheEvent {
+                        event_id,
+                        data: KvCacheEventData::Stored(KvCacheStoreData {
+                            parent_hash,
+                            start_position: None,
+                            blocks: vec![block.clone()],
+                        }),
+                        dp_rank: worker.dp_rank,
+                    },
+                ));
+                dumped_blocks.insert((*worker, block_hash));
+                event_id += 1;
+            }
+
+            for child in node.children.iter() {
+                queue.push_back((child.clone(), Some(block_hash), Some(live_workers.clone())));
+            }
+        }
+
+        (events, dumped_blocks)
+    }
+
+    fn append_reachable_shard_events(
+        all_events: &mut Vec<RouterEvent>,
+        dumped_blocks: &mut DumpedBlockSet,
+        shard_events: Vec<RouterEvent>,
+    ) {
+        for event in shard_events {
+            let KvCacheEventData::Stored(store_data) = &event.event.data else {
+                all_events.push(event);
+                continue;
+            };
+            let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+            if let Some(parent_hash) = store_data.parent_hash
+                && !dumped_blocks.contains(&(worker, parent_hash))
+            {
+                continue;
+            }
+            for block in &store_data.blocks {
+                dumped_blocks.insert((worker, block.block_hash));
+            }
+            all_events.push(event);
         }
     }
 
@@ -433,86 +556,76 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
         let KvCacheEventData::Stored(store_data) = &event.event.data else {
             return;
         };
+        let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
+        let decision = self.route_stored(worker, store_data);
 
-        let (shard_idx, new_fnv_state) = self.compute_stored_routing(store_data);
-
-        // Update eager block count before dispatching.
-        self.shard_block_counts[shard_idx].fetch_add(store_data.blocks.len(), Ordering::Relaxed);
-
-        // Record block → shard before dispatching so a fast continuation
-        // can find entries immediately.
-        for block in &store_data.blocks {
-            self.block_to_shard
-                .entry(block.block_hash.0)
-                .and_modify(|e| e.1 += 1)
-                .or_insert((shard_idx, 1));
+        if decision.skip_backend {
+            return;
         }
 
-        // Propagate partial FNV state on the last block of this batch.
-        if let (Some(fnv_state), Some(last_block)) = (new_fnv_state, store_data.blocks.last()) {
-            self.block_to_fnv_state
-                .insert(last_block.block_hash.0, fnv_state);
+        if decision.rewrite_for_anchor
+            && let Some(anchor) = decision.anchor
+        {
+            self.ensure_worker_anchor(decision.shard_idx, worker, anchor);
+            if let Some(rewritten) = self.rewritten_store_event(event, &decision) {
+                self.shards[decision.shard_idx].apply_event(rewritten).await;
+            }
+            return;
         }
 
-        self.shards[shard_idx].apply_event(event).await;
+        self.shards[decision.shard_idx].apply_event(event).await;
     }
 
     async fn apply_removed(&self, event: RouterEvent) {
-        // Copy metadata before borrowing event.event.data.
-        let worker_id = event.worker_id;
-        let storage_tier = event.storage_tier;
-        let event_id = event.event.event_id;
-        let dp_rank = event.event.dp_rank;
-
+        let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
         let KvCacheEventData::Removed(remove_data) = &event.event.data else {
             return;
         };
 
-        // --- Plan: classify each block as mapped-to-shard or broadcast ---
-        let mut shard_blocks: Vec<Vec<ExternalSequenceBlockHash>> =
-            vec![Vec::new(); self.num_shards];
-        let mut broadcast_blocks: Vec<ExternalSequenceBlockHash> = Vec::new();
+        let mut shard_blocks = vec![Vec::new(); self.num_shards];
+        let mut broadcast_blocks = Vec::new();
 
-        for &block_hash in &remove_data.block_hashes {
-            self.block_to_fnv_state.remove(&block_hash.0);
-            let found_shard = self.block_to_shard.get_mut(&block_hash.0).map(|mut e| {
-                let shard_idx = e.0;
-                e.1 = e.1.saturating_sub(1);
-                shard_idx
-            });
-            match found_shard {
-                Some(shard_idx) => {
-                    self.block_to_shard
-                        .remove_if(&block_hash.0, |_, v| v.1 == 0);
-                    shard_blocks[shard_idx].push(block_hash);
-                }
-                None => {
+        if let Some(lookup) = self.worker_block_index.get(&worker) {
+            for &block_hash in &remove_data.block_hashes {
+                let Some(entry) = lookup.get(&block_hash).map(|entry| entry.clone()) else {
                     #[cfg(feature = "bench")]
                     self.metrics
                         .counters
                         .remove_broadcasts
                         .fetch_add(1, Ordering::Relaxed);
                     broadcast_blocks.push(block_hash);
+                    continue;
+                };
+
+                if entry.affects_router_node {
+                    entry.routing_node.live_workers.remove(&worker);
+                    lookup.remove(&block_hash);
+                } else {
+                    shard_blocks[entry.shard_idx].push(block_hash);
+                    lookup.remove(&block_hash);
                 }
+            }
+        } else {
+            for &block_hash in &remove_data.block_hashes {
+                #[cfg(feature = "bench")]
+                self.metrics
+                    .counters
+                    .remove_broadcasts
+                    .fetch_add(1, Ordering::Relaxed);
+                broadcast_blocks.push(block_hash);
             }
         }
 
-        // --- Dispatch: route mapped removes to their owning shards ---
         for (shard_idx, blocks) in shard_blocks.into_iter().enumerate() {
             if blocks.is_empty() {
                 continue;
             }
-            self.shard_block_counts[shard_idx]
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                    Some(count.saturating_sub(blocks.len()))
-                })
-                .ok();
             let shard_event = RouterEvent {
-                worker_id,
-                storage_tier,
+                worker_id: event.worker_id,
+                storage_tier: event.storage_tier,
                 event: KvCacheEvent {
-                    event_id,
-                    dp_rank,
+                    event_id: event.event.event_id,
+                    dp_rank: event.event.dp_rank,
                     data: KvCacheEventData::Removed(KvCacheRemoveData {
                         block_hashes: blocks,
                     }),
@@ -521,16 +634,14 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
             self.shards[shard_idx].apply_event(shard_event).await;
         }
 
-        // Broadcast unknown blocks to all shards; each CRTC treats a missing
-        // block as a no-op so correctness is maintained.
         if !broadcast_blocks.is_empty() {
             for shard in &self.shards {
                 let broadcast_event = RouterEvent {
-                    worker_id,
-                    storage_tier,
+                    worker_id: event.worker_id,
+                    storage_tier: event.storage_tier,
                     event: KvCacheEvent {
-                        event_id,
-                        dp_rank,
+                        event_id: event.event.event_id,
+                        dp_rank: event.event.dp_rank,
                         data: KvCacheEventData::Removed(KvCacheRemoveData {
                             block_hashes: broadcast_blocks.clone(),
                         }),
@@ -543,57 +654,87 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
 }
 
 #[async_trait]
-impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
-    /// Route to a single shard determined by the first `prefix_depth` block hashes.
-    ///
-    /// If the branch key is not in the routing table, no worker has ever stored
-    /// that prefix, so the result would be empty regardless of which shard is
-    /// queried.  We return `OverlapScores::new()` immediately without dispatching.
+impl<T: AnchorCapableSyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
     async fn find_matches(
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<OverlapScores, KvRouterError> {
         #[cfg(feature = "bench")]
         let t_routing = Instant::now();
-        let branch_key = self.branch_key_for_local_hashes(&sequence);
-        let shard_idx = match self.lookup_shard(branch_key) {
-            Some(idx) => idx,
-            None => {
+
+        let mut node = self.root.clone();
+        let mut depth = 0usize;
+        let mut router_scores = OverlapScores::new();
+        let mut active = FxHashSet::default();
+
+        for hash in &sequence {
+            if depth == self.max_routing_depth {
+                Self::add_active_scores(&mut router_scores, &active, depth);
                 #[cfg(feature = "bench")]
-                self.metrics
-                    .counters
-                    .find_match_early_returns
-                    .fetch_add(1, Ordering::Relaxed);
-                return Ok(OverlapScores::new());
+                let routing_ns = t_routing.elapsed().as_nanos() as u64;
+                #[cfg(feature = "bench")]
+                let t_shard = Instant::now();
+                let result = self
+                    .dispatch_read(node, sequence, router_scores, active)
+                    .await;
+                #[cfg(feature = "bench")]
+                {
+                    self.metrics.timing.calls.fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .timing
+                        .routing_ns
+                        .fetch_add(routing_ns, Ordering::Relaxed);
+                    self.metrics
+                        .timing
+                        .shard_ns
+                        .fetch_add(t_shard.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+                return result;
             }
-        };
+
+            let child = node.children.get(hash).map(|child| child.clone());
+            match child {
+                Some(child) => {
+                    node = child;
+                    depth += 1;
+                    if depth == 1 {
+                        active = Self::collect_live_workers(&node);
+                    } else {
+                        Self::reconcile_active_workers(
+                            &mut router_scores,
+                            &mut active,
+                            &node,
+                            depth - 1,
+                        );
+                    }
+                    if active.is_empty() {
+                        #[cfg(feature = "bench")]
+                        self.metrics
+                            .counters
+                            .find_match_early_returns
+                            .fetch_add(1, Ordering::Relaxed);
+                        return Ok(router_scores);
+                    }
+                }
+                None => {
+                    #[cfg(feature = "bench")]
+                    self.metrics
+                        .counters
+                        .find_match_early_returns
+                        .fetch_add(1, Ordering::Relaxed);
+                    Self::add_active_scores(&mut router_scores, &active, depth);
+                    return Ok(router_scores);
+                }
+            }
+        }
+
         #[cfg(feature = "bench")]
         self.metrics
             .counters
-            .find_match_dispatches
+            .find_match_early_returns
             .fetch_add(1, Ordering::Relaxed);
-
-        #[cfg(feature = "bench")]
-        let routing_ns = t_routing.elapsed().as_nanos() as u64;
-
-        #[cfg(feature = "bench")]
-        let t_shard = Instant::now();
-        let result = self.shards[shard_idx].find_matches(sequence).await;
-        #[cfg(feature = "bench")]
-        {
-            let shard_ns = t_shard.elapsed().as_nanos() as u64;
-            self.metrics.timing.calls.fetch_add(1, Ordering::Relaxed);
-            self.metrics
-                .timing
-                .routing_ns
-                .fetch_add(routing_ns, Ordering::Relaxed);
-            self.metrics
-                .timing
-                .shard_ns
-                .fetch_add(shard_ns, Ordering::Relaxed);
-        }
-
-        result
+        Self::add_active_scores(&mut router_scores, &active, depth);
+        Ok(router_scores)
     }
 
     async fn find_matches_for_request(
@@ -611,11 +752,7 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
                 block_mm_infos: None,
             },
         );
-        let branch_key = self.branch_key_for_local_hashes(&sequence);
-        match self.lookup_shard(branch_key) {
-            Some(idx) => self.shards[idx].find_matches(sequence).await,
-            None => Ok(OverlapScores::new()),
-        }
+        self.find_matches(sequence).await
     }
 
     async fn apply_event(&self, event: RouterEvent) {
@@ -623,8 +760,10 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
             KvCacheEventData::Stored(_) => self.apply_stored(event).await,
             KvCacheEventData::Removed(_) => self.apply_removed(event).await,
             KvCacheEventData::Cleared => {
-                // A worker may have blocks across multiple shards (different
-                // branches stored over its lifetime) — broadcast to all.
+                let worker_id = event.worker_id;
+                for worker in self.tracked_workers_for_worker_id(worker_id) {
+                    self.remove_worker_entries(worker);
+                }
                 for shard in &self.shards {
                     shard.apply_event(event.clone()).await;
                 }
@@ -633,13 +772,16 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {
-        // A worker may have blocks on any shard — broadcast.
+        for worker in self.tracked_workers_for_worker_id(worker_id) {
+            self.remove_worker_entries(worker);
+        }
         for shard in &self.shards {
             shard.remove_worker(worker_id).await;
         }
     }
 
     async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: DpRank) {
+        self.remove_worker_entries(WorkerWithDpRank::new(worker_id, dp_rank));
         for shard in &self.shards {
             shard.remove_worker_dp_rank(worker_id, dp_rank).await;
         }
@@ -652,9 +794,16 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
-        let mut all_events = Vec::new();
+        let (mut all_events, mut dumped_blocks) = self.dump_router_events();
         for shard in &self.shards {
-            all_events.extend(shard.dump_events().await?);
+            Self::append_reachable_shard_events(
+                &mut all_events,
+                &mut dumped_blocks,
+                shard.dump_events().await?,
+            );
+        }
+        for (idx, event) in all_events.iter_mut().enumerate() {
+            event.event.event_id = idx as u64;
         }
         Ok(all_events)
     }
@@ -678,13 +827,16 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
     async fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
         let mut sizes = Vec::new();
         for (idx, shard) in self.shards.iter().enumerate() {
-            // ThreadPoolIndexer::shard_sizes() already populates node_count
-            // via backend.node_count() (O(1)).  No need to call
-            // node_edge_lengths().len() which allocates an O(N) Vec.
-            sizes.extend(shard.shard_sizes().await.into_iter().map(move |mut s| {
-                s.shard_idx = idx;
-                s
-            }));
+            sizes.extend(
+                shard
+                    .shard_sizes()
+                    .await
+                    .into_iter()
+                    .map(move |mut snapshot| {
+                        snapshot.shard_idx = idx;
+                        snapshot
+                    }),
+            );
         }
         sizes
     }
@@ -709,54 +861,47 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
                 .counters
                 .find_match_dispatches
                 .load(Ordering::Relaxed);
-            let misses = self
+            let shallow = self
                 .metrics
                 .counters
                 .find_match_early_returns
                 .load(Ordering::Relaxed);
-            let total_calls = dispatched + misses;
+            let total_calls = dispatched + shallow;
+            if total_calls == 0 {
+                return String::new();
+            }
             let broadcasts = self
                 .metrics
                 .counters
                 .remove_broadcasts
                 .load(Ordering::Relaxed);
-            if total_calls == 0 {
-                return String::new();
-            }
-            let miss_pct = 100.0 * misses as f64 / total_calls as f64;
+            let anchor_installs = self
+                .metrics
+                .counters
+                .anchor_installs
+                .load(Ordering::Relaxed);
+            let anchor_reuses = self.metrics.counters.anchor_reuses.load(Ordering::Relaxed);
 
             let timing = {
-                let timing_calls = self.metrics.timing.calls.load(Ordering::Relaxed);
-                let avg_routing_ns = if timing_calls > 0 {
-                    self.metrics.timing.routing_ns.load(Ordering::Relaxed) / timing_calls
+                let calls = self.metrics.timing.calls.load(Ordering::Relaxed);
+                let avg_routing_ns = if calls > 0 {
+                    self.metrics.timing.routing_ns.load(Ordering::Relaxed) / calls
                 } else {
                     0
                 };
-                let avg_shard_us = if timing_calls > 0 {
-                    self.metrics.timing.shard_ns.load(Ordering::Relaxed) / timing_calls / 1000
+                let avg_shard_us = if calls > 0 {
+                    self.metrics.timing.shard_ns.load(Ordering::Relaxed) / calls / 1000
                 } else {
                     0
                 };
-                format!(
-                    "\n  avg routing    = {avg_routing_ns}ns  (routing table lookup)\n  \
-                 avg shard      = {avg_shard_us}µs  (CRTC traversal, inline on caller thread)"
-                )
+                format!("\n  avg routing = {avg_routing_ns}ns\n  avg shard = {avg_shard_us}µs")
             };
 
-            let branch_counts = self.branch_counts.lock().unwrap();
-            let total_branches: usize = branch_counts.iter().sum();
-            let branch_dist: Vec<String> = branch_counts
-                .iter()
-                .enumerate()
-                .map(|(i, c)| format!("shard[{i}]={c}"))
-                .collect();
-            drop(branch_counts);
             format!(
                 "BranchShardedIndexer find_matches ({total_calls} total: {dispatched} dispatched, \
-             {misses} early-exit / {miss_pct:.1}% miss):{timing}\n  \
-             branches known = {total_branches}  ({})\n  \
-             remove broadcasts = {broadcasts}  (fallback for blocks absent from index)",
-                branch_dist.join(", ")
+             {shallow} shallow):{timing}\n  \
+             remove broadcasts = {broadcasts}\n  \
+             anchors = {anchor_installs} installs / {anchor_reuses} reuses"
             )
         }
     }
@@ -764,97 +909,677 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+
     use super::*;
+    use crate::indexer::SyncIndexer;
     use crate::indexer::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
-
-    fn block(block_hash: u64, tokens_hash: u64) -> KvCacheStoredBlockData {
-        KvCacheStoredBlockData {
-            block_hash: ExternalSequenceBlockHash(block_hash),
-            tokens_hash: LocalBlockHash(tokens_hash),
-            mm_extra_info: None,
-        }
-    }
-
-    fn stored_event(
-        worker_id: WorkerId,
-        parent_hash: Option<u64>,
-        blocks: Vec<KvCacheStoredBlockData>,
-    ) -> RouterEvent {
-        RouterEvent::new(
-            worker_id,
-            KvCacheEvent {
-                event_id: worker_id,
-                data: KvCacheEventData::Stored(KvCacheStoreData {
-                    parent_hash: parent_hash.map(ExternalSequenceBlockHash),
-                    start_position: None,
-                    blocks,
-                }),
-                dp_rank: 0,
-            },
-        )
-    }
+    use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
+    use tokio::sync::Barrier as AsyncBarrier;
 
     fn make_indexer(
         num_shards: usize,
-        prefix_depth: usize,
+        depth: usize,
     ) -> BranchShardedIndexer<ConcurrentRadixTreeCompressed> {
         let shards = (0..num_shards)
-            .map(|_| ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 1, 32))
+            .map(|_| ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 32))
             .collect();
-        BranchShardedIndexer::new_with_options(shards, prefix_depth, 32)
+        BranchShardedIndexer::new(shards, depth, 32)
+    }
+
+    fn local_hashes(values: &[u64]) -> Vec<LocalBlockHash> {
+        values.iter().copied().map(LocalBlockHash).collect()
+    }
+
+    fn stored_blocks(values: &[u64]) -> Vec<KvCacheStoredBlockData> {
+        let locals = local_hashes(values);
+        let seq_hashes = compute_seq_hash_for_block(&locals);
+        stored_blocks_with_sequence_hashes(&locals, &seq_hashes)
+    }
+
+    fn store_event(worker_id: u64, values: &[u64]) -> RouterEvent {
+        store_event_with_dp_rank(worker_id, 0, values)
+    }
+
+    fn store_event_with_dp_rank(worker_id: u64, dp_rank: u32, values: &[u64]) -> RouterEvent {
+        router_event(
+            worker_id,
+            0,
+            dp_rank,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                start_position: None,
+                blocks: stored_blocks(values),
+            }),
+        )
+    }
+
+    fn store_event_with_parent(
+        worker_id: u64,
+        parent_values: &[u64],
+        suffix_values: &[u64],
+    ) -> RouterEvent {
+        let parent_hashes = compute_seq_hash_for_block(&local_hashes(parent_values));
+        let parent_hash = parent_hashes.last().copied().map(ExternalSequenceBlockHash);
+        let mut full_values = parent_values.to_vec();
+        full_values.extend_from_slice(suffix_values);
+        let full_hashes = local_hashes(&full_values);
+        let seq_hashes = compute_seq_hash_for_block(&full_hashes);
+        let suffix_hashes = local_hashes(suffix_values);
+        let suffix_seq_hashes = &seq_hashes[parent_values.len()..];
+
+        router_event(
+            worker_id,
+            0,
+            0,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash,
+                start_position: None,
+                blocks: stored_blocks_with_sequence_hashes(&suffix_hashes, suffix_seq_hashes),
+            }),
+        )
+    }
+
+    fn remove_hash_event(
+        worker_id: u64,
+        dp_rank: u32,
+        full_sequence: &[u64],
+        removed_idx: usize,
+    ) -> RouterEvent {
+        let locals = local_hashes(full_sequence);
+        let seq_hashes = compute_seq_hash_for_block(&locals);
+        remove_event(
+            worker_id,
+            0,
+            dp_rank,
+            vec![ExternalSequenceBlockHash(seq_hashes[removed_idx])],
+        )
+    }
+
+    fn clear_event(worker_id: u64) -> RouterEvent {
+        router_event(worker_id, 0, 0, KvCacheEventData::Cleared)
+    }
+
+    fn child(parent: &Arc<RoutingNode>, key: u64) -> Arc<RoutingNode> {
+        parent
+            .children
+            .get(&LocalBlockHash(key))
+            .expect("expected routing child")
+            .clone()
+    }
+
+    fn worker(worker_id: u64) -> WorkerWithDpRank {
+        WorkerWithDpRank::new(worker_id, 0)
+    }
+
+    fn score(scores: &OverlapScores, worker: WorkerWithDpRank) -> Option<u32> {
+        scores.scores.get(&worker).copied()
+    }
+
+    fn has_anchor_for_worker(
+        index: &BranchShardedIndexer<ConcurrentRadixTreeCompressed>,
+        worker: WorkerWithDpRank,
+    ) -> bool {
+        index
+            .installed_worker_anchors
+            .iter()
+            .any(|entry| entry.key().1 == worker)
+    }
+
+    async fn normalized_scores(
+        index: &BranchShardedIndexer<ConcurrentRadixTreeCompressed>,
+        query: &[u64],
+    ) -> Vec<(WorkerWithDpRank, u32)> {
+        let mut scores: Vec<_> = index
+            .find_matches(local_hashes(query))
+            .await
+            .unwrap()
+            .scores
+            .into_iter()
+            .collect();
+        scores.sort_by_key(|(worker, score)| (worker.worker_id, worker.dp_rank, *score));
+        scores
     }
 
     #[tokio::test]
-    async fn short_query_hits_after_full_root_batch_registers_intermediate_keys() {
-        let indexer = make_indexer(2, 2);
-        indexer
-            .apply_event(stored_event(
-                1,
-                None,
-                vec![block(101, 11), block(102, 22), block(103, 33)],
-            ))
-            .await;
-        indexer.flush().await;
+    async fn linear_chain_inherits_parent_and_caps_construction() {
+        let index = make_indexer(2, 4);
+        index.apply_event(store_event(0, &[1, 2, 3, 4, 5, 6])).await;
 
-        let overlap = indexer
-            .find_matches(vec![LocalBlockHash(11)])
-            .await
-            .expect("query should succeed");
-        let best = overlap.scores.values().copied().max().unwrap_or(0);
-        assert_eq!(
-            best, 1,
-            "short query should get shallow overlap instead of miss"
-        );
+        let a = child(&index.root, 1);
+        let b = child(&a, 2);
+        let c = child(&b, 3);
+        let d = child(&c, 4);
+
+        assert_eq!(a.shard(), 0);
+        assert_eq!(b.shard(), 0);
+        assert_eq!(c.shard(), 0);
+        assert_eq!(d.shard(), 0);
+        assert!(d.children.get(&LocalBlockHash(5)).is_none());
+
+        let lookup = index.worker_block_index.get(&worker(0)).unwrap();
+        let seq_hashes = compute_seq_hash_for_block(&local_hashes(&[1, 2, 3, 4, 5, 6]));
+        let suffix_entry = lookup
+            .get(&ExternalSequenceBlockHash(seq_hashes[5]))
+            .expect("suffix block should be reverse-indexed");
+        assert_eq!(suffix_entry.shard_idx, 0);
+        assert!(!suffix_entry.affects_router_node);
+        assert!(Arc::ptr_eq(&suffix_entry.routing_node, &d));
     }
 
     #[tokio::test]
-    async fn short_query_hits_after_shallow_root_crosses_prefix_depth() {
-        let indexer = make_indexer(1, 4);
-        indexer
-            .apply_event(stored_event(1, None, vec![block(201, 11)]))
-            .await;
-        indexer
-            .apply_event(stored_event(
-                1,
-                Some(201),
-                vec![
-                    block(202, 22),
-                    block(203, 33),
-                    block(204, 44),
-                    block(205, 55),
-                ],
-            ))
-            .await;
-        indexer.flush().await;
+    async fn structural_divergence_and_zombie_history_are_sticky() {
+        let index = make_indexer(2, 4);
+        index.apply_event(store_event(0, &[1, 2, 3])).await;
 
-        let overlap = indexer
-            .find_matches(vec![LocalBlockHash(11), LocalBlockHash(22)])
+        let a = child(&index.root, 1);
+        let b = child(&a, 2);
+        let c = child(&b, 3);
+        assert_eq!(c.shard(), 0);
+
+        index
+            .apply_event(remove_hash_event(0, 0, &[1, 2, 3], 2))
+            .await;
+        assert!(c.live_workers.is_empty());
+        assert!(b.children.get(&LocalBlockHash(3)).is_some());
+
+        index.apply_event(store_event(1, &[1, 2, 5])).await;
+        let e = child(&b, 5);
+        assert_eq!(e.shard(), 1);
+
+        index.apply_event(store_event(2, &[1, 2, 6])).await;
+        let f = child(&b, 6);
+        assert_eq!(f.shard(), 1);
+        assert_eq!(b.children.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn static_divergent_assignment_excludes_parent_shard() {
+        let index = make_indexer(4, 4);
+        index.apply_event(store_event(0, &[1, 2, 3])).await;
+
+        let b = child(&child(&index.root, 1), 2);
+        let block = stored_blocks(&[1, 2, 5]).remove(2);
+        let expected = index.static_divergent_shard(b.shard(), &b, &block);
+        assert_ne!(expected, b.shard());
+
+        index.apply_event(store_event(1, &[1, 2, 5])).await;
+        let e = child(&b, 5);
+        assert_eq!(e.shard(), expected);
+    }
+
+    #[test]
+    fn concurrent_sibling_creation_under_hot_prefix_has_one_first_child() {
+        let index = Arc::new(make_indexer(2, 4));
+        let ab_blocks = stored_blocks(&[1, 2]);
+        let a = index.get_or_create_child(&index.root, &ab_blocks[0]);
+        let b = index.get_or_create_child(&a, &ab_blocks[1]);
+
+        let sibling_count = 4;
+        let barrier = Arc::new(Barrier::new(sibling_count));
+        let mut handles = Vec::new();
+
+        for key in 10..(10 + sibling_count as u64) {
+            let index = index.clone();
+            let barrier = barrier.clone();
+            let parent = b.clone();
+            handles.push(std::thread::spawn(move || {
+                let block = stored_blocks(&[1, 2, key]).remove(2);
+                barrier.wait();
+                index.get_or_create_child(&parent, &block)
+            }));
+        }
+
+        let children: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        let inherited_children = children
+            .iter()
+            .filter(|node| node.shard() == b.shard())
+            .count();
+
+        assert_eq!(inherited_children, 1);
+        assert_eq!(b.children.len(), sibling_count);
+    }
+
+    #[tokio::test]
+    async fn drained_read_returns_router_scores_for_all_live_branch_workers() {
+        let index = make_indexer(2, 4);
+        index.apply_event(store_event(0, &[1, 2, 3, 4])).await;
+        index.apply_event(store_event(1, &[1, 2, 5, 6])).await;
+
+        let scores = index
+            .find_matches(local_hashes(&[1, 2, 9, 10]))
             .await
-            .expect("query should succeed");
-        let best = overlap.scores.values().copied().max().unwrap_or(0);
-        assert_eq!(
-            best, 2,
-            "prefix keys added during depth crossing should route short queries correctly"
+            .unwrap();
+
+        assert_eq!(score(&scores, worker(0)), Some(2));
+        assert_eq!(score(&scores, worker(1)), Some(2));
+        #[cfg(feature = "bench")]
+        {
+            assert_eq!(
+                index
+                    .metrics
+                    .counters
+                    .find_match_dispatches
+                    .load(Ordering::Relaxed),
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn prefix_only_parent_continuations_stay_router_only() {
+        let index = make_indexer(2, 3);
+        index.apply_event(store_event(0, &[1])).await;
+        index
+            .apply_event(store_event_with_parent(0, &[1], &[2]))
+            .await;
+        index
+            .apply_event(store_event_with_parent(0, &[1, 2], &[3]))
+            .await;
+        index.flush().await;
+
+        let scores = index.find_matches(local_hashes(&[1, 2, 3])).await.unwrap();
+        let backend_blocks: usize = index
+            .shard_sizes()
+            .await
+            .iter()
+            .map(|snapshot| snapshot.block_count)
+            .sum();
+
+        assert_eq!(score(&scores, worker(0)), Some(3));
+        #[cfg(feature = "bench")]
+        {
+            assert_eq!(
+                index
+                    .metrics
+                    .counters
+                    .anchor_installs
+                    .load(Ordering::Relaxed),
+                0
+            );
+        }
+        assert_eq!(backend_blocks, 0);
+    }
+
+    #[tokio::test]
+    async fn depth_dispatch_uses_boundary_anchor_for_divergent_suffix() {
+        let index = make_indexer(2, 3);
+        index.apply_event(store_event(0, &[1, 2, 3, 4])).await;
+        index.apply_event(store_event(1, &[1, 2, 5, 6])).await;
+        index.flush().await;
+
+        let scores = index
+            .find_matches(local_hashes(&[1, 2, 5, 6]))
+            .await
+            .unwrap();
+
+        assert_eq!(score(&scores, worker(1)), Some(4));
+        #[cfg(feature = "bench")]
+        {
+            assert_eq!(
+                index
+                    .metrics
+                    .counters
+                    .anchor_installs
+                    .load(Ordering::Relaxed),
+                2
+            );
+            assert_eq!(
+                index
+                    .metrics
+                    .counters
+                    .find_match_dispatches
+                    .load(Ordering::Relaxed),
+                1
+            );
+        }
+
+        index
+            .apply_event(remove_hash_event(1, 0, &[1, 2, 5, 6], 2))
+            .await;
+        index.flush().await;
+
+        let scores_after_remove = index
+            .find_matches(local_hashes(&[1, 2, 5, 6]))
+            .await
+            .unwrap();
+        assert_eq!(score(&scores_after_remove, worker(0)), Some(2));
+        assert_eq!(score(&scores_after_remove, worker(1)), Some(2));
+    }
+
+    #[tokio::test]
+    async fn anchor_installed_by_one_worker_is_visible_to_another_worker_queue() {
+        let index = make_indexer(2, 3);
+        index.apply_event(store_event(0, &[1, 2, 3, 4])).await;
+        index.apply_event(store_event(1, &[1, 2, 5, 6])).await;
+        index.flush().await;
+
+        let b = child(&child(&index.root, 1), 2);
+        let e = child(&b, 5);
+        let anchor = index
+            .anchor_for_parent(&e)
+            .expect("expected boundary anchor");
+        let shard_idx = e.shard();
+
+        let full = local_hashes(&[1, 2, 5, 7]);
+        let seq_hashes = compute_seq_hash_for_block(&full);
+        let suffix_blocks = stored_blocks_with_sequence_hashes(&full[3..], &seq_hashes[3..]);
+        let direct_worker_event = router_event(
+            2,
+            0,
+            0,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: Some(anchor.anchor_id),
+                start_position: None,
+                blocks: suffix_blocks,
+            }),
         );
+
+        index.shards[shard_idx]
+            .apply_event(direct_worker_event)
+            .await;
+        index.flush().await;
+
+        let scores = index.shards[shard_idx]
+            .backend()
+            .find_matches_from_anchor(anchor, &local_hashes(&[7]))
+            .unwrap();
+        assert_eq!(score(&scores, worker(2)), Some(4));
+    }
+
+    #[tokio::test]
+    async fn many_workers_inducing_same_anchor_divergence_all_carry_idempotent_anchor() {
+        let index = Arc::new(make_indexer(2, 3));
+        index.apply_event(store_event(0, &[1, 2, 3, 4])).await;
+
+        let worker_count = 4usize;
+        let barrier = Arc::new(AsyncBarrier::new(worker_count));
+        let mut tasks = Vec::with_capacity(worker_count);
+
+        for worker_id in 1..=worker_count as u64 {
+            let index = index.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                index
+                    .apply_event(store_event(worker_id, &[1, 2, 5, 6]))
+                    .await;
+            }));
+        }
+
+        for task in tasks {
+            task.await.unwrap();
+        }
+        index.flush().await;
+
+        let b = child(&child(&index.root, 1), 2);
+        let e = child(&b, 5);
+        assert_eq!(b.children.len(), 2);
+        assert_eq!(e.shard(), 1);
+        assert_eq!(e.live_workers.len(), worker_count);
+        assert_eq!(index.installed_worker_anchors.len(), worker_count + 1);
+        #[cfg(feature = "bench")]
+        {
+            assert_eq!(
+                index
+                    .metrics
+                    .counters
+                    .anchor_installs
+                    .load(Ordering::Relaxed),
+                worker_count as u64 + 1
+            );
+        }
+
+        let scores = index
+            .find_matches(local_hashes(&[1, 2, 5, 6]))
+            .await
+            .unwrap();
+        for worker_id in 1..=worker_count as u64 {
+            assert_eq!(score(&scores, worker(worker_id)), Some(4));
+        }
+    }
+
+    #[tokio::test]
+    async fn removing_anchor_parent_prefix_does_not_leak_suffix_scores() {
+        let index = make_indexer(2, 3);
+        index.apply_event(store_event(0, &[1, 2, 3, 4])).await;
+        index.apply_event(store_event(1, &[1, 2, 5, 6])).await;
+        index.flush().await;
+
+        index
+            .apply_event(remove_hash_event(1, 0, &[1, 2, 5, 6], 1))
+            .await;
+        index.flush().await;
+
+        let full = index
+            .find_matches(local_hashes(&[1, 2, 5, 6]))
+            .await
+            .unwrap();
+        assert_eq!(score(&full, worker(0)), Some(2));
+        assert_eq!(score(&full, worker(1)), Some(1));
+
+        let drained = index.find_matches(local_hashes(&[1, 2, 9])).await.unwrap();
+        assert_eq!(score(&drained, worker(0)), Some(2));
+        assert_eq!(score(&drained, worker(1)), Some(1));
+    }
+
+    #[tokio::test]
+    async fn read_stops_at_dead_router_node_before_walking_zombie_descendants() {
+        let index = make_indexer(2, 4);
+        index.apply_event(store_event(0, &[1, 2, 3, 4])).await;
+        index
+            .apply_event(remove_hash_event(0, 0, &[1, 2, 3, 4], 2))
+            .await;
+        index.flush().await;
+
+        let scores = index
+            .find_matches(local_hashes(&[1, 2, 3, 4, 5]))
+            .await
+            .unwrap();
+
+        assert_eq!(score(&scores, worker(0)), Some(2));
+        #[cfg(feature = "bench")]
+        {
+            assert_eq!(
+                index
+                    .metrics
+                    .counters
+                    .find_match_early_returns
+                    .load(Ordering::Relaxed),
+                1
+            );
+            assert_eq!(
+                index
+                    .metrics
+                    .counters
+                    .find_match_dispatches
+                    .load(Ordering::Relaxed),
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn suffix_beyond_cap_remove_routes_without_clearing_prefix_liveness() {
+        let index = make_indexer(2, 2);
+        index.apply_event(store_event(0, &[1, 2, 3, 4, 5])).await;
+        index.flush().await;
+
+        let b = child(&child(&index.root, 1), 2);
+        assert!(b.live_workers.contains(&worker(0)));
+
+        index
+            .apply_event(remove_hash_event(0, 0, &[1, 2, 3, 4, 5], 4))
+            .await;
+        index.flush().await;
+
+        assert!(b.live_workers.contains(&worker(0)));
+        #[cfg(feature = "bench")]
+        {
+            assert_eq!(
+                index
+                    .metrics
+                    .counters
+                    .remove_broadcasts
+                    .load(Ordering::Relaxed),
+                0
+            );
+        }
+
+        let prefix = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
+        assert_eq!(score(&prefix, worker(0)), Some(2));
+
+        let full = index
+            .find_matches(local_hashes(&[1, 2, 3, 4, 5]))
+            .await
+            .unwrap();
+        assert_eq!(score(&full, worker(0)), Some(4));
+    }
+
+    #[tokio::test]
+    async fn parent_hash_continuation_past_depth_cap_matches_from_prefix_anchor() {
+        let index = make_indexer(2, 2);
+        index.apply_event(store_event(0, &[1, 2])).await;
+        index
+            .apply_event(store_event_with_parent(0, &[1, 2], &[3, 4, 5]))
+            .await;
+        index.flush().await;
+
+        let scores = index
+            .find_matches(local_hashes(&[1, 2, 3, 4, 5]))
+            .await
+            .unwrap();
+
+        assert_eq!(score(&scores, worker(0)), Some(5));
+    }
+
+    #[tokio::test]
+    async fn per_worker_reverse_index_removes_only_one_owner_of_shared_hash() {
+        let index = make_indexer(2, 4);
+        index.apply_event(store_event(0, &[7, 8, 9])).await;
+        index.apply_event(store_event(1, &[7, 8, 9])).await;
+
+        index
+            .apply_event(remove_hash_event(0, 0, &[7, 8, 9], 2))
+            .await;
+
+        let full = index.find_matches(local_hashes(&[7, 8, 9])).await.unwrap();
+        assert_eq!(score(&full, worker(0)), Some(2));
+        assert_eq!(score(&full, worker(1)), Some(3));
+
+        let prefix = index.find_matches(local_hashes(&[7, 8])).await.unwrap();
+        assert_eq!(score(&prefix, worker(0)), Some(2));
+        assert_eq!(score(&prefix, worker(1)), Some(2));
+    }
+
+    #[tokio::test]
+    async fn duplicate_store_keeps_one_live_worker_entry() {
+        let index = make_indexer(2, 4);
+        index.apply_event(store_event(0, &[1, 2, 3])).await;
+        index.apply_event(store_event(0, &[1, 2, 3])).await;
+
+        let c = child(&child(&child(&index.root, 1), 2), 3);
+        assert_eq!(c.live_workers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cleanup_updates_router_state() {
+        let index = make_indexer(2, 4);
+        index
+            .apply_event(store_event_with_dp_rank(0, 0, &[1, 2, 3]))
+            .await;
+        index
+            .apply_event(store_event_with_dp_rank(0, 1, &[1, 2, 4]))
+            .await;
+
+        index.remove_worker_dp_rank(0, 0).await;
+        let after_dp_remove = index.find_matches(local_hashes(&[1, 2, 3])).await.unwrap();
+        assert_eq!(score(&after_dp_remove, WorkerWithDpRank::new(0, 0)), None);
+
+        index.apply_event(clear_event(0)).await;
+        let after_clear = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
+        assert!(after_clear.scores.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_installed_worker_anchors_for_returning_worker() {
+        let index = make_indexer(2, 3);
+        let dp0 = WorkerWithDpRank::new(0, 0);
+        let dp1 = WorkerWithDpRank::new(0, 1);
+
+        index
+            .apply_event(store_event_with_dp_rank(0, 0, &[1, 2, 3, 4]))
+            .await;
+        index
+            .apply_event(store_event_with_dp_rank(0, 1, &[1, 2, 5, 6]))
+            .await;
+        index.flush().await;
+
+        assert!(has_anchor_for_worker(&index, dp0));
+        assert!(has_anchor_for_worker(&index, dp1));
+
+        index.remove_worker_dp_rank(0, 0).await;
+        assert!(!has_anchor_for_worker(&index, dp0));
+        assert!(has_anchor_for_worker(&index, dp1));
+
+        index.apply_event(clear_event(0)).await;
+        assert!(!has_anchor_for_worker(&index, dp0));
+        assert!(!has_anchor_for_worker(&index, dp1));
+
+        index
+            .apply_event(store_event_with_dp_rank(0, 0, &[1, 2, 3, 4]))
+            .await;
+        index.flush().await;
+
+        assert!(has_anchor_for_worker(&index, dp0));
+        let scores = index
+            .find_matches(local_hashes(&[1, 2, 3, 4]))
+            .await
+            .unwrap();
+        assert_eq!(score(&scores, dp0), Some(4));
+    }
+
+    #[tokio::test]
+    async fn dump_replay_preserves_query_scores() {
+        let index = make_indexer(2, 3);
+        index.apply_event(store_event(0, &[1, 2, 3, 4])).await;
+        index.apply_event(store_event(1, &[1, 2, 5, 6])).await;
+        index.apply_event(store_event(2, &[7, 8])).await;
+        index
+            .apply_event(remove_hash_event(1, 0, &[1, 2, 5, 6], 3))
+            .await;
+        index.flush().await;
+
+        let queries = [
+            &[1, 2, 3, 4][..],
+            &[1, 2, 5, 6],
+            &[1, 2, 9],
+            &[7, 8],
+            &[7, 8, 9],
+        ];
+        let mut expected = Vec::with_capacity(queries.len());
+        for query in &queries {
+            expected.push(normalized_scores(&index, query).await);
+        }
+
+        let dumped = index.dump_events().await.unwrap();
+        assert!(!dumped.is_empty());
+
+        let restored = make_indexer(2, 3);
+        for event in dumped {
+            restored.apply_event(event).await;
+        }
+        restored.flush().await;
+
+        for (query, expected_scores) in queries.iter().zip(expected.iter()) {
+            assert_eq!(
+                normalized_scores(&restored, query).await,
+                *expected_scores,
+                "dump replay changed scores for query {query:?}"
+            );
+        }
     }
 }

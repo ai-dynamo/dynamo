@@ -28,6 +28,15 @@ pub struct BlockPoolMetrics {
     scan_hashes_requested: AtomicU64,
     scan_blocks_returned: AtomicU64,
 
+    // Audit counters for normally-rare branches. These exist primarily
+    // so tests can assert "this code path actually fired" rather than
+    // inferring it from emergent behaviour, and so production
+    // dashboards detect regressions if these spike.
+    eager_primary_to_inactive_total: AtomicU64,
+    allocate_atomic_rollback_total: AtomicU64,
+    release_primary_noop_total: AtomicU64,
+    release_duplicate_noop_total: AtomicU64,
+
     // Gauges (bidirectional)
     inflight_mutable: AtomicI64,
     inflight_immutable: AtomicI64,
@@ -51,6 +60,10 @@ impl BlockPoolMetrics {
             match_blocks_returned: AtomicU64::new(0),
             scan_hashes_requested: AtomicU64::new(0),
             scan_blocks_returned: AtomicU64::new(0),
+            eager_primary_to_inactive_total: AtomicU64::new(0),
+            allocate_atomic_rollback_total: AtomicU64::new(0),
+            release_primary_noop_total: AtomicU64::new(0),
+            release_duplicate_noop_total: AtomicU64::new(0),
             inflight_mutable: AtomicI64::new(0),
             inflight_immutable: AtomicI64::new(0),
             reset_pool_size: AtomicI64::new(0),
@@ -129,8 +142,18 @@ impl BlockPoolMetrics {
     }
 
     #[inline(always)]
+    pub fn inc_inflight_mutable_by(&self, n: i64) {
+        self.inflight_mutable.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
     pub fn dec_inflight_mutable(&self) {
         self.inflight_mutable.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn dec_inflight_mutable_by(&self, n: i64) {
+        self.inflight_mutable.fetch_sub(n, Ordering::Relaxed);
     }
 
     #[inline(always)]
@@ -139,8 +162,18 @@ impl BlockPoolMetrics {
     }
 
     #[inline(always)]
+    pub fn inc_inflight_immutable_by(&self, n: i64) {
+        self.inflight_immutable.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
     pub fn dec_inflight_immutable(&self) {
         self.inflight_immutable.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn dec_inflight_immutable_by(&self, n: i64) {
+        self.inflight_immutable.fetch_sub(n, Ordering::Relaxed);
     }
 
     #[inline(always)]
@@ -154,8 +187,18 @@ impl BlockPoolMetrics {
     }
 
     #[inline(always)]
+    pub fn inc_reset_pool_size_by(&self, n: i64) {
+        self.reset_pool_size.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
     pub fn dec_reset_pool_size(&self) {
         self.reset_pool_size.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn dec_reset_pool_size_by(&self, n: i64) {
+        self.reset_pool_size.fetch_sub(n, Ordering::Relaxed);
     }
 
     #[inline(always)]
@@ -169,8 +212,56 @@ impl BlockPoolMetrics {
     }
 
     #[inline(always)]
+    pub fn inc_inactive_pool_size_by(&self, n: i64) {
+        self.inactive_pool_size.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
     pub fn dec_inactive_pool_size(&self) {
         self.inactive_pool_size.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub fn dec_inactive_pool_size_by(&self, n: i64) {
+        self.inactive_pool_size.fetch_sub(n, Ordering::Relaxed);
+    }
+
+    // ---- Audit counters ----
+
+    /// Lookup-driven `Primary → Inactive` transition fired when the
+    /// active-pool `Weak` was dead. Hitting this is exclusively a
+    /// race-window event; tests assert it ticks under stress.
+    #[inline(always)]
+    pub fn inc_eager_primary_to_inactive(&self) {
+        self.eager_primary_to_inactive_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `allocate_atomic` rolled back due to an inactive backend
+    /// returning fewer pairs than `len()` advertised. Should never
+    /// happen with shipped backends; tests assert it fires when wired
+    /// against an under-allocating fake.
+    #[inline(always)]
+    pub fn inc_allocate_atomic_rollback(&self) {
+        self.allocate_atomic_rollback_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `release_primary` no-op'd because the slot was no longer
+    /// `Primary` for this Inner (a concurrent lookup eagerly transitioned
+    /// it, or it was resurrected to a different Inner).
+    #[inline(always)]
+    pub fn inc_release_primary_noop(&self) {
+        self.release_primary_noop_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `release_duplicate` no-op'd because the slot's `Duplicate` weak
+    /// no longer matches this Inner.
+    #[inline(always)]
+    pub fn inc_release_duplicate_noop(&self) {
+        self.release_duplicate_noop_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     // ---- Snapshot for stats collector ----
@@ -189,6 +280,14 @@ impl BlockPoolMetrics {
             match_blocks_returned: self.match_blocks_returned.load(Ordering::Relaxed),
             scan_hashes_requested: self.scan_hashes_requested.load(Ordering::Relaxed),
             scan_blocks_returned: self.scan_blocks_returned.load(Ordering::Relaxed),
+            eager_primary_to_inactive_total: self
+                .eager_primary_to_inactive_total
+                .load(Ordering::Relaxed),
+            allocate_atomic_rollback_total: self
+                .allocate_atomic_rollback_total
+                .load(Ordering::Relaxed),
+            release_primary_noop_total: self.release_primary_noop_total.load(Ordering::Relaxed),
+            release_duplicate_noop_total: self.release_duplicate_noop_total.load(Ordering::Relaxed),
             inflight_mutable: self.inflight_mutable.load(Ordering::Relaxed),
             inflight_immutable: self.inflight_immutable.load(Ordering::Relaxed),
             reset_pool_size: self.reset_pool_size.load(Ordering::Relaxed),
@@ -211,6 +310,10 @@ pub struct MetricsSnapshot {
     pub match_blocks_returned: u64,
     pub scan_hashes_requested: u64,
     pub scan_blocks_returned: u64,
+    pub eager_primary_to_inactive_total: u64,
+    pub allocate_atomic_rollback_total: u64,
+    pub release_primary_noop_total: u64,
+    pub release_duplicate_noop_total: u64,
     pub inflight_mutable: i64,
     pub inflight_immutable: i64,
     pub reset_pool_size: i64,
