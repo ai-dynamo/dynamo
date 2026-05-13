@@ -9,6 +9,18 @@ The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to h
 
 KVBM is modular and can be used standalone via `pip install kvbm` or as the memory management component in the full Dynamo stack. This guide covers installation, configuration, and deployment of the Dynamo KV Block Manager (KVBM) and other KV cache management systems.
 
+## Quick start with the pre-built NGC container
+
+The fastest path is the published Dynamo container, which includes KVBM:
+
+```bash
+docker run --gpus all --rm -it \
+  nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1 \
+  /bin/bash
+```
+
+For installation from source or custom builds, see [Local Installation](../../getting-started/local-installation.md) and [Release Artifacts](../../reference/release-artifacts.md).
+
 ## Run KVBM Standalone
 
 KVBM can be used independently without using the rest of the Dynamo stack:
@@ -46,9 +58,12 @@ See the [Local Installation Guide](../../getting-started/local-installation.md) 
 
 ```bash
 # Build a dynamo vLLM container (KVBM is built in by default)
-# NOTE: render.py defaults to --platform linux/amd64. On ARM64 hosts, pass --platform linux/arm64.
-python container/render.py --framework vllm --target runtime --output-short-filename
-docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
+# x86_64
+python container/render.py --framework vllm --target runtime --output-short-filename --platform linux/amd64
+docker buildx build --platform linux/amd64 -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
+# arm64 (Grace, Jetson, arm64 EC2)
+python container/render.py --framework vllm --target runtime --output-short-filename --platform linux/arm64
+docker buildx build --platform linux/arm64 -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
 
 # Launch the container
 container/run.sh --image dynamo:latest-vllm-runtime -it --mount-workspace --use-nixl-gds
@@ -112,9 +127,12 @@ See the [Local Installation Guide](../../getting-started/local-installation.md) 
 
 ```bash
 # Build a dynamo TRTLLM container (KVBM is built in by default)
-# NOTE: render.py defaults to --platform linux/amd64. On ARM64 hosts, pass --platform linux/arm64.
-python container/render.py --framework trtllm --target runtime --output-short-filename
-docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
+# x86_64
+python container/render.py --framework trtllm --target runtime --output-short-filename --platform linux/amd64
+docker buildx build --platform linux/amd64 -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
+# arm64 (Grace, Jetson, arm64 EC2)
+python container/render.py --framework trtllm --target runtime --output-short-filename --platform linux/arm64
+docker buildx build --platform linux/arm64 -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 
 # Launch the container
 container/run.sh --image dynamo:latest-trtllm-runtime -it --mount-workspace --use-nixl-gds

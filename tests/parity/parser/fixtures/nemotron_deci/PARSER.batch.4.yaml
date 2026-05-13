@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: nemotron_deci
+mode: batch
+cases:
+  PARSER.batch.4.a:
+    description: TOOLCALL wrapper with garbage
+    ref: dynamo
+    model_text: <TOOLCALL>not a json array</TOOLCALL>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls: []
+      normal_text: <TOOLCALL>not a json array</TOOLCALL>
+  PARSER.batch.4.b:
+    description: Unterminated JSON string in args
+    ref: dynamo
+    model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC</TOOLCALL>'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
+  PARSER.batch.4.c:
+    description: Missing name key in JSON
+    ref: dynamo
+    model_text: '<TOOLCALL>[{"arguments": {"location": "NYC"}}]</TOOLCALL>'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: ''
+  PARSER.batch.4.d:
+    description: Mismatched JSON brackets
+    ref: dynamo
+    model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}</TOOLCALL>'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''

@@ -1564,7 +1564,7 @@ async fn fetch_preprocessor_from_discovery(
     );
 
     // Download config (tokenizer files) if not local
-    card.download_config().await?;
+    card.download_config(None).await?;
 
     // Create preprocessor
     let preprocessor = OpenAIPreprocessor::new(card.clone())?;

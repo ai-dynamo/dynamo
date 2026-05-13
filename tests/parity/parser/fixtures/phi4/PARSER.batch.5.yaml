@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: phi4
+mode: batch
+cases:
+  PARSER.batch.5.a:
+    description: No explicit end (truncation)
+    ref: dynamo
+    model_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls: []
+      normal_text: ''
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}'
+  PARSER.batch.5.b:
+    description: Closing `]` without matching `functools[` open
+    ref: dynamo
+    model_text: 'functools{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: 'functools{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+  PARSER.batch.5.c:
+    description: Truncation mid-arguments JSON
+    ref: dynamo
+    model_text: 'functools[{"name": "get_weather", "arguments": {"loc'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: ''
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: 'functools[{"name": "get_weather", "arguments": {"loc'

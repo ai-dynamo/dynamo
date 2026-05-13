@@ -18,6 +18,7 @@ from tests.serve.common import (
 from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.multimodal import make_image_payload_b64
 from tests.utils.payload_builder import (
     anthropic_messages_payload_default,
     anthropic_messages_stream_payload_default,
@@ -316,6 +317,50 @@ sglang_configs = {
                 temperature=0.0,
                 max_tokens=100,
             )
+        ],
+    ),
+    "multimodal_agg_fd_qwen": SGLangConfig(
+        # Aggregated multimodal with --frontend-decoding: the Rust frontend
+        # decodes the image and ships pre-decoded pixels via NIXL RDMA;
+        # the SGLang worker consumes Decoded items through ImageLoader and
+        # hands PIL Images to sgl.Engine.async_generate(image_data=...).
+        # Mirrors the vLLM FD pattern at
+        # tests/serve/multimodal_profiles/vllm.py (Qwen3.5-0.8B "b64_frontend_decoding").
+        name="multimodal_agg_fd_qwen",
+        directory=sglang_dir,
+        script_name="agg_vision.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(4.7),  # parity with vLLM Qwen3.5-0.8B
+            # 4096 covers the b64 PNG image-token expansion (~2198 tokens
+            # for our 1999x1125 LFS test asset under Qwen3.5-0.8B's vision
+            # processor) + 100-token max response + headroom.
+            # TODO: bisect via tests/utils/profile_pytest.py for a tighter bound.
+            pytest.mark.requested_sglang_kv_tokens(4096),
+            pytest.mark.timeout(300),
+            # post_merge: NIXL stubs outside docker can lack the Decoded
+            # transport path. Same gating as vLLM's FD case
+            # (tests/serve/multimodal_profiles/vllm.py:67-70).
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3.5-0.8B",
+        script_args=[
+            "--model-path",
+            "Qwen/Qwen3.5-0.8B",
+            # Hybrid Mamba/full-attention VL: SGLang's MambaRadixCache v1
+            # asserts page_size == 1. The launch script defaults to 16.
+            "--page-size",
+            "1",
+            "--frontend-decoding",
+        ],
+        delayed_start=0,
+        timeout=360,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            # Inline-base64 PNG: exercises strip_inline_data_urls in the
+            # Rust frontend + NIXL RDMA transfer of decoded pixels — the
+            # path that distinguishes FD from the plain URL path.
+            make_image_payload_b64(["green"]),
         ],
     ),
     "multimodal_agg_qwen": SGLangConfig(
