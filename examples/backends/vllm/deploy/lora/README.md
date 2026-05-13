@@ -153,7 +153,7 @@ env:
 
 ### Update the Image (if needed)
 
-Edit `agg_lora.yaml` to use your container image:
+Edit `v1beta1/agg_lora.yaml` to use your container image:
 
 ```bash
 # Using yq to update the image
