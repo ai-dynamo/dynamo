@@ -73,7 +73,8 @@ async def started_engine():
 
     engine, _ = await SglangLLMEngine.from_args(_BASE_ARGV)
     try:
-        engine_config = await engine.start()
+        # Worker_id 0 is fine for tests — the engine doesn't use it.
+        engine_config = await engine.start(0)
         yield engine, engine_config
     finally:
         await engine.cleanup()

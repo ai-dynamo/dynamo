@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: jamba
+mode: batch
+cases:
+  PARSER.batch.4.a:
+    description: Tool_calls wrapper with garbage
+    ref: dynamo
+    model_text: <tool_calls>not a json array</tool_calls>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls: []
+      normal_text: <tool_calls>not a json array</tool_calls>
+  PARSER.batch.4.b:
+    description: Missing close brace in JSON
+    ref: dynamo
+    model_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"]</tool_calls>'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"]</tool_calls>'
+  PARSER.batch.4.c:
+    description: Missing name key
+    ref: dynamo
+    model_text: '<tool_calls>[{"arguments": {"location": "NYC"}}]</tool_calls>'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: ''
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: '<tool_calls>[{"arguments": {"location": "NYC"}}]</tool_calls>'
+  PARSER.batch.4.d:
+    description: Missing </tool_calls> close
+    ref: dynamo
+    model_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
