@@ -31,9 +31,9 @@ from gpu_memory_service.integrations.common.utils import (
 
 if os.environ.get("MX_ENABLED", "0") == "1":
     try:
+        from modelexpress.engines.vllm.adapter import build_vllm_load_context
         from modelexpress.load_strategy import (
             LoadStrategyChain,
-            build_load_context,
             publish_metadata,
             register_tensors,
         )
@@ -91,7 +91,7 @@ def get_mx_load_context(
     if os.environ.get("MX_ENABLED", "0") != "1":
         return None
 
-    _mx_ctx = build_load_context(vllm_config, model_config)
+    _mx_ctx = build_vllm_load_context(vllm_config, model_config)
     logger.info(
         "[GMS-MX] Created MX context (rank=%d, device=%d)",
         _mx_ctx.global_rank,
