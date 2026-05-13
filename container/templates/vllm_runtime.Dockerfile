@@ -120,19 +120,26 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 {% endif %}
 
-{% if device == "cuda" %}
-# Upstream vLLM v0.19.1 currently ships NIXL 0.9.0, whose wheels omit
+# Upgrade NIXL meta package and all device variants to match our built version.
+# The nixl meta package imports device-specific packages, so all must be at the same version.
+# 
+# For CUDA, Upstream vLLM v0.19.1 currently ships NIXL 0.9.0, whose wheels omit
 # libnixl_capi.so. Upgrade both CUDA wheel variants so nixl_sys stubs and the
 # runtime-selected NIXL path see the same C API capable package.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eu; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     NIXL_VERSION="${NIXL_REF#v}"; \
-    uv pip install --system --force-reinstall --no-deps \
+    uv pip install \
+{% if device == "cuda" %}
+        --system \
+{% endif %}
+        --force-reinstall --no-deps \
         "nixl==${NIXL_VERSION}" \
         "nixl-cu12==${NIXL_VERSION}" \
         "nixl-cu13==${NIXL_VERSION}"
 
+{% if device == "cuda" %}
 # Find upstream's CUDA-versioned NIXL and libcudart libs and expose them at
 # stable paths. CUDA 12 and CUDA 13 package the runtime under different
 # site-packages directories, so resolve the actual location once at build time.
@@ -152,22 +159,6 @@ RUN set -eu; \
 # Copy attribution files and wheels
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-
-# Upgrade NIXL meta package and all device variants to match our built version.
-# The nixl meta package imports device-specific packages, so all must be at the same version.
-# This is needed for both runtime and dev targets to ensure version consistency for maturin/cargo builds.
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    set -eu; \
-    export UV_CACHE_DIR=/root/.cache/uv; \
-    NIXL_VERSION="${NIXL_REF#v}"; \
-    uv pip install \
-{% if device == "cuda" %}
-        --system \
-{% endif %}
-        --force-reinstall --no-deps \
-        "nixl==${NIXL_VERSION}" \
-        "nixl-cu12==${NIXL_VERSION}" \
-        "nixl-cu13==${NIXL_VERSION}"
 
 # Install device-specific NIXL wheels for non-CUDA devices.
 # These are custom-built in wheel_builder and required for dev builds to link against NIXL libraries.
