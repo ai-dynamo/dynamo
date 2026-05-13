@@ -22,6 +22,7 @@ from dynamo.sglang.health_check import (
 )
 from dynamo.sglang.publisher import (
     handle_non_leader_node,
+    resolve_multinode_leader_worker_id,
     set_forward_pass_metrics_worker_id,
     setup_sgl_metrics,
 )
@@ -90,8 +91,11 @@ async def init_decode(
 
     shutdown_endpoints[:] = [generate_endpoint]
 
+    kv_worker_id = await resolve_multinode_leader_worker_id(
+        generate_endpoint, server_args
+    )
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
-        engine, config, generate_endpoint
+        engine, config, generate_endpoint, kv_worker_id=kv_worker_id
     )
 
     publisher.component_gauges.set_model_load_time(load_time)
@@ -235,8 +239,11 @@ async def init_prefill(
 
     shutdown_endpoints[:] = [generate_endpoint]
 
+    kv_worker_id = await resolve_multinode_leader_worker_id(
+        generate_endpoint, server_args
+    )
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
-        engine, config, generate_endpoint
+        engine, config, generate_endpoint, kv_worker_id=kv_worker_id
     )
 
     publisher.component_gauges.set_model_load_time(load_time)

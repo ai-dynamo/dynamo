@@ -217,7 +217,8 @@ impl KvEventPublisher {
     ///
     /// Args:
     ///     endpoint: The Dynamo component endpoint for this worker.
-    ///     worker_id: Identifier of this worker (default 0).
+    ///     worker_id: Optional worker identity override. When 0, the publisher
+    ///         uses the endpoint's local connection id.
     ///     kv_block_size: KV cache block size in tokens; must be > 0.
     ///     dp_rank: Data-parallel rank of this worker (default 0).
     ///     enable_local_indexer: When True, a local KV indexer is kept in-process
@@ -243,8 +244,6 @@ impl KvEventPublisher {
         zmq_topic: Option<String>,
         batching_timeout_ms: Option<u64>,
     ) -> PyResult<Self> {
-        let _ = worker_id;
-
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
@@ -256,16 +255,19 @@ impl KvEventPublisher {
 
         // Extract component from endpoint
         let component = endpoint.inner.component().clone();
+        let worker_id = (worker_id != 0).then_some(worker_id);
 
-        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
-            component,
-            kv_block_size as u32,
-            source_config,
-            enable_local_indexer,
-            dp_rank,
-            batching_timeout_ms,
-        )
-        .map_err(to_pyerr)?;
+        let inner =
+            llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer_and_worker_id(
+                component,
+                worker_id,
+                kv_block_size as u32,
+                source_config,
+                enable_local_indexer,
+                dp_rank,
+                batching_timeout_ms,
+            )
+            .map_err(to_pyerr)?;
 
         Ok(Self {
             inner: inner.into(),

@@ -9,14 +9,25 @@ import logging
 from typing import TYPE_CHECKING, List, Optional, Tuple
 from urllib.parse import urlparse
 
-import sglang as sgl
 import zmq
 import zmq.asyncio
-from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
-from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto, get_zmq_socket
 
 if TYPE_CHECKING:
+    import sglang as sgl
     from prometheus_client import CollectorRegistry
+
+try:
+    from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
+    from sglang.srt.utils.network import (
+        NetworkAddress,
+        get_local_ip_auto,
+        get_zmq_socket,
+    )
+except ImportError:
+    NetworkAddress = None
+    ZmqEventPublisher = None
+    get_local_ip_auto = None
+    get_zmq_socket = None
 
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -25,6 +36,13 @@ from dynamo.common.utils.prometheus import (
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
 from dynamo.sglang.args import Config
+
+
+def require_sglang_dependency(value, name: str):
+    if value is not None:
+        return value
+
+    raise ImportError(f"sglang is required to use {name}")
 
 
 def get_local_dp_rank_range(server_args) -> range:
@@ -59,6 +77,34 @@ def set_forward_pass_metrics_worker_id(
     server_args.forward_pass_metrics_ipc_name = f"ipc://{ipc_path}"
 
 
+async def resolve_multinode_leader_worker_id(
+    generate_endpoint: Endpoint,
+    server_args,
+) -> Optional[int]:
+    """Return the routable leader worker id for SGLang non-leader nodes."""
+    node_rank = getattr(server_args, "node_rank", 0) or 0
+    nnodes = getattr(server_args, "nnodes", 1) or 1
+    if node_rank <= 0 or nnodes <= 1:
+        return None
+
+    client = await generate_endpoint.client()
+    instances = await client.wait_for_instances()
+    if len(instances) == 1:
+        worker_id = int(instances[0])
+        logging.info(
+            "Using SGLang leader worker_id=%s for non-leader KV event publishing",
+            worker_id,
+        )
+        return worker_id
+
+    logging.warning(
+        "Expected exactly one SGLang leader endpoint instance for non-leader "
+        "KV event attribution, got %d; using local worker id",
+        len(instances),
+    )
+    return None
+
+
 def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
     """Format ZMQ endpoint by replacing wildcard with IP address.
 
@@ -82,7 +128,8 @@ def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
         raise ValueError(
             f"Expected tcp://host:port endpoint, got {endpoint_template!r}"
         )
-    return NetworkAddress(ip_address, parsed.port).to_tcp()
+    network_address = require_sglang_dependency(NetworkAddress, "NetworkAddress")
+    return network_address(ip_address, parsed.port).to_tcp()
 
 
 # Note: We use SGLang's ZmqEventPublisher.offset_endpoint_port() directly
@@ -102,6 +149,7 @@ class DynamoSglangPublisher:
         generate_endpoint: Endpoint,
         component_gauges: LLMBackendMetrics,
         metrics_labels: Optional[List[Tuple[str, str]]] = None,
+        kv_worker_id: Optional[int] = None,
     ) -> None:
         """Initialize the SGLang publisher for metrics and KV events.
 
@@ -111,11 +159,13 @@ class DynamoSglangPublisher:
             generate_endpoint: The Dynamo endpoint for generation requests.
             metrics_labels: Optional list of label key-value pairs for metrics.
             component_gauges: LLM backend metrics instance (created via LLMBackendMetrics()).
+            kv_worker_id: Optional worker identity for KV event attribution.
         """
         self.engine = engine
         self.server_args = config.server_args
         self.dynamo_args = config.dynamo_args
         self.generate_endpoint = generate_endpoint
+        self.kv_worker_id = kv_worker_id
         self.metrics_publisher = WorkerMetricsPublisher()
         self.component_gauges = component_gauges
         # Endpoint creation is deferred to async context in setup_sgl_metrics
@@ -134,7 +184,8 @@ class DynamoSglangPublisher:
         self._ctx: zmq.asyncio.Context | None = None
         if node_rank == 0:
             self._ctx = zmq.asyncio.Context()
-            self._sock = get_zmq_socket(
+            get_socket = require_sglang_dependency(get_zmq_socket, "get_zmq_socket")
+            self._sock = get_socket(
                 self._ctx,
                 zmq.PULL,
                 self.engine.port_args.metrics_ipc_name,
@@ -256,7 +307,13 @@ class DynamoSglangPublisher:
                 raise ValueError(
                     "sglang kv_events_config is set but missing 'endpoint'"
                 )
-            local_ip = get_local_ip_auto()
+            get_local_ip = require_sglang_dependency(
+                get_local_ip_auto, "get_local_ip_auto"
+            )
+            zmq_event_publisher = require_sglang_dependency(
+                ZmqEventPublisher, "ZmqEventPublisher"
+            )
+            local_ip = get_local_ip()
 
             # Determine DP attention configuration
             dp_ranks = get_local_dp_rank_range(self.server_args)
@@ -270,7 +327,7 @@ class DynamoSglangPublisher:
             for dp_rank in dp_ranks:
                 # Use SGLang's offset_endpoint_port to ensure alignment with publishers
                 # This is the same function SGLang schedulers use to determine their bind ports
-                zmq_ep = ZmqEventPublisher.offset_endpoint_port(base_ep, dp_rank)
+                zmq_ep = zmq_event_publisher.offset_endpoint_port(base_ep, dp_rank)
                 if not zmq_ep:
                     logging.warning(
                         f"Skipping ZMQ subscriber for dp_rank={dp_rank}: "
@@ -286,6 +343,7 @@ class DynamoSglangPublisher:
                 )
                 publisher = KvEventPublisher(
                     endpoint=self.generate_endpoint,
+                    worker_id=self.kv_worker_id or 0,
                     kv_block_size=self.server_args.page_size,
                     zmq_endpoint=zmq_ep,
                     zmq_topic="",
@@ -401,6 +459,7 @@ async def setup_sgl_metrics(
     engine: sgl.Engine,
     config: Config,
     generate_endpoint: Endpoint,
+    kv_worker_id: Optional[int] = None,
 ) -> tuple[DynamoSglangPublisher, asyncio.Task, list[tuple[str, str]]]:
     """Create publisher, initialize metrics, and start the metrics publishing loop.
 
@@ -408,6 +467,7 @@ async def setup_sgl_metrics(
         engine: The SGLang engine instance.
         config: SGLang configuration including server args.
         generate_endpoint: The Dynamo endpoint for generation requests.
+        kv_worker_id: Optional worker identity for KV event attribution.
 
     Returns:
         Tuple of (publisher instance, running asyncio task, metrics labels).
@@ -445,6 +505,7 @@ async def setup_sgl_metrics(
         generate_endpoint,
         component_gauges=component_gauges,
         metrics_labels=metrics_labels,
+        kv_worker_id=kv_worker_id,
     )
     # Create endpoint in async context (must await before publishing)
     await publisher.metrics_publisher.create_endpoint(generate_endpoint)
