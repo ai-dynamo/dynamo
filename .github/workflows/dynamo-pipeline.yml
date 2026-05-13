@@ -8,9 +8,9 @@
 name: Dynamo Pipeline
 
 on:
-  push:
-    branches:
-      - rrubin/remove-dind-runners
+  # push:
+  #   branches:
+  #     - rrubin/remove-dind-runners
   workflow_call:
     inputs:
       builder_name:
