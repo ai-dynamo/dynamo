@@ -49,9 +49,8 @@ const (
 // DynamoComponentDeploymentSpec defines the desired state of a DynamoComponentDeployment.
 type DynamoComponentDeploymentSpec struct {
 	// backendFramework specifies the backend framework.
-	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
-	BackendFramework string `json:"backendFramework"`
+	BackendFramework string `json:"backendFramework,omitempty"`
 
 	// DynamoComponentDeploymentSharedSpec embeds common deployment and runtime
 	// settings that apply to the component.

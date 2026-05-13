@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: jamba
+mode: batch
+cases:
+  PARSER.batch.5.a:
+    description: Missing </tool_calls> end marker
+    ref: dynamo
+    model_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+  PARSER.batch.5.b:
+    description: Closing </tool_calls> without matching <tool_calls> open
+    ref: dynamo
+    model_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls>'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls>'
+  PARSER.batch.5.c:
+    description: Truncation mid-arguments JSON
+    ref: dynamo
+    model_text: '<tool_calls>[{"name": "get_weather", "arguments": {"loc'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"loc'

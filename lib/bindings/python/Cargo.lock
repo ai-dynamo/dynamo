@@ -2037,6 +2037,7 @@ dependencies = [
  "dynamo-protocols",
  "dynamo-runtime",
  "futures",
+ "serde",
  "tokio",
  "tokio-util",
  "tracing",

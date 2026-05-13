@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3_2
+mode: batch
+cases:
+  PARSER.batch.6.a:
+    description: Invoke with no <parameter>
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_deepseekv32_tool_parser.py#L363
+    model_text: |-
+      <｜DSML｜function_calls>
+      <｜DSML｜invoke name="get_time">
+      </｜DSML｜invoke>
+      </｜DSML｜function_calls>
+    tools:
+    - &id001
+      name: get_time
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      calls:
+      - name: get_time
+        arguments: {}
+      normal_text: ''
+  PARSER.batch.6.b:
+    description: Invoke with extra newline
+    ref: dynamo
+    model_text: |-
+      <｜DSML｜function_calls>
+      <｜DSML｜invoke name="get_time">
+
+      </｜DSML｜invoke>
+      </｜DSML｜function_calls>
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_time
+        arguments: {}
+      normal_text: ''
