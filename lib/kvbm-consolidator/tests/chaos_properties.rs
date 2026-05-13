@@ -194,24 +194,19 @@ fn check_parent_chain(emitted: &[ConsolidatedEvent]) -> Result<(), TestCaseError
 
     for ev in emitted {
         if let ConsolidatedEvent::Store { seq_hash, .. } = ev {
+            if seq_hash.position() > 0 {
+                let parent_frag = seq_hash.parent_hash_fragment();
+                prop_assert!(
+                    ever_stored.contains_key(&parent_frag),
+                    "STORE for {:?} at pos {} references parent fragment {} not yet emitted",
+                    seq_hash,
+                    seq_hash.position(),
+                    parent_frag
+                );
+            }
             ever_stored.insert(
                 kvbm_consolidator::hash::router_block_hash(*seq_hash),
                 *seq_hash,
-            );
-        }
-    }
-
-    for ev in emitted {
-        if let ConsolidatedEvent::Store { seq_hash, .. } = ev
-            && seq_hash.position() > 0
-        {
-            let parent_frag = seq_hash.parent_hash_fragment();
-            prop_assert!(
-                ever_stored.contains_key(&parent_frag),
-                "STORE for {:?} at pos {} references parent fragment {} not in ever_stored",
-                seq_hash,
-                seq_hash.position(),
-                parent_frag
             );
         }
     }

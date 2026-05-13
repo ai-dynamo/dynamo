@@ -17,12 +17,14 @@ use kvbm_logical::SequenceHash;
 /// Returns the fragment a child at `self.position() + 1` would observe as its
 /// `parent_hash_fragment` — the load-bearing invariant for chain alignment across mode
 /// boundaries.
+#[must_use]
 pub fn router_block_hash(hash: SequenceHash) -> u64 {
     hash.parent_fragment_for_child_position(hash.position() + 1)
 }
 
 /// Project the parent block's u64 hash for the kv-router wire format.
 /// Returns `None` at position 0 (root block).
+#[must_use]
 pub fn router_parent_hash(hash: SequenceHash) -> Option<u64> {
     if hash.position() == 0 {
         None

@@ -1714,9 +1714,16 @@ impl TokenBlockSequence {
     /// Creates a [`TokenBlockSequence`] with multimodal placeholder runs.
     ///
     /// `mm_info` is validated and sorted via [`validate_and_sort_mm_info`]. Each block's
-    /// [`BlockHash`] is computed using the byte encoding documented on
-    /// [`compute_block_bytes_with_mm`]: token slots emit 4 bytes (LE u32), placeholder slots
-    /// emit 12 bytes (LE u64 mm_hash + LE u32 run_offset).
+    /// [`BlockHash`] is computed using the per-block byte encoding documented on
+    /// [`compute_block_bytes_with_mm`], which selects one of two encodings:
+    ///
+    /// - **MM-affected block** (at least one run overlaps the block): every slot emits
+    ///   13 bytes — a 1-byte tag ([`MM_SLOT_TAG_TOKEN`] or [`MM_SLOT_TAG_PLACEHOLDER`])
+    ///   followed by a 12-byte payload. Real-token slots carry `token_id u32 LE` plus
+    ///   8 bytes of padding; placeholder slots carry `run_offset u32 LE | mm_hash u64 LE`.
+    /// - **Non-MM block** (no run overlaps): the legacy `bytemuck::cast_slice(tokens)`
+    ///   form is used (4 bytes per slot, LE u32), preserving cache identity with blocks
+    ///   produced by [`Self::from_slice`].
     ///
     /// Returns an error if `mm_info` is invalid (overlap, out of bounds, zero-length run).
     pub fn new_with_mm(
