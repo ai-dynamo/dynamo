@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: minimax_m2
+mode: batch
+cases:
+  PARSER.batch.5.a:
+    description: Missing </minimax:tool_call> end marker
+    ref: dynamo
+    model_text: |-
+      <minimax:tool_call>
+      <invoke name="get_weather">
+      <parameter name="location">NYC</parameter>
+      </invoke>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: '<minimax:tool_call>\n<invoke name="get_weather">\n<parameter name="location">NYC</parameter>\n</invoke>'
+  PARSER.batch.5.b:
+    description: Closing </minimax:tool_call> without matching open
+    ref: dynamo
+    model_text: |-
+      <invoke name="get_weather">
+      <parameter name="location">NYC</parameter>
+      </invoke>
+      </minimax:tool_call>
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: |-
+        <invoke name="get_weather">
+        <parameter name="location">NYC</parameter>
+        </invoke>
+        </minimax:tool_call>
+  PARSER.batch.5.c:
+    description: Truncation mid-parameter value
+    ref: dynamo
+    model_text: |-
+      <minimax:tool_call>
+      <invoke name="get_weather">
+      <parameter name="location">NY
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NY
+      normal_text: ''
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: '<minimax:tool_call>\n<invoke name="get_weather">\n<parameter name="location">NY'

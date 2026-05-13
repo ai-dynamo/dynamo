@@ -1304,6 +1304,7 @@ class KvRouterConfig:
         serve_indexer: bool = False,
         shared_cache_multiplier: float = 0.0,
         shared_cache_type: str = "none",
+        router_predicted_ttl_secs: Optional[float] = None,
         *,
         overlap_score_credit: float = 1.0,
         prefill_load_scale: float = 1.0,
@@ -1352,6 +1353,10 @@ class KvRouterConfig:
             serve_indexer: Serve this router's local indexer from the worker component (default: False).
             shared_cache_multiplier: Credit multiplier for shared cache hits beyond the device prefix (default: 0.0).
             shared_cache_type: External shared KV cache type, "none" or "hicache" (default: "none").
+            router_predicted_ttl_secs: Enables predict-on-route when set. This TTL
+                applies to entries in the local side indexer and requires
+                use_kv_events=True. Set to None to disable. Independent of
+                router_ttl_secs, which covers pure approximate mode.
         """
         ...
 

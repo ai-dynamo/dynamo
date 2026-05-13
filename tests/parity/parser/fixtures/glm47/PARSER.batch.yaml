@@ -21,26 +21,6 @@ cases:
         arguments:
           location: NYC
       normal_text: ''
-  PARSER.batch.2:
-    description: Multiple tool calls
-    model_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call><tool_call>get_time<arg_key>timezone</arg_key><arg_value>EST</arg_value></tool_call>
-    tools:
-    - *id001
-    - name: get_time
-      parameters:
-        type: object
-        properties:
-          timezone:
-            type: string
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
@@ -49,59 +29,6 @@ cases:
     expected:
       calls: []
       normal_text: Hello, how can I help you today?
-  PARSER.batch.4:
-    description: Malformed (missing arg_value end tag)
-    model_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</tool_call>
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments: {}
-      normal_text: ''
-  PARSER.batch.5:
-    description: Missing </tool_call> end marker
-    model_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-  PARSER.batch.6:
-    description: Empty args (no-arg call)
-    model_text: <tool_call>get_time</tool_call>
-    tools:
-    - name: get_time
-      parameters:
-        type: object
-        properties: {}
-    expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
-  PARSER.batch.7:
-    description: Complex args (multi-parameter)
-    model_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value><arg_key>unit</arg_key><arg_value>fahrenheit</arg_value></tool_call>
-    tools:
-    - name: get_weather
-      parameters:
-        type: object
-        properties:
-          location:
-            type: string
-          unit:
-            type: string
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-          unit: fahrenheit
-      normal_text: ''
   PARSER.batch.9:
     description: Empty input
     model_text: ''

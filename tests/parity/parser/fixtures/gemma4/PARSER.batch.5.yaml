@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: gemma4
+mode: batch
+cases:
+  PARSER.batch.5.a:
+    description: Missing <tool_call|> end marker
+    ref: dynamo
+    model_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls: []
+      normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
+  PARSER.batch.5.b:
+    description: Closing <tool_call|> without matching <|tool_call> open
+    ref: dynamo
+    model_text: call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>
+  PARSER.batch.5.c:
+    description: Truncation mid-argument value
+    ref: dynamo
+    model_text: <|tool_call>call:get_weather{location:<|"|>N
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: <|tool_call>call:get_weather{location:<|"|>N

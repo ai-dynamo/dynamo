@@ -77,6 +77,7 @@ When throughput-based scaling is enabled, the planner needs engine performance d
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `throughput_adjustment_interval_seconds` | int | `180` | Seconds between throughput-based scaling decisions. |
+| `throughput_metrics_source` | string | `frontend` | Prometheus traffic source for throughput scaling: `frontend` reads `dynamo_frontend_*` metrics from the public Frontend; `router` reads `dynamo_component_router_*` metrics from a LocalRouter. Use `router` for pool-local Planner in GlobalPlanner deployments. |
 | `min_endpoint` | int | `1` | Minimum number of engine endpoints to maintain. |
 | `max_gpu_budget` | int | `8` | Maximum total GPUs the planner may allocate. |
 | `ttft_ms` | float | `500.0` | TTFT SLA target (ms) for scaling decisions. |
