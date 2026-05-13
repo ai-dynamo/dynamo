@@ -327,17 +327,18 @@ run_test() {
     echo
 
     # Run curl test
-    local response=$(curl -s "http://127.0.0.1:$ROUTER_PORT/v1/completions" \
+    local response
+    if ! response=$(curl --silent --show-error --fail \
+        --connect-timeout 5 \
+        --max-time 60 \
+        "http://127.0.0.1:$ROUTER_PORT/v1/completions" \
         -H "Content-Type: application/json" \
         -d "{
             \"model\": \"$MODEL\",
             \"prompt\": \"$test_prompt\",
             \"max_tokens\": $max_tokens
-        }")
-
-    # Check if request succeeded
-    if [ -z "$response" ]; then
-        log_error "No response from router"
+        }"); then
+        log_error "Inference request failed"
         return 1
     fi
 
