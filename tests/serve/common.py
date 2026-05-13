@@ -22,11 +22,95 @@ from tests.utils.engine_process import (
     EngineProcess,
     ResponseValidationError,
 )
+from tests.utils.payload_builder import (
+    make_chat_health_check,
+    make_completions_health_check,
+)
+from tests.utils.payloads import ChatPayload, CompletionPayload
 from tests.utils.port_utils import allocate_port, deallocate_port
 
 DEFAULT_TIMEOUT = 10
 
 SERVE_TEST_DIR = os.path.join(WORKSPACE_DIR, "tests/serve")
+
+
+def _tail_logs(content: str, *, lines: int = 80) -> str:
+    if not content:
+        return "<no server logs captured>"
+    return "".join(content.splitlines(keepends=True)[-lines:]).rstrip()
+
+
+# Payload-class → factory for an endpoint-readiness check. isinstance matches
+# subclasses (e.g. ChatPayloadWithLogprobs) and is robust to ad-hoc `endpoint`
+# string overrides on derived payloads.
+_ENDPOINT_HEALTH_CHECK_FACTORIES = (
+    (CompletionPayload, make_completions_health_check),
+    (ChatPayload, make_chat_health_check),
+)
+
+
+def _is_multimodal_chat(payload: ChatPayload) -> bool:
+    # make_chat_health_check sends a text-only probe; multimodal endpoints
+    # (e.g. Qwen3-VL disagg/EPD) won't accept it, so the probe spins until
+    # pytest-timeout. Detect via OpenAI-style list content with any non-text
+    # part (image_url, video_url, input_audio, ...).
+    messages = (getattr(payload, "body", None) or {}).get("messages") or []
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") not in (None, "text"):
+                    return True
+    return False
+
+
+def _payload_eligible_for_check(payload: Any, payload_cls: type) -> bool:
+    if not isinstance(payload, payload_cls):
+        return False
+    if payload_cls is ChatPayload and _is_multimodal_chat(payload):
+        return False
+    return True
+
+
+def _with_endpoint_readiness_checks(
+    config: EngineConfig, frontend_port: int
+) -> EngineConfig:
+    new_checks = [
+        factory(frontend_port, config.model)
+        for payload_cls, factory in _ENDPOINT_HEALTH_CHECK_FACTORIES
+        if any(
+            _payload_eligible_for_check(p, payload_cls) for p in config.request_payloads
+        )
+    ]
+    if not new_checks:
+        return config
+    return dataclasses.replace(
+        config,
+        health_check_funcs=[*config.health_check_funcs, *new_checks],
+    )
+
+
+def _format_request_failure(
+    *,
+    config: EngineConfig,
+    payload: Any,
+    server_process: EngineProcess,
+    error: Exception,
+) -> str:
+    server_state = "running" if server_process.is_running() else "not running"
+    try:
+        url = payload.url()
+    except Exception:
+        url = "<payload.url() raised>"
+    return (
+        f"{type(payload).__name__} request failed for config '{config.name}' "
+        f"(method={payload.method}, url={url}, timeout={payload.timeout}s, "
+        f"server_pid={server_process.get_pid()}, server_state={server_state}, "
+        f"log_path={server_process.log_path})\n"
+        f"Original error: {type(error).__name__}: {error}\n\n"
+        "Last 80 server log lines:\n"
+        f"{_tail_logs(server_process.read_logs(), lines=80)}"
+    )
 
 
 def run_serve_deployment(
@@ -149,6 +233,8 @@ def run_serve_deployment(
             int(merged_env.get("DYN_SYSTEM_PORT2") or DefaultPort.SYSTEM2.value),
         ]
 
+    config = _with_endpoint_readiness_checks(config, dynamic_frontend_port)
+
     # Disagg scripts need a unique bootstrap port so parallel runs don't collide.
     disagg_bootstrap_port: int | None = None
     if config.script_name and "disagg" in config.script_name:
@@ -220,31 +306,47 @@ def run_serve_deployment(
                     # factor 1.5 keeps the worst-case sleep budget bounded
                     # for max_attempts up to ~6.
                     last_err: Optional[ResponseValidationError] = None
-                    for attempt in range(payload.max_attempts):
-                        try:
-                            response = send_request(
-                                url=payload.url(),
-                                payload=payload.body,
-                                timeout=payload.timeout,
-                                method=payload.method,
-                                stream=payload.http_stream,
-                            )
-                            server_process.check_response(payload, response)
-                            last_err = None
-                            break
-                        except ResponseValidationError as e:
-                            last_err = e
-                            if attempt < payload.max_attempts - 1:
-                                wait = 1.0 * (1.5**attempt)
-                                logger.warning(
-                                    "%s request failed (attempt %d/%d): %s — retrying in %.1fs",
-                                    type(payload).__name__,
-                                    attempt + 1,
-                                    payload.max_attempts,
-                                    e,
-                                    wait,
+                    try:
+                        for attempt in range(payload.max_attempts):
+                            try:
+                                response = send_request(
+                                    url=payload.url(),
+                                    payload=payload.body,
+                                    timeout=payload.timeout,
+                                    method=payload.method,
+                                    stream=payload.http_stream,
                                 )
-                                time.sleep(wait)
+                                server_process.check_response(payload, response)
+                                last_err = None
+                                break
+                            except ResponseValidationError as e:
+                                last_err = e
+                                if attempt < payload.max_attempts - 1:
+                                    wait = 1.0 * (1.5**attempt)
+                                    logger.warning(
+                                        "%s request failed (attempt %d/%d): %s — retrying in %.1fs",
+                                        type(payload).__name__,
+                                        attempt + 1,
+                                        payload.max_attempts,
+                                        e,
+                                        wait,
+                                    )
+                                    time.sleep(wait)
+                    except Exception as e:
+                        # Transport / connection failures (and payload.url()
+                        # failures) aren't retried by design; the inner loop
+                        # only retries ResponseValidationError. Re-raise with
+                        # the server's last 80 log lines so a CI failure is
+                        # diagnosable in one pass rather than yielding a bare
+                        # ReadTimeout.
+                        raise RuntimeError(
+                            _format_request_failure(
+                                config=config,
+                                payload=payload,
+                                server_process=server_process,
+                                error=e,
+                            )
+                        ) from e
                     if last_err is not None:
                         raise last_err
 

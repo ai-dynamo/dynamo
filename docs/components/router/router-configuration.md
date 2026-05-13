@@ -9,8 +9,10 @@ This page collects the main router flags for frontend-embedded and standalone de
 
 ## Routing Behavior
 
-- `--router-kv-overlap-score-weight`: Controls the importance of prefix cache overlaps in prefill cost calculations. Higher values improve Time To First Token (TTFT) at the cost of Inter-Token Latency (ITL). When set to 0, the router ignores prefix caches and uses pure load balancing. Defaults to 1.
-- `--router-temperature`: Controls worker selection randomness through softmax sampling of router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
+- `--router-kv-overlap-score-credit`: Device-local prefix-overlap credit multiplier in the prefill cost calculation, from 0.0 to 1.0. Higher values improve Time To First Token (TTFT) at the cost of Inter-Token Latency (ITL). When set to 0, the router ignores prefix caches and skips creating a local indexer. Defaults to 1.
+- `--router-prefill-load-scale`: Scale applied to adjusted prompt-side prefill load after device, lower-tier, and shared-cache credits are subtracted. Defaults to 1.
+- `--load-aware`: Preset for load-aware KV routing without cache-reuse signals. On the frontend, it implies `--router-mode kv`. It sets `overlap_score_credit=0`, disables KV events, durable KV events, and KV reuse assumptions, enables active-block and prefill-token load tracking, disables remote/shared cache indexers, and preserves `--router-prefill-load-scale`.
+- `--router-temperature`: Controls worker selection randomness through softmax sampling of normalized router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 - `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
 - `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 4.0). The router holds incoming requests in a priority queue while all workers exceed this fraction of `max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is actually sent to a worker. It also enables priority scheduling via `priority` hints in `nvext.agent_hints`. Must be greater than 0. Set to `None` to disable queueing. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend.
@@ -22,9 +24,37 @@ This page collects the main router flags for frontend-embedded and standalone de
 
 For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` to the approximate throughput ratio of one non-CPU worker relative to one CPU worker. The default is `8`.
 
+### AIC Prefill Load Model
+
+Use `--router-prefill-load-model aic` when you want prompt-side load tracking to decay the oldest active prefill request using an AIC-predicted duration instead of keeping prompt load static until first token. For the cost-model behavior, see [Prefill Load Modeling](router-concepts.md#prefill-load-modeling).
+
+Enable it on the frontend like this:
+
+```bash
+python -m dynamo.frontend \
+    --router-mode kv \
+    --router-prefill-load-model aic \
+    --aic-backend vllm \
+    --aic-system h200_sxm \
+    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8
+```
+
+Required when `--router-prefill-load-model=aic` is enabled:
+
+- `--router-mode kv` on the frontend
+- `--router-track-prefill-tokens`
+- `--aic-backend`
+- `--aic-system`
+- `--aic-model-path`
+
+Optional AIC knobs:
+
+- `--aic-backend-version`: pinned AIC database version; if omitted, Dynamo uses a backend-specific default
+- `--aic-tp-size`: tensor-parallel size for the modeled backend; defaults to `1`
+
 ## KV Event Transport and Persistence
 
-- `--no-router-kv-events`: Disables KV event tracking. By default, the router uses KV events to monitor block creation and deletion from workers. When disabled, the router predicts cache state from routing decisions with TTL-based expiration.
+- `--no-router-kv-events`: Disables KV event tracking. By default, the router consumes KV events to monitor block creation and deletion from workers that publish them. When disabled, the router predicts cache state from routing decisions with TTL-based expiration.
 - `--router-durable-kv-events`: **Deprecated.** Enables JetStream mode for KV event transport. The event-plane subscriber in local indexer mode is now the recommended path.
 - `--router-reset-states`: Only applies in JetStream mode (`--router-durable-kv-events`). Resets the router state on startup by clearing both the JetStream event stream and NATS object store, starting from a fresh state.
 - `--router-snapshot-threshold`: Only applies in JetStream mode (`--router-durable-kv-events`). Sets the number of messages in JetStream before triggering a snapshot.
@@ -32,7 +62,7 @@ For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` t
 ## Block Tracking
 
 - `--no-router-track-active-blocks`: Disables tracking of active blocks used for ongoing generation or decode phases. Disable this when routing to workers that only perform prefill.
-- `--router-track-output-blocks`: **Experimental.** Enables tracking of output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward the expected output sequence length (`agent_hints.osl` in `nvext`).
+- `--router-track-output-blocks`: **Experimental.** Enables tracking of output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward the expected output sequence length (`agent_hints.osl` in `nvext`). For the cost-model behavior, see [Decode Load Modeling](router-concepts.md#decode-load-modeling).
 - `--no-router-assume-kv-reuse`: When tracking active blocks, disables the assumption of KV cache reuse. This is useful in disaggregated setups where transferred blocks are not actually deduplicated on the decode side.
 - `--no-router-track-prefill-tokens`: Disables prompt-side prefill token accounting in the router's active load model. Use this for decode-only routing paths where prompt processing already happened elsewhere.
 - `--router-replica-sync`: Disabled by default. Enables NATS-based synchronization of local routing decisions between router replicas.
@@ -40,7 +70,16 @@ For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` t
 ## KV Indexer / Approx KV Indexer
 
 - `--router-ttl-secs`: Time-to-live in seconds for blocks in the router's local cache predictions. Defaults to 120.0 seconds when `--no-router-kv-events` is used.
-- `--router-event-threads`: Number of KV indexer worker threads (default: 4). Values greater than 1 use the concurrent radix tree for both event-driven routing and approximate routing with `--no-router-kv-events`; set this to 1 to force the single-threaded indexer.
+- `--router-event-threads`: Number of KV indexer worker threads (default: 4). Values greater than 1 use the concurrent radix tree for event-driven routing, approximate routing with `--no-router-kv-events`, and the predict-on-route side indexer.
+- `--router-predicted-ttl-secs`: Enables predict-on-route with this TTL in seconds for entries in a local side indexer. Requires KV events; omit to disable. When enabled, the router feeds each routing decision into the side indexer and scores each worker with the larger overlap from the primary indexer and the local side indexer. Independent of `--router-ttl-secs`; kept short so decisions the engine never confirms (cancelled requests, prefill failures) age out quickly.
+
+### When to use `--router-predicted-ttl-secs`
+
+Without this setting, an event-driven router depends entirely on engine KV events to learn which worker now holds which prefix. That works for steady-state traffic, but creates a race when many sibling requests arrive in a single batch — for example, 16 problems × 4 samples each with a shared system prompt, or any parallel-sampling / best-of-N workload. No engine has emitted a "block stored" event yet, so the router scores every sibling with zero overlap and round-robins them across workers. The prefix then gets prefilled on every worker instead of being reused.
+
+Setting `--router-predicted-ttl-secs 5` makes the router record each routing decision into a secondary, short-TTL approximate indexer. When the next sibling is scored, the router queries both indexers and takes the per-worker max overlap, so siblings see the first sibling's prefix immediately and pin to the same worker. The primary event-driven indexer is untouched — engines compute their sequence hashes with salts and cryptographic digests the router cannot reproduce, so inserting router-computed hashes into the primary would key the same physical block under two different hashes and pollute the tree. Running the two trees in parallel sidesteps that entirely; the side tree has a short TTL and its entries simply expire once the primary takes over.
+
+Do not combine this setting with `--no-router-kv-events`, including when the approximate primary is remote: approximate mode already inserts on routing decisions by construction, and running a second approximate side indexer is redundant. With `--use-remote-indexer` and KV events enabled, the side indexer remains local to the consumer router while the remote indexer remains the shared primary view. If a router also serves an indexer for other routers, the side indexer is still local only; it is never served or consumed as the remote primary.
 
 To implement KV event publishing for custom inference engines, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
 For details on per-request agent hints (`priority`, `osl`, `speculative_prefill`), see [NVIDIA Request Extensions (`nvext`)](../frontend/nvext.md#agent-hints).
@@ -56,15 +95,25 @@ These activate automatically with `--router-mode kv` -- no additional flags are 
 
 ## Tuning Guidelines
 
-`--router-kv-overlap-score-weight` is the primary knob for balancing prefill efficiency against decode load. Prefill-heavy workloads benefit from a higher weight, which steers requests toward workers with better cache overlap and reduces TTFT. Decode-heavy workloads benefit from a lower weight, which distributes decode load more evenly and reduces ITL. The default of 1.0 is a reasonable starting point. This weight can also be overridden per request via `nvext.agent_hints.kv_overlap_score_weight`.
+`--router-kv-overlap-score-credit` is the primary knob for cache reuse. It credits device-local prefix overlap against the prefill load and must be between 0.0 and 1.0. Higher values steer requests toward workers with better cache overlap and reduce TTFT. Lower values distribute load more evenly and reduce ITL. The default of 1.0 is a reasonable starting point. This credit can also be overridden per request via `nvext.agent_hints.kv_overlap_score_credit`.
+
+Use `--load-aware` when you want the KV scheduler's active load model without prefix/cache reuse. This is equivalent to using KV mode with overlap credit set to 0, KV events disabled, KV reuse assumptions disabled, active load tracking enabled, and shared-cache routing disabled. `--router-prefill-load-scale` remains available to tune prompt-side load relative to decode blocks.
+
+Deprecated: `--router-kv-overlap-score-weight`, `--kv-overlap-score-weight`, `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT`, and `DYN_OVERLAP_SCORE_WEIGHT` are still accepted, but emit deprecation warnings. Nonzero legacy values map to `prefill_load_scale` to preserve existing behavior without changing overlap credit. A legacy value of 0 maps to both `prefill_load_scale=0` and `overlap_score_credit=0`, which preserves the old no-overlap/no-indexer behavior. If a deprecated overlap score weight is still present, it takes precedence over the newer prefill load scale field; a legacy value of 0 also takes precedence over the newer overlap credit field. When migrating to `--router-prefill-load-scale` or `DYN_ROUTER_PREFILL_LOAD_SCALE`, remove the deprecated flag, env var, or JSON field from the deployment config. Use `--router-kv-overlap-score-credit` or `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` only when you mean to tune the cache-overlap credit itself.
+
+If an older config used overlap score weight above 1.0 to make the router care more about TTFT, keep the overlap credit at or below 1.0 and move that larger value to `--router-prefill-load-scale` instead. `prefill_load_scale` multiplies the overlap-adjusted prompt-side load, so it still implicitly accounts for device, host, disk, and shared-cache credits.
+
+Use `--router-prefill-load-scale` when prompt-side load should count more or less than decode-side block load after cache-hit credits are applied. The final score is `prefill_load_scale * adjusted_prefill_blocks + decode_blocks`.
 
 Use `--no-router-kv-events` when you are not confident that your backend engine emits KV events correctly. In this mode the router falls back to approximate routing, predicting cache state from its own routing decisions with TTL-based expiration.
+
+Use `--router-predicted-ttl-secs 5` when the workload fires bursts of sibling requests with shared prefixes — parallel sampling, best-of-N, agent fan-out. It closes the window between the routing decision and the engine's first "block stored" event so siblings co-locate on the worker the first sibling picked. See the configuration section above for the side-indexer mechanics.
 
 Use `--no-router-assume-kv-reuse` in disaggregated setups where the decode worker does not reuse transferred KV cache blocks. Without this flag, the router undercounts decode blocks when duplicates exist, leading to inaccurate load estimates.
 
 Use `--no-router-track-prefill-tokens` when a router is serving decode-only traffic and prompt processing has already completed elsewhere. This keeps decode routing decisions focused on decode-side load instead of briefly charging prompt tokens to the decode worker after handoff.
 
-Use `--router-track-output-blocks` when your workload is output-heavy and you want the router to account for output-side KV cache growth in load balancing. If you also pass `nvext.agent_hints.osl` per request, the router applies fractional decay to output blocks so that requests nearing completion contribute less future load.
+Use `--router-track-output-blocks` when your workload is output-heavy and you want the router to account for output-side KV cache growth in load balancing. If you also pass `nvext.agent_hints.osl` per request, the router applies fractional decay to output blocks so that requests nearing completion contribute less future load. See [Decode Load Modeling](router-concepts.md#decode-load-modeling) for the cost-model details.
 
 `--router-queue-threshold` controls when incoming requests are held in a priority queue. The router waits while all workers exceed the configured fraction of `max_num_batched_tokens`, then releases work as capacity frees up. Set it to `None` to disable queueing entirely.
 
@@ -75,7 +124,7 @@ Use `--router-track-output-blocks` when your workload is output-heavy and you wa
 
 The threshold is applied as `active_tokens > threshold * max_num_batched_tokens`, so this fallback inflates the effective denominator and a threshold like `1.0` may effectively never queue. To get the originally intended "fraction of the per-step prefill window" semantics on SGLang, either set `--max-prefill-tokens` explicitly on the SGLang backend so the MDC value matches the prefill window, or use a much smaller `--router-queue-threshold` (for example `0.1`) to compensate for the inflated denominator.
 
-Use `--router-prefill-load-model aic` when you want prompt-side load tracking to decay the oldest active prefill request using an AIC-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and the shared `--aic-*` config.
+Use `--router-prefill-load-model aic` when you want prompt-side load tracking to decay the oldest active prefill request using an AIC-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and the shared `--aic-*` config; see [AIC Prefill Load Model](#aic-prefill-load-model) for the full flag set and [Prefill Load Modeling](router-concepts.md#prefill-load-modeling) for the cost-model details.
 
 Use `--router-queue-policy wspt` when your workload has a mix of short and long requests and you want to minimize average TTFT. Use the default `fcfs` when you want to minimize tail TTFT.
 

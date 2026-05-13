@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: llama3_json
+mode: batch
+cases:
+  PARSER.batch.7.a:
+    description: Standard scalar types
+    ref: dynamo
+    model_text: '<|python_tag|>{"name": "book_flight", "arguments": {"destination": "Paris", "passengers": 2, "first_class":
+      true}}'
+    tools:
+    - name: book_flight
+      parameters:
+        type: object
+        properties:
+          destination:
+            type: string
+          passengers:
+            type: integer
+          first_class:
+            type: boolean
+    expected:
+      calls:
+      - name: book_flight
+        arguments:
+          destination: Paris
+          first_class: true
+          passengers: 2
+      normal_text: ''
+  PARSER.batch.7.b:
+    description: Unicode + escaped chars
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_llama3_json_tool_parser.py#L217
+    model_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "Tōkyō \"central\""}}'
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: Tōkyō "central"
+      normal_text: ''
+  PARSER.batch.7.c:
+    description: Schema mismatch — string value where schema declares integer
+    ref: dynamo
+    model_text: '<|python_tag|>{"name": "set_temperature", "arguments": {"celsius": "20"}}'
+    tools:
+    - name: set_temperature
+      parameters:
+        type: object
+        properties:
+          celsius:
+            type: integer
+    expected:
+      calls:
+      - name: set_temperature
+        arguments:
+          celsius: '20'
+      normal_text: ''
+  PARSER.batch.7.d:
+    description: Nested object + array
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_llama3_json_tool_parser.py#L146
+    model_text: '<|python_tag|>{"name": "process_data", "arguments": {"items": [1,2,3], "config": {"nested": true}}}'
+    tools:
+    - name: process_data
+      parameters:
+        type: object
+        properties:
+          items:
+            type: array
+          config:
+            type: object
+    expected:
+      calls:
+      - name: process_data
+        arguments:
+          config:
+            nested: true
+          items:
+          - 1
+          - 2
+          - 3
+      normal_text: ''

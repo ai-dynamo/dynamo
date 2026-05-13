@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: nemotron_nano
+mode: batch
+cases:
+  PARSER.batch.5.a:
+    description: Missing </tool_call> end marker
+    ref: dynamo
+    model_text: |-
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      NYC
+      </parameter>
+      </function>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
+  PARSER.batch.5.b:
+    description: Closing </tool_call> without matching <tool_call> open
+    ref: dynamo
+    model_text: |-
+      <function=get_weather>
+      <parameter=location>
+      NYC
+      </parameter>
+      </function>
+      </tool_call>
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: |-
+        <function=get_weather>
+        <parameter=location>
+        NYC
+        </parameter>
+        </function>
+        </tool_call>
+  PARSER.batch.5.c:
+    description: Truncation mid-parameter value
+    ref: dynamo
+    model_text: |-
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      NY
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NY
+      normal_text: ''

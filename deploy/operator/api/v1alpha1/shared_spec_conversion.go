@@ -548,6 +548,7 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 	}
 
 	fillSharedAlphaOnlyFromPreserved(dst, restored, sharedHasMainContainer(src))
+	restoreSharedPreservedFlatVolumeMounts(dst, restored, src)
 	pruneEmptyExtraPodSpec(dst, restored)
 	if save != nil {
 		if err := saveSharedHubOnlySpec(src, dst, save); err != nil {
@@ -912,6 +913,81 @@ func convertVolumeMountsFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec
 		MountPoint:            src.CompilationCache.MountPath,
 		UseAsCompilationCache: true,
 	}}
+}
+
+// Restore alpha-only cache flags only when live beta still matches their lossy projection.
+func restoreSharedPreservedFlatVolumeMounts(dst, preserved *DynamoComponentDeploymentSharedSpec, src *v1beta1.DynamoComponentDeploymentSharedSpec) {
+	if dst == nil || preserved == nil || src == nil || volumeMountsRoundTripThroughHub(preserved.VolumeMounts) {
+		return
+	}
+	if !firstPreservedCompilationCacheMatches(src.CompilationCache, preserved.VolumeMounts) {
+		return
+	}
+	if !volumeMountsEqual(dst.VolumeMounts, visiblePreservedVolumeMountProjection(src, preserved.VolumeMounts)) {
+		return
+	}
+	dst.VolumeMounts = mergePreservedCompilationCacheVolumeMounts(preserved.VolumeMounts, dst.VolumeMounts)
+}
+
+func firstPreservedCompilationCacheMatches(compilationCache *v1beta1.CompilationCacheConfig, mounts []VolumeMount) bool {
+	for _, mount := range mounts {
+		if !mount.UseAsCompilationCache {
+			continue
+		}
+		return compilationCache != nil &&
+			compilationCache.PVCName == mount.Name &&
+			compilationCache.MountPath == mount.MountPoint
+	}
+	return compilationCache == nil
+}
+
+func visiblePreservedVolumeMountProjection(src *v1beta1.DynamoComponentDeploymentSharedSpec, mounts []VolumeMount) []VolumeMount {
+	projected := make([]VolumeMount, 0, len(mounts))
+	firstCompilationCacheSeen := false
+	for _, mount := range mounts {
+		if !mount.UseAsCompilationCache {
+			continue
+		}
+		if firstCompilationCacheSeen {
+			continue
+		}
+		projected = append(projected, mount)
+		firstCompilationCacheSeen = true
+	}
+	if main, ok := sharedMainContainer(src); ok && len(main.VolumeMounts) > 0 {
+		projected = appendMissingVolumeMounts(projected, volumeMountsFromNative(main.VolumeMounts))
+	}
+	return projected
+}
+
+func sharedMainContainer(src *v1beta1.DynamoComponentDeploymentSharedSpec) (corev1.Container, bool) {
+	if src == nil || src.PodTemplate == nil {
+		return corev1.Container{}, false
+	}
+	return findContainerByName(src.PodTemplate.Spec.Containers, mainContainerName)
+}
+
+func volumeMountsEqual(a, b []VolumeMount) bool {
+	return slices.EqualFunc(a, b, func(left, right VolumeMount) bool {
+		return left.Name == right.Name &&
+			left.MountPoint == right.MountPoint &&
+			left.UseAsCompilationCache == right.UseAsCompilationCache
+	})
+}
+
+func mergePreservedCompilationCacheVolumeMounts(preserved, current []VolumeMount) []VolumeMount {
+	out := make([]VolumeMount, 0, len(preserved)+len(current))
+	for _, mount := range preserved {
+		if mount.UseAsCompilationCache && !flatVolumeMountHasNamePath(out, mount.Name, mount.MountPoint) {
+			out = append(out, mount)
+		}
+	}
+	for _, mount := range current {
+		if !flatVolumeMountHasNamePath(out, mount.Name, mount.MountPoint) {
+			out = append(out, mount)
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -1963,7 +2039,8 @@ func pruneEmptyExtraPodSpec(dst, restored *DynamoComponentDeploymentSharedSpec) 
 	if dst == nil || dst.ExtraPodSpec == nil {
 		return
 	}
-	if containerIsEmpty(dst.ExtraPodSpec.MainContainer) {
+	if containerIsEmpty(dst.ExtraPodSpec.MainContainer) &&
+		!extraPodSpecOnlyPreservesMainContainerName(restoredExtraPodSpec(restored)) {
 		dst.ExtraPodSpec.MainContainer = nil
 	}
 	if extraPodSpecIsZero(dst.ExtraPodSpec) {
@@ -1972,6 +2049,13 @@ func pruneEmptyExtraPodSpec(dst, restored *DynamoComponentDeploymentSharedSpec) 
 		}
 		dst.ExtraPodSpec = nil
 	}
+}
+
+func restoredExtraPodSpec(restored *DynamoComponentDeploymentSharedSpec) *ExtraPodSpec {
+	if restored == nil {
+		return nil
+	}
+	return restored.ExtraPodSpec
 }
 
 func restoreMainContainerFieldOrigins(dst, preserved *DynamoComponentDeploymentSharedSpec, mainContainerPresent bool) {

@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: phi4
+mode: batch
+cases:
+  PARSER.batch.4.a:
+    description: functools[ wrapper with garbage
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L322
+    model_text: functools[not a json array]
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls: []
+      normal_text: ''
+  PARSER.batch.4.b:
+    description: Missing close brace
+    ref: dynamo
+    model_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"]'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: ''
+  PARSER.batch.4.c:
+    description: Missing name key
+    ref: dynamo
+    model_text: 'functools[{"arguments": {"location": "NYC"}}]'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: ''
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: 'functools[{"arguments": {"location": "NYC"}}]'
+  PARSER.batch.4.d:
+    description: Missing closing ]
+    ref: dynamo
+    model_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: ''
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}'

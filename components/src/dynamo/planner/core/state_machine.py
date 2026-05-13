@@ -23,6 +23,10 @@ import math
 from typing import TYPE_CHECKING, Optional
 
 from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core.budget import (
+    proportional_clamp_pair,
+    proportional_clamp_single,
+)
 from dynamo.planner.core.load.predictors import LOAD_PREDICTORS
 from dynamo.planner.core.load_scaling import LoadScalingMixin
 from dynamo.planner.core.perf_model import (
@@ -385,46 +389,55 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         return self._budget_clamp(max(desired, self._config.min_endpoint), gpu)
 
     def _apply_global_budget(self, num_p: int, num_d: int) -> tuple[int, int]:
-        budget = self._config.max_gpu_budget
+        """Apply the GPU budget band (ceiling and optional floor) to
+        ``(num_p, num_d)``. Delegates to ``budget.proportional_clamp_pair``
+        for the actual math; this method only resolves the per-engine GPU
+        counts from capabilities."""
         p_gpu = (
             self._capabilities.prefill.num_gpu if self._capabilities.prefill else None
         )
         d_gpu = self._capabilities.decode.num_gpu if self._capabilities.decode else None
-        if budget < 0 or p_gpu is None or d_gpu is None:
+        if p_gpu is None or d_gpu is None:
             return num_p, num_d
-        total = num_p * p_gpu + num_d * d_gpu
-        if total <= budget:
-            return num_p, num_d
-        min_req = self._config.min_endpoint * p_gpu + self._config.min_endpoint * d_gpu
-        if budget < min_req:
+
+        new_p, new_d = proportional_clamp_pair(
+            num_p,
+            num_d,
+            p_gpu,
+            d_gpu,
+            self._config.min_gpu_budget,
+            self._config.max_gpu_budget,
+            self._config.min_endpoint,
+        )
+        if (new_p, new_d) != (num_p, num_d):
+            old_total = num_p * p_gpu + num_d * d_gpu
+            new_total = new_p * p_gpu + new_d * d_gpu
             logger.warning(
-                f"max_gpu_budget ({budget}) below min ({min_req}); zero replicas"
+                f"GPU budget band [min={self._config.min_gpu_budget}, "
+                f"max={self._config.max_gpu_budget}] clamped "
+                f"({num_p}P + {num_d}D = {old_total}) -> "
+                f"({new_p}P + {new_d}D = {new_total})"
             )
-            return 0, 0
-        scale = budget / total
-        max_p = math.floor((budget - self._config.min_endpoint * d_gpu) / p_gpu)
-        num_p = max(self._config.min_endpoint, min(max_p, math.floor(num_p * scale)))
-        remaining = budget - num_p * p_gpu
-        num_d = max(self._config.min_endpoint, math.floor(remaining / d_gpu))
-        logger.warning(f"GPUs ({total}) > budget ({budget}), -> {num_p}P + {num_d}D")
-        return num_p, num_d
+        return new_p, new_d
 
     def _budget_clamp(self, desired: int, engine_gpu: int) -> int:
-        budget = self._config.max_gpu_budget
-        if budget < 0:
-            return desired
-        total = desired * engine_gpu
-        if total <= budget:
-            return desired
-        min_req = self._config.min_endpoint * engine_gpu
-        if budget < min_req:
+        """Apply the GPU budget band to a single component's desired replica
+        count (agg, prefill-only, or decode-only mode)."""
+        new_replicas = proportional_clamp_single(
+            desired,
+            engine_gpu,
+            self._config.min_gpu_budget,
+            self._config.max_gpu_budget,
+            self._config.min_endpoint,
+        )
+        if new_replicas != desired:
             logger.warning(
-                f"max_gpu_budget ({budget}) below min ({min_req}); zero replicas"
+                f"GPU budget band [min={self._config.min_gpu_budget}, "
+                f"max={self._config.max_gpu_budget}] clamped "
+                f"{desired} replicas (= {desired * engine_gpu} GPUs) -> "
+                f"{new_replicas} replicas (= {new_replicas * engine_gpu} GPUs)"
             )
-            return 0
-        result = max(self._config.min_endpoint, math.floor(budget / engine_gpu))
-        logger.warning(f"GPUs ({total}) > budget ({budget}), -> {result} replicas")
-        return result
+        return new_replicas
 
     # ------------------------------------------------------------------
     # FPM / worker count reconciliation

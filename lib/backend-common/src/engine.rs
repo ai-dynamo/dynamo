@@ -10,20 +10,73 @@
 //! Object-safety: every instance method takes `&self`. `Arc<dyn LLMEngine>` is
 //! the handle `Worker` drives the lifecycle through.
 
+use std::ops::Deref;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use tokio::sync::watch;
 
 use crate::error::DynamoError;
 
 pub use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
-pub use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
+pub use dynamo_llm::protocols::common::preprocessor::{
+    BootstrapInfo, PrefillResult, PreprocessedRequest,
+};
 pub use dynamo_llm::protocols::common::{
     FinishReason, OutputOptions, SamplingOptions, StopConditions,
 };
 pub use dynamo_protocols::types::CompletionUsage;
 pub use dynamo_runtime::engine::AsyncEngineContext;
+
+/// Per-request handle wrapping the runtime context. `Deref`s to
+/// `dyn AsyncEngineContext` so engine code uses it transparently.
+pub struct GenerateContext {
+    inner: Arc<dyn AsyncEngineContext>,
+    /// Decode-mode first-token signal. `Some` only on decode-mode requests;
+    /// `None` otherwise.
+    first_token: Option<watch::Sender<bool>>,
+}
+
+impl GenerateContext {
+    pub fn new(
+        inner: Arc<dyn AsyncEngineContext>,
+        first_token: Option<watch::Sender<bool>>,
+    ) -> Self {
+        Self { inner, first_token }
+    }
+
+    /// Clone the underlying runtime context Arc — for spawned tasks
+    /// outliving `generate`'s scope.
+    pub fn inner_arc(&self) -> Arc<dyn AsyncEngineContext> {
+        self.inner.clone()
+    }
+
+    /// Fire the first-token signal. Idempotent; no-op on non-decode
+    /// requests. Engines normally don't need this — the framework
+    /// auto-fires on the first non-empty chunk. Use only when first-token
+    /// is observable via a side channel before the main stream yields.
+    pub fn notify_first_token(&self) {
+        if let Some(tx) = &self.first_token {
+            let _ = tx.send(true);
+        }
+    }
+
+    /// Framework-internal: borrow the underlying Sender for cross-boundary
+    /// threading (PyO3 mirrors this handle into Python's `Context` so
+    /// `notify_first_token()` fires the same signal). Rust engines should
+    /// call [`notify_first_token`](Self::notify_first_token) instead.
+    pub fn first_token_sender(&self) -> Option<&watch::Sender<bool>> {
+        self.first_token.as_ref()
+    }
+}
+
+impl Deref for GenerateContext {
+    type Target = dyn AsyncEngineContext;
+    fn deref(&self) -> &Self::Target {
+        &*self.inner
+    }
+}
 
 /// Registration metadata returned by [`LLMEngine::start`].
 ///
@@ -52,6 +105,25 @@ pub struct EngineConfig {
     pub max_num_seqs: Option<u64>,
     /// Maximum tokens the engine will process in a single batched step.
     pub max_num_batched_tokens: Option<u64>,
+    /// Bootstrap host this prefill worker advertises to decode peers.
+    ///
+    /// Only meaningful for backends with a Dynamo-level host/port
+    /// handshake (today: SGLang). Backends whose KV transport is
+    /// internal — TRT-LLM uses TRT-LLM's transceiver, vLLM uses vLLM's
+    /// `NixlConnector` — should leave this `None`.
+    ///
+    /// Engines that do use it set this in `start()` after the engine
+    /// has resolved its bootstrap address (SGLang reads
+    /// `tokenizer_manager.server_args.disaggregation_bootstrap_port`).
+    /// When both `bootstrap_host` and `bootstrap_port` are `Some`,
+    /// `Worker` publishes them via
+    /// `ModelRuntimeConfig::disaggregated_endpoint` so the frontend's
+    /// `PrefillRouter` can take its optimised "Bootstrap path" (route
+    /// decode concurrent with prefill instead of waiting for prefill
+    /// to drain).
+    pub bootstrap_host: Option<String>,
+    /// Bootstrap port for disaggregated KV transfer. See `bootstrap_host`.
+    pub bootstrap_port: Option<u16>,
 }
 
 /// Inference engine trait.
@@ -70,12 +142,21 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// calls. `Worker` will register the model and begin serving immediately.
     /// Use interior mutability for any state allocated here.
     ///
+    /// `worker_id` is an opaque, runtime-allocated unique identifier for
+    /// this worker. It is stable from `start()` onward for the worker's
+    /// lifetime and unique across replicas in the cluster. Engines that
+    /// need a per-worker key for cluster-wide bookkeeping (e.g. TRT-LLM's
+    /// 10-bit `disagg_machine_id` snowflake field) should derive it from
+    /// this value rather than hashing host/pid or asking operators for a
+    /// CLI override. The internal mechanism (discovery instance ID) is
+    /// not part of the contract — engines should treat it as opaque.
+    ///
     /// `start()` is async and may take minutes for real backends (e.g.
     /// compiling a model graph on an accelerator). Emit
     /// `tracing::info!` checkpoints so operators see progress — this
     /// call is otherwise a silent window between process launch and
     /// endpoint serving.
-    async fn start(&self) -> Result<EngineConfig, DynamoError>;
+    async fn start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError>;
 
     /// Yield streaming response chunks for a single request.
     ///
@@ -108,7 +189,7 @@ pub trait LLMEngine: Send + Sync + 'static {
     async fn generate(
         &self,
         request: PreprocessedRequest,
-        ctx: Arc<dyn AsyncEngineContext>,
+        ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError>;
 
     /// Abort an in-flight request (optional, default no-op).
@@ -141,7 +222,27 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Release all engine resources. Called once on shutdown.
+    /// Release all engine resources. Called exactly once.
+    ///
+    /// `Worker` guarantees:
+    ///
+    /// * `cleanup` runs after [`start`](LLMEngine::start) succeeded
+    ///   *and* on shutdown — the common case.
+    /// * `cleanup` also runs after `start` raised, on the partial
+    ///   state the engine may have allocated before failing (inner
+    ///   LLM handle, sockets, background tasks). Implementations
+    ///   **must** be null-safe: guard each resource with an `is
+    ///   None` / `Option::is_some` check so a partially constructed
+    ///   engine can be released without panic.
+    /// * `cleanup` is **not** called when `start` was never invoked
+    ///   (pre-start shutdown via SIGTERM during distributed runtime
+    ///   construction). Engines whose constructors allocate
+    ///   resources must release them via `Drop` rather than rely on
+    ///   `cleanup`.
+    ///
+    /// `cleanup` must also be idempotent: a second call after a
+    /// successful first call must return `Ok(())` without re-entering
+    /// teardown (NCCL groups and similar fail noisily on double-free).
     async fn cleanup(&self) -> Result<(), DynamoError>;
 }
 
