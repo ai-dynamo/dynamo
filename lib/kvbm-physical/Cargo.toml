@@ -3,7 +3,7 @@
 
 [package]
 name = "kvbm-physical"
-version = "1.1.0"
+version = "1.2.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

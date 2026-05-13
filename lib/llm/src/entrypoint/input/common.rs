@@ -101,7 +101,7 @@ pub async fn prepare_engine(
             let model_manager = Arc::new(ModelManager::new());
             // Create metrics for migration tracking (not exposed via /metrics in Dynamic engine mode)
             let metrics = Arc::new(Metrics::new());
-            let watch_obj = Arc::new(ModelWatcher::new(
+            let mut watcher = ModelWatcher::new(
                 distributed_runtime.clone(),
                 model_manager.clone(),
                 RouterConfig::default(),
@@ -110,7 +110,11 @@ pub async fn prepare_engine(
                 None,
                 prefill_load_estimator,
                 metrics,
-            ));
+            );
+            if !local_model.path().as_os_str().is_empty() {
+                watcher.set_local_model_path(Some(local_model.path().to_path_buf()));
+            }
+            let watch_obj = Arc::new(watcher);
             let discovery = distributed_runtime.discovery();
             let discovery_stream = discovery
                 .list_and_watch(
@@ -322,19 +326,13 @@ where
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
 
-    // Get threshold value and wrap monitor for PushRouter
-    // Note: PushRouter uses active_decode_blocks_threshold for its internal logic
-    let threshold_value = worker_monitor
-        .as_ref()
-        .map(|m| m.active_decode_blocks_threshold());
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
     let router =
-        PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
+        PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
             router_client,
             router_mode,
-            threshold_value,
             monitor_arc,
         )
         .await?;

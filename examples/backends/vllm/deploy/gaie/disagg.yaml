@@ -70,7 +70,7 @@ spec:
       sharedMemory:
         size: 2Gi
       frontendSidecar:
-        image: docker.io/lambda108/dynamo:post-rebase
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
         args:
           - -m
           - dynamo.frontend
@@ -78,30 +78,34 @@ spec:
           - direct
         envFromSecret: hf-token-secret
       extraPodSpec:
+        tolerations:
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
         affinity:
           podAffinity:
-            preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchExpressions:
-                  - key: nvidia.com/dynamo-component-type
-                    operator: In
-                    values:
-                    - worker
-                topologyKey: kubernetes.io/hostname
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values:
+                  - worker
+              topologyKey: kubernetes.io/hostname
         mainContainer:
           env:
             - name: SERVED_MODEL_NAME
               value: "Qwen/Qwen3-0.6B"
             - name: MODEL_PATH
               value: "Qwen/Qwen3-0.6B"
+            - name: UCX_TLS
+              value: "tcp,self"
           args:
           - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode prefill --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --enable-prefix-caching --block-size 16 --kv-events-config '{\"enable_kv_cache_events\":true}'"
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:post-rebase
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           imagePullPolicy: IfNotPresent
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
@@ -117,7 +121,7 @@ spec:
       sharedMemory:
         size: 2Gi
       frontendSidecar:
-        image: docker.io/lambda108/dynamo:post-rebase
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
         args:
           - -m
           - dynamo.frontend
@@ -125,30 +129,34 @@ spec:
           - direct
         envFromSecret: hf-token-secret
       extraPodSpec:
+        tolerations:
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
         affinity:
           podAffinity:
-            preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchExpressions:
-                  - key: nvidia.com/dynamo-component-type
-                    operator: In
-                    values:
-                    - worker
-                topologyKey: kubernetes.io/hostname
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values:
+                  - worker
+              topologyKey: kubernetes.io/hostname
         mainContainer:
           env:
             - name: SERVED_MODEL_NAME
               value: "Qwen/Qwen3-0.6B"
             - name: MODEL_PATH
               value: "Qwen/Qwen3-0.6B"
+            - name: UCX_TLS
+              value: "tcp,self"
           args:
           - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode decode --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --block-size 16"
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:post-rebase
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           imagePullPolicy: IfNotPresent
           workingDir: /workspace/examples/backends/vllm
       replicas: 1

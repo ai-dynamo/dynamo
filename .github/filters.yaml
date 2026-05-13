@@ -9,6 +9,7 @@
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
 #   frontend -> frontend EPP image build, dynamo build-test
+#   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
@@ -28,11 +29,13 @@ docs:
   - '**/.gitattributes'
   - 'LICENSE'
   - 'CODEOWNERS'
+  - '.coveragerc'
+  - '.claude/**'
+  - '.agents/**'
 
 examples:
   - 'recipes/**'
   - 'examples/**'
-  - 'benchmarks/**'
   - '.devcontainer/**'
   - 'deploy/discovery/**'
   - 'deploy/inference-gateway/**'
@@ -89,6 +92,9 @@ core:
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'components/src/dynamo/gpu_memory_service/**'
+  # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
+  # TokenSpeed Docker images and backend-specific build/test jobs.
+  - 'components/src/dynamo/tokenspeed/**'
   - '*.toml'
   - '*.lock'
   - '*.py'
@@ -150,6 +156,16 @@ trtllm:
   - '!**/*.md'
   - '!**/*.rst'
 
+# sample -> sample-unified-test (framework-agnostic CPU-only backend
+# reference implementation). Piggybacks on the vllm image, so a sample-only
+# change triggers vllm-build + sample-unified-test. The common/backend ABC
+# already triggers `core`; this filter is for the launch scripts and tests
+# that are specific to the sample backend.
+sample:
+  - 'examples/backends/sample/**'
+  - '!**/*.md'
+  - '!**/*.rst'
+
 frontend:
   - *ci
   - '.cargo/config.toml'
@@ -173,3 +189,8 @@ rust:
   - '**/Cargo.toml'
   - '**/Cargo.lock'
   - 'deny.toml'
+
+benchmarks:
+  - 'benchmarks/**'
+  - '!**/*.md'
+  - '!**/*.rst'

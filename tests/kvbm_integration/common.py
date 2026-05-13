@@ -532,6 +532,19 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
     params = getattr(request, "param", {})
     cpu_blocks = params.get("cpu_blocks", 100)
     gpu_blocks = params.get("gpu_blocks", 10)
+    block_size = int(params.get("block_size", 16))
+    max_model_len = params.get("max_model_len")
+    if max_model_len is None:
+        env_max_model_len = os.environ.get("KVBM_MAX_MODEL_LEN")
+        if env_max_model_len is not None:
+            max_model_len = int(env_max_model_len)
+        elif gpu_blocks is not None:
+            # vLLM 0.20.1 validates max_model_len against explicit KV block
+            # overrides during engine init. These tests intentionally use tiny
+            # GPU caches, so default the sequence limit to that cache budget.
+            max_model_len = int(gpu_blocks) * block_size
+        else:
+            max_model_len = 8000
     model = params.get(
         "model",
         os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
@@ -580,14 +593,14 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
         "vllm",
         "serve",
         "--block-size",
-        "16",
+        str(block_size),
         "--port",
         str(port),
         "--kv-transfer-config",
         kv_transfer_config,
         model,
         "--max-model-len",
-        "8000",  # Required to fit on L4 GPU with smaller models
+        str(max_model_len),
     ]
 
     # GPU blocks override

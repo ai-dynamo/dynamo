@@ -250,6 +250,11 @@ async def parse_args(args: list[str]) -> Config:
     if dynamo_config.embedding_worker:
         parsed_args.is_embedding = True
 
+    # Enable encoder_only mode for multimodal encode workers to load only vision encoder
+    # This significantly reduces memory usage by avoiding loading the full LLM weights
+    if dynamo_config.multimodal_encode_worker:
+        parsed_args.encoder_only = True
+
     endpoint = dynamo_config.endpoint
     if endpoint is None:
         if dynamo_config.embedding_worker:
@@ -360,6 +365,7 @@ async def parse_args(args: list[str]) -> Config:
         server_args.disaggregation_mode = None
         server_args.dllm_algorithm = False
         server_args.load_format = None
+        server_args.enable_trace = getattr(parsed_args, "enable_trace", False)
         logging.info(
             f"Created stub ServerArgs for {worker_type}: model_path={server_args.model_path}"
         )
@@ -406,6 +412,13 @@ async def parse_args(args: list[str]) -> Config:
     logging.info(
         f"Derived use_kv_events={use_kv_events} from kv_events_config={server_args.kv_events_config}"
     )
+
+    # Enable forward pass metrics from dynamo env var if configured
+    if os.environ.get("DYN_FORWARDPASS_METRIC_PORT") and not getattr(
+        server_args, "enable_forward_pass_metrics", False
+    ):
+        server_args.enable_forward_pass_metrics = True
+        logging.info("Enabled forward_pass_metrics from DYN_FORWARDPASS_METRIC_PORT")
 
     # Auto-detect diffusion worker mode if dllm_algorithm
     diffusion_worker = server_args.dllm_algorithm is not None

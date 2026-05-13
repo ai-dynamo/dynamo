@@ -201,6 +201,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-lock"
+version = "3.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "290f7f2596bd5b78a9fec8088ccd89180d7f9f55b94b0576823bbbdc72ee8311"
+dependencies = [
+ "event-listener",
+ "event-listener-strategy",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "async-nats"
 version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -803,6 +814,7 @@ checksum = "021e862c184ae977658b36c4500f7feac3221ca5da43e3f25bd04ab6c79a29b5"
 dependencies = [
  "axum-core",
  "axum-macros",
+ "base64 0.22.1",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -822,8 +834,10 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
+ "sha1",
  "sync_wrapper",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -1996,14 +2010,14 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-config"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2030,7 +2044,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "aho-corasick",
  "aligned-vec",
@@ -2060,20 +2074,23 @@ dependencies = [
  "dynamo-parsers",
  "dynamo-protocols",
  "dynamo-runtime",
+ "dynamo-tokenizers",
  "dynamo-tokens",
  "either",
- "fastokens",
  "flate2",
  "futures",
  "futures-util",
  "galil-seiferas",
  "hf-hub",
  "image",
+ "ipnet",
  "json-five",
+ "lru 0.12.5",
  "minijinja",
  "minijinja-contrib",
  "modelexpress-client",
  "modelexpress-common",
+ "moka",
  "ndarray",
  "nix 0.26.4",
  "nixl-sys",
@@ -2087,14 +2104,13 @@ dependencies = [
  "rayon",
  "reqwest",
  "rmp-serde",
- "rustc-hash 1.1.0",
  "rustls 0.23.40",
  "serde",
  "serde_json",
+ "sha2",
  "strum",
  "tempfile",
  "thiserror 2.0.18",
- "tiktoken-rs",
  "tmq",
  "tokenizers",
  "tokio",
@@ -2115,7 +2131,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2131,7 +2147,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "dashmap",
@@ -2140,6 +2156,7 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-tokens",
  "indicatif 0.18.4",
+ "kvbm-logical",
  "ndarray",
  "ndarray-interp",
  "ndarray-npy",
@@ -2158,7 +2175,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "dynamo-protocols",
@@ -2175,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2190,7 +2207,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2257,8 +2274,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-tokenizers"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "fastokens",
+ "rayon",
+ "rustc-hash 1.1.0",
+ "serde",
+ "serde_json",
+ "strum",
+ "tiktoken-rs",
+ "tokenizers",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-tokens"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -2590,9 +2624,9 @@ dependencies = [
 
 [[package]]
 name = "filetime"
-version = "0.2.28"
+version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d5b2eef6fafbf69f877e55509ce5b11a760690ac9700a2921be067aa6afaef6"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
 dependencies = [
  "cfg-if",
  "libc",
@@ -3892,7 +3926,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-common"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "dynamo-tokens",
  "serde",
@@ -3900,7 +3934,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-config"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "dynamo-memory",
@@ -3947,7 +3981,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-engine"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "aws-config",
@@ -3981,14 +4015,14 @@ dependencies = [
 
 [[package]]
 name = "kvbm-kernels"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "cudarc",
 ]
 
 [[package]]
 name = "kvbm-logical"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4025,7 +4059,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-physical"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -4051,7 +4085,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-py3"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -4471,9 +4505,9 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-client"
-version = "0.2.2"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9929c605e135347ccda5e0e7ff0627217f23189915a5c3971265ce490a14abf"
+checksum = "7de62490b58d9862482a2cf223c3aeceaadd01d46ac996d99b4b6a75af204d21"
 dependencies = [
  "anyhow",
  "clap",
@@ -4493,9 +4527,9 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-common"
-version = "0.2.2"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4997c93ac4b3ded7a999eff0b770aea2448d808ce7f020729e6af11e4c08fe67"
+checksum = "44ec153f868d45d5d48129dd2f1e24755e93f74d6f9f423094a3b784fa6a88cc"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4513,6 +4547,26 @@ dependencies = [
  "tonic 0.13.1",
  "tonic-build 0.13.1",
  "tracing",
+]
+
+[[package]]
+name = "moka"
+version = "0.12.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "957228ad12042ee839f93c8f257b62b4c0ab5eaae1d4fa60de53b27c9d7c5046"
+dependencies = [
+ "async-lock",
+ "crossbeam-channel",
+ "crossbeam-epoch",
+ "crossbeam-utils",
+ "equivalent",
+ "event-listener",
+ "futures-util",
+ "parking_lot",
+ "portable-atomic",
+ "smallvec",
+ "tagptr",
+ "uuid",
 ]
 
 [[package]]
@@ -7363,6 +7417,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "tagptr"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
+
+[[package]]
 name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7663,6 +7723,18 @@ dependencies = [
  "slab",
  "timerfd",
  "tokio",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.26.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a9daff607c6d2bf6c16fd681ccb7eecc83e4e2cdc1ca067ffaadfca5de7f084"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite",
 ]
 
 [[package]]
@@ -8058,6 +8130,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tungstenite"
+version = "0.26.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4793cb5e56680ecbb1d843515b23b6de9a75eb04b66643e256a396d43be33c13"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http 1.4.0",
+ "httparse",
+ "log",
+ "rand 0.9.4",
+ "sha1",
+ "thiserror 2.0.18",
+ "utf-8",
+]
+
+[[package]]
 name = "typeid"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8282,6 +8371,12 @@ name = "urlencoding"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
+
+[[package]]
+name = "utf-8"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
 
 [[package]]
 name = "utf16_iter"
@@ -9217,9 +9312,9 @@ dependencies = [
 
 [[package]]
 name = "zerofrom"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69faa1f2a1ea75661980b013019ed6687ed0e83d069bc1114e2cc74c6c04c4df"
+checksum = "0ec05a11813ea801ff6d75110ad09cd0824ddba17dfe17128ea0d5f68e6c5272"
 dependencies = [
  "zerofrom-derive",
 ]

@@ -23,6 +23,10 @@ import math
 from typing import TYPE_CHECKING, Optional
 
 from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core.budget import (
+    proportional_clamp_pair,
+    proportional_clamp_single,
+)
 from dynamo.planner.core.load.predictors import LOAD_PREDICTORS
 from dynamo.planner.core.load_scaling import LoadScalingMixin
 from dynamo.planner.core.perf_model import (
@@ -63,6 +67,7 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
     ) -> None:
         self._config = config
         self._capabilities = capabilities or WorkerCapabilities()
+
         self._is_agg = config.mode == "agg"
         self._has_prefill = config.mode in ("disagg", "prefill")
         self._has_decode = config.mode in ("disagg", "decode", "agg")
@@ -94,6 +99,9 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             self._num_req_predictor = predictor_cls(config)
             self._isl_predictor = predictor_cls(config)
             self._osl_predictor = predictor_cls(config)
+            # KV hit rate has no good offline-trace proxy, so it is NOT warmed
+            # via ``warm_load_predictors``; it learns only from live observations.
+            self._kv_hit_rate_predictor = predictor_cls(config)
 
         self._num_p_workers: int = 0
         self._num_d_workers: int = 0
@@ -102,6 +110,12 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
 
         self._throughput_lower_bound_p: int = 1
         self._throughput_lower_bound_d: int = 1
+
+        # Most recent observed KV hit rate from the router. Used by load-scaling
+        # to discount queued/avg prefill tokens in ``estimate_next_ttft``. Sticky
+        # across ticks because load-scaling and throughput-scaling cadences
+        # may differ. ``None`` means "no observation yet" -> no discount.
+        self._last_kv_hit_rate: Optional[float] = None
 
         self._next_load_s: float = float("inf")
         self._next_throughput_s: float = float("inf")
@@ -112,6 +126,7 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_predicted_num_req: Optional[float] = None
         self._diag_predicted_isl: Optional[float] = None
         self._diag_predicted_osl: Optional[float] = None
+        self._diag_predicted_kv_hit_rate: Optional[float] = None
         self._diag_engine_rps_prefill: Optional[float] = None
         self._diag_engine_rps_decode: Optional[float] = None
         self._diag_load_reason: Optional[str] = None
@@ -125,11 +140,15 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
     # Public API
     # ------------------------------------------------------------------
 
+    def update_capabilities(self, capabilities: WorkerCapabilities) -> None:
+        """Replace the current worker capabilities."""
+        self._capabilities = capabilities
+
     def initial_tick(self, start_s: float) -> ScheduledTick:
-        self._next_load_s = start_s + self._config.load_adjustment_interval
+        self._next_load_s = start_s + self._config.load_adjustment_interval_seconds
         if self._config.enable_throughput_scaling:
             self._next_throughput_s = (
-                start_s + self._config.throughput_adjustment_interval
+                start_s + self._config.throughput_adjustment_interval_seconds
             )
         return self._next_scheduled_tick()
 
@@ -189,17 +208,24 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
                 self._observe_traffic(tick_input.traffic)
                 throughput_decision = self._advance_throughput(tick_input.traffic)
             self._next_throughput_s = (
-                tick_input.now_s + self._config.throughput_adjustment_interval
+                tick_input.now_s + self._config.throughput_adjustment_interval_seconds
             )
 
         if tick.run_load_scaling:
+            # In load-only deployments the kv-hit-rate scrape rides on the
+            # load tick, so consume the traffic observation here.  In mixed
+            # mode the throughput branch above already handled it.
+            if not tick.run_throughput_scaling and tick_input.traffic is not None:
+                self._observe_traffic(tick_input.traffic)
             if tick_input.fpm_observations is not None:
                 if not self._is_easy:
                     self._observe_fpm(tick_input.fpm_observations)
                 load_decision = self._advance_load(tick_input.fpm_observations)
                 if load_decision is not None:
                     effects.scale_to = load_decision
-            self._next_load_s = tick_input.now_s + self._config.load_adjustment_interval
+            self._next_load_s = (
+                tick_input.now_s + self._config.load_adjustment_interval_seconds
+            )
 
         # Load scaling has precedence when it produced a decision; otherwise
         # fall back to the throughput-scaling decision.
@@ -216,6 +242,7 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_predicted_num_req = None
         self._diag_predicted_isl = None
         self._diag_predicted_osl = None
+        self._diag_predicted_kv_hit_rate = None
         self._diag_engine_rps_prefill = None
         self._diag_engine_rps_decode = None
         self._diag_load_reason = None
@@ -232,6 +259,7 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             predicted_num_req=self._diag_predicted_num_req,
             predicted_isl=self._diag_predicted_isl,
             predicted_osl=self._diag_predicted_osl,
+            predicted_kv_hit_rate=self._diag_predicted_kv_hit_rate,
             engine_rps_prefill=self._diag_engine_rps_prefill,
             engine_rps_decode=self._diag_engine_rps_decode,
             throughput_lower_bound_prefill=self._throughput_lower_bound_p,
@@ -255,16 +283,29 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         at_s = min(self._next_load_s, self._next_throughput_s)
         is_load = self._next_load_s <= at_s + self._MERGE_TOLERANCE_S
         is_throughput = self._next_throughput_s <= at_s + self._MERGE_TOLERANCE_S
+        # Throughput ticks scrape full traffic over the throughput interval.
+        # In load-only deployments (no throughput tick ever fires) load ticks
+        # carry a kv-hit-rate-only scrape over the load interval so the
+        # planner can still discount prefill work by recent prefix reuse.
+        if is_throughput:
+            need_traffic = True
+            traffic_duration_s = float(
+                self._config.throughput_adjustment_interval_seconds
+            )
+        elif is_load and not self._config.enable_throughput_scaling:
+            need_traffic = True
+            traffic_duration_s = float(self._config.load_adjustment_interval_seconds)
+        else:
+            need_traffic = False
+            traffic_duration_s = 0.0
         return ScheduledTick(
             at_s=at_s,
             run_load_scaling=is_load,
             run_throughput_scaling=is_throughput,
             need_worker_states=True,
             need_worker_fpm=is_load,
-            need_traffic_metrics=is_throughput,
-            traffic_metrics_duration_s=(
-                self._config.throughput_adjustment_interval if is_throughput else 0.0
-            ),
+            need_traffic_metrics=need_traffic,
+            traffic_metrics_duration_s=traffic_duration_s,
         )
 
     # ------------------------------------------------------------------
@@ -312,9 +353,25 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             logger.info(f"FPM load stats: {len(obs.decode)} decode engines observed")
 
     def _observe_traffic(self, traffic: TrafficObservation) -> None:
-        self._num_req_predictor.add_data_point(traffic.num_req)
-        self._isl_predictor.add_data_point(traffic.isl)
-        self._osl_predictor.add_data_point(traffic.osl)
+        # Throughput-scaling predictors only have a downstream consumer when
+        # throughput scaling is enabled. In load-only mode the traffic scrape
+        # is a kv-hit-rate-only path and num_req/isl/osl arrive as zero
+        # placeholders, so feeding the predictors would just pollute them.
+        if self._config.enable_throughput_scaling:
+            self._num_req_predictor.add_data_point(traffic.num_req)
+            self._isl_predictor.add_data_point(traffic.isl)
+            self._osl_predictor.add_data_point(traffic.osl)
+        if traffic.kv_hit_rate is not None and not math.isnan(traffic.kv_hit_rate):
+            if self._config.enable_throughput_scaling:
+                # Mixed mode: feed the predictor; ``_last_kv_hit_rate`` will be
+                # overwritten with the predicted value inside
+                # ``_advance_throughput`` so load scaling consumes the smoothed
+                # forecast (not the raw per-window observation).
+                self._kv_hit_rate_predictor.add_data_point(traffic.kv_hit_rate)
+            else:
+                # Load-only mode: there is no predictor path, the load tick
+                # consumes the freshly observed average directly.
+                self._last_kv_hit_rate = traffic.kv_hit_rate
 
     # ------------------------------------------------------------------
     # Budget
@@ -332,46 +389,55 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         return self._budget_clamp(max(desired, self._config.min_endpoint), gpu)
 
     def _apply_global_budget(self, num_p: int, num_d: int) -> tuple[int, int]:
-        budget = self._config.max_gpu_budget
+        """Apply the GPU budget band (ceiling and optional floor) to
+        ``(num_p, num_d)``. Delegates to ``budget.proportional_clamp_pair``
+        for the actual math; this method only resolves the per-engine GPU
+        counts from capabilities."""
         p_gpu = (
             self._capabilities.prefill.num_gpu if self._capabilities.prefill else None
         )
         d_gpu = self._capabilities.decode.num_gpu if self._capabilities.decode else None
-        if budget < 0 or p_gpu is None or d_gpu is None:
+        if p_gpu is None or d_gpu is None:
             return num_p, num_d
-        total = num_p * p_gpu + num_d * d_gpu
-        if total <= budget:
-            return num_p, num_d
-        min_req = self._config.min_endpoint * p_gpu + self._config.min_endpoint * d_gpu
-        if budget < min_req:
+
+        new_p, new_d = proportional_clamp_pair(
+            num_p,
+            num_d,
+            p_gpu,
+            d_gpu,
+            self._config.min_gpu_budget,
+            self._config.max_gpu_budget,
+            self._config.min_endpoint,
+        )
+        if (new_p, new_d) != (num_p, num_d):
+            old_total = num_p * p_gpu + num_d * d_gpu
+            new_total = new_p * p_gpu + new_d * d_gpu
             logger.warning(
-                f"max_gpu_budget ({budget}) below min ({min_req}); zero replicas"
+                f"GPU budget band [min={self._config.min_gpu_budget}, "
+                f"max={self._config.max_gpu_budget}] clamped "
+                f"({num_p}P + {num_d}D = {old_total}) -> "
+                f"({new_p}P + {new_d}D = {new_total})"
             )
-            return 0, 0
-        scale = budget / total
-        max_p = math.floor((budget - self._config.min_endpoint * d_gpu) / p_gpu)
-        num_p = max(self._config.min_endpoint, min(max_p, math.floor(num_p * scale)))
-        remaining = budget - num_p * p_gpu
-        num_d = max(self._config.min_endpoint, math.floor(remaining / d_gpu))
-        logger.warning(f"GPUs ({total}) > budget ({budget}), -> {num_p}P + {num_d}D")
-        return num_p, num_d
+        return new_p, new_d
 
     def _budget_clamp(self, desired: int, engine_gpu: int) -> int:
-        budget = self._config.max_gpu_budget
-        if budget < 0:
-            return desired
-        total = desired * engine_gpu
-        if total <= budget:
-            return desired
-        min_req = self._config.min_endpoint * engine_gpu
-        if budget < min_req:
+        """Apply the GPU budget band to a single component's desired replica
+        count (agg, prefill-only, or decode-only mode)."""
+        new_replicas = proportional_clamp_single(
+            desired,
+            engine_gpu,
+            self._config.min_gpu_budget,
+            self._config.max_gpu_budget,
+            self._config.min_endpoint,
+        )
+        if new_replicas != desired:
             logger.warning(
-                f"max_gpu_budget ({budget}) below min ({min_req}); zero replicas"
+                f"GPU budget band [min={self._config.min_gpu_budget}, "
+                f"max={self._config.max_gpu_budget}] clamped "
+                f"{desired} replicas (= {desired * engine_gpu} GPUs) -> "
+                f"{new_replicas} replicas (= {new_replicas * engine_gpu} GPUs)"
             )
-            return 0
-        result = max(self._config.min_endpoint, math.floor(budget / engine_gpu))
-        logger.warning(f"GPUs ({total}) > budget ({budget}), -> {result} replicas")
-        return result
+        return new_replicas
 
     # ------------------------------------------------------------------
     # FPM / worker count reconciliation

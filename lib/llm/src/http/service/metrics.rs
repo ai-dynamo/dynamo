@@ -251,7 +251,9 @@ struct MetricsHandlerState {
 
 pub struct Metrics {
     request_counter: IntCounterVec,
+    /// Deprecated: use `active_requests_gauge`. Kept for backwards compatibility until Phase 3.
     inflight_gauge: IntGaugeVec,
+    active_requests_gauge: IntGaugeVec,
     client_disconnect_gauge: prometheus::IntGauge,
     http_queue_gauge: IntGaugeVec,
     request_duration: HistogramVec,
@@ -504,6 +506,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let active_requests_gauge = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::ACTIVE_REQUESTS),
+                "Number of requests currently being handled by the frontend, from HTTP handler entry to response completion",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
         let client_disconnect_gauge = prometheus::IntGauge::new(
             frontend_metric_name(frontend_service::DISCONNECTED_CLIENTS),
             "Number of disconnected clients",
@@ -722,6 +733,7 @@ impl Metrics {
         Metrics {
             request_counter,
             inflight_gauge,
+            active_requests_gauge,
             client_disconnect_gauge,
             http_queue_gauge,
             request_duration,
@@ -799,11 +811,13 @@ impl Metrics {
     }
 
     fn inc_inflight_gauge(&self, model: &str) {
-        self.inflight_gauge.with_label_values(&[model]).inc()
+        self.inflight_gauge.with_label_values(&[model]).inc();
+        self.active_requests_gauge.with_label_values(&[model]).inc();
     }
 
     fn dec_inflight_gauge(&self, model: &str) {
-        self.inflight_gauge.with_label_values(&[model]).dec()
+        self.inflight_gauge.with_label_values(&[model]).dec();
+        self.active_requests_gauge.with_label_values(&[model]).dec();
     }
 
     /// Increment the gauge for client disconnections
@@ -827,6 +841,7 @@ impl Metrics {
     pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
+        registry.register(Box::new(self.active_requests_gauge.clone()))?;
         registry.register(Box::new(self.client_disconnect_gauge.clone()))?;
         registry.register(Box::new(self.http_queue_gauge.clone()))?;
         registry.register(Box::new(self.request_duration.clone()))?;
@@ -1594,17 +1609,29 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
 
     if let Some(ref msg) = annotated.event {
         if msg == "error" {
-            let msgs = annotated
-                .comment
-                .unwrap_or_else(|| vec!["unspecified error".to_string()]);
-            return Err(axum::Error::new(msgs.join(" -- ")));
+            let error_message = if let Some(ref dynamo_err) = annotated.error
+                && !dynamo_err.message().is_empty()
+            {
+                dynamo_err.message().to_string()
+            } else if let Some(ref comments) = annotated.comment {
+                let joined = comments.join(" -- ");
+                if joined.trim().is_empty() {
+                    "unspecified error".to_string()
+                } else {
+                    joined
+                }
+            } else {
+                "unspecified error".to_string()
+            };
+            return Err(axum::Error::new(error_message));
         }
         event = event.event(msg);
     }
 
     if let Some(comments) = annotated.comment {
         for comment in comments {
-            event = event.comment(comment);
+            // Axum's Event::comment() panics on \n / \r
+            event = event.comment(comment.replace(['\n', '\r'], " "));
         }
     }
 
@@ -2356,6 +2383,79 @@ mod tests {
     }
 
     #[test]
+    fn test_active_requests_tracks_inflight_guard() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model-active";
+
+        // Both gauges start at 0
+        assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 0);
+        assert_eq!(
+            metrics
+                .active_requests_gauge
+                .with_label_values(&[model])
+                .get(),
+            0
+        );
+
+        {
+            let _guard = metrics.clone().create_inflight_guard(
+                model,
+                Endpoint::ChatCompletions,
+                true,
+                "req-1",
+            );
+
+            // Both gauges increment together
+            assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 1);
+            assert_eq!(
+                metrics
+                    .active_requests_gauge
+                    .with_label_values(&[model])
+                    .get(),
+                1
+            );
+
+            {
+                let _guard2 = metrics.clone().create_inflight_guard(
+                    model,
+                    Endpoint::ChatCompletions,
+                    true,
+                    "req-2",
+                );
+                assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 2);
+                assert_eq!(
+                    metrics
+                        .active_requests_gauge
+                        .with_label_values(&[model])
+                        .get(),
+                    2
+                );
+            }
+            // guard2 dropped
+            assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 1);
+            assert_eq!(
+                metrics
+                    .active_requests_gauge
+                    .with_label_values(&[model])
+                    .get(),
+                1
+            );
+        }
+        // guard dropped — both back to 0
+        assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 0);
+        assert_eq!(
+            metrics
+                .active_requests_gauge
+                .with_label_values(&[model])
+                .get(),
+            0
+        );
+    }
+
+    #[test]
     fn test_all_error_types_recorded_correctly() {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
@@ -2478,5 +2578,76 @@ mod tests {
             ])
             .get();
         assert_eq!(success_count, 1);
+    }
+
+    fn run_event_converter(
+        annotated: crate::types::Annotated<String>,
+    ) -> Result<Option<Event>, axum::Error> {
+        let metrics = Arc::new(Metrics::new());
+        let mut collector = ResponseMetricCollector::new(metrics, "test-model".to_string());
+        let mut http_queue_guard: Option<HttpQueueGuard> = None;
+        process_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(annotated),
+            &mut collector,
+            &mut http_queue_guard,
+        )
+    }
+
+    fn error_annotated(
+        error: Option<dynamo_runtime::error::DynamoError>,
+        comment: Option<Vec<String>>,
+    ) -> crate::types::Annotated<String> {
+        crate::types::Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment,
+            error,
+        }
+    }
+
+    #[test]
+    fn test_error_event_uses_dynamo_error_message() {
+        use dynamo_runtime::error::DynamoError;
+        let result = run_event_converter(error_annotated(
+            Some(DynamoError::msg("image load failed: 403 Forbidden")),
+            None,
+        ));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("403 Forbidden"));
+    }
+
+    #[test]
+    fn test_error_event_falls_back_to_comment() {
+        let result =
+            run_event_converter(error_annotated(None, Some(vec!["connection lost".into()])));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("connection lost"));
+    }
+
+    #[test]
+    fn test_error_event_unspecified_when_no_message() {
+        let result = run_event_converter(error_annotated(None, None));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
+    }
+
+    #[test]
+    fn test_error_event_empty_comment_falls_through() {
+        let result = run_event_converter(error_annotated(None, Some(vec!["".into()])));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
+    }
+
+    #[test]
+    fn test_comment_newlines_sanitized() {
+        let annotated = crate::types::Annotated::<String> {
+            data: Some("test".to_string()),
+            id: None,
+            event: Some("metrics".to_string()),
+            comment: Some(vec!["line1\nline2\r\nline3".into()]),
+            error: None,
+        };
+        assert!(run_event_converter(annotated).is_ok());
     }
 }

@@ -355,6 +355,8 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
             model_id,
             "--kv-transfer-config",
             '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}',
+            "--kv-events-config",
+            '{"enable_kv_cache_events": true}',
             "--enforce-eager",  # For faster startup in tests
         ]
     else:  # trtllm
@@ -383,6 +385,13 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
             # NATS_SERVER and ETCD_ENDPOINTS inherited from runtime_services fixture env
             "DYN_KVBM_CPU_CACHE_GB": "5",
             "DYN_KVBM_DISK_CACHE_GB": "5",
+            # Disable O_DIRECT on the KVBM G3 disk cache so the test runs on
+            # hardware / filesystems that don't support `fcntl(F_SETFL, O_DIRECT)`
+            # (e.g. tmpfs on Linux kernels <~6.1, lustre, overlay, NFS). Without
+            # this, trtllm's blocking layout init hangs until the 120s worker
+            # registration timeout. Only affects disk I/O path, not functional
+            # event/dedup coverage this test exercises.
+            "DYN_KVBM_DISK_DISABLE_O_DIRECT": "true",
             "DYN_LOG": "debug",  # Enable debug logs for consolidator visibility
         }
     )
@@ -776,6 +785,8 @@ class TestConsolidatorRouterE2E:
                     model_id,
                     "--kv-transfer-config",
                     '{"kv_connector":"DynamoConnector","kv_connector_module_path":"kvbm.vllm_integration.connector","kv_role":"kv_both"}',
+                    "--kv-events-config",
+                    '{"enable_kv_cache_events": true}',
                     "--enforce-eager",
                     "--enable-prefix-caching",
                     "--num-gpu-blocks-override",
@@ -809,6 +820,12 @@ class TestConsolidatorRouterE2E:
                     # NATS_SERVER and ETCD_ENDPOINTS inherited from runtime_services fixture env
                     "DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS": str(g2_cpu_blocks),
                     "DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS": str(g3_disk_blocks),
+                    # Disable O_DIRECT on the KVBM G3 disk cache so the test runs
+                    # on hardware / filesystems that don't support
+                    # `fcntl(F_SETFL, O_DIRECT)` (e.g. tmpfs on Linux kernels
+                    # <~6.1, lustre, overlay, NFS). Only affects disk I/O path,
+                    # not the event/dedup behavior under test.
+                    "DYN_KVBM_DISK_DISABLE_O_DIRECT": "true",
                     "DYN_LOG": "debug",
                 }
             )

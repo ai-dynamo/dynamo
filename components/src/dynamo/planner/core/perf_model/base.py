@@ -11,7 +11,7 @@ decode, and agg perf model subclasses.
 import logging
 import math
 from collections import defaultdict, deque
-from typing import Union
+from typing import Optional, Union
 
 import numpy as np
 from sklearn.linear_model import LinearRegression
@@ -19,6 +19,22 @@ from sklearn.linear_model import LinearRegression
 from dynamo.common.forward_pass_metrics import ForwardPassMetrics
 
 logger = logging.getLogger(__name__)
+
+# Upper bound on the applied KV hit rate discount. A full 1.0 reading would
+# zero out queued/avg prefill tokens and could mask a genuine backlog; cap
+# at 0.95 so the planner always sees *some* work ahead.
+_MAX_KV_HIT_RATE_DISCOUNT = 0.95
+
+
+def _clamp_kv_hit_rate(kv_hit_rate: Optional[float]) -> float:
+    """Clamp a raw hit rate into the usable discount range.
+
+    Returns 0.0 for ``None`` / NaN (no discount, preserves pre-change
+    behavior), otherwise clamps into ``[0.0, _MAX_KV_HIT_RATE_DISCOUNT]``.
+    """
+    if kv_hit_rate is None or math.isnan(kv_hit_rate):
+        return 0.0
+    return max(0.0, min(_MAX_KV_HIT_RATE_DISCOUNT, float(kv_hit_rate)))
 
 
 class _MovingAverage:

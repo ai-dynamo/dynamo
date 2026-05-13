@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import BenchmarkConfig, SweepConfig, input_file_tag, resolve_repo_root
+from .dataset_shape import count_session_ids
 from .runner import run_aiperf_single
 from .server import ServerManager
 
@@ -16,6 +17,26 @@ def _resolve_workflow(workflow: str, repo_root: Path) -> str:
     if p.is_absolute():
         return str(p)
     return str(repo_root / p)
+
+
+def _resolve_conversation_num(config: SweepConfig, input_file: str) -> int:
+    """Pick conversation_num for this input file: explicit value from config wins,
+    otherwise derive from the JSONL's unique session_id count. Error if an
+    explicit value exceeds the JSONL's capacity (sampler would wrap)."""
+    detected = count_session_ids(input_file)
+    if config.conversation_num is None:
+        print(
+            f"  conversation_num derived from {input_file}: {detected}",
+            flush=True,
+        )
+        return detected
+    if config.conversation_num > detected:
+        raise ValueError(
+            f"conversation_num={config.conversation_num} exceeds unique "
+            f"session_id count ({detected}) in {input_file}. SequentialSampler "
+            f"would wrap. Set conversation_num <= {detected} or reshape the JSONL."
+        )
+    return config.conversation_num
 
 
 def _print_banner(title: str, char: str = "=", width: int = 70) -> None:
@@ -46,7 +67,8 @@ def run_sweep(
     print(f"  Sweep mode:    {sweep_mode}")
     print(f"  Sweep values:  {sweep_values}")
     print(f"  OSL:           {config.osl}")
-    print(f"  Requests:      {config.request_count} per {sweep_mode}")
+    if config.conversation_num is not None:
+        print(f"  Conversations: {config.conversation_num} per {sweep_mode}")
     print(
         f"  Restart:       {'every run' if config.restart_server_every_benchmark else 'per config'}"
     )
@@ -98,10 +120,12 @@ def _run_config(
     _print_banner(f"Config: {bench_cfg.label}", char="#")
 
     # Collect pending runs, skipping those with existing results.
-    pending_runs: List[tuple[str, str, int, Path]] = []
+    pending_runs: List[tuple[str, str, int, Path, int]] = []
     for input_file in config.input_files:
         file_tag = input_file_tag(input_file)
         sweep_dir = output_base / file_tag / bench_cfg.label
+
+        conversation_num = _resolve_conversation_num(config, input_file)
 
         for value in sorted(sweep_values):
             artifact_dir = sweep_dir / f"{sweep_mode}{value}"
@@ -113,7 +137,9 @@ def _run_config(
                     flush=True,
                 )
             else:
-                pending_runs.append((input_file, file_tag, value, artifact_dir))
+                pending_runs.append(
+                    (input_file, file_tag, value, artifact_dir, conversation_num)
+                )
 
     if not pending_runs:
         print(f"  All runs skipped for {bench_cfg.label}", flush=True)
@@ -128,7 +154,7 @@ def _run_config(
         )
 
     try:
-        for input_file, file_tag, value, artifact_dir in pending_runs:
+        for input_file, file_tag, value, artifact_dir, conversation_num in pending_runs:
             _print_banner(
                 f"[{file_tag}] Config: {bench_cfg.label}  " f"{sweep_mode}={value}",
                 char="-",
@@ -148,7 +174,7 @@ def _run_config(
                     port=config.port,
                     sweep_mode=sweep_mode,
                     sweep_value=value,
-                    request_count=config.request_count,
+                    conversation_num=conversation_num,
                     warmup_count=config.warmup_count,
                     input_file=input_file,
                     osl=config.osl,

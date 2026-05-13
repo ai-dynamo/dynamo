@@ -19,6 +19,7 @@ TokenIdType = int
 class StopConditions(BaseModel):
     max_tokens: Optional[int] = None
     stop: Optional[List[str]] = None
+    stop_token_ids: Optional[List[TokenIdType]] = None
     stop_token_ids_hidden: Optional[List[TokenIdType]] = None
     min_tokens: Optional[int] = None
     ignore_eos: Optional[bool] = None
@@ -120,6 +121,8 @@ class MultiModalGroup(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
+    video_grid_thw: Optional[List[Any]] = None
+    num_mm_tokens: Optional[int] = None
 
 
 class SglangMultimodalRequest(BaseModel):
@@ -204,10 +207,12 @@ class CreateVideoRequest(BaseModel):
     size: Optional[str] = "832x480"  # WxH format (Wan default: 832x480)
     user: Optional[str] = None
     response_format: Optional[str] = "url"  # url or b64_json
+    output_format: Optional[str] = None  # only mp4 is supported
     nvext: Optional[VideoNvExt] = None
 
 
 class VideoData(BaseModel):
+    output_format: str
     url: Optional[str] = None
     b64_json: Optional[str] = None
 

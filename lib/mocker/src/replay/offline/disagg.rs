@@ -303,7 +303,14 @@ impl DisaggRuntime {
 
     /// Turn prefill router admissions into concrete worker dispatches.
     fn dispatch_prefill_admissions(&mut self, admissions: Vec<WorkerAdmission>) -> Result<()> {
-        for WorkerAdmission { uuid, worker_idx } in admissions {
+        for WorkerAdmission {
+            uuid,
+            worker_idx,
+            overlap_blocks,
+            isl_blocks,
+        } in admissions
+        {
+            self.traffic.on_admission(overlap_blocks, isl_blocks);
             if self.state(uuid)?.phase != DisaggPhase::QueuedPrefill {
                 bail!("offline disagg replay expected queued prefill request for {uuid}");
             }
@@ -313,8 +320,16 @@ impl DisaggRuntime {
     }
 
     /// Turn decode router admissions into concrete worker dispatches.
+    ///
+    /// Note: only the prefill router's admissions are fed to
+    /// ``traffic.on_admission``; decode-router admissions reflect the
+    /// same requests re-routing after prefill completes and would double
+    /// count overlap observations.
     fn dispatch_decode_admissions(&mut self, admissions: Vec<WorkerAdmission>) -> Result<()> {
-        for WorkerAdmission { uuid, worker_idx } in admissions {
+        for WorkerAdmission {
+            uuid, worker_idx, ..
+        } in admissions
+        {
             if self.state(uuid)?.phase != DisaggPhase::QueuedDecode {
                 bail!("offline disagg replay expected queued decode request for {uuid}");
             }
@@ -968,7 +983,7 @@ fn derive_decode_router_config(
     router_config: Option<KvRouterConfig>,
 ) -> KvRouterConfig {
     let mut config = base_router_config(args, router_config);
-    config.overlap_score_weight = 0.0;
+    config.overlap_score_credit = 0.0;
     config.router_assume_kv_reuse = false;
     config.router_track_prefill_tokens = false;
     config.router_prefill_load_model = dynamo_kv_router::config::RouterPrefillLoadModel::None;
@@ -1146,7 +1161,7 @@ mod tests {
     #[test]
     fn test_derive_stage_router_configs_force_required_overrides() {
         let config = KvRouterConfig {
-            overlap_score_weight: 2.0,
+            overlap_score_credit: 1.0,
             router_track_active_blocks: true,
             router_assume_kv_reuse: true,
             router_track_prefill_tokens: true,
@@ -1157,7 +1172,7 @@ mod tests {
         let decode = derive_decode_router_config(&args, Some(config));
 
         assert!(!prefill.router_track_active_blocks);
-        assert_eq!(decode.overlap_score_weight, 0.0);
+        assert_eq!(decode.overlap_score_credit, 0.0);
         assert!(!decode.router_assume_kv_reuse);
         assert!(!decode.router_track_prefill_tokens);
     }

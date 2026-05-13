@@ -845,22 +845,19 @@ struct PolicyEvaluator<T: BlockMetadata> {
 }
 
 impl<T: BlockMetadata> PolicyEvaluator<T> {
-    async fn run(self) {
-        let mut poll_interval = tokio::time::interval(Duration::from_micros(100));
-        poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
+    async fn run(mut self) {
         loop {
-            // Poll for items
-            if let Some(item) = self.input_queue.pop_valid() {
+            while let Some(item) = self.input_queue.pop_valid() {
                 self.evaluate(item.data).await;
-            } else {
-                // No items available, wait a bit
-                poll_interval.tick().await;
             }
 
-            // Check for shutdown (cancel channel closed)
-            if self.cancel_rx.has_changed().is_err() {
-                break;
+            tokio::select! {
+                _ = self.input_queue.notified() => {}
+                result = self.cancel_rx.changed() => {
+                    if result.is_err() {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -1445,6 +1442,16 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
                 TransferOptions::default(),
             )?;
 
+            // `execute_local_transfer` reserves the physical/simulated
+            // transfer synchronously and returns an awaitable completion
+            // notification. Only now is the handle a safe marker for
+            // virtual-time accounting.
+            for (state, block_ids) in transfer_states.values() {
+                let mut state_guard = state.lock().unwrap();
+                state_guard.set_status(TransferStatus::Transferring);
+                state_guard.mark_in_flight(block_ids.iter().copied());
+            }
+
             // Wait for transfer completion
             notification.await?;
             let end_xfer = Instant::now();
@@ -1536,6 +1543,12 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
                         );
                     }
                 }
+            }
+        } else {
+            for (state, block_ids) in transfer_states.values() {
+                let mut state_guard = state.lock().unwrap();
+                state_guard.set_status(TransferStatus::Transferring);
+                state_guard.mark_in_flight(block_ids.iter().copied());
             }
         }
 

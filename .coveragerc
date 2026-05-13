@@ -1,0 +1,11 @@
+[paths]
+dynamo =
+    components/src/dynamo
+    /workspace/components/src/dynamo
+    $GITHUB_WORKSPACE/components/src/dynamo
+dynamo_bindings =
+    lib/bindings/python/src/dynamo
+    /workspace/lib/bindings/python/src/dynamo
+    $GITHUB_WORKSPACE/lib/bindings/python/src/dynamo
+[run]
+parallel = True

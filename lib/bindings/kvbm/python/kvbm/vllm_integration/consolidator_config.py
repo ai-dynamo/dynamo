@@ -5,8 +5,14 @@
 
 from kvbm.v1.vllm_integration.consolidator_config import (  # noqa: F401
     get_consolidator_endpoints,
+    get_consolidator_mode,
     is_truthy,
     should_enable_consolidator,
 )
 
-__all__ = ["get_consolidator_endpoints", "is_truthy", "should_enable_consolidator"]
+__all__ = [
+    "get_consolidator_endpoints",
+    "get_consolidator_mode",
+    "is_truthy",
+    "should_enable_consolidator",
+]
