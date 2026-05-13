@@ -6,10 +6,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-try:
-    from sglang.srt.utils.network import NetworkAddress
-except ImportError:
-    NetworkAddress = None
+from sglang.srt.utils.network import NetworkAddress
 
 SGLANG_WORKER_GROUP_ID_KEY = "sglang_worker_group_id"
 
@@ -25,13 +22,6 @@ def get_sglang_worker_group_id(server_args) -> Optional[str]:
         logging.warning(
             "SGLang multi-node worker group id requires dist_init_addr; "
             "falling back to local worker id behavior"
-        )
-        return None
-
-    if NetworkAddress is None:
-        logging.warning(
-            "SGLang NetworkAddress is unavailable; cannot normalize "
-            "dist_init_addr for worker group id"
         )
         return None
 

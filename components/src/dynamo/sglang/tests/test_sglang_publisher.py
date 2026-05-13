@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -9,8 +10,9 @@ import dynamo.sglang.publisher as publisher_mod
 import dynamo.sglang.worker_group as worker_group_mod
 from dynamo.sglang.publisher import (
     DynamoSglangPublisher,
+    _resolve_multinode_leader_worker_id,
     get_local_dp_rank_range,
-    resolve_multinode_leader_worker_id,
+    handle_non_leader_node,
     set_forward_pass_metrics_worker_id,
 )
 from dynamo.sglang.worker_group import (
@@ -137,7 +139,7 @@ async def test_resolve_multinode_leader_worker_id_uses_single_instance():
 
     server_args = SimpleNamespace(nnodes=2, node_rank=1)
 
-    worker_id = await resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
+    worker_id = await _resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
 
     assert worker_id == 1234
 
@@ -160,9 +162,13 @@ async def test_resolve_multinode_leader_worker_id_uses_worker_group(monkeypatch)
         "get_sglang_worker_group_id",
         lambda server_args: "dist_init:tcp://10.0.0.1:2345",
     )
-    server_args = SimpleNamespace(nnodes=2, node_rank=1, dist_timeout=5)
+    server_args = SimpleNamespace(
+        nnodes=2,
+        node_rank=1,
+        dist_timeout=5,
+    )
 
-    worker_id = await resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
+    worker_id = await _resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
 
     assert worker_id == 1234
     assert calls == [
@@ -186,9 +192,65 @@ async def test_resolve_multinode_leader_worker_id_ignores_ambiguous_instances():
 
     server_args = SimpleNamespace(nnodes=2, node_rank=1)
 
-    worker_id = await resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
+    worker_id = await _resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
 
     assert worker_id is None
+
+
+@pytest.mark.asyncio
+async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypatch):
+    calls = []
+    init_called = asyncio.Event()
+
+    class FakeClient:
+        async def wait_for_instance_by_runtime_data(self, key, value, timeout_s=None):
+            return 1234
+
+    class FakeEndpoint:
+        async def client(self):
+            return FakeClient()
+
+    server_args = SimpleNamespace(
+        nnodes=2,
+        node_rank=1,
+        dist_timeout=5,
+        kv_events_config='{"endpoint": "tcp://*:5557"}',
+    )
+
+    class FakePublisher:
+        def __init__(self):
+            self.generate_endpoint = FakeEndpoint()
+            self.server_args = server_args
+            self.kv_worker_id = None
+
+        def init_kv_event_publish(self):
+            calls.append(self.kv_worker_id)
+            init_called.set()
+
+        def cleanup(self):
+            pass
+
+    monkeypatch.setattr(
+        publisher_mod,
+        "get_sglang_worker_group_id",
+        lambda server_args: "dist_init:tcp://10.0.0.1:2345",
+    )
+    metrics_task = asyncio.create_task(asyncio.Event().wait())
+    task = asyncio.create_task(
+        handle_non_leader_node(
+            SimpleNamespace(server_args=server_args),
+            FakePublisher(),
+            metrics_task,
+        )
+    )
+
+    await asyncio.wait_for(init_called.wait(), timeout=1)
+    assert calls == [1234]
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert metrics_task.cancelled()
 
 
 def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):

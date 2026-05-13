@@ -17,7 +17,7 @@ def pytest_ignore_collect(collection_path, config):
     Checks test file naming pattern: test_sglang_*.py
     """
     filename = collection_path.name
-    if filename.startswith("test_sglang_") and filename != "test_sglang_publisher.py":
+    if filename.startswith("test_sglang_"):
         if importlib.util.find_spec("sglang") is None:
             return True  # sglang not available, skip this file
     return None

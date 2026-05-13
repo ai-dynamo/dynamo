@@ -9,25 +9,14 @@ import logging
 from typing import TYPE_CHECKING, List, Optional, Tuple
 from urllib.parse import urlparse
 
+import sglang as sgl
 import zmq
 import zmq.asyncio
+from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
+from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto, get_zmq_socket
 
 if TYPE_CHECKING:
-    import sglang as sgl
     from prometheus_client import CollectorRegistry
-
-try:
-    from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
-    from sglang.srt.utils.network import (
-        NetworkAddress,
-        get_local_ip_auto,
-        get_zmq_socket,
-    )
-except ImportError:
-    NetworkAddress = None
-    ZmqEventPublisher = None
-    get_local_ip_auto = None
-    get_zmq_socket = None
 
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -42,13 +31,6 @@ from dynamo.sglang.worker_group import (
 )
 
 SGLANG_WORKER_GROUP_LOOKUP_TIMEOUT_S = 300.0
-
-
-def require_sglang_dependency(value, name: str):
-    if value is not None:
-        return value
-
-    raise ImportError(f"sglang is required to use {name}")
 
 
 def get_local_dp_rank_range(server_args) -> range:
@@ -83,7 +65,7 @@ def set_forward_pass_metrics_worker_id(
     server_args.forward_pass_metrics_ipc_name = f"ipc://{ipc_path}"
 
 
-async def resolve_multinode_leader_worker_id(
+async def _resolve_multinode_leader_worker_id(
     generate_endpoint: Endpoint,
     server_args,
 ) -> Optional[int]:
@@ -160,8 +142,7 @@ def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
         raise ValueError(
             f"Expected tcp://host:port endpoint, got {endpoint_template!r}"
         )
-    network_address = require_sglang_dependency(NetworkAddress, "NetworkAddress")
-    return network_address(ip_address, parsed.port).to_tcp()
+    return NetworkAddress(ip_address, parsed.port).to_tcp()
 
 
 # Note: We use SGLang's ZmqEventPublisher.offset_endpoint_port() directly
@@ -216,8 +197,7 @@ class DynamoSglangPublisher:
         self._ctx: zmq.asyncio.Context | None = None
         if node_rank == 0:
             self._ctx = zmq.asyncio.Context()
-            get_socket = require_sglang_dependency(get_zmq_socket, "get_zmq_socket")
-            self._sock = get_socket(
+            self._sock = get_zmq_socket(
                 self._ctx,
                 zmq.PULL,
                 self.engine.port_args.metrics_ipc_name,
@@ -339,13 +319,7 @@ class DynamoSglangPublisher:
                 raise ValueError(
                     "sglang kv_events_config is set but missing 'endpoint'"
                 )
-            get_local_ip = require_sglang_dependency(
-                get_local_ip_auto, "get_local_ip_auto"
-            )
-            zmq_event_publisher = require_sglang_dependency(
-                ZmqEventPublisher, "ZmqEventPublisher"
-            )
-            local_ip = get_local_ip()
+            local_ip = get_local_ip_auto()
 
             # Determine DP attention configuration
             dp_ranks = get_local_dp_rank_range(self.server_args)
@@ -359,7 +333,7 @@ class DynamoSglangPublisher:
             for dp_rank in dp_ranks:
                 # Use SGLang's offset_endpoint_port to ensure alignment with publishers
                 # This is the same function SGLang schedulers use to determine their bind ports
-                zmq_ep = zmq_event_publisher.offset_endpoint_port(base_ep, dp_rank)
+                zmq_ep = ZmqEventPublisher.offset_endpoint_port(base_ep, dp_rank)
                 if not zmq_ep:
                     logging.warning(
                         f"Skipping ZMQ subscriber for dp_rank={dp_rank}: "
@@ -544,7 +518,9 @@ async def setup_sgl_metrics(
     logging.debug("SGLang metrics publisher endpoint created")
 
     publisher.init_engine_metrics_publish()
-    publisher.init_kv_event_publish()
+    node_rank = getattr(config.server_args, "node_rank", 0) or 0
+    if node_rank <= 0:
+        publisher.init_kv_event_publish()
     publisher.init_fpm_relay()
 
     task = asyncio.create_task(publisher.run())
@@ -570,6 +546,13 @@ async def handle_non_leader_node(
         f"Non-leader node detected (node_rank={engine.server_args.node_rank}). "
         "Running with metrics and KV event publishing for local DP ranks."
     )
+
+    if publisher.server_args.kv_events_config:
+        publisher.kv_worker_id = await _resolve_multinode_leader_worker_id(
+            publisher.generate_endpoint,
+            publisher.server_args,
+        )
+        publisher.init_kv_event_publish()
 
     try:
         await asyncio.Event().wait()
