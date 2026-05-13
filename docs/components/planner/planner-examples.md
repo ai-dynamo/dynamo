@@ -126,7 +126,7 @@ spec:
   searchStrategy: rapid
 ```
 
-### Mocker Deployment (Testing)
+### Simulation with Mocker
 
 Deploy a mocker backend that simulates GPU timing behavior without real GPUs. Useful for:
 - Large-scale experiments without GPU resources

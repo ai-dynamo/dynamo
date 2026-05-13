@@ -50,7 +50,7 @@ cases:
       normal_text: ''
   PARSER.batch.8.c:
     description: Narration both before and after (sandwich)
-    ref: dynamo
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L282
     model_text: |-
       I will check the weather. <tool_call>
       <function=get_weather>
