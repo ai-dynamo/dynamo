@@ -22,6 +22,8 @@ except ImportError:
         ToolParserManager,
     )
 
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+
 from tests.parity.common import ParseResult, decode_arguments
 
 
@@ -112,13 +114,14 @@ def parse(
             error=f"UNAVAILABLE: vLLM has no parser for family={parser_family!r}"
         )
 
-    # Wrap flat tool defs to the OpenAI `{"type":"function","function":{...}}`
-    # shape vLLM expects, then pass through to BOTH the constructor and the
-    # request. Some parsers (e.g. hermes-style schema-aware ones) coerce or
-    # cache the schemas at __init__ from the `tools=` kwarg; passing only
-    # `request.tools` skips that path.
+    # Wrap flat tool defs as real `ChatCompletionToolsParam` Pydantic instances
     wrapped_tools = (
-        [t if "function" in t else {"type": "function", "function": t} for t in tools]
+        [
+            ChatCompletionToolsParam.model_validate(
+                t if "function" in t else {"type": "function", "function": t}
+            )
+            for t in tools
+        ]
         if tools
         else None
     )
