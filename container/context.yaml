@@ -54,11 +54,15 @@ vllm:
     runtime_image_tag: v0.19.1-cu130
     vllm_ref: v0.19.1
   xpu:
-    base_image: intel/deep-learning-essentials
-    runtime_image: intel/deep-learning-essentials
-    base_image_tag: 2025.3.2-0-devel-ubuntu24.04
-    runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
-    vllm_ref: v0.17.1
+    #base_image: intel/deep-learning-essentials
+    #runtime_image: intel/deep-learning-essentials
+    #base_image_tag: 2025.3.2-0-devel-ubuntu24.04
+    #runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
+    base_image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
+    runtime_image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
+    base_image_tag: 132765e3560659ff63ebd236203672e991b70e08-xpu
+    runtime_image_tag: 132765e3560659ff63ebd236203672e991b70e08-xpu
+    vllm_ref: v0.20.1
   cpu:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu

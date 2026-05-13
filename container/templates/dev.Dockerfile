@@ -295,6 +295,7 @@ ARG WORKSPACE_DIR=/workspace
 
 # Dev environment variables (aligned with framework dev stages)
 # Framework-specific PATH additions are handled in /etc/profile.d/50-framework-paths.sh
+
 {% if device == "cuda" or framework != "vllm" %}
 ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     DYNAMO_HOME=${WORKSPACE_DIR} \
@@ -334,6 +335,7 @@ RUN mkdir -p /opt/dynamo/venv && \
     pip install --ignore-installed maturin[patchelf]
 {% elif framework == "vllm" %}
 # vLLM inherits upstream's system Python solve; keep dev installs in our venv.
+
 {% if device == "cuda" %}
 # CUDA: Runtime uses system Python, so --system-site-packages correctly inherits packages.
 RUN mkdir -p /opt/dynamo/venv && \
@@ -343,7 +345,16 @@ RUN mkdir -p /opt/dynamo/venv && \
 # CPU/XPU: Runtime uses /opt/venv from upstream vLLM-CPU image. Reuse it directly
 # instead of creating /opt/dynamo/venv, since --system-site-packages points to UV Python
 # and won't inherit /opt/venv packages (nixl, vllm, etc.).
-RUN ln -sf /usr/local/bin/uv /opt/venv/bin/uv
+
+# Make /opt/venv writable by dynamo user for development (maturin develop, pip install)
+# Point /usr/local/bin/python to /opt/venv so scripts using 'python' work correctly
+# Use a wrapper script instead of symlink to ensure Python recognizes the venv context
+RUN chown -R dynamo:0 /opt/venv && \
+    ln -sf /usr/local/bin/uv /opt/venv/bin/uv && \
+    rm -f /usr/local/bin/python && \
+    echo '#!/bin/bash' > /usr/local/bin/python && \
+    echo 'exec /opt/venv/bin/python "$@"' >> /usr/local/bin/python && \
+    chmod +x /usr/local/bin/python
 {% endif %}
 {% elif framework == "dynamo" %}
 # framework=none: Create venv if runtime stage didn't already provide one
