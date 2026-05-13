@@ -16,34 +16,11 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-// Default jemalloc tuning baked in so wheels ship with the recommended
-// configuration without operators needing to set the env var.
-//
-// IMPORTANT — symbol naming: tikv-jemalloc-sys builds jemalloc with the
-// `--with-jemalloc-prefix=_rjem_` configure flag (to avoid clashing with
-// a system libjemalloc that may be preloaded). That prefix applies to
-// every public C symbol jemalloc looks up at startup, including
-// `malloc_conf`. So the symbol we must export is `_rjem_malloc_conf` (not
-// `malloc_conf`) — and the env var operators set to override at runtime
-// is `_RJEM_MALLOC_CONF` (not `MALLOC_CONF`). A plain `malloc_conf`
-// symbol or `MALLOC_CONF` env var is silently ignored on this build.
-//
-// Only CPU-count-independent knobs are baked here, so the same binary is
-// safe across hardware sizes:
-//
-// - `tcache:true` — explicit per-thread cache (default; kept for clarity).
-// - `tcache_max:32768` — per-thread cache covers allocations up to 32 KB
-//   (default 8 KB), keeping bytes::Bytes and HF tokenizer mid-sized allocs
-//   lock-free instead of routing through an arena.
-// - `dirty_decay_ms:5000`, `muzzy_decay_ms:5000` — halve the default decay
-//   times (10 s → 5 s) so dirty pages return to the OS faster. Mitigates
-//   sustained-load memory growth.
-//
-// `narenas` is intentionally NOT set: jemalloc's default of `4 * ncpu`
-// scales with hardware.
-//
-// Operators override via the `_RJEM_MALLOC_CONF` env var (jemalloc's
-// precedence: build < global symbol < /etc/malloc.conf < env).
+// Default jemalloc tuning. tikv-jemalloc-sys prefixes jemalloc symbols
+// with `_rjem_`, so the export name must be `_rjem_malloc_conf` and the
+// runtime override env var is `_RJEM_MALLOC_CONF` (not `MALLOC_CONF`).
+// Larger tcache keeps mid-sized allocs lock-free; faster decay returns
+// dirty pages to the OS sooner. `narenas` left at the `4 * ncpu` default.
 #[cfg(all(
     feature = "jemalloc",
     any(
