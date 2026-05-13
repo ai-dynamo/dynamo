@@ -15,10 +15,14 @@ import logging
 import os
 import random
 import sys
-from collections.abc import AsyncGenerator
-from typing import Any
+from collections.abc import AsyncGenerator, Callable
+from typing import Any, Optional
 
 import sglang as sgl
+import zmq
+import zmq.asyncio
+from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
+from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 from dynamo._core import Context
 from dynamo.common.backend.engine import (
@@ -27,6 +31,12 @@ from dynamo.common.backend.engine import (
     GenerateRequest,
     LLMEngine,
 )
+from dynamo.common.backend.publisher import (
+    KvEventSource,
+    Metrics,
+    SnapshotSource,
+    ZmqSource,
+)
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
@@ -34,6 +44,7 @@ from dynamo.llm import ModelInput
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import compute_bootstrap_address, warmup_prefill_engine
 from dynamo.sglang.args import parse_args
+from dynamo.sglang.publisher import format_zmq_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +63,21 @@ def _warmup_enabled() -> bool:
     return raw.strip().lower() not in ("1", "true", "yes", "on")
 
 
+def _local_dp_rank_range(server_args) -> tuple[int, int]:
+    """Per-node local-rank slice for this worker. Under DP attention each
+    node owns ``dp_size // nnodes`` ranks starting at
+    ``node_rank * local_dp_size``; otherwise rank 0 only."""
+    dp_size = getattr(server_args, "dp_size", 1) or 1
+    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
+    nnodes = getattr(server_args, "nnodes", 1) or 1
+    node_rank = getattr(server_args, "node_rank", 0) or 0
+    if enable_dp_attention and dp_size > 1:
+        local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
+        start = node_rank * local_dp_size
+        return start, start + local_dp_size
+    return 0, 1
+
+
 class SglangLLMEngine(LLMEngine):
     def __init__(self, server_args, dynamo_args, serving_mode: DisaggregationMode):
         self.server_args = server_args
@@ -67,6 +93,11 @@ class SglangLLMEngine(LLMEngine):
         # Background drain tasks for prefill stream after the bootstrap
         # chunk yields (Completed path only). Cancelled in cleanup().
         self._prefill_consume_tasks: set[asyncio.Task[Any]] = set()
+        # Populated by `_metrics_pull_loop`; read by `metrics_sources()`.
+        self._latest_metrics: dict[int, Metrics] = {}
+        self._metrics_task: Optional[asyncio.Task[None]] = None
+        self._metrics_zmq_ctx: Optional[zmq.asyncio.Context] = None
+        self._metrics_zmq_sock = None
 
     @classmethod
     async def from_args(
@@ -131,6 +162,8 @@ class SglangLLMEngine(LLMEngine):
             getattr(self.server_args, "max_prefill_tokens", None) or max_total_tokens
         )
 
+        self._start_metrics_task()
+
         return EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
@@ -143,6 +176,44 @@ class SglangLLMEngine(LLMEngine):
             bootstrap_host=self._bootstrap_host,
             bootstrap_port=self._bootstrap_port,
         )
+
+    def _start_metrics_task(self) -> None:
+        # Only the leader node hosts the PUSH socket; others skip.
+        assert self.engine is not None, "Engine not initialized"
+        node_rank = getattr(self.server_args, "node_rank", 0) or 0
+        if node_rank != 0:
+            return
+        self._metrics_zmq_ctx = zmq.asyncio.Context()
+        self._metrics_zmq_sock = get_zmq_socket(
+            self._metrics_zmq_ctx,
+            zmq.PULL,
+            self.engine.port_args.metrics_ipc_name,
+            True,
+        )
+        self._metrics_task = asyncio.create_task(
+            self._metrics_pull_loop(), name="sglang-metrics-pull"
+        )
+
+    async def _metrics_pull_loop(self) -> None:
+        sock = self._metrics_zmq_sock
+        assert sock is not None
+        while True:
+            try:
+                kv_metrics = await sock.recv_pyobj()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Log and exit; matches the legacy publisher's stance.
+                logger.exception("SGLang metrics pull loop terminated")
+                return
+            dp_rank = (
+                kv_metrics.data_parallel_rank
+                if kv_metrics.data_parallel_rank is not None
+                else 0
+            )
+            self._latest_metrics[dp_rank] = Metrics(
+                kv_used_blocks=kv_metrics.kv_active_blocks,
+            )
 
     async def generate(
         self, request: GenerateRequest, context: Context
@@ -285,6 +356,27 @@ class SglangLLMEngine(LLMEngine):
                 task.cancel()
         self._prefill_consume_tasks.clear()
 
+        if self._metrics_task is not None:
+            self._metrics_task.cancel()
+            # CancelledError is a BaseException (not Exception) in 3.8+; the
+            # tuple catches both the expected cancel and any teardown error.
+            try:
+                await self._metrics_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._metrics_task = None
+        if self._metrics_zmq_sock is not None:
+            try:
+                self._metrics_zmq_sock.close(linger=0)
+            except Exception:
+                pass
+            self._metrics_zmq_sock = None
+        if self._metrics_zmq_ctx is not None:
+            try:
+                self._metrics_zmq_ctx.term()
+            except Exception:
+                pass
+            self._metrics_zmq_ctx = None
         if self.engine is not None:
             self.engine.shutdown()
             logger.info("SGLang engine shutdown")
@@ -409,6 +501,50 @@ class SglangLLMEngine(LLMEngine):
                 rid,
                 exc_info=True,
             )
+
+    async def kv_event_sources(self) -> list[KvEventSource]:
+        if not getattr(self.server_args, "kv_events_config", None):
+            return []
+        kv_events = json.loads(self.server_args.kv_events_config)
+        base_ep = kv_events.get("endpoint")
+        if not base_ep:
+            return []
+        local_ip = get_local_ip_auto()
+        start, end = _local_dp_rank_range(self.server_args)
+        sources: list[KvEventSource] = []
+        for dp_rank in range(start, end):
+            zmq_ep = ZmqEventPublisher.offset_endpoint_port(base_ep, dp_rank)
+            if not zmq_ep:
+                logger.warning(
+                    "Skipping ZMQ subscriber for dp_rank=%d: offset_endpoint_port "
+                    "returned None for base_ep=%s",
+                    dp_rank,
+                    base_ep,
+                )
+                continue
+            sources.append(
+                ZmqSource(
+                    endpoint=format_zmq_endpoint(zmq_ep, local_ip),
+                    dp_rank=dp_rank,
+                )
+            )
+        return sources
+
+    async def metrics_sources(self) -> list[SnapshotSource]:
+        # Only the leader node hosts the PULL socket that feeds
+        # `_latest_metrics`; non-leader ranks would advertise closures
+        # that stay `None` forever, so skip them.
+        if (getattr(self.server_args, "node_rank", 0) or 0) != 0:
+            return []
+
+        def snapshot_for(r: int) -> Callable[[], Optional[Metrics]]:
+            return lambda: self._latest_metrics.get(r)
+
+        start, end = _local_dp_rank_range(self.server_args)
+        return [
+            SnapshotSource(snapshot=snapshot_for(rank), dp_rank=rank)
+            for rank in range(start, end)
+        ]
 
     def _build_sampling_params(self, request: GenerateRequest) -> dict:
         if not self._use_sglang_tokenizer:

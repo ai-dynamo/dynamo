@@ -2397,6 +2397,7 @@ class backend:
             reasoning_parser: Optional[str] = None,
             exclude_tools_when_tool_choice_none: bool = ...,
             enable_local_indexer: bool = ...,
+            enable_kv_routing: bool = ...,
             metrics_labels: List[Tuple[str, str]] = ...,
             runtime: Optional["backend.RuntimeConfig"] = None,
             disaggregation_mode: "backend.DisaggregationMode" = ...,

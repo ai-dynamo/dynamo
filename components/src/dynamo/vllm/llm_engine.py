@@ -12,12 +12,16 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-from collections.abc import AsyncGenerator
-from typing import Any, cast
+from collections.abc import AsyncGenerator, Callable
+from typing import Any, Optional, cast
 
+from vllm.config import VllmConfig
+from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.inputs import TokensPrompt
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.metrics.loggers import StatLoggerBase
+from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo._core import Context
 from dynamo.common.backend.disagg import require_prefill_result
@@ -27,14 +31,88 @@ from dynamo.common.backend.engine import (
     GenerateRequest,
     LLMEngine,
 )
+from dynamo.common.backend.publisher import (
+    KvEventSource,
+    Metrics,
+    SnapshotSource,
+    ZmqSource,
+)
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput
 from dynamo.vllm.args import parse_args
+from dynamo.vllm.cache_info import (
+    configure_kv_event_block_size,
+    get_configured_kv_event_block_size,
+)
 
-from .handlers import build_sampling_params
+from .handlers import build_sampling_params, get_dp_range_for_worker
 
 logger = logging.getLogger(__name__)
+
+
+class _DpRankMetricsCache:
+    """Thread-safe (single-writer-per-rank) cache of the latest per-rank
+    ``Metrics`` snapshot.
+
+    Written by vLLM's ``StatLoggerBase.record`` callback (one logger per
+    dp_rank) and read by ``LLMEngine.metrics_sources`` on a fixed interval
+    from the runtime side. Reads return ``None`` until the engine has
+    emitted its first scheduler iteration for that rank.
+    """
+
+    def __init__(self, num_gpu_blocks: int) -> None:
+        # vLLM's `SchedulerStats.kv_cache_usage` is fractional; multiply by
+        # total blocks to get the absolute block count the router expects.
+        self._num_gpu_blocks = max(1, num_gpu_blocks)
+        self._by_rank: dict[int, Metrics] = {}
+
+    def update(self, dp_rank: int, scheduler_stats: SchedulerStats) -> None:
+        kv_used = int(self._num_gpu_blocks * scheduler_stats.kv_cache_usage)
+        self._by_rank[dp_rank] = Metrics(kv_used_blocks=kv_used)
+
+    def snapshot(self, dp_rank: int) -> Optional[Metrics]:
+        return self._by_rank.get(dp_rank)
+
+
+class _UnifiedStatLogger(StatLoggerBase):
+    """vLLM-side hook that just refreshes the per-rank metrics cache.
+
+    Replaces the legacy ``DynamoStatLoggerPublisher`` (which owned its own
+    ``WorkerMetricsPublisher`` and NATS endpoint). Under the unified path
+    the Rust ``Worker`` owns publishers, so this class only needs to
+    update an in-memory snapshot that ``metrics_sources()`` reads.
+    """
+
+    def __init__(self, cache: _DpRankMetricsCache, dp_rank: int) -> None:
+        self._cache = cache
+        self.dp_rank = dp_rank
+
+    def record(
+        self,
+        scheduler_stats: Optional[SchedulerStats],
+        iteration_stats: Optional[IterationStats],
+        mm_cache_stats: object = None,
+        engine_idx: int = 0,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        if scheduler_stats is None:
+            return
+        self._cache.update(self.dp_rank, scheduler_stats)
+
+    def log_engine_initialized(self) -> None:
+        pass
+
+
+class _UnifiedStatLoggerFactory:
+    """vLLM calls this once per dp_rank during engine initialization."""
+
+    def __init__(self, cache: _DpRankMetricsCache) -> None:
+        self._cache = cache
+
+    def __call__(self, vllm_config: VllmConfig, dp_rank: int) -> StatLoggerBase:
+        return _UnifiedStatLogger(self._cache, dp_rank)
 
 
 class VllmLLMEngine(LLMEngine):
@@ -46,6 +124,10 @@ class VllmLLMEngine(LLMEngine):
         self._default_sampling_params: Any = None
         self._prometheus_temp_dir: tempfile.TemporaryDirectory[str] | None = None
         self._model_max_len: int | None = None
+        # `_dp_range` / `_metrics_cache` resolved in `start()` once vllm
+        # has built its engine config and reported `num_gpu_blocks`.
+        self._dp_range: Optional[tuple[int, int]] = None
+        self._metrics_cache: Optional[_DpRankMetricsCache] = None
 
     @classmethod
     async def from_args(
@@ -98,16 +180,26 @@ class VllmLLMEngine(LLMEngine):
         )
         self._vllm_config = vllm_config
 
+        self._dp_range = get_dp_range_for_worker(vllm_config)
+        num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks or 0
+        self._metrics_cache = _DpRankMetricsCache(num_gpu_blocks=num_gpu_blocks)
+
         self.engine_client = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
             usage_context=UsageContext.OPENAI_API_SERVER,
+            stat_loggers=[_UnifiedStatLoggerFactory(self._metrics_cache)],
         )
         self._model_max_len = getattr(
             getattr(vllm_config, "model_config", None), "max_model_len", None
         )
 
-        num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks or 0
-        block_size = vllm_config.cache_config.block_size
+        # The KV-event block size can differ from `cache_config.block_size`
+        # (the main-attention block size lives in cache-group metadata).
+        # Populate `additional_config[DYNAMO_KV_EVENT_BLOCK_SIZE_KEY]` so
+        # `get_configured_kv_event_block_size` returns the right value
+        # both to the runtime via `EngineConfig` and to any future readers.
+        await configure_kv_event_block_size(self.engine_client, vllm_config)
+        block_size = get_configured_kv_event_block_size(vllm_config)
 
         return EngineConfig(
             model=self.engine_args.model,
@@ -220,6 +312,57 @@ class VllmLLMEngine(LLMEngine):
 
                 yield out
                 num_output_tokens_so_far[output_idx] = next_total
+
+    def _kv_routing_enabled(self) -> bool:
+        # vLLM's KV-event publisher is gated on prefix caching being on, on
+        # the engine actually emitting events, and on whether this worker
+        # role holds long-lived cache. Decode workers in disaggregated mode
+        # don't, so we opt out — matching the legacy publisher behavior.
+        if not self.engine_args.enable_prefix_caching:
+            return False
+        kv_events_config = self.engine_args.kv_events_config
+        if kv_events_config is None or not kv_events_config.enable_kv_cache_events:
+            return False
+        if self.disaggregation_mode == DisaggregationMode.DECODE:
+            return False
+        return True
+
+    async def kv_event_sources(self) -> list[KvEventSource]:
+        if not self._kv_routing_enabled():
+            return []
+        assert self._vllm_config is not None
+        assert self._dp_range is not None
+        kv_events_config = self.engine_args.kv_events_config
+        dp_start, dp_size = self._dp_range
+        return [
+            ZmqSource(
+                endpoint=ZmqEventPublisher.offset_endpoint_port(
+                    kv_events_config.endpoint,
+                    data_parallel_rank=rank,
+                ).replace("*", "127.0.0.1"),
+                dp_rank=rank,
+            )
+            for rank in range(dp_start, dp_start + dp_size)
+        ]
+
+    async def metrics_sources(self) -> list[SnapshotSource]:
+        # Same opt-in gating as kv_event_sources — if this worker isn't
+        # publishing KV events, it shouldn't publish load metrics either,
+        # or the router will score against partial worker state.
+        if not self._kv_routing_enabled():
+            return []
+        if self._dp_range is None or self._metrics_cache is None:
+            return []
+        cache = self._metrics_cache
+        dp_start, dp_size = self._dp_range
+
+        def snapshot_for(r: int) -> Callable[[], Optional[Metrics]]:
+            return lambda: cache.snapshot(r)
+
+        return [
+            SnapshotSource(snapshot=snapshot_for(rank), dp_rank=rank)
+            for rank in range(dp_start, dp_start + dp_size)
+        ]
 
     async def abort(self, context: Context) -> None:
         request_id = context.id()
