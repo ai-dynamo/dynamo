@@ -164,6 +164,7 @@ class SglangLLMEngine(LLMEngine):
 
         self._start_metrics_task()
 
+        dp_start, dp_end = _local_dp_rank_range(self.server_args)
         return EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
@@ -172,6 +173,10 @@ class SglangLLMEngine(LLMEngine):
             total_kv_blocks=total_kv_blocks,
             max_num_seqs=getattr(self.server_args, "max_running_requests", None),
             max_num_batched_tokens=max_num_batched_tokens,
+            # Number of DP ranks this worker hosts. Without this, the Rust
+            # runtime defaults to 1 and the router can't route to non-zero
+            # dp_ranks even though `kv_event_sources` registers them.
+            data_parallel_size=dp_end - dp_start,
             # Prefill-only — drives PrefillRouter's Bootstrap path.
             bootstrap_host=self._bootstrap_host,
             bootstrap_port=self._bootstrap_port,

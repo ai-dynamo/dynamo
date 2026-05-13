@@ -221,6 +221,10 @@ class VllmLLMEngine(LLMEngine):
             total_kv_blocks=num_gpu_blocks,
             max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
             max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+            # Number of DP ranks this worker hosts. Without this, the Rust
+            # runtime defaults to 1 and the router can't route to non-zero
+            # dp_ranks even though `kv_event_sources` registers them.
+            data_parallel_size=self._dp_range[1],
         )
 
     async def generate(
