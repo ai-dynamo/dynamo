@@ -80,29 +80,6 @@ _FAMILY_TO_VLLM_KEY = {
 }
 
 
-def _tools_as_namespace(
-    tools: list[dict[str, Any]] | None,
-) -> list[SimpleNamespace] | None:
-    """Wrap tool dicts so vLLM parsers can use attribute access
-    (``tool.function.name``) while keeping ``parameters`` as a plain
-    dict (vLLM also calls ``.get()`` on it)."""
-    if not tools:
-        return None
-    out = []
-    for t in tools:
-        fn = t.get("function", t)
-        out.append(
-            SimpleNamespace(
-                type=t.get("type", "function"),
-                function=SimpleNamespace(
-                    name=fn["name"],
-                    parameters=fn.get("parameters") or {},
-                ),
-            )
-        )
-    return out
-
-
 def parse(
     parser_family: str,
     raw_text: str,
@@ -114,7 +91,10 @@ def parse(
             error=f"UNAVAILABLE: vLLM has no parser for family={parser_family!r}"
         )
 
-    # Wrap flat tool defs as real `ChatCompletionToolsParam` Pydantic instances
+    # Wrap flat tool defs as real `ChatCompletionToolsParam` Pydantic instances —
+    # vLLM's schema-aware coercion paths gate on `hasattr(config, "type")` and
+    # `hasattr(config.function, "name")`, which the Pydantic model satisfies via
+    # attribute access (plain dicts would silently fall back to raw-string emission).
     wrapped_tools = (
         [
             ChatCompletionToolsParam.model_validate(
@@ -125,19 +105,15 @@ def parse(
         if tools
         else None
     )
-    # Some vLLM parsers (e.g. glm4_moe) access request.tools[i].function.name
-    # via attribute, not dict subscript. Convert to SimpleNamespace so both
-    # access styles work.
-    ns_tools = _tools_as_namespace(wrapped_tools)
     try:
         parser_cls = ToolParserManager.get_tool_parser(key)
         # vLLM's ToolParser constructor checks `if not self.model_tokenizer:` and raises
         # if falsy. None of the parsers we test actually call tokenizer methods inside
         # extract_tool_calls(), so a truthy stub satisfies the check.
-        parser: ToolParser = parser_cls(tokenizer=_StubTokenizer(), tools=ns_tools)
+        parser: ToolParser = parser_cls(tokenizer=_StubTokenizer(), tools=wrapped_tools)
         # vLLM's extract_tool_calls signature: (model_output, request) → ExtractedToolCallInformation.
         # We construct a minimal request shape with only the tools field, since most parsers ignore the rest.
-        request = SimpleNamespace(tools=ns_tools)
+        request = SimpleNamespace(tools=wrapped_tools)
         info = parser.extract_tool_calls(raw_text, request)
     except NotImplementedError as e:
         # Known unsupported combinations (e.g., vLLM's harmony parser requires
