@@ -8,7 +8,6 @@ package dynamo
 import (
 	"fmt"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -84,17 +83,4 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 	}...)
 
 	return container, nil
-}
-
-// KvTransferPolicyEnvVars returns the env vars a frontend router needs for
-// topology-aware KV transfer routing.
-func KvTransferPolicyEnvVars(policy *v1beta1.KvTransferPolicy) []corev1.EnvVar {
-	noMatchPolicy := string(policy.NoMatchPolicy)
-	if noMatchPolicy == "" {
-		noMatchPolicy = string(v1beta1.NoMatchPolicyFail)
-	}
-	return []corev1.EnvVar{
-		{Name: commonconsts.EnvRouterKvTransferDomain, Value: string(policy.Domain)},
-		{Name: commonconsts.EnvRouterKvTransferNoMatchPolicy, Value: noMatchPolicy},
-	}
 }
