@@ -120,6 +120,20 @@ class DistributedRuntime:
         """
         ...
 
+    def register_activity_notifier(self, name: str) -> None:
+        """
+        Register an activity notifier with the given name.
+        Idempotent: subsequent calls with the same name are no-ops.
+        """
+        ...
+
+    def fire_activity_notifier(self, name: str) -> bool:
+        """
+        Fire the activity notifier with the given name (wake its Waiter).
+        Returns true if the notifier was found and fired, false if not registered (no-op).
+        """
+        ...
+
     def register_engine_route(
         self,
         route_name: str,
