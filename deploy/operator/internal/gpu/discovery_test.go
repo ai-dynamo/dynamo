@@ -481,6 +481,21 @@ func TestInferHardwareSystem(t *testing.T) {
 			input:    "A100",
 			expected: nvidiacomv1beta1.GPUSKUTypeA100PCIe,
 		},
+		{
+			name:     "A30",
+			input:    "NVIDIA A30",
+			expected: nvidiacomv1beta1.GPUSKUTypeA30,
+		},
+		{
+			name:     "A30 with capacity suffix",
+			input:    "NVIDIA A30-24GB",
+			expected: nvidiacomv1beta1.GPUSKUTypeA30,
+		},
+		{
+			name:     "RTX A3000 should not match A30",
+			input:    "NVIDIA RTX A3000",
+			expected: "",
+		},
 
 		// --- Ada ---
 		{

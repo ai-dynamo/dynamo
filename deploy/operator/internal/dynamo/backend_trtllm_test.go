@@ -89,7 +89,7 @@ func TestShellQuoteForBashC_InLeaderCommand(t *testing.T) {
 		},
 	}
 
-	backend.setupLeaderContainer(container, 2, "dec", component, &GroveMultinodeDeployer{})
+	backend.setupLeaderContainer(container, 2, "dec", betaComponent(t, component), &GroveMultinodeDeployer{})
 
 	if len(container.Args) != 1 {
 		t.Fatalf("expected 1 arg, got %d", len(container.Args))
@@ -238,7 +238,7 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 				StartupProbe:   &corev1.Probe{},
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, tt.component, "test-service", tt.multinodeDeployer)
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, betaComponent(t, tt.component), "test-service", tt.multinodeDeployer)
 
 			validateVolumeMounts(t, container, tt.expectedVolumeMounts)
 			validateCommand(t, container, tt.expectedCommand)
@@ -448,7 +448,7 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{}
 
 			// Call UpdatePodSpec
-			backend.UpdatePodSpec(podSpec, tt.numberOfNodes, tt.role, component, "test-service", tt.multinodeDeployer)
+			backend.UpdatePodSpec(podSpec, tt.numberOfNodes, tt.role, betaComponent(t, component), "test-service", tt.multinodeDeployer)
 
 			// Check volume count
 			if len(podSpec.Volumes) != tt.expectedVolumeCount {
@@ -769,7 +769,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 				}
 			}
 
-			backend.setupLeaderContainer(container, tt.numberOfNodes, tt.serviceName, tt.component, tt.multinodeDeployer)
+			backend.setupLeaderContainer(container, tt.numberOfNodes, tt.serviceName, betaComponent(t, tt.component), tt.multinodeDeployer)
 
 			// Check that command is set correctly
 			expectedCommand := []string{"/bin/sh", "-c"}
@@ -920,7 +920,7 @@ func TestTRTLLMBackend_getGPUsPerNode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := getGPUsPerNode(tt.resources)
+			result := getGPUsPerNode(betaResourceRequirements(t, tt.resources))
 			if result != tt.expected {
 				t.Errorf("getGPUsPerNode() = %d, want %d", result, tt.expected)
 			}
@@ -1005,7 +1005,7 @@ func TestTRTLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 			originalEnvCount := len(container.Env)
 
 			// Call UpdateContainer (single node to avoid multinode logic)
-			backend.UpdateContainer(container, 1, RoleMain, tt.component, "test-service", &GroveMultinodeDeployer{})
+			backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, tt.component), "test-service", &GroveMultinodeDeployer{})
 
 			if tt.expectNoEnvVarChanges {
 				// Check that no new environment variables were added

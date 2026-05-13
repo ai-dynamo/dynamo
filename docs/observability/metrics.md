@@ -413,7 +413,7 @@ Gauge tracking the number of requests pending in the router's scheduler queue. O
 
 #### KV Indexer Metrics
 
-Tracks KV cache events applied to the router's radix tree index. Only appears when `--router-kv-overlap-score-weight` is greater than 0 (default) and workers are publishing KV events. Will not appear if `--router-kv-overlap-score-weight 0` is set or no KV events have been received.
+Tracks KV cache events applied to the router's radix tree index. Only appears when `--router-kv-overlap-score-credit` is greater than 0 (default) and workers are publishing KV events. Will not appear if `--router-kv-overlap-score-credit 0` is set or no KV events have been received.
 
 | Metric | Type | Description |
 |--------|------|-------------|
@@ -471,3 +471,5 @@ For the full list of metrics, configuration options, and architecture details, s
 - [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
 - [Dynamo Architecture Overview](../design-docs/architecture.md)
 - [Backend Guide](../development/backend-guide.md)
+- [Forward Pass Metrics (SGLang)](../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) - Per-iteration scheduler telemetry via ZMQ/NATS for planner-driven scaling
+- [Forward Pass Metrics RFC](../proposals/vllm-rfc-forward-pass-metrics.md) - Design rationale for per-iteration metrics
