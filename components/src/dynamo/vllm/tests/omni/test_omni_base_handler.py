@@ -48,6 +48,7 @@ def _make_config(**parallel_overrides):
     cfg = MagicMock()
     cfg.model = "test-model"
     cfg.stage_configs_path = None
+    cfg.output_modalities = None
     cfg.engine_args.trust_remote_code = False
     cfg.diffusion = OmniDiffusionKwargs()
     cfg.parallel = dataclasses.replace(OmniParallelKwargs(), **parallel_overrides)
@@ -92,3 +93,11 @@ class TestDiffusionParallelConfigCoverage:
             _build_kwargs(config)
             _, kwargs = MockCfg.call_args
             assert kwargs.get("tensor_parallel_size") == 4
+
+    def test_output_modalities_forwarded_to_async_omni(self):
+        config = _make_config()
+        config.output_modalities = ["image"]
+
+        kwargs = _build_kwargs(config)
+
+        assert kwargs["output_modalities"] == ["image"]

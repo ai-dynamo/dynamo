@@ -104,6 +104,10 @@ Allowed local helpers:
 - `save` data contains only source fields that `dst` cannot represent.
 - Preserve unrepresentable data only through the type's private sparse spec and
   status payloads.
+- Conversion is stateless: do not infer origin, age, creation version, upgrade
+  path, or controller state from the fact that conversion runs.
+- If origin matters, admission can stamp explicit metadata on create;
+  conversion may only preserve it opaquely.
 - New conversion style allows at most two private conversion annotations per
   type: one spec payload annotation and one status payload annotation.
 - Do not add per-field, per-list, per-subobject, or other conversion

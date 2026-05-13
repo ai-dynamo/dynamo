@@ -76,6 +76,8 @@ navigation:
             path: kubernetes/installation-guide.md
           - page: Model Deployment Guide
             path: kubernetes/model-deployment-guide.md
+          - page: Model Caching
+            path: kubernetes/model-caching.md
           - page: DGDR Reference
             path: kubernetes/dgdr.md
           - page: Dynamo Operator
@@ -178,6 +180,8 @@ navigation:
             path: backends/trtllm/trtllm-diffusion.md
       - page: LoRA Adapters
         path: features/lora/README.md
+      - page: Fastokens Tokenizer
+        path: features/tokenizer/README.md
       - section: Agents
         slug: agents
         path: agents/README.md

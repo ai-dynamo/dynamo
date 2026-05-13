@@ -19,9 +19,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
-    AsyncEngineContext, BackendError, DynamoError, EngineConfig as RsEngineConfig, ErrorType,
-    LLMEngine, LLMEngineOutput, PreprocessedRequest, RuntimeConfig as RsRuntimeConfig,
-    Worker as RsWorker, WorkerConfig as RsWorkerConfig,
+    AsyncEngineContext, BackendError, DisaggregationMode as RsDisaggregationMode, DynamoError,
+    EngineConfig as RsEngineConfig, ErrorType, LLMEngine, LLMEngineOutput, PreprocessedRequest,
+    RuntimeConfig as RsRuntimeConfig, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
 };
 use dynamo_llm::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
@@ -41,6 +41,7 @@ use crate::to_pyerr;
 pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let m = PyModule::new(py, "backend")?;
+    m.add_class::<DisaggregationMode>()?;
     m.add_class::<EngineConfig>()?;
     m.add_class::<RuntimeConfig>()?;
     m.add_class::<WorkerConfig>()?;
@@ -50,6 +51,38 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
         .getattr("modules")?
         .set_item("dynamo._core.backend", &m)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// DisaggregationMode — mirror of `dynamo_backend_common::DisaggregationMode`.
+//
+// Variant names and integer values are stable wire format for the Python
+// side. `eq_int` enables `mode == DisaggregationMode.Prefill` plus integer
+// comparisons in tests.
+// ---------------------------------------------------------------------------
+
+#[pyclass(
+    module = "dynamo._core.backend",
+    name = "DisaggregationMode",
+    eq,
+    eq_int
+)]
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
+pub enum DisaggregationMode {
+    #[default]
+    Aggregated = 1,
+    Prefill = 2,
+    Decode = 3,
+}
+
+impl From<DisaggregationMode> for RsDisaggregationMode {
+    fn from(value: DisaggregationMode) -> Self {
+        match value {
+            DisaggregationMode::Aggregated => RsDisaggregationMode::Aggregated,
+            DisaggregationMode::Prefill => RsDisaggregationMode::Prefill,
+            DisaggregationMode::Decode => RsDisaggregationMode::Decode,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -78,7 +111,10 @@ impl EngineConfig {
         total_kv_blocks = None,
         max_num_seqs = None,
         max_num_batched_tokens = None,
+        bootstrap_host = None,
+        bootstrap_port = None,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         model: String,
         served_model_name: Option<String>,
@@ -87,6 +123,8 @@ impl EngineConfig {
         total_kv_blocks: Option<u64>,
         max_num_seqs: Option<u64>,
         max_num_batched_tokens: Option<u64>,
+        bootstrap_host: Option<String>,
+        bootstrap_port: Option<u16>,
     ) -> Self {
         Self {
             inner: RsEngineConfig {
@@ -97,6 +135,8 @@ impl EngineConfig {
                 total_kv_blocks,
                 max_num_seqs,
                 max_num_batched_tokens,
+                bootstrap_host,
+                bootstrap_port,
             },
         }
     }
@@ -128,6 +168,14 @@ impl EngineConfig {
     #[getter]
     fn max_num_batched_tokens(&self) -> Option<u64> {
         self.inner.max_num_batched_tokens
+    }
+    #[getter]
+    fn bootstrap_host(&self) -> Option<&str> {
+        self.inner.bootstrap_host.as_deref()
+    }
+    #[getter]
+    fn bootstrap_port(&self) -> Option<u16> {
+        self.inner.bootstrap_port
     }
 }
 
@@ -188,6 +236,7 @@ impl WorkerConfig {
         enable_local_indexer = true,
         metrics_labels = Vec::new(),
         runtime = None,
+        disaggregation_mode = DisaggregationMode::Aggregated,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -205,6 +254,7 @@ impl WorkerConfig {
         enable_local_indexer: bool,
         metrics_labels: Vec<(String, String)>,
         runtime: Option<RuntimeConfig>,
+        disaggregation_mode: DisaggregationMode,
     ) -> Self {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
@@ -227,6 +277,7 @@ impl WorkerConfig {
                 exclude_tools_when_tool_choice_none,
                 enable_local_indexer,
                 metrics_labels,
+                disaggregation_mode: disaggregation_mode.into(),
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
             },
         }
@@ -419,11 +470,30 @@ impl Drop for TraceContextGuard {
 
 #[async_trait]
 impl LLMEngine for PyLLMEngine {
-    async fn start(&self) -> Result<RsEngineConfig, DynamoError> {
-        let result = self
-            .call_method0_async("start")
-            .await
-            .map_err(py_err_to_dynamo)?;
+    async fn start(&self, worker_id: u64) -> Result<RsEngineConfig, DynamoError> {
+        let engine = self.engine.clone();
+        let event_loop = self.event_loop.clone();
+
+        // Forward worker_id to Python `start(worker_id)`. spawn_blocking
+        // around the GIL section matches `call_method0_async`.
+        let py_future = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<_> {
+                let bound = engine.bind(py);
+                let coroutine = bound.call_method1("start", (worker_id,))?;
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("start offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)?;
+
+        let result = py_future.await.map_err(py_err_to_dynamo)?;
 
         Python::with_gil(|py| -> PyResult<RsEngineConfig> {
             let bound = result.bind(py);
@@ -441,6 +511,8 @@ impl LLMEngine for PyLLMEngine {
                 total_kv_blocks: opt_attr::<u64>(bound, "total_kv_blocks")?,
                 max_num_seqs: opt_attr::<u64>(bound, "max_num_seqs")?,
                 max_num_batched_tokens: opt_attr::<u64>(bound, "max_num_batched_tokens")?,
+                bootstrap_host: opt_attr::<String>(bound, "bootstrap_host")?,
+                bootstrap_port: opt_attr::<u16>(bound, "bootstrap_port")?,
             })
         })
         .map_err(py_err_to_dynamo)
@@ -449,7 +521,7 @@ impl LLMEngine for PyLLMEngine {
     async fn generate(
         &self,
         request: PreprocessedRequest,
-        ctx: Arc<dyn AsyncEngineContext>,
+        ctx: dynamo_backend_common::GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
@@ -466,12 +538,15 @@ impl LLMEngine for PyLLMEngine {
             }
         });
 
+        let first_token = ctx.first_token_sender().cloned();
+        let inner_ctx = ctx.inner_arc();
+
         // Pythonize the request, call generate(request, context=ctx), and
         // turn the resulting Python async generator into a Rust stream.
         let stream = tokio::task::spawn_blocking(move || -> PyResult<_> {
             Python::with_gil(|py| {
                 let py_request = pythonize(py, &request)?;
-                let py_ctx = Py::new(py, PyContext::new(ctx, trace_context))?;
+                let py_ctx = Py::new(py, PyContext::new(inner_ctx, trace_context, first_token))?;
 
                 let kwargs = PyDict::new(py);
                 kwargs.set_item("context", &py_ctx)?;
@@ -562,7 +637,7 @@ impl LLMEngine for PyLLMEngine {
             let py_future = tokio::task::spawn_blocking(move || {
                 Python::with_gil(|py| -> PyResult<_> {
                     let bound = engine.bind(py);
-                    let py_ctx = Py::new(py, PyContext::new(ctx, trace_context))?;
+                    let py_ctx = Py::new(py, PyContext::new(ctx, trace_context, None))?;
                     let coroutine = bound.call_method1("abort", (py_ctx,))?;
                     let locals = TaskLocals::new(event_loop.bind(py).clone());
                     pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)

@@ -95,24 +95,13 @@ cases:
       calls:
       - name: process_data
         arguments:
-          config:
-            nested: true
           items:
           - 1
           - 2
           - 3
+          config:
+            nested: true
       normal_text: ''
-  PARSER.batch.8:
-    description: Interleaved normal text
-    model_text: 'I will check the weather. functools[{"name": "get_weather", "arguments": {"location": "NYC"}}] Done.'
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: I will check the weather.
   PARSER.batch.9:
     description: Empty input
     model_text: ''

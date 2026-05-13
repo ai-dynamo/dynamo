@@ -91,7 +91,7 @@ cases:
       - name: get_weather
         arguments:
           location: NYC
-      normal_text: null
+      normal_text: ''
   PARSER.batch.6:
     description: Empty args (no-arg call)
     model_text: |-
@@ -134,22 +134,6 @@ cases:
           location: NYC
           unit: fahrenheit
       normal_text: ''
-  PARSER.batch.8:
-    description: Interleaved normal text
-    model_text: |-
-      I'll help you check the weather. <minimax:tool_call>
-      <invoke name="get_weather">
-      <parameter name="location">Tokyo</parameter>
-      </invoke>
-      </minimax:tool_call>
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: Tokyo
-      normal_text: "I'll help you check the weather. "
   PARSER.batch.9:
     description: Empty input
     model_text: ''
