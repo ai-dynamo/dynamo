@@ -436,8 +436,22 @@ async def init_llm_worker(
         default_sampling_params.detokenize = False
 
     connector = None
-    logging.info("Initializing NIXL Connect.")
-    connector = nixl_connect.Connector()
+    if config.disaggregation_mode != DisaggregationMode.AGGREGATED:
+        try:
+            logging.info("Initializing NIXL Connect.")
+            connector = nixl_connect.Connector()
+            await connector._create_connection()
+        except Exception:
+            logging.warning(
+                "Failed to initialize NIXL Connect; "
+                "KV-cache transfer will be unavailable.",
+                exc_info=True,
+            )
+            connector = None
+    else:
+        logging.info(
+            "Skipping NIXL Connect initialization (aggregated mode)."
+        )
 
     dump_config(
         config.dump_config_to, {"engine_args": engine_args, "dynamo_args": config}
