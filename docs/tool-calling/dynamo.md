@@ -85,41 +85,54 @@ python -m dynamo.frontend
 
 ### Tool Calling Request Example
 
-```python
-from openai import OpenAI
-import json
-
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
-
-def get_weather(location: str, unit: str):
-    return f"Getting the weather for {location} in {unit}..."
-tool_functions = {"get_weather": get_weather}
-
-tools = [{
-    "type": "function",
-    "function": {
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3.5-4B",
+    "messages": [
+      {"role": "user", "content": "What is the weather in San Francisco?"}
+    ],
+    "tools": [{
+      "type": "function",
+      "function": {
         "name": "get_weather",
-        "description": "Get the current weather in a given location",
+        "description": "Get the current weather for a location.",
         "parameters": {
-            "type": "object",
-            "properties": {
-                "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
-                "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
-            },
-            "required": ["location", "unit"]
+          "type": "object",
+          "properties": {"location": {"type": "string"}},
+          "required": ["location"]
         }
-    }
-}]
+      }
+    }],
+    "tool_choice": "auto"
+  }'
+```
 
-response = client.chat.completions.create(
-    model="Qwen/Qwen3.5-4B",
-    messages=[{"role": "user", "content": "What's the weather like in San Francisco in Celsius?"}],
-    tools=tools,
-    tool_choice="auto",
-    max_tokens=10000
-)
-tool_call = response.choices[0].message.tool_calls[0].function
-print(f"Function called: {tool_call.name}")
-print(f"Arguments: {tool_call.arguments}")
-print(f"Result: {tool_functions[tool_call.name](**json.loads(tool_call.arguments))}")
+Dynamo parses the tool call out of the model output and surfaces it as an
+OpenAI-compatible `tool_calls` entry on the response:
+
+```json
+{
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_0",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\": \"San Francisco\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ]
+}
 ```
