@@ -150,6 +150,17 @@ class PlannerConfig(BaseModel):
             "read once at startup."
         ),
     )
+    metric_pulling_prometheus_ssl_verify: bool = Field(
+        default_factory=lambda: os.environ.get("PROMETHEUS_SSL_VERIFY", "false").lower()
+        in ("1", "true", "yes"),
+        exclude=True,
+        description=(
+            "Verify the upstream Prometheus TLS certificate. Default False "
+            "preserves the previous PrometheusConnect(disable_ssl=True) "
+            "behavior. Set True for hardened monitoring stacks; pair with "
+            "an injected CA bundle if the upstream uses a private CA."
+        ),
+    )
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
     )
