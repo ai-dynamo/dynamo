@@ -604,7 +604,24 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 
 	t.Run("ready gms checkpoint injects restore sidecars and loader mount", func(t *testing.T) {
 		podSpec := testPodSpec()
+		podSpec.Volumes = append(
+			podSpec.Volumes,
+			corev1.Volume{Name: "nvme0", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			corev1.Volume{Name: "nvme1", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		)
 		podSpec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
+		podSpec.Containers[0].VolumeMounts = append(
+			podSpec.Containers[0].VolumeMounts,
+			corev1.VolumeMount{Name: "nvme0", MountPath: "/mnt/nvme0"},
+			corev1.VolumeMount{Name: "nvme1", MountPath: "/mnt/nvme1"},
+		)
+		podSpec.Containers[0].Env = append(
+			podSpec.Containers[0].Env,
+			corev1.EnvVar{Name: EnvTransferBackend, Value: "local-ssd-striped"},
+			corev1.EnvVar{Name: EnvLoadWorkers, Value: "32"},
+			corev1.EnvVar{Name: EnvLocalSSDRoots, Value: "/mnt/nvme0/gms,/mnt/nvme1/gms"},
+			corev1.EnvVar{Name: EnvShardSizeBytes, Value: "1073741824"},
+		)
 		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash, GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
@@ -629,15 +646,66 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		}
 		assert.Equal(t, "/checkpoints", mounts[snapshotprotocol.CheckpointVolumeName])
 		assert.Equal(t, gms.SharedMountPath, mounts[gms.SharedVolumeName])
+		assert.Equal(t, "/mnt/nvme0", mounts["nvme0"])
+		assert.Equal(t, "/mnt/nvme1", mounts["nvme1"])
 
 		env := map[string]string{}
 		for _, item := range loader.Env {
 			env[item.Name] = item.Value
 		}
 		assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", env["GMS_CHECKPOINT_DIR"])
+		assert.Equal(t, "local-ssd-striped", env["GMS_TRANSFER_BACKEND"])
+		assert.Equal(t, "32", env["GMS_LOAD_WORKERS"])
+		assert.Equal(t, "/mnt/nvme0/gms,/mnt/nvme1/gms", env["GMS_LOCAL_SSD_ROOTS"])
+		assert.Equal(t, "1073741824", env["GMS_SHARD_SIZE_BYTES"])
 		assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", info.GMSArtifactDir)
 		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, gmsServer.Command)
 		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.loader"}, loader.Command)
+	})
+
+	t.Run("ready gms checkpoint can use separate artifact storage", func(t *testing.T) {
+		podSpec := testPodSpec()
+		info := &CheckpointInfo{
+			Enabled: true,
+			Ready:   true,
+			Hash:    testHash,
+			GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+				Enabled: true,
+				ArtifactStorage: &nvidiacomv1alpha1.GMSArtifactStorageSpec{
+					PVCName:  "weights-pvc",
+					BasePath: "/gms-checkpoints",
+				},
+			},
+		}
+		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
+
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
+
+		volumes := map[string]string{}
+		for _, volume := range podSpec.Volumes {
+			if volume.PersistentVolumeClaim != nil {
+				volumes[volume.Name] = volume.PersistentVolumeClaim.ClaimName
+			}
+		}
+		assert.Equal(t, "snapshot-pvc", volumes[snapshotprotocol.CheckpointVolumeName])
+		assert.Equal(t, "weights-pvc", volumes[GMSArtifactVolume])
+
+		loader := findContainer(podSpec, GMSLoaderContainer)
+		require.NotNil(t, loader)
+		mounts := map[string]string{}
+		for _, mount := range loader.VolumeMounts {
+			mounts[mount.Name] = mount.MountPath
+		}
+		assert.Equal(t, "/checkpoints", mounts[snapshotprotocol.CheckpointVolumeName])
+		assert.Equal(t, "/gms-checkpoints", mounts[GMSArtifactVolume])
+
+		env := map[string]string{}
+		for _, item := range loader.Env {
+			env[item.Name] = item.Value
+		}
+		assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", env[EnvCheckpointDir])
+		assert.Equal(t, "/gms-checkpoints/"+testHash+"/versions/1", env[EnvWeightsCheckpointDir])
+		assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", info.GMSArtifactDir)
 	})
 
 	t.Run("error cases", func(t *testing.T) {
