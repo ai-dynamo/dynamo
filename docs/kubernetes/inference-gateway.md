@@ -172,6 +172,50 @@ documented in the Configuration section below.
 > does not require `InferencePool` or `InferenceModel` CRDs for endpoint
 > discovery. It discovers workers through Dynamo's own registration mechanism.
 
+#### `InferencePool` and the data plane (Istio, kGateway, Agentgateway)
+
+Although the Rust EPP does not consult `InferencePool` for worker discovery,
+the CRD is still required by the gateway **data plane**. Gateway
+implementations (Istio, kGateway, Agentgateway) read `InferencePool` to:
+
+1. Attach the `ext_proc` filter pointing at the EPP service.
+2. Enable the `override_host` LB policy so the EPP's
+   `x-gateway-destination-endpoint` header / dynamic-metadata is honored.
+3. Scope which pods are eligible to receive traffic — the pool's selector
+   becomes the `envoy.lb.subset_hint` metadata that the EPP intersects with
+   its own discovered workers before picking one.
+
+The Dynamo operator **auto-generates the `InferencePool`** for every
+`DynamoGraphDeployment` ([`deploy/operator/internal/dynamo/epp/inference_pool.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/epp/inference_pool.go)).
+Its `Selector` matches the operator's worker-pod labels and its
+`EndpointPickerRef` points at the EPP service on `9002`, so Dynamo's
+discovery and the pool's pod set stay in sync automatically — users do not
+hand-craft the pool.
+
+**Using Istio instead of kGateway:**
+
+- The only Istio-specific step is creating an Istio `Gateway` / `HTTPRoute`
+  that references the operator-generated `InferencePool` as its `backendRef`.
+  The DGD, the generated pool, and the Rust EPP image are all unchanged.
+- The operator targets the stable `inference.networking.k8s.io/v1` API group,
+  supported in Istio ≥ 1.27. Older Istio versions used the experimental
+  `inference.networking.x-k8s.io` group and are not compatible.
+- **mTLS to the EPP.** Istio expects mTLS between the gateway and the EPP
+  service. The Rust EPP serves self-signed TLS on `9002` by default
+  (`DYN_SECURE_SERVING=true`). See *Service Mesh Integration (Istio)* below
+  for the `DestinationRule` the Dynamo Helm chart can generate so Istio
+  terminates the EPP's TLS correctly.
+
+> [!IMPORTANT]
+> Model card discovery, worker liveness, KV-aware routing, and bookkeeping
+> remain entirely in Dynamo's control. The `InferencePool` provides the
+> data-plane envelope (which pods, which port, which EPP); Dynamo's
+> discovery and the Rust EPP provide the routing intelligence inside that
+> envelope. Customizing the pool selector by hand is supported but requires
+> keeping it consistent with the operator's worker-pod labels — otherwise
+> pods discovered by Dynamo will fail subset filtering and the EPP will
+> return `RoutingFailed`.
+
 ### 5. Deploy
 
 We recommend deploying Inference Gateway's Endpoint Picker as a Dynamo operator's managed component. Alternatively,
