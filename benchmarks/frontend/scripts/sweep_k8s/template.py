@@ -57,9 +57,7 @@ def build_substitution_dict(
     hf_token_secret_name = DEFAULT_HF_TOKEN_SECRET_NAME
     variables: Dict[str, str] = {
         # Deploy dimensions
-        "DYN_TOKENIZER": TOKENIZER_TEMPLATE_MAP.get(
-            deploy.tokenizer, deploy.tokenizer
-        ),
+        "DYN_TOKENIZER": TOKENIZER_TEMPLATE_MAP.get(deploy.tokenizer, deploy.tokenizer),
         "NUM_WORKERS": str(deploy.workers),
         # Model info
         "MODEL": config.model,
