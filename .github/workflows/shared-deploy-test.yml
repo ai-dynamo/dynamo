@@ -55,7 +55,7 @@ jobs:
         KUBECONFIG_BASE64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
       run: |
         set +x
-        echo "${{ KUBECONFIG_BASE64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig
+        echo "$KUBECONFIG_BASE64" | base64 -d > ${{ github.workspace }}/.kubeconfig
         chmod 600 ${{ github.workspace }}/.kubeconfig
         echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV
 
