@@ -1,37 +1,34 @@
 # dynamo-parsers
 
-Rust crate for parsing **tool calls** and **reasoning content** out of raw LLM
-output. Wire-format-aware, streaming-first, model-family-aware.
+> Also available as a standalone crate at **[ai-dynamo/frontend-crates](https://github.com/ai-dynamo/frontend-crates)**. That repo is the canonical home for publishing to crates.io; this in-tree copy is kept in sync manually for workspace builds.
 
-This is the post-model side of Dynamo's chat-completions pipeline: given a
-token stream from vLLM or SGLang, extract structured `Vec<ToolCall>` +
-`reasoning_content` for the client. The pre-model side (prompt formatting)
-lives in `lib/llm/src/preprocessor/prompt/`.
+Rust crate for parsing **tool calls** and **reasoning content** out of raw LLM output. Wire-format-aware, streaming-first, model-family-aware.
+
+Given a token stream from any inference engine (vLLM, SGLang, etc.), extract structured `Vec<ToolCallResponse>` + `reasoning_content` ready to be returned to the client. Prompt formatting (the pre-model side) is out of scope.
 
 ## What's in the crate
 
 Two top-level modules, each with its own parser registry:
 
 ```
-lib/parsers/
-├── src/
-│   ├── tool_calling/        ← tool-call extraction (18 registered parsers)
-│   │   ├── parsers.rs         — registry + dispatch (detect_and_parse_tool_call)
-│   │   ├── config.rs          — per-parser ToolCallConfig
-│   │   ├── response.rs        — ToolCallResponse shape (wire type)
-│   │   ├── dsml/              — DeepSeek V3.2 / V4 DSML grammar
-│   │   ├── gemma4/            — Google Gemma 4 custom non-JSON grammar (`<|"|>`-delimited strings)
-│   │   ├── xml/               — hermes, glm47, kimi_k2, minimax_m2, qwen3_coder
-│   │   ├── json/              — deepseek_v3, deepseek_v3_1, nemotron_deci/nano, jamba, mistral, phi4, llama3_json
-│   │   ├── harmony/           — OpenAI gpt-oss (Harmony token stream, uses openai_harmony crate)
-│   │   └── pythonic/          — Python function-call syntax (some Llama variants)
-│   └── reasoning/           ← reasoning-content extraction (15 registered parsers)
-│       ├── mod.rs             — registry + dispatch
-│       ├── base_parser.rs     — BasicReasoningParser (<think> ... </think>)
-│       ├── gemma4_parser.rs   — Gemma 4 (`<|channel>thought\n...<channel|>`)
-│       ├── gpt_oss_parser.rs  — Harmony channel parsing
-│       ├── granite_parser.rs  — Granite-style
-│       └── minimax_append_think_parser.rs  — MiniMax inline-reasoning
+src/
+├── tool_calling/        ← tool-call extraction (18 registered parsers)
+│   ├── parsers.rs         — registry + dispatch (detect_and_parse_tool_call)
+│   ├── config.rs          — per-parser ToolCallConfig
+│   ├── response.rs        — ToolCallResponse shape (wire type)
+│   ├── dsml/              — DeepSeek V3.2 / V4 DSML grammar
+│   ├── gemma4/            — Google Gemma 4 custom non-JSON grammar (`<|"|>`-delimited strings)
+│   ├── xml/               — hermes, glm47, kimi_k2, minimax_m2, qwen3_coder
+│   ├── json/              — deepseek_v3, deepseek_v3_1, nemotron_deci/nano, jamba, mistral, phi4, llama3_json
+│   ├── harmony/           — OpenAI gpt-oss (Harmony token stream, uses openai_harmony crate)
+│   └── pythonic/          — Python function-call syntax (some Llama variants)
+└── reasoning/           ← reasoning-content extraction (15 registered parsers)
+    ├── mod.rs             — registry + dispatch
+    ├── base_parser.rs     — BasicReasoningParser (<think> ... </think>)
+    ├── gemma4_parser.rs   — Gemma 4 (`<|channel>thought\n...<channel|>`)
+    ├── gpt_oss_parser.rs  — Harmony channel parsing
+    ├── granite_parser.rs  — Granite-style
+    └── minimax_append_think_parser.rs  — MiniMax inline-reasoning
 ```
 
 ## How a request flows through the crate
@@ -90,45 +87,20 @@ Reasoning parsers:
 | **Append-think** | `<think>...</think>` left inline as text, with `<think>` prefix on first chunk | `reasoning/minimax_append_think_parser.rs` | MiniMax M2 |
 | **Harmony channel** | Hidden `analysis` channel | `reasoning/gpt_oss_parser.rs` (wraps external `openai_harmony`) | gpt-oss-20B / 120B |
 | **Granite** | Custom start/end tokens | `reasoning/granite_parser.rs` | IBM Granite |
-| **Gemma 4 channel** | `<\|channel>thought\n...<channel\|>` with role-label prefix stripped | `reasoning/gemma4_parser.rs` | Google Gemma 4 thinking models |
+| **Gemma 4 channel** | `<\|channel>thought\n...<channel|>` with role-label prefix stripped | `reasoning/gemma4_parser.rs` | Google Gemma 4 thinking models |
 
 ## Adding a new parser
 
-1. **Pick the family** from the cheat sheet above. If an existing config-driven
-   family fits, add a `ToolCallConfig::<your_model>()` constructor in
-   `tool_calling/config.rs`, register it in `tool_calling/parsers.rs`. Done —
-   you inherit all the shared parser and tests.
+1. **Pick the family** from the cheat sheet above. If an existing config-driven family fits, add a `ToolCallConfig::<your_model>()` constructor in `tool_calling/config.rs`, register it in `tool_calling/parsers.rs`. Done — you inherit all the shared parser and tests.
 
-2. **If the grammar is genuinely new**, add a module under `tool_calling/` and
-   add a `ParserConfig` variant in `config.rs`. Follow the existing parser
-   modules for layout.
+2. **If the grammar is genuinely new**, add a module under `tool_calling/` and add a `ParserConfig` variant in `config.rs`. Follow the existing parser modules for layout.
 
-3. **For reasoning**, prefer aliasing to `BasicReasoningParser` unless the
-   grammar truly diverges (append-think, Harmony channels). Most new models
-   use plain `<think>...</think>` and can share.
+3. **For reasoning**, prefer aliasing to `BasicReasoningParser` unless the grammar truly diverges (append-think, Harmony channels). Most new models use plain `<think>...</think>` and can share.
 
-4. **Write tests.** Minimum viable set is in [`PARSER_CASES.md`](./PARSER_CASES.md) (`PARSER.*`
-   taxonomy). At minimum: `PARSER.1`/`PARSER.2`/`PARSER.3` for correctness,
-   `PARSER.5` for truncation behavior, `PARSER.8`/`PARSER.9` for streaming
-   with reasoning, and `PARSER.13` for interleaved text. `N/A` categories
-   should be explicitly called out in a comment rather than silently skipped.
+4. **Write tests.** Minimum viable set is in [`PARSER_CASES.md`](./PARSER_CASES.md) (`PARSER.*` taxonomy). At minimum: `PARSER.1`/`PARSER.2`/`PARSER.3` for correctness, `PARSER.5` for truncation behavior, `PARSER.8`/`PARSER.9` for streaming with reasoning, and `PARSER.13` for interleaved text. `N/A` categories should be explicitly called out in a comment rather than silently skipped.
 
 ## Related docs
 
-- [`PARSER_CASES.md`](./PARSER_CASES.md) — corner-case taxonomy. What every
-  parser should be tested against, what's N/A per family, what's a universal
-  gap today.
-- `lib/llm/tests/data/` — captured streaming fixtures per (engine × model)
-  that feed `test_streaming_tool_parsers.rs`. The replay side of the testing
-  story.
-
-## Integration with the rest of Dynamo
-
-- `lib/llm/src/preprocessor/prompt/` — pre-model side. Writes the prompts
-  that (eventually) come back and get parsed here.
-- `lib/llm/src/preprocessor.rs` — top-level request/response pipeline.
-  Decides whether to run the reasoning parser based on
-  `is_reasoning_disabled_by_request`, then hands the reasoning-stripped
-  tail to the tool-call parser.
-- `components/src/dynamo/frontend/` — Python frontend that surfaces parsed
-  output as OpenAI-compatible SSE chunks to the client.
+- [`PARSER_CASES.md`](./PARSER_CASES.md) — corner-case taxonomy. What every parser should be tested against, what's N/A per family, what's a universal gap today.
+- [`REASONING_CASES.md`](./REASONING_CASES.md) — same idea for reasoning parsers.
+- [`PIPELINE_CASES.md`](./PIPELINE_CASES.md) — end-to-end (reasoning → tool-call) test scenarios.

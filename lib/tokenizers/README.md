@@ -1,53 +1,48 @@
-# Tokenizers
+# dynamo-tokenizers
 
-## Introduction
-`dynamo-tokenizers` provides efficient, versatile tokenization for NLP workloads. It supports HuggingFace and TikToken tokenizers (plus a FastTokenizer hybrid mode) through a streamlined encoding/decoding API.
+> Also available as a standalone crate at **[ai-dynamo/frontend-crates](https://github.com/ai-dynamo/frontend-crates)**. That repo is the canonical home for publishing to crates.io; this in-tree copy is kept in sync manually for workspace builds.
+
+Efficient, versatile tokenization for LLM inference. Wraps HuggingFace and TikToken tokenizers (plus a FastTokenizer hybrid mode) behind a small encode/decode/sequence API designed for streaming detokenization.
 
 ## Features
-- **Hash Verification**: Ensures tokenization consistency and accuracy across different models.
-- **Simple Encoding and Decoding**: Facilitates the conversion of text to token IDs and back.
-- **Sequence Management**: Manage sequences of tokens for complex NLP tasks effectively.
 
-## Quick Start
+- **Multiple backends.** HuggingFace `tokenizers`, OpenAI `tiktoken`, and a FastTokenizer hybrid behind one trait.
+- **Streaming-friendly.** `Sequence` tracks incremental token-id appends and emits text deltas without re-decoding the full prefix.
+- **Hash verification.** Detect tokenizer drift across model versions.
 
-#### HuggingFace Tokenizer
+## Quick start
+
 ```rust
 use dynamo_tokenizers::hf::HuggingFaceTokenizer;
+use dynamo_tokenizers::traits::{Encoder, Decoder};
 
-let hf_tokenizer = HuggingFaceTokenizer::from_file("tests/data/sample-models/TinyLlama_v1.1/tokenizer.json")
-    .expect("Failed to load HuggingFace tokenizer");
+// tokenizer.json downloaded from any HuggingFace model repo
+let tokenizer = HuggingFaceTokenizer::from_file("/path/to/tokenizer.json")
+    .expect("load tokenizer");
+
+let encoding = tokenizer.encode("Your sample text here")
+    .expect("encode");
+println!("{:?}", encoding);
+
+let decoded = tokenizer.decode(&encoding.token_ids, false)
+    .expect("decode");
+assert_eq!(decoded, "Your sample text here");
 ```
 
-### Encoding and Decoding Text
+## Streaming detokenization with `Sequence`
 
 ```rust
-use dynamo_tokenizers::{HuggingFaceTokenizer, traits::{Encoder, Decoder}};
-
-let tokenizer = HuggingFaceTokenizer::from_file("tests/data/sample-models/TinyLlama_v1.1/tokenizer.json")
-    .expect("Failed to load HuggingFace tokenizer");
-
-let text = "Your sample text here";
-let encoding = tokenizer.encode(text)
-    .expect("Failed to encode text");
-
-println!("Encoding: {:?}", encoding);
-
-let decoded_text = tokenizer.decode(&encoding.token_ids, false)
-    .expect("Failed to decode token IDs");
-
-assert_eq!(text, decoded_text);
-
-// Using the Sequence object for encoding and decoding
-
 use dynamo_tokenizers::{Sequence, Tokenizer};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 let tokenizer = Tokenizer::from(Arc::new(tokenizer));
 let mut sequence = Sequence::new(tokenizer.clone());
 
 sequence.append_text("Your sample text here")
-    .expect("Failed to append text");
+    .expect("append text");
 
+// As each new token id is produced by the engine, append it
+// and get back just the incremental text delta:
 let delta = sequence.append_token_id(1337)
-    .expect("Failed to append token_id");
+    .expect("append token_id");
 ```

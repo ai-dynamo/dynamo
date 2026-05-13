@@ -3,13 +3,14 @@
 
 [package]
 name = "dynamo-tokenizers"
+description = "Standalone tokenizer implementations (HuggingFace, tiktoken, FastTokenizers) for LLM inference serving."
+# Canonical home for this crate is ai-dynamo/frontend-crates.
+homepage = "https://github.com/ai-dynamo/frontend-crates"
+repository = "https://github.com/ai-dynamo/frontend-crates.git"
 version.workspace = true
 edition.workspace = true
-description = "Standalone tokenizer implementations for Dynamo"
 authors.workspace = true
 license.workspace = true
-homepage.workspace = true
-repository.workspace = true
 keywords.workspace = true
 
 [dependencies]
