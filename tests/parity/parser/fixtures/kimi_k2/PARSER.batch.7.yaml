@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: kimi_k2
+mode: batch
+cases:
+  PARSER.batch.7.a:
+    description: Standard scalar types (string + int + bool)
+    ref: dynamo
+    model_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.book_flight:0<|tool_call_argument_begin|>{"destination":"Paris","passengers":2,"first_class":true}<|tool_call_end|><|tool_calls_section_end|>
+    tools:
+    - name: book_flight
+      parameters:
+        type: object
+        properties:
+          destination:
+            type: string
+          passengers:
+            type: integer
+          first_class:
+            type: boolean
+    expected:
+      calls:
+      - name: book_flight
+        arguments:
+          destination: Paris
+          passengers: 2
+          first_class: true
+      normal_text: ''
+  PARSER.batch.7.b:
+    description: Unicode + escaped chars in string value
+    ref: dynamo
+    model_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Tōkyō
+      \"central\""}<|tool_call_end|><|tool_calls_section_end|>
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: Tōkyō "central"
+      normal_text: ''
+  PARSER.batch.7.c:
+    description: Schema mismatch — string value where schema declares integer
+    ref: dynamo
+    model_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.set_temperature:0<|tool_call_argument_begin|>{"celsius":"20"}<|tool_call_end|><|tool_calls_section_end|>
+    tools:
+    - name: set_temperature
+      parameters:
+        type: object
+        properties:
+          celsius:
+            type: integer
+    expected:
+      calls:
+      - name: set_temperature
+        arguments:
+          celsius: '20'
+      normal_text: ''
+  PARSER.batch.7.d:
+    description: Nested object + array (existing shape)
+    ref: dynamo
+    model_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.process_data:0<|tool_call_argument_begin|>{"items":[1,2,3],"config":{"nested":true}}<|tool_call_end|><|tool_calls_section_end|>
+    tools:
+    - name: process_data
+      parameters:
+        type: object
+        properties:
+          items:
+            type: array
+          config:
+            type: object
+    expected:
+      calls:
+      - name: process_data
+        arguments:
+          items:
+          - 1
+          - 2
+          - 3
+          config:
+            nested: true
+      normal_text: ''

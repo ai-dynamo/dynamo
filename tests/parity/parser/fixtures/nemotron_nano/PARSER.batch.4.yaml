@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: nemotron_nano
+mode: batch
+cases:
+  PARSER.batch.4.a:
+    description: Tool_call wrapper with no <function> body
+    ref: dynamo
+    model_text: |-
+      <tool_call>
+      random text
+      </tool_call>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls: []
+      normal_text: ''
+  PARSER.batch.4.d:
+    description: Missing </parameter> closing tag
+    ref: dynamo
+    model_text: |-
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      NYC
+      </function>
+      </tool_call>
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      normal_text: ''
