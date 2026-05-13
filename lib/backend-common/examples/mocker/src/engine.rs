@@ -284,6 +284,7 @@ impl LLMEngine for MockerBackend {
             max_num_seqs: self.engine_args.max_num_seqs.map(|v| v as u64),
             max_num_batched_tokens: self.engine_args.max_num_batched_tokens.map(|v| v as u64),
             data_parallel_size: None,
+            data_parallel_start_rank: None,
             // Mocker has no real KV transport, so it never advertises a
             // bootstrap address. Real prefill engines populate these in
             // start() to publish ModelRuntimeConfig.disaggregated_endpoint.

@@ -115,6 +115,7 @@ impl EngineConfig {
         max_num_seqs = None,
         max_num_batched_tokens = None,
         data_parallel_size = None,
+        data_parallel_start_rank = None,
         bootstrap_host = None,
         bootstrap_port = None,
     ))]
@@ -128,6 +129,7 @@ impl EngineConfig {
         max_num_seqs: Option<u64>,
         max_num_batched_tokens: Option<u64>,
         data_parallel_size: Option<u32>,
+        data_parallel_start_rank: Option<u32>,
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
     ) -> Self {
@@ -141,6 +143,7 @@ impl EngineConfig {
                 max_num_seqs,
                 max_num_batched_tokens,
                 data_parallel_size,
+                data_parallel_start_rank,
                 bootstrap_host,
                 bootstrap_port,
             },
@@ -178,6 +181,10 @@ impl EngineConfig {
     #[getter]
     fn data_parallel_size(&self) -> Option<u32> {
         self.inner.data_parallel_size
+    }
+    #[getter]
+    fn data_parallel_start_rank(&self) -> Option<u32> {
+        self.inner.data_parallel_start_rank
     }
     #[getter]
     fn bootstrap_host(&self) -> Option<&str> {
@@ -525,6 +532,7 @@ impl LLMEngine for PyLLMEngine {
                 max_num_seqs: opt_attr::<u64>(bound, "max_num_seqs")?,
                 max_num_batched_tokens: opt_attr::<u64>(bound, "max_num_batched_tokens")?,
                 data_parallel_size: opt_attr::<u32>(bound, "data_parallel_size")?,
+                data_parallel_start_rank: opt_attr::<u32>(bound, "data_parallel_start_rank")?,
                 bootstrap_host: opt_attr::<String>(bound, "bootstrap_host")?,
                 bootstrap_port: opt_attr::<u16>(bound, "bootstrap_port")?,
             })

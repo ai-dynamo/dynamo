@@ -109,6 +109,12 @@ pub struct EngineConfig {
     /// Number of data-parallel ranks this worker hosts. Defaults to 1.
     /// The router uses this to enumerate per-rank load when scoring.
     pub data_parallel_size: Option<u32>,
+    /// Global index of the first DP rank this worker hosts. Defaults to 0.
+    /// Non-zero only under multi-worker DP layouts where each worker owns a
+    /// sub-range (e.g. vLLM hybrid/external LB, SGLang DP-attention across
+    /// multiple nodes). The router enumerates ranks
+    /// `[data_parallel_start_rank, data_parallel_start_rank + data_parallel_size)`.
+    pub data_parallel_start_rank: Option<u32>,
     /// Bootstrap host this prefill worker advertises to decode peers.
     ///
     /// Only meaningful for backends with a Dynamo-level host/port

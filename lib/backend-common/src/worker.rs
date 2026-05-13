@@ -813,6 +813,7 @@ async fn build_local_model(
         max_num_seqs: engine_config.max_num_seqs,
         max_num_batched_tokens: engine_config.max_num_batched_tokens,
         data_parallel_size: engine_config.data_parallel_size.unwrap_or(1),
+        data_parallel_start_rank: engine_config.data_parallel_start_rank.unwrap_or(0),
         tool_call_parser: config.tool_call_parser.clone(),
         reasoning_parser: config.reasoning_parser.clone(),
         exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,

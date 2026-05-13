@@ -225,6 +225,9 @@ class VllmLLMEngine(LLMEngine):
             # runtime defaults to 1 and the router can't route to non-zero
             # dp_ranks even though `kv_event_sources` registers them.
             data_parallel_size=self._dp_range[1],
+            # Global index of the first rank this worker hosts. Non-zero
+            # under hybrid/external LB where each worker owns a sub-range.
+            data_parallel_start_rank=self._dp_range[0],
         )
 
     async def generate(

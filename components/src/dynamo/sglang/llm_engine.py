@@ -177,6 +177,10 @@ class SglangLLMEngine(LLMEngine):
             # runtime defaults to 1 and the router can't route to non-zero
             # dp_ranks even though `kv_event_sources` registers them.
             data_parallel_size=dp_end - dp_start,
+            # Global index of the first rank this worker hosts. Non-zero
+            # for multi-node DP-attention where each node owns a slice
+            # starting at `node_rank * local_dp_size`.
+            data_parallel_start_rank=dp_start,
             # Prefill-only — drives PrefillRouter's Bootstrap path.
             bootstrap_host=self._bootstrap_host,
             bootstrap_port=self._bootstrap_port,
