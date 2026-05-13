@@ -311,6 +311,7 @@ struct KvRouterConfigSerde {
     serve_indexer: bool,
     shared_cache_multiplier: f64,
     shared_cache_type: SharedCacheType,
+    router_predicted_ttl_secs: Option<f64>,
 }
 
 impl Default for KvRouterConfigSerde {
@@ -342,6 +343,7 @@ impl Default for KvRouterConfigSerde {
             serve_indexer: config.serve_indexer,
             shared_cache_multiplier: config.shared_cache_multiplier,
             shared_cache_type: config.shared_cache_type,
+            router_predicted_ttl_secs: config.router_predicted_ttl_secs,
         }
     }
 }
@@ -454,6 +456,16 @@ pub struct KvRouterConfig {
     /// Type of external shared KV cache to query during routing.
     /// "none" (default): disabled. "hicache": query sglang workers for L3 cache state.
     pub shared_cache_type: SharedCacheType,
+
+    /// TTL in seconds applied to entries in the local predict-on-route side
+    /// indexer. `None` disables predict-on-route. A value requires
+    /// `use_kv_events=true` and enables a secondary approximate indexer
+    /// populated by routing decisions; `find_matches` queries both the
+    /// event-driven primary and local side indexer and returns the per-worker
+    /// maximum overlap.
+    #[serde(default)]
+    #[validate(range(min = 0.0))]
+    pub router_predicted_ttl_secs: Option<f64>,
 }
 
 impl Default for KvRouterConfig {
@@ -483,6 +495,7 @@ impl Default for KvRouterConfig {
             serve_indexer: false,
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
+            router_predicted_ttl_secs: None,
         }
     }
 }
@@ -527,6 +540,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             serve_indexer: compat.serve_indexer,
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
+            router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
         })
     }
 }
@@ -570,6 +584,11 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
             "serve_indexer requires overlap_score_credit > 0",
         ));
     }
+    if config.router_predicted_ttl_secs.is_some() && !config.use_kv_events {
+        return Err(ValidationError::new(
+            "router_predicted_ttl_secs requires use_kv_events=true",
+        ));
+    }
     Ok(())
 }
 
@@ -587,6 +606,10 @@ impl KvRouterConfig {
         }
 
         DEFAULT_RECHECK_INTERVAL
+    }
+
+    pub fn predict_on_route_enabled(&self) -> bool {
+        self.router_predicted_ttl_secs.is_some()
     }
 
     pub fn assume_kv_reuse(&self, config_override: Option<&RouterConfigOverride>) -> bool {
@@ -722,6 +745,61 @@ mod tests {
 
         assert!(too_small.validate().is_err());
         assert!(too_large.validate().is_err());
+    }
+
+    #[test]
+    fn test_kv_router_config_rejects_local_approx_with_predicted_ttl() {
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_predicted_ttl_secs: Some(5.0),
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_kv_router_config_rejects_remote_approx_with_predicted_ttl() {
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            use_remote_indexer: true,
+            router_predicted_ttl_secs: Some(5.0),
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_kv_router_config_allows_remote_events_with_predicted_ttl() {
+        let config = KvRouterConfig {
+            use_kv_events: true,
+            use_remote_indexer: true,
+            router_predicted_ttl_secs: Some(5.0),
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_kv_router_config_allows_served_events_with_predicted_ttl() {
+        let config = KvRouterConfig {
+            use_kv_events: true,
+            serve_indexer: true,
+            router_predicted_ttl_secs: Some(5.0),
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_kv_router_config_deserializes_predicted_ttl() {
+        let config: KvRouterConfig =
+            serde_json::from_str(r#"{"router_predicted_ttl_secs":5.0}"#).unwrap();
+
+        assert_eq!(config.router_predicted_ttl_secs, Some(5.0));
     }
 
     #[test]

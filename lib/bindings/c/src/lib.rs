@@ -630,6 +630,9 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     if let Some(v) = env_f64("DYN_ROUTER_QUEUE_THRESHOLD") {
         cfg.router_queue_threshold = Some(v);
     }
+    if let Some(v) = env_f64("DYN_ROUTER_PREDICTED_TTL_SECS") {
+        cfg.router_predicted_ttl_secs = Some(v);
+    }
 
     tracing::info!(
         overlap_score_credit = cfg.overlap_score_credit,
@@ -641,6 +644,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
         router_track_output_blocks = cfg.router_track_output_blocks,
         router_track_prefill_tokens = cfg.router_track_prefill_tokens,
         router_queue_threshold = ?cfg.router_queue_threshold,
+        router_predicted_ttl_secs = ?cfg.router_predicted_ttl_secs,
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
 

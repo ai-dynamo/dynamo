@@ -2668,6 +2668,53 @@ mod parallel_jail_tests {
         validate_parallel_streaming_tool_calls(&results, &expected_calls);
     }
 
+    /// GLM-4.7 parallel tool calls in a single chunk. GLM uses a distinct
+    /// `<tool_call>func<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>`
+    /// wire format with its own `find_tool_call_end_position_glm47`.
+    /// Regression test: the old single-find end-position function exited after the
+    /// first `</tool_call>`, leaking subsequent calls as raw XML into content.
+    #[tokio::test]
+    async fn test_parallel_tool_calls_single_chunk_glm47() {
+        let jail = JailedStream::builder().tool_call_parser("glm47").build();
+
+        let input_chunks = vec![test_utils::create_mock_response_chunk(
+            "<tool_call>get_weather\
+<arg_key>location</arg_key><arg_value>Boston</arg_value>\
+</tool_call>\
+<tool_call>get_weather\
+<arg_key>location</arg_key><arg_value>New York</arg_value>\
+</tool_call>"
+                .to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(input_chunks);
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        assert!(!results.is_empty(), "Should have results");
+
+        let expected_calls = [
+            ("get_weather", json!({"location": "Boston"})),
+            ("get_weather", json!({"location": "New York"})),
+        ];
+
+        validate_parallel_streaming_tool_calls(&results, &expected_calls);
+
+        for result in &results {
+            if let Some(ref data) = result.data {
+                for choice in &data.inner.choices {
+                    if let Some(ref content) = choice.delta.content {
+                        let text = test_utils::extract_text(content);
+                        assert!(
+                            !text.contains("<tool_call>"),
+                            "Raw XML must not leak as text content, got: {text:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // =============================================================================
     // 2. PARALLEL TOOL CALLS ACROSS MULTIPLE CHUNKS (STREAMING)
     // =============================================================================

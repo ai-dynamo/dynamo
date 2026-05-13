@@ -319,29 +319,12 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
         "PARSER.batch.2.a",
     ): "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits",
     # PARSER.batch.7 sub-cases — complex argument types.
-    # .a (multi-arg standard types): vLLM's XML-grammar parsers (deepseek_v3_2/v4,
-    # minimax_m2, qwen3_coder) emit JSON-typed values as raw strings while Dynamo
-    # coerces per the schema. Same pattern as old bare-key entries, now scoped to .a/.d.
-    (
-        "vllm",
-        "deepseek_v3_2",
-        "PARSER.batch.7.a",
-    ): "vLLM emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types",
-    (
-        "vllm",
-        "deepseek_v4",
-        "PARSER.batch.7.a",
-    ): "vLLM emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types",
-    (
-        "vllm",
-        "minimax_m2",
-        "PARSER.batch.7.a",
-    ): "vLLM emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types",
-    (
-        "vllm",
-        "qwen3_coder",
-        "PARSER.batch.7.a",
-    ): "vLLM emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types",
+    # .a (multi-arg standard types) used to diverge for vLLM's XML-grammar parsers
+    # (deepseek_v3_2/v4, minimax_m2, qwen3_coder) — vLLM emitted JSON-typed values
+    # as raw strings while Dynamo coerced per the schema. After this PR's wrapper
+    # fix (passing real ChatCompletionToolsParam Pydantic instances), vLLM's
+    # schema-aware coercion fires and all four families match Dynamo. Only phi4 .d
+    # remains divergent.
     (
         "vllm",
         "phi4",
