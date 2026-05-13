@@ -12,7 +12,14 @@ use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 use std::sync::{Arc, Weak};
 
+// Under `#[cfg(test)]`, swap in `tracing-mutex`'s parking_lot wrapper
+// so the test suite enforces the documented `attachments → store`
+// lock-acquisition ordering at runtime via a global DAG. Identical API
+// in release builds; zero cost.
+#[cfg(not(test))]
 use parking_lot::Mutex;
+#[cfg(test)]
+use tracing_mutex::parkinglot::Mutex;
 
 /// Handle that represents a block registration in the global registry.
 /// This handle is cloneable and can be shared across pools.
@@ -65,13 +72,35 @@ impl BlockRegistrationHandleInner {
 impl Drop for BlockRegistrationHandleInner {
     #[inline]
     fn drop(&mut self) {
-        if let Some(registry) = self.registry.upgrade()
-            && registry
-                .prefix(&self.seq_hash)
-                .remove(&self.seq_hash)
-                .is_none()
-        {
-            tracing::warn!("Failed to remove block from registry: {:?}", self.seq_hash);
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        // The position-level write lock held by `prefix()` for the lifetime of
+        // `map` serializes us against concurrent `register_sequence_hash` and
+        // `transfer_registration` on this `seq_hash`. Without that lock, a
+        // concurrent registration could replace the entry's `Weak` between our
+        // strong-count-drop and this body running, and an unconditional remove
+        // would silently delete the newer registration's entry.
+        //
+        // Compare the stored `Weak`'s pointer to `self`: `Weak::<T>::as_ptr()`
+        // for sized `T` returns the same pointer as `&T as *const T`, and
+        // during `drop_in_place` the inner allocation is still live (the
+        // implicit weak from the strong refcount is released after `Drop`
+        // returns). Only remove if the entry still points to us.
+        let map = registry.prefix(&self.seq_hash);
+        let should_remove = match map.get(&self.seq_hash) {
+            Some(weak_ref) => std::ptr::eq(weak_ref.as_ptr(), self as *const Self),
+            None => {
+                debug_assert!(
+                    false,
+                    "registry entry vanished while a strong ref was alive: {:?}",
+                    self.seq_hash
+                );
+                false
+            }
+        };
+        if should_remove {
+            map.remove(&self.seq_hash);
         }
     }
 }
@@ -93,38 +122,69 @@ impl BlockRegistrationHandle {
             .unwrap_or(false)
     }
 
-    /// Mark that a Block<T, Registered> exists for this sequence hash.
-    /// Called when transitioning from Complete to Registered state.
+    /// Increment the refcounted presence marker for tier `T`. Each
+    /// presence-bearing slot transition (`Staged → Primary`,
+    /// `Staged → Duplicate`) calls this exactly once.
     pub(crate) fn mark_present<T: BlockMetadata>(&self) {
         let type_id = TypeId::of::<T>();
         let mut attachments = self.inner.attachments.lock();
-        attachments.presence_markers.insert(type_id, ());
+        *attachments.presence_markers.entry(type_id).or_insert(0) += 1;
     }
 
-    /// Mark that Block<T, Registered> no longer exists for this sequence hash.
-    /// Called when transitioning from Registered to Reset state.
+    /// Decrement the refcounted presence marker for tier `T`. Each
+    /// presence-removing slot transition (`Inactive → Mutable` via
+    /// eviction, `Duplicate → Reset` via last-duplicate drop) calls this
+    /// exactly once. The entry is removed on reaching zero.
     pub(crate) fn mark_absent<T: BlockMetadata>(&self) {
         let type_id = TypeId::of::<T>();
         let mut attachments = self.inner.attachments.lock();
-        attachments.presence_markers.remove(&type_id);
+        match attachments.presence_markers.get_mut(&type_id) {
+            Some(count) => {
+                debug_assert!(*count > 0, "mark_absent on zero-count presence marker");
+                *count -= 1;
+                if *count == 0 {
+                    attachments.presence_markers.remove(&type_id);
+                }
+            }
+            None => debug_assert!(false, "mark_absent with no presence marker present"),
+        }
     }
 
-    /// Check if a Block<T, Registered> currently exists for this sequence hash.
-    /// Returns true if block exists in active or inactive pool, false otherwise.
+    /// Returns `true` if at least one `Block<T, Registered>` exists for
+    /// this sequence hash (i.e., the refcount is > 0).
+    ///
+    /// This is a **refcounted shadow** of authoritative `BlockStore<T>`
+    /// state, not a linearizable snapshot. The store is updated under
+    /// its own mutex; this counter is incremented/decremented in a
+    /// separate critical section that runs after the store lock is
+    /// released. In steady state the shadow agrees with the store; while
+    /// a registration, eviction, or duplicate drop is mid-flight it can
+    /// briefly report the pre-update value. Callers who need the exact
+    /// current state should go through `BlockManager::match_blocks`
+    /// (which consults the store directly).
     pub fn has_block<T: BlockMetadata>(&self) -> bool {
         let type_id = TypeId::of::<T>();
         let attachments = self.inner.attachments.lock();
-        attachments.presence_markers.contains_key(&type_id)
+        attachments
+            .presence_markers
+            .get(&type_id)
+            .copied()
+            .unwrap_or(0)
+            > 0
     }
 
-    /// Check if a Block exists for any of the specified metadata types.
-    /// Returns true if a block exists for at least one of the types.
-    /// Acquires the lock only once for efficiency.
+    /// Returns `true` if a block exists for at least one of the
+    /// specified metadata-tier `TypeId`s.
     pub fn has_any_block(&self, type_ids: &[TypeId]) -> bool {
         let attachments = self.inner.attachments.lock();
-        type_ids
-            .iter()
-            .any(|type_id| attachments.presence_markers.contains_key(type_id))
+        type_ids.iter().any(|type_id| {
+            attachments
+                .presence_markers
+                .get(type_id)
+                .copied()
+                .unwrap_or(0)
+                > 0
+        })
     }
 
     /// Register a callback to be invoked when this handle is touched.

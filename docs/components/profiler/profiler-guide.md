@@ -133,7 +133,7 @@ features:
     enable_throughput_scaling: true
 ```
 
-`optimization_target` must be set to `sla` for `enable_throughput_scaling` and the planner's `ttft`/`itl` SLA targets to take effect. The `PlannerConfig` default is `throughput`, which uses static queue/utilization thresholds: it silently flips `enable_throughput_scaling` to `false` (so pre-deployment profiling is skipped and `planner-profile-data-XXXX` is not emitted) and ignores any `features.planner.ttft`/`itl` values. `enable_load_scaling` is unaffected (easy-mode keeps load scaling enabled). See the [Planner Guide](../planner/planner-guide.md#optimization-target) for the full explanation of each `optimization_target` value.
+`optimization_target` must be set to `sla` for `enable_throughput_scaling` and the planner's `ttft_ms`/`itl_ms` SLA targets to take effect. The `PlannerConfig` default is `throughput`, which uses static queue/utilization thresholds: it silently flips `enable_throughput_scaling` to `false` (so pre-deployment profiling is skipped and `planner-profile-data-XXXX` is not emitted) and ignores any `features.planner.ttft_ms`/`itl_ms` values. `enable_load_scaling` is unaffected (easy-mode keeps load scaling enabled). See the [Planner Guide](../planner/planner-guide.md#optimization-target) for the full explanation of each `optimization_target` value.
 
 - **rapid**: Uses AIC simulation to generate interpolation curves (~30s, no GPUs)
 - **thorough**: Deploys the selected engine config on real GPUs and sweeps across ISL/concurrency ranges (2-4h)
@@ -198,7 +198,7 @@ Each DGDR requires a container image for profiling and deployment:
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1"
 ```
 
 #### Quick Start: Deploy with DGDR
@@ -215,7 +215,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1"
 ```
 
 **Step 2: Apply the DGDR**
@@ -352,7 +352,7 @@ If GPU discovery is disabled, provide hardware config manually in the DGDR:
 spec:
   hardware:
     numGpusPerNode: 8
-    gpuSku: "H100-SXM5-80GB"
+    gpuSku: h100_sxm
     vramMb: 81920
 ```
 
@@ -372,7 +372,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1"
 
   searchStrategy: rapid  # or thorough
   autoApply: true

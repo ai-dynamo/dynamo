@@ -658,12 +658,22 @@ class VllmProcessor:
                 finish_reason = map_finish_reason(raw_finish_reason)
                 stop_reason = engine_response.get("stop_reason")
 
-                vllm_response = EngineCoreOutput(
-                    request_id=output_request_id,
-                    new_token_ids=engine_response["token_ids"],
-                    finish_reason=finish_reason,
-                    stop_reason=stop_reason,
-                )
+                output_kwargs: dict[str, Any] = {
+                    "request_id": output_request_id,
+                    "new_token_ids": engine_response["token_ids"],
+                    "finish_reason": finish_reason,
+                    "stop_reason": stop_reason,
+                }
+                output_fields = getattr(EngineCoreOutput, "__struct_fields__", ())
+                if "is_segment_finished" in output_fields:
+                    output_kwargs["is_segment_finished"] = engine_response.get(
+                        "is_segment_finished", False
+                    )
+                if "new_prompt_len_snapshot" in output_fields:
+                    output_kwargs["new_prompt_len_snapshot"] = engine_response.get(
+                        "new_prompt_len_snapshot"
+                    )
+                vllm_response = EngineCoreOutput(**output_kwargs)
 
                 vllm_out: OutputProcessorOutput = self.output_processor.process_outputs(
                     [vllm_response]
@@ -760,6 +770,9 @@ class EngineFactory:
             )
         loop = asyncio.get_running_loop()
 
+        # TODO(gh-8749): consume mdc.model_info.path()'s parent (slug_dir)
+        # instead of re-running fetch_model. The MDC cache already has
+        # blake3-verified copies; this path duplicates the download.
         source_path = mdc.source_path()
         if not os.path.exists(source_path):
             await fetch_model(source_path, ignore_weights=True)

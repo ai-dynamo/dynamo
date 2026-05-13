@@ -30,11 +30,11 @@ def _make_agg_strategy(
     num_pools=2, priority_overrides=None
 ) -> AggPoolSelectionStrategy:
     return AggPoolSelectionStrategy(
-        ttft_min=10,
-        ttft_max=3000,
+        ttft_min_ms=10,
+        ttft_max_ms=3000,
         ttft_resolution=2,
-        itl_min=5,
-        itl_max=200,
+        itl_min_ms=5,
+        itl_max_ms=200,
         itl_resolution=2,
         agg_pool_mapping=[[0, 1], [1, 1]],
         priority_overrides=priority_overrides or [],
@@ -86,41 +86,41 @@ class TestAggPoolSelection:
     def test_tight_ttft_tight_itl(self):
         strategy = _make_agg_strategy()
         # ttft_idx=0, itl_idx=0 -> pool 0
-        result = strategy.select_pool(ttft_target=100, itl_target=10)
+        result = strategy.select_pool(ttft_target_ms=100, itl_target_ms=10)
         assert result == 0
 
     def test_tight_ttft_relaxed_itl(self):
         strategy = _make_agg_strategy()
         # ttft_idx=0, itl_idx=1 -> pool 1
-        result = strategy.select_pool(ttft_target=100, itl_target=150)
+        result = strategy.select_pool(ttft_target_ms=100, itl_target_ms=150)
         assert result == 1
 
     def test_relaxed_ttft_tight_itl(self):
         strategy = _make_agg_strategy()
         # ttft_idx=1, itl_idx=0 -> pool 1
-        result = strategy.select_pool(ttft_target=2000, itl_target=10)
+        result = strategy.select_pool(ttft_target_ms=2000, itl_target_ms=10)
         assert result == 1
 
     def test_relaxed_ttft_relaxed_itl(self):
         strategy = _make_agg_strategy()
         # ttft_idx=1, itl_idx=1 -> pool 1
-        result = strategy.select_pool(ttft_target=2000, itl_target=150)
+        result = strategy.select_pool(ttft_target_ms=2000, itl_target_ms=150)
         assert result == 1
 
     def test_default_ttft_uses_midpoint(self):
         strategy = _make_agg_strategy()
-        # ttft_target=None -> midpoint=(10+3000)/2=1505 -> ttft_idx=1
-        # itl_target=10 -> itl_idx=0
+        # ttft_target_ms=None -> midpoint=(10+3000)/2=1505 -> ttft_idx=1
+        # itl_target_ms=10 -> itl_idx=0
         # [1][0] = 1
-        result = strategy.select_pool(itl_target=10)
+        result = strategy.select_pool(itl_target_ms=10)
         assert result == 1
 
     def test_default_itl_uses_midpoint(self):
         strategy = _make_agg_strategy()
-        # ttft_target=100 -> ttft_idx=0
-        # itl_target=None -> midpoint=(5+200)/2=102.5 -> itl_idx=1
+        # ttft_target_ms=100 -> ttft_idx=0
+        # itl_target_ms=None -> midpoint=(5+200)/2=102.5 -> itl_idx=1
         # [0][1] = 1
-        result = strategy.select_pool(ttft_target=100)
+        result = strategy.select_pool(ttft_target_ms=100)
         assert result == 1
 
     def test_both_defaults_use_midpoints(self):
@@ -133,13 +133,13 @@ class TestAggPoolSelection:
     def test_clamping_below_min(self):
         strategy = _make_agg_strategy()
         # Both below min -> both clamp to idx 0
-        result = strategy.select_pool(ttft_target=0, itl_target=0)
+        result = strategy.select_pool(ttft_target_ms=0, itl_target_ms=0)
         assert result == 0
 
     def test_clamping_above_max(self):
         strategy = _make_agg_strategy()
         # Both above max -> both clamp to max idx
-        result = strategy.select_pool(ttft_target=10000, itl_target=1000)
+        result = strategy.select_pool(ttft_target_ms=10000, itl_target_ms=1000)
         assert result == 1
 
     def test_priority_override_takes_precedence(self):
@@ -149,7 +149,9 @@ class TestAggPoolSelection:
             ]
         )
         # Grid: relaxed TTFT + relaxed ITL -> pool 1, but priority overrides to 0
-        result = strategy.select_pool(ttft_target=2000, itl_target=150, priority=50)
+        result = strategy.select_pool(
+            ttft_target_ms=2000, itl_target_ms=150, priority=50
+        )
         assert result == 0
 
     def test_no_priority_uses_grid(self):
@@ -158,7 +160,7 @@ class TestAggPoolSelection:
                 PriorityPoolOverride(min_priority=10, max_priority=100, target_pool=0)
             ]
         )
-        result = strategy.select_pool(ttft_target=2000, itl_target=150)
+        result = strategy.select_pool(ttft_target_ms=2000, itl_target_ms=150)
         assert result == 1  # grid result, no priority
 
     def test_unmatched_priority_uses_grid(self):
@@ -167,12 +169,14 @@ class TestAggPoolSelection:
                 PriorityPoolOverride(min_priority=10, max_priority=100, target_pool=0)
             ]
         )
-        result = strategy.select_pool(ttft_target=2000, itl_target=150, priority=5)
+        result = strategy.select_pool(
+            ttft_target_ms=2000, itl_target_ms=150, priority=5
+        )
         assert result == 1  # priority=5 doesn't match [10, 100]
 
     def test_no_overrides_backward_compatible(self):
         strategy = _make_agg_strategy()
-        result = strategy.select_pool(ttft_target=100, itl_target=10, priority=50)
+        result = strategy.select_pool(ttft_target_ms=100, itl_target_ms=10, priority=50)
         assert result == 0  # no overrides configured, grid result
 
 
@@ -182,22 +186,22 @@ class TestAggPoolSelection:
 class TestAggPoolSelectionCustomMapping:
     def test_3x3_grid(self):
         strategy = AggPoolSelectionStrategy(
-            ttft_min=10,
-            ttft_max=3010,
+            ttft_min_ms=10,
+            ttft_max_ms=3010,
             ttft_resolution=3,
-            itl_min=10,
-            itl_max=100,
+            itl_min_ms=10,
+            itl_max_ms=100,
             itl_resolution=3,
             agg_pool_mapping=[[0, 1, 2], [1, 2, 0], [2, 0, 1]],
         )
         # Low TTFT, low ITL -> pool 0
-        assert strategy.select_pool(ttft_target=100, itl_target=15) == 0
+        assert strategy.select_pool(ttft_target_ms=100, itl_target_ms=15) == 0
         # Low TTFT, high ITL -> pool 2
-        assert strategy.select_pool(ttft_target=100, itl_target=90) == 2
+        assert strategy.select_pool(ttft_target_ms=100, itl_target_ms=90) == 2
         # Mid TTFT, mid ITL -> pool 2
-        assert strategy.select_pool(ttft_target=1500, itl_target=55) == 2
+        assert strategy.select_pool(ttft_target_ms=1500, itl_target_ms=55) == 2
         # High TTFT, low ITL -> pool 2
-        assert strategy.select_pool(ttft_target=2500, itl_target=15) == 2
+        assert strategy.select_pool(ttft_target_ms=2500, itl_target_ms=15) == 2
 
 
 # --- GlobalRouterConfig agg validation tests ---
@@ -252,11 +256,11 @@ class TestAggConfigValidation:
 
     def test_invalid_pool_idx_in_mapping(self):
         strategy = AggPoolSelectionStrategy(
-            ttft_min=10,
-            ttft_max=3000,
+            ttft_min_ms=10,
+            ttft_max_ms=3000,
             ttft_resolution=2,
-            itl_min=5,
-            itl_max=200,
+            itl_min_ms=5,
+            itl_max_ms=200,
             itl_resolution=2,
             agg_pool_mapping=[[0, 5], [0, 1]],  # pool 5 is out of range
         )
@@ -271,11 +275,11 @@ class TestAggConfigValidation:
 
     def test_mapping_row_count_mismatch(self):
         strategy = AggPoolSelectionStrategy(
-            ttft_min=10,
-            ttft_max=3000,
+            ttft_min_ms=10,
+            ttft_max_ms=3000,
             ttft_resolution=3,  # expects 3 rows
-            itl_min=5,
-            itl_max=200,
+            itl_min_ms=5,
+            itl_max_ms=200,
             itl_resolution=2,
             agg_pool_mapping=[[0, 1], [0, 1]],  # only 2 rows
         )
@@ -290,11 +294,11 @@ class TestAggConfigValidation:
 
     def test_mapping_col_count_mismatch(self):
         strategy = AggPoolSelectionStrategy(
-            ttft_min=10,
-            ttft_max=3000,
+            ttft_min_ms=10,
+            ttft_max_ms=3000,
             ttft_resolution=2,
-            itl_min=5,
-            itl_max=200,
+            itl_min_ms=5,
+            itl_max_ms=200,
             itl_resolution=3,  # expects 3 columns
             agg_pool_mapping=[[0, 1], [0, 1]],  # only 2 columns per row
         )
@@ -344,11 +348,11 @@ class TestAggConfigValidation:
 
     def test_ttft_range_invalid(self):
         strategy = AggPoolSelectionStrategy(
-            ttft_min=3000,
-            ttft_max=10,  # min > max
+            ttft_min_ms=3000,
+            ttft_max_ms=10,  # min > max
             ttft_resolution=2,
-            itl_min=5,
-            itl_max=200,
+            itl_min_ms=5,
+            itl_max_ms=200,
             itl_resolution=2,
             agg_pool_mapping=[[0, 1], [0, 1]],
         )
@@ -358,16 +362,16 @@ class TestAggConfigValidation:
             agg_pool_dynamo_namespaces=["a", "b"],
             agg_pool_selection_strategy=strategy,
         )
-        with pytest.raises(ValueError, match="ttft_min.*must be less than"):
+        with pytest.raises(ValueError, match="ttft_min_ms.*must be less than"):
             config.validate()
 
     def test_itl_range_invalid(self):
         strategy = AggPoolSelectionStrategy(
-            ttft_min=10,
-            ttft_max=3000,
+            ttft_min_ms=10,
+            ttft_max_ms=3000,
             ttft_resolution=2,
-            itl_min=200,
-            itl_max=5,  # min > max
+            itl_min_ms=200,
+            itl_max_ms=5,  # min > max
             itl_resolution=2,
             agg_pool_mapping=[[0, 1], [0, 1]],
         )
@@ -377,7 +381,7 @@ class TestAggConfigValidation:
             agg_pool_dynamo_namespaces=["a", "b"],
             agg_pool_selection_strategy=strategy,
         )
-        with pytest.raises(ValueError, match="itl_min.*must be less than"):
+        with pytest.raises(ValueError, match="itl_min_ms.*must be less than"):
             config.validate()
 
 
@@ -394,10 +398,10 @@ class TestLoadAggConfig:
         assert config.num_agg_pools == 2
         assert config.agg_pool_dynamo_namespaces == ["ns-agg-0", "ns-agg-1"]
         assert config.agg_pool_selection_strategy is not None
-        assert config.agg_pool_selection_strategy.ttft_min == 10
-        assert config.agg_pool_selection_strategy.ttft_max == 3000
-        assert config.agg_pool_selection_strategy.itl_min == 5
-        assert config.agg_pool_selection_strategy.itl_max == 200
+        assert config.agg_pool_selection_strategy.ttft_min_ms == 10
+        assert config.agg_pool_selection_strategy.ttft_max_ms == 3000
+        assert config.agg_pool_selection_strategy.itl_min_ms == 5
+        assert config.agg_pool_selection_strategy.itl_max_ms == 200
 
     def test_agg_config_with_priority_overrides(self, tmp_path):
         config_data = _agg_base_config()
@@ -437,8 +441,11 @@ class TestLoadAggConfig:
 
         strategy = config.agg_pool_selection_strategy
         # Tight TTFT + tight ITL -> pool 0 from grid
-        assert strategy.select_pool(ttft_target=100, itl_target=10) == 0
+        assert strategy.select_pool(ttft_target_ms=100, itl_target_ms=10) == 0
         # Relaxed TTFT + relaxed ITL -> pool 1 from grid
-        assert strategy.select_pool(ttft_target=2000, itl_target=150) == 1
+        assert strategy.select_pool(ttft_target_ms=2000, itl_target_ms=150) == 1
         # Priority override: relaxed would be pool 1, but priority 75 -> pool 0
-        assert strategy.select_pool(ttft_target=2000, itl_target=150, priority=75) == 0
+        assert (
+            strategy.select_pool(ttft_target_ms=2000, itl_target_ms=150, priority=75)
+            == 0
+        )

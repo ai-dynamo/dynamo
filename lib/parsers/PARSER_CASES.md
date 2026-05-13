@@ -77,8 +77,9 @@ The tag describes the *grammar*, not the parser stage.
 
 - **`PARSER.fmt.1`** Function-name conventions — allowed identifier chars (hyphens, underscores, dots), prefix variants (`functions.NAME` vs bare `NAME`), and rejection of malformed function IDs.
 - **`PARSER.fmt.2`** Whitespace / formatting tolerance — whitespace inside or between grammar tokens.
-- **`PARSER.fmt.3`** Token format variants — multiple acceptable spellings for the same semantic (e.g., Kimi K2's singular `<|tool_call_section_*|>` vs plural `<|tool_calls_section_*|>` section tokens).
+- **`PARSER.fmt.3`** Token / wire-format variants — multiple acceptable spellings for the same semantic. Examples: Kimi K2's singular `<|tool_call_section_*|>` vs plural `<|tool_calls_section_*|>` section tokens; Mistral pre-v11 (`[TOOL_CALLS][{"name":...,"arguments":...}]` JSON-array body) vs v11+ (`[TOOL_CALLS]name{...args}` name-then-object); Llama 3 with vs without `<|python_tag|>` start fence; Hermes `qwen25` registry alias. Parser must accept all configured variants and reject ones not registered for the active config.
 - **`PARSER.fmt.4`** Empty section / no-content wrappers — start+end fences with nothing between them.
+- **`PARSER.fmt.5`** Argument-shape conventions — JSON envelope shape inside the call body, distinct from `PARSER.fmt.1`'s function-name surface. Three sub-axes: native call-ID preservation (Kimi K2 `functions.NAME:N` surfaced verbatim on `ToolCall.id`); JSON field-order tolerance (`{name, arguments}` vs `{arguments, name}`, including the case where `arguments` itself contains a key called `"name"`); argument-key aliasing (`arguments` vs `parameters` interchangeably).
 
 #### `PARSER.xml.*` — XML-family only
 
@@ -102,6 +103,11 @@ The tag describes the *grammar*, not the parser stage.
 - Extremely long output (≥10 KB tool-call JSON in a single call).
 - Mid-stream error injection / interruption (worker kill, network drop mid-parse).
 - Schema arg-count mismatch (model emits extra or missing args vs declared schema).
+- Regex timeout / catastrophic-pattern guard, parser-exception containment, long ordinary-content fast-path. vLLM has explicit `test_regex_timeout_handling` for `llama3_json` / `llama4_pythonic` / `pythonic` and `test_extract_tool_calls_streaming_exception_returns_none` for Mistral; Dynamo relies on the Rust `regex` crate's linear-time guarantee but does not pin failure-containment paths.
+
+### Known production gaps (parser missing entirely)
+
+- **Mistral v11+ wire format** (`[TOOL_CALLS]name{...args}` name-then-object). Dynamo's `ToolCallConfig::mistral()` and the underlying `base_json_parser.rs` only handle pre-v11 (`[TOOL_CALLS][{name, arguments}]` JSON-array body). v11 is the current production path for Mistral-Small / Mistral-Large; vLLM tests it extensively under the `mistral_tool_parser` fixture. See `PARSER.fmt.3` for the variant taxonomy.
 
 ---
 
@@ -112,6 +118,11 @@ One complete, well-formed call in the response.
 - Applies to every tool-call parser.
 - Baseline correctness check. If `PARSER.batch.1` fails, nothing else
   below matters.
+- For parsers whose grammar carries a model-emitted call ID (e.g. Kimi
+  K2's `functions.NAME:N`), the happy-path test must additionally
+  assert that the native ID is preserved verbatim on `ToolCall.id` —
+  see `PARSER.fmt.5` for the broader argument-shape contract.
+  Reference: vLLM Kimi K2 PR #32768.
 
 ## `PARSER.batch.2` — Multiple tool calls (sequential or parallel)
 
@@ -121,6 +132,26 @@ Two or more calls in one response, in the same block or back-to-back.
 - Some grammars emit parallel calls in one block (DSML, XML); others
   emit sequential top-level sentinels (JSON dialects). Either way,
   extract all.
+
+### Sub-cases
+
+vLLM's test corpus partitions multi-call coverage along call-structure
+axes — same-delta vs incremental, surrounding content, and ID/index
+distinctness. The bare bucket would collapse all of these into one
+parity cell; sub-cases preserve the distinction.
+
+- **`PARSER.batch.2.a`** Parallel calls (canonical batched). Two or
+  more calls present together in the same emission unit; harness
+  asserts each is extracted, and order matches input.
+- **`PARSER.batch.2.b`** Multi-invoke close-together. Calls arrive in
+  the same delta or in rapid sequential chunks; the parser's loop
+  must surface every closed invoke, not stop after the first.
+- **`PARSER.batch.2.c`** Multi-invoke with surrounding content. Normal
+  text wraps the call group (vs `batch.8`'s single-call interleaving);
+  asserts that the parser doesn't conflate text with subsequent calls.
+- **`PARSER.batch.2.d`** ID / index distinctness. Each emitted call
+  carries a unique `id` (or sequential index) — covers the surface
+  contract that downstream tool-result correlation depends on.
 
 ## `PARSER.batch.3` — No tool call
 
@@ -144,6 +175,25 @@ arguments payload.
   parity tests should record divergences in their `KNOWN_DIVERGENCES`
   registry rather than asserting one truth.
 
+### Sub-cases
+
+The bare bucket lumped four distinct malformation classes together; vLLM's
+test corpus targets each separately and the recovery contract differs by
+class.
+
+- **`PARSER.batch.4.a`** Generic catch-all (no-crash). Random / arbitrary
+  garbage in the call body. Contract: parser must not panic; any output
+  shape is acceptable. This is the inherited common-suite shape.
+- **`PARSER.batch.4.b`** Invalid JSON syntax. Bad quote, extra/missing
+  comma, leaked delimiter chars inside an otherwise well-formed wrapper.
+  Tests the JSON-decoder fallback path (typically: surface as raw string).
+- **`PARSER.batch.4.c`** Missing structural keys. Wrapper is well-formed
+  but the body lacks `name` / `arguments` / `parameters`. Tests
+  field-validation surface (skip vs error vs partial extraction).
+- **`PARSER.batch.4.d`** Malformed wrapper / XML structure. Unclosed tags,
+  missing delimiters, mismatched fences. Tests the wrapper-parser layer
+  (vs the JSON-body layer in `.b`).
+
 ## `PARSER.batch.5` — Missing end-token recovery
 
 Model response is truncated before the closing fence arrives
@@ -159,6 +209,21 @@ or the model emitted EOS mid-generation.
   return an explicit error. Either way, pin the behavior with a test
   so a future change is intentional.
 
+### Sub-cases
+
+Three distinct truncation shapes with different recovery contracts:
+
+- **`PARSER.batch.5.a`** Missing closing tag. Open fence present,
+  matching close absent. The most common shape (model hit `max_tokens`
+  after emitting the call body but before the close fence).
+- **`PARSER.batch.5.b`** Missing opening tag. Close fence present
+  without a matching open — rare, but real (some grammars / streaming
+  edge cases). Most parsers no-op here; pin the behavior.
+- **`PARSER.batch.5.c`** Truncation / EOS mid-call. Stream ends
+  partway through the call body (mid-arguments, mid-name). The
+  recovery contract differs from `.a`/`.b`: the call body itself is
+  incomplete, not just the wrapper.
+
 ## `PARSER.batch.6` — Empty args
 
 Tool call with `arguments={}`, or a no-parameter invoke.
@@ -166,6 +231,22 @@ Tool call with `arguments={}`, or a no-parameter invoke.
 - Applies to every tool-call parser.
 - Must still return the call — empty args is a valid call, not a
   missing one.
+
+### Sub-cases
+
+vLLM's tests separate three empty-args shapes that look identical at
+the API but exercise different parser code paths.
+
+- **`PARSER.batch.6.a`** Canonical empty `{}`. Wrapper present,
+  arguments key with literal `{}` value. The inherited common-suite
+  baseline.
+- **`PARSER.batch.6.b`** Zero-arg formatting variants. Same call
+  shape as `.a` but with whitespace/newline variations (inline `{}`
+  vs newline `{\n}`, streaming-chunked emission). Tests parser
+  whitespace tolerance.
+- **`PARSER.batch.6.c`** No-args-key / parameterless. The
+  `arguments` key is absent entirely (vs explicit `{}`). Tests that
+  the parser treats missing-key as "no args" rather than "invalid".
 
 ## `PARSER.batch.7` — Complex argument types
 
@@ -179,6 +260,32 @@ values, and newlines inside argument values.
   verify that complex values make it through without truncation or
   escape bugs.
 
+### Sub-cases
+
+vLLM's `batch.7` is the largest single bucket (58 rows) and naturally
+splits along four type-handling axes:
+
+- **`PARSER.batch.7.a`** Standard scalar / container types. Canonical
+  type matrix: int, float, bool, null, list, object. The inherited
+  common-suite shape — verifies the parser preserves JSON-typed values
+  (vs stringifying everything).
+- **`PARSER.batch.7.b`** Escaped / Unicode / special chars. String
+  escapes (`\n`, `\"`), Unicode preservation (no `\uXXXX` re-encoding),
+  HTML inside argument values. Tests the JSON-decoder boundary.
+- **`PARSER.batch.7.c`** Schema mismatch — string value where schema
+  declares a typed primitive. Input is `{"celsius": "20"}` while the
+  schema says `celsius: integer`. The contract pinned here is
+  *value-preservation*: most parsers surface the raw string `"20"`
+  as-is and leave coercion to a downstream layer; a few parsers
+  (e.g. vLLM's deepseek_v3_2) opt to coerce at the parser layer and
+  produce `20` (int) instead. The test asserts preservation
+  (Dynamo's behavior); schema-coercing impls show up as registered
+  divergences.
+- **`PARSER.batch.7.d`** Multi-arg / nested / quoted / split-across-chunks.
+  Multiple parameters in one call, deeply-nested arguments, quotes/
+  brackets inside string values, and primitives split across streaming
+  token boundaries. Tests the streaming-aware concatenation logic.
+
 ## `PARSER.batch.8` — Normal text interleaved with tool calls
 
 Model emits narration text before / after / between tool-call blocks.
@@ -190,6 +297,31 @@ Parser must split content correctly: text → `normal_text`, calls →
   analog), the test additionally exercises the reasoning-parser
   handoff. Cross-tag with `REASONING.batch.2` if the reasoning parser
   also runs over the input.
+
+### Sub-cases
+
+The `b8` column of the cross-impl parity matrix shows broad divergence
+(vLLM and SGLang drop trailing text after the wrapper across XML-style
+families; Dynamo preserves it). The sub-cases pin which positional
+shape is being exercised so divergences land on a precise row.
+
+- **`PARSER.batch.8.a`** Narration **before** the tool call only —
+  model emits text, then a single tool call, then nothing else. Most
+  parsers handle this; it's the historical happy path.
+- **`PARSER.batch.8.b`** Narration **after** the tool call only —
+  model emits the tool call, then trailing text. Common divergence
+  point: vLLM and SGLang typically truncate at the wrapper close.
+- **`PARSER.batch.8.c`** Narration **both before and after** the tool
+  call (the sandwich). Combines `.a` and `.b` shapes; useful as a
+  superset assertion.
+- **`PARSER.batch.8.d`** Narration **between** multiple tool calls —
+  text → call → text → call → text. Tests that inter-call text is
+  preserved (not just leading/trailing).
+
+All four sub-cases share the same parser contract — `tool_calls` extracted,
+`normal_text` preserved by position. `.a`/`.b`/`.c` are single-call shapes
+that vary only in where the narration sits; `.d` is the multi-call
+interleaving shape. The assertion across all four is on `normal_text`.
 
 ## `PARSER.batch.9` — Empty content / empty `tool_calls` array / null response
 
@@ -259,6 +391,9 @@ which prefix variants it recognizes (`functions.NAME` vs bare `NAME`).
 - Models differ on what they emit. The parser must take a position
   and pin it with a test so a future tokenizer change doesn't
   silently start dropping valid calls.
+- Argument-envelope shape concerns (native ID preservation, JSON
+  field-order, argument-key alias) live under `PARSER.fmt.5`, not
+  here. `PARSER.fmt.1` is strictly the function-name surface.
 
 ## `PARSER.fmt.2` — Whitespace / formatting tolerance
 
@@ -272,15 +407,27 @@ arg JSON, etc.).
 - Rejecting whitespace strictly is also a valid choice — pin the
   behavior either way.
 
-## `PARSER.fmt.3` — Token format variants
+## `PARSER.fmt.3` — Token / wire-format variants
 
-Multiple acceptable spellings for the same semantic — e.g., Kimi K2's
-singular `<|tool_call_section_*|>` vs plural
-`<|tool_calls_section_*|>` section tokens. Parser must accept all
-configured variants.
+Multiple acceptable spellings for the same semantic. Examples:
 
-- Grammar-conditional. Applies only when the parser's config
-  explicitly enumerates more than one token-form alias.
+- **Kimi K2**: singular `<|tool_call_section_*|>` vs plural
+  `<|tool_calls_section_*|>` section tokens.
+- **Mistral**: pre-v11 (`[TOOL_CALLS][{"name":...,"arguments":...}]`
+  JSON-array body) vs v11+ (`[TOOL_CALLS]name{...args}`
+  name-then-object). The two forms come from different tokenizer
+  versions; production traffic mixes both.
+- **Llama 3**: with vs without `<|python_tag|>` start fence — same
+  inner JSON, different outer envelope.
+- **Hermes**: `qwen25` parser-name alias resolves to the same
+  `ToolCallConfig::hermes()` config; both names must dispatch
+  identically.
+
+Parser must accept all configured variants and reject ones not
+registered for the active config.
+
+- Grammar-conditional. Applies whenever the parser's config or
+  registry enumerates more than one token-form spelling.
 
 ## `PARSER.fmt.4` — Empty section / no-content wrappers
 
@@ -291,6 +438,37 @@ must produce zero calls and preserve any surrounding text as
 
 - Grammar-conditional. Applies to parsers with paired start/end
   fences.
+
+## `PARSER.fmt.5` — Argument-shape conventions
+
+JSON-envelope shape inside the call body. Distinct from
+`PARSER.fmt.1` (function-name surface) — these axes describe how the
+arguments object is laid out, not the function identifier.
+
+Three sub-axes:
+
+1. **Native call-ID preservation** — when the model emits its own
+   call ID (e.g. Kimi K2's `functions.NAME:N`), the parser must
+   surface it verbatim on `ToolCall.id` rather than synthesizing one
+   from a parser-internal counter. Reference: vLLM Kimi K2 PR #32768.
+2. **JSON field-order tolerance** — `{name, arguments}` vs
+   `{arguments, name}` must both parse, including the case where
+   `arguments` itself contains a key called `"name"`. Reference:
+   vLLM Mistral `argument_before_name` and
+   `argument_before_name_and_name_in_argument` parametrize IDs
+   appearing in 3 test functions: `test_extract_tool_calls_pre_v11_tokenizer`,
+   `test_extract_tool_calls_streaming_pre_v11_tokenizer`,
+   `test_extract_tool_calls_streaming_one_chunk`.
+3. **Argument-key aliasing** — `arguments` vs `parameters`
+   interchangeably. Reference: vLLM Llama 3 JSON
+   `test_extract_tool_calls_with_arguments_key`.
+
+- Grammar-conditional. Applies to JSON-family parsers (Mistral,
+  Llama 3 JSON, Hermes) where the wire format embeds a JSON object
+  with named keys; sub-axis 1 also applies to XML-family parsers
+  that surface a model-emitted ID (Kimi K2 specifically).
+- Each sub-axis can be N/A independently — e.g. Hermes has no
+  native call-ID surface, so sub-axis 1 is N/A there.
 
 ---
 
@@ -386,7 +564,7 @@ parenthetical names the originating incident. No separate
 | -- | -- | -- |
 | `PARSER.batch.{1..10}` | All | Universal behavior contract |
 | `PARSER.stream.{1..4}` | All | Streaming surface; same logical cases via different harness |
-| `PARSER.fmt.{1..4}` | Grammar-conditional | Each variant required only where the grammar permits it |
+| `PARSER.fmt.{1..5}` | Grammar-conditional | Each variant required only where the grammar permits it; `.5` (argument-shape) is JSON-family-leaning |
 | `PARSER.xml.{1,2}` | XML-family only | Entity decoding + schema-aware coercion |
 | `PARSER.harmony.{1,2}` | Harmony only | Channel routing + envelope variants |
 
@@ -405,9 +583,11 @@ Minimum viable set:
    frontend.
 6. `PARSER.batch.8` — interleaved text.
 7. `PARSER.batch.{9, 10}` — empty/null and duplicate calls.
-8. Format variants where applicable (`PARSER.fmt.{1..4}`): cover
+8. Format variants where applicable (`PARSER.fmt.{1..5}`): cover
    any that the parser's grammar permits. Mark `N/A` for those that
-   don't apply.
+   don't apply. JSON-family parsers (Mistral, Llama 3 JSON, Hermes)
+   should specifically pin `PARSER.fmt.5` (argument-shape: native
+   ID / field-order / arguments-vs-parameters alias).
 9. Family-specific categories where applicable: `PARSER.xml.{1, 2}`
    for XML grammars, `PARSER.harmony.{1, 2}` for Harmony.
 

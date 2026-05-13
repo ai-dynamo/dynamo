@@ -76,6 +76,8 @@ navigation:
             path: kubernetes/installation-guide.md
           - page: Model Deployment Guide
             path: kubernetes/model-deployment-guide.md
+          - page: Model Caching
+            path: kubernetes/model-caching.md
           - page: DGDR Reference
             path: kubernetes/dgdr.md
           - page: Dynamo Operator
@@ -154,6 +156,22 @@ navigation:
         path: components/router/router-guide.md
       - page: KV Cache Offloading
         path: components/kvbm/kvbm-guide.md
+      - section: Tool Calling
+        slug: tool-calling
+        path: tool-calling/README.md
+        contents:
+          - page: Tool Call Parsing (Dynamo)
+            path: tool-calling/dynamo.md
+          - page: Tool Call Parsing (Engine Fallback)
+            path: tool-calling/engine-fallback.md
+      - section: Reasoning
+        slug: reasoning
+        path: reasoning/README.md
+        contents:
+          - page: Reasoning Parsing (Dynamo)
+            path: reasoning/dynamo.md
+          - page: Reasoning Parsing (Engine Fallback)
+            path: reasoning/engine-fallback.md
       - section: Multimodal
         path: features/multimodal/README.md
         contents:
@@ -178,22 +196,16 @@ navigation:
             path: backends/trtllm/trtllm-diffusion.md
       - page: LoRA Adapters
         path: features/lora/README.md
+      - page: Fastokens Tokenizer
+        path: features/tokenizer/README.md
       - section: Agents
         slug: agents
         path: agents/README.md
         contents:
-          - page: Agent Context
-            path: agents/agent-context.md
           - page: Agent Tracing
             path: agents/agent-tracing.md
           - page: Agent Hints
             path: agents/agent-hints.md
-          - page: Chat Processors
-            path: agents/chat-processor-options.md
-          - page: Tool Calling
-            path: agents/tool-calling.md
-          - page: Reasoning
-            path: agents/reasoning.md
           - page: SGLang for Agentic Workloads
             path: backends/sglang/agents.md
       - section: Observability (Local)
@@ -243,7 +255,7 @@ navigation:
         contents:
           - page: Reference Guide
             path: backends/sglang/sglang-reference-guide.md
-          - page: Chat Processor
+          - page: Frontend Processor Fallback
             path: backends/sglang/sglang-chat-processor.md
           - page: Examples
             path: backends/sglang/sglang-examples.md
@@ -253,8 +265,6 @@ navigation:
             path: backends/sglang/sglang-diffusion.md
           - page: Observability
             path: backends/sglang/sglang-observability.md
-          - page: HiCache
-            path: backends/sglang/sglang-hicache.md
           - page: Agentic Workloads
             path: backends/sglang/agents.md
       - section: TensorRT-LLM
@@ -275,6 +285,8 @@ navigation:
         contents:
           - page: Reference Guide
             path: backends/vllm/vllm-reference-guide.md
+          - page: Frontend Processor Fallback
+            path: backends/vllm/vllm-chat-processor.md
           - page: Examples
             path: backends/vllm/vllm-examples.md
           - page: KV Cache Offloading
@@ -292,6 +304,8 @@ navigation:
         contents:
           - page: Frontend Guide
             path: components/frontend/frontend-guide.md
+          - page: Configuration Reference
+            path: components/frontend/configuration.md
           - page: Tokenizer
             path: components/frontend/Tokenizer.md
       - section: Router
@@ -338,6 +352,8 @@ navigation:
     contents:
       - page: LMCache
         path: integrations/lmcache-integration.md
+      - page: SGLang HiCache
+        path: integrations/sglang-hicache.md
       - page: FlexKV
         path: integrations/flexkv-integration.md
       - page: KV Events for Custom Engines

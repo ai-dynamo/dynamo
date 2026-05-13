@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,6 +115,177 @@ func makePod(name, namespace, nodeName string, phase corev1.PodPhase, ready bool
 			Conditions: conditions,
 		},
 	}
+}
+
+func TestCheckpointLocationsFromPod(t *testing.T) {
+	pod := makePod(
+		"test-pod",
+		"default",
+		testNodeName,
+		corev1.PodRunning,
+		true,
+		nil,
+		map[string]string{
+			snapshotprotocol.CheckpointArtifactVersionAnnotation: "2",
+		},
+	)
+
+	t.Run("agent mount uses the agent-visible path", func(t *testing.T) {
+		w := makeTestController(t)
+		w.config.Storage.BasePath = "/checkpoints"
+
+		locations, err := w.checkpointLocationsFromPod(pod, "abc123", 0)
+		if err != nil {
+			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
+		}
+
+		expected := "/checkpoints/abc123/versions/2"
+		if locations.HostPath != expected {
+			t.Fatalf("HostPath = %q, want %q", locations.HostPath, expected)
+		}
+		if locations.ContainerPath != expected {
+			t.Fatalf("ContainerPath = %q, want %q", locations.ContainerPath, expected)
+		}
+	})
+
+	t.Run("pod mount uses the target container root from host proc", func(t *testing.T) {
+		w := makeTestController(t)
+		w.config.Storage.BasePath = "/checkpoints"
+		w.config.Storage.AccessMode = types.StorageAccessModePodMount
+
+		locations, err := w.checkpointLocationsFromPod(pod, "abc123", 1234)
+		if err != nil {
+			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
+		}
+
+		expectedContainerPath := "/checkpoints/abc123/versions/2"
+		expectedHostPath := filepath.Join(snapshotruntime.HostProcPath, "1234", "root", "checkpoints/abc123/versions/2")
+		if locations.HostPath != expectedHostPath {
+			t.Fatalf("HostPath = %q, want %q", locations.HostPath, expectedHostPath)
+		}
+		if locations.ContainerPath != expectedContainerPath {
+			t.Fatalf("ContainerPath = %q, want %q", locations.ContainerPath, expectedContainerPath)
+		}
+	})
+
+	t.Run("pod storage annotation overrides agent base path", func(t *testing.T) {
+		annotatedPod := pod.DeepCopy()
+		annotatedPod.Annotations[snapshotprotocol.CheckpointStorageBasePathAnnotation] = "/pod-checkpoints/"
+
+		w := makeTestController(t)
+		w.config.Storage.BasePath = "/agent-checkpoints"
+
+		locations, err := w.checkpointLocationsFromPod(annotatedPod, "abc123", 0)
+		if err != nil {
+			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
+		}
+
+		expected := "/pod-checkpoints/abc123/versions/2"
+		if locations.HostPath != expected {
+			t.Fatalf("HostPath = %q, want %q", locations.HostPath, expected)
+		}
+		if locations.ContainerPath != expected {
+			t.Fatalf("ContainerPath = %q, want %q", locations.ContainerPath, expected)
+		}
+	})
+
+	t.Run("blank pod storage annotation falls back to agent base path", func(t *testing.T) {
+		annotatedPod := pod.DeepCopy()
+		annotatedPod.Annotations[snapshotprotocol.CheckpointStorageBasePathAnnotation] = "   "
+
+		w := makeTestController(t)
+		w.config.Storage.BasePath = "/agent-checkpoints"
+
+		locations, err := w.checkpointLocationsFromPod(annotatedPod, "abc123", 0)
+		if err != nil {
+			t.Fatalf("checkpointLocationsFromPod() error = %v", err)
+		}
+
+		expected := "/agent-checkpoints/abc123/versions/2"
+		if locations.HostPath != expected {
+			t.Fatalf("HostPath = %q, want %q", locations.HostPath, expected)
+		}
+		if locations.ContainerPath != expected {
+			t.Fatalf("ContainerPath = %q, want %q", locations.ContainerPath, expected)
+		}
+	})
+
+	t.Run("missing base path returns an error", func(t *testing.T) {
+		w := makeTestController(t)
+		w.config.Storage.BasePath = ""
+
+		if _, err := w.checkpointLocationsFromPod(pod, "abc123", 0); err == nil {
+			t.Fatal("expected error for missing base path")
+		}
+	})
+
+	t.Run("non-clean base path returns an error", func(t *testing.T) {
+		annotatedPod := pod.DeepCopy()
+		annotatedPod.Annotations[snapshotprotocol.CheckpointStorageBasePathAnnotation] = "/checkpoints/../escape"
+
+		w := makeTestController(t)
+		w.config.Storage.BasePath = "/agent-checkpoints"
+		w.config.Storage.AccessMode = types.StorageAccessModePodMount
+
+		_, err := w.checkpointLocationsFromPod(annotatedPod, "abc123", 1234)
+		if err == nil {
+			t.Fatal("expected error for non-clean checkpoint location")
+		}
+		if !strings.Contains(err.Error(), "absolute, clean") {
+			t.Fatalf("expected clean-path validation error, got: %v", err)
+		}
+	})
+
+	t.Run("pod mount requires a host PID", func(t *testing.T) {
+		w := makeTestController(t)
+		w.config.Storage.BasePath = "/checkpoints"
+		w.config.Storage.AccessMode = types.StorageAccessModePodMount
+
+		if _, err := w.checkpointLocationsFromPod(pod, "abc123", 0); err == nil {
+			t.Fatal("expected error for missing host PID")
+		}
+	})
+}
+
+func TestRestoreCheckpointReady(t *testing.T) {
+	w := makeTestController(t)
+	log := testr.New(t)
+
+	t.Run("existing directory is ready", func(t *testing.T) {
+		dir := t.TempDir()
+		ready, err := w.restoreCheckpointReady(log, "default/test-pod", "abc123", dir)
+		if err != nil {
+			t.Fatalf("restoreCheckpointReady() error = %v", err)
+		}
+		if !ready {
+			t.Fatal("expected checkpoint directory to be ready")
+		}
+	})
+
+	t.Run("missing directory is not ready", func(t *testing.T) {
+		ready, err := w.restoreCheckpointReady(log, "default/test-pod", "abc123", filepath.Join(t.TempDir(), "missing"))
+		if err != nil {
+			t.Fatalf("restoreCheckpointReady() error = %v", err)
+		}
+		if ready {
+			t.Fatal("expected missing checkpoint directory to be not ready")
+		}
+	})
+
+	t.Run("file is rejected", func(t *testing.T) {
+		filePath := filepath.Join(t.TempDir(), "checkpoint")
+		if err := os.WriteFile(filePath, []byte("not a directory"), 0o600); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+
+		_, err := w.restoreCheckpointReady(log, "default/test-pod", "abc123", filePath)
+		if err == nil {
+			t.Fatal("expected file checkpoint location to be rejected")
+		}
+		if !strings.Contains(err.Error(), "not a directory") {
+			t.Fatalf("expected not-a-directory error, got: %v", err)
+		}
+	})
 }
 
 func TestReconcileCheckpointPod(t *testing.T) {
@@ -558,7 +730,7 @@ func TestRunCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testi
 		stopCh: make(chan struct{}),
 	}
 
-	err := w.runCheckpoint(context.Background(), pod, job, "abc123", "main", filepath.Join(t.TempDir(), "abc123"), "default/test-pod", time.Now())
+	err := w.runCheckpoint(context.Background(), pod, job, "abc123", "main", "default/test-pod", time.Now())
 	if err == nil {
 		t.Fatal("expected terminal checkpoint status update to fail")
 	}

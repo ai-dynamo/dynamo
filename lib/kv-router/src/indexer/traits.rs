@@ -236,3 +236,10 @@ pub trait SyncIndexer: Send + Sync + 'static {
         vec![]
     }
 }
+
+/// Marker trait for [`SyncIndexer`] backends that implement structural anchors.
+///
+/// Branch-sharded routing can split a suffix onto a shard whose backend needs a
+/// synthetic parent anchor. Implement this only when `apply_anchor` and
+/// `find_matches_from_anchor` are supported by the backend.
+pub trait AnchorCapableSyncIndexer: SyncIndexer {}
