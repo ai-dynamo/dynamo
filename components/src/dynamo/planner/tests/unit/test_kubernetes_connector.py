@@ -976,7 +976,7 @@ def test_service_get_gpu_count_missing_raises_error():
     )
     with pytest.raises(ValueError) as exc_info:
         service.get_gpu_count()
-    assert "No GPU count specified" in str(exc_info.value)
+    assert "No GPU/XPU count specified" in str(exc_info.value)
     assert "test-service" in str(exc_info.value)
 
 

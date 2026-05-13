@@ -22,7 +22,7 @@ DO NOT EDIT MANUALLY - regenerate using the script.
 """
 
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -57,6 +57,11 @@ class SearchStrategy(str, Enum):
     Thorough = "thorough"
 
 
+class DeviceType(str, Enum):
+    Cuda = "cuda"
+    Xpu = "xpu"
+
+
 class GPUSKUType(str, Enum):
     GB200SXM = "gb200_sxm"
     GB10 = "gb10"
@@ -75,6 +80,15 @@ class GPUSKUType(str, Enum):
     T4 = "t4"
     MI200 = "mi200"
     MI300 = "mi300"
+
+
+class XPUSKUType(str, Enum):
+    IntelArcProB60 = "b60"
+
+    @property
+    def aic_system(self) -> str:
+        """Return the AIC system identifier (enum value is already the AIC name)."""
+        return self.value
 
 
 class BackendType(str, Enum):
@@ -216,9 +230,13 @@ class FeaturesSpec(BaseModel):
 class HardwareSpec(BaseModel):
     """HardwareSpec describes the GPU hardware for profiling and deployment. All fields are auto-detected from cluster GPU nodes when omitted (requires cluster-wide mode with GPU discovery enabled). gpuSku is a selector (restricts which nodes are considered); the other fields are pure overrides passed to the profiler. If all four fields are set, discovery is skipped."""
 
-    gpuSku: Optional[GPUSKUType] = Field(
+    deviceType: DeviceType = Field(
+        default="cuda",
+        description="DeviceType is the accelerator device category. Supported values: 'cuda' (NVIDIA GPU), 'xpu' (Intel XPU). Defaults to 'cuda'.",
+    )
+    gpuSku: Optional[Union[GPUSKUType, XPUSKUType]] = Field(
         default=None,
-        description="GPUSKU selects the GPU type to target. When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU.",
+        description="GPUSKU is the AIC hardware system identifier for the GPU. When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.",
     )
     vramMb: Optional[float] = Field(
         default=None,
@@ -240,6 +258,26 @@ class HardwareSpec(BaseModel):
         default=None,
         description="RDMA indicates whether the cluster has RDMA-capable networking available for Dynamo data movement.  Semantics / usage: - This is capability metadata used for profiling, planning, and deployment decisions. - It does NOT install, enable, or configure RDMA (e.g., drivers, SR-IOV, NVIDIA network operator, GPUDirect settings). It only expresses availability/intent. - When omitted, the operator may attempt best-effort discovery (e.g., via node labels indicating RDMA/SR-IOV capability and/or presence of NVIDIA network-operator RDMA components). If discovery is unavailable, it may remain unset.  Impact of wrong / missing values: - False positive (set true when RDMA is not actually usable end-to-end) may cause plans or deployments to assume RDMA is available; depending on the runtime transport selection and fallback behavior, this can lead to connection/setup failures or performance regressions. - False negative (set false when RDMA is available) will typically avoid RDMA-optimized paths and fall back to non-RDMA transports, usually remaining functional but potentially slower. - If unset and undiscovered, consumers should treat RDMA availability as unknown and use conservative defaults / fallback transports. ",
     )
+
+    @model_validator(mode="after")
+    def _derive_device_type_from_sku(self) -> "HardwareSpec":
+        """Auto-derive deviceType from gpuSku when not explicitly set.
+
+        If gpuSku identifies an Intel XPU accelerator and deviceType was not
+        explicitly provided by the user, set deviceType to 'xpu'.  This
+        prevents the silent misconfiguration where a user specifies an Intel
+        SKU but the default 'cuda' deviceType bypasses all XPU-specific logic.
+        """
+        if isinstance(self.gpuSku, XPUSKUType):
+            if "deviceType" not in self.model_fields_set:
+                # Not explicitly provided — auto-derive from XPU SKU.
+                self.deviceType = DeviceType.Xpu
+            elif self.deviceType != DeviceType.Xpu:
+                raise ValueError(
+                    f"gpuSku '{self.gpuSku}' is an Intel XPU accelerator but deviceType is "
+                    f"'{self.deviceType}'. Set deviceType to 'xpu' or omit it to auto-derive."
+                )
+        return self
 
 
 class DynamoGraphDeploymentRequestSpec(BaseModel):
