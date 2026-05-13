@@ -158,6 +158,8 @@ navigation:
             path: agents/agent-tracing.md
           - page: Agent Hints
             path: agents/agent-hints.md
+          - page: Use Pi-Mono with Dynamo
+            path: agents/pi-mono.md
       - page: Disaggregated Serving
         path: features/disaggregated-serving/README.md
       - page: KV Cache Aware Routing
