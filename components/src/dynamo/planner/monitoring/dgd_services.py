@@ -103,37 +103,57 @@ class Service(BaseModel):
     def get_gpu_count(self) -> int:
         """Get the GPU count from the service's resource specification.
 
-        GPU count is read from spec.services.[ServiceName].resources.limits.gpu,
-        falling back to requests.gpu if limits is not specified.
+        Resolution order:
+        1. ``resources.limits.gpu`` or ``resources.requests.gpu`` (NVIDIA device-plugin style)
+        2. ``--tensor-parallel-size`` / ``--tp`` from ``extraPodSpec.mainContainer.args``
+           (Intel DRA deployments omit ``resources.gpu`` and use ``resourceClaims`` instead;
+           TP size equals the number of devices per worker)
 
         Returns:
-            The number of GPUs configured for this service
+            The number of GPUs/XPUs configured for this service
 
         Raises:
-            ValueError: If GPU count is not specified or invalid
+            ValueError: If GPU count cannot be determined
         """
         resources = self.service.get("resources", {})
         limits = resources.get("limits", {})
         requests = resources.get("requests", {})
 
-        # Prefer limits, fall back to requests. For GPUs, Kubernetes device plugins
-        # typically treat requests and limits as equivalent since GPUs are
-        # non-compressible and allocated exclusively (no fractional sharing).
+        # 1. Prefer limits, fall back to requests (NVIDIA device-plugin style).
         gpu_str = limits.get("gpu") or requests.get("gpu")
+        if gpu_str is not None:
+            try:
+                return int(gpu_str)
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"Invalid GPU count '{gpu_str}' for service '{self.name}'. "
+                    f"GPU count must be an integer."
+                )
 
-        if gpu_str is None:
-            raise ValueError(
-                f"No GPU count specified for service '{self.name}'. "
-                f"Please set resources.limits.gpu or resources.requests.gpu in the DGD."
-            )
+        # 2. DRA fallback: Intel XPU deployments use resourceClaims and do not set
+        # resources.gpu.  Infer device count from --tensor-parallel-size / --tp in
+        # the container args (TP size == number of devices per worker).
+        raw_args = (
+            self.service.get("extraPodSpec", {})
+            .get("mainContainer", {})
+            .get("args", [])
+        )
+        args = break_arguments(raw_args)
+        for i, arg in enumerate(args):
+            if arg in ("--tensor-parallel-size", "--tp") and i + 1 < len(args):
+                try:
+                    return int(args[i + 1])
+                except (ValueError, TypeError):
+                    raise ValueError(
+                        f"Invalid --tensor-parallel-size value '{args[i + 1]}' "
+                        f"for service '{self.name}'."
+                    )
 
-        try:
-            return int(gpu_str)
-        except (ValueError, TypeError):
-            raise ValueError(
-                f"Invalid GPU count '{gpu_str}' for service '{self.name}'. "
-                f"GPU count must be an integer."
-            )
+        raise ValueError(
+            f"No GPU/XPU count specified for service '{self.name}'. "
+            f"Set resources.limits.gpu, resources.requests.gpu, or "
+            f"--tensor-parallel-size in extraPodSpec.mainContainer.args."
+        )
 
 
 # TODO: still supporting framework component names for backwards compatibility

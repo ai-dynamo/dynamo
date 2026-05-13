@@ -175,6 +175,15 @@ const (
 	SearchStrategyThorough SearchStrategy = "thorough"
 )
 
+// DeviceType is the accelerator device category.
+// +kubebuilder:validation:Enum=cuda;xpu
+type DeviceType string
+
+const (
+	DeviceTypeCuda DeviceType = "cuda"
+	DeviceTypeXpu  DeviceType = "xpu"
+)
+
 // GPUSKUType is the AIC hardware system identifier for a supported GPU.
 // +kubebuilder:validation:Enum=gb200_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
 type GPUSKUType string
@@ -202,6 +211,14 @@ const (
 	// --- AMD ---
 	GPUSKUTypeMI200 GPUSKUType = "mi200"
 	GPUSKUTypeMI300 GPUSKUType = "mi300"
+)
+
+// XPUSKUType is the AIC hardware system identifier for a supported Intel XPU.
+// +kubebuilder:validation:Enum=b60
+type XPUSKUType string
+
+const (
+	XPUSKUTypeIntelArcProB60 XPUSKUType = "b60"
 )
 
 // BackendType specifies the inference backend.
@@ -356,11 +373,14 @@ type FeaturesSpec struct {
 // the other fields are pure overrides passed to the profiler.
 // If all four fields are set, discovery is skipped.
 type HardwareSpec struct {
-	// GPUSKU selects the GPU type to target.
-	// When omitted, auto-detected by selecting the GPU with the highest
-	// node count, then highest VRAM. In mixed-GPU clusters, set this to
-	// choose which GPU type to use. Discovery and totalGpus are then
-	// restricted to nodes matching this SKU.
+	// DeviceType is the accelerator device category.
+	// Supported values: 'cuda' (NVIDIA GPU), 'xpu' (Intel XPU). Defaults to 'cuda'.
+	// +optional
+	// +kubebuilder:default="cuda"
+	DeviceType DeviceType `json:"deviceType,omitempty"`
+
+	// GPUSKU is the AIC hardware system identifier for the GPU.
+	// When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.
 	// +optional
 	// +kubebuilder:validation:Enum=gb200_sxm;b200_sxm;h200_sxm;h100_sxm;h100_pcie;a100_sxm;a100_pcie;a30;l40s;l40;l4;v100_sxm;v100_pcie;t4;mi200;mi300
 	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`

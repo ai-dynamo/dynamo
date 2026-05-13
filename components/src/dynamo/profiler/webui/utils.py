@@ -21,11 +21,13 @@ from aiconfigurator.webapp.components.profiling import (
     load_profiling_javascript,
 )
 
+from dynamo.profiler.utils.defaults import DeviceLabel
 from dynamo.profiler.utils.dgd_generation import (
     generate_decode_service_config_preview,
     generate_prefill_decode_services_config_preview,
     generate_prefill_service_config_preview,
 )
+from dynamo.profiler.utils.dgdr_v1beta1_types import DeviceType
 from dynamo.profiler.utils.pareto import compute_pareto
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,27 @@ def _maybe_add_model_backend_header_lines(header_lines: list[str], args) -> None
         header_lines.append(f"# Backend: {backend}")
 
 
+def _get_device_label(args: Any) -> str:
+    """Return the device label ("GPU" or "XPU") based on args or environment.
+
+    Checks, in order:
+    1. ``args.device_type`` (from ProfilerOperationalConfig or a SimpleNamespace)
+    2. ``VLLM_TARGET_DEVICE`` environment variable
+    Falls back to "GPU" if neither is set.
+    """
+    device_type = getattr(args, "device_type", None)
+    if not device_type:
+        device_type = os.environ.get("VLLM_TARGET_DEVICE", DeviceType.Cuda)
+    # Compare using enum value — str(DeviceType.Xpu) returns 'DeviceType.Xpu'
+    # in Python 3.11+, not 'xpu', so we must normalise via str/lower on .value.
+    device_str = (
+        device_type.value
+        if isinstance(device_type, DeviceType)
+        else str(device_type).lower()
+    )
+    return DeviceLabel.XPU if device_str == DeviceType.Xpu.value else DeviceLabel.GPU
+
+
 def build_single_service_preview_header_lines(
     *,
     service_name: str,
@@ -87,11 +110,12 @@ def build_single_service_preview_header_lines(
     thpt_per_gpu: float | None,
     args: Any,
 ) -> list[str]:
+    device_label = _get_device_label(args)
     header_lines = [
         "# DynamoGraphDeployment Service Config Preview",
         f"# Service: {service_name}",
         f"# Engine: {engine_type}",
-        f"# Num GPUs: {mapping.get_num_gpus()}",
+        f"# Num {device_label}s: {mapping.get_num_gpus()}",
         f"# Parallelization: {mapping.label()}",
     ]
     if engine_type == "prefill" and ttft_or_itl_ms is not None:
@@ -100,7 +124,7 @@ def build_single_service_preview_header_lines(
         header_lines.append(f"# Profiled ITL: {round(ttft_or_itl_ms, 2)} ms")
     if thpt_per_gpu is not None:
         header_lines.append(
-            f"# Profiled Throughput: {round(thpt_per_gpu, 2)} tokens/s/GPU"
+            f"# Profiled Throughput: {round(thpt_per_gpu, 2)} tokens/s/{device_label}"
         )
     _maybe_add_model_backend_header_lines(header_lines, args)
     header_lines.append(
@@ -121,10 +145,11 @@ def build_two_service_preview_header_lines(
     decode_thpt_per_gpu: float | None,
     args: Any,
 ) -> list[str]:
+    device_label = _get_device_label(args)
     header_lines = [
         "# DynamoGraphDeployment Services Config Preview",
-        f"# Prefill service: {prefill_service_name} ({prefill_mapping.get_num_gpus()} GPU(s), {prefill_mapping.label()})",
-        f"# Decode service: {decode_service_name} ({decode_mapping.get_num_gpus()} GPU(s), {decode_mapping.label()})",
+        f"# Prefill service: {prefill_service_name} ({prefill_mapping.get_num_gpus()} {device_label}(s), {prefill_mapping.label()})",
+        f"# Decode service: {decode_service_name} ({decode_mapping.get_num_gpus()} {device_label}(s), {decode_mapping.label()})",
     ]
     if prefill_ttft_ms is not None:
         header_lines.append(f"# Profiled TTFT: {round(prefill_ttft_ms, 2)} ms")
@@ -132,11 +157,11 @@ def build_two_service_preview_header_lines(
         header_lines.append(f"# Profiled ITL: {round(decode_itl_ms, 2)} ms")
     if prefill_thpt_per_gpu is not None:
         header_lines.append(
-            f"# Profiled Prefill Throughput: {round(prefill_thpt_per_gpu, 2)} tokens/s/GPU"
+            f"# Profiled Prefill Throughput: {round(prefill_thpt_per_gpu, 2)} tokens/s/{device_label}"
         )
     if decode_thpt_per_gpu is not None:
         header_lines.append(
-            f"# Profiled Decode Throughput: {round(decode_thpt_per_gpu, 2)} tokens/s/GPU"
+            f"# Profiled Decode Throughput: {round(decode_thpt_per_gpu, 2)} tokens/s/{device_label}"
         )
     _maybe_add_model_backend_header_lines(header_lines, args)
     header_lines.append(
@@ -199,6 +224,8 @@ def generate_config_data(
     # Construct output path
     output_path = os.path.join(args.output_dir, "webui_data.json")
 
+    device_label = _get_device_label(args)
+
     # Set SLA targets
     data[PlotType.PREFILL]["chart"]["target_line"]["value"] = args.ttft
     data[PlotType.PREFILL]["chart"]["target_line"][
@@ -210,9 +237,42 @@ def generate_config_data(
         "label"
     ] = f"Target ITL: {args.itl} ms"
 
+    # Embed deviceLabel so frontend JS can use it for dynamic tooltip strings
+    data["deviceLabel"] = device_label
+
+    # Update y-axis labels to reflect actual device type
+    data[PlotType.PREFILL]["chart"]["axes"]["y"][
+        "title"
+    ] = f"Prefill Throughput per {device_label} (tokens/s/{device_label})"
+    data[PlotType.DECODE]["chart"]["axes"]["y"][
+        "title"
+    ] = f"Decode Throughput per {device_label} (tokens/s/{device_label})"
+    data[PlotType.COST]["chart"]["axes"]["y"]["title"] = f"{device_label} Hours"
+    data[PlotType.PREFILL]["table"]["columns"] = [
+        f"{device_label}s",
+        "TTFT (ms)",
+        f"Throughput (tokens/s/{device_label})",
+        "Action",
+    ]
+    data[PlotType.DECODE]["table"]["columns"] = [
+        f"{device_label}s",
+        "ITL (ms)",
+        f"Throughput (tokens/s/{device_label})",
+        "Action",
+    ]
+    data[PlotType.COST]["table"]["columns"] = [
+        "TTFT (ms)",
+        f"Prefill Thpt (tokens/s/{device_label})",
+        "ITL (ms)",
+        f"Decode Thpt (tokens/s/{device_label})",
+        "Tokens/User",
+        f"{device_label} Hours",
+        "Action",
+    ]
+
     data[PlotType.COST]["chart"][
         "title"
-    ] = f"GPU Hours Per 1000 i{args.isl}o{args.osl} requests"
+    ] = f"{device_label} Hours Per 1000 i{args.isl}o{args.osl} requests"
 
     # Populate data sections
     populate_prefill_data(data, prefill_data, args)
@@ -234,9 +294,12 @@ def populate_prefill_data(data: dict, prefill_data: Any, args: Any) -> None:
     if not prefill_data.num_gpus:
         return
 
-    # Get unique GPU counts for labels
+    device_label = _get_device_label(args)
+    # Get unique device counts for labels
     unique_gpus = sorted(set(prefill_data.num_gpus))
-    data[PlotType.PREFILL]["chart"]["labels"] = [f"{gpu} GPUs" for gpu in unique_gpus]
+    data[PlotType.PREFILL]["chart"]["labels"] = [
+        f"{gpu} {device_label}s" for gpu in unique_gpus
+    ]
 
     # Populate chart data points
     chart_data = []
@@ -254,7 +317,7 @@ def populate_prefill_data(data: dict, prefill_data: Any, args: Any) -> None:
                 "y": round(thpt, 2),
                 "gpu": gpu,
                 "tableIdx": i,
-                "gpuLabel": f"{gpu} GPUs [{label}]",
+                "gpuLabel": f"{gpu} {device_label}s [{label}]",
             }
         )
     data[PlotType.PREFILL]["chart"]["datasets"][0]["data"] = chart_data
@@ -295,7 +358,8 @@ def populate_decode_data(data: dict, decode_data: Any, args: Any) -> None:
     if not decode_data.num_gpus:
         return
 
-    # Group by GPU count for multiple datasets
+    device_label = _get_device_label(args)
+    # Group by device count for multiple datasets
     gpu_groups: dict[int, list[dict[str, float | int]]] = {}
     for i, (gpu, itl, thpt, label) in enumerate(
         zip(
@@ -309,13 +373,13 @@ def populate_decode_data(data: dict, decode_data: Any, args: Any) -> None:
             gpu_groups[gpu] = []
         gpu_groups[gpu].append({"x": round(itl, 2), "y": round(thpt, 2), "tableIdx": i})
 
-    # Create datasets for each GPU count with different colors
+    # Create datasets for each device count with different colors
     datasets = []
     for idx, (gpu, points) in enumerate(sorted(gpu_groups.items())):
         color = CHART_COLORS[idx % len(CHART_COLORS)]
         datasets.append(
             {
-                "label": f"{gpu} GPUs",
+                "label": f"{gpu} {device_label}s",
                 "data": points,
                 "backgroundColor": color,
                 "borderColor": color,
@@ -362,8 +426,8 @@ def populate_cost_data(
 ) -> None:
     """Populate cost chart and table data with pareto-optimal configurations.
 
-    Note: This function computes GPU hours (not cost). The frontend handles
-    cost calculation when the user provides a GPU cost per hour value.
+    Note: This function computes device hours (not cost). The frontend handles
+    cost calculation when the user provides a device cost per hour value.
     """
     if not prefill_data.num_gpus or not decode_data.num_gpus:
         return
@@ -396,8 +460,8 @@ def populate_cost_data(
         prefill_mapping = prefill_data.parallel_mappings[orig_prefill_idx]
         prefill_num_gpus = prefill_mapping.get_num_gpus()
 
-        # Calculate prefill GPU hours per 1000 requests
-        # GPU hours = (tokens_per_request * num_requests) / (tokens_per_second_per_gpu * 3600) * num_gpus
+        # Calculate prefill device hours per 1000 requests
+        # device_hours = (tokens_per_request * num_requests) / (tokens_per_second_per_device * 3600) * num_devices
         prefill_gpu_hours = args.isl * 1000 / _p_thpt / 3600 * prefill_num_gpus
 
         # For each decode config, calculate total GPU hours
@@ -408,7 +472,7 @@ def populate_cost_data(
             decode_mapping = decode_data.parallel_mappings[orig_decode_idx]
             decode_num_gpus = decode_mapping.get_num_gpus()
 
-            # Calculate decode GPU hours per 1000 requests (scaled by num_gpus)
+            # Calculate decode device hours per 1000 requests (scaled by num_devices)
             decode_gpu_hours = args.osl * 1000 / _d_thpt / 3600 * decode_num_gpus
             total_gpu_hours = prefill_gpu_hours + decode_gpu_hours
 
@@ -616,7 +680,7 @@ def create_gradio_interface(
         gr.Markdown(
             """
             **Two ways to select prefill and decode configs:**
-            1. **GPU Hours Analysis** (recommended): Select any row in the GPU Hours table - automatically determines both prefill and decode
+            1. **Device Hours Analysis** (recommended): Select any row in the Device Hours table - automatically determines both prefill and decode
             2. **Individual**: Select one row in the Prefill table AND one row in the Decode table
             The selection will be processed automatically once complete.
 
@@ -626,7 +690,7 @@ def create_gradio_interface(
 
             > ⚠️ **Warning:** The TTFT values here represent the ideal case when requests arrive uniformly, minimizing queueing. Real-world TTFT may be higher than profiling results. To mitigate the issue, planner uses [correction factors](https://github.com/ai-dynamo/dynamo/blob/main/docs/design-docs/planner-design.md#step-2-correction-factor-calculation) to adjust dynamically at runtime.
 
-            > 💡 **Tip:** Use the GPU cost checkbox and input in the charts section to convert GPU hours to cost.
+            > 💡 **Tip:** Use the device cost checkbox and input in the charts section to convert device hours to cost.
             """
         )
 

@@ -33,7 +33,10 @@ from pathlib import Path
 
 import yaml
 
-from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
+from dynamo.profiler.utils.dgdr_v1beta1_types import (
+    DeviceType,
+    DynamoGraphDeploymentRequestSpec,
+)
 
 from .profile_sla import run_profile
 from .utils.profile_common import (
@@ -134,12 +137,18 @@ def _parse_args() -> tuple[DynamoGraphDeploymentRequestSpec, ProfilerOperational
     args = parser.parse_args()
 
     dgdr = _parse_dgdr_spec(args.config)
+    device_type = (
+        dgdr.hardware.deviceType
+        if dgdr.hardware and dgdr.hardware.deviceType
+        else DeviceType.Cuda
+    )
     ops = ProfilerOperationalConfig(
         output_dir=args.output_dir,
         deployment_timeout=args.deployment_timeout,
         prefill_interpolation_granularity=args.prefill_interpolation_granularity,
         decode_interpolation_granularity=args.decode_interpolation_granularity,
         dry_run=args.dry_run,
+        device_type=device_type,
     )
 
     return dgdr, ops
