@@ -99,12 +99,15 @@ dynamo-llm = { path = "../../llm" }
 dynamo-llm = { path = "../../llm", default-features = false }
 
 # jemalloc is only pulled in on platforms where it builds reliably.
-# Excluded on Windows (jemalloc upstream doesn't support it) and musl.
+# Excluded on Windows (jemalloc upstream doesn't support it) and on musl
+# (linux-musl targets don't ship a system libc compatible with jemalloc's
+# build assumptions; `target_os = "linux"` alone would still match them,
+# so we exclude `target_env = "musl"` explicitly).
 #
 # `disable_initial_exec_tls`: we're a cdylib that gets dlopen()-ed by Python,
 # so jemalloc's TLS must use general-dynamic, not initial-exec — otherwise
 # we hit "cannot allocate memory in static TLS block" on import.
-[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+[target.'cfg(any(all(target_os = "linux", not(target_env = "musl")), target_os = "macos"))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true, features = ["disable_initial_exec_tls"] }
 
 [dev-dependencies]

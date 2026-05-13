@@ -3,9 +3,17 @@
 
 // jemalloc as the Rust global allocator. Issue #9466 traced FE saturation to
 // glibc malloc's per-arena mutex under tokenizer + bytes::Bytes drop churn;
-// jemalloc's per-thread tcaches sidestep the arena lock. Linux + macOS only —
-// jemalloc upstream doesn't support Windows.
-#[cfg(all(feature = "jemalloc", any(target_os = "linux", target_os = "macos")))]
+// jemalloc's per-thread tcaches sidestep the arena lock. Linux (glibc) +
+// macOS only — Windows isn't supported upstream, and musl (which matches
+// target_os = "linux" but uses a different libc) is excluded explicitly via
+// target_env. Kept in sync with the same cfg in Cargo.toml.
+#[cfg(all(
+    feature = "jemalloc",
+    any(
+        all(target_os = "linux", not(target_env = "musl")),
+        target_os = "macos"
+    )
+))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
