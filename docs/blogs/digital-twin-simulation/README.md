@@ -505,19 +505,28 @@ timing.
 
 The first version is prefill-load modeling. With the
 [AIC prefill-load model](../../components/router/router-guide.md#aic-prefill-load-model),
-the Router can estimate the prefill time for each candidate worker from request
-shape, cached prefix, and worker state, then route to the engine with the best
-projected TTFT. On the same Kimi/toolagent setup above, enabling router-side AIC
-prefill-load modeling on the fixed winning layout reduced mean TTFT from
-`1695.40 ms` to `1390.86 ms`, a `304.54 ms` or `18.0%` reduction; that
-router-side path can also be validated with live engines before becoming a
-production policy.
+the Router can attach an expected prefill duration to an admitted request. In
+the simple non-queued case, the request arrives, the Router computes its cached
+prefix and effective input length, AIC predicts the expected prefill time, and
+the Router records that hint on the chosen worker. Future routing decisions then
+decay the worker's oldest active prefill by elapsed wall-clock time, turning the
+static token count into an estimate of remaining prompt-side work. That live
+load estimate becomes part of the next routing score. On the same Kimi/toolagent
+setup above, enabling router-side AIC prefill-load modeling on the fixed winning
+layout reduced mean TTFT from `1695.40 ms` to `1390.86 ms`, a `304.54 ms` or
+`18.0%` reduction; that router-side path can also be validated with live engines
+before becoming a production policy.
 
 This makes admission control more principled too. If every candidate projects
 past the TTFT threshold, the Router can queue, defer, or reject early instead of
-accepting work that is unlikely to meet the SLA. The same idea can extend to
-decode: an AIC-backed ITL model over active decode blocks could route by
-projected decode pressure, and priority decode pools in the
+accepting work that is unlikely to meet the SLA. A related load signal is
+expected output length: a request's prefill may be short, but if its decode is
+expected to occupy a slot for a long time, the Router should price that future
+work too. OSL is not known exactly before generation, but agentic harnesses can
+provide useful predictions through `nvext.agent_hints.osl`, as discussed in
+[Streaming Tokens and Tools](../../digest/agentic-inference/agentic-harnesses.md).
+The same idea can extend to decode: an AIC-backed ITL model over active decode
+blocks could route by projected decode pressure, and priority decode pools in the
 [GlobalRouter/GlobalPlanner deployment pattern](../../components/planner/global-planner.md)
 would give the system a place to send latency-sensitive decode work.
 
