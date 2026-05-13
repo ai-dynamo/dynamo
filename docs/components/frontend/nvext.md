@@ -33,9 +33,9 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `use_raw_prompt` | `bool` | `None` | Preprocessor | Bypasses the prompt template and passes the prompt directly to the tokenizer. |
 | `annotations` | `string[]` | `None` | Preprocessor | Triggers out-of-band information in the SSE stream via the `event:` field. |
 | `backend_instance_id` | `u64` | `None` | Router | Routes the request to a specific backend instance. |
-| `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When provided with `backend_instance_id`, tokenization is skipped. |
+| `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When provided, tokenization is skipped. `backend_instance_id` remains an independent routing hint. |
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
-| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`. |
+| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`, `"completion_token_ids"`. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
 | `agent_context` | object | `None` | Preprocessor | Passive session and trajectory identity for agent traces. See [Agent Context](#agent-context) below and [Agent Tracing](../../agents/agent-tracing.md). |
@@ -208,6 +208,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 | `routed_experts` | `extra_fields: ["routed_experts"]` | Routed expert capture payload returned by SGLang-backed requests. |
 | `engine_data` | `extra_fields: ["engine_data"]` | Opaque backend-provided engine metadata. |
 | `stop_reason` | `extra_fields: ["stop_reason"]` | Backend-specific matched stop condition, returned under `nvext` because it is not part of the OpenAI completions schema. Dynamo currently serves this as a response-level field for single-choice requests; supporting `n > 1` will require an indexed per-choice shape. |
+| `completion_token_ids` | `extra_fields: ["completion_token_ids"]` | Generated token IDs accumulated across the chat-completions response and emitted on the final chunk. |
 | `token_ids` | Automatic (GAIE Stage 1) | Tokenized prompt for reuse in Stage 2 query-only mode. |
 
 ### Example response `nvext`

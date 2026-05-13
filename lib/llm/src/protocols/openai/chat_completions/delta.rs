@@ -10,7 +10,7 @@ use crate::{
         openai::{
             convert_backend_top_logprobs,
             delta_common::{self, DeltaGeneratorOptions},
-            nvext::NvExtProvider,
+            nvext::{NvExtProvider, NvExtResponse},
             token_to_utf8_bytes,
         },
     },
@@ -59,6 +59,9 @@ pub struct DeltaGenerator {
     options: DeltaGeneratorOptions,
     /// Request tracker for per-request metrics (shared with PreprocessedRequest).
     tracker: Arc<RequestTracker>,
+    /// Accumulated output token IDs across chunks, emitted on the final chunk
+    /// when `nvext.extra_fields` includes `completion_token_ids`.
+    accumulated_completion_token_ids: Vec<TokenIdType>,
 }
 
 impl DeltaGenerator {
@@ -75,6 +78,7 @@ impl DeltaGenerator {
             msg_counter: 0,
             options,
             tracker,
+            accumulated_completion_token_ids: Vec::new(),
         }
     }
 
@@ -257,6 +261,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         self.usage.completion_tokens += token_length;
 
+        if self.options.response_fields.completion_token_ids && !delta.token_ids.is_empty() {
+            self.accumulated_completion_token_ids
+                .extend_from_slice(&delta.token_ids);
+        }
+
         // If backend provides completion_usage, use it to update usage stats
         // This is critical for prompt embeddings where prompt_tokens comes from
         // the embedding sequence length computed by the worker
@@ -311,27 +320,58 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
         // completions delta generators go through the same helper so the gating
         // rules stay in one place.
-        if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
-            Some(&self.tracker),
-            delta.disaggregated_params.as_ref(),
-            finish_reason.is_some(),
-            delta.engine_data,
-            stop_reason,
-        ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
+        if let Some(mut nvext_response) = self
+            .options
+            .response_fields
+            .build_response_nvext(
+                Some(&self.tracker),
+                delta.disaggregated_params.as_ref(),
+                finish_reason.is_some(),
+                delta.engine_data,
+                stop_reason,
+            )
+            .or_else(|| {
+                if self.options.response_fields.completion_token_ids && finish_reason.is_some() {
+                    Some(NvExtResponse {
+                        worker_id: None,
+                        timing: None,
+                        token_ids: None,
+                        routed_experts: None,
+                        engine_data: None,
+                        stop_reason: None,
+                        completion_token_ids: None,
+                    })
+                } else {
+                    None
+                }
+            })
         {
-            stream_response.nvext = Some(nvext_json);
-            if let Some(ref info) = nvext_response.worker_id {
-                tracing::debug!(
-                    "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
-                    info.prefill_worker_id,
-                    info.decode_worker_id
-                );
+            if self.options.response_fields.completion_token_ids && finish_reason.is_some() {
+                nvext_response.completion_token_ids =
+                    Some(self.accumulated_completion_token_ids.clone());
             }
-            if let Some(ref tokens) = nvext_response.token_ids {
-                tracing::debug!(
-                    "Injected token_ids into chat completion nvext: {} tokens",
-                    tokens.len()
-                );
+
+            if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
+                stream_response.nvext = Some(nvext_json);
+                if let Some(ref info) = nvext_response.worker_id {
+                    tracing::debug!(
+                        "Injected worker_id into chat completion nvext: prefill={:?}, decode={:?}",
+                        info.prefill_worker_id,
+                        info.decode_worker_id
+                    );
+                }
+                if let Some(ref tokens) = nvext_response.token_ids {
+                    tracing::debug!(
+                        "Injected token_ids into chat completion nvext: {} tokens",
+                        tokens.len()
+                    );
+                }
+                if let Some(ref tokens) = nvext_response.completion_token_ids {
+                    tracing::debug!(
+                        "Injected completion_token_ids into chat completion nvext: {} tokens",
+                        tokens.len()
+                    );
+                }
             }
         }
 
@@ -612,6 +652,48 @@ mod tests {
         );
         // timing is NOT auto-enabled for query_instance_id — it is gated by `extra_fields: ["timing"]`.
         assert!(nvext_json.get("timing").is_none());
+        assert!(nvext_json.get("routed_experts").is_none());
+    }
+
+    #[test]
+    fn test_completion_token_ids_extra_field_emits_accumulated_ids_on_final_chunk() {
+        let request =
+            create_test_request_with_extra_fields(vec!["completion_token_ids".to_string()]);
+        let mut generator = request.response_generator("req-completion-ids".to_string());
+
+        let mut first_output = final_backend_output();
+        first_output.token_ids = vec![7];
+        first_output.tokens = vec![Some("A".to_string())];
+        first_output.text = Some("A".to_string());
+        first_output.finish_reason = None;
+        first_output.disaggregated_params = None;
+
+        let first_response = generator
+            .choice_from_postprocessor(first_output)
+            .expect("first choice generation");
+        assert!(
+            first_response.nvext.is_none(),
+            "completion_token_ids should be emitted only on the final chunk"
+        );
+
+        let mut final_output = final_backend_output();
+        final_output.token_ids = vec![8, 9];
+        final_output.tokens = vec![Some("B".to_string()), Some("C".to_string())];
+        final_output.text = Some("BC".to_string());
+        final_output.disaggregated_params = None;
+
+        let final_response = generator
+            .choice_from_postprocessor(final_output)
+            .expect("final choice generation");
+
+        let nvext_json = final_response
+            .nvext
+            .expect("nvext present for completion_token_ids request");
+        assert_eq!(
+            nvext_json.get("completion_token_ids"),
+            Some(&serde_json::json!([7, 8, 9]))
+        );
+        assert!(nvext_json.get("token_ids").is_none());
         assert!(nvext_json.get("routed_experts").is_none());
     }
 
