@@ -251,12 +251,21 @@ if [ "$DEVICE" = "cpu" ]; then
     uv pip install dist/*.whl
 fi
 
-# Apply vendored patches for this vLLM ref. Used to carry upstream fixes that
-# are missing from the pinned release wheel (e.g. PR backports dropped between
-# rc and final tags). Each subdir is keyed by --vllm-ref so a version bump
-# automatically stops applying stale patches.
+# Apply vendored vLLM patches for this ref. Used to carry upstream fixes
+# that are missing from the pinned release wheel (e.g. PR backports
+# dropped between rc and final tags). Skipped when:
+#   - VLLM_VER is >= 0.21.0  (upstream fix expected to be merged by then)
+#   - no patches/<VLLM_REF>/ subdir exists, or it has no *.patch files
+#
+# rc/post/dev/+ suffixes are stripped before comparison (so v0.21.0rc0
+# also trips the skip). Non-semver refs (commit SHA, branch name) fall
+# through to the directory-existence check.
+VLLM_VER_BASE=$(echo "$VLLM_VER" | sed -E 's/(rc|\.post|\.dev|\+).*//')
 PATCH_DIR="/tmp/deps/vllm/patches/${VLLM_REF}"
-if [ -d "$PATCH_DIR" ] && compgen -G "$PATCH_DIR/*.patch" > /dev/null; then
+if [[ "$VLLM_VER_BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && \
+   printf '%s\n%s\n' "0.21.0" "$VLLM_VER_BASE" | sort -V | head -n1 | grep -qx "0.21.0"; then
+    echo "vLLM $VLLM_VER >= 0.21 — skipping vendored patches (assumed merged upstream)"
+elif [ -d "$PATCH_DIR" ] && compgen -G "$PATCH_DIR/*.patch" > /dev/null; then
     echo "\n=== Applying vendored vLLM patches from $PATCH_DIR ==="
     VLLM_SITE_PACKAGES=$(python3 -c "import vllm, os; print(os.path.dirname(os.path.dirname(vllm.__file__)))")
     for p in "$PATCH_DIR"/*.patch; do
