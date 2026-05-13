@@ -26,10 +26,12 @@ the equivalent tool-call fallback, see
 | **vLLM chat processor** | `--dyn-chat-processor vllm --reasoning-parser <name>` | *(none)* | Yes | Parsing runs in vLLM's Python preprocessor. See [vLLM Chat Processor](../backends/vllm/vllm-chat-processor.md). |
 | **SGLang chat processor** | `--dyn-chat-processor sglang --reasoning-parser <name>` | *(none)* | Yes | Parsing runs in SGLang's Python preprocessor. See [SGLang Chat Processor](../backends/sglang/sglang-chat-processor.md). |
 
-Upstream parser names come from the engine's registry and may differ from
-Dynamo's name for the same model (e.g., vLLM's `nemotron_v3` vs Dynamo's
-`nemotron3`). They are pinned to the engine version shipped in the Dynamo
-container.
+> [!NOTE]
+> `--dyn-reasoning-parser` selects the **Dynamo-native** parser path, while
+> `--reasoning-parser` selects the **engine fallback** (vLLM or SGLang)
+> parser path. The accepted values for each flag come from a different
+> registry and may differ slightly based on the definitions from each
+> framework (e.g., vLLM's `nemotron_v3` vs Dynamo's `nemotron3`).
 
 ## Examples
 

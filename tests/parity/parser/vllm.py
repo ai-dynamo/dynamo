@@ -22,6 +22,8 @@ except ImportError:
         ToolParserManager,
     )
 
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+
 from tests.parity.common import ParseResult, decode_arguments
 
 
@@ -78,6 +80,29 @@ _FAMILY_TO_VLLM_KEY = {
 }
 
 
+def _tools_as_namespace(
+    tools: list[dict[str, Any]] | None,
+) -> list[SimpleNamespace] | None:
+    """Wrap tool dicts so vLLM parsers can use attribute access
+    (``tool.function.name``) while keeping ``parameters`` as a plain
+    dict (vLLM also calls ``.get()`` on it)."""
+    if not tools:
+        return None
+    out = []
+    for t in tools:
+        fn = t.get("function", t)
+        out.append(
+            SimpleNamespace(
+                type=t.get("type", "function"),
+                function=SimpleNamespace(
+                    name=fn["name"],
+                    parameters=fn.get("parameters") or {},
+                ),
+            )
+        )
+    return out
+
+
 def parse(
     parser_family: str,
     raw_text: str,
@@ -89,25 +114,30 @@ def parse(
             error=f"UNAVAILABLE: vLLM has no parser for family={parser_family!r}"
         )
 
-    # Wrap flat tool defs to the OpenAI `{"type":"function","function":{...}}`
-    # shape vLLM expects, then pass through to BOTH the constructor and the
-    # request. Some parsers (e.g. hermes-style schema-aware ones) coerce or
-    # cache the schemas at __init__ from the `tools=` kwarg; passing only
-    # `request.tools` skips that path.
+    # Wrap flat tool defs as real `ChatCompletionToolsParam` Pydantic instances
     wrapped_tools = (
-        [t if "function" in t else {"type": "function", "function": t} for t in tools]
+        [
+            ChatCompletionToolsParam.model_validate(
+                t if "function" in t else {"type": "function", "function": t}
+            )
+            for t in tools
+        ]
         if tools
         else None
     )
+    # Some vLLM parsers (e.g. glm4_moe) access request.tools[i].function.name
+    # via attribute, not dict subscript. Convert to SimpleNamespace so both
+    # access styles work.
+    ns_tools = _tools_as_namespace(wrapped_tools)
     try:
         parser_cls = ToolParserManager.get_tool_parser(key)
         # vLLM's ToolParser constructor checks `if not self.model_tokenizer:` and raises
         # if falsy. None of the parsers we test actually call tokenizer methods inside
         # extract_tool_calls(), so a truthy stub satisfies the check.
-        parser: ToolParser = parser_cls(tokenizer=_StubTokenizer(), tools=wrapped_tools)
+        parser: ToolParser = parser_cls(tokenizer=_StubTokenizer(), tools=ns_tools)
         # vLLM's extract_tool_calls signature: (model_output, request) → ExtractedToolCallInformation.
         # We construct a minimal request shape with only the tools field, since most parsers ignore the rest.
-        request = SimpleNamespace(tools=wrapped_tools)
+        request = SimpleNamespace(tools=ns_tools)
         info = parser.extract_tool_calls(raw_text, request)
     except NotImplementedError as e:
         # Known unsupported combinations (e.g., vLLM's harmony parser requires
