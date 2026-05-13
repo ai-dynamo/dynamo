@@ -70,12 +70,12 @@ logger.info("[GMS] Worker module loaded - model loader registered, all patches a
 if os.environ.get("MX_ENABLED", "0") == "1":
     try:
         from modelexpress import configure_vllm_logging
-        from modelexpress.client import MxClient
         from modelexpress.load_strategy import (
             publish_metadata,
             register_tensors,
             unpublish_metadata,
         )
+        from modelexpress.metadata.client_factory import create_metadata_client
 
         configure_vllm_logging()
     except ImportError as e:
@@ -127,7 +127,8 @@ def mx_teardown(ctx) -> None:
 def mx_bringup(ctx, model: torch.nn.Module) -> None:
     """Rebuild MX state on wake, reusing the discovered tensor set.
 
-    Creates a fresh MxClient and worker_id, re-registers the tensor
+    Creates a fresh metadata client (dispatched by MX_METADATA_BACKEND
+    via create_metadata_client) and worker_id, re-registers the tensor
     set from initial load with a new NIXL agent, and republishes
     metadata. Peers see a new identity and drop any cached references
     to the pre-sleep instance.
@@ -141,7 +142,7 @@ def mx_bringup(ctx, model: torch.nn.Module) -> None:
 
     TODO: port this helper into modelexpress.load_strategy.
     """
-    ctx.mx_client = MxClient()
+    ctx.mx_client = create_metadata_client(worker_rank=ctx.worker_rank)
     ctx.worker_id = uuid.uuid4().hex[:8]
 
     register_tensors(model, ctx, reuse_discovered=True)
