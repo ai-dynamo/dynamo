@@ -9,6 +9,13 @@ import pytest
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
 from dynamo.runtime import DistributedRuntime
 
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.none,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
+
 SGLANG_WORKER_GROUP_ID_KEY = "sglang_worker_group_id"
 ENDPOINT_PATH = "test.sglang.generate"
 

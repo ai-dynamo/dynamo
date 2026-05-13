@@ -349,7 +349,7 @@ class DynamoSglangPublisher:
                 )
                 publisher = KvEventPublisher(
                     endpoint=self.generate_endpoint,
-                    worker_id=self.kv_worker_id or 0,
+                    worker_id=self.kv_worker_id,
                     kv_block_size=self.server_args.page_size,
                     zmq_endpoint=zmq_ep,
                     zmq_topic="",
@@ -547,14 +547,14 @@ async def handle_non_leader_node(
         "Running with metrics and KV event publishing for local DP ranks."
     )
 
-    if publisher.server_args.kv_events_config:
-        publisher.kv_worker_id = await _resolve_multinode_leader_worker_id(
-            publisher.generate_endpoint,
-            publisher.server_args,
-        )
-        publisher.init_kv_event_publish()
-
     try:
+        if publisher.server_args.kv_events_config:
+            publisher.kv_worker_id = await _resolve_multinode_leader_worker_id(
+                publisher.generate_endpoint,
+                publisher.server_args,
+            )
+            publisher.init_kv_event_publish()
+
         await asyncio.Event().wait()
     finally:
         metrics_task.cancel()

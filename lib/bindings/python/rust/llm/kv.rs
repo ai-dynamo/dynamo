@@ -217,7 +217,7 @@ impl KvEventPublisher {
     ///
     /// Args:
     ///     endpoint: The Dynamo component endpoint for this worker.
-    ///     worker_id: Optional worker identity override. When 0, the publisher
+    ///     worker_id: Optional worker identity override. When None, the publisher
     ///         uses the endpoint's local connection id.
     ///     kv_block_size: KV cache block size in tokens; must be > 0.
     ///     dp_rank: Data-parallel rank of this worker (default 0).
@@ -232,11 +232,11 @@ impl KvEventPublisher {
     ///         ``0`` is treated as ``None`` (also disables batching).
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=0, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
-        worker_id: WorkerId,
+        worker_id: Option<WorkerId>,
         kv_block_size: usize,
         dp_rank: DpRank,
         enable_local_indexer: bool,
@@ -255,7 +255,6 @@ impl KvEventPublisher {
 
         // Extract component from endpoint
         let component = endpoint.inner.component().clone();
-        let worker_id = (worker_id != 0).then_some(worker_id);
 
         let inner =
             llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer_and_worker_id(

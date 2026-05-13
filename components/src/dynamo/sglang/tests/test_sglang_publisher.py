@@ -22,7 +22,7 @@ from dynamo.sglang.worker_group import (
 
 pytestmark = [
     pytest.mark.unit,
-    pytest.mark.none,
+    pytest.mark.sglang,
     pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
@@ -253,6 +253,38 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
     assert metrics_task.cancelled()
 
 
+@pytest.mark.asyncio
+async def test_handle_non_leader_node_cleans_up_when_resolution_fails(monkeypatch):
+    cleanup_called = asyncio.Event()
+
+    async def fail_resolution(generate_endpoint, server_args):
+        raise RuntimeError("resolution failed")
+
+    class FakePublisher:
+        generate_endpoint = object()
+        server_args = SimpleNamespace(kv_events_config='{"endpoint": "tcp://*:5557"}')
+
+        def cleanup(self):
+            cleanup_called.set()
+
+    monkeypatch.setattr(
+        publisher_mod,
+        "_resolve_multinode_leader_worker_id",
+        fail_resolution,
+    )
+    metrics_task = asyncio.create_task(asyncio.Event().wait())
+
+    with pytest.raises(RuntimeError, match="resolution failed"):
+        await handle_non_leader_node(
+            SimpleNamespace(server_args=SimpleNamespace(node_rank=1)),
+            FakePublisher(),
+            metrics_task,
+        )
+
+    assert cleanup_called.is_set()
+    assert metrics_task.cancelled()
+
+
 def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     calls = []
 
@@ -302,3 +334,50 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     assert len(publishers) == 4
     assert [call["dp_rank"] for call in calls] == [4, 5, 6, 7]
     assert {call["worker_id"] for call in calls} == {1234}
+
+
+def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
+    calls = []
+
+    class FakeKvEventPublisher:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(publisher_mod, "KvEventPublisher", FakeKvEventPublisher)
+    monkeypatch.setattr(publisher_mod, "get_local_ip_auto", lambda: "127.0.0.1")
+    monkeypatch.setattr(
+        publisher_mod,
+        "ZmqEventPublisher",
+        SimpleNamespace(
+            offset_endpoint_port=staticmethod(lambda base_ep, dp_rank: "tcp://*:5557")
+        ),
+    )
+    monkeypatch.setattr(
+        publisher_mod,
+        "format_zmq_endpoint",
+        lambda endpoint, ip_address: endpoint.replace("*", ip_address),
+    )
+
+    server_args = SimpleNamespace(
+        kv_events_config='{"endpoint": "tcp://*:5557"}',
+        page_size=16,
+        dp_size=1,
+        enable_dp_attention=False,
+        nnodes=1,
+        node_rank=0,
+    )
+    config = SimpleNamespace(
+        server_args=server_args,
+        dynamo_args=SimpleNamespace(enable_local_indexer=True),
+    )
+    publisher = DynamoSglangPublisher(
+        engine=SimpleNamespace(),
+        config=config,
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+        kv_worker_id=0,
+    )
+
+    publisher.init_kv_event_publish()
+
+    assert calls[0]["worker_id"] == 0
