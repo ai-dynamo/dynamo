@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: harmony
+mode: batch
+cases:
+  PARSER.batch.4.a:
+    description: Channel envelope with garbage body
+    ref: dynamo
+    model_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>not json at all<|call|>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls: []
+      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>not json at
+        all<|call|>
+  PARSER.batch.4.b:
+    description: Unterminated JSON in message body
+    ref: dynamo
+    model_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>
+  PARSER.batch.4.c:
+    description: No to=functions.X recipient
+    ref: dynamo
+    model_text: <|start|>assistant<|channel|>commentary <|constrain|>json<|message|>{"location":"NYC"}<|call|>
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: ''

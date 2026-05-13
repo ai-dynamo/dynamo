@@ -12,12 +12,11 @@ use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 #[cfg(feature = "bench")]
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
     AnchorRef, AnchorTask, EventKind, EventWarningKind, KvIndexerMetrics, KvRouterError,
-    MatchDetails, PreBoundEventCounters, SyncIndexer, WorkerTask,
+    MatchDetails, PreBoundEventCounters, SyncIndexer, WorkerLookupStats, WorkerTask,
 };
 use crate::cleanup::{CleanupGuard, CleanupState};
 use crate::protocols::*;
@@ -42,7 +41,6 @@ pub struct ConcurrentRadixTreeCompressed {
     /// The root of the radix tree. Has an empty edge and only contains children.
     root: SharedNode,
 
-    tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
     anchor_nodes: DashMap<ExternalSequenceBlockHash, SharedNode, FxBuildHasher>,
     cleanup: CleanupState,
     #[cfg(feature = "bench")]
@@ -96,7 +94,6 @@ impl ConcurrentRadixTreeCompressed {
     pub fn new() -> Self {
         Self {
             root: Arc::new(Node::new()),
-            tree_sizes: DashMap::with_hasher(FxBuildHasher),
             anchor_nodes: DashMap::with_hasher(FxBuildHasher),
             cleanup: CleanupState::new(),
             #[cfg(feature = "bench")]
@@ -162,13 +159,6 @@ impl ConcurrentRadixTreeCompressed {
         children
     }
 
-    #[cfg(test)]
-    pub(crate) fn tree_size_for_worker(&self, worker: WorkerWithDpRank) -> Option<usize> {
-        self.tree_sizes
-            .get(&worker)
-            .map(|size| size.load(Ordering::Relaxed))
-    }
-
     fn resolve_anchor_lookup(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
@@ -217,8 +207,7 @@ impl ConcurrentRadixTreeCompressed {
         worker_lookup: &mut WorkerLookup,
         blocks: &[KvCacheStoredBlockData],
         node: &SharedNode,
-    ) -> (usize, bool) {
-        let mut num_blocks_added = 0usize;
+    ) -> bool {
         let mut changed = false;
         for block in blocks {
             match worker_lookup.insert(block.block_hash, node.clone()) {
@@ -227,12 +216,11 @@ impl ConcurrentRadixTreeCompressed {
                     changed = true;
                 }
                 None => {
-                    num_blocks_added += 1;
                     changed = true;
                 }
             }
         }
-        (num_blocks_added, changed)
+        changed
     }
 
     // ------------------------------------------------------------------
@@ -255,27 +243,9 @@ impl ConcurrentRadixTreeCompressed {
             KvCacheEventData::Removed(op) => self.apply_removed(lookup, worker, op, id),
             KvCacheEventData::Cleared => {
                 lookup.entry(worker).or_default();
-                self.tree_sizes
-                    .entry(worker)
-                    .or_insert_with(|| AtomicUsize::new(0));
                 self.clear_all_blocks(lookup, worker.worker_id);
                 Ok(())
             }
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Accessors
-    // ------------------------------------------------------------------
-
-    pub fn get_workers(&self) -> Vec<WorkerId> {
-        let mut worker_ids: Vec<WorkerId> = self
-            .tree_sizes
-            .iter()
-            .map(|entry| entry.key().worker_id)
-            .collect();
-        worker_ids.sort_unstable();
-        worker_ids.dedup();
-        worker_ids
     }
 }

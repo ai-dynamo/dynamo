@@ -142,7 +142,7 @@ pub trait KvIndexerInterface {
     /// that don't override this) return an empty `Vec`.
     ///
     /// See [`ShardSizeSnapshot`] for the fields exposed per shard.
-    fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
+    async fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
         vec![]
     }
 
@@ -178,7 +178,7 @@ pub trait SyncIndexer: Send + Sync + 'static {
 
     /// Install a shared structural anchor for branch-sharded suffix routing.
     ///
-    /// Backends that do not support anchor-aware routing keep the default
+    /// Backends that do not support anchored routing keep the default
     /// unsupported response. This is only called by the branch-sharded wrapper
     /// when a routed subtree starts on a different shard than its parent prefix.
     fn apply_anchor(
@@ -196,7 +196,7 @@ pub trait SyncIndexer: Send + Sync + 'static {
         _suffix: &[LocalBlockHash],
     ) -> Result<OverlapScores, KvRouterError> {
         Err(KvRouterError::Unsupported(
-            "backend does not support anchor-aware find_matches".to_string(),
+            "backend does not support anchored find_matches".to_string(),
         ))
     }
 
@@ -219,16 +219,6 @@ pub trait SyncIndexer: Send + Sync + 'static {
         None
     }
 
-    /// Number of distinct workers registered in this backend.
-    fn worker_count(&self) -> usize {
-        0
-    }
-
-    /// Total cached blocks across all workers.
-    fn block_count(&self) -> usize {
-        0
-    }
-
     /// Return a human-readable backend-specific timing or instrumentation report.
     fn timing_report(&self) -> String {
         String::new()
@@ -246,3 +236,10 @@ pub trait SyncIndexer: Send + Sync + 'static {
         vec![]
     }
 }
+
+/// Marker trait for [`SyncIndexer`] backends that implement structural anchors.
+///
+/// Branch-sharded routing can split a suffix onto a shard whose backend needs a
+/// synthetic parent anchor. Implement this only when `apply_anchor` and
+/// `find_matches_from_anchor` are supported by the backend.
+pub trait AnchorCapableSyncIndexer: SyncIndexer {}

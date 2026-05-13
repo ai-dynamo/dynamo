@@ -5,6 +5,7 @@ pub mod config;
 mod integration;
 mod record;
 mod relay;
+mod replay;
 pub mod sink;
 pub mod types;
 
@@ -14,14 +15,16 @@ use crate::telemetry::bus::TelemetryBus;
 
 pub use config::{AgentTracePolicy, is_enabled, policy};
 pub(crate) use integration::{
-    record_llm_metric_tokens, request_metrics, start_tool_event_ingest_from_policy,
+    build_agent_trace_request_end_state, record_llm_metric_tokens, request_metrics,
+    start_tool_event_ingest_from_policy, wrap_agent_trace_request_end_stream,
 };
 pub(crate) use record::validate_tool_record;
 pub use record::{emit_request_end, publish_tool_record};
 pub use relay::AgentToolEventRelay;
+pub(crate) use replay::request_replay_metrics;
 pub use types::{
-    AgentRequestMetrics, AgentToolEvent, AgentToolStatus, AgentTraceRecord, TraceEventSource,
-    TraceEventType, TraceSchema, WorkerInfo,
+    AgentReplayMetrics, AgentRequestMetrics, AgentToolEvent, AgentToolStatus, AgentTraceRecord,
+    TraceEventSource, TraceEventType, TraceSchema, WorkerInfo,
 };
 
 pub const DEFAULT_TOOL_EVENTS_TOPIC: &str = "agent-tool-events";

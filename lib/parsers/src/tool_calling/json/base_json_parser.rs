@@ -1,28 +1,34 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
-
 use regex::RegexBuilder;
-use serde_json::Value;
+use serde_json::value::RawValue;
 use uuid::Uuid;
 
 use super::super::ToolDefinition;
 use super::config::JsonParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
-// Same as CalledFunction with named parameters
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+// Same as CalledFunction with named parameters.
+//
+// `parameters` / `arguments` are deserialized as `Box<RawValue>` so the
+// original byte span — including key order, whitespace, and number
+// formatting — is preserved verbatim. Going through `HashMap<String, Value>`
+// here would normalize via `serde_json::to_string`, which strips spaces and
+// reorders keys based on HashMap iteration. That broke append-only KV-cache
+// prefix matching: when the model's emitted `arguments` were re-rendered
+// through this parser and round-tripped back into the next turn's prompt,
+// the bytes diverged from what the model originally emitted.
+#[derive(Debug, serde::Deserialize)]
 pub struct CalledFunctionParameters {
     pub name: String,
-    pub parameters: HashMap<String, Value>,
+    pub parameters: Box<RawValue>,
 }
 
-// Same as CalledFunction with named parameters
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 pub struct CalledFunctionArguments {
     pub name: String,
-    pub arguments: HashMap<String, Value>,
+    pub arguments: Box<RawValue>,
 }
 
 // Extract the contents between start and end tokens using regex parsing.
@@ -102,17 +108,16 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
             // Handle array format (like phi4: functools[{...}])
             if let Some(pos) = s.rfind(']') {
                 let candidate = &s[..=pos].trim();
-                // Keep only valid JSON arrays
-                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
-                    // For arrays, we need to extract the individual objects
-                    if let Ok(serde_json::Value::Array(arr)) =
-                        serde_json::from_str::<serde_json::Value>(candidate)
-                    {
-                        for item in arr {
-                            if let Ok(item_str) = serde_json::to_string(&item) {
-                                items.push(item_str);
-                            }
-                        }
+                // Parse as `Vec<Box<RawValue>>` so each element retains its
+                // original byte span. Going through `serde_json::Value` +
+                // `to_string` here would strip whitespace and reorder keys
+                // inside each tool call's `arguments`, breaking byte-level
+                // append-only across multi-step tool use for parsers that
+                // route through this single-token path (functools, [TOOL_CALLS],
+                // <|python_tag|>).
+                if let Ok(arr) = serde_json::from_str::<Vec<Box<RawValue>>>(candidate) {
+                    for item in arr {
+                        items.push(item.get().to_string());
                     }
                 }
             }
@@ -334,16 +339,19 @@ pub fn try_tool_call_parse_basic_json(
     }
     // Convert json (String) to &str
     let json = json.as_str();
-    // Anonymous function to attempt deserialization into a known representation
-    let parse = |name: String, args: HashMap<String, Value>| -> anyhow::Result<ToolCallResponse> {
-        // Preserve nested JSON strings intact; do not double-escape.
-        // serde_json::to_string on Value preserves required escapes only.
+    // Anonymous function to attempt deserialization into a known representation.
+    //
+    // We pass through the original byte span via `RawValue::get()` rather than
+    // re-serializing a parsed `HashMap` / `Value`. That keeps `arguments`
+    // byte-identical to what the model emitted, which is required for KV-cache
+    // append-only prefix matching across multi-step tool use.
+    let parse = |name: String, args: &RawValue| -> anyhow::Result<ToolCallResponse> {
         Ok(ToolCallResponse {
             id: format!("call-{}", Uuid::new_v4()),
             tp: ToolCallType::Function,
             function: CalledFunction {
                 name,
-                arguments: serde_json::to_string(&args)?,
+                arguments: args.get().to_string(),
             },
         })
     };
@@ -359,10 +367,9 @@ pub fn try_tool_call_parse_basic_json(
     // }
     if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(json) {
         return Ok((
-            vec![parse(single.name, single.parameters)?],
+            vec![parse(single.name, &single.parameters)?],
             Some(normal_text),
         ));
-        //parse(single.name, single.parameters).map(Some);
 
         // CalledFunctionArguments: Single { name, arguments }
         // Example:
@@ -375,7 +382,7 @@ pub fn try_tool_call_parse_basic_json(
         // }
     } else if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(json) {
         return Ok((
-            vec![parse(single.name, single.arguments)?],
+            vec![parse(single.name, &single.arguments)?],
             Some(normal_text),
         ));
 
@@ -385,17 +392,21 @@ pub fn try_tool_call_parse_basic_json(
     //   { "name": "lookup_user", "parameters": { "user_id": "123" } },
     //   { "name": "get_weather", "arguments": { "location": "SF", "units": "celsius" } }
     // ]
-    // Parse as generic array to handle both formats and malformed entries gracefully
-    // Note: Always return once we parse a valid array, even if empty or with malformed entries
-    } else if let Ok(array) = serde_json::from_str::<Vec<serde_json::Value>>(json) {
+    // Parse the array as `Vec<Box<RawValue>>` so each element retains its
+    // original byte span. Going through `Vec<serde_json::Value>` would
+    // already have mangled the inner `arguments` / `parameters` bytes by the
+    // time we tried to extract them.
+    } else if let Ok(array) = serde_json::from_str::<Vec<Box<RawValue>>>(json) {
         let mut results = Vec::new();
         for item in array {
+            let item_str = item.get();
             // Try both CalledFunctionArguments and CalledFunctionParameters formats
-            if let Ok(func_args) = serde_json::from_value::<CalledFunctionArguments>(item.clone()) {
-                results.push(parse(func_args.name, func_args.arguments)?);
-            } else if let Ok(func_params) = serde_json::from_value::<CalledFunctionParameters>(item)
+            if let Ok(func_args) = serde_json::from_str::<CalledFunctionArguments>(item_str) {
+                results.push(parse(func_args.name, &func_args.arguments)?);
+            } else if let Ok(func_params) =
+                serde_json::from_str::<CalledFunctionParameters>(item_str)
             {
-                results.push(parse(func_params.name, func_params.parameters)?);
+                results.push(parse(func_params.name, &func_params.parameters)?);
             }
             // Skip malformed entries silently
         }
@@ -413,25 +424,24 @@ pub fn try_tool_call_parse_basic_json(
         let repaired = repaired.as_str();
         if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(repaired) {
             return Ok((
-                vec![parse(single.name, single.parameters)?],
+                vec![parse(single.name, &single.parameters)?],
                 Some(normal_text),
             ));
         } else if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(repaired) {
             return Ok((
-                vec![parse(single.name, single.arguments)?],
+                vec![parse(single.name, &single.arguments)?],
                 Some(normal_text),
             ));
-        } else if let Ok(array) = serde_json::from_str::<Vec<serde_json::Value>>(repaired) {
+        } else if let Ok(array) = serde_json::from_str::<Vec<Box<RawValue>>>(repaired) {
             let mut results = Vec::new();
             for item in array {
-                if let Ok(func_args) =
-                    serde_json::from_value::<CalledFunctionArguments>(item.clone())
-                {
-                    results.push(parse(func_args.name, func_args.arguments)?);
+                let item_str = item.get();
+                if let Ok(func_args) = serde_json::from_str::<CalledFunctionArguments>(item_str) {
+                    results.push(parse(func_args.name, &func_args.arguments)?);
                 } else if let Ok(func_params) =
-                    serde_json::from_value::<CalledFunctionParameters>(item)
+                    serde_json::from_str::<CalledFunctionParameters>(item_str)
                 {
-                    results.push(parse(func_params.name, func_params.parameters)?);
+                    results.push(parse(func_params.name, &func_params.parameters)?);
                 }
             }
             if !results.is_empty() {
@@ -520,7 +530,7 @@ mod repair_tests {
 mod detect_parser_tests {
     use super::*;
 
-    #[test] // CASE.20
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_with_tool_call_start_token_hermes() {
         let text =
             r#"<tool_call>{"name": "search", "parameters": { "query": "rust" } }</tool_call>"#;
@@ -533,7 +543,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // CASE.20
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_without_tool_call_start_token() {
         let text = r#"{"name": "search", "parameters": { "query": "rust" } }"#;
         let config = JsonParserConfig {
@@ -545,7 +555,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // CASE.20, CASE.13
+    #[test] // helper, PARSER.batch.8
     fn detect_tool_call_start_basic_json_chunk_without_tool_call_start_token_with_normal_text() {
         let text = r#"Here it is {"name": "#;
         let config = JsonParserConfig {
@@ -557,7 +567,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // CASE.20
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_with_square_brackets() {
         // These kind of false positives are expected when calling this function for stream=True
         let text = r#"Here it is [{"name": "search","#;
@@ -570,7 +580,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // CASE.20
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_false_positive() {
         // These kind of false positives are expected when calling this function for stream=True
         let text = r#"Here it is { Whats up"#;
@@ -583,7 +593,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // CASE.20
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_with_tool_call_start_token_nemotron_deci() {
         let text =
             r#"<TOOLCALL>[{"name": "search", "parameters": { "query": "rust" } }]</TOOLCALL>"#;
@@ -596,7 +606,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // CASE.20
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_with_lllama3_json_token() {
         let text = r#"<|python_tag|>{ "name": }"#;
         let config = JsonParserConfig {
@@ -608,7 +618,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // CASE.20
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_mistral_token() {
         let text = r#"Hello Yo ! [TOOL_CALLS]{"name": "search", "#;
         let config = JsonParserConfig {
@@ -620,7 +630,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // CASE.20
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_phi4_token() {
         let text = r#"functools{"name": "search", "#;
         let config = JsonParserConfig {
@@ -632,7 +642,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // CASE.20, CASE.8
+    #[test] // helper, PARSER.stream.3
     fn detect_tool_call_start_basic_json_chunk_phi4_partial_token_fun() {
         // Test the streaming scenario where "fun" arrives first
         let text = r#"fun"#;
@@ -648,7 +658,7 @@ mod detect_parser_tests {
         );
     }
 
-    #[test] // CASE.20, CASE.8
+    #[test] // helper, PARSER.stream.3
     fn detect_tool_call_start_basic_json_chunk_phi4_partial_token_func() {
         let text = r#"func"#;
         let config = JsonParserConfig {
@@ -663,7 +673,7 @@ mod detect_parser_tests {
         );
     }
 
-    #[test] // CASE.20, CASE.8
+    #[test] // helper, PARSER.stream.3
     fn detect_tool_call_start_basic_json_chunk_phi4_partial_token_f() {
         let text = r#"f"#;
         let config = JsonParserConfig {
@@ -678,7 +688,7 @@ mod detect_parser_tests {
         );
     }
 
-    #[test] // CASE.20, CASE.8
+    #[test] // helper, PARSER.stream.3
     fn detect_tool_call_start_basic_json_chunk_phi4_partial_with_prefix() {
         // Test case where text ends with a partial token (more realistic streaming scenario)
         let text = r#"Hello fun"#;
@@ -694,7 +704,7 @@ mod detect_parser_tests {
         );
     }
 
-    #[test] // CASE.20
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_phi4_avoid_false_positive() {
         // Test to ensure we don't get false positives for unrelated text
         let text = r#"funny joke"#;
@@ -710,7 +720,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // CASE.20
+    #[test] // helper
     fn detect_tool_call_start_basic_json_chunk_phi4_no_match() {
         let text = r#"hello world"#;
         let config = JsonParserConfig {

@@ -265,6 +265,7 @@ type ServiceReplicaStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:storageversion
+// +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoGraphDeployment is deprecated; use nvidia.com/v1beta1 DynamoGraphDeployment"
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=dgd
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].status`,description="Ready status of the graph deployment"

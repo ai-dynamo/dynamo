@@ -20,6 +20,19 @@ fn direct_lookup() -> DirectLookup {
     FxHashMap::default()
 }
 
+fn worker_lookup_len(lookup: &DirectLookup, worker: WorkerWithDpRank) -> Option<usize> {
+    lookup.get(&worker).map(|worker_lookup| worker_lookup.len())
+}
+
+async fn index_block_count(index: &ThreadPoolIndexer<ConcurrentRadixTreeCompressed>) -> usize {
+    index
+        .shard_sizes()
+        .await
+        .into_iter()
+        .map(|snapshot| snapshot.block_count)
+        .sum()
+}
+
 fn local_hashes(query: &[u64]) -> Vec<LocalBlockHash> {
     query.iter().copied().map(LocalBlockHash).collect()
 }
@@ -101,7 +114,7 @@ mod race_tests {
             apply_direct(&index, &mut lookup1, make_store_event(1, &[1, 2, 3, 4]));
             apply_direct(&index, &mut lookup2, make_store_event(2, &[1, 2, 3, 4]));
 
-            let (_lookup1, _lookup2) = race_two_events(
+            let (lookup1, lookup2) = race_two_events(
                 index.clone(),
                 lookup1,
                 make_store_event_with_parent(1, &[1, 2, 3, 4], &[5, 6]),
@@ -115,8 +128,8 @@ mod race_tests {
             assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker2, 4);
             assert_direct_score(&index, &[1, 2, 3, 4, 7, 8], worker1, 4);
             assert_direct_score(&index, &[1, 2, 3, 4, 7, 8], worker2, 6);
-            assert_eq!(index.tree_size_for_worker(worker1), Some(6));
-            assert_eq!(index.tree_size_for_worker(worker2), Some(6));
+            assert_eq!(worker_lookup_len(&lookup1, worker1), Some(6));
+            assert_eq!(worker_lookup_len(&lookup2, worker2), Some(6));
         }
 
         #[test]
@@ -130,7 +143,7 @@ mod race_tests {
             apply_direct(&index, &mut lookup1, make_store_event(1, &[1, 2, 3, 4]));
             apply_direct(&index, &mut lookup2, make_store_event(2, &[1, 2, 3, 4]));
 
-            let (_lookup1, _lookup2) = race_two_events(
+            let (lookup1, lookup2) = race_two_events(
                 index.clone(),
                 lookup1,
                 make_store_event_with_parent(1, &[1, 2, 3, 4], &[5, 6]),
@@ -142,8 +155,8 @@ mod race_tests {
             assert_edge_lengths(&index, &[6]);
             assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
             assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker2, 6);
-            assert_eq!(index.tree_size_for_worker(worker1), Some(6));
-            assert_eq!(index.tree_size_for_worker(worker2), Some(6));
+            assert_eq!(worker_lookup_len(&lookup1, worker1), Some(6));
+            assert_eq!(worker_lookup_len(&lookup2, worker2), Some(6));
         }
 
         #[test]
@@ -660,7 +673,7 @@ mod remove_cleanup_tests {
         flush_and_settle(&index).await;
 
         assert_score(&index, &[1, 2, 3], worker, 3).await;
-        assert_eq!(index.backend().tree_size_for_worker(worker), Some(3));
+        assert_eq!(index_block_count(&index).await, 3);
 
         index
             .apply_event(make_remove_event_with_parent(0, &[1], &[2]))
@@ -668,7 +681,7 @@ mod remove_cleanup_tests {
         flush_and_settle(&index).await;
 
         assert_score(&index, &[1, 2, 3], worker, 1).await;
-        assert_eq!(index.backend().tree_size_for_worker(worker), Some(1));
+        assert_eq!(index_block_count(&index).await, 1);
 
         index
             .apply_event(make_store_event_with_parent(0, &[1], &[2, 3]))
@@ -676,7 +689,7 @@ mod remove_cleanup_tests {
         flush_and_settle(&index).await;
 
         assert_score(&index, &[1, 2, 3], worker, 3).await;
-        assert_eq!(index.backend().tree_size_for_worker(worker), Some(3));
+        assert_eq!(index_block_count(&index).await, 3);
     }
 
     #[tokio::test]

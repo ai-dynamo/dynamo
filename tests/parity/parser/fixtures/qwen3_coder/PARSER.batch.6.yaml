@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: qwen3_coder
+mode: batch
+cases:
+  PARSER.batch.6.a:
+    description: Function block with no <parameter>
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L260
+    model_text: |-
+      <tool_call>
+      <function=get_time>
+      </function>
+      </tool_call>
+    tools:
+    - &id001
+      name: get_time
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      calls:
+      - name: get_time
+        arguments: {}
+      normal_text: ''
+  PARSER.batch.6.b:
+    description: Function block with extra whitespace inside
+    ref: dynamo
+    model_text: |-
+      <tool_call>
+      <function=get_time>
+
+      </function>
+      </tool_call>
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_time
+        arguments: {}
+      normal_text: ''

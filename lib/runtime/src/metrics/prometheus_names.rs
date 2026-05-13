@@ -282,6 +282,21 @@ pub mod frontend_service {
     /// Number of requests pending in the router's scheduler queue (gauge per worker_type)
     pub const ROUTER_QUEUE_PENDING_REQUESTS: &str = "router_queue_pending_requests";
 
+    /// Number of replicas allocated for a LoRA adapter (gauge per LoRA)
+    pub const LORA_REPLICA_FACTOR: &str = "lora_replica_factor";
+
+    /// Whether a LoRA adapter is actively receiving traffic (1=active, 0=inactive)
+    pub const LORA_IS_ACTIVE: &str = "lora_is_active";
+
+    /// Estimated load (windowed request count) for a LoRA adapter
+    pub const LORA_ESTIMATED_LOAD: &str = "lora_estimated_load";
+
+    /// Raw arrival count (windowed rate counter) for a LoRA adapter
+    pub const LORA_RAW_ARRIVAL_COUNT: &str = "lora_raw_arrival_count";
+
+    /// Number of in-flight (active) requests for a LoRA adapter
+    pub const LORA_ACTIVE_REQUESTS: &str = "lora_active_requests";
+
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
 
@@ -681,6 +696,18 @@ pub mod kvrouter {
 pub mod kv_publisher {
     /// Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
     pub const ENGINES_DROPPED_EVENTS_TOTAL: &str = "kv_publisher_engines_dropped_events_total";
+
+    /// Total number of ZMQ KV events seen by the relay, labeled by stage and event type
+    pub const ZMQ_EVENTS_TOTAL: &str = "kv_publisher_zmq_events_total";
+
+    /// Total number of ZMQ KV events filtered before conversion, labeled by event type and reason
+    pub const ZMQ_FILTERED_EVENTS_TOTAL: &str = "kv_publisher_zmq_filtered_events_total";
+
+    /// Total number of ZMQ KV events dropped due to conversion issues, labeled by event type and reason
+    pub const ZMQ_CONVERSION_ISSUES_TOTAL: &str = "kv_publisher_zmq_conversion_issues_total";
+
+    /// Total number of suspicious-but-forwarded ZMQ KV events, labeled by event type and reason
+    pub const ZMQ_SUSPICIOUS_EVENTS_TOTAL: &str = "kv_publisher_zmq_suspicious_events_total";
 }
 
 /// Additional TRT-LLM worker metrics beyond what the engine natively provides.

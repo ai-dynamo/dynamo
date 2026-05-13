@@ -158,8 +158,8 @@ impl MockWorker {
     }
 
     /// Update the worker's notion of current simulation time. Engine calls
-    /// this at the start of `tick(now_ms)` and before every `enqueue_*` /
-    /// `try_onboard_prefix` so transfer reservation reads a fresh `now_ms`
+    /// this at the start of `tick(now_ms)` and before every enqueue/start
+    /// operation so transfer reservation reads a fresh `now_ms`
     /// inside `execute_local_transfer`.
     pub fn set_now_ms(&self, now_ms: f64) {
         self.now_us.store(ms_to_us(now_ms), Ordering::Release);

@@ -22,7 +22,7 @@ fn commentary_block_regex() -> &'static Regex {
         // Between name and `<|message|>` we tolerate optional
         // `<|constrain|>json` and whitespace by using non-greedy `.*?`.
         // Args end at either `<|call|>` (normal close) or end-of-string
-        // (`\z`, the bare-envelope CASE.5 variant where the model never
+        // (`\z`, the bare-envelope PARSER.batch.5 variant where the model never
         // emitted `<|call|>` before EOS / max_tokens).
         Regex::new(
             r"(?s)<\|channel\|>commentary to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)(?:<\|call\|>|\z)",
@@ -294,7 +294,7 @@ mod tests {
         (call.function.name, args)
     }
 
-    #[tokio::test] // CASE.1, CASE.19
+    #[tokio::test] // PARSER.batch.1, PARSER.harmony.2
     async fn test_parse_tool_calls_harmony_complete_basic() {
         let text = r#"<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"format":"celsius","location":"San Francisco"}"#;
         let (tool_calls, normal_content) =
@@ -308,7 +308,7 @@ mod tests {
         assert_eq!(args["format"], "celsius");
     }
 
-    #[tokio::test] // CASE.4, CASE.19
+    #[tokio::test] // PARSER.batch.4, PARSER.harmony.2
     async fn test_parse_tools_harmony_without_start_token() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|message|>{"location":"San Francisco"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(tool_calls.len(), 0);
     }
 
-    #[tokio::test] // CASE.7, CASE.9, CASE.19
+    #[tokio::test] // PARSER.batch.7, PARSER.batch.8, PARSER.harmony.2
     async fn test_parse_tool_calls_harmony_with_multi_args() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco", "unit":"fahrenheit"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(args["unit"], "fahrenheit");
     }
 
-    #[tokio::test] // CASE.9, CASE.13, CASE.19
+    #[tokio::test] // PARSER.batch.8, PARSER.batch.8, PARSER.harmony.2
     async fn test_parse_tool_calls_harmony_with_normal_text() {
         let text = r#"<|channel|>analysis<|message|>Need to use function get_current_weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"San Francisco"}<|call|>"#;
         let (tool_calls, normal_content) =
@@ -363,10 +363,10 @@ mod tests {
     // Pin current behavior on two back-to-back commentary blocks. The
     // harmony parser today does NOT extract both calls — the second
     // `<|start|>assistant<|channel|>commentary` block is left in normal
-    // content. Same failure class as CASE.5: parser drops in-flight work,
+    // content. Same failure class as PARSER.batch.5: parser drops in-flight work,
     // customer sees HTTP 200 with fewer tool_calls than the model emitted.
     // Promoting this to recovery is a parser change.
-    #[tokio::test] // CASE.2 — gpt-oss
+    #[tokio::test] // PARSER.batch.2 — gpt-oss
     async fn test_parse_harmony_multiple_calls_recovers() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|><|start|>assistant<|channel|>commentary to=functions.b <|constrain|>json<|message|>{"y":2}<|call|>"#;
         let (tool_calls, _normal) = parse_tool_calls_harmony_complete(
@@ -391,7 +391,7 @@ mod tests {
     // Pin current behavior on truncated JSON args. harmony today drops the
     // call entirely rather than falling back to a string-form arguments or
     // surfacing an explicit error.
-    #[tokio::test] // CASE.4 — gpt-oss
+    #[tokio::test] // PARSER.batch.4 — gpt-oss
     async fn test_parse_harmony_truncated_json_recovers() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>"#;
         let (tool_calls, _normal) = parse_tool_calls_harmony_complete(
@@ -410,10 +410,10 @@ mod tests {
         assert_eq!(args["location"], "NYC");
     }
 
-    // Bare-envelope CASE.5: no preceding `analysis` block, no `<|call|>`
+    // Bare-envelope PARSER.batch.5: no preceding `analysis` block, no `<|call|>`
     // at the end. harmony's tokenizer rejects this; the regex fallback
     // accepts EOS as a synthetic close.
-    #[tokio::test] // CASE.5 — gpt-oss
+    #[tokio::test] // PARSER.batch.5 — gpt-oss
     async fn test_parse_harmony_bare_envelope_no_call_token_recovers() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}"#;
         let (tool_calls, _normal) = parse_tool_calls_harmony_complete(
@@ -459,7 +459,7 @@ mod tests {
         );
     }
 
-    #[tokio::test] // CASE.4, CASE.5, CASE.19
+    #[tokio::test] // PARSER.batch.4, PARSER.batch.5, PARSER.harmony.2
     async fn test_parse_tool_calls_harmony_without_call_token() {
         let text = r#"<|channel|>analysis<|message|>We need to call get_weather function. The user asks "What's the weather like in San Francisco in Celsius?" So location: "San Francisco, CA" unit: "celsius". Let's call function.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"San Francisco, CA","unit":"celsius"}"#;
         let (tool_calls, normal_content) =
@@ -476,7 +476,7 @@ mod tests {
 
     /// Parser-level invariant: the harmony parser is byte-stable — it
     /// doesn't see `finish_reason` and produces the same output regardless
-    /// of the upstream stream-end reason. Real CASE.12 coverage (stop /
+    /// of the upstream stream-end reason. Real PIPELINE.finish_reason coverage (stop /
     /// tool_calls / length mapping) lives in
     /// `lib/llm/tests/test_streaming_tool_parsers.rs` and belongs in the
     /// cross-parser finish_reason mapping work-item (tracked separately).
@@ -489,9 +489,9 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
     }
 
-    /// CASE.6 — empty args. A no-arg harmony call (`{}`) must still surface
+    /// PARSER.batch.6 — empty args. A no-arg harmony call (`{}`) must still surface
     /// the function name.
-    #[tokio::test] // CASE.6 — gpt-oss
+    #[tokio::test] // PARSER.batch.6 — gpt-oss
     async fn test_parse_harmony_empty_args() {
         let text =
             r#"<|channel|>commentary to=functions.current_time <|constrain|>json<|message|>{}"#;
@@ -504,12 +504,12 @@ mod tests {
         assert_eq!(args, serde_json::json!({}));
     }
 
-    /// CASE.14 — empty / null content variants. Truly-empty (zero bytes)
+    /// PARSER.batch.9 — empty / null content variants. Truly-empty (zero bytes)
     /// and whitespace-only inputs must yield no tool calls. Unlike the
     /// XML/JSON parsers (which trim whitespace down to `Some("")`), the
     /// harmony parser passes the input verbatim through to normal_text —
     /// pin that distinction here.
-    #[tokio::test] // CASE.14 — gpt-oss
+    #[tokio::test] // PARSER.batch.9 — gpt-oss
     async fn test_parse_harmony_empty_and_whitespace_inputs() {
         for input in &["", " ", "\n", "\t\n  \t"] {
             let (tool_calls, normal) =
@@ -530,11 +530,11 @@ mod tests {
         }
     }
 
-    /// CASE.15 — duplicate calls (same function name twice). Two
+    /// PARSER.batch.10 — duplicate calls (same function name twice). Two
     /// back-to-back commentary blocks for the same function. Pin
     /// parser-level behavior — both calls returned with distinct ids
     /// and distinct args.
-    #[tokio::test] // CASE.15 — gpt-oss
+    #[tokio::test] // PARSER.batch.10 — gpt-oss
     async fn test_parse_harmony_duplicate_calls_same_name() {
         let text = r#"<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"NYC"}<|call|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"LA"}<|call|>"#;
         let (tool_calls, _) = parse_tool_calls_harmony_complete(text, &Default::default(), None)
@@ -562,7 +562,7 @@ mod tests {
 mod detect_parser_tests {
     use super::*;
 
-    #[test] // CASE.20
+    #[test] // helper
     fn test_detect_tool_call_start_harmony_chunk_with_tool_call_start_token() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json"#;
         let config = JsonParserConfig {
@@ -574,7 +574,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // CASE.20
+    #[test] // helper
     fn test_detect_tool_call_start_harmony_chunk_without_tool_call_start_token() {
         // This is a warkaround for now. Right now everything is treated as tool call start token.
         // We need to improve this in the future.
@@ -588,7 +588,7 @@ mod detect_parser_tests {
         assert!(result);
     }
 
-    #[test] // CASE.20, CASE.8
+    #[test] // helper, PARSER.stream.3
     fn test_detect_tool_call_start_harmony_partial_tokens() {
         // Test partial token detection for streaming scenarios
         let config = JsonParserConfig {

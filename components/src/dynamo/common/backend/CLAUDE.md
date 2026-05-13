@@ -6,10 +6,10 @@ Two-class abstraction: `Worker` (runtime integration) and
 ## Engine Lifecycle
 
 ```
-from_args(argv)  ->  start()  ->  generate() / abort()  ->  cleanup()
-     |                  |              |                        |
-  parse args,      start engine,    serve requests         shutdown,
-  return config    return metadata  (concurrent)           release resources
+from_args(argv) -> start() -> generate()/abort() -> drain() -> cleanup()
+     |                |              |                  |          |
+  parse args,    start engine,   serve requests    drain in-flight, shutdown,
+  return config  return metadata (concurrent)      then cleanup    release resources
 ```
 
 1. `from_args(argv)` -- classmethod factory. Parses CLI args, returns
@@ -18,7 +18,18 @@ from_args(argv)  ->  start()  ->  generate() / abort()  ->  cleanup()
    `generate()` MUST be ready to accept calls.
 3. `generate(request, context)` -- streaming inference, called concurrently.
 4. `abort(context)` -- cancel an in-flight request (optional, default no-op).
-5. `cleanup()` -- called once on shutdown.
+5. `drain()` -- backend-side drain before cleanup (optional, default no-op).
+   Called after the discovery unregister + grace period; use it for in-flight
+   NIXL transfers (issue #7319) that must complete while the runtime is alive.
+6. `cleanup()` -- called exactly once. Runs after `start()` succeeded
+   on shutdown, **and** after `start()` raised — so implementations
+   must be null-safe against partial state (inner engine handle,
+   sockets, background tasks). All current engines guard each
+   resource with `if self.engine is not None`. Must also be
+   idempotent: a second call after a successful first is a no-op.
+   Not called when `start()` was never invoked (e.g. pre-start
+   shutdown); use `__del__` for resources allocated in the
+   constructor.
 
 ## Design Constraints
 
@@ -39,11 +50,11 @@ from_args(argv)  ->  start()  ->  generate() / abort()  ->  cleanup()
   build a `WorkerConfig` is a type error, not a runtime `AttributeError`.
 
 - **`generate()` delegates to engine with cancellation monitoring.**
-  `Worker.generate()` runs a background task that watches
-  `context.async_killed_or_stopped()` and calls `engine.abort(context)` on
-  cancellation. It also checks `context.is_stopped()` after each yielded
-  chunk. Sampling params, prompt building, and output formatting stay inside
-  each engine -- they are deeply engine-specific.
+  Cancellation monitoring lives in Rust (`dynamo_backend_common::EngineAdapter`):
+  it spawns a per-request task that watches `ctx.stopped()` / `ctx.killed()`
+  and calls `engine.abort(context)` on cancellation. The Python ABC's
+  `generate()` just yields chunks — the cross-stream cancel logic and
+  exception → `BackendError` mapping are handled by the bridge.
 
 - **`start()` returns `EngineConfig`.** The model class needs registration
   metadata (`context_length`, `block_size`, `total_kv_blocks`) but must not
@@ -81,6 +92,49 @@ Build the `completion_usage` dict inline. Finish reason normalization
 4. Create `<backend>/unified_main.py` calling `run(<YourEngine>)`
 5. Use `sample_engine.py` as the reference implementation
 
+## Disaggregated Serving
+
+`WorkerConfig.disaggregation_mode` is the single source of truth for the
+worker's role. Default `DisaggregationMode.AGGREGATED` keeps existing
+callers unchanged.
+
+What the **runtime** does with the mode (Rust `Worker` in `lib/backend-common`):
+
+- `Prefill` → register with `ModelType::Prefill` so the frontend's
+  `PrefillRouter` targets this worker, regardless of `endpoint_types`.
+- `Decode` → keep `endpoint_types`, but force-disable
+  `enable_local_indexer` (decode workers don't host the indexer endpoint).
+- `Aggregated` → register with the parsed `endpoint_types`.
+
+What the **engine** does with the mode (consumed in each backend's
+`generate()`):
+
+- `Prefill`: cap output to one token, run the engine through its
+  prefill-only path, pack the resulting handoff payload (vLLM's
+  `kv_transfer_params`, SGLang's bootstrap triple, TRT-LLM's encoded
+  `LlmDisaggregatedParams`) into the terminal chunk's
+  `disaggregated_params`.
+- `Decode`: read `request.prefill_result.disaggregated_params`, fail
+  loudly if missing (`require_prefill_result`), feed it into the
+  engine's resume-from-KV-transfer call.
+- `Aggregated`: existing path, no branching.
+
+`drain()` is the prefill-shutdown hook: prefill engines should poll
+their scheduler until in-flight NIXL transfers finish before GPU
+memory is released (issue #7319). Aggregated/decode engines leave the
+default no-op.
+
+`disagg.py` ships `enforce_prefill_max_tokens`, `extract_prefill_result`,
+and `require_prefill_result` — small helpers backends call from inside
+`generate()` to avoid reinventing the same patterns. They are utilities,
+not abstractions; backends free to inline the logic when their generate
+path is shaped differently.
+
+The sample engine (`sample_engine.py`) implements the full dispatch in
+pure Python with synthetic handoff payloads — useful as a reference
+when wiring a new backend, and as a CPU-only smoke test for the
+disaggregated wire format (`examples/backends/sample/launch/disagg.sh`).
+
 ## Error Handling
 
 `Worker` wraps lifecycle and generate errors in
@@ -111,6 +165,15 @@ Standardize on:
 | File | What it does |
 |------|-------------|
 | `engine.py` | `LLMEngine` ABC -- the only interface engines must implement |
-| `worker.py` | `Worker` -- runtime lifecycle: create runtime, register model, serve endpoint, cleanup |
+| `worker.py` | `Worker` -- thin shim over `dynamo._core.backend.Worker`; lifecycle state machine and signal handling live in Rust (`lib/backend-common`) |
 | `run.py` | Common entry point -- `run(engine_cls)` used by all `unified_main.py` files |
 | `sample_engine.py` | Reference engine -- use as template and for testing |
+
+The Rust `Worker` (in `lib/backend-common/src/worker.rs`) owns:
+  - Lifecycle state machine (Init → Running → Stopped)
+  - SIGTERM/SIGINT handling and graceful shutdown orchestration
+    (discovery unregister → grace period → drain → cleanup)
+  - 3-phase distributed runtime shutdown after engine.cleanup() returns
+
+State-machine and orchestrator invariants are pinned by Rust unit tests
+in the same crate. Don't reimplement them on the Python side.
