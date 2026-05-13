@@ -195,6 +195,8 @@ fn create_chat_request(
         chat_template_args: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        separate_reasoning: None,
+        stream_reasoning: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -503,6 +505,8 @@ fn create_cmpl_request(include_usage: Option<bool>, stream: bool) -> NvCreateCom
         nvext: None,
         metadata: None,
         return_tokens_as_token_ids: None,
+        separate_reasoning: None,
+        stream_reasoning: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -531,6 +535,8 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
         chat_template_args: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        separate_reasoning: None,
+        stream_reasoning: None,
         unsupported_fields: Default::default(),
     }
 }

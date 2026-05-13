@@ -42,7 +42,7 @@ async def init_embedding(
 
     handler = EmbeddingWorkerHandler(engine, config, publisher, shutdown_event)
     health_check_payload = SglangHealthCheckPayload(
-        engine, use_text_input=dynamo_args.use_sglang_tokenizer
+        engine, use_text_input=dynamo_args.preprocessor == "sglang"
     ).to_dict()
 
     try:

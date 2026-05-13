@@ -40,6 +40,7 @@ use std::borrow::Cow;
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
+use crate::backend::{Backend, DecoderParams};
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
@@ -72,7 +73,9 @@ use crate::tokenizers::traits::Tokenizer;
 
 use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TextInput, TokenInput};
 
-pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
+pub use crate::protocols::common::llm_backend::{
+    BackendOutput, LLMEngineOutput, PreprocessedRequest,
+};
 pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
@@ -1786,6 +1789,148 @@ impl
 
         // return the response stream - single boxing at the end
         Ok(ResponseStream::new(Box::pin(stream), context))
+    }
+}
+
+#[async_trait]
+impl
+    Operator<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        SingleIn<PreprocessedRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+    > for OpenAIPreprocessor
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+        next: Arc<
+            dyn AsyncEngine<
+                    SingleIn<PreprocessedRequest>,
+                    ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+                    Error,
+                >,
+        >,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (mut request, context) = request.into_parts();
+
+        let original_stream_flag = request.inner.stream.unwrap_or(false);
+        request.enable_usage_for_nonstreaming(original_stream_flag);
+        request.inner.stream = Some(true);
+
+        let response_generator = request.response_generator(context.id().to_string());
+        let tracker = response_generator.tracker();
+
+        let (mut common_request, annotations, prompt_injected_reasoning) = self
+            .preprocess_request(&request, tracker.as_deref())
+            .await?;
+        tracing::trace!(
+            request = ?common_request,
+            prompt_injected_reasoning,
+            "Pre-processed request for backend text output"
+        );
+
+        common_request.tracker = tracker;
+        let mut extra_args = common_request
+            .extra_args
+            .take()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !extra_args.is_object() {
+            extra_args = serde_json::json!({ "backend_extra_args": extra_args });
+        }
+        extra_args["openai_request"] = serde_json::to_value(&request)?;
+        common_request.extra_args = Some(extra_args);
+
+        let common_request = context.map(|_| common_request);
+        let annotations: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = annotations
+            .into_iter()
+            .flat_map(|(k, v)| Annotated::from_annotation(k, &v))
+            .collect();
+        let annotations_stream = stream::iter(annotations);
+
+        let response_stream = next.generate(common_request).await?;
+        let context = response_stream.context();
+        let stream = annotations_stream.chain(response_stream);
+
+        Ok(ResponseStream::new(Box::pin(stream), context))
+    }
+}
+
+#[async_trait]
+impl
+    Operator<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<LLMEngineOutput>>,
+    > for OpenAIPreprocessor
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+        next: Arc<
+            dyn AsyncEngine<
+                    SingleIn<NvCreateChatCompletionRequest>,
+                    ManyOut<Annotated<LLMEngineOutput>>,
+                    Error,
+                >,
+        >,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (mut request, context) = request.into_parts();
+        let frontend_context = context.context();
+
+        let original_stream_flag = request.inner.stream.unwrap_or(false);
+        request.enable_usage_for_nonstreaming(original_stream_flag);
+        request.inner.stream = Some(true);
+
+        let response_generator = request.response_generator(context.id().to_string());
+        let tracker = response_generator.tracker();
+
+        let (mut common_request, annotations, prompt_injected_reasoning) = self
+            .preprocess_request(&request, tracker.as_deref())
+            .await?;
+        tracing::trace!(
+            request = ?common_request,
+            prompt_injected_reasoning,
+            "Prepared Dynamo postprocessor state for backend text input"
+        );
+        common_request.tracker = tracker;
+
+        let mut response_generator = Box::new(response_generator);
+        if common_request.prompt_embeds.is_none() {
+            let isl = common_request.token_ids.len() as u32;
+            response_generator.update_isl(isl);
+        }
+
+        let postprocess_request = request.clone();
+        let backend_request = context.map(|_| request);
+        let annotations: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = annotations
+            .into_iter()
+            .flat_map(|(k, v)| Annotated::from_annotation(k, &v))
+            .collect();
+        let annotations_stream = stream::iter(annotations);
+
+        let response_stream = next.generate(backend_request).await?;
+        let backend =
+            Backend::from_tokenizer(crate::tokenizers::Tokenizer::from(self.tokenizer.clone()));
+        let decoder_params = DecoderParams::from_request(&common_request);
+        let response_stream = backend.process_token_stream(response_stream, decoder_params)?;
+        frontend_context.link_child(response_stream.context());
+
+        let stream = Self::transform_postprocessor_stream(
+            response_stream,
+            response_generator,
+            frontend_context.clone(),
+            false,
+        );
+        let transformed_stream = self.postprocessor_parsing_stream(
+            stream,
+            &postprocess_request,
+            prompt_injected_reasoning,
+        )?;
+        let stream = annotations_stream.chain(transformed_stream);
+
+        Ok(ResponseStream::new(Box::pin(stream), frontend_context))
     }
 }
 

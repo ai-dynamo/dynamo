@@ -75,7 +75,7 @@ async def init_llm_diffusion(
     handler.register_engine_routes(runtime)
 
     health_check_payload = SglangHealthCheckPayload(
-        engine, use_text_input=dynamo_args.use_sglang_tokenizer
+        engine, use_text_input=dynamo_args.preprocessor == "sglang"
     ).to_dict()
 
     logging.info(

@@ -715,13 +715,18 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             self.metrics_publisher = publisher.metrics_publisher
             self.kv_publisher = publisher.kv_publisher
         self.serving_mode = config.serving_mode
-        self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
+        self.use_sglang_tokenizer = (
+            config.dynamo_args.preprocessor == "sglang"
+            and config.dynamo_args.postprocessor == "sglang"
+        )
+        self.use_sglang_preprocessor = config.dynamo_args.preprocessor == "sglang"
+        self.use_sglang_postprocessor = config.dynamo_args.postprocessor == "sglang"
         self.enable_trace = getattr(config.server_args, "enable_trace", False)
 
         if engine is not None:
             self.input_param_manager = InputParamManager(
                 self.engine.tokenizer_manager.tokenizer
-                if self.use_sglang_tokenizer
+                if self.use_sglang_preprocessor
                 else None
             )
             self._engine_supports_priority = (
@@ -1051,7 +1056,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
 
     def _get_input_param(self, request: Dict[str, Any]) -> Dict[str, Any]:
         request_input = self.input_param_manager.get_input_param(
-            request, use_tokenizer=self.use_sglang_tokenizer
+            request, use_tokenizer=self.use_sglang_preprocessor
         )
 
         return {

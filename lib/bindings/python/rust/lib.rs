@@ -197,6 +197,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<context::Context>()?;
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
+    m.add_class::<ModelOutput>()?;
     m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
@@ -267,7 +268,7 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, self_host_metadata=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, self_host_metadata=None, model_output=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -287,6 +288,7 @@ fn register_model<'p>(
     lora_name: Option<&str>,
     base_model_path: Option<&str>,
     self_host_metadata: Option<bool>,
+    model_output: Option<ModelOutput>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
     if model_type.inner == llm_rs::model_type::ModelType::Prefill
@@ -302,6 +304,10 @@ fn register_model<'p>(
         ModelInput::Tokens => llm_rs::model_type::ModelInput::Tokens,
         ModelInput::Tensor => llm_rs::model_type::ModelInput::Tensor,
     };
+    let model_output = model_output.map(|output| match output {
+        ModelOutput::Text => llm_rs::model_type::ModelOutput::Text,
+        ModelOutput::Tokens => llm_rs::model_type::ModelOutput::Tokens,
+    });
 
     let is_tensor_based = model_type.inner.supports_tensor();
     let is_images = model_type.inner.supports_images();
@@ -363,6 +369,7 @@ fn register_model<'p>(
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
             card.model_type = model_type_obj;
             card.model_input = model_input;
+            card.model_output = model_output.unwrap_or_else(|| model_input.into());
             card.user_data = user_data_json;
 
             if let Some(cfg) = runtime_config {
@@ -426,7 +433,13 @@ fn register_model<'p>(
             });
 
         local_model
-            .attach(&endpoint.inner, model_type_obj, model_input, lora_info)
+            .attach(
+                &endpoint.inner,
+                model_type_obj,
+                model_input,
+                model_output,
+                lora_info,
+            )
             .await
             .map_err(to_pyerr)?;
 
@@ -593,6 +606,13 @@ enum ModelInput {
     Text = 1,
     Tokens = 2,
     Tensor = 3,
+}
+
+#[pyclass(eq, eq_int)]
+#[derive(Clone, PartialEq)]
+enum ModelOutput {
+    Text = 1,
+    Tokens = 2,
 }
 
 #[pymethods]

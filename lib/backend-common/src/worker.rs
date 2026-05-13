@@ -426,7 +426,7 @@ impl Worker {
         let mut local_model = build_local_model(&self.config, engine_config).await?;
         tracing::debug!("local model built");
         local_model
-            .attach(&endpoint, model_type, self.config.model_input, None)
+            .attach(&endpoint, model_type, self.config.model_input, None, None)
             .await
             .map_err(|e| {
                 err(

@@ -196,3 +196,31 @@ impl ModelInput {
         }
     }
 }
+
+#[derive(Copy, Debug, Default, Clone, Display, Serialize, Deserialize, Eq, PartialEq)]
+pub enum ModelOutput {
+    /// Backend returns OpenAI-compatible text responses.
+    #[default]
+    Text,
+    /// Backend returns token ids for Dynamo post-processing.
+    Tokens,
+}
+
+impl ModelOutput {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Text => "text",
+            Self::Tokens => "tokens",
+        }
+    }
+}
+
+impl From<ModelInput> for ModelOutput {
+    fn from(input: ModelInput) -> Self {
+        match input {
+            ModelInput::Text => Self::Text,
+            ModelInput::Tokens => Self::Tokens,
+            ModelInput::Tensor => Self::Text,
+        }
+    }
+}

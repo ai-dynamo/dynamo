@@ -32,7 +32,7 @@ use crate::{
     http::service::metrics::Metrics,
     kv_router::PrefillRouter,
     model_card::ModelDeploymentCard,
-    model_type::{ModelInput, ModelType},
+    model_type::{ModelInput, ModelOutput, ModelType},
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
     protocols::{
         common::llm_backend::EmbeddingsEngineOutput,
@@ -715,7 +715,8 @@ impl ModelWatcher {
             // uses the local routed pipeline and therefore still needs a chooser.
             let needs_local_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_none();
-            let needs_local_completions_pipeline = card.model_type.supports_completions();
+            let needs_local_completions_pipeline =
+                card.model_type.supports_completions() && card.model_output == ModelOutput::Tokens;
             let kv_chooser = if router_config.router_mode == RouterMode::KV
                 && (needs_local_chat_pipeline || needs_local_completions_pipeline)
             {
@@ -814,6 +815,27 @@ impl ModelWatcher {
 
                 let chat_engine = if let Some(engine) = factory_engine {
                     engine
+                } else if card.model_output == ModelOutput::Text {
+                    let tk = tokenizer.clone().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Model has no supported Rust tokenizer and cannot use ModelInput::Tokens. \
+                             Provide a supported tokenizer file (tokenizer.json, tiktoken.model, or *.tiktoken) \
+                             or perform preprocessing in the backend (ModelInput::Text)."
+                        )
+                    })?;
+                    entrypoint::build_routed_pipeline_text_output::<
+                        NvCreateChatCompletionRequest,
+                        NvCreateChatCompletionStreamResponse,
+                    >(
+                        card,
+                        &client,
+                        router_config.router_mode,
+                        worker_monitor.clone(),
+                        kv_chooser.clone(),
+                        tk,
+                    )
+                    .await
+                    .context("build_routed_pipeline_text_output")?
                 } else {
                     let tk = tokenizer.clone().ok_or_else(|| {
                         anyhow::anyhow!(
@@ -848,7 +870,7 @@ impl ModelWatcher {
 
             // Add completions engine only if the model supports completions
             // and we have a tokenizer (completions always uses the Rust preprocessor).
-            if card.model_type.supports_completions() {
+            if card.model_type.supports_completions() && card.model_output == ModelOutput::Tokens {
                 if let Some(tk) = tokenizer {
                     let formatter = PromptFormatter::no_op();
                     let PromptFormatter::OAI(formatter) = formatter;
@@ -882,6 +904,12 @@ impl ModelWatcher {
                         "Skipping completions engine: no Rust tokenizer available for this model"
                     );
                 }
+            } else if card.model_type.supports_completions()
+                && card.model_output == ModelOutput::Text
+            {
+                tracing::warn!(
+                    "Skipping completions engine: ModelOutput::Text is currently supported for chat completions only"
+                );
             }
 
             // Verify we built at least one serving engine. A Tokens model that
@@ -896,7 +924,10 @@ impl ModelWatcher {
                     card.name()
                 );
             }
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_embedding() {
+        } else if card.model_input == ModelInput::Text
+            && card.model_output == ModelOutput::Text
+            && card.model_type.supports_embedding()
+        {
             // Case: Text + Embeddings
             let push_router = PushRouter::<
                 NvCreateEmbeddingRequest,
@@ -912,6 +943,7 @@ impl ModelWatcher {
         // diffusion models often set both Images and Chat flags. The branch below
         // handles the chat registration internally when supports_chat() is true.
         else if card.model_input == ModelInput::Text
+            && card.model_output == ModelOutput::Text
             && (card.model_type.supports_images()
                 || card.model_type.supports_audios()
                 || card.model_type.supports_videos())
@@ -960,7 +992,10 @@ impl ModelWatcher {
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));
             }
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
+        } else if card.model_input == ModelInput::Text
+            && card.model_output == ModelOutput::Text
+            && card.model_type.supports_chat()
+        {
             // Case: Text + Chat (pure text-to-text, no diffusion)
             let push_router =
                 PushRouter::<
@@ -969,7 +1004,10 @@ impl ModelWatcher {
                 >::from_client_with_monitor(client, router_config.router_mode, None)
                 .await?;
             worker_set.chat_engine = Some(Arc::new(push_router));
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_completions() {
+        } else if card.model_input == ModelInput::Text
+            && card.model_output == ModelOutput::Text
+            && card.model_type.supports_completions()
+        {
             // Case: Text + Completions
             let push_router = PushRouter::<
                 NvCreateCompletionRequest,
@@ -979,6 +1017,24 @@ impl ModelWatcher {
             )
             .await?;
             worker_set.completions_engine = Some(Arc::new(push_router));
+        } else if card.model_input == ModelInput::Text
+            && card.model_output == ModelOutput::Tokens
+            && card.model_type.supports_chat()
+        {
+            // Case: Text + Chat + token output. The backend owns preprocessing
+            // while Dynamo still detokenizes and parses the token stream.
+            let tokenizer = card.tokenizer().context(
+                "ModelInput::Text + ModelOutput::Tokens requires a Rust tokenizer for postprocessing",
+            )?;
+            let chat_engine =
+                entrypoint::build_routed_pipeline_text_input_token_output::<
+                    NvCreateChatCompletionRequest,
+                    NvCreateChatCompletionStreamResponse,
+                >(card, &client, router_config.router_mode, None, tokenizer)
+                .await
+                .context("build_routed_pipeline_text_input_token_output")?;
+            worker_set.chat_engine = Some(chat_engine);
+            tracing::info!("Chat completions is ready");
         } else if card.model_input == ModelInput::Tokens && card.model_type.supports_embedding() {
             // Case 4: Tokens + Embeddings
             // Create preprocessing pipeline similar to Backend

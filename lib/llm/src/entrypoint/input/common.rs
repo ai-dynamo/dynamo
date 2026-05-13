@@ -11,7 +11,8 @@ use crate::{
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::{
-        DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
+        DirectRoutingRouter, KvPushRouter, KvRouter, KvRouterResponse, PrefillRouter,
+        metrics::RouterRequestMetrics,
     },
     migration::Migration,
     model_card::ModelDeploymentCard,
@@ -203,7 +204,7 @@ pub async fn build_pipeline<Req, Resp>(
     tokenizer: crate::tokenizers::Tokenizer,
 ) -> anyhow::Result<Arc<ServiceFrontend<SingleIn<Req>, ManyOut<Annotated<Resp>>>>>
 where
-    Req: Data,
+    Req: Data + serde::Serialize,
     Resp: Data,
     OpenAIPreprocessor: Operator<
             Context<Req>,
@@ -245,7 +246,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
-    Req: Data,
+    Req: Data + serde::Serialize,
     Resp: Data,
     OpenAIPreprocessor: Operator<
             Context<Req>,
@@ -371,6 +372,139 @@ where
         .link(prefill_op.backward_edge())?
         .link(backend.backward_edge())?
         .link(migration.backward_edge())?
+        .link(preprocessor_op.backward_edge())?
+        .link(frontend)?;
+
+    Ok(engine)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn build_routed_pipeline_text_output<Req, Resp>(
+    card: &ModelDeploymentCard,
+    client: &Client,
+    router_mode: RouterMode,
+    worker_monitor: Option<KvWorkerMonitor>,
+    chooser: Option<Arc<KvRouter>>,
+    tokenizer: crate::tokenizers::Tokenizer,
+) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
+where
+    Req: Data,
+    Resp: Data + KvRouterResponse,
+    OpenAIPreprocessor: Operator<
+            Context<Req>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
+            Context<PreprocessedRequest>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
+        >,
+{
+    let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
+    let PromptFormatter::OAI(formatter) =
+        PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
+    let preprocessor =
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())
+            .context("OpenAIPreprocessor.new_with_parts")?;
+    let preprocessor_op = preprocessor.into_operator();
+    let min_initial_workers = min_initial_workers_from_env()?;
+
+    let router_client = if router_mode == RouterMode::KV {
+        let Some(ref chooser) = chooser else {
+            anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
+        };
+        chooser.client().clone()
+    } else {
+        client.clone()
+    };
+
+    wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
+
+    let monitor_arc =
+        worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
+
+    let router = PushRouter::<PreprocessedRequest, Annotated<Resp>>::from_client_with_monitor(
+        router_client,
+        router_mode,
+        monitor_arc,
+    )
+    .await?;
+
+    RouterRequestMetrics::from_component(client.endpoint.component());
+
+    let service_backend = match router_mode {
+        RouterMode::Direct => {
+            ServiceBackend::from_engine(Arc::new(DirectRoutingRouter::<Resp>::new(router)))
+        }
+        RouterMode::Random
+        | RouterMode::RoundRobin
+        | RouterMode::PowerOfTwoChoices
+        | RouterMode::LeastLoaded
+        | RouterMode::DeviceAwareWeighted => ServiceBackend::from_engine(Arc::new(router)),
+        RouterMode::KV => {
+            let Some(chooser) = chooser else {
+                anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
+            };
+            ServiceBackend::from_engine(Arc::new(KvPushRouter::<Resp>::new(router, chooser)))
+        }
+    };
+
+    let engine = frontend
+        .link(preprocessor_op.forward_edge())?
+        .link(service_backend)?
+        .link(preprocessor_op.backward_edge())?
+        .link(frontend)?;
+
+    Ok(engine)
+}
+
+pub async fn build_routed_pipeline_text_input_token_output<Req, Resp>(
+    card: &ModelDeploymentCard,
+    client: &Client,
+    router_mode: RouterMode,
+    worker_monitor: Option<KvWorkerMonitor>,
+    tokenizer: crate::tokenizers::Tokenizer,
+) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
+where
+    Req: Data + serde::Serialize,
+    Resp: Data,
+    OpenAIPreprocessor: Operator<
+            Context<Req>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
+            Context<Req>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<LLMEngineOutput>>>>,
+        >,
+{
+    if matches!(router_mode, RouterMode::KV | RouterMode::Direct) {
+        anyhow::bail!(
+            "{router_mode:?} routing is not supported for ModelInput::Text + ModelOutput::Tokens; \
+             use Dynamo preprocessing (ModelInput::Tokens) when routing needs token metadata"
+        );
+    }
+
+    let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
+    let PromptFormatter::OAI(formatter) =
+        PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
+    let preprocessor =
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())
+            .context("OpenAIPreprocessor.new_with_parts")?;
+    let preprocessor_op = preprocessor.into_operator();
+    let min_initial_workers = min_initial_workers_from_env()?;
+
+    wait_for_min_initial_workers(client, min_initial_workers).await?;
+
+    let monitor_arc =
+        worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
+
+    let router = PushRouter::<Req, Annotated<LLMEngineOutput>>::from_client_with_monitor(
+        client.clone(),
+        router_mode,
+        monitor_arc,
+    )
+    .await?;
+
+    RouterRequestMetrics::from_component(client.endpoint.component());
+
+    let engine = frontend
+        .link(preprocessor_op.forward_edge())?
+        .link(ServiceBackend::from_engine(Arc::new(router)))?
         .link(preprocessor_op.backward_edge())?
         .link(frontend)?;
 

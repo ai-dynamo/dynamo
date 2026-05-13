@@ -24,9 +24,9 @@ not switch between them per request.
 |---|---|---|---|---|
 | **A** Dynamo-native (default) | `--dyn-chat-processor dynamo` | `--dyn-tool-call-parser <name>` `--dyn-reasoning-parser <name>` | Yes | Rust preprocessor. Lowest latency. |
 | **B** vLLM chat processor | `--dyn-chat-processor vllm` `--tool-call-parser <name>` `--reasoning-parser <name>` | *(none)* | Yes | Delegates to vLLM's Python preprocessor. |
-| **C** SGLang chat processor | `--dyn-chat-processor sglang` `--tool-call-parser <name>` `--reasoning-parser <name>` | *(none)* | Yes | Delegates to SGLang's Python preprocessor. See [SGLang Chat Processor](../backends/sglang/sglang-chat-processor.md). |
+| **C** SGLang postprocessor delegation | *(none)* | `--preprocessor dynamo --postprocessor sglang` `--tool-call-parser <name>` `--reasoning-parser <name>` | Yes | Dynamo tokenizes for routing; SGLang detokenizes and parses output. See [SGLang Processing Modes](../backends/sglang/sglang-chat-processor.md). |
 | **D** vLLM tokenizer delegation | `--router-mode round-robin` | `--use-vllm-tokenizer` | No | Engine-side tokenization. Day-0 model fallback. |
-| **E** SGLang tokenizer delegation | `--router-mode round-robin` | `--use-sglang-tokenizer` | No | **Deprecated** -- use option C instead. |
+| **E** SGLang full delegation | `--router-mode round-robin` | `--preprocessor sglang --postprocessor sglang` | No | Closest to `sglang.launch_server`; deprecated alias: `--use-sglang-tokenizer`. |
 
 > [!NOTE]
 > Although `dynamo` is the default for `--dyn-chat-processor`, specifying it
@@ -35,7 +35,7 @@ not switch between them per request.
 
 ## Flag reference
 
-### `--dyn-chat-processor {dynamo | vllm | sglang}`
+### `--dyn-chat-processor {dynamo | vllm}`
 
 Frontend flag (default `dynamo`). Selects the chat processor that renders
 templates, tokenizes, and dispatches parsing.
@@ -44,14 +44,16 @@ templates, tokenizes, and dispatches parsing.
   (see [Tool Calling](tool-calling.md) and [Reasoning](reasoning.md)).
 - `vllm` -- vLLM's Python preprocessor. Parser names come from vLLM's
   registry, which may differ from Dynamo's.
-- `sglang` -- SGLang's Python preprocessor. Parser names come from SGLang's
-  registry. See [SGLang Chat Processor](../backends/sglang/sglang-chat-processor.md).
+
+SGLang processing is configured on the SGLang worker with `--preprocessor` and
+`--postprocessor`; it is no longer a frontend `--dyn-chat-processor` choice.
+See [SGLang Processing Modes](../backends/sglang/sglang-chat-processor.md).
 
 ### `--dyn-tool-call-parser <name>` / `--dyn-reasoning-parser <name>`
 
-Worker flags. Names from Dynamo's parser registry. Only effective under
-`--dyn-chat-processor dynamo` (option A); silently ignored under other chat
-processors.
+Worker flags. Names from Dynamo's parser registry. Use them when Dynamo owns
+postprocessing: the default Dynamo path (option A) or SGLang
+`--postprocessor dynamo`.
 
 The flags are declared on the worker CLI, but the parser runs on the frontend --
 the name propagates via model metadata. For supported names, see
@@ -60,10 +62,12 @@ the name propagates via model metadata. For supported names, see
 ### `--tool-call-parser <name>` / `--reasoning-parser <name>`
 
 Frontend flags (no `--dyn-` prefix). Names from the upstream engine's registry.
-Only accepted when paired with the matching chat processor:
+For vLLM, these are frontend flags paired with `--dyn-chat-processor vllm`.
+For SGLang, pass SGLang's native flags on the worker when using
+`--postprocessor sglang`.
 
 - Under `--dyn-chat-processor vllm`: accepted. Use vLLM parser names.
-- Under `--dyn-chat-processor sglang`: accepted. Use SGLang parser names.
+- Under `python -m dynamo.sglang --postprocessor sglang`: accepted. Use SGLang parser names.
 - Under `--dyn-chat-processor dynamo`: **rejected at startup** with
   `Unknown arguments specified: ...`. Use the `--dyn-*` worker flags instead.
 
@@ -77,7 +81,8 @@ Worker flags (boolean). Hand tokenization to the engine instead of the
 frontend. The flag must match the engine on the worker.
 
 `--use-sglang-tokenizer` is deprecated. New SGLang deployments should use
-`--dyn-chat-processor sglang` (option C) instead. See
+`--preprocessor sglang --postprocessor sglang` (option E) or, when KV routing
+is needed, `--preprocessor dynamo --postprocessor sglang` (option C). See
 [Migration from --use-sglang-tokenizer](../backends/sglang/sglang-chat-processor.md#migration-from---use-sglang-tokenizer).
 
 ## Which option should I pick?
@@ -94,8 +99,8 @@ frontend. The flag must match the engine on the worker.
    rope variants)? Use **option D**. KV routing is off; pair with
    `--router-mode round-robin`.
 
-4. **SGLang + day-0 model?** Use **option C** with the appropriate upstream
-   parser name. Do not use option E (deprecated).
+4. **SGLang + day-0 model?** Use **option E** with the appropriate upstream
+   parser name.
 
 ## Invalid and silently broken combinations
 
@@ -108,6 +113,10 @@ frontend. The flag must match the engine on the worker.
 - **`--tool-call-parser` and `--dyn-tool-call-parser` together** on the same
   SGLang worker. SGLang rejects this: `Cannot use both --tool-call-parser and
   --dyn-tool-call-parser`. Pick one namespace.
+
+- **`--custom-jinja-template` with `--preprocessor sglang`**. Dynamo custom
+  templates require Dynamo preprocessing. Use SGLang's `--chat-template`
+  instead.
 
 - **`--use-vllm-tokenizer` on an SGLang worker** (and vice versa). The flag
   must match the engine.
@@ -149,10 +158,10 @@ KV-routable -- pair them with `round-robin` or `random`.
   (custom special tokens, rope variants). The engine owns the tokenizer in
   this mode, so KV routing drops out.
 
-- **Chat-processor swap** (options B/C) is the middle ground: tokenization
-  stays on the frontend (KV-routable), but parsing delegates to the upstream
-  engine's Python implementation. This covers models where Dynamo's Rust
-  parser hasn't been written yet.
+- **Postprocessor delegation** (options B/C) is the middle ground:
+  tokenization stays on the Dynamo side for KV routing, but parsing delegates
+  to the upstream engine's Python implementation. This covers models where
+  Dynamo's Rust parser hasn't been written yet.
 
 ## Parser names by model
 
@@ -180,15 +189,20 @@ python -m dynamo.frontend \
   --tool-call-parser hermes \
   --reasoning-parser deepseek_r1
 
-# C -- SGLang chat-processor.
-python -m dynamo.sglang ...
-python -m dynamo.frontend \
-  --dyn-chat-processor sglang \
+# C -- SGLang postprocessor delegation with Dynamo tokenization.
+python -m dynamo.sglang \
+  --preprocessor dynamo \
+  --postprocessor sglang \
   --tool-call-parser kimi_k2 \
   --reasoning-parser kimi_k25
+python -m dynamo.frontend --router-mode kv
 
 # D -- vLLM tokenizer delegation (no KV routing).
 python -m dynamo.vllm --use-vllm-tokenizer ...
+python -m dynamo.frontend --router-mode round-robin
+
+# E -- SGLang full delegation (no KV routing).
+python -m dynamo.sglang --preprocessor sglang --postprocessor sglang ...
 python -m dynamo.frontend --router-mode round-robin
 ```
 
@@ -196,5 +210,5 @@ python -m dynamo.frontend --router-mode round-robin
 
 - [Tool Calling](tool-calling.md) -- Supported tool call parser names, request examples
 - [Reasoning](reasoning.md) -- Supported reasoning parser names, common pairings
-- [SGLang Chat Processor](../backends/sglang/sglang-chat-processor.md) -- Option C details
+- [SGLang Processing Modes](../backends/sglang/sglang-chat-processor.md) -- SGLang pre/post delegation details
 - [Frontend Configuration Reference](../components/frontend/configuration.md) -- Full CLI flag reference

@@ -124,8 +124,17 @@ def test_openai_stop_sampling_params_maps_token_id_stop_array():
 def _new_decode_handler(*, use_sglang_tokenizer: bool = False):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
     handler.use_sglang_tokenizer = use_sglang_tokenizer
+    handler.use_sglang_preprocessor = use_sglang_tokenizer
+    handler.use_sglang_postprocessor = use_sglang_tokenizer
+    handler._sglang_openai_chat = SimpleNamespace(
+        reasoning_parser=None,
+        tool_call_parser=None,
+    )
     handler.config = SimpleNamespace(
-        server_args=SimpleNamespace(served_model_name="test-model")
+        server_args=SimpleNamespace(
+            served_model_name="test-model",
+            incremental_streaming_output=True,
+        )
     )
 
     @asynccontextmanager
@@ -144,6 +153,37 @@ async def _stream(items):
 class _Context:
     def is_stopped(self):
         return False
+
+
+class _FakeReasoningOpenAIChat:
+    reasoning_parser = "qwen3"
+    tool_call_parser = None
+
+    def _process_reasoning_stream(
+        self, index, delta, reasoning_parser_dict, content, request
+    ):
+        reasoning_parser_dict[index] = object()
+        return "thinking", delta.replace("<think>thinking</think>", "")
+
+
+class _FakeToolOpenAIChat:
+    reasoning_parser = None
+    tool_call_parser = "qwen25"
+
+    async def _process_tool_call_stream(
+        self, index, delta, parser_dict, content, request, has_tool_calls
+    ):
+        parser_dict[index] = object()
+        has_tool_calls[index] = True
+        yield (
+            'data: {"id":"request-1","choices":[{"index":0,'
+            '"delta":{"tool_calls":[{"index":0,"id":"call_0","type":"function",'
+            '"function":{"name":"get_weather","arguments":"{}"}}]},'
+            '"finish_reason":null}],"model":"test-model"}\n\n'
+        )
+
+    def _check_for_unstreamed_tool_args(self, parser, content, request, index):
+        return None
 
 
 def test_build_sampling_params_passes_n_for_token_requests():
@@ -296,12 +336,12 @@ async def test_process_text_stream_tracks_delta_per_choice_index():
                     },
                     {
                         "index": 0,
-                        "text": "Hello",
+                        "text": "llo",
                         "meta_info": {"id": "request-1", "finish_reason": None},
                     },
                     {
                         "index": 1,
-                        "text": "Good",
+                        "text": "od",
                         "meta_info": {"id": "request-1", "finish_reason": None},
                     },
                 ]
@@ -311,8 +351,9 @@ async def test_process_text_stream_tracks_delta_per_choice_index():
     )
 
     choices = [chunk["choices"][0] for chunk in chunks]
-    assert [choice["index"] for choice in choices] == [0, 1, 0, 1]
-    assert [choice["delta"]["content"] for choice in choices] == [
+    content_choices = [choice for choice in choices if choice["delta"].get("content")]
+    assert [choice["index"] for choice in content_choices] == [0, 1, 0, 1]
+    assert [choice["delta"]["content"] for choice in content_choices] == [
         "He",
         "Go",
         "llo",
@@ -321,7 +362,7 @@ async def test_process_text_stream_tracks_delta_per_choice_index():
 
 
 @pytest.mark.asyncio
-async def test_process_text_stream_stop_reason_uses_response_nvext():
+async def test_process_text_stream_stop_reason_uses_matched_stop():
     handler = _new_decode_handler()
 
     chunks = await _collect(
@@ -343,12 +384,12 @@ async def test_process_text_stream_stop_reason_uses_response_nvext():
         )
     )
 
-    assert "stop_reason" not in chunks[0]["choices"][0]
-    assert chunks[0]["nvext"]["stop_reason"] == "END"
+    finish_choice = chunks[-1]["choices"][0]
+    assert finish_choice["matched_stop"] == "END"
 
 
 @pytest.mark.asyncio
-async def test_process_text_stream_stop_reason_requires_nvext_extra_field():
+async def test_process_text_stream_stop_reason_does_not_use_nvext():
     handler = _new_decode_handler()
 
     chunks = await _collect(
@@ -369,8 +410,98 @@ async def test_process_text_stream_stop_reason_requires_nvext_extra_field():
         )
     )
 
-    assert "stop_reason" not in chunks[0]["choices"][0]
-    assert "nvext" not in chunks[0]
+    finish_choice = chunks[-1]["choices"][0]
+    assert finish_choice["matched_stop"] == "END"
+    assert "nvext" not in chunks[-1]
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_delegates_reasoning_to_sglang_parser():
+    handler = _new_decode_handler()
+    handler._sglang_openai_chat = _FakeReasoningOpenAIChat()
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "text": "<think>thinking</think>answer",
+                        "meta_info": {"id": "request-1", "finish_reason": None},
+                    }
+                ]
+            ),
+            _Context(),
+            request={
+                "extra_args": {
+                    "openai_request": {
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "separate_reasoning": True,
+                    }
+                }
+            },
+        )
+    )
+
+    deltas = [chunk["choices"][0]["delta"] for chunk in chunks]
+    assert {"reasoning_content": "thinking"} in deltas
+    assert {"content": "answer"} in deltas
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_delegates_tool_calls_to_sglang_parser():
+    handler = _new_decode_handler()
+    handler._sglang_openai_chat = _FakeToolOpenAIChat()
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "text": "<tool_call>{}</tool_call>",
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop", "matched": None},
+                        },
+                    }
+                ]
+            ),
+            _Context(),
+            request={
+                "extra_args": {
+                    "openai_request": {
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "weather?"}],
+                        "tools": [
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "description": "Get weather",
+                                    "parameters": {
+                                        "type": "object",
+                                        "properties": {},
+                                    },
+                                },
+                            }
+                        ],
+                    }
+                }
+            },
+        )
+    )
+
+    tool_chunks = [
+        chunk
+        for chunk in chunks
+        if chunk["choices"] and chunk["choices"][0]["delta"].get("tool_calls")
+    ]
+    assert tool_chunks[0]["choices"][0]["delta"]["tool_calls"][0]["function"][
+        "name"
+    ] == "get_weather"
+    assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
 
 
 @pytest.mark.asyncio

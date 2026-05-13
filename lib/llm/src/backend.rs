@@ -78,7 +78,7 @@ struct DecoderUnfoldState {
     skip_special_tokens: bool,
 }
 
-struct DecoderParams {
+pub(crate) struct DecoderParams {
     prompt_token_ids: Vec<TokenIdType>,
     stop_conditions: StopConditions,
     skip_special_tokens: bool,
@@ -88,7 +88,7 @@ struct DecoderParams {
 }
 
 impl DecoderParams {
-    fn from_request(request: &PreprocessedRequest) -> Self {
+    pub(crate) fn from_request(request: &PreprocessedRequest) -> Self {
         Self {
             prompt_token_ids: request.token_ids.clone(),
             stop_conditions: request.stop_conditions.clone(),
@@ -162,28 +162,14 @@ impl Backend {
             skip_special_tokens: params.skip_special_tokens,
         })
     }
-}
 
-#[async_trait]
-impl
-    Operator<
-        SingleIn<PreprocessedRequest>,
-        ManyOut<Annotated<BackendOutput>>,
-        SingleIn<PreprocessedRequest>,
-        ManyOut<Annotated<LLMEngineOutput>>,
-    > for Backend
-{
-    async fn generate(
+    pub(crate) fn process_token_stream(
         &self,
-        request: SingleIn<PreprocessedRequest>,
-        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-    ) -> Result<ManyOut<Annotated<BackendOutput>>> {
-        let decoder_params = DecoderParams::from_request(&request);
-
-        let next_stream = next.generate(request).await?;
-
-        let context = next_stream.context();
-        let state = self.decoder(next_stream, decoder_params)?;
+        stream: ManyOut<ExecutionOutputStream>,
+        params: DecoderParams,
+    ) -> anyhow::Result<ManyOut<Annotated<BackendOutput>>> {
+        let context = stream.context();
+        let state = self.decoder(stream, params)?;
 
         let processed_stream = stream::unfold(state, |mut state| async move {
             // If we've already detected a local stop condition, end the stream
@@ -193,9 +179,6 @@ impl
 
             match state.stream.next().await {
                 Some(output) => {
-                    // move to state.process_output
-                    // handle any error conditions / unwraps here
-
                     // events are pass thru
                     if output.is_event() || output.data.is_none() {
                         return Some((output, state));
@@ -339,7 +322,7 @@ impl
                     // on the same path, so we ship the simple version. Revisit if a
                     // streaming flamegraph with top_logprobs=20 puts this above ~1%:
                     // the cheapest win is a shared LRU on the Tokenizer keyed by
-                    // (token_id, skip_special_tokens) — top-k entries repeat heavily
+                    // (token_id, skip_special_tokens) - top-k entries repeat heavily
                     // across positions and requests. Do NOT batch as a single
                     // decode(&[ids..]) call: BPE merge / leading-space rules differ
                     // between single-token and sequence decode and will corrupt strings.
@@ -371,8 +354,6 @@ impl
         })
         .fuse();
 
-        // convert stream of processed Annotated<LLMEngineOutput> to Annotated<BackendOutput>
-        //let mdcsum = self.mdcsum.clone();
         let stream = processed_stream.map(move |output| {
             output.map_data(|data| {
                 Ok(BackendOutput {
@@ -384,7 +365,6 @@ impl
                     top_logprobs: data.top_logprobs,
                     finish_reason: data.finish_reason,
                     stop_reason: data.stop_reason,
-                    //mdcsum: mdcsum.clone(),
                     index: data.index,
                     completion_usage: data.completion_usage,
                     disaggregated_params: data.disaggregated_params,
@@ -394,6 +374,27 @@ impl
         });
 
         Ok(ResponseStream::new(Box::pin(stream), context))
+    }
+}
+
+#[async_trait]
+impl
+    Operator<
+        SingleIn<PreprocessedRequest>,
+        ManyOut<Annotated<BackendOutput>>,
+        SingleIn<PreprocessedRequest>,
+        ManyOut<Annotated<LLMEngineOutput>>,
+    > for Backend
+{
+    async fn generate(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+        next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+    ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+        let decoder_params = DecoderParams::from_request(&request);
+
+        let next_stream = next.generate(request).await?;
+        self.process_token_stream(next_stream, decoder_params)
     }
 }
 

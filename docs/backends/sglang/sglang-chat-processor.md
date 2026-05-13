@@ -1,154 +1,103 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: SGLang Chat Processor
-subtitle: SGLang-native preprocessing and postprocessing for chat completions
+title: SGLang Processing Modes
+subtitle: Choose Dynamo or SGLang for preprocessing and postprocessing
 ---
 
-The SGLang chat processor enables SGLang-native preprocessing and postprocessing in the Dynamo frontend. It uses SGLang's tokenizer, chat templates, tool call parser, and reasoning parser directly -- bypassing the default Rust preprocessor for `v1/chat/completions` requests.
+Dynamo's SGLang backend can choose preprocessing and postprocessing ownership independently on the worker:
 
-## When to Use
+- `--preprocessor dynamo|sglang` controls chat template rendering and tokenization.
+- `--postprocessor dynamo|sglang` controls detokenization, tool-call parsing, and reasoning parsing.
 
-Use `--dyn-chat-processor sglang` when Dynamo's built-in Rust preprocessor does not yet support a tool call parser or reasoning parser you need. The SGLang processor delegates to SGLang's Python implementations, so any parser SGLang supports works immediately.
+Use SGLang postprocessing when SGLang already supports a model's tool-call or reasoning format and Dynamo's Rust parser does not. This makes Dynamo's `/v1/chat/completions` behavior match `sglang.launch_server` for those parser paths.
 
-Common cases:
+## Modes
 
-- A **tool call format** not yet in the Rust `tool_calling` library
-- A **reasoning parser** not yet supported natively
-- A **chat template** that the Rust preprocessor doesn't handle correctly
-
-If the parser you need is missing from the Rust preprocessor, consider [opening an issue or PR](https://github.com/ai-dynamo/dynamo/issues) to add native support -- native parsers avoid the Python GIL overhead entirely.
+| Preprocessor | Postprocessor | Model I/O | Use case |
+|---|---|---|---|
+| `dynamo` | `dynamo` | `Tokens/Tokens` | Default Rust path. Enables Dynamo tokenization and postprocessing. |
+| `dynamo` | `sglang` | `Tokens/Text` | Dynamo tokenizes for KV routing, SGLang handles detokenization plus tool and reasoning parsing. |
+| `sglang` | `sglang` | `Text/Text` | Worker-side passthrough, closest to `sglang.launch_server`. |
+| `sglang` | `dynamo` | `Text/Tokens` | Backend tokenizes, Dynamo postprocesses token output. Useful only for specialized fallback cases. |
 
 ## Quick Start
 
-```bash
-# Frontend with SGLang processor, tool calling, and reasoning
-python -m dynamo.frontend \
-  --router-mode kv \
-  --dyn-chat-processor sglang \
-  --tool-call-parser hermes \
-  --reasoning-parser qwen3
+Keep Dynamo preprocessing for KV routing, but delegate output parsing to SGLang:
 
-# Workers (unchanged)
+```bash
+python -m dynamo.frontend --router-mode kv
+
 CUDA_VISIBLE_DEVICES=0 python -m dynamo.sglang \
   --model-path Qwen/Qwen3-14B-FP8 \
   --served-model-name Qwen/Qwen3-14B-FP8 \
+  --preprocessor dynamo \
+  --postprocessor sglang \
+  --tool-call-parser qwen25 \
+  --reasoning-parser qwen3 \
   --tp 1 --trust-remote-code \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
 ```
 
-## Frontend Arguments
-
-These arguments are passed to the **frontend** (not the worker) when using `--dyn-chat-processor sglang`:
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--dyn-chat-processor sglang` | (none) | Enable the SGLang chat processor |
-| `--tool-call-parser` | `None` | Tool call parser name (any SGLang-supported parser) |
-| `--reasoning-parser` | `None` | Reasoning parser name (any SGLang-supported parser) |
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DYN_SGLANG_STREAM_INTERVAL` | `20` | Number of tokens to accumulate before detokenizing. Higher values improve throughput. The first chunk always emits immediately (interval=1) to minimize time-to-first-token. |
-
-## Tool Calling
-
-The processor supports all SGLang tool call formats. Pass `--tool-call-parser` on the frontend:
+For full SGLang-native preprocessing and postprocessing:
 
 ```bash
-python -m dynamo.frontend \
-  --dyn-chat-processor sglang \
-  --tool-call-parser hermes
+python -m dynamo.frontend --router-mode round-robin
+
+CUDA_VISIBLE_DEVICES=0 python -m dynamo.sglang \
+  --model-path Qwen/Qwen3-14B-FP8 \
+  --served-model-name Qwen/Qwen3-14B-FP8 \
+  --preprocessor sglang \
+  --postprocessor sglang \
+  --tool-call-parser qwen25 \
+  --reasoning-parser qwen3 \
+  --tp 1 --trust-remote-code
 ```
 
-Any parser supported by SGLang can be used. See the [SGLang documentation](https://docs.sglang.ai/) for the full list of available tool call parsers.
+## Parser Flags
 
-### Example: Tool Call Request
+When `--postprocessor sglang`, use SGLang's parser names with SGLang's native flags:
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-14B-FP8",
-    "messages": [{"role": "user", "content": "What is the weather in Paris?"}],
-    "tools": [{
-      "type": "function",
-      "function": {
-        "name": "get_weather",
-        "description": "Get weather for a city",
-        "parameters": {
-          "type": "object",
-          "properties": {"city": {"type": "string"}},
-          "required": ["city"]
-        }
-      }
-    }],
-    "tool_choice": "auto"
-  }'
+python -m dynamo.sglang \
+  --model-path <model> \
+  --postprocessor sglang \
+  --tool-call-parser <sglang-parser> \
+  --reasoning-parser <sglang-parser>
 ```
 
-Response:
-
-```json
-{
-  "choices": [{
-    "message": {
-      "role": "assistant",
-      "tool_calls": [{
-        "id": "call_8cd24396f3671048",
-        "type": "function",
-        "function": {
-          "name": "get_weather",
-          "arguments": "{\"city\": \"Paris\"}"
-        }
-      }],
-      "reasoning_content": "The user wants weather info for Paris..."
-    },
-    "finish_reason": "tool_calls"
-  }]
-}
-```
-
-## Reasoning Parsing
-
-For models that produce chain-of-thought reasoning (e.g., Qwen3, DeepSeek-R1), pass `--reasoning-parser`:
+When `--postprocessor dynamo`, use Dynamo's parser names with the `--dyn-*` flags:
 
 ```bash
-python -m dynamo.frontend \
-  --dyn-chat-processor sglang \
-  --reasoning-parser qwen3
+python -m dynamo.sglang \
+  --model-path <model> \
+  --postprocessor dynamo \
+  --dyn-tool-call-parser <dynamo-parser> \
+  --dyn-reasoning-parser <dynamo-parser>
 ```
 
-The parser separates think tag content into the `reasoning_content` field and regular content into the `content` field.
+The parser name sets can differ between Dynamo and SGLang.
 
 ## Migration from `--use-sglang-tokenizer`
 
-`--use-sglang-tokenizer` on the **worker** is deprecated. Replace with `--dyn-chat-processor sglang` on the **frontend**:
+`--use-sglang-tokenizer` is deprecated. It remains as a compatibility alias for:
 
-```diff
-  # Before (deprecated)
-- python -m dynamo.sglang --model-path <model> --use-sglang-tokenizer
-- python -m dynamo.frontend
-
-  # After
-  python -m dynamo.sglang --model-path <model>
-+ python -m dynamo.frontend --dyn-chat-processor sglang
+```bash
+--preprocessor sglang --postprocessor sglang
 ```
 
-Key differences:
+Replace old launches like this:
 
-| | `--use-sglang-tokenizer` | `--dyn-chat-processor sglang` |
-|---|---|---|
-| Location | Worker flag | Frontend flag |
-| KV router | Not supported | Supported |
-| Tool calling | Not supported | Supported |
-| Reasoning | Not supported | Supported |
-| Endpoints | `v1/chat/completions` only | `v1/chat/completions` only |
+```diff
+- python -m dynamo.sglang --model-path <model> --use-sglang-tokenizer
++ python -m dynamo.sglang --model-path <model> --preprocessor sglang --postprocessor sglang
+```
+
+`--custom-jinja-template` requires `--preprocessor dynamo`. Use SGLang's `--chat-template` flag when delegating preprocessing to SGLang.
 
 ## See Also
 
-- **[Tool Calling](../../agents/tool-calling.md)**: General tool calling guide
-- **[Reference Guide](sglang-reference-guide.md)**: Full SGLang backend reference
-- **[Agentic Workloads](agents.md)**: Priority scheduling and cache pinning for agents
+- [Tool Calling](../../agents/tool-calling.md)
+- [Reasoning](../../agents/reasoning.md)
+- [Reference Guide](sglang-reference-guide.md)
+- [Agentic Workloads](agents.md)

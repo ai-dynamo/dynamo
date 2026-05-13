@@ -433,10 +433,9 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "[EXPERIMENTAL] Chat pre/post processor backend. 'dynamo' uses the Rust "
                 "preprocessor. 'vllm' uses local vLLM for pre and post processing. "
-                "'sglang' uses SGLang APIs for chat template rendering, tool call "
-                "parsing, and reasoning parsing."
+                "For SGLang, configure the worker with --preprocessor/--postprocessor."
             ),
-            choices=["dynamo", "vllm", "sglang"],
+            choices=["dynamo", "vllm"],
         )
 
         add_negatable_bool_argument(
@@ -448,7 +447,7 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "[EXPERIMENTAL] Enable performance instrumentation for diagnosing preprocessing bottlenecks. "
                 "Logs per-function timing, request concurrency, and hot-path section durations. "
-                "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
+                "Supported with '--dyn-chat-processor vllm'."
             ),
         )
 
@@ -463,7 +462,7 @@ class FrontendArgGroup(ArgGroup):
                 "When > 0, offloads CPU-bound work (tokenization, template rendering, "
                 "detokenization) to a ProcessPoolExecutor with N workers, each with its "
                 "own GIL. 0 (default) keeps all processing on the main event loop. "
-                "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
+                "Supported with '--dyn-chat-processor vllm'."
             ),
             arg_type=int,
         )

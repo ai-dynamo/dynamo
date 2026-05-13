@@ -55,7 +55,7 @@ pub mod sticky_sessions;
 pub use agent_controller::AgentController;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
-pub use push_router::{DirectRoutingRouter, KvPushRouter};
+pub use push_router::{DirectRoutingRouter, KvPushRouter, KvRouterResponse};
 pub use sticky_sessions::StickySessionRouter;
 
 use crate::{

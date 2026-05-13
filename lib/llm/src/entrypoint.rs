@@ -6,7 +6,10 @@
 //! - Connect it to an Input
 
 pub mod input;
-pub use input::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
+pub use input::{
+    build_routed_pipeline, build_routed_pipeline_text_input_token_output,
+    build_routed_pipeline_text_output, build_routed_pipeline_with_preprocessor,
+};
 
 use std::future::Future;
 use std::pin::Pin;

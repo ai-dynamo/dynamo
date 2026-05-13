@@ -64,6 +64,18 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_tokens_as_token_ids: Option<bool>,
 
+    /// SGLang-compatible option: return parsed reasoning separately from
+    /// visible assistant content. Dynamo's Rust postprocessor has its own
+    /// parser controls, but this field must pass through when SGLang owns
+    /// postprocessing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separate_reasoning: Option<bool>,
+
+    /// SGLang-compatible option controlling whether streaming responses emit
+    /// reasoning deltas while they are generated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_reasoning: Option<bool>,
+
     /// Catch-all for unsupported fields - checked during validation
     #[serde(flatten, default, skip_serializing)]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,

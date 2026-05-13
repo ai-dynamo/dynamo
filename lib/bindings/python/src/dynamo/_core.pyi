@@ -1203,6 +1203,12 @@ class ModelInput:
     Tensor: ModelInput
 
 
+class ModelOutput:
+    """What type of response this model emits: Text or Tokens"""
+    Text: ModelOutput
+    Tokens: ModelOutput
+
+
 class ModelType:
     """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images, Videos or Prefill"""
     Chat: ModelType
@@ -1539,6 +1545,8 @@ async def register_model(
     media_fetcher: Optional[MediaFetcher] = None,
     lora_name: Optional[str] = None,
     base_model_path: Optional[str] = None,
+    self_host_metadata: Optional[bool] = None,
+    model_output: Optional[ModelOutput] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.

@@ -15,6 +15,7 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 use futures::stream::{self, StreamExt};
+use serde::de::DeserializeOwned;
 use serde_json::json;
 use tracing::Instrument;
 
@@ -31,10 +32,52 @@ use crate::{
         preprocessor::RoutingHints,
         timing::{RequestPhase, RequestTracker},
     },
+    types::openai::chat_completions::NvCreateChatCompletionStreamResponse,
 };
 
-pub struct KvPushRouter {
-    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+pub trait KvRouterResponse: dynamo_runtime::engine::Data + DeserializeOwned {
+    fn generated_token_count(&self) -> usize;
+
+    fn is_generation_progress(&self) -> bool {
+        self.generated_token_count() > 0
+    }
+
+    fn query_response(_disaggregated_params: serde_json::Value) -> Result<Self, Error>
+    where
+        Self: Sized,
+    {
+        anyhow::bail!("KV router query-only responses are not supported for this output type")
+    }
+}
+
+impl KvRouterResponse for LLMEngineOutput {
+    fn generated_token_count(&self) -> usize {
+        self.token_ids.len()
+    }
+
+    fn query_response(disaggregated_params: serde_json::Value) -> Result<Self, Error> {
+        Ok(Self {
+            disaggregated_params: Some(disaggregated_params),
+            ..Default::default()
+        })
+    }
+}
+
+impl KvRouterResponse for NvCreateChatCompletionStreamResponse {
+    fn generated_token_count(&self) -> usize {
+        0
+    }
+
+    fn is_generation_progress(&self) -> bool {
+        !self.inner.choices.is_empty() || self.inner.usage.is_some()
+    }
+}
+
+pub struct KvPushRouter<T = LLMEngineOutput>
+where
+    T: KvRouterResponse,
+{
+    inner: PushRouter<PreprocessedRequest, Annotated<T>>,
     pub chooser: Arc<KvRouter>,
     /// Sticky session routing. Lazily activated when requests carry session_control.
     sticky_sessions: Arc<StickySessionRouter>,
@@ -88,7 +131,7 @@ struct RequestGuard {
 }
 
 impl RequestGuard {
-    async fn on_item(&mut self, item: &Annotated<LLMEngineOutput>) {
+    async fn on_item<T: KvRouterResponse>(&mut self, item: &Annotated<T>) {
         // End dispatch stage on first response from backend (any item, not just tokens).
         if !self.first_response_received {
             self.first_response_received = true;
@@ -96,12 +139,12 @@ impl RequestGuard {
         }
 
         if !self.prefill_marked {
-            let has_tokens = item
+            let has_progress = item
                 .data
                 .as_ref()
-                .map(|d| !d.token_ids.is_empty())
+                .map(|d| d.is_generation_progress())
                 .unwrap_or(false);
-            if has_tokens {
+            if has_progress {
                 if self.scheduler_tracked
                     && let Err(e) = self.chooser.mark_prefill_completed(&self.context_id).await
                 {
@@ -114,7 +157,11 @@ impl RequestGuard {
             }
         }
 
-        let new_tokens = item.data.as_ref().map(|d| d.token_ids.len()).unwrap_or(0);
+        let new_tokens = item
+            .data
+            .as_ref()
+            .map(|d| d.generated_token_count())
+            .unwrap_or(0);
 
         if !self.first_token_recorded && new_tokens > 0 {
             if let Some(ref tracker) = self.tracker {
@@ -249,9 +296,12 @@ impl Drop for RequestGuard {
     }
 }
 
-impl KvPushRouter {
+impl<T> KvPushRouter<T>
+where
+    T: KvRouterResponse,
+{
     pub fn new(
-        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        inner: PushRouter<PreprocessedRequest, Annotated<T>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
@@ -465,8 +515,9 @@ impl KvPushRouter {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-    for KvPushRouter
+impl<T> AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<T>>, Error> for KvPushRouter<T>
+where
+    T: KvRouterResponse,
 {
     /// Generate method that handles KV-aware routing with three distinct behaviors:
     ///
@@ -490,7 +541,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     async fn generate(
         &self,
         mut request: SingleIn<PreprocessedRequest>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+    ) -> Result<ManyOut<Annotated<T>>, Error> {
         // Extract context ID for request tracking
         let context_id = request.context().id().to_string();
 
@@ -599,13 +650,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 "Returning worker selection (query-only mode)"
             );
 
-            let output = LLMEngineOutput {
-                disaggregated_params: Some(json!({
-                    "worker_id": worker_id_info,
-                    "token_ids": request.token_ids
-                })),
-                ..Default::default()
-            };
+            let output = T::query_response(json!({
+                "worker_id": worker_id_info,
+                "token_ids": request.token_ids
+            }))?;
             let response = Annotated::from_data(output);
             let stream = stream::iter(vec![response]);
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
@@ -765,12 +813,18 @@ fn pinned_worker_hint(
 /// This wraps a `PushRouter` and reads worker IDs from each request's routing hints,
 /// then routes directly to the specified worker. Used when an external router
 /// (e.g., EPP) handles worker selection.
-pub struct DirectRoutingRouter {
-    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+pub struct DirectRoutingRouter<T = LLMEngineOutput>
+where
+    T: KvRouterResponse,
+{
+    inner: PushRouter<PreprocessedRequest, Annotated<T>>,
 }
 
-impl DirectRoutingRouter {
-    pub fn new(inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>) -> Self {
+impl<T> DirectRoutingRouter<T>
+where
+    T: KvRouterResponse,
+{
+    pub fn new(inner: PushRouter<PreprocessedRequest, Annotated<T>>) -> Self {
         DirectRoutingRouter { inner }
     }
 
@@ -790,13 +844,15 @@ impl DirectRoutingRouter {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-    for DirectRoutingRouter
+impl<T> AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<T>>, Error>
+    for DirectRoutingRouter<T>
+where
+    T: KvRouterResponse,
 {
     async fn generate(
         &self,
         request: SingleIn<PreprocessedRequest>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+    ) -> Result<ManyOut<Annotated<T>>, Error> {
         let worker_id = Self::get_worker_id(&request)?;
 
         tracing::debug!(worker_id = worker_id, "Direct routing to specified worker");

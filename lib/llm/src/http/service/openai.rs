@@ -2875,6 +2875,8 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            separate_reasoning: None,
+            stream_reasoning: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -2908,6 +2910,8 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            separate_reasoning: None,
+            stream_reasoning: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -3111,7 +3115,6 @@ mod tests {
         assert!(request.metadata.is_some());
         assert_eq!(request.metadata.as_ref().unwrap()["user"]["id"], 1);
     }
-
     #[test]
     fn test_bad_base_request_for_chatcompletion() {
         // Frequency Penalty: Should be a float between -2.0 and 2.0
@@ -3132,6 +3135,8 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            separate_reasoning: None,
+            stream_reasoning: None,
             unsupported_fields: Default::default(),
         };
 
@@ -3163,6 +3168,8 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            separate_reasoning: None,
+            stream_reasoning: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3193,6 +3200,8 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            separate_reasoning: None,
+            stream_reasoning: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3223,6 +3232,8 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            separate_reasoning: None,
+            stream_reasoning: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3255,6 +3266,8 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            separate_reasoning: None,
+            stream_reasoning: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3285,6 +3298,8 @@ mod tests {
             chat_template_args: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            separate_reasoning: None,
+            stream_reasoning: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -3331,6 +3346,24 @@ mod tests {
             assert!(msg.contains("documents"));
             assert!(msg.contains("chat_template"));
         }
+    }
+
+    #[test]
+    fn test_chat_completions_accepts_sglang_reasoning_controls() {
+        let json = r#"{
+            "messages": [{"role": "user", "content": "Hello"}],
+            "model": "test-model",
+            "separate_reasoning": false,
+            "stream_reasoning": false
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.separate_reasoning, Some(false));
+        assert_eq!(request.stream_reasoning, Some(false));
+        assert!(request.unsupported_fields.is_empty());
+
+        let result = validate_chat_completion_fields_generic(&request);
+        assert!(result.is_ok());
     }
 
     #[test]

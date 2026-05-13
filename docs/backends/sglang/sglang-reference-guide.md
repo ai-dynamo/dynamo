@@ -34,10 +34,12 @@ These arguments are added by Dynamo on top of SGLang's native arguments.
 | Argument | Env Var | Default | Description |
 |----------|---------|---------|-------------|
 | `--endpoint` | `DYN_ENDPOINT` | Auto-generated | Dynamo endpoint in `dyn://namespace.component.endpoint` format |
-| `--use-sglang-tokenizer` | `DYN_SGL_USE_TOKENIZER` | `false` | **[Deprecated]** Use `--dyn-chat-processor sglang` on the frontend instead. See [SGLang Chat Processor](sglang-chat-processor.md). |
+| `--preprocessor` | `DYN_SGL_PREPROCESSOR` | `dynamo` | Preprocessing owner: `dynamo` or `sglang` |
+| `--postprocessor` | `DYN_SGL_POSTPROCESSOR` | `dynamo` | Postprocessing owner: `dynamo` or `sglang` |
+| `--use-sglang-tokenizer` | `DYN_SGL_USE_TOKENIZER` | `false` | **[Deprecated]** Compatibility alias for `--preprocessor sglang --postprocessor sglang`. See [SGLang Processing Modes](sglang-chat-processor.md). |
 | `--dyn-tool-call-parser` | `DYN_TOOL_CALL_PARSER` | `None` | [Tool call](../../agents/tool-calling.md#supported-tool-call-parsers) parser (overrides SGLang's `--tool-call-parser`) |
 | `--dyn-reasoning-parser` | `DYN_REASONING_PARSER` | `None` | [Reasoning](../../agents/reasoning.md#supported-reasoning-parsers) parser for chain-of-thought models |
-| `--custom-jinja-template` | `DYN_CUSTOM_JINJA_TEMPLATE` | `None` | Custom chat template path (incompatible with `--use-sglang-tokenizer`) |
+| `--custom-jinja-template` | `DYN_CUSTOM_JINJA_TEMPLATE` | `None` | Custom chat template path (requires `--preprocessor dynamo`) |
 | `--embedding-worker` | `DYN_SGL_EMBEDDING_WORKER` | `false` | Run as embedding worker (also sets SGLang's `--is-embedding`) |
 | `--multimodal-encode-worker` | `DYN_SGL_MULTIMODAL_ENCODE_WORKER` | `false` | Run as [multimodal](../../features/multimodal/multimodal-sglang.md) encode worker (frontend-facing) |
 | `--multimodal-worker` | `DYN_SGL_MULTIMODAL_WORKER` | `false` | Run as multimodal LLM worker |
@@ -50,16 +52,16 @@ These arguments are added by Dynamo on top of SGLang's native arguments.
 `--disagg-config` and `--disagg-config-key` must be provided together. The selected section is written to a temp YAML file and passed to SGLang's `--config` flag.
 </Note>
 
-The current supported parser names for both flags are documented in [Tool Calling](../../agents/tool-calling.md#supported-tool-call-parsers) and [Reasoning](../../agents/reasoning.md#supported-reasoning-parsers).
+Dynamo parser names for the `--dyn-*` flags are documented in [Tool Calling](../../agents/tool-calling.md#supported-tool-call-parsers) and [Reasoning](../../agents/reasoning.md#supported-reasoning-parsers). When `--postprocessor sglang`, use SGLang's native `--tool-call-parser` and `--reasoning-parser` names instead.
 
 ## Tokenizer Behavior
 
-By default, Dynamo handles tokenization and detokenization through its Rust-based frontend, passing `input_ids` to SGLang. This enables all frontend endpoints (`v1/chat/completions`, `v1/completions`, `v1/embeddings`).
+By default, Dynamo handles tokenization and detokenization through its Rust-based frontend, passing `input_ids` to SGLang and receiving token ids back. This is `--preprocessor dynamo --postprocessor dynamo`.
 
-For SGLang-native preprocessing (tool calling, reasoning parsing, chat templates), use `--dyn-chat-processor sglang` on the frontend. See [SGLang Chat Processor](sglang-chat-processor.md) for architecture and usage.
+To delegate only the output path to SGLang, use `--postprocessor sglang`. This keeps Dynamo preprocessing and tokenization available for KV routing while SGLang handles detokenization, tool-call parsing, and reasoning parsing. To delegate both sides, use `--preprocessor sglang --postprocessor sglang`.
 
 <Warning>
-`--use-sglang-tokenizer` is deprecated. Use `--dyn-chat-processor sglang` on the frontend instead, which provides the same SGLang-native processing with KV router support and the completions endpoint.
+`--use-sglang-tokenizer` is deprecated. Use `--preprocessor sglang --postprocessor sglang` instead.
 </Warning>
 
 ## Request Cancellation

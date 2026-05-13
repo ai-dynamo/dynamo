@@ -1883,4 +1883,4 @@ class TestDeprecationWarning:  # FRONTEND.8 — legacy/deprecated field warnings
         source = inspect.getsource(sglang_args)
         assert "use_sglang_tokenizer" in source
         assert "FutureWarning" in source
-        assert "--dyn-chat-processor sglang" in source
+        assert "--preprocessor sglang --postprocessor sglang" in source

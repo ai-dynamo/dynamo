@@ -14,11 +14,27 @@ from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto
 
 from dynamo._core import Endpoint
 from dynamo.common.utils.output_modalities import get_output_modalities
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.llm import ModelInput, ModelOutput, ModelRuntimeConfig, ModelType, register_model
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang.args import DynamoConfig
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
+
+
+def _model_input_from_args(dynamo_args: DynamoConfig) -> ModelInput:
+    return (
+        ModelInput.Text
+        if getattr(dynamo_args, "preprocessor", "dynamo") == "sglang"
+        else ModelInput.Tokens
+    )
+
+
+def _model_output_from_args(dynamo_args: DynamoConfig) -> ModelOutput:
+    return (
+        ModelOutput.Text
+        if getattr(dynamo_args, "postprocessor", "dynamo") == "sglang"
+        else ModelOutput.Tokens
+    )
 
 
 async def _register_model_with_runtime_config(
@@ -43,15 +59,21 @@ async def _register_model_with_runtime_config(
         True if registration succeeded, False otherwise.
     """
     runtime_config = await _get_runtime_config(engine, server_args, dynamo_args)
+    if output_type == ModelType.Prefill:
+        model_output = ModelOutput.Tokens
+    elif output_type == ModelType.Embedding:
+        input_type = _model_input_from_args(dynamo_args)
+        model_output = _model_output_from_args(dynamo_args)
+    else:
+        input_type = _model_input_from_args(dynamo_args)
+        model_output = _model_output_from_args(dynamo_args)
 
-    if dynamo_args.use_sglang_tokenizer:
+    if model_output == ModelOutput.Text and output_type != ModelType.Embedding:
         logging.warning(
-            "Using the sglang tokenizer/detokenizer instead. The dynamo tokenizer/detokenizer will not be used and only v1/chat/completions will be available"
+            "Using SGLang postprocessing. The Dynamo postprocessor will not be "
+            "used and only v1/chat/completions will be registered for LLM requests."
         )
-        input_type = ModelInput.Text
-        # Only override output_type for chat models, not for embeddings
-        if output_type != ModelType.Embedding:
-            output_type = ModelType.Chat
+        output_type = ModelType.Chat
 
     try:
         await register_model(
@@ -64,6 +86,7 @@ async def _register_model_with_runtime_config(
             kv_cache_block_size=server_args.page_size,
             runtime_config=runtime_config,
             custom_template_path=dynamo_args.custom_jinja_template,
+            model_output=model_output,
         )
         logging.info("Successfully registered LLM with runtime config")
         return True

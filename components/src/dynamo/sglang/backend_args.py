@@ -37,8 +37,36 @@ class DynamoSGLangArgGroup(ArgGroup):
             default=False,
             help="[Deprecated] Use SGLang's tokenizer for pre and post processing. "
             "This option will be removed in a future release. Use "
-            "'--dyn-chat-processor sglang' on the frontend instead, which provides "
-            "the same SGLang-native pre/post processing with KV router support.",
+            "'--preprocessor sglang --postprocessor sglang' instead.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--preprocessor",
+            env_var="DYN_SGL_PREPROCESSOR",
+            default="dynamo",
+            choices=["dynamo", "sglang"],
+            help=(
+                "Preprocessing owner for chat requests. 'dynamo' registers "
+                "ModelInput.Tokens so the Rust frontend applies templates and "
+                "tokenizes for KV routing. 'sglang' registers ModelInput.Text so "
+                "the worker delegates preprocessing to SGLang."
+            ),
+        )
+
+        add_argument(
+            g,
+            flag_name="--postprocessor",
+            env_var="DYN_SGL_POSTPROCESSOR",
+            default="dynamo",
+            choices=["dynamo", "sglang"],
+            help=(
+                "Postprocessing owner for chat responses. 'dynamo' registers "
+                "ModelOutput.Tokens so the Rust frontend detokenizes and parses "
+                "tool/reasoning output. 'sglang' registers ModelOutput.Text so "
+                "the worker delegates detokenization, tool parsing, and reasoning "
+                "parsing to SGLang."
+            ),
         )
 
         add_negatable_bool_argument(
@@ -114,6 +142,8 @@ class DynamoSGLangConfig(ConfigBase):
     """Configuration for Dynamo SGLang wrapper (SGLang-specific only)."""
 
     use_sglang_tokenizer: bool
+    preprocessor: str
+    postprocessor: str
     multimodal_encode_worker: bool
     multimodal_worker: bool
     embedding_transfer_mode: EmbeddingTransferMode
@@ -127,6 +157,11 @@ class DynamoSGLangConfig(ConfigBase):
     enable_rl: bool
 
     def validate(self) -> None:
+        if self.preprocessor not in ("dynamo", "sglang"):
+            raise ValueError("--preprocessor must be one of: dynamo, sglang")
+        if self.postprocessor not in ("dynamo", "sglang"):
+            raise ValueError("--postprocessor must be one of: dynamo, sglang")
+
         if not isinstance(self.embedding_transfer_mode, EmbeddingTransferMode):
             self.embedding_transfer_mode = EmbeddingTransferMode(
                 str(self.embedding_transfer_mode)

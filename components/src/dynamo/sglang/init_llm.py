@@ -112,11 +112,11 @@ async def init_decode(
 
     if config.serving_mode == DisaggregationMode.DECODE:
         health_check_payload = SglangDisaggHealthCheckPayload(
-            engine, use_text_input=dynamo_args.use_sglang_tokenizer
+            engine, use_text_input=dynamo_args.preprocessor == "sglang"
         ).to_dict()
     else:
         health_check_payload = SglangHealthCheckPayload(
-            engine, use_text_input=dynamo_args.use_sglang_tokenizer
+            engine, use_text_input=dynamo_args.preprocessor == "sglang"
         ).to_dict()
 
     logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")

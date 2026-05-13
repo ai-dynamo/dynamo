@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import argparse
 import contextlib
+import inspect
 import json
 import logging
 import os
@@ -90,6 +91,28 @@ def _has_cli_flag(args: list[str], flag: str) -> bool:
     return any(arg == flag or arg.startswith(f"{flag}=") for arg in args)
 
 
+def _apply_legacy_tokenizer_shim(dynamo_config: DynamoConfig, args: list[str]) -> None:
+    """Map deprecated --use-sglang-tokenizer to split pre/post modes.
+
+    Explicit --preprocessor/--postprocessor flags, including env-backed values,
+    take precedence so operators can override one side while using the legacy
+    flag during rollout.
+    """
+    if not dynamo_config.use_sglang_tokenizer:
+        return
+
+    preprocessor_explicit = _has_cli_flag(args, "--preprocessor") or (
+        "DYN_SGL_PREPROCESSOR" in os.environ
+    )
+    postprocessor_explicit = _has_cli_flag(args, "--postprocessor") or (
+        "DYN_SGL_POSTPROCESSOR" in os.environ
+    )
+    if not preprocessor_explicit:
+        dynamo_config.preprocessor = "sglang"
+    if not postprocessor_explicit:
+        dynamo_config.postprocessor = "sglang"
+
+
 def _remove_cli_flag_and_value(args: list[str], flag: str) -> list[str]:
     """Remove a flag from CLI args, supporting '--flag val' and '--flag=val' forms."""
     updated: list[str] = []
@@ -105,6 +128,25 @@ def _remove_cli_flag_and_value(args: list[str], flag: str) -> list[str]:
             continue
         updated.append(arg)
     return updated
+
+
+def _merge_sglang_config_args(
+    parser: argparse.ArgumentParser, args: list[str]
+) -> list[str]:
+    """Merge SGLang --config args across ConfigArgumentMerger API versions."""
+    merger_params = inspect.signature(ConfigArgumentMerger).parameters
+    if "parser" in merger_params:
+        config_merger = ConfigArgumentMerger(parser=parser)
+    else:
+        boolean_actions = [
+            action.dest
+            for action in parser._actions
+            if isinstance(
+                action, (argparse._StoreTrueAction, argparse._StoreFalseAction)
+            )
+        ]
+        config_merger = ConfigArgumentMerger(boolean_actions=boolean_actions)
+    return config_merger.merge_config_with_args(args)
 
 
 def _load_disagg_config_section(config_path: str, config_key: str) -> dict[str, Any]:
@@ -204,6 +246,7 @@ async def parse_args(args: list[str]) -> Config:
     dynamo_args, unknown = parser.parse_known_args(args)
 
     dynamo_config = DynamoConfig.from_cli_args(dynamo_args)
+    _apply_legacy_tokenizer_shim(dynamo_config, args)
     dynamo_config.validate()
 
     # Dealing with SGLang native configs
@@ -221,8 +264,7 @@ async def parse_args(args: list[str]) -> Config:
         unknown.append(temp_config_file)
 
     if "--config" in unknown:
-        config_merger = ConfigArgumentMerger(parser=sglang_only_parser)
-        unknown = config_merger.merge_config_with_args(unknown)
+        unknown = _merge_sglang_config_args(sglang_only_parser, unknown)
 
     parsed_args = sglang_only_parser.parse_args(unknown)
 
@@ -296,11 +338,11 @@ async def parse_args(args: list[str]) -> Config:
         "reasoning-parser",
     )
 
-    if dynamo_config.custom_jinja_template and dynamo_config.use_sglang_tokenizer:
+    if dynamo_config.custom_jinja_template and dynamo_config.preprocessor == "sglang":
         logging.error(
-            "Cannot use --custom-jinja-template and --use-sglang-tokenizer together. "
+            "Cannot use --custom-jinja-template with --preprocessor sglang. "
             "--custom-jinja-template requires Dynamo's preprocessor to apply the template, "
-            "while --use-sglang-tokenizer bypasses Dynamo's preprocessor entirely."
+            "while --preprocessor sglang bypasses Dynamo's preprocessor entirely."
             "If you want to use the SGLang tokenizer with a custom chat template, "
             "please use the --chat-template argument from SGLang."
         )
@@ -379,6 +421,17 @@ async def parse_args(args: list[str]) -> Config:
             "values are always higher priority at the API layer."
         )
 
+    if (
+        dynamo_config.preprocessor == "sglang"
+        or dynamo_config.postprocessor == "sglang"
+    ) and getattr(server_args, "skip_tokenizer_init", False):
+        logging.error(
+            "--skip-tokenizer-init cannot be used with --preprocessor sglang or "
+            "--postprocessor sglang because SGLang must initialize its tokenizer "
+            "for delegated pre/post processing."
+        )
+        sys.exit(1)
+
     # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
     # tokens since last output), not cumulative tokens. Modern SGLang gates this
     # behavior behind incremental_streaming_output, while older releases used
@@ -388,15 +441,15 @@ async def parse_args(args: list[str]) -> Config:
     if dynamo_config.use_sglang_tokenizer:
         warnings.warn(
             "--use-sglang-tokenizer is deprecated and will be removed in a future "
-            "release. Use '--dyn-chat-processor sglang' on the frontend instead, "
-            "which provides the same SGLang-native pre/post processing with KV "
-            "router support.",
+            "release. Use '--preprocessor sglang --postprocessor sglang' instead.",
             FutureWarning,
             stacklevel=2,
         )
-        logging.info("Using SGLang's built in tokenizer")
-    else:
-        logging.info("Using dynamo's built in tokenizer")
+    logging.info(
+        "Using %s preprocessing and %s postprocessing",
+        dynamo_config.preprocessor,
+        dynamo_config.postprocessor,
+    )
 
     # Derive use_kv_events from server_args.kv_events_config
     # Check that kv_events_config exists AND publisher is not "null" ("zmq" or any future publishers)

@@ -19,7 +19,7 @@ use std::sync::{Arc, OnceLock};
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
-use crate::model_type::{ModelInput, ModelType};
+use crate::model_type::{ModelInput, ModelOutput, ModelType};
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::{slug::Slug, storage::kv};
@@ -265,6 +265,12 @@ pub struct ModelDeploymentCard {
     /// `Tokens` for engines that expect pre-processed input.
     /// `Text` for engines that take care of pre-processing themselves.
     pub model_input: ModelInput,
+
+    /// Specifies the model output type.
+    /// `Tokens` for engines that return token ids for Dynamo post-processing.
+    /// `Text` for engines that return OpenAI-compatible text responses.
+    #[serde(default)]
+    pub model_output: ModelOutput,
 
     /// LoRA metadata for routing
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -536,6 +542,10 @@ impl ModelDeploymentCard {
 
     pub fn requires_preprocessing(&self) -> bool {
         matches!(self.model_input, ModelInput::Tokens)
+    }
+
+    pub fn requires_postprocessing(&self) -> bool {
+        matches!(self.model_output, ModelOutput::Tokens)
     }
 
     /// Walk populated metadata `CheckedFile` slots in deterministic
@@ -844,8 +854,9 @@ impl ModelDeploymentCard {
             context_length,
             kv_cache_block_size: 0, // set later
             migration_limit: 0,
-            model_type: Default::default(),  // set later
-            model_input: Default::default(), // set later
+            model_type: Default::default(),   // set later
+            model_input: Default::default(),  // set later
+            model_output: Default::default(), // set later
             lora: None,
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),

@@ -17,7 +17,7 @@ from dynamo.sglang._compat import (
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
 )
-from dynamo.sglang.args import parse_args
+from dynamo.sglang.args import _apply_legacy_tokenizer_shim, parse_args
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
@@ -199,6 +199,51 @@ def test_compat_caches_async_generate_signature_inspection(monkeypatch):
     assert calls == 1
 
     sglang_compat._get_async_generate_supported_kwarg_names.cache_clear()
+
+
+def test_legacy_use_sglang_tokenizer_enables_split_modes(monkeypatch):
+    monkeypatch.delenv("DYN_SGL_PREPROCESSOR", raising=False)
+    monkeypatch.delenv("DYN_SGL_POSTPROCESSOR", raising=False)
+    config = SimpleNamespace(
+        use_sglang_tokenizer=True,
+        preprocessor="dynamo",
+        postprocessor="dynamo",
+    )
+
+    _apply_legacy_tokenizer_shim(config, ["--use-sglang-tokenizer"])
+
+    assert config.preprocessor == "sglang"
+    assert config.postprocessor == "sglang"
+
+
+def test_legacy_use_sglang_tokenizer_respects_explicit_split_modes(monkeypatch):
+    monkeypatch.delenv("DYN_SGL_PREPROCESSOR", raising=False)
+    monkeypatch.setenv("DYN_SGL_POSTPROCESSOR", "dynamo")
+    config = SimpleNamespace(
+        use_sglang_tokenizer=True,
+        preprocessor="dynamo",
+        postprocessor="dynamo",
+    )
+
+    _apply_legacy_tokenizer_shim(
+        config, ["--use-sglang-tokenizer", "--preprocessor=dynamo"]
+    )
+
+    assert config.preprocessor == "dynamo"
+    assert config.postprocessor == "dynamo"
+
+
+def test_register_model_input_output_modes_are_independent():
+    from dynamo.llm import ModelInput, ModelOutput
+    from dynamo.sglang.register import _model_input_from_args, _model_output_from_args
+
+    cfg = SimpleNamespace(preprocessor="dynamo", postprocessor="sglang")
+    assert _model_input_from_args(cfg) == ModelInput.Tokens
+    assert _model_output_from_args(cfg) == ModelOutput.Text
+
+    cfg = SimpleNamespace(preprocessor="sglang", postprocessor="dynamo")
+    assert _model_input_from_args(cfg) == ModelInput.Text
+    assert _model_output_from_args(cfg) == ModelOutput.Tokens
 
 
 @pytest.mark.asyncio
