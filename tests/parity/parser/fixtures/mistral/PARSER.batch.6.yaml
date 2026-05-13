@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: mistral
+mode: batch
+cases:
+  PARSER.batch.6.a:
+    description: 'Canonical "arguments": {}'
+    ref: dynamo
+    model_text: '[TOOL_CALLS][{"name": "get_time", "arguments": {}}][/TOOL_CALLS]'
+    tools:
+    - &id001
+      name: get_time
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      calls:
+      - name: get_time
+        arguments: {}
+      normal_text: ''
+  PARSER.batch.6.b:
+    description: Whitespace inside arguments {}
+    ref: dynamo
+    model_text: '[TOOL_CALLS][{"name": "get_time", "arguments": { }}][/TOOL_CALLS]'
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_time
+        arguments: {}
+      normal_text: ''
+  PARSER.batch.6.c:
+    description: No arguments key
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_mistral_tool_parser.py#L514
+    model_text: '[TOOL_CALLS][{"name": "get_time"}][/TOOL_CALLS]'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: ''
+    # TODO(research): vllm diverges — vLLM accepts call with missing arguments key as having empty args; Dynamo returns calls=[]
+    # vllm produces:
+    #   calls: [{'name': 'get_time', 'arguments': {}}]
+    #   normal_text: None

@@ -102,10 +102,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             ),
             # `agg_router` exercises agg_multimodal_router.sh: Rust frontend
             # with the `lightseek-mm` feature, MM-aware KV routing, multi-worker.
-            # Smoke-level on pre_merge so regressions to the script's plumbing
+            # Smoke-level on post_merge so regressions to the script's plumbing
             # (worker boot order, ZMQ KV events, MM-routing build) surface in
-            # gating CI before they merge. The fine-grained routing-correctness
-            # assertions live in tests/mm_router/test_router_rust_mm_router_e2e.py.
+            # CI. The fine-grained routing-correctness assertions live in
+            # tests/mm_router/test_router_rust_mm_router_e2e.py.
             #
             # The payload sends two identical MM requests and asserts the
             # second sees cached_tokens > 0 — proves the warm worker reused
@@ -114,7 +114,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # text-prefix only, both requests would still succeed but the
             # second's cached_tokens would be 0 and this case would fail.
             "agg_router": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
@@ -124,13 +124,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # The chat-processor variant of the MM-aware router: same routing
             # architecture, but the frontend uses --dyn-chat-processor=vllm
             # (Python preprocessor) instead of the Rust+lightseek path. Kept
-            # on pre_merge alongside the default so both entry points stay
-            # covered by gating CI; the routing assertions are equivalent.
+            # on post_merge alongside the default so both entry points stay
+            # covered by CI; the routing assertions are equivalent.
             # SINGLE_GPU=true packs both workers onto GPU 0 to match the
             # single-GPU CI environment (the chat-processor script's own
             # default is false for production multi-GPU usage).
             "agg_router_chat_processor": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
@@ -147,7 +147,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # CI; the content-hash correctness assertion lives in
             # tests/mm_router/test_router_rust_mm_frontend_decode_e2e.py.
             "agg_router_frontend_decode": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=1_719_075_000,

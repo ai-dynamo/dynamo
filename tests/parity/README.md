@@ -99,7 +99,7 @@ Both servers receive identical chat-completion requests with `structured_outputs
 | **Real tokenizer?** | yes | no | yes |
 | **Real chat template?** | yes | no | yes |
 | **Real HTTP?** | yes | no | yes |
-| **Cost** | (TBD) | ~3 s for 570 tests | ~60 s for 30 tests (server boot dominates) |
+| **Cost** | (TBD) | ~5 s for 1350 tests (693 pass / 545 skip / 112 xfail with sglang skipped locally) | ~60 s for 30 tests (server boot dominates) |
 | **GPU** | yes | none | yes (`--load-format dummy` still allocates ~2.5 GiB) |
 | **CI markers** | (TBD) | `unit, pre_merge, gpu_0` | `e2e, pre_merge, gpu_1` |
 
@@ -117,21 +117,15 @@ They're stacked diagnostics:
 
 ## Current parity status (M2, batch mode)
 
-Each row is a parser family; each column `bN` is
-[`PARSER.batch.N`](../../lib/parsers/PARSER_CASES.md):
-
-```
-b1   =  PARSER.batch.1   "single happy-path call"
-b2   =  PARSER.batch.2   "multiple calls"
-b3   =  PARSER.batch.3   "no tool call (plain text)"
-b4   =  PARSER.batch.4   "malformed JSON args"
-b5   =  PARSER.batch.5   "missing end-token recovery"
-b6   =  PARSER.batch.6   "empty args (no-arg call)"
-b7   =  PARSER.batch.7   "complex args (nested JSON / arrays)"
-b8   =  PARSER.batch.8   "interleaved normal text"
-b9   =  PARSER.batch.9   "empty input"
-b10  =  PARSER.batch.10  "duplicate calls (same name twice)"
-```
+Each row is one **parser** (one family of input wire format). Each row
+also names the **model(s)** that parser is wired up for — many parsers
+serve more than one model (e.g. `mistral` covers the Mistral series,
+`hermes` covers Hermes-3 + various Llama variants). Columns are the
+sub-case IDs from [`PARSER_CASES.md`](../../lib/parsers/PARSER_CASES.md):
+top-level buckets (`1`, `3`, `9`, `10`) have no sub-cases and use a
+single column; the other buckets (`2`, `4`, `5`, `6`, `7`, `8`) split
+into `.a`–`.d` sub-cases per the per-bucket axes documented in the
+PR description.
 
 Cell values show divergence from Dynamo (the oracle):
 
@@ -139,36 +133,38 @@ Cell values show divergence from Dynamo (the oracle):
 - `V` — vLLM diverges (xfailed via `KNOWN_DIVERGENCES`).
 - `S` — SGLang diverges.
 - `VS` — both diverge.
-- `n/a` — no peer parser registered for that family.
+- `n/a` — **not applicable**: no peer parser registered for that
+  family, OR the sub-case shape doesn't apply to this grammar (e.g.
+  attribute-encoded DSML families have no `4.b` because there's no
+  embedded JSON to malform).
 
-19 parser families total — split into the **Top-N models** we prioritize
-(rows tagged with the model name in parens) and **Others** that aren't
-top-N today but are wired into the harness for completeness. Both sections
-sorted alphabetically within themselves.
+19 parsers total — split into the **Top-N models** we prioritize and
+**Others** wired into the harness for completeness. Both sections sorted
+alphabetically within themselves.
 
-| family                          |  b1 |  b2 |  b3 |  b4 |  b5 |  b6 |  b7 |  b8 |  b9 | b10 |
-|---------------------------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **Top-N models**                |     |     |     |     |     |     |     |     |     |     |
-| deepseek_v4 § (DeepSeek V4)     | ✓   | ✓   | ✓   | ✓   | V   | ✓   | V   | ✓   | ✓   | ✓   |
-| gemma4 § (Gemma 4)              | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | V   | ✓   | ✓   |
-| glm47 (GLM 5.1)                 | ✓   | ✓   | ✓   | ✓   | VS  | ✓   | ✓   | V   | ✓   | ✓   |
-| harmony † (gpt-oss)             | S   | S   | ✓   | S   | S   | S   | S   | S   | ✓   | S   |
-| kimi_k2 (Kimi K2.6)             | ✓   | ✓   | ✓   | S   | ✓   | ✓   | ✓   | VS  | ✓   | ✓   |
-| minimax_m2 (MiniMax 2.7)        | ✓   | ✓   | ✓   | V   | VS  | ✓   | ✓   | ✓   | ✓   | ✓   |
-| nemotron_deci †§ (Nemotron)     | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
-| qwen3_coder (Qwen 3.5)          | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   |
-| **Others**                      |     |     |     |     |     |     |     |     |     |     |
-| deepseek_v3                     | ✓   | ✓   | ✓   | V   | VS  | ✓   | ✓   | S   | ✓   | ✓   |
-| deepseek_v3_1                   | ✓   | ✓   | ✓   | V   | VS  | ✓   | ✓   | S   | ✓   | ✓   |
-| deepseek_v3_2                   | ✓   | ✓   | ✓   | ✓   | V   | ✓   | V   | S   | ✓   | ✓   |
-| hermes                          | ✓   | ✓   | ✓   | VS  | ✓   | ✓   | ✓   | V   | ✓   | ✓   |
-| jamba §                         | ✓   | ✓   | ✓   | ✓   | V   | ✓   | ✓   | V   | ✓   | ✓   |
-| llama3_json §                   | ✓   | V   | ✓   | V   | V   | ✓   | ✓   | ✓   | ✓   | V   |
-| mistral                         | S   | S   | ✓   | VS  | S   | S   | S   | VS  | ✓   | S   |
-| nemotron_nano †§                | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
-| phi4 §                          | ✓   | ✓   | ✓   | ✓   | V   | ✓   | V   | V   | ✓   | ✓   |
-| pythonic                        | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | ✓   | VS  | ✓   | ✓   |
-| qwen25 †                        | S   | S   | ✓   | S   | S   | S   | S   | S   | ✓   | S   |
+| model | parser | 1 | 2.a | 2.b | 2.c | 2.d | 3 | 4.a | 4.b | 4.c | 4.d | 5.a | 5.b | 5.c | 6.a | 6.b | 6.c | 7.a | 7.b | 7.c | 7.d | 8.a | 8.b | 8.c | 8.d | 9 | 10 |
+|---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| **Top-N models** |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |
+| DeepSeek V4 | deepseek_v4 § | ✓ | ✓ | V | V | ✓ | ✓ | V | n/a | V | ✓ | V | ✓ | V | ✓ | ✓ | n/a | V | ✓ | n/a | n/a | ✓ | V | V | V | ✓ | ✓ |
+| Gemma 4 | gemma4 § | ✓ | ✓ | n/a | V | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | V | V | V | ✓ | ✓ |
+| GLM 5.1 | glm47 | ✓ | ✓ | n/a | V | ✓ | ✓ | VS | n/a | n/a | ✓ | VS | ✓ | VS | ✓ | S | n/a | ✓ | ✓ | n/a | n/a | V | V | V | V | ✓ | ✓ |
+| gpt-oss | harmony † | S | S | n/a | S | S | ✓ | S | S | ✓ | n/a | S | ✓ | S | S | S | ✓ | S | S | S | S | S | S | S | S | ✓ | S |
+| Kimi K2.6 | kimi_k2 | ✓ | ✓ | ✓ | VS | ✓ | ✓ | ✓ | S | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | VS | VS | VS | VS | ✓ | ✓ |
+| MiniMax 2.7 | minimax_m2 | ✓ | ✓ | S | S | ✓ | ✓ | V | n/a | V | V | VS | ✓ | VS | ✓ | ✓ | n/a | V | ✓ | n/a | n/a | ✓ | S | S | S | ✓ | ✓ |
+| Nemotron (DeciLM) | nemotron_deci †§ | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| Qwen 3 Coder | qwen3_coder | ✓ | ✓ | n/a | ✓ | ✓ | ✓ | V | n/a | n/a | ✓ | ✓ | V | ✓ | ✓ | ✓ | n/a | VS | ✓ | n/a | n/a | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **Others** |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |
+| DeepSeek V3 | deepseek_v3 | ✓ | ✓ | ✓ | S | ✓ | ✓ | VS | V | VS | VS | VS | ✓ | VS | ✓ | V | V | ✓ | ✓ | ✓ | ✓ | S | ✓ | S | S | ✓ | ✓ |
+| DeepSeek V3.1 | deepseek_v3_1 | ✓ | ✓ | ✓ | S | ✓ | ✓ | VS | V | VS | VS | VS | ✓ | VS | ✓ | ✓ | V | ✓ | ✓ | ✓ | ✓ | S | ✓ | S | S | ✓ | ✓ |
+| DeepSeek V3.2 | deepseek_v3_2 | ✓ | ✓ | VS | VS | ✓ | ✓ | V | n/a | V | ✓ | V | ✓ | V | ✓ | ✓ | n/a | V | ✓ | n/a | n/a | S | VS | VS | VS | ✓ | ✓ |
+| Hermes-3 / Llama variants | hermes | ✓ | ✓ | n/a | V | ✓ | ✓ | ✓ | VS | S | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | S | ✓ | ✓ | ✓ | ✓ | V | ✓ | V | V | ✓ | ✓ |
+| AI21 Jamba | jamba § | ✓ | ✓ | n/a | V | ✓ | ✓ | ✓ | ✓ | V | V | V | ✓ | ✓ | ✓ | ✓ | V | ✓ | ✓ | ✓ | ✓ | V | ✓ | V | V | ✓ | ✓ |
+| Llama 3 (JSON fmt) | llama3_json § | ✓ | V | n/a | V | V | ✓ | V | V | V | n/a | V | n/a | V | ✓ | ✓ | V | ✓ | ✓ | ✓ | ✓ | V | ✓ | V | V | ✓ | V |
+| Mistral series | mistral | S | S | n/a | VS | S | ✓ | VS | VS | V | S | S | ✓ | VS | S | S | V | S | S | S | S | VS | S | VS | V | ✓ | S |
+| Nemotron Nano | nemotron_nano †§ | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| Phi-4 | phi4 § | ✓ | ✓ | n/a | V | ✓ | ✓ | ✓ | ✓ | V | V | V | V | V | ✓ | ✓ | V | ✓ | ✓ | ✓ | V | V | ✓ | V | V | ✓ | ✓ |
+| Llama 4 (pythonic fmt) | pythonic | ✓ | ✓ | n/a | VS | ✓ | ✓ | ✓ | ✓ | n/a | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ | ✓ | ✓ | ✓ | VS | VS | VS | VS | ✓ | ✓ |
+| Qwen 2.5 | qwen25 † | S | S | n/a | S | S | ✓ | ✓ | S | ✓ | S | S | ✓ | ✓ | S | S | ✓ | S | S | S | S | S | S | S | S | ✓ | S |
 
 ### Footnotes
 
@@ -182,9 +178,6 @@ sorted alphabetically within themselves.
 upstream has a peer parser, so the rows are fully `n/a`. Listed here for
 completeness; Dynamo-only self-parity could be added in a follow-up but
 yields no cross-impl signal.
-
-Tally (excluding `dynamo` since it's the oracle): 380 cells against
-the YAML expected — 203 parity, 67 divergence (xfailed), 110 n/a.
 
 **Hot columns:**
 - `PARSER.batch.4` (malformed JSON) and `PARSER.batch.5` (missing
@@ -447,34 +440,25 @@ cases:
       normal_text: ''
   PARSER.batch.8.a:                    # sub-case keys also valid
     description: Narration before tool call only
-    ref: https://github.com/vllm-project/vllm/blob/<sha>/tests/tool_parsers/test_<family>_tool_parser.py#L<line>
+    ref: originated from https://github.com/vllm-project/vllm/blob/<sha>/tests/tool_parsers/test_<family>_tool_parser.py#L<line>
     model_text: |-
       ...
 ```
 
 The `ref` field is required on per-sub-case files
-(`PARSER.<mode>.<n>.yaml`) and takes one of three forms, distinguishing
-how strongly the fixture is tied to upstream:
+(`PARSER.<mode>.<n>.yaml`) and takes one of two forms:
 
-- **`ref: inspired-by <url>`** — there's an upstream test exercising
-  this same shape on this same family, but the fixture's `model_text`
-  is freshly authored (templated narration, consistent function/args
-  across families) rather than copied verbatim. The URL points back at
-  the upstream test for traceability. Most cases that have an upstream
-  analogue land here.
-- **`ref: ported-from <url>`** — the fixture's `model_text` is a
-  verbatim (or minimally-adapted) copy of the upstream test's input.
-  Rare; reserve for when the wire format is intricate enough that
-  byte-equivalence matters and we want the upstream link to be a
-  literal source-of-truth.
+- **`ref: originated from <url>`** — there's an upstream test exercising
+  this same shape on this same family. The fixture's `model_text` may
+  be freshly authored (templated narration, consistent function/args
+  across families) rather than copied verbatim, but the shape is
+  directly traceable to the linked upstream test. The URL names the
+  impl: `vllm-project/vllm` → vLLM, `sgl-project/sglang` → SGLang.
 - **`ref: dynamo`** — authored fresh in this repo, no upstream peer.
   Most sub-case taxonomy fillers (`.b` post-only, `.d` between-calls)
   land here because vLLM/SGLang don't test those shapes.
 
-The URL form (`inspired-by` / `ported-from`) names the impl in the URL
-itself: `vllm-project/vllm` → vLLM, `sgl-project/sglang` → SGLang.
-
-Every sub-case carries one of these three states; there's no "no
+Every sub-case carries one of these two states; there's no "no
 provenance" state. The legacy flat `PARSER.<mode>.yaml` (cases without
 sub-cases) does NOT carry `ref` — those entries predate the convention.
 
@@ -519,6 +503,26 @@ wire formats (XML-style families, harmony) read as the actual text
 the model would emit, not a `\n`-escaped one-liner. UTF-8 with
 `allow_unicode=True`, so DeepSeek special tokens (`｜` U+FF5C, `▁`
 U+2581) appear as literal characters rather than escape sequences.
+
+A side-effect of letting pyyaml choose the best block-scalar header
+for every value: `normal_text` occasionally emits as the
+unusual-looking `|2+`. Decoding this in three pieces:
+
+- `|` — literal block scalar (preserve newlines as written).
+- `2` — explicit indent indicator: "content is indented 2 spaces."
+  pyyaml normally auto-detects indent from the first content line;
+  it falls back to the explicit form when the body is blank-only
+  and there's nothing to detect from.
+- `+` — "keep" chomping: preserve all trailing newlines (`-` strips
+  them, no indicator clips to one).
+
+So `|2+` followed by one blank line decodes to `"\n"` — a single
+newline. It shows up where the divergence between Dynamo and an
+upstream impl is literally one inter-wrapper newline character (e.g.
+back-to-back `</tool_calls>` / `<tool_calls>` fence pairs where
+Dynamo treats the `\n` between them as `normal_text` and the impl
+treats it as part of the wrapper). pyyaml round-trips the value to
+its canonical form; the header looks cryptic but it's just `"\n"`.
 
 ## Why families' YAMLs look so similar (and why that's the point)
 

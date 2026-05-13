@@ -8,6 +8,7 @@ pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::context::Controller;
 use pyo3::prelude::*;
 use std::sync::Arc;
+use tokio::sync::watch;
 
 // Context is a wrapper around the AsyncEngineContext to allow for Python bindings.
 // Not all methods of the AsyncEngineContext are exposed, jsut the primary ones for tracing + cancellation.
@@ -17,16 +18,21 @@ use std::sync::Arc;
 pub struct Context {
     inner: Arc<dyn AsyncEngineContext>,
     trace_context: Option<DistributedTraceContext>,
+    /// First-token signal for decode-mode disagg. `None` on aggregated /
+    /// prefill requests.
+    first_token: Option<watch::Sender<bool>>,
 }
 
 impl Context {
     pub fn new(
         inner: Arc<dyn AsyncEngineContext>,
         trace_context: Option<DistributedTraceContext>,
+        first_token: Option<watch::Sender<bool>>,
     ) -> Self {
         Self {
             inner,
             trace_context,
+            first_token,
         }
     }
 
@@ -52,6 +58,7 @@ impl Context {
         Self {
             inner: Arc::new(controller),
             trace_context: None,
+            first_token: None,
         }
     }
 
@@ -87,6 +94,16 @@ impl Context {
                 }
             }
         })
+    }
+
+    /// Fire the first-token signal so the framework can release any
+    /// deferred `engine.abort()`. Idempotent; no-op on non-decode
+    /// requests. Engines normally don't need this — the framework
+    /// auto-fires on the first non-empty chunk in the response stream.
+    fn notify_first_token(&self) {
+        if let Some(tx) = &self.first_token {
+            let _ = tx.send(true);
+        }
     }
 
     // Expose trace information to Python for debugging

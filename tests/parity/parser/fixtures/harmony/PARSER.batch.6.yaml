@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: harmony
+mode: batch
+cases:
+  PARSER.batch.6.a:
+    description: Canonical empty {} message body
+    ref: dynamo
+    model_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{}
+    tools:
+    - &id001
+      name: get_time
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      calls:
+      - name: get_time
+        arguments: {}
+      normal_text: ''
+  PARSER.batch.6.b:
+    description: Whitespace inside empty {}
+    ref: dynamo
+    model_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{ }
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_time
+        arguments: {}
+      normal_text: ''
+  PARSER.batch.6.c:
+    description: No <|message|> body
+    ref: dynamo
+    model_text: <|channel|>commentary to=functions.get_time <|constrain|>json
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json

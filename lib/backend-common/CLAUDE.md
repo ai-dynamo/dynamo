@@ -37,9 +37,12 @@ opt-out and lets `run.rs` stay non-generic.
   release logic inside the `generate` stream body using RAII; use
   `abort` only for out-of-band notifications (e.g. telling a remote
   scheduler to cancel compute early).
-- `cleanup(&self) -> Result<(), DynamoError>` — called once on shutdown.
-  Guaranteed to run if `start()` succeeded, even if later registration or
-  serve fails.
+- `cleanup(&self) -> Result<(), DynamoError>` — called exactly once.
+  Runs after `start()` returns Ok on shutdown (even if registration /
+  serve fails), **and** after `start()` raises — so implementations
+  must be null-safe against partial state (inner LLM, sockets,
+  background tasks). Must also be idempotent: a second call after a
+  successful first returns `Ok(())` without re-entering teardown.
 
 ## Contract for `generate`
 
@@ -140,6 +143,38 @@ aggregates it when present. `usage(prompt, completion)` computes
   where `BackendError` is the runtime's nested category enum. No custom
   error types inside backend-common.
 
+## Disaggregated Serving
+
+`DisaggregationMode` (`disagg.rs`) is metadata carried on `WorkerConfig`.
+`Aggregated` is the default and keeps existing callers unchanged.
+`CommonArgs` exposes the `--disaggregation-mode` flag (env
+`DYN_DISAGGREGATION_MODE`) so engines that flatten `CommonArgs` get the
+flag automatically.
+
+What the **`Worker`** does with the mode at registration time:
+
+- `Prefill` → register with `ModelType::Prefill` regardless of
+  `endpoint_types`, so the frontend's `PrefillRouter` targets it.
+- `Decode` → keep `endpoint_types`, but force-disable
+  `enable_local_indexer` (decode workers don't host the indexer
+  endpoint, so they must not advertise it).
+- `Aggregated` → register with the parsed `endpoint_types`.
+
+What an **`LLMEngine`** does with the mode (engine-side dispatch in
+`generate` and `drain`): see `examples/mocker` for a worked reference.
+The mocker stamps a synthetic `disaggregated_params` payload on the
+prefill terminal and rejects decode requests that arrive without
+`PrefillResult`. Real engines run an analogous protocol with their
+own KV transfer transport.
+
+`drain` is the prefill shutdown hook: poll-until-idle so in-flight
+NIXL/KV transfers finish before GPU memory is released. Aggregated and
+decode engines leave the default no-op.
+
+`PrefillResult` and `BootstrapInfo` are re-exported from
+`dynamo-backend-common` so engines don't need a separate `dynamo-llm`
+dep just to read these fields off `PreprocessedRequest`.
+
 ## Adding a New Engine
 
 1. Create a new Rust crate depending on `dynamo-backend-common`. Place
@@ -234,10 +269,15 @@ use dynamo_backend_common::testing;
 
 #[tokio::test]
 async fn my_engine_satisfies_contract() {
-    let engine = MyEngine::new_for_test();
-    testing::run_conformance(engine).await.expect("conformance");
+    testing::run_conformance(MyEngine::new_for_test)
+        .await
+        .expect("conformance");
 }
 ```
+
+`run_conformance` takes a factory rather than a built engine — it
+constructs one engine for the main lifecycle test and a second
+pristine engine for the "cleanup before start" check.
 
 The kit asserts:
 
@@ -252,6 +292,9 @@ The kit asserts:
   other terminal reason, or no terminal at all — the check raises
   `ConformanceFailure::CancellationIgnored`.
 - `cleanup()` succeeds and is idempotent (two calls in a row both Ok).
+- `cleanup()` is safe on a never-started engine — mirrors `Worker`'s
+  post-start-failure path. Failures here surface as
+  `CleanupWithoutStartFailed`.
 
 Also available: `testing::mock_context()` and
 `testing::cancelling_context(after)` for hand-written tests.
