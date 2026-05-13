@@ -18,14 +18,10 @@ from typing import Optional
 import pytest
 
 from dynamo.thunderagent_router.capacity import WorkerCapacity, WorkerKey
-from dynamo.thunderagent_router.program_state import (
-    ProgramLifecycle,
-    ProgramStatus,
-        )
-from dynamo.thunderagent_router.router import (
-    KvThunderAgentRouter,
-    ThunderAgentConfig,
-        )
+from dynamo.thunderagent_router.program_state import ProgramLifecycle, ProgramStatus
+from dynamo.thunderagent_router.router import KvThunderAgentRouter, ThunderAgentConfig
+
+pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
 @dataclass
@@ -54,7 +50,7 @@ def make_router(
     capacity_workers: Optional[dict[WorkerKey, WorkerCapacity]] = None,
     kv_response: tuple[int, int, int] = (7, 0, 0),
     config: Optional[ThunderAgentConfig] = None,
-        ) -> tuple[KvThunderAgentRouter, FakeCapacity, FakeKvRouter]:
+) -> tuple[KvThunderAgentRouter, FakeCapacity, FakeKvRouter]:
     capacity = FakeCapacity(workers=capacity_workers or {})
     kv = FakeKvRouter(response=kv_response)
     cfg = config or ThunderAgentConfig(
@@ -62,7 +58,7 @@ def make_router(
         resume_timeout_seconds=2.0,
         pause_threshold=0.95,
         soft_demote_threshold=0.80,
-        )
+    )
     return KvThunderAgentRouter(kv, capacity, cfg), capacity, kv  # type: ignore[arg-type]
 
 
@@ -83,7 +79,7 @@ async def test_after_request_records_real_tokens():
         prompt_tokens=120,
         completion_tokens=30,
         last_prefix_token_ids=[1, 2, 3, 4],
-        )
+    )
     program = router._table.programs["p1"]
     assert program.token_total == 150
     assert program.last_prefix_token_ids == [1, 2, 3, 4]
@@ -100,7 +96,10 @@ async def test_before_request_records_exact_prompt_estimate_before_admission():
 
 
 @pytest.mark.asyncio
-async def test_kv_aware_resume_consults_kv_router_with_last_prefix():
+async def test_kv_aware_resume_default_off_does_not_override_bfd():
+    """Default (kv_aware_resume_enabled=False): select_worker stays out of the
+    way on resume and lets BFD's worker assignment from _greedy_resume stand.
+    Empirically the override loses 6-11% spm on 2xTP4 / 128 agents."""
     router, _, kv = make_router(kv_response=(42, 0, 7))
     await router.before_request("p1")
     await router.after_request(
@@ -108,10 +107,33 @@ async def test_kv_aware_resume_consults_kv_router_with_last_prefix():
         prompt_tokens=100,
         completion_tokens=10,
         last_prefix_token_ids=[10, 11, 12],
-        )
+    )
+    worker_id = await router.select_worker(
+        "p1", token_ids=[10, 11, 12, 13, 14], was_paused=True
+    )
+    assert worker_id is None
+    assert kv.calls == []
 
-    # Simulate "the program was resumed" without going through the full
-    # scheduler; we just exercise select_worker's was_paused branch.
+
+@pytest.mark.asyncio
+async def test_kv_aware_resume_when_enabled_consults_kv_router_with_last_prefix():
+    """Opt-in ablation path: with kv_aware_resume_enabled=True, select_worker
+    overrides BFD's worker assignment with KvRouter.best_worker(last_prefix)."""
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=0.05,
+        resume_timeout_seconds=2.0,
+        pause_threshold=0.95,
+        soft_demote_threshold=0.80,
+        kv_aware_resume_enabled=True,
+    )
+    router, _, kv = make_router(kv_response=(42, 0, 7), config=cfg)
+    await router.before_request("p1")
+    await router.after_request(
+        "p1",
+        prompt_tokens=100,
+        completion_tokens=10,
+        last_prefix_token_ids=[10, 11, 12],
+    )
     worker_id = await router.select_worker(
         "p1", token_ids=[10, 11, 12, 13, 14], was_paused=True
     )
@@ -128,7 +150,7 @@ async def test_select_worker_falls_through_when_not_paused():
         prompt_tokens=100,
         completion_tokens=10,
         last_prefix_token_ids=[10, 11, 12],
-        )
+    )
     worker_id = await router.select_worker(
         "p1", token_ids=[10, 11, 12, 13], was_paused=False
     )
@@ -151,7 +173,7 @@ async def test_pause_acting_then_before_request_blocks_until_resume():
     cfg = ThunderAgentConfig(
         scheduler_interval_seconds=0.05,
         resume_timeout_seconds=2.0,
-        )
+    )
     router, _, _ = make_router(config=cfg)
 
     # Turn 1: place on worker 0 then transition to ACTING.
@@ -190,7 +212,7 @@ async def test_forced_resume_after_timeout():
     cfg = ThunderAgentConfig(
         scheduler_interval_seconds=10.0,
         resume_timeout_seconds=0.05,
-        )
+    )
     router, _, _ = make_router(config=cfg)
     await router.before_request("p1")
     router.assign_worker("p1", 0)
@@ -209,7 +231,7 @@ async def test_new_program_queues_before_first_request_when_capacity_full():
         resume_timeout_seconds=2.0,
         pause_threshold=1.0,
         resume_hysteresis=0.0,
-        )
+    )
     workers = {
         WorkerKey(worker_id=1, dp_rank=0): WorkerCapacity(
             worker_id=1,
@@ -241,7 +263,7 @@ async def test_soft_demote_marks_borderline_workers():
         scheduler_interval_seconds=10.0,
         soft_demote_threshold=0.80,
         pause_threshold=0.95,
-        )
+    )
     workers = {
         WorkerKey(worker_id=1, dp_rank=0): WorkerCapacity(
             worker_id=1,
@@ -308,7 +330,7 @@ async def test_scheduling_disabled_passthrough_records_lifecycle():
         prompt_tokens=120,
         completion_tokens=30,
         last_prefix_token_ids=[1, 2, 3, 4],
-        )
+    )
     assert program.token_total == 150
     assert program.last_prefix_token_ids == [1, 2, 3, 4]
     assert program.lifecycle == ProgramLifecycle.ACTIVE  # not PAUSED
@@ -332,7 +354,7 @@ async def test_utilization_uses_kv_pool_and_working_set():
         pause_target=0.95,
         acting_token_weight=1.0,
         scheduler_interval_seconds=10.0,
-        )
+    )
     workers = {
         WorkerKey(worker_id=1, dp_rank=0): WorkerCapacity(
             worker_id=1,
@@ -347,7 +369,9 @@ async def test_utilization_uses_kv_pool_and_working_set():
     for pid, prompt_tokens in [("big", 940_000), ("small", 10_000)]:
         await router.before_request(pid)
         router.assign_worker(pid, 1)
-        await router.after_request(pid, prompt_tokens=prompt_tokens, completion_tokens=0)
+        await router.after_request(
+            pid, prompt_tokens=prompt_tokens, completion_tokens=0
+        )
 
     snapshot = router._capacity.snapshot()
     await router._pause_until_safe(snapshot)
@@ -367,7 +391,7 @@ async def test_pause_until_safe_pauses_smallest_acting_first():
         pause_target=0.80,
         acting_token_weight=1.0,
         scheduler_interval_seconds=10.0,
-        )
+    )
     workers = {
         WorkerKey(worker_id=1, dp_rank=0): WorkerCapacity(
             worker_id=1,
@@ -382,7 +406,9 @@ async def test_pause_until_safe_pauses_smallest_acting_first():
     for pid, prompt_tokens in [("big", 600), ("small", 100)]:
         await router.before_request(pid)
         router.assign_worker(pid, 1)
-        await router.after_request(pid, prompt_tokens=prompt_tokens, completion_tokens=0)
+        await router.after_request(
+            pid, prompt_tokens=prompt_tokens, completion_tokens=0
+        )
 
     snapshot = router._capacity.snapshot()
     await router._pause_until_safe(snapshot)
@@ -398,7 +424,7 @@ async def test_pause_until_safe_is_scoped_to_overloaded_worker():
         pause_target=0.80,
         acting_token_weight=1.0,
         scheduler_interval_seconds=10.0,
-        )
+    )
     workers = {
         WorkerKey(worker_id=1, dp_rank=0): WorkerCapacity(
             worker_id=1,
@@ -420,7 +446,9 @@ async def test_pause_until_safe_is_scoped_to_overloaded_worker():
     ]:
         await router.before_request(pid)
         router.assign_worker(pid, worker_id)
-        await router.after_request(pid, prompt_tokens=prompt_tokens, completion_tokens=0)
+        await router.after_request(
+            pid, prompt_tokens=prompt_tokens, completion_tokens=0
+        )
 
     await router._pause_until_safe(router._capacity.snapshot())
 
@@ -440,7 +468,7 @@ async def test_pause_drives_util_to_pause_target_not_threshold():
         pause_target=0.80,
         acting_token_weight=1.0,
         scheduler_interval_seconds=10.0,
-        )
+    )
     workers = {
         WorkerKey(worker_id=1, dp_rank=0): WorkerCapacity(
             worker_id=1,
@@ -460,20 +488,16 @@ async def test_pause_drives_util_to_pause_target_not_threshold():
     await router._pause_until_safe(snapshot)
 
     paused = sum(
-        1 for p in router._table.programs.values()
+        1
+        for p in router._table.programs.values()
         if p.lifecycle == ProgramLifecycle.PAUSED
     )
-    active = 10 - paused
     # After pause cycle, util should be ~0.80, not ~0.95.
     # 10 programs * 100k = 1.0M total. To reach 0.80M we need 2 paused.
     # Old behavior (pause_target ignored) would have paused 1 (1.0M -> 0.9M).
-    assert paused >= 2, (
-        f"pause cycle stopped too early: paused={paused}, expected >= 2"
-    )
+    assert paused >= 2, f"pause cycle stopped too early: paused={paused}, expected >= 2"
     # Verify we didn't over-shoot wildly either.
-    assert paused <= 3, (
-        f"pause cycle ran too long: paused={paused}, expected <= 3"
-    )
+    assert paused <= 3, f"pause cycle ran too long: paused={paused}, expected <= 3"
 
 
 @pytest.mark.asyncio
@@ -490,7 +514,7 @@ async def test_scheduler_tick_resumes_before_pausing_new_overload():
         acting_token_weight=1.0,
         acting_decay_tau_seconds=1.0,
         scheduler_interval_seconds=10.0,
-        )
+    )
     workers = {
         WorkerKey(worker_id=1, dp_rank=0): WorkerCapacity(
             worker_id=1,
@@ -516,11 +540,10 @@ async def test_scheduler_tick_resumes_before_pausing_new_overload():
     await router._scheduler_tick()
 
     paused = sum(
-        1 for p in router._table.programs.values()
+        1
+        for p in router._table.programs.values()
         if p.lifecycle == ProgramLifecycle.PAUSED
     )
     assert paused == 6
     assert router._stat_pauses == 6
     assert router._stat_resumes == 0
-
-

@@ -9,11 +9,15 @@ state machine.
 
 from __future__ import annotations
 
+import pytest
+
 from dynamo.thunderagent_router.program_state import (
     ProgramLifecycle,
     ProgramStatus,
     ProgramTable,
 )
+
+pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
 def test_begin_request_creates_program_in_reasoning():
@@ -78,5 +82,3 @@ def test_counts_reflects_lifecycle_and_status():
 
     counts = table.counts()
     assert counts == {"reasoning": 1, "acting": 1, "paused": 1}
-
-

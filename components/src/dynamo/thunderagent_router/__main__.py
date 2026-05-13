@@ -31,7 +31,6 @@ import uvloop
 from dynamo.llm import KvRouter, ModelInput, ModelType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
-
 from dynamo.thunderagent_router.args import (
     ThunderAgentRouterConfig,
     build_aic_perf_config,
@@ -160,7 +159,9 @@ class ThunderAgentRouterHandler:
                 logger.info(
                     "first request shape: keys=%s token_ids_type=%s "
                     "token_ids_len=%s agent_context=%s",
-                    sorted(list(request.keys())) if isinstance(request, dict) else type(request),
+                    sorted(list(request.keys()))
+                    if isinstance(request, dict)
+                    else type(request),
                     type(tids).__name__ if tids is not None else "missing",
                     len(tids) if isinstance(tids, list) else "n/a",
                     ac,
@@ -236,7 +237,9 @@ class ThunderAgentRouterHandler:
                         self._scheduler.assign_worker(program_id, selected_worker)
 
                 # Item 1: real token accounting from the response usage.
-                usage = chunk.get("completion_usage") if isinstance(chunk, dict) else None
+                usage = (
+                    chunk.get("completion_usage") if isinstance(chunk, dict) else None
+                )
                 if isinstance(usage, dict):
                     prompt_tokens_seen = int(
                         usage.get("prompt_tokens", prompt_tokens_seen)
@@ -272,7 +275,9 @@ class ThunderAgentRouterHandler:
                 program_id,
                 prompt_tokens_seen,
                 completion_tokens_seen,
-                last_prefix_token_ids=token_ids if isinstance(token_ids, list) else None,
+                last_prefix_token_ids=token_ids
+                if isinstance(token_ids, list)
+                else None,
             )
 
     async def stats(self, _request: Any):
@@ -317,9 +322,7 @@ async def worker(runtime: DistributedRuntime) -> None:
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.thunderagent_router.generate"
     )
-    stats_endpoint = runtime.endpoint(
-        f"{config.namespace}.thunderagent_router.stats"
-    )
+    stats_endpoint = runtime.endpoint(f"{config.namespace}.thunderagent_router.stats")
 
     if config.model_name:
         model_path = config.model_path or config.model_name

@@ -16,7 +16,6 @@ from dynamo.router.args import (
     build_aic_perf_config,
     build_kv_router_config,
 )
-
 from dynamo.thunderagent_router.router import ThunderAgentConfig
 
 
@@ -34,6 +33,7 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
     acting_decay_tau_seconds: float
     scheduler_interval_seconds: float
     scheduling_disabled: bool
+    kv_aware_resume_enabled: bool
     model_name: Optional[str] = None
     model_path: Optional[str] = None
 
@@ -50,6 +50,7 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
             acting_decay_tau_seconds=self.acting_decay_tau_seconds,
             scheduler_interval_seconds=self.scheduler_interval_seconds,
             scheduling_disabled=self.scheduling_disabled,
+            kv_aware_resume_enabled=self.kv_aware_resume_enabled,
         )
 
     def validate(self) -> None:  # type: ignore[override]
@@ -175,8 +176,7 @@ class ThunderAgentArgGroup(ArgGroup):
             flag_name="--scheduler-interval-seconds",
             env_var="DYN_THUNDERAGENT_SCHEDULER_INTERVAL_SECONDS",
             default=5.0,
-            help="Period of the background pause/resume scheduler tick "
-            "(default: 5.0)",
+            help="Period of the background pause/resume scheduler tick (default: 5.0)",
             arg_type=float,
         )
         add_argument(
@@ -187,6 +187,20 @@ class ThunderAgentArgGroup(ArgGroup):
             help="When set, the router records lifecycle state but does not "
             "pause / resume / soft-demote. Used as the 'TR off' arm to "
             "isolate scheduling value vs program-aware passthrough.",
+            arg_type=bool,
+        )
+        add_argument(
+            g,
+            flag_name="--kv-aware-resume-enabled",
+            env_var="DYN_THUNDERAGENT_KV_AWARE_RESUME_ENABLED",
+            default=False,
+            help="Ablation flag. When True, select_worker hard-overrides BFD's "
+            "worker assignment with KvRouter.best_worker(last_prefix) for "
+            "paused programs to preserve cache locality. Default False: "
+            "let BFD pick the lighter worker. Empirically the override "
+            "concentrates load on the warm-cache worker (which is also the "
+            "one that just over-pressured into a pause) and costs 6-11% spm "
+            "vs pure BFD at 128 concurrent agents (see DESIGN.md sec 5).",
             arg_type=bool,
         )
         add_argument(

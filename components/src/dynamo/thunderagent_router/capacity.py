@@ -6,11 +6,14 @@
 The scheduler treats ``kv_pool_tokens`` (block_size * total_kv_blocks from
 each worker's published MDC) as a static pool size and uses it as the
 pause-trigger denominator. We attach to ``FpmEventSubscriber`` purely for
-its model-card stream; the per-iteration FPM payloads are not consumed.
+its model-card stream; the per-iteration FPM payloads are not consumed
+in v0.
 
-If engine-runtime load fields (active_decode_tokens, num_running, etc) are
-ever wired into the pause trigger, the FPM payload decode path will need to
-be reintroduced. See DESIGN.md section 7 (open work).
+Engine-runtime load fields (active_decode_tokens, num_running, ...) are
+available on the FPM payload and are an open extension point: wiring them
+into the pause trigger would make the denominator engine-true rather than
+program-state-projected. Not done yet because the projected denominator
+behaved well enough on the multi-worker benchmarks. See README roadmap.
 """
 
 from __future__ import annotations
@@ -114,9 +117,7 @@ class FpmCapacityProvider:
             self._subscriber = FpmEventSubscriber(self._endpoint)
             self._subscriber.start_tracking()
             self._started = True
-            logger.info(
-                "FpmCapacityProvider: started tracking forward-pass-metrics"
-            )
+            logger.info("FpmCapacityProvider: started tracking forward-pass-metrics")
 
     def stop(self) -> None:
         with self._lock:

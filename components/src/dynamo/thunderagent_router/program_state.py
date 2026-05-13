@@ -6,11 +6,11 @@
 Mirrors ``ThunderAgent/program/state.py`` semantics with two intentional
 differences for v0:
 
-* ``last_prefix_token_ids`` is captured at request_end so resume can target the
-  warmest-KV worker via ``KvRouter.best_worker``. ThunderAgent has no equivalent
-  because its public repo does not do KV-aware resume.
 * ``token_total`` comes from real ``prompt_tokens + completion_tokens`` reported
-  by the response, not a ``chars / 5`` heuristic.
+  on the chat-completions response, not a ``chars / 5`` heuristic.
+* ``last_prefix_token_ids`` is captured at request_end and made available to
+  ``KvRouter.best_worker`` when the opt-in ``kv_aware_resume_enabled`` flag
+  is set. Default-off; see router.py for the rationale.
 """
 
 from __future__ import annotations

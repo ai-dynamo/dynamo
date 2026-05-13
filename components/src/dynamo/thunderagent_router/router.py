@@ -6,13 +6,22 @@
 Composes Dynamo's native ``KvRouter`` (KV-aware placement) with:
 
 * a per-``program_id`` lifecycle table (REASONING / ACTING; ACTIVE / PAUSED);
-* engine-true capacity from the FPM event plane;
+* engine-true capacity from the FPM event plane (sub-second cadence vs
+  upstream's 5 s Prometheus poll);
+* real token accounting from chat-completions ``usage``, not a chars/5
+  estimator;
+* working-set projection with ``pause_target`` setpoint;
+* asymmetric ACTING-token weighting -- full weight on the pause side
+  (conservative), exponential decay on the resume side (optimistic);
 * soft-pause-then-hard-pause priority demotion;
-* KV-aware resume placement that targets the warmest worker for the program's
-  last-turn prefix.
+* BFD load-balanced resume worker selection by default. An opt-in
+  ``kv_aware_resume_enabled`` flag exists for the hard-override
+  ablation; multi-worker benchmarks showed it concentrates load on the
+  warm-cache worker and costs 6-11% spm vs BFD (see README section 4).
 
-See ``2026-05-04-thunderagent-router-v0-scoping.md`` in project memory for the
-items this v0 covers (1, 2, 3, 6) and the deferred follow-ups (4, 5, 7).
+Status: experimental. See README for the empirical results that motivate
+the defaults, and the roadmap for the planned blended-cost-function
+replacement of the override path.
 """
 
 from __future__ import annotations
@@ -24,11 +33,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from dynamo.llm import KvRouter
-
-from dynamo.thunderagent_router.capacity import (
-    FpmCapacityProvider,
-    WorkerCapacity,
-)
+from dynamo.thunderagent_router.capacity import FpmCapacityProvider
 from dynamo.thunderagent_router.program_state import (
     Program,
     ProgramLifecycle,
@@ -137,6 +142,14 @@ class ThunderAgentConfig:
 
     buffer_per_program: int = DEFAULT_BUFFER_PER_PROGRAM
     """Headroom reserved per program when BFD-packing during resume."""
+
+    kv_aware_resume_enabled: bool = False
+    """Ablation flag. When True, `select_worker` hard-overrides BFD's worker
+    assignment with KvRouter.best_worker(last_prefix) for paused programs.
+    Default False: empirically the override concentrates load on the
+    warm-cache worker -- which is the same worker that just over-pressured
+    into a pause -- and loses 6-11% spm vs pure BFD on 2xTP4 / 128 agents
+    (see README section 4). Set True to reproduce the prior behaviour."""
 
 
 class KvThunderAgentRouter:
@@ -293,7 +306,10 @@ class KvThunderAgentRouter:
                 )
                 async with self._lock:
                     program = self._table.programs.get(program_id)
-                    if program is not None and program.lifecycle == ProgramLifecycle.PAUSED:
+                    if (
+                        program is not None
+                        and program.lifecycle == ProgramLifecycle.PAUSED
+                    ):
                         snapshot = self._capacity.snapshot()
                         worker_id = self._least_loaded_worker_locked(snapshot)
                         self._resume_program(program, worker_id)
@@ -353,7 +369,7 @@ class KvThunderAgentRouter:
             prefix = program.last_prefix_token_ids if program else None
             assigned_worker_id = program.assigned_worker_id if program else None
 
-        if was_paused and prefix:
+        if was_paused and prefix and self._cfg.kv_aware_resume_enabled:
             try:
                 worker_id, _dp_rank, _overlap = await self._kv_router.best_worker(
                     prefix
@@ -504,7 +520,9 @@ class KvThunderAgentRouter:
 
     def _worker_used(self, worker_id: int, *, decayed: bool = False) -> int:
         programs = self._active_programs_for_worker(worker_id)
-        tokens = sum(self._program_tokens(program, decayed=decayed) for program in programs)
+        tokens = sum(
+            self._program_tokens(program, decayed=decayed) for program in programs
+        )
         return tokens + len(programs) * self._cfg.buffer_per_program
 
     def _worker_remaining(
@@ -558,9 +576,7 @@ class KvThunderAgentRouter:
         for worker_id, capacity in capacities.items():
             util = self._worker_used(worker_id) / capacity
             if not (
-                self._cfg.soft_demote_threshold
-                <= util
-                < self._cfg.pause_threshold
+                self._cfg.soft_demote_threshold <= util < self._cfg.pause_threshold
             ):
                 continue
             for program in self._active_programs_for_worker(worker_id):
@@ -734,9 +750,7 @@ class KvThunderAgentRouter:
                     return 0
                 return 2
 
-            paused_programs.sort(
-                key=lambda p: (group_key(p), p.token_total)
-            )
+            paused_programs.sort(key=lambda p: (group_key(p), p.token_total))
 
             # Match upstream TA default (use_acting_token_decay=False): the
             # resume gate uses NON-decayed used-tokens so paused programs only
@@ -750,7 +764,9 @@ class KvThunderAgentRouter:
                     worker_id,
                     int(
                         capacity
-                        * max(0.0, self._cfg.pause_threshold - self._cfg.resume_hysteresis)
+                        * max(
+                            0.0, self._cfg.pause_threshold - self._cfg.resume_hysteresis
+                        )
                     )
                     - self._worker_used(worker_id, decayed=False),
                 )

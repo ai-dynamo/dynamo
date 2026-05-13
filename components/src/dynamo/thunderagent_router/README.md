@@ -1,166 +1,260 @@
-# `dynamo.thunderagent_router`
+# `dynamo.thunderagent_router` (experimental)
+
+> **Status: experimental.** CLI flags, the `nvext.agent_context` schema, and
+> the lifecycle hooks in this package are not stable. Defaults reflect what
+> we have measured so far; expect them to move.
 
 A standalone Dynamo routing service that adds **program-level scheduling**
-with tool-boundary pause/resume on top of Dynamo's native KV-aware router.
-Designed to capture ThunderAgent's outer-loop scheduling wins on agentic
-workloads while replacing its weakest mechanisms with engine-true Dynamo
-signals.
-
-This is the v0 implementation: scope is items 1, 2, 3, 6 of the differentiator
-list described in
-[`~/memory/agent-orchestration-exploration/2026-05-04-thunderagent-router-v0-scoping.md`](../../../../../../memory/agent-orchestration-exploration/2026-05-04-thunderagent-router-v0-scoping.md).
-Items 4, 5, 7 (workflow profile, subagent-aware lifecycle, fairness aging)
-are deferred to follow-up PRs gated on ablation results.
+with tool-boundary pause/resume on top of Dynamo's native KV router. It
+treats an entire agent run (LLM turn → tool execution → next LLM turn …)
+as the schedulable unit, not individual requests.
 
 ---
 
-## Attribution
+## 1. The problem
 
-This component is heavily inspired by **ThunderAgent**:
+Agentic LLM workloads (SWE-bench, browser-use, anything with a tool loop)
+make many short LLM calls interleaved with non-GPU work — `docker exec`,
+`pytest`, `curl`, waiting on subagent output. Between turns the agent's
+KV cache sits on the GPU contributing zero progress while still occupying
+blocks. At scale this caps useful throughput well below what the engine
+can sustain on raw request volume.
 
-- Paper: <https://arxiv.org/abs/2602.13692>
-- Public repository: <https://github.com/HaoKang-Timmy/ThunderAgent>
-- See [`DESIGN.md`](DESIGN.md) for a walk-through of which mechanisms we port,
-  where the upstream code drifts from the paper, and where this package
-  deliberately deviates. Citation for the paper is at the bottom of this file.
+Request-level routers (vLLM's, SGLang's, Dynamo's stock `KvRouter`)
+schedule one request at a time. They see the LLM turn but not the agent
+behind it. Two failure modes follow:
 
-The mechanism we adopt directly:
+1. **Cache-occupancy explosion.** With N concurrent agents at conversation
+   step K, the working set is `N × step_K_context`. Most of that KV is
+   between turns, doing nothing. The engine evicts useful blocks under
+   memory pressure or refuses admission, and every "next turn" pays a
+   re-prefill tax.
+2. **No tool-boundary backpressure.** The router can't slow down a hot
+   trajectory at a natural pause point; it can only cancel in-flight
+   requests or queue them. Either choice is worse than "wait until this
+   agent is between turns and then defer."
 
-- **`program_id` as the schedulable unit.** A program is one agent run across
-  many LLM turns and tool gaps. The scheduler operates on programs, not
-  individual requests.
-- **REASONING / ACTING state per program.** REASONING means a turn is on GPU;
-  ACTING means the program is between turns (running a tool, waiting on a
-  subagent, or otherwise off-GPU).
-- **ACTIVE / PAUSED lifecycle.** A program in PAUSED is unregistered from
-  every backend and waits in a global queue until the scheduler resumes it.
-- **Tool-boundary admission gate.** ThunderAgent never interrupts an
-  in-flight generation. It only blocks the *next* request for a paused
-  program, and lets the current generation finish first when marking a
-  REASONING program for pause.
-- **Best-Fit-Decreasing resume.** When workers free up, paused programs are
-  packed onto workers in priority order (continuation > new > acting) using
-  BFD against per-worker remaining capacity.
-
-We re-implement these primitives natively in Dynamo because the public
-ThunderAgent codebase has several mechanisms that are weaker than what
-Dynamo can already provide. The next section spells out exactly what we
-kept, what we replaced, and why.
+This package addresses both.
 
 ---
 
-## What we kept vs. what we replaced
+## 2. ThunderAgent in one paragraph
 
-The table below summarises the deltas relative to the public ThunderAgent
-repository at commit `aebad6421abe8e1fbf4e8fdca88f91346176cf29`.
+[ThunderAgent](https://arxiv.org/abs/2602.13692) (Kang et al., 2026)
+groups requests under a `program_id` and runs an outer scheduler that
+moves a program through `(REASONING | ACTING) × (ACTIVE | PAUSED)`.
+At a tool boundary the program goes to ACTING; under memory pressure the
+scheduler **pauses** ACTING programs (logically — no decode preemption)
+so that their KV blocks are eligible for eviction by the engine. When
+working-set util drops, the scheduler **resumes** the smallest-token
+programs first, BFD-packing them back below threshold. The result is
+boundary-aware admission that never preempts active decode.
 
-| Concern                  | ThunderAgent (public repo)                               | `dynamo.thunderagent_router` v0                                                  |
-| ------------------------ | -------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| Identity                 | `program_id` only (single-string)                        | Full `nvext.agent_context`: `workflow_type_id`, `workflow_id`, `program_id`, `parent_program_id` |
-| Token accounting         | `chars / global_char_to_token_ratio` heuristic           | **Item 1.** Real `prompt_tokens` + `completion_tokens` from response usage; `len(token_ids)` for ISL |
-| Capacity signal          | `/metrics` Prometheus polling per backend; `shared_tokens` heuristic that is dead code in the public repo | **Item 3.** `forward-pass-metrics` event-plane subscription; engine-true `sum_decode_kv_tokens` per worker |
-| Per-worker capacity cap  | `max_total_num_tokens` from SGLang `/get_server_info`    | `runtime_config.max_num_batched_tokens` from each worker's published model deployment card |
-| Acting-token decay       | `2^(-t)` with `t` in seconds, no fitted half-life        | Off in v0; revisit in follow-up using observed inter-turn gaps from agent traces |
-| Resume placement         | BFD by remaining capacity; recompute prefix on the new worker | **Item 2.** `KvRouter.best_worker(last_prefix_token_ids)` -- target the warmest worker for the program's last-turn prefix |
-| Pause severity           | Binary: pause or not                                     | **Item 6.** Soft (negative `priority_jump` in the next request) before hard pause; soft expires every scheduler tick |
-| In-flight decode         | Never interrupted (we keep this)                         | Same: marked-for-pause REASONING programs only pause at next ACTING transition |
-| Engine cache control     | None in public repo (`backend.unregister_program` is bookkeeping only) | Same in v0; demote/prefetch APIs are Phase 3 in the design doc and live in a separate workstream |
-| Live KV migration        | Logical only -- pause + recompute on resume              | Same in v0; KV-aware resume *placement* mitigates this, but no actual KV transfer |
-| Integration              | Standalone Python proxy intercepting OpenAI requests; strips `program_id` before forwarding | Standalone `dynamo_worker` that wraps Dynamo's native `KvRouter`; preserves `agent_context` end-to-end |
+The mechanism is simple. The wins reported in the paper come from two
+places: working-set accounting that knows about programs (not requests),
+and pause/resume targeting tool boundaries (not arbitrary tokens).
 
-If a row is the same in both columns it means the concept is sound and
-we are deliberately not changing it for v0.
+---
 
-### What we explicitly chose not to do in v0
+## 3. How we built on ThunderAgent
 
-These were considered and deferred so the v0 surface stays small enough to
-ablate cleanly:
+We re-implemented the program scheduler inside a Dynamo router service.
+Where the reference implementation makes choices that don't generalise
+to Dynamo's surface area, we deviate. Five deliberate changes:
 
-- **Item 4 — Workflow-profile-aware pause selection.** Pausing only programs
-  whose predicted idle exceeds resume cost. Requires a `workflow_profile.json`
-  artifact built offline from agent traces. See
-  [`2026-04-14-oraculus-notes.md`](../../../../../../memory/agent-orchestration-exploration/2026-04-14-oraculus-notes.md).
-- **Item 5 — Subagent-aware lifecycle.** Treat programs whose
-  `parent_program_id` is set as subagents: never pause subagents (they ride
-  the streaming-session path), and bias parent pause toward "child is slow".
-  Encodes the finding in
-  [`2026-04-30 session policy`](INDEX.md).
-- **Item 7 — Step-count-aware fairness aging.** Bias resume priority by
-  waited time so step=20 paused programs do not starve under step=2 floods.
-- **Items 8, 9, 10, 11 from the design roadmap** (tier-aware cache status,
-  external `warm_kv` / `prefetch_kv`, `demote_kv` / `pause_prefix`, full
-  program scheduler + cache controller). These are separate workstreams
-  tracked in
-  [`2026-04-15-dynamo-program-scheduler-design.md`](../../../../../../memory/agent-orchestration-exploration/2026-04-15-dynamo-program-scheduler-design.md).
+1. **FPM-driven capacity, not Prometheus polling.** Upstream polls
+   Prometheus every 5 s. Dynamo's forward-pass metrics (FPM) event plane
+   delivers per-worker `active_decode_kv_tokens`, `active_prefill_tokens`,
+   `queued_prefill_tokens` at sub-second cadence. We subscribe to the
+   stream instead.
+2. **Real token accounting.** Upstream estimates `total_tokens` as
+   `len(json.dumps(payload)) / chars_per_token_ratio`. We use the
+   `prompt_tokens + completion_tokens` already on every chat-completions
+   response. No estimator state, no momentum-updated ratio, no
+   error compounding across long conversations.
+3. **Working-set projection with `pause_target`.** The trigger is
+   `Σ token_total + per-program buffer >= pause_threshold * pool`, and
+   pauses keep firing until projected util drops to `pause_target`. The
+   target is what fixes the "stall just under threshold" failure mode.
+4. **Asymmetric decay.** ACTING programs are weighted at full
+   `acting_token_weight` on the **pause** side (conservative) and decay
+   exponentially with `acting_decay_tau_seconds` on the **resume** side
+   (optimistic). Mirrors the paper's `remaining_capacity_with_decay`.
+   The decay replaces a hard TTL/GC for zombie programs.
+5. **Pure BFD load-balance on resume worker selection.** Resumed
+   programs go to whichever Dynamo worker BFD picks (lightest load).
+   We initially tried a hard-override that pinned resumed programs back
+   to the worker with the warmest prefix; on multi-worker benchmarks
+   that override turned out to be a net negative (§4) and is now an
+   opt-in ablation flag, not the default.
+
+Single in-memory service for now; pause state is lost on restart and a
+Rust port is on the roadmap.
+
+### Knobs (full table)
+
+| Flag | Env var | Default | Description |
+|---|---|---|---|
+| `--endpoint` | `DYN_ROUTER_ENDPOINT` | – | Worker endpoint (e.g. `dynamo.vllm.generate`) |
+| `--router-block-size` | `DYN_ROUTER_BLOCK_SIZE` | 128 | KV cache block size |
+| `--pause-threshold` | `DYN_THUNDERAGENT_PAUSE_THRESHOLD` | 0.95 | Working-set fraction of KV pool that fires a pause cycle. |
+| `--pause-target` | `DYN_THUNDERAGENT_PAUSE_TARGET` | 0.80 | Setpoint that pause cycles drive util back down to. |
+| `--soft-demote-threshold` | `DYN_THUNDERAGENT_SOFT_DEMOTE_THRESHOLD` | 0.80 | Soft-demote band start (negative priority jump in `[soft, pause)`). |
+| `--soft-demote-priority-jump` | `DYN_THUNDERAGENT_SOFT_DEMOTE_PRIORITY_JUMP` | -2.0 | Priority seconds applied to soft-demoted programs. |
+| `--resume-priority-boost` | `DYN_THUNDERAGENT_RESUME_PRIORITY_BOOST` | 1.0 | Priority seconds added to a request that just resumed. |
+| `--resume-timeout-seconds` | `DYN_THUNDERAGENT_RESUME_TIMEOUT_SECONDS` | 1800.0 | Forced-resume cap. Mirrors ThunderAgent's `_wait_for_resume`. |
+| `--resume-hysteresis` | `DYN_THUNDERAGENT_RESUME_HYSTERESIS` | 0.10 | Headroom below `pause_threshold` required before any resume. |
+| `--acting-token-weight` | `DYN_THUNDERAGENT_ACTING_TOKEN_WEIGHT` | 1.0 | Multiplier on `token_total` for ACTING programs in the **pause-side** working set. |
+| `--acting-decay-tau-seconds` | `DYN_THUNDERAGENT_ACTING_DECAY_TAU_SECONDS` | 1.0 | Tau for exponential decay of ACTING tokens in the **resume-side** working set. |
+| `--scheduler-interval-seconds` | `DYN_THUNDERAGENT_SCHEDULER_INTERVAL_SECONDS` | 5.0 | Scheduler tick period. |
+| `--scheduling-disabled` | `DYN_THUNDERAGENT_SCHEDULING_DISABLED` | false | Record lifecycle state but skip pause/resume/soft-demote. Useful for attribution. |
+| `--kv-aware-resume-enabled` | `DYN_THUNDERAGENT_KV_AWARE_RESUME_ENABLED` | **false** | Ablation flag. When true, hard-overrides BFD's resume worker assignment with `KvRouter.best_worker(last_prefix)`. Default false because the override hurts spm (§4). |
+| `--model-name` | `DYN_THUNDERAGENT_MODEL_NAME` | – | Frontend-visible model name. Triggers `register_model`. |
+| `--model-path` | `DYN_THUNDERAGENT_MODEL_PATH` | – | Path or HF repo ID for tokenizer + model card. |
+
+All `KvRouter` flags from `dynamo.router` (`--router-temperature`,
+`--use-kv-events`, `--router-track-output-blocks`, …) are also accepted
+and forwarded.
+
+---
+
+## 4. Initial experimental results
+
+Benchmark stack — public repro:
+
+- Model: `MiniMaxAI/MiniMax-M2.7` (FP8), 2× TP4 on 8× H100.
+- Frontend: `dynamo.frontend --router-mode round-robin`.
+- Workers: 2× `dynamo.vllm` at TP4, KV events on.
+- Router: this package, knobs as below.
+- Bench: `mini-swe-agent` v1.14.4 against SWE-bench-Lite at 128 concurrent
+  workers, driven by [ishandhanani/ThunderAgent](https://github.com/ishandhanani/ThunderAgent)'s
+  `mini-extra swebench`. The fork carries a minimal `nvext.agent_context`
+  injector so each LLM call carries a stable `trajectory_id` and
+  `session_id`; everything else is upstream.
+- Window: bench start +10 min to +70 min (steady-state).
+- Metric: successful `chat_completions` per minute at the frontend.
+
+Three arms run with identical worker config and bench settings, varying
+only the router behaviour:
+
+| Arm | Workers | KV-aware override on resume | spm (10–67) | Pauses fired |
+|---|---:|---|---:|---:|
+| Dynamo + stock `KvRouter` (no program scheduler) | 128 | n/a | ≈ 23.7 | 0 |
+| `thunderagent_router`, override **on** | 128 | yes | 25.93 | 823 |
+| **`thunderagent_router`, override off (BFD)** | 128 | no | **27.54** | 651 |
+
+**Headline:** program-aware pause/resume + working-set projection beats
+the stock KV router by **+16%** when the override is off, and beats
+itself-with-override by **+6.2%**. The override concentrates resumed
+programs on whichever worker holds their warm prefix — which is the
+same worker that just over-pressured into a pause — and on multi-worker
+benchmarks that is strictly worse than letting BFD spread the load.
+
+Mechanism, confirmed by per-worker metrics:
+
+- With override on, W0 holds 92% KV util while W1 sits at 80% — ~12 pp
+  of stranded capacity.
+- With override off, both workers track at ~93% util with symmetric
+  ~76% prefix-cache hit rates. The cache locality argument doesn't
+  hold up at 128-concurrency on this workload: mini-SWE programs
+  share large system-prompt prefixes that *both* workers see within a
+  few turns.
+- Pause rate drops 21% (823 → 651) once BFD spreads the load, because
+  fewer programs cross threshold on a single worker.
+
+The flag is kept for reproducibility but should be considered
+experimental.
+
+A separate `workers=64` arm (same override-on config) lost an additional
+16% to the 128-worker baseline. Under-saturation does not rescue the
+override; the asymmetric load concentration is what costs throughput.
+
+---
+
+## 5. Roadmap
+
+Next, in rough priority:
+
+1. **Blended worker-selection cost function.** Replace both the hard
+   override on resume and the load-only admission path in
+   `_select_worker_for_new_program_locked` with a single `KvRouter`
+   call configured with `overlap_score_weight ∈ (0, 1)`. Dynamo's
+   KvRouter already supports λ-blending of load and prefix overlap;
+   we just need to call the right scoring API with a tuned weight.
+   Sweep λ on captured traces, then live-validate the top candidate.
+2. **Frontend in `--router-mode kv`.** The richer per-request timing
+   fields (`prefill_wait_time_ms`, `prefill_time_ms`, `ttft_ms`,
+   `avg_itl_ms`, `kv_hit_rate`, prefill/decode worker IDs) are only
+   populated by `push_router`'s `record_prefill_start/complete` markers.
+   Today's round-robin frontend skips them. Switching modes adds zero
+   schema work and unlocks prefill/decode breakdown for offline replay.
+3. **Workflow-profile-aware pause selection.** Profile per-session-type
+   tool-gap distributions from captured traces (P50/P90 acting seconds).
+   At pause time, prefer programs whose predicted idle exceeds the
+   resume cost. This is where the trace work pays off: pick the right
+   program to pause based on what it's likely to do next.
+4. **KV demote / prefetch primitives.** Today pause is logical; the
+   engine evicts on its own schedule. A `demote_kv(program_id, tier)`
+   RPC lets the scheduler deterministically offload paused KV to
+   HiCache CPU/disk, freeing GPU pool predictably. Paired with a
+   `prefetch_kv(prefix, worker)` call on subagent close, the parent
+   resume turn skips re-prefill.
+5. **Rust port of the hot path.** Per-response-chunk `Python::with_gil`
+   + `pythonize` cost is real at 128-concurrency. The Rust scaffold in
+   `lib/llm/src/kv_router/program_controller.rs` is the starting point
+   once the algorithm stabilises.
+6. **Stronger correctness coverage.** Multi-worker resume placement,
+   restart durability of pause state, and the
+   `routing.backend_instance_id` honouring path are smoke-tested today;
+   they need per-request log assertions before this package is
+   promoted out of `experimental`.
+
+---
+
+## Tracing
+
+When the frontend has agent-trace enabled
+(`DYN_AGENT_TRACE_SINKS=jsonl`, `DYN_AGENT_TRACE_OUTPUT_PATH=...`), every
+LLM call lands a `request_end` record carrying `trajectory_id`,
+`session_id`, `input_tokens`, `output_tokens`, `cached_tokens`,
+`request_received_ms`, `total_time_ms`, and the block-level
+`input_sequence_hashes` — enough for offline replay against this router.
+With a producer-side ZMQ publisher (set
+`DYN_AGENT_TOOL_EVENTS_ZMQ_ENDPOINT` on the harness), `tool_start` /
+`tool_end` / `tool_error` events come through with the same
+`trajectory_id` and matching `tool_call_id` pairs, giving you the full
+LLM-turn ↔ tool-gap timeline per agent.
 
 ---
 
 ## Architecture
 
 ```
-                         frontend (--router-mode kv | --router-mode round-robin | ...)
-                                       │
-                                       │  OpenAI request → preprocessor → PreprocessedRequest
-                                       │  (nvext.agent_context survives end-to-end)
-                                       ▼
-              ┌─────────────────────────────────────────────┐
-              │  python -m dynamo.thunderagent_router       │
-              │                                             │
-              │  ┌──────────────────────────────────────┐   │
-              │  │ KvThunderAgentRouter                  │   │
-              │  │  - ProgramTable (REASONING/ACTING,    │   │
-              │  │    ACTIVE/PAUSED, soft-demote state)  │   │
-              │  │  - before_request()  ← admission gate │   │
-              │  │  - select_worker()   ← KV-aware resume│   │
-              │  │  - after_request()   ← REASONING→ACTING│   │
-              │  │  - _scheduler_tick() ← every 5 s      │   │
-              │  └──────────────────────────────────────┘   │
-              │              │             │                │
-              │              │             │ snapshot()     │
-              │              │             ▼                │
-              │              │   ┌──────────────────┐       │
-              │              │   │ FpmCapacityProvider│      │
-              │              │   │  subscribes to     │      │
-              │              │   │  forward-pass-     │      │
-              │              │   │  metrics event plane│     │
-              │              │   └──────────────────┘       │
-              │              ▼                              │
-              │      ┌──────────────────┐                   │
-              │      │ KvRouter (PyO3)   │ ── best_worker(prefix)
-              │      │ - KV indexer      │      kv-aware resume placement
-              │      │ - scheduler queue │      (item 2)
-              │      │ - WorkerLoadMon.  │
-              │      └──────────────────┘                   │
-              │              │                              │
-              └──────────────┼──────────────────────────────┘
-                             ▼
-                       ┌─────────────┐    ┌─────────────┐
-                       │ vLLM worker │    │ vLLM worker │ …
-                       └─────────────┘    └─────────────┘
-                       /metrics emitted via FPM ZMQ → event plane
+┌─────────────────────────────────────────────────────────────┐
+│ dynamo.frontend  (HTTP + auth + tracing sink)               │
+└────────────────────┬────────────────────────────────────────┘
+                     │  chat completions, with nvext.agent_context
+                     ▼
+┌─────────────────────────────────────────────────────────────┐
+│ dynamo.thunderagent_router  (this service)                  │
+│  - ProgramTable: trajectory_id → ProgramState               │
+│  - admission gate: before_request → was_paused?             │
+│  - scheduler loop (every scheduler_interval_seconds):       │
+│      _apply_soft_demotes → _pause_until_safe → _greedy_resume│
+│  - select_worker: BFD on resume; passthrough on new req     │
+│  - after_request: real-token accounting                     │
+└────────────────────┬────────────────────────────────────────┘
+                     │  KvRouter.generate
+                     ▼
+┌─────────────────────────────────────────────────────────────┐
+│ KvRouter  (in-process; subscribes to KV events + FPM)       │
+└────────────────────┬────────────────────────────────────────┘
+                     │  per-worker dispatch
+                     ▼
+┌─────────────────────────────────────────────────────────────┐
+│ dynamo.vllm  (N workers; FPM publisher, KV events publisher)│
+└─────────────────────────────────────────────────────────────┘
 ```
-
-The scheduler service registers
-`{namespace}.thunderagent_router.generate` as a Dynamo endpoint. The
-frontend's discovery picks it up the same way it picks up any other model
-worker; no `--router-mode` change in the frontend is required.
-
-The mapping between original ThunderAgent components and our equivalents:
-
-| ThunderAgent concept                                | Our equivalent                                                |
-| --------------------------------------------------- | ------------------------------------------------------------- |
-| `MultiBackendRouter`                                | `KvThunderAgentRouter` (`router.py`)                          |
-| `Program` dataclass + `ProgramStatus`/`ProgramState`| `program_state.py:Program` + `ProgramStatus`/`ProgramLifecycle`|
-| `BackendState` per-backend metrics                  | `FpmCapacityProvider` snapshot per-worker (`capacity.py`)     |
-| `update_program_before_request`                     | `before_request()` admission gate                             |
-| `update_program_after_request`                      | `after_request()` REASONING→ACTING transition                 |
-| `_scheduler_loop` / `_scheduled_check`              | `_scheduler_tick()` (every `--scheduler-interval-seconds`)    |
-| `_pause_until_safe`                                 | `_pause_until_safe()` -- same semantics, different signal source |
-| `_greedy_resume`                                    | `_greedy_resume()` BFD                                        |
-| `_pause_program` / `_mark_program_for_pause`        | `_pause_acting()` / `program.marked_for_pause` flag           |
-| `_resume_program`                                   | `_resume_program()`                                           |
-| `_wait_for_resume`                                  | `asyncio.Event` per program with timeout-driven forced resume |
-| `httpx.AsyncClient` proxy                           | `KvRouter.generate_from_request()` from PyO3 bindings         |
 
 ---
 
@@ -170,229 +264,69 @@ The mapping between original ThunderAgent components and our equivalents:
 
 ```bash
 # 1. Start your Dynamo workers (vLLM example, with KV events on)
-DYN_SYSTEM_PORT=8081 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
-    --model Qwen/Qwen3-0.6B \
-    --block-size 64 \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' &
-
-DYN_SYSTEM_PORT=8082 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
-    --model Qwen/Qwen3-0.6B \
-    --block-size 64 \
-    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
+python -m dynamo.vllm \
+    --model <model> --tensor-parallel-size <N> \
+    --kv-events-config '{"publisher":"zmq","topic":"kv-events",
+                         "endpoint":"tcp://*:20080",
+                         "enable_kv_cache_events":true}'
 
 # 2. Start the ThunderAgent router pointing at the worker endpoint
 python -m dynamo.thunderagent_router \
-    --endpoint dynamo.vllm.generate \
-    --router-block-size 64 \
-    --pause-threshold 0.95 \
-    --soft-demote-threshold 0.80 \
-    --resume-priority-boost 1.0 &
+    --endpoint dynamo.backend.generate \
+    --model-name <model> \
+    --router-block-size 16 \
+    --router-reset-states
 
 # 3. Start the frontend (any router mode -- the frontend just needs to find
 #    a model handler, which our service registered)
-python -m dynamo.frontend --router-mode round-robin &
+python -m dynamo.frontend --router-mode round-robin --router-reset-states
 ```
 
 ### Sending requests
 
-Clients use the standard OpenAI-compatible API. The only ThunderAgent-specific
-contract is `nvext.agent_context.program_id`:
+The router expects `nvext.agent_context.trajectory_id` (and optionally
+`session_id`, `session_type_id`) on each chat-completions request so it
+can group turns under the same program. The
+[ishandhanani/ThunderAgent](https://github.com/ishandhanani/ThunderAgent)
+fork of `mini-swe-agent` injects these directly via OpenAI client
+`extra_body`; any other harness can do the same.
 
-```python
-import openai
-
-client = openai.AsyncOpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
-await client.chat.completions.create(
-    model="Qwen/Qwen3-0.6B",
-    messages=[{"role": "user", "content": "..."}],
-    extra_body={
-        "nvext": {
-            "agent_context": {
-                "workflow_type_id": "ms_agent",
-                "workflow_id": "task-42",
-                "program_id": "task-42:researcher",
-                "parent_program_id": "task-42:root",  # optional
-            }
-        }
-    },
-)
+```json
+{
+  "model": "MiniMaxAI/MiniMax-M2",
+  "messages": [...],
+  "stream": true,
+  "nvext": {
+    "agent_context": {
+      "trajectory_id": "astropy__astropy-14365",
+      "session_id":    "mswea-...",
+      "session_type_id": "swebench-lite"
+    }
+  }
+}
 ```
 
-Requests **without** `agent_context` are routed normally and bypass all
-program-scheduling logic. This keeps the service backward-compatible for
-mixed traffic.
-
-### Configuration knobs
-
-| Flag                                | Env var                                              | Default | Description                                                                          |
-| ----------------------------------- | ---------------------------------------------------- | ------- | ------------------------------------------------------------------------------------ |
-| `--endpoint`                        | `DYN_ROUTER_ENDPOINT`                                | --      | Worker endpoint to route to (e.g. `dynamo.vllm.generate`)                            |
-| `--router-block-size`               | `DYN_ROUTER_BLOCK_SIZE`                              | 128     | KV cache block size                                                                  |
-| `--pause-threshold`                 | `DYN_THUNDERAGENT_PAUSE_THRESHOLD`                   | 0.95    | Hard-pause when worker utilization >= this                                           |
-| `--soft-demote-threshold`           | `DYN_THUNDERAGENT_SOFT_DEMOTE_THRESHOLD`             | 0.80    | Soft-demote (negative `priority_jump`) when utilization is between this and `pause-threshold` |
-| `--soft-demote-priority-jump`       | `DYN_THUNDERAGENT_SOFT_DEMOTE_PRIORITY_JUMP`         | -2.0    | `priority_jump` (seconds) applied to soft-demoted programs                           |
-| `--resume-priority-boost`           | `DYN_THUNDERAGENT_RESUME_PRIORITY_BOOST`             | 1.0     | `priority_jump` (seconds) added to a request that just resumed from hard pause       |
-| `--resume-timeout-seconds`          | `DYN_THUNDERAGENT_RESUME_TIMEOUT_SECONDS`            | 1800.0  | Forced-resume after this many seconds; mirrors ThunderAgent's `_wait_for_resume`     |
-| `--scheduler-interval-seconds`      | `DYN_THUNDERAGENT_SCHEDULER_INTERVAL_SECONDS`        | 5.0     | Scheduler tick period -- matches ThunderAgent's default                              |
-
-All `KvRouter` flags from `dynamo.router` (`--router-temperature`,
-`--use-kv-events`, `--router-track-output-blocks`, etc.) are also
-accepted and forwarded.
-
----
-
-## Lifecycle deep-dive
-
-### When a request arrives
-
-```
-generate(request) called by Dynamo runtime
-    │
-    │ extract_program_id(request)
-    ▼
-  program_id?
-    │
-    │ no   ─────► forward to KvRouter.generate_from_request unchanged
-    │
-    │ yes
-    ▼
-  scheduler.before_request(program_id)
-    │
-    │ program is PAUSED?  ──── yes ─────► await waiting_event (with timeout)
-    │                                       │
-    │                                       │ on timeout: forced resume
-    │                                       ▼
-    │ no                            (continue)
-    ▼
-  PauseDecision { priority_jump, was_paused, assigned_worker_hint }
-    │
-    │ was_paused? ─── yes ──► scheduler.select_worker(program_id, token_ids, was_paused=True)
-    │                          │   uses KvRouter.best_worker(last_prefix_token_ids)  ◄── ITEM 2
-    │                          ▼
-    │                       worker_id (soft pin) or None
-    │
-    │ fold priority_jump into routing.priority_jump  ◄── ITEM 6
-    │
-    ▼
-  KvRouter.generate_from_request(preprocessed)
-    │
-    ▼
-  on each chunk:
-    - capture worker_id from disaggregated_params (first chunk)
-    - update prompt_tokens / completion_tokens from completion_usage  ◄── ITEM 1
-    - yield chunk to caller
-    │
-    ▼
-  on stream end:
-    scheduler.after_request(program_id, prompt_tokens, completion_tokens, last_prefix=token_ids)
-        │
-        │ marked_for_pause?  ── yes ─► transition to PAUSED, register in global queue
-        ▼
-       state: REASONING -> ACTING
-```
-
-### The scheduler tick (every `scheduler_interval_seconds`)
-
-```
-snapshot = capacity.snapshot()  # FPM event-plane data, item 3
-    │
-    ▼
-apply_soft_demotes(snapshot)
-    for each worker with soft_demote_threshold <= util < pause_threshold:
-        for each ACTIVE program on that worker:
-            program.soft_demoted_until = now + 1.5 * tick_interval
-    │
-    ▼
-pause_until_safe(snapshot)
-    for each worker with util >= pause_threshold:
-        loop while effective_active > limit:
-            smallest ACTING program on this worker  → hard pause
-            else smallest REASONING program on this worker  → mark_for_pause
-        (effective_active accounts for tokens we removed in this loop, since
-         the FPM snapshot is stale until the next event)
-    │
-    ▼
-greedy_resume(snapshot)
-    candidates = paused_programs sorted by (priority_group, token_total)
-        priority groups: REASONING (continuation) > NEW (step==1) > ACTING
-    cumulative selection up to total remaining capacity
-    BFD placement: largest first into highest-remaining worker
-    on resume: signal asyncio.Event so any waiting before_request returns
-```
-
----
-
-## Differences from the v0 Rust prototype
-
-A Rust `ProgramController` lives at
-`lib/llm/src/kv_router/program_controller.rs` from earlier in this branch.
-It implements the same state machine in-process beside `KvPushRouter`. The
-Python service supersedes it for v0 because:
-
-- The integration pattern (PR #8522, `dynamo.thompson_router`) is the
-  precedent for stateful routing strategies. Mirroring it keeps the
-  contribution model consistent and avoids a Rust trait extension.
-- Faster iteration on the scheduler heuristics. v0 ablations matter more
-  than in-process zero-hop latency for between-turn admission decisions
-  measured against tool gaps in seconds.
-- The Rust controller stays as the future "promote to Rust" path once the
-  Python design is settled.
+Requests without `agent_context` are passed through as one-off (no
+program admission, no pause/resume). This is the safe fallback for
+non-agentic traffic sharing the same workers.
 
 ---
 
 ## Testing
 
-```bash
-PYTHONPATH=/path/to/dynamo/components/src:$PYTHONPATH \
-    python -m pytest components/src/dynamo/thunderagent_router/tests/ -v
+```
+pytest components/src/dynamo/thunderagent_router/tests/test_router.py
 ```
 
-Coverage in v0:
-
-- `tests/test_program_state.py` — pure state-machine validation: REASONING /
-  ACTING transitions, real token accounting, prefix capture, release
-  semantics, status counts.
-- `tests/test_router.py` — scheduler logic with mocked `KvRouter` and
-  capacity provider:
-  - first turn admission is a no-op
-  - real token totals end up on the program
-  - KV-aware resume calls `kv_router.best_worker(last_prefix)`
-  - non-paused turns skip KV-aware resume
-  - hard pause + admission block + resume signal release
-  - forced resume after timeout
-  - soft demote applies the configured negative `priority_jump`
-  - `pause_until_safe` pauses the smallest ACTING first
-
-End-to-end / live validation is intentionally out of scope for unit tests;
-see the bench harness section below.
-
----
-
-## Benchmark harness (4-arm comparison)
-
-The intended comparison rows (all on the same model, same workload):
-
-| Arm | Stack                                               | Notes                                            |
-| --- | --------------------------------------------------- | ------------------------------------------------ |
-| A   | bare vLLM                                           | baseline                                         |
-| B   | ThunderAgent + 2× vLLM                              | original reference; baseline for "outer-loop scheduling helps" |
-| C   | Dynamo + 2× vLLM (no `thunderagent_router`)         | baseline for "Dynamo's KV-aware routing alone"   |
-| D   | Dynamo + 2× vLLM + `dynamo.thunderagent_router`     | this PR                                          |
-
-`examples/backends/vllm/launch/agg_router.sh` is the reference launcher for
-arms C and D. Workload: concurrent ms-agent DeepResearch with
-`DYN_AGENT_TRACE_*` enabled to capture lifecycle.
-
-Replay-driven offline ablations reuse `python -m dynamo.replay` against
-agent traces converted to Mooncake format; toggling individual v0 items
-(1, 2, 3, 6) against a single trace lets us attribute wins.
+The unit tests exercise admission, after-request token accounting, the
+default BFD-on-resume path, and the opt-in KV-aware-override path.
 
 ---
 
 ## Citation
 
-If you use this package for research, please cite the upstream ThunderAgent
-paper:
+If you use this package for research, please cite the original
+ThunderAgent paper:
 
 ```bibtex
 @misc{kang2026thunderagentsimplefastprogramaware,
@@ -408,15 +342,8 @@ paper:
 
 ## References
 
-- Original ThunderAgent paper: <https://arxiv.org/abs/2602.13692>
-- Original ThunderAgent repository: <https://github.com/HaoKang-Timmy/ThunderAgent>
-- PR #8522 -- `dynamo.thompson_router` standalone-router integration pattern this service mirrors.
-- PR #7260 -- pluggable scheduling policy for the KV router queue (FCFS / WSPT). Our `priority_jump` boosts and demotes ride on top of this.
-- Project memory:
-  - [`2026-04-06-thunderagent-analysis.md`](../../../../../../memory/agent-orchestration-exploration/2026-04-06-thunderagent-analysis.md) -- public-repo gaps and how Dynamo signals address them.
-  - [`2026-04-15-dynamo-program-scheduler-design.md`](../../../../../../memory/agent-orchestration-exploration/2026-04-15-dynamo-program-scheduler-design.md) -- phased design (this v0 covers Phase 0/1/2 admission; Phase 3+ cache APIs are separate).
-  - [`2026-05-04-thunderagent-router-v0-scoping.md`](../../../../../../memory/agent-orchestration-exploration/2026-05-04-thunderagent-router-v0-scoping.md) -- v0 scoping decision (this PR's contract).
-- Related Dynamo docs:
-  - `docs/components/router/router-guide.md` -- KV router fundamentals.
-  - `docs/components/frontend/nvext.md` -- the `nvext` extension surface.
-  - `docs/features/agentic_workloads.md` -- `agent_context` schema.
+- ThunderAgent paper: <https://arxiv.org/abs/2602.13692>
+- Upstream ThunderAgent reference: <https://github.com/HaoKang-Timmy/ThunderAgent>
+- Repro fork (mini-swe-agent + agent_context injector): <https://github.com/ishandhanani/ThunderAgent>
+- Dynamo KV router: `docs/components/router/router-guide.md`
+- `nvext.agent_context` schema: `docs/features/agentic_workloads.md`
