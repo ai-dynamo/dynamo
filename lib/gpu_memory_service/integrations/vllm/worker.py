@@ -441,3 +441,13 @@ class GMSWorker(Worker):
         if tag == "kv_cache":
             return gms_use_mem_pool("kv_cache", torch.device("cuda", self.local_rank))
         return super()._maybe_get_memory_pool_context(tag)
+
+
+# Install GMS_DIAG=1 snapshot hooks at module load time. Deferred to
+# the bottom of the file so every consumer that imported
+# register_tensors by name is present in sys.modules before we rebind.
+from gpu_memory_service.integrations.vllm.diagnostics import (  # noqa: E402
+    maybe_install as _gms_diag_install,
+)
+
+_gms_diag_install()
