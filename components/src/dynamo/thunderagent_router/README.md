@@ -58,31 +58,30 @@ and pause/resume targeting tool boundaries (not arbitrary tokens).
 
 ## 3. How we built on ThunderAgent
 
-The scheduler algorithm here is upstream's: same lifecycle model
-(`REASONING / ACTING × ACTIVE / PAUSED`), same "pause smallest ACTING
-first" selection, same BFD restore, same `2^(-t/τ)` decay applied only
-on the resume side. v0 makes two real mechanical changes:
+This is a port, not a redesign. The scheduler algorithm is upstream's:
+same lifecycle model (`REASONING / ACTING × ACTIVE / PAUSED`), same
+"pause smallest ACTING first" selection, same BFD restore, same
+`2^(-t/τ)` decay applied only on the resume side, same per-backend
+capacity bookkeeping. The scheduler knobs in the table below are
+upstream values exposed as flags, not new mechanisms.
 
-1. **Real-token accounting.** Upstream estimates `total_tokens` from
-   `len(json.dumps(payload)) / chars_per_token_ratio`. We read
-   `prompt_tokens + completion_tokens` from the chat-completions
-   response. No estimator state, no error compounding across long
-   conversations.
-2. **Multi-worker BFD packing.** Upstream is single-backend; Dynamo is
-   not. Resumed programs go to whichever worker the BFD restore picks
-   by load.
+Two implementation choices worth flagging:
 
-What makes both possible is the integration shape: this is a Dynamo
-router *inside* the request path, not a Python OpenAI proxy in front of
-the engine. Same shape gives us `nvext.agent_context` propagation and
-an opt-in `dynamo.agent.trace.v1` event stream for offline analysis.
-The scheduler knobs in the table below are upstream values exposed as
-flags, not new mechanisms.
+1. **Native Dynamo router service.** Upstream's reference is a Python
+   OpenAI proxy. We re-implemented the algorithm as a Dynamo router
+   service that owns a `KvRouter` instance directly and registers as a
+   model handler — no external proxy in the path.
+2. **Real-token accounting.** Because the router runs in-path, we read
+   `prompt_tokens + completion_tokens` straight off the chat-completions
+   response. Upstream's proxy estimates from
+   `len(json.dumps(payload)) / chars_per_token_ratio` since it sits
+   in front of the engine and only sees raw bytes.
 
 Single in-memory service for now; pause state is lost on restart, a
-Rust port is on the roadmap, and the more substantial deviations
-(blended cost function for worker selection, workflow-profile-aware
-pause selection, KV demote/prefetch) are explicitly future work.
+Rust port is on the roadmap, and the substantial deviations from
+upstream (blended cost function for worker selection,
+workflow-profile-aware pause selection, KV demote/prefetch) are
+explicitly future work, not part of v0.
 
 ### Knobs (full table)
 

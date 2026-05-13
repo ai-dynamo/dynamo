@@ -3,18 +3,17 @@
 
 """KvThunderAgentRouter -- ThunderAgent program scheduler inside a Dynamo router.
 
-The algorithm is upstream ThunderAgent's: program lifecycle
-(REASONING / ACTING; ACTIVE / PAUSED), pause-smallest-ACTING-first,
-BFD restore, exponential decay (2^(-t/tau)) applied only on the resume
-side. v0 makes two mechanical changes versus upstream:
+A native re-implementation of upstream ThunderAgent's algorithm:
+program lifecycle (REASONING / ACTING; ACTIVE / PAUSED),
+pause-smallest-ACTING-first, BFD restore, exponential decay (2^(-t/tau))
+applied only on the resume side. v0's one mechanical change is
+real-token accounting from chat-completions ``usage`` instead of
+upstream's ``chars / 5`` proxy estimator -- available to us because the
+router runs in-path.
 
-* real-token accounting from chat-completions ``usage`` instead of a
-  ``chars / 5`` estimator;
-* multi-worker BFD restore (upstream is single-backend).
-
-Status: experimental. The more substantial deviations (blended
-cost-function for worker selection, workflow-profile-aware pause, KV
-demote/prefetch) are future work.
+Status: experimental. The substantial deviations from upstream
+(blended cost-function for worker selection, workflow-profile-aware
+pause, KV demote/prefetch) are explicitly future work.
 """
 
 from __future__ import annotations

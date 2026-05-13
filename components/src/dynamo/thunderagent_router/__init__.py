@@ -3,21 +3,15 @@
 
 """ThunderAgent program scheduler inside a Dynamo router service. **Experimental.**
 
-The scheduler algorithm is upstream ThunderAgent's. v0 makes two
-mechanical changes:
+A native re-implementation of the upstream ThunderAgent algorithm as a
+``dynamo_worker`` that owns its own ``KvRouter`` instance and registers
+as a model handler. v0's one mechanical change versus the upstream
+reference is real-token accounting from chat-completions ``usage``
+instead of the proxy's ``chars / 5`` estimator -- available to us
+because the router runs in-path rather than out in front.
 
-1. Real-token accounting from chat-completions ``usage`` instead of a
-   ``chars / 5`` estimator.
-2. Multi-worker BFD packing on resume (upstream is single-backend).
-
-The integration shape -- a ``dynamo_worker`` inside the request path
-that owns its own ``KvRouter`` instance, rather than a Python OpenAI
-proxy in front of the engine -- is what makes both of those possible
-and unlocks the optional ``dynamo.agent.trace.v1`` event stream for
-offline analysis.
-
-The more substantial deviations from upstream (blended cost-function
-worker selection, workflow-profile-aware pause, KV demote/prefetch) are
+The substantial deviations from upstream (blended cost-function worker
+selection, workflow-profile-aware pause, KV demote/prefetch) are
 explicitly future work.
 
 Usage:
