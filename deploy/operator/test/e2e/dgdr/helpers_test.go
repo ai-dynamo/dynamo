@@ -271,7 +271,9 @@ func waitForPhase(name string, target v1beta1.DGDRPhase, timeout time.Duration) 
 // This is useful when autoApply=true causes the operator to skip the Ready phase
 // and transition directly to Deploying.
 // Fails immediately if the DGDR enters the Failed phase.
-func waitForPhaseAtLeast(name string, target v1beta1.DGDRPhase, timeout time.Duration) *v1beta1.DynamoGraphDeploymentRequest {
+func waitForPhaseAtLeast(
+	name string, target v1beta1.DGDRPhase, timeout time.Duration,
+) *v1beta1.DynamoGraphDeploymentRequest {
 	var dgdr v1beta1.DynamoGraphDeploymentRequest
 	targetOrder := phaseOrder[target]
 	Eventually(func(g Gomega) {

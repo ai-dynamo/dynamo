@@ -63,7 +63,7 @@ var _ = Describe("DGDR Profiling", Label("gpu_0", "nightly", "integration", "k8s
 				withSLA(2000.0, 30.0),
 				withFeatures(v1beta1.FeaturesSpec{
 					Planner: plannerRawExtension(map[string]interface{}{
-						"enabled":                       true,
+						"enabled":                      true,
 						"plannerPreDeploymentSweeping": "rapid",
 					}),
 				}),
