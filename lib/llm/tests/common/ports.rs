@@ -10,7 +10,7 @@
 // binaries; not every binary uses both helpers.
 #[allow(dead_code)]
 pub async fn bind_random_port() -> (tokio::net::TcpListener, u16) {
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("failed to bind ephemeral port");
     let port = listener

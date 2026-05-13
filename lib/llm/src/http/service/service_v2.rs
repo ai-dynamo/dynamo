@@ -725,22 +725,27 @@ impl HttpServiceConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
-    #[serial]
     async fn test_liveness_endpoint_reflects_cancellation() {
-        // 1. Setup service & token
+        // 1. Setup service & token. Pre-bind to a random loopback port and hand the
+        //    listener to `run_with_listener` to avoid colliding with parallel tests.
         let cancel_token = Arc::new(CancellationToken::new());
-        let service = HttpService::builder().build().unwrap();
-        let port = service.port;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind ephemeral port");
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder().port(port).build().unwrap();
 
         // 2. Spawn service with shared token
         let service_token = cancel_token.clone();
         let handle = tokio::spawn(async move {
-            service.run((*service_token).clone()).await.unwrap();
+            service
+                .run_with_listener((*service_token).clone(), listener)
+                .await
+                .unwrap();
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
