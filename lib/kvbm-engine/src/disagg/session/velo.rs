@@ -442,20 +442,20 @@ fn dispatch_frame(inner: &Arc<VeloSessionInner>, frame: Frame, runtime: &Handle)
                 // attach_anchor. Without this, the streaming registry
                 // is empty and `attach_anchor(handle)` fails with
                 // "TCP streaming: peer X not registered".
-                if let Some(resolver) = inner_for_attach.peer_resolver.clone() {
-                    if let Err(err) = resolver.resolve_and_register(instance_id).await {
-                        tracing::error!(
-                            peer_instance_id = %instance_id,
-                            error = ?err,
-                            "decode Attach peer resolution failed"
-                        );
-                        inner_for_attach
-                            .lifecycle_stream
-                            .push(LifecycleEvent::Failed {
-                                reason: format!("decode Attach resolve peer {instance_id}: {err}"),
-                            });
-                        return;
-                    }
+                if let Some(resolver) = inner_for_attach.peer_resolver.clone()
+                    && let Err(err) = resolver.resolve_and_register(instance_id).await
+                {
+                    tracing::error!(
+                        peer_instance_id = %instance_id,
+                        error = ?err,
+                        "decode Attach peer resolution failed"
+                    );
+                    inner_for_attach
+                        .lifecycle_stream
+                        .push(LifecycleEvent::Failed {
+                            reason: format!("decode Attach resolve peer {instance_id}: {err}"),
+                        });
+                    return;
                 }
                 let sender = match inner_for_attach.velo.attach_anchor::<Frame>(handle).await {
                     Ok(s) => s,

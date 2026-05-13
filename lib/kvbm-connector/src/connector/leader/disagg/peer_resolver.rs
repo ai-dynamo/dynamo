@@ -24,7 +24,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures::future::BoxFuture;
 use kvbm_hub::HubClient;
-use velo::{Messenger, Velo, discovery::PeerDiscovery};
+use velo::{Velo, discovery::PeerDiscovery};
 
 use crate::InstanceId;
 

@@ -25,7 +25,7 @@ use anyhow::{Context, Result, anyhow};
 use kvbm_config::{DisaggConfig, DisaggregationRole};
 use kvbm_hub::{ConditionalDisaggClient, ConditionalDisaggRole, HubClient, HubClientBuilder};
 use url::Url;
-use velo::{InstanceId, Messenger, Velo};
+use velo::{InstanceId, Velo};
 
 use crate::BlockId;
 use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
