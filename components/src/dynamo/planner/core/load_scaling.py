@@ -430,7 +430,7 @@ class LoadScalingMixin:
         consolidation_refused = False
         if can_scale_down:
             t_own_ms = t_own_s * 1000  # type: ignore[operator]
-            queue_budget_ms = (self._config.ttft - t_own_ms) * sensitivity
+            queue_budget_ms = (self._config.ttft_ms - t_own_ms) * sensitivity
             if queue_budget_ms <= 0:
                 # Own compute alone already exceeds SLA -- never safe to lose
                 # a worker (would only make queue contention worse).
@@ -473,7 +473,7 @@ class LoadScalingMixin:
 
         decision = self._scale_decision(
             estimates,
-            self._config.ttft,
+            self._config.ttft_ms,
             num_workers,
             "prefill TTFT",
             can_scale_down=can_scale_down,
@@ -541,7 +541,7 @@ class LoadScalingMixin:
                 )
                 if post_itl is None:
                     can_scale_down = False
-                elif post_itl * 1000 >= self._config.itl * sensitivity:
+                elif post_itl * 1000 >= self._config.itl_ms * sensitivity:
                     can_scale_down = False
                     consolidation_refused = True
 
@@ -550,7 +550,7 @@ class LoadScalingMixin:
 
         decision = self._scale_decision(
             estimates,
-            self._config.itl,
+            self._config.itl_ms,
             num_workers,
             "decode ITL",
             can_scale_down=can_scale_down,
@@ -619,7 +619,7 @@ class LoadScalingMixin:
                     can_scale_down = False
                 else:
                     t_own_ms = t_own_post * 1000
-                    queue_budget_ms = (self._config.ttft - t_own_ms) * sensitivity
+                    queue_budget_ms = (self._config.ttft_ms - t_own_ms) * sensitivity
                     queue_induced_ms = post_est * 1000 - t_own_ms
                     if queue_budget_ms <= 0 or queue_induced_ms >= queue_budget_ms:
                         can_scale_down = False
@@ -630,7 +630,7 @@ class LoadScalingMixin:
 
         decision = self._scale_decision(
             estimates,
-            self._config.ttft,
+            self._config.ttft_ms,
             num_workers,
             "agg TTFT",
             can_scale_down=can_scale_down,
@@ -690,7 +690,7 @@ class LoadScalingMixin:
                 )
                 if post_itl is None:
                     can_scale_down = False
-                elif post_itl * 1000 >= self._config.itl * sensitivity:
+                elif post_itl * 1000 >= self._config.itl_ms * sensitivity:
                     can_scale_down = False
                     consolidation_refused = True
 
@@ -699,7 +699,7 @@ class LoadScalingMixin:
 
         decision = self._scale_decision(
             estimates,
-            self._config.itl,
+            self._config.itl_ms,
             num_workers,
             "agg ITL",
             can_scale_down=can_scale_down,

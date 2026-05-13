@@ -40,7 +40,7 @@ cases:
       normal_text: ''
   PARSER.batch.8.c:
     description: Narration both before and after (sandwich)
-    ref: inspired-by https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L282
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L282
     model_text: 'I will check the weather. functools[{"name": "get_weather", "arguments": {"location": "NYC"}}] Let me know
       if you need more.'
     tools:

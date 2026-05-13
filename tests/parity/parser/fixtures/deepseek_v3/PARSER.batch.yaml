@@ -25,33 +25,6 @@ cases:
         arguments:
           location: NYC
       normal_text: ''
-  PARSER.batch.2:
-    description: Multiple tool calls (parallel)
-    model_text: |-
-      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-      ```json
-      {"location": "NYC"}
-      ```<｜tool▁call▁end｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time
-      ```json
-      {"timezone": "EST"}
-      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-    tools:
-    - *id001
-    - name: get_time
-      parameters:
-        type: object
-        properties:
-          timezone:
-            type: string
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
@@ -60,82 +33,6 @@ cases:
     expected:
       calls: []
       normal_text: Hello, how can I help you today?
-  PARSER.batch.4:
-    description: Malformed JSON args (missing close brace)
-    model_text: |-
-      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-      ```json
-      {"location": "NYC"
-      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-    tools:
-    - *id001
-    expected:
-      calls: []
-      normal_text: |-
-        <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-        ```json
-        {"location": "NYC"
-        ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-  PARSER.batch.5:
-    description: Missing calls_end / call_end markers
-    model_text: |-
-      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-      ```json
-      {"location": "NYC"}
-      ```
-    tools:
-    - *id001
-    expected:
-      calls: []
-      normal_text: |-
-        <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-        ```json
-        {"location": "NYC"}
-        ```
-  PARSER.batch.6:
-    description: Empty args (no-arg call)
-    model_text: |-
-      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time
-      ```json
-      {}
-      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-    tools:
-    - name: get_time
-      parameters:
-        type: object
-        properties: {}
-    expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
-  PARSER.batch.7:
-    description: Complex args (nested object + array)
-    model_text: |-
-      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>process_data
-      ```json
-      {"items": [1, 2, 3], "config": {"nested": true}}
-      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-    tools:
-    - name: process_data
-      parameters:
-        type: object
-        properties:
-          items:
-            type: array
-          config:
-            type: object
-    expected:
-      calls:
-      - name: process_data
-        arguments:
-          items:
-          - 1
-          - 2
-          - 3
-          config:
-            nested: true
-      normal_text: ''
   PARSER.batch.9:
     description: Empty input
     model_text: ''

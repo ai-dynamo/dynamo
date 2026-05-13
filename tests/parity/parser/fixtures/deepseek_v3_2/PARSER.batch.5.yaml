@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3_2
+mode: batch
+cases:
+  PARSER.batch.5.a:
+    description: Missing </｜DSML｜function_calls> end marker
+    ref: dynamo
+    model_text: |-
+      <｜DSML｜function_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls: []
+      normal_text: ''
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: '<｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>'
+  PARSER.batch.5.b:
+    description: Closing </｜DSML｜function_calls> without matching open
+    ref: dynamo
+    model_text: |-
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜function_calls>
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: |-
+        <｜DSML｜invoke name="get_weather">
+        <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+        </｜DSML｜invoke>
+        </｜DSML｜function_calls>
+  PARSER.batch.5.c:
+    description: Truncation mid-parameter value
+    ref: dynamo
+    model_text: |-
+      <｜DSML｜function_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NY
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: ''
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: '<｜DSML｜function_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NY'

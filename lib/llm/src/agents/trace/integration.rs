@@ -3,16 +3,23 @@
 
 //! Dynamo LLM integration helpers for agent trace records.
 
+use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dynamo_runtime::DistributedRuntime;
+use dynamo_runtime::pipeline::Context;
+use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
+use futures::Stream;
 
+use crate::agents::context::AgentContext;
 use crate::agents::trace::{
-    AgentRequestMetrics, AgentToolEventRelay, AgentTracePolicy, AgentTraceRecord,
-    DEFAULT_TOOL_EVENTS_TOPIC, WorkerInfo,
+    AgentReplayMetrics, AgentRequestMetrics, AgentToolEventRelay, AgentTracePolicy,
+    AgentTraceRecord, DEFAULT_TOOL_EVENTS_TOPIC, WorkerInfo,
 };
 use crate::local_model::LocalModel;
+use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
 
 /// Record token counts needed by agent trace request-end records.
@@ -82,6 +89,81 @@ pub(crate) fn request_metrics(
         worker,
         replay: None,
     }
+}
+
+pub(crate) struct AgentTraceRequestEndState {
+    pub agent_context: AgentContext,
+    pub request_model: String,
+    pub request_tracker: Option<Arc<RequestTracker>>,
+    pub x_request_id: Option<String>,
+    pub replay_metrics: Option<AgentReplayMetrics>,
+}
+
+pub(crate) fn build_agent_trace_request_end_state(
+    common_request: &PreprocessedRequest,
+    tracker: &Option<Arc<RequestTracker>>,
+    context: &Context<()>,
+    trace_block_size: usize,
+) -> Option<AgentTraceRequestEndState> {
+    if !super::is_enabled() {
+        return None;
+    }
+    let agent_context = common_request.agent_context.clone()?;
+    let x_request_id = dynamo_runtime::logging::get_distributed_tracing_context()
+        .and_then(|c| c.x_request_id)
+        .or_else(|| {
+            context
+                .get::<String>(super::X_REQUEST_ID_CONTEXT_KEY)
+                .ok()
+                .map(|v| v.as_ref().clone())
+        });
+    Some(AgentTraceRequestEndState {
+        agent_context,
+        request_model: common_request.model.clone(),
+        request_tracker: tracker.clone(),
+        x_request_id,
+        replay_metrics: super::request_replay_metrics(&common_request.token_ids, trace_block_size),
+    })
+}
+
+pub(crate) fn wrap_agent_trace_request_end_stream<Resp>(
+    stream: Pin<Box<dyn Stream<Item = Annotated<Resp>> + Send>>,
+    trace_state: Option<AgentTraceRequestEndState>,
+    request_id: String,
+) -> Pin<Box<dyn Stream<Item = Annotated<Resp>> + Send>>
+where
+    Resp: Send + 'static,
+{
+    let Some(AgentTraceRequestEndState {
+        agent_context,
+        request_model,
+        request_tracker,
+        x_request_id,
+        replay_metrics,
+    }) = trace_state
+    else {
+        return stream;
+    };
+
+    let (stream, done_fut) = crate::telemetry::stream::notify_on_completion(stream);
+    tokio::spawn(async move {
+        done_fut.await;
+        if request_tracker.is_none() {
+            tracing::warn!(
+                request_id,
+                "agent_context present but request tracker is missing; emitting partial trace"
+            );
+        }
+        let mut metrics = super::request_metrics(
+            request_id,
+            x_request_id,
+            request_model,
+            request_tracker.as_deref(),
+        );
+        metrics.replay = replay_metrics;
+        super::emit_request_end(agent_context, metrics);
+    });
+    stream
 }
 
 pub(crate) async fn start_tool_event_ingest_from_policy(
