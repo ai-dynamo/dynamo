@@ -269,6 +269,7 @@ class TopologyConfig:
     marks: list[Any] = field(default_factory=list)  # default for cases
     profiled_vram_gib: Optional[float] = None
     requested_vllm_kv_cache_bytes: Optional[int] = None
+    requested_sglang_kv_tokens: Optional[int] = None
     delayed_start: int = 0
     directory: Optional[str] = None  # override profile-level directory
     gpu_marker: Optional[str] = None  # override profile-level gpu_marker
@@ -353,6 +354,12 @@ def make_multimodal_configs(
                 marks.append(
                     pytest.mark.requested_vllm_kv_cache_bytes(
                         topo_cfg.requested_vllm_kv_cache_bytes
+                    )
+                )
+            if topo_cfg.requested_sglang_kv_tokens is not None:
+                marks.append(
+                    pytest.mark.requested_sglang_kv_tokens(
+                        topo_cfg.requested_sglang_kv_tokens
                     )
                 )
             if profile.gated:

@@ -5,7 +5,7 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import pybase64
 import sglang as sgl
@@ -192,6 +192,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if self._enable_frontend_decoding:
             # Lazy-inits a NIXL connector internally for Decoded variants.
             self._image_loader = ImageLoader(enable_frontend_decoding=True)
+        # Probe once: forwarding mm_hashes requires sgl-project/sglang#25300.
+        # Older builds drop the kwarg and degrade to text-prefix MM routing.
+        self._mm_hashes_supported: bool = self._resolve_mm_hashes_supported(self.engine)
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
@@ -215,6 +218,39 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         return filter_supported_async_generate_kwargs(
             engine, {"return_routed_experts": True}
         )
+
+    @staticmethod
+    def _resolve_mm_hashes_supported(engine: Any) -> bool:
+        """Probe whether engine.async_generate accepts ``mm_hashes``.
+
+        SGLang accepted the kwarg starting with the upstream interop PR; older
+        builds (and forks lacking the patch) raise TypeError if we pass it.
+        Probing the signature once at init keeps the request hot path free of
+        repeated inspection. Returns ``False`` when the kwarg is absent — the
+        request still completes, MM-aware routing just falls back to the
+        text-prefix overlap signal.
+        """
+        probe = filter_supported_async_generate_kwargs(engine, {"mm_hashes": None})
+        return "mm_hashes" in probe
+
+    @staticmethod
+    def _extract_mm_hashes(request: Dict[str, Any]) -> Optional[List[str]]:
+        """Pull the per-image hashes the Rust frontend forwards via extra_args.
+
+        The frontend (``lib/llm/src/preprocessor.rs``) emits one 64-char hex
+        string per image when MM-aware routing is enabled. We accept either a
+        list of strings (the canonical shape) or pass-through ``None`` so the
+        SGLang worker recomputes the hash via its own ``hash_feature()``.
+        """
+        extra_args = request.get("extra_args")
+        if not isinstance(extra_args, dict):
+            return None
+        mm_hashes = extra_args.get("mm_hashes")
+        if not mm_hashes:
+            return None
+        if not isinstance(mm_hashes, list):
+            return None
+        return mm_hashes
 
     def cleanup(self) -> None:
         """Shutdown the engine and cleanup resources."""
@@ -527,6 +563,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
 
+            mm_hashes_kwargs: Dict[str, Any] = {}
+            if self._mm_hashes_supported:
+                forwarded = self._extract_mm_hashes(request)
+                if forwarded is not None:
+                    mm_hashes_kwargs["mm_hashes"] = forwarded
+
             agg = await self.engine.async_generate(
                 **input_param,
                 image_data=image_data,
@@ -534,6 +576,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 sampling_params=sampling_params,
                 stream=True,
                 **self._routed_experts_kwargs,
+                **mm_hashes_kwargs,
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
