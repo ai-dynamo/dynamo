@@ -6,7 +6,6 @@ import logging
 import os
 import re
 import secrets
-import shlex
 import time
 from dataclasses import dataclass, field
 from typing import Any, List, Literal, Optional
@@ -41,152 +40,71 @@ def _get_workspace_dir() -> str:
 class ServiceSpec:
     """Wrapper around a single service in the deployment spec."""
 
-    def __init__(
-        self,
-        service_name: str,
-        service_spec: dict,
-        component_style: Literal["services", "components"] = "services",
-    ):
+    def __init__(self, service_name: str, service_spec: dict):
         self._name = service_name
         self._spec = service_spec
-        self._component_style = component_style
 
     @property
     def name(self) -> str:
         """The service name (read-only)"""
         return self._name
 
-    @property
-    def _is_components_style(self) -> bool:
-        return self._component_style == "components"
-
-    def _get_pod_spec(self, create: bool = False) -> Optional[dict]:
-        if not self._is_components_style:
-            return None
-
-        if create:
-            return self._spec.setdefault("podTemplate", {}).setdefault("spec", {})
-
-        return self._spec.get("podTemplate", {}).get("spec")
-
-    def _get_container(
-        self, name: str = "main", create: bool = False
-    ) -> Optional[dict]:
-        if self._is_components_style:
-            pod_spec = self._get_pod_spec(create=create)
-            if pod_spec is None:
-                return None
-
-            containers = pod_spec.get("containers")
-            if containers is None:
-                if not create:
-                    return None
-                containers = []
-                pod_spec["containers"] = containers
-
-            for container in containers:
-                if container.get("name") == name:
-                    return container
-
-            if name == "main" and containers and not create:
-                return containers[0]
-
-            if not create:
-                return None
-
-            container = {"name": name}
-            containers.append(container)
-            return container
-
-        if create:
-            return self._spec.setdefault("extraPodSpec", {}).setdefault(
-                "mainContainer", {}
-            )
-
-        return self._spec.get("extraPodSpec", {}).get("mainContainer")
-
     # ----- Image -----
     @property
     def image(self) -> Optional[str]:
         """Container image for the service"""
-        container = self._get_container()
-        if container is None:
+        try:
+            return self._spec["extraPodSpec"]["mainContainer"]["image"]
+        except KeyError:
             return None
-        return container.get("image")
 
     @image.setter
     def image(self, value: str):
-        container = self._get_container(create=True)
-        assert container is not None
-        container["image"] = value
+        if "extraPodSpec" not in self._spec:
+            self._spec["extraPodSpec"] = {"mainContainer": {}}
+        if "mainContainer" not in self._spec["extraPodSpec"]:
+            self._spec["extraPodSpec"]["mainContainer"] = {}
+        self._spec["extraPodSpec"]["mainContainer"]["image"] = value
 
     @property
     def frontend_sidecar_image(self) -> Optional[str]:
         """Container image for the frontendSidecar (if present)."""
-        if self._is_components_style:
-            sidecar_name = self._spec.get("frontendSidecar")
-            if not isinstance(sidecar_name, str):
-                return None
-            container = self._get_container(sidecar_name)
-            if container is None:
-                return None
-            return container.get("image")
-
-        return self._spec.get("frontendSidecar", {}).get("image")
+        try:
+            return self._spec["frontendSidecar"]["image"]
+        except KeyError:
+            return None
 
     @frontend_sidecar_image.setter
     def frontend_sidecar_image(self, value: str):
-        if self._is_components_style:
-            sidecar_name = self._spec.get("frontendSidecar")
-            if not isinstance(sidecar_name, str):
-                sidecar_name = "sidecar-frontend"
-                self._spec["frontendSidecar"] = sidecar_name
-            container = self._get_container(sidecar_name, create=True)
-            assert container is not None
-            container["image"] = value
-            return
-
-        self._spec.setdefault("frontendSidecar", {})["image"] = value
+        if "frontendSidecar" not in self._spec:
+            self._spec["frontendSidecar"] = {}
+        self._spec["frontendSidecar"]["image"] = value
 
     @property
     def envs(self) -> list[dict[str, str]]:
         """Environment variables for the service"""
-        if self._is_components_style:
-            container = self._get_container()
-            if container is None:
-                return []
-            return container.get("env", [])
-
         return self._spec.get("envs", [])
 
     @envs.setter
     def envs(self, value: list[dict[str, str]]):
-        if self._is_components_style:
-            container = self._get_container(create=True)
-            assert container is not None
-            container["env"] = value
-            return
-
         self._spec["envs"] = value
 
-    def _get_args(self, create: bool = False) -> list[str]:
+    def _get_args(self) -> list[str]:
         """Return the container args list, normalising scalar strings to a list in-place.
 
         Always returns the same list object that is stored in the spec, so
         in-place mutations (append / index assignment) are reflected immediately
         without an explicit writeback.
         """
-        container = self._get_container(create=create)
-        if container is None:
+        try:
+            container = self._spec["extraPodSpec"]["mainContainer"]
+        except KeyError:
             return []
-
         if "args" not in container:
-            if not create:
-                return []
             container["args"] = []
         args = container["args"]
         if isinstance(args, str):
-            args = shlex.split(args)
+            args = args.split()
             container["args"] = args
         return args
 
@@ -221,32 +139,18 @@ class ServiceSpec:
     # ----- GPUs -----
     @property
     def gpus(self) -> int:
-        if self._is_components_style:
-            container = self._get_container()
-            resources = container.get("resources", {}) if container is not None else {}
-        else:
-            resources = self._spec.get("resources", {})
-        limits = resources.get("limits", {})
-        gpu_value = limits.get("nvidia.com/gpu", limits.get("gpu"))
-        if gpu_value is None:
+        try:
+            return int(self._spec["resources"]["limits"]["gpu"])
+        except KeyError:
             return 0
-        return int(gpu_value)
 
     @gpus.setter
     def gpus(self, value: int):
-        if self._is_components_style:
-            container = self._get_container(create=True)
-            assert container is not None
-            resources = container.setdefault("resources", {})
-            gpu_key = "nvidia.com/gpu"
-        else:
-            resources = self._spec.setdefault("resources", {})
-            gpu_key = "gpu"
-
-        resources.setdefault("limits", {})[gpu_key] = str(value)
-        requests = resources.get("requests")
-        if requests is not None and gpu_key in requests:
-            requests[gpu_key] = str(value)
+        if "resources" not in self._spec:
+            self._spec["resources"] = {}
+        if "limits" not in self._spec["resources"]:
+            self._spec["resources"]["limits"] = {}
+        self._spec["resources"]["limits"]["gpu"] = str(value)
 
     @property
     def tensor_parallel_size(self) -> int:
@@ -261,7 +165,7 @@ class ServiceSpec:
 
     @tensor_parallel_size.setter
     def tensor_parallel_size(self, value: int):
-        args = self._get_args(create=True)
+        args = self._get_args()
         for i, arg in enumerate(args):
             if arg == "--tensor-parallel-size":
                 if i + 1 < len(args) and not args[i + 1].startswith("-"):
@@ -284,47 +188,6 @@ class DeploymentSpec:
         self._endpoint = endpoint
         self._port = port
         self._system_port = system_port
-
-    @property
-    def api_version(self) -> str:
-        """Served Kubernetes API version for this DGD manifest."""
-        api_version = self._deployment_spec.get("apiVersion", "nvidia.com/v1alpha1")
-        return api_version.split("/", 1)[-1]
-
-    @property
-    def _component_style(self) -> Literal["services", "components"]:
-        if "components" in self._deployment_spec.get("spec", {}):
-            return "components"
-        return "services"
-
-    @property
-    def uses_components(self) -> bool:
-        return self._component_style == "components"
-
-    @property
-    def _top_level_env_key(self) -> str:
-        return "env" if self._component_style == "components" else "envs"
-
-    def _iter_service_specs(self) -> list[tuple[str, dict]]:
-        spec = self._deployment_spec.get("spec", {})
-        if self._component_style == "components":
-            return [
-                (component["name"], component)
-                for component in spec.get("components", [])
-                if "name" in component
-            ]
-
-        return list(spec.get("services", {}).items())
-
-    def _get_service_spec(self, service_name: str) -> dict:
-        spec = self._deployment_spec.get("spec", {})
-        if self._component_style == "components":
-            for component in spec.get("components", []):
-                if component.get("name") == service_name:
-                    return component
-            raise KeyError(service_name)
-
-        return spec["services"][service_name]
 
     @property
     def name(self) -> str:
@@ -352,7 +215,7 @@ class DeploymentSpec:
     @property
     def namespace(self) -> str:
         """Deployment namespace"""
-        return self._deployment_spec["metadata"].get("namespace", "")
+        return self._deployment_spec["metadata"]["namespace"]
 
     @namespace.setter
     def namespace(self, value: str):
@@ -415,22 +278,21 @@ class DeploymentSpec:
             log_level: Set log level (sets DYN_LOG to specified level)
         """
         spec = self._deployment_spec
-        env_key = self._top_level_env_key
-        if env_key not in spec["spec"]:
-            spec["spec"][env_key] = []
+        if "envs" not in spec["spec"]:
+            spec["spec"]["envs"] = []
 
         # Remove any existing logging env vars to avoid duplicates
-        spec["spec"][env_key] = [
+        spec["spec"]["envs"] = [
             env
-            for env in spec["spec"][env_key]
+            for env in spec["spec"]["envs"]
             if env.get("name") not in ["DYN_LOGGING_JSONL", "DYN_LOG"]
         ]
 
         if enable_jsonl:
-            spec["spec"][env_key].append({"name": "DYN_LOGGING_JSONL", "value": "true"})
+            spec["spec"]["envs"].append({"name": "DYN_LOGGING_JSONL", "value": "true"})
 
         if log_level:
-            spec["spec"][env_key].append({"name": "DYN_LOG", "value": log_level})
+            spec["spec"]["envs"].append({"name": "DYN_LOG", "value": log_level})
 
     def get_logging_config(self) -> dict:
         """Get current logging configuration
@@ -438,8 +300,7 @@ class DeploymentSpec:
         Returns:
             dict with 'jsonl_enabled' and 'log_level' keys
         """
-        spec = self._deployment_spec.get("spec", {})
-        envs = spec.get(self._top_level_env_key, spec.get("envs", []))
+        envs = self._deployment_spec.get("spec", {}).get("envs", [])
 
         jsonl_enabled = False
         log_level = None
@@ -484,14 +345,14 @@ class DeploymentSpec:
     def services(self) -> list[ServiceSpec]:
         """List of ServiceSpec objects"""
         return [
-            ServiceSpec(svc, spec, self._component_style)
-            for svc, spec in self._iter_service_specs()
+            ServiceSpec(svc, spec)
+            for svc, spec in self._deployment_spec["spec"]["services"].items()
         ]
 
     def __getitem__(self, service_name: str) -> ServiceSpec:
         """Allow dict-like access: d['Frontend']"""
         return ServiceSpec(
-            service_name, self._get_service_spec(service_name), self._component_style
+            service_name, self._deployment_spec["spec"]["services"][service_name]
         )
 
     def spec(self):
@@ -507,7 +368,24 @@ class DeploymentSpec:
             arg_value: Argument value (e.g., "1024")
         """
         service = self.get_service(service_name)
-        args_list = service._get_args(create=True)
+        service_spec = service._spec
+
+        # Ensure args list exists
+        if "extraPodSpec" not in service_spec:
+            service_spec["extraPodSpec"] = {"mainContainer": {}}
+        if "mainContainer" not in service_spec["extraPodSpec"]:
+            service_spec["extraPodSpec"]["mainContainer"] = {}
+        if "args" not in service_spec["extraPodSpec"]["mainContainer"]:
+            service_spec["extraPodSpec"]["mainContainer"]["args"] = []
+
+        args_list = service_spec["extraPodSpec"]["mainContainer"]["args"]
+
+        # Convert to list if needed (sometimes it's a single string)
+        if isinstance(args_list, str):
+            import shlex
+
+            args_list = shlex.split(args_list)
+            service_spec["extraPodSpec"]["mainContainer"]["args"] = args_list
 
         # Find existing argument
         arg_index = None
@@ -534,12 +412,12 @@ class DeploymentSpec:
         """
         Get a specific service from the deployment spec
         """
-        try:
-            return self[service_name]
-        except KeyError as exc:
-            raise ValueError(
-                f"Service '{service_name}' not found in deployment spec"
-            ) from exc
+        if service_name not in self._deployment_spec["spec"]["services"]:
+            raise ValueError(f"Service '{service_name}' not found in deployment spec")
+
+        return ServiceSpec(
+            service_name, self._deployment_spec["spec"]["services"][service_name]
+        )
 
     def set_service_replicas(self, service_name: str, replicas: int):
         """
@@ -773,7 +651,7 @@ class ManagedDeployment:
                 assert self._custom_api is not None, "Kubernetes API not initialized"
                 status = await self._custom_api.get_namespaced_custom_object(  # type: ignore[awaitable-is-not-coroutine]
                     group="nvidia.com",
-                    version=self.deployment_spec.api_version,
+                    version="v1alpha1",
                     namespace=self.namespace,
                     plural="dynamographdeployments",
                     name=self._deployment_name,
@@ -973,7 +851,7 @@ class ManagedDeployment:
             assert self._custom_api is not None, "Kubernetes API not initialized"
             await self._custom_api.create_namespaced_custom_object(
                 group="nvidia.com",
-                version=self.deployment_spec.api_version,
+                version="v1alpha1",
                 namespace=self.namespace,
                 plural="dynamographdeployments",
                 body=self.deployment_spec.spec(),
@@ -1000,28 +878,21 @@ class ManagedDeployment:
                 "service_names cannot be empty for trigger_rolling_upgrade"
             )
 
+        patch_body: dict[str, Any] = {"spec": {"services": {}}}
+
         for service_name in service_names:
             self.deployment_spec.set_service_env_var(
                 service_name, "TEST_ROLLING_UPDATE_TRIGGER", secrets.token_hex(8)
             )
 
-        if self.deployment_spec.uses_components:
-            patch_body: dict[str, Any] = {
-                "spec": {
-                    "components": self.deployment_spec.spec()["spec"]["components"]
-                }
-            }
-        else:
-            patch_body = {"spec": {"services": {}}}
-            for service_name in service_names:
-                updated_envs = self.deployment_spec.get_service_env_vars(service_name)
-                patch_body["spec"]["services"][service_name] = {"envs": updated_envs}
+            updated_envs = self.deployment_spec.get_service_env_vars(service_name)
+            patch_body["spec"]["services"][service_name] = {"envs": updated_envs}
 
         try:
             assert self._custom_api is not None, "Kubernetes API not initialized"
             await self._custom_api.patch_namespaced_custom_object(
                 group="nvidia.com",
-                version=self.deployment_spec.api_version,
+                version="v1alpha1",
                 namespace=self.namespace,
                 plural="dynamographdeployments",
                 name=self._deployment_name,
@@ -1173,7 +1044,7 @@ class ManagedDeployment:
             if self._deployment_name and self._custom_api is not None:
                 await self._custom_api.delete_namespaced_custom_object(
                     group="nvidia.com",
-                    version=self.deployment_spec.api_version,
+                    version="v1alpha1",
                     namespace=self.namespace,
                     plural="dynamographdeployments",
                     name=self._deployment_name,
@@ -1332,7 +1203,6 @@ class ManagedDGDR:
     DGDR_PLURAL = "dynamographdeploymentrequests"
 
     # CRD coordinates for DGD (for mocker cleanup)
-    DGD_VERSION = "v1beta1"
     DGD_PLURAL = "dynamographdeployments"
 
     DEFAULT_POLL_INTERVAL = 10  # seconds
@@ -1562,7 +1432,7 @@ class ManagedDGDR:
         try:
             await self._custom_api.delete_namespaced_custom_object(
                 group=self.DGDR_GROUP,
-                version=self.DGD_VERSION,
+                version="v1alpha1",
                 namespace=self.namespace,
                 plural=self.DGD_PLURAL,
                 name=name,
@@ -1579,7 +1449,7 @@ class ManagedDGDR:
         try:
             return await self._custom_api.get_namespaced_custom_object(
                 group=self.DGDR_GROUP,
-                version=self.DGD_VERSION,
+                version="v1alpha1",
                 namespace=self.namespace,
                 plural=self.DGD_PLURAL,
                 name=name,
