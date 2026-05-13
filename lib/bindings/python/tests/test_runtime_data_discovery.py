@@ -76,7 +76,7 @@ async def test_wait_for_instance_by_runtime_data_resolves_from_watch_event(
     resolver = _runtime()
     try:
         client = await resolver.endpoint(ENDPOINT_PATH).client()
-        wait_task = asyncio.create_task(
+        wait_task = asyncio.ensure_future(
             client.wait_for_instance_by_runtime_data(
                 SGLANG_WORKER_GROUP_ID_KEY,
                 "group-a",
@@ -167,14 +167,14 @@ async def test_wait_for_instance_by_runtime_data_links_two_multinode_groups(
     try:
         client_a = await nonleader_a.endpoint(ENDPOINT_PATH).client()
         client_b = await nonleader_b.endpoint(ENDPOINT_PATH).client()
-        wait_a = asyncio.create_task(
+        wait_a = asyncio.ensure_future(
             client_a.wait_for_instance_by_runtime_data(
                 SGLANG_WORKER_GROUP_ID_KEY,
                 "group-a",
                 timeout_s=5.0,
             )
         )
-        wait_b = asyncio.create_task(
+        wait_b = asyncio.ensure_future(
             client_b.wait_for_instance_by_runtime_data(
                 SGLANG_WORKER_GROUP_ID_KEY,
                 "group-b",
