@@ -111,7 +111,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libfontconfig-dev && \
     # Use system python explicitly: some runtime bases put a framework venv first on PATH.
     /usr/bin/python3 -m pip install \
-{% if device == "cuda" %}
+{% if device == "cuda" or device == "xpu" %}
         --break-system-packages \
 {% endif %}
         --no-cache-dir yq && \
