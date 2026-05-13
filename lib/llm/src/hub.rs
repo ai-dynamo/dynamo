@@ -70,6 +70,17 @@ fn is_offline_mode() -> bool {
         .unwrap_or(false)
 }
 
+/// Check if shared-storage mode is disabled via MODEL_EXPRESS_NO_SHARED_STORAGE.
+/// When true, the Model Express client streams files from the server over gRPC
+/// instead of relying on a shared filesystem path. This is required when the
+/// server and worker pods do not share a filesystem (e.g. RWO PVCs, cross-namespace
+/// deployments).
+fn is_no_shared_storage() -> bool {
+    env::var(env_model::model_express::MODEL_EXPRESS_NO_SHARED_STORAGE)
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false)
+}
+
 /// Download a model using ModelExpress client. The client first requests for the model
 /// from the server and fallbacks to direct download in case of server failure.
 /// If ignore_weights is true, model weight files will be skipped
@@ -97,6 +108,9 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     let mut config: MxClientConfig = MxClientConfig::default();
     if let Ok(endpoint) = env::var(env_model::model_express::MODEL_EXPRESS_URL) {
         config = config.with_endpoint(endpoint);
+    }
+    if is_no_shared_storage() {
+        config.cache.shared_storage = false;
     }
 
     let result = match MxClient::new(config).await {
