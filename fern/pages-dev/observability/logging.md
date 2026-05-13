@@ -4,6 +4,10 @@
 title: Logging
 ---
 
+<Info>
+Set `OTEL_EXPORT_ENABLED=true` on every Dynamo process. Without it, logs never leave the process and Loki will be silent regardless of `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`.
+</Info>
+
 ## Overview
 
 Dynamo provides structured logging in both text as well as JSONL. When
