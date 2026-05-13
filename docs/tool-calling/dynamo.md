@@ -28,9 +28,6 @@ To enable this feature, you should set the following flag while launching the ba
 python -m dynamo.<backend> --help
 ```
 
-> [!NOTE]
-> If no tool call parser is provided by the user, Dynamo will try to use default tool call parsing based on &lt;TOOLCALL&gt; and &lt;|python_tag|&gt; tool tags.
-
 > [!TIP]
 > If your model's default chat template doesn't support tool calling, but the model itself does, you can specify a custom chat template per worker
 > with `python -m dynamo.<backend> --custom-jinja-template </path/to/template.jinja>`.
