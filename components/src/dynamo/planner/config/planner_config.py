@@ -159,6 +159,16 @@ class PlannerConfig(BaseModel):
             "read once at startup."
         ),
     )
+    metric_pulling_prometheus_token_file: Optional[str] = Field(
+        default_factory=lambda: os.environ.get("PROMETHEUS_TOKEN_FILE"),
+        exclude=True,
+        description=(
+            "Optional path to a file containing a bearer token. When set, "
+            "the token is re-read before every PromQL request so rotated "
+            "tokens (Kubernetes projected ServiceAccount tokens, OpenShift "
+            "OAuth SA tokens) are picked up without restarting the planner."
+        ),
+    )
     metric_pulling_prometheus_ssl_verify: bool = Field(
         default_factory=_prometheus_ssl_verify_default,
         exclude=True,
