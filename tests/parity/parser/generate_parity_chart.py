@@ -62,8 +62,26 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = REPO_ROOT / "tests/parity/parser/fixtures"
 PARSER_CASES_MD = REPO_ROOT / "lib/parsers/PARSER_CASES.md"
+PYPROJECT_TOML = REPO_ROOT / "pyproject.toml"
 
 RUST_TOOL_CALLING_DIR = REPO_ROOT / "lib/parsers/src/tool_calling"
+
+
+def _peer_versions() -> dict[str, str]:
+    """Extract pinned vllm / sglang versions from pyproject.toml.
+
+    Matches a line like `"vllm[flashinfer,runai,otel]==0.20.1",` (TOML is
+    not parsed — the regex is sufficient and avoids a tomllib import on
+    older Pythons running this script outside a Python 3.11+ env)."""
+    out: dict[str, str] = {}
+    if not PYPROJECT_TOML.exists():
+        return out
+    text = PYPROJECT_TOML.read_text()
+    for name in ("vllm", "sglang"):
+        m = re.search(rf'"{name}(?:\[[^\]]*\])?==([0-9][^"]*)"', text)
+        if m:
+            out[name] = m.group(1)
+    return out
 
 
 def _build_family_to_rust_ref() -> dict[str, tuple[str, int]]:
@@ -296,6 +314,18 @@ def render_row(
     return f"| {model} | {family}{suff} | " + " | ".join(cells) + " |"
 
 
+_LEGEND_MD = (
+    "**Legend:** "
+    "`=` full parity (Dynamo, vLLM, and SGLang produce the same results) · "
+    "`V`/`S` divergence (V = vLLM, S = SGLang; intentional, has `reason:`) · "
+    "`?` research-needed suffix (e.g. V?, S? — diverges with no `reason:` yet) · "
+    "`!` expected-error suffix (e.g. V!, S! — engine crashes by design) · "
+    "`n/a` not applicable · "
+    "`†` (parser column) = no vLLM peer parser for this family · "
+    "`§` (parser column) = no SGLang peer parser for this family."
+)
+
+
 def render_markdown(
     cases: dict,
     sub_cases: list[str],
@@ -313,6 +343,8 @@ def render_markdown(
     lines.append("| **Others** |   |" + "   |" * len(sub_cases))
     for model, fam in others:
         lines.append(render_row(model, fam, cases, sub_cases, no_vllm, no_sglang))
+    lines.append("")
+    lines.append(_LEGEND_MD)
     return "\n".join(lines)
 
 
@@ -753,6 +785,7 @@ tr.section td { background: #eef; font-weight: bold; text-align: left; }
 .stats { font-size: 13px; margin-top: 0.4em; }
 .stats span { font-family: ui-monospace, monospace; font-weight: bold; }
 .generated { color: #888; font-size: 12px; margin-top: -0.5em; }
+.versions { color: #555; font-size: 12px; margin-top: 0.2em; }
 table.glossary { margin-top: 0.5em; }
 table.glossary td.sub { white-space: nowrap; font-weight: bold; }
 
@@ -949,6 +982,21 @@ def render_html(
     now = datetime.datetime.now(zoneinfo.ZoneInfo("America/Los_Angeles"))
     stamp = now.strftime("%Y-%m-%d %H:%M %Z")
 
+    versions = _peer_versions()
+    if versions:
+        peer_bits = " · ".join(
+            f"{name} <code>{html_lib.escape(versions[name])}</code>"
+            for name in ("vllm", "sglang")
+            if name in versions
+        )
+        versions_html = (
+            f'<p class="versions">Peer parser versions pinned in '
+            f'<a href="../../../pyproject.toml">pyproject.toml</a>: '
+            f"{peer_bits}.</p>\n"
+        )
+    else:
+        versions_html = ""
+
     return (
         "<!DOCTYPE html>\n"
         '<html lang="en">\n'
@@ -968,6 +1016,7 @@ def render_html(
         "the divergence reason.</p>\n"
         f"{table_html}\n"
         f"{_LEGEND_HTML}\n"
+        f"{versions_html}"
         f"{_stats_html(stats)}\n"
         f"{_glossary_html(descriptions, sub_cases)}\n"
         f"<script>{_HTML_SCRIPT}</script>\n"
