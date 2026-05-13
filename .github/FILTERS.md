@@ -10,6 +10,7 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 |--------|----------|
 | `core` | Main test suite (vLLM, SGLang, TRT-LLM containers) |
 | `operator` | Kubernetes operator tests |
+| `snapshot` | Snapshot Agent tests |
 | `deploy` | Deploy-specific tests |
 | `vllm` / `sglang` / `trtllm` | Backend-specific tests |
 | `benchmarks` | Dynamo runtime pipeline (runs `tests/benchmarks/**` pytest suite) |
@@ -65,4 +66,3 @@ changed-files action so the coverage check knows about it:
      "Check for uncovered files" step.
 
 If you skip this step, CI will fail with "uncovered files" even though your filter exists.
-
