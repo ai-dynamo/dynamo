@@ -233,7 +233,7 @@ impl Router {
 
         let config_override = if is_disaggregated {
             Some(RouterConfigOverride {
-                overlap_score_weight: Some(0.0),
+                overlap_score_credit: Some(0.0),
                 assume_kv_reuse: Some(false),
                 track_prefill_tokens: Some(false),
                 ..Default::default()
@@ -273,7 +273,7 @@ impl Router {
         tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
             let worker = WorkerWithDpRank::new(worker_id, dp_rank);
             let router_config_override = RouterConfigOverride {
-                overlap_score_weight: Some(0.0),
+                overlap_score_credit: Some(0.0),
                 assume_kv_reuse: Some(false),
                 track_prefill_tokens: Some(false),
                 ..Default::default()
@@ -481,7 +481,7 @@ async fn fetch_preprocessor_from_discovery(
         "Found model card via discovery"
     );
 
-    card.download_config().await?;
+    card.download_config(None).await?;
     let preprocessor = OpenAIPreprocessor::new(card.clone())?;
 
     Ok(DiscoveredModelBootstrap {
@@ -654,7 +654,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     }
 
     if let Some(v) = env_f64("DYN_OVERLAP_SCORE_WEIGHT") {
-        cfg.overlap_score_weight = v;
+        cfg.overlap_score_credit = v;
     }
     if let Some(v) = env_f64("DYN_ROUTER_TEMPERATURE") {
         cfg.router_temperature = v;
@@ -679,7 +679,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     }
 
     tracing::info!(
-        overlap_score_weight = cfg.overlap_score_weight,
+        overlap_score_weight = cfg.overlap_score_credit,
         router_temperature = cfg.router_temperature,
         use_kv_events = cfg.use_kv_events,
         "KvRouterConfig initialized"
