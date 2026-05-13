@@ -125,6 +125,9 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 # Keep the upstream Python solve intact: install only Dynamo-owned wheels and
 # suppress transitive dependency resolution unless a later validation proves a
 # missing package must be added explicitly.
+
+# Install Dynamo runtime wheels and optional KVBM/GMS wheels.
+# Use --no-deps to prevent dependency conflicts (e.g., KVBM downgrading nixl).
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
