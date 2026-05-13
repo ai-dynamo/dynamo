@@ -4,16 +4,14 @@
 """GMS checkpoint saver entry point.
 
 Waits for committed GMS weights on each device, then saves GPU memory state
-to the checkpoint directory. Runs as an init sidecar — sleeps after saving
-until the pod terminates.
+to the checkpoint directory. Runs as a regular Job container so checkpoint Job
+completion waits for the save to finish.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import signal
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -153,11 +151,7 @@ def main() -> None:
     elapsed = time.monotonic() - t0
     logger.info("All %d devices saved in %.2fs", len(devices), elapsed)
     _write_completion_sentinel(control_dir)
-
-    logger.info("Save complete; sleeping until pod terminates")
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    while True:
-        time.sleep(3600)
+    logger.info("Save complete; exiting")
 
 
 if __name__ == "__main__":
