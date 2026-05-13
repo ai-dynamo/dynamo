@@ -91,7 +91,7 @@ curl -s http://localhost:8000/v1/chat/completions \
   -d '{
     "model": "Qwen/Qwen3.5-4B",
     "messages": [
-      {"role": "user", "content": "What is the weather in San Francisco?"}
+      {"role": "user", "content": "What is the weather in San Francisco and New York?"}
     ],
     "tools": [{
       "type": "function",
@@ -109,30 +109,44 @@ curl -s http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-Dynamo parses the tool call out of the model output and surfaces it as an
-OpenAI-compatible `tool_calls` entry on the response:
+Dynamo parses the tool calls out of the model output and surfaces them as
+OpenAI-compatible `tool_calls` entries on the response:
 
 ```json
 {
+  "id": "chatcmpl-b415caad-9be0-4d9e-ac6d-9d23bfe57703",
   "choices": [
     {
       "index": 0,
       "message": {
-        "role": "assistant",
         "content": null,
         "tool_calls": [
           {
-            "id": "call_0",
+            "id": "call-56223a95-3d14-4433-a94e-011f106c0e40",
             "type": "function",
             "function": {
               "name": "get_weather",
-              "arguments": "{\"location\": \"San Francisco\"}"
+              "arguments": "{\"location\":\"San Francisco\"}"
+            }
+          },
+          {
+            "id": "call-d5b5772b-6b0c-4120-ad01-623278a937fe",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\":\"New York\"}"
             }
           }
-        ]
+        ],
+        "role": "assistant",
+        "reasoning_content": "The user is asking about the weather in two cities: San Francisco and New York. I need to call the get_weather function for each city. I'll make two separate function calls to get the weather information for both locations.\n"
       },
-      "finish_reason": "tool_calls"
+      "finish_reason": "tool_calls",
+      "logprobs": null
     }
-  ]
+  ],
+  "created": 1778653281,
+  "model": "Qwen/Qwen3.5-4B",
+  ...
 }
 ```
