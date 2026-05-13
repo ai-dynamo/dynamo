@@ -348,17 +348,29 @@ def _format_output_block_html(block) -> str:
 # (e.g. `[{...}]`, `[1, 2]`) don't get false-matched as tags.
 _TAG_RE = re.compile(r"<[^<>]+>|\[/?[A-Z][A-Z0-9_]*\]")
 
-# Stable name→palette-class mapping across the whole HTML run. First-seen
-# order assigns the next color; same name gets the same color everywhere.
+# Two coloring schemes share one cycling palette:
+#   * Paired open/close: every matched pair gets a *fresh* palette index, so
+#     two `<tool_call>...</tool_call>` instances in the same input render as
+#     two different colors.
+#   * Singletons (e.g. harmony's `<|channel|>` section markers): stable
+#     by-role color so all `<|channel|>` tokens share one class everywhere.
 _PAIRED_PALETTE_SIZE = 8
-_paired_classes: dict[str, str] = {}
+_color_seq = 0
+_singleton_classes: dict[str, str] = {}
 
 
-def _paired_class_for(name: str) -> str:
-    cls = _paired_classes.get(name)
+def _next_color_class() -> str:
+    global _color_seq
+    cls = f"tt-c{_color_seq % _PAIRED_PALETTE_SIZE}"
+    _color_seq += 1
+    return cls
+
+
+def _singleton_class_for(name: str) -> str:
+    cls = _singleton_classes.get(name)
     if cls is None:
-        cls = f"tt-c{len(_paired_classes) % _PAIRED_PALETTE_SIZE}"
-        _paired_classes[name] = cls
+        cls = _next_color_class()
+        _singleton_classes[name] = cls
     return cls
 
 
@@ -398,9 +410,12 @@ def _tag_kind_and_name(inner: str) -> tuple[str | None, str, str | None]:
     """
 
     def _name_of(s: str) -> str:
+        # Split on whitespace, slash, `>`, OR `=` so that
+        # `<function=book_flight>` pairs with `</function>` and
+        # `<parameter=destination>` pairs with `</parameter>`.
         if not s:
             return ""
-        return re.split(r"[\s/>]", s, 1)[0].rstrip("|")
+        return re.split(r"[\s/>=]", s, 1)[0].rstrip("|")
 
     if inner.startswith("/"):
         return ("close", _name_of(inner[1:]), None)
@@ -454,7 +469,7 @@ def _colorize_xml(text: str) -> str:
         if kind is None:
             pieces.append(f'<span class="tt-orphan">{esc}</span>')
         elif kind == "singleton":
-            cls = _paired_class_for(pair_id)
+            cls = _singleton_class_for(pair_id)
             pieces.append(f'<span class="{cls}">{esc}</span>')
         elif kind == "close":
             match_at = -1
@@ -468,9 +483,13 @@ def _colorize_xml(text: str) -> str:
                         unmatched_idx
                     ] = f'<span class="tt-orphan">{pieces[unmatched_idx]}</span>'
                 open_idx = stack[match_at][1]
-                # Closer's color_override (if any) wins, so the same
-                # `<|start|>` opener can recolor by its closer flavor.
-                cls = _paired_class_for(color_override or pair_id)
+                # Per-instance color: every matched pair gets a fresh palette
+                # index, so two `<tool_call>...</tool_call>` (or two
+                # `<|start|>...<|call|>`) blocks in the same input render as
+                # different colors. (color_override unused on the paired
+                # path — kept on the singleton-flavor branch only.)
+                _ = color_override
+                cls = _next_color_class()
                 pieces[open_idx] = f'<span class="{cls}">{pieces[open_idx]}</span>'
                 pieces.append(f'<span class="{cls}">{esc}</span>')
                 del stack[match_at:]
