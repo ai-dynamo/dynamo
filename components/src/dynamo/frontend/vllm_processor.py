@@ -636,12 +636,20 @@ class VllmProcessor:
                 "mm_frontend:stream_response", color="purple"
             )
             async for dynamo_response in dynamo_stream:
-                if self.is_kv_router:
+                if self.routed_engine is None:
                     engine_response = dynamo_response
-                elif hasattr(dynamo_response, "data"):
-                    engine_response = dynamo_response.data()
                 else:
-                    engine_response = dynamo_response
+                    if dynamo_response.is_error():
+                        comments = dynamo_response.comments() or []
+                        message = "; ".join(comments) or "unknown routed_engine error"
+                        logger.error(
+                            "routed_engine error for request %s: %s",
+                            request_id,
+                            message,
+                        )
+                        yield make_internal_error(request_id, message)
+                        break
+                    engine_response = dynamo_response.data()
 
                 if engine_response is None or "token_ids" not in engine_response:
                     yield handle_engine_error(engine_response, request_id, logger)

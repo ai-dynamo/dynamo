@@ -34,8 +34,8 @@ use dynamo_runtime::{
     component::Client,
     engine::{AsyncEngineStream, Data},
     pipeline::{
-        Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource,
-        ServiceBackend, ServiceEngine, ServiceFrontend, SingleIn, Source,
+        Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend,
+        ServiceEngine, ServiceFrontend, SingleIn, Source,
     },
 };
 use std::sync::Arc;
