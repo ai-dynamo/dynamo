@@ -103,11 +103,18 @@ for i in $(seq 1 120); do
 done
 
 echo "=== AIPerf START (n=$N c=$CONCURRENCY isl=$ISL osl=$OSL) ==="
+# Note: use --request-count (not --num-prompts) to set the number of benchmark
+# requests. --num-prompts controls dataset size; the profiling phase defaults to
+# concurrency*2 if --request-count is not given.
+# Note: Qwen3-8B thinking mode produces empty streaming chunks for ~14% of requests
+# at c=1 (InvalidInferenceResultError). Use a non-thinking model or add:
+#   --extra-inputs enable_thinking:false
+# to suppress thinking mode for cleaner benchmark results.
 aiperf profile \
   --url "http://127.0.0.1:$DECODE_PORT" \
   --model-names "$MODEL" \
   --endpoint-type chat \
-  --num-prompts "$N" \
+  --request-count "$N" \
   --concurrency "$CONCURRENCY" \
   --isl "$ISL" \
   --osl "$OSL" \
