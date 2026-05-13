@@ -160,6 +160,14 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export UV_CACHE_DIR=/root/.cache/uv; \
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
+
+{% if device == "xpu" %}
+# Remove conflicting standard triton package for XPU and reinstall triton-xpu
+# This must be done after vLLM-Omni installation to ensure no dependencies re-install triton
+# Reinstalling triton-xpu ensures the triton namespace is properly configured
+RUN uv pip uninstall -y triton && \
+    uv pip install --force-reinstall --no-deps triton-xpu
+{% endif %}
 {% endif %}
 
 {% if context.vllm.enable_media_ffmpeg == "true" %}
