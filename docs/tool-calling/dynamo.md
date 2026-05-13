@@ -89,7 +89,7 @@ python -m dynamo.frontend
 from openai import OpenAI
 import json
 
-client = OpenAI(base_url="http://localhost:8081/v1", api_key="dummy")
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
 
 def get_weather(location: str, unit: str):
     return f"Getting the weather for {location} in {unit}..."

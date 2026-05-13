@@ -88,7 +88,7 @@ python -m dynamo.frontend
 ### Reasoning Request Example
 
 ```bash
-curl -s http://localhost:8081/v1/chat/completions \
+curl -s http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "Qwen/Qwen3.5-4B",
