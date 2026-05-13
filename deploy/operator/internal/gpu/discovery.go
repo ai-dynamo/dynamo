@@ -86,6 +86,7 @@ const (
 	tokenH200   = "H200"
 	tokenH100   = "H100"
 	tokenA100   = "A100"
+	tokenA30    = "A30"
 	tokenL40S   = "L40S"
 	tokenL40    = "L40"
 	tokenL4     = "L4"
@@ -130,6 +131,7 @@ var gpuRules = []gpuRule{
 
 	// Ampere
 	{token: tokenA100, sxmSKU: nvidiacomv1beta1.GPUSKUTypeA100SXM, pcieSKU: nvidiacomv1beta1.GPUSKUTypeA100PCIe},
+	{token: tokenA30, singleSKU: nvidiacomv1beta1.GPUSKUTypeA30},
 
 	// Ada
 	{token: tokenL40S, singleSKU: nvidiacomv1beta1.GPUSKUTypeL40S},
@@ -172,7 +174,7 @@ type gpuCacheEntry struct {
 }
 
 // GPUDiscoveryCache caches discovery results keyed by SKU filter.
-// Bounded by the GPUSKUType enum (≤7 values incl. empty for unfiltered).
+// Bounded by the GPUSKUType enum plus empty for unfiltered discovery.
 type GPUDiscoveryCache struct {
 	mu      sync.RWMutex
 	entries map[nvidiacomv1beta1.GPUSKUType]gpuCacheEntry
@@ -917,6 +919,9 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	formFactor := detectFormFactor(normalized)
 
 	for _, rule := range gpuRules {
+		if rule.token == tokenA30 && !containsModelToken(gpuProduct, tokenA30) {
+			continue
+		}
 		if strings.Contains(normalized, rule.token) {
 			if rule.singleSKU != "" {
 				return rule.singleSKU
@@ -948,6 +953,28 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 func normalize(input string) string {
 	s := strings.ToUpper(strings.ReplaceAll(input, strDash, strSpace))
 	return strings.ReplaceAll(s, " ", "")
+}
+
+func containsModelToken(input, token string) bool {
+	upper := strings.ToUpper(input)
+	for start := 0; start < len(upper); {
+		idx := strings.Index(upper[start:], token)
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		end := idx + len(token)
+		if (idx == 0 || !isASCIIAlphaNum(upper[idx-1])) &&
+			(end == len(upper) || !isASCIIAlphaNum(upper[end])) {
+			return true
+		}
+		start = idx + 1
+	}
+	return false
+}
+
+func isASCIIAlphaNum(ch byte) bool {
+	return (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
 }
 
 // detectFormFactor determines the GPU form factor (e.g. SXM or PCIe)

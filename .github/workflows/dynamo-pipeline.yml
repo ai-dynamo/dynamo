@@ -196,7 +196,7 @@ jobs:
     with:
       test_suite_name: dynamo
       test_type: parallel
-      amd_runner: prod-tester-amd-v1
+      amd_runner: prod-tester-amd-v2
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
       cuda_version: '["${{ inputs.cuda_version }}"]'
       platform: '["amd64", "arm64"]'
@@ -216,7 +216,7 @@ jobs:
     with:
       test_suite_name: dynamo
       test_type: sequential
-      amd_runner: prod-tester-amd-v1
+      amd_runner: prod-tester-amd-v2
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
       cuda_version: '["${{ inputs.cuda_version }}"]'
       platform: '["amd64", "arm64"]'
@@ -236,7 +236,7 @@ jobs:
     with:
       test_suite_name: dynamo
       test_type: gpu
-      amd_runner: prod-tester-amd-gpu-v1
+      amd_runner: prod-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
       cuda_version: '["${{ inputs.cuda_version }}"]'
       platform: '["amd64"]'

@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: pythonic
+mode: batch
+cases:
+  PARSER.batch.5.a:
+    description: Missing closing `]` end marker
+    ref: dynamo
+    model_text: '[get_weather(location="NYC")'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls: []
+      normal_text: '[get_weather(location="NYC")'
+  PARSER.batch.5.b:
+    description: Closing `]` without matching `[` open
+    ref: dynamo
+    model_text: get_weather(location="NYC")]
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: get_weather(location="NYC")]
+  PARSER.batch.5.c:
+    description: Truncation mid-argument value
+    ref: dynamo
+    model_text: '[get_weather(location="N'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: '[get_weather(location="N'

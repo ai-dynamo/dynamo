@@ -26,7 +26,6 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 )
 from dynamo.common.multimodal import EMBEDDING_SENDER_FACTORIES
 from dynamo.common.utils import nvtx_utils as _nvtx
-from dynamo.sglang._compat import mm_encode
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     MultiModalGroup,
@@ -237,8 +236,8 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         # SGLang's _encode outputs are already on CPU; use CPU as target for consistency
         target_device = torch.device("cpu")
         if uncached_urls:
-            grid_dim, new_embeddings, _aux = await mm_encode(
-                self.encoder, uncached_urls, Modality.IMAGE
+            grid_dim, new_embeddings, _aux = await self.encoder._encode(
+                uncached_urls, Modality.IMAGE
             )
             # Verify SGLang output is on CPU as expected
             if new_embeddings.device != target_device:
@@ -429,8 +428,8 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                     if modality_name == "IMAGE" and self._embedding_cache is not None:
                         grid_dim, embeddings = await self._encode_with_cache(urls)
                     else:
-                        grid_dim, embeddings, _aux = await mm_encode(
-                            self.encoder, urls, modality_enum
+                        grid_dim, embeddings, _aux = await self.encoder._encode(
+                            urls, modality_enum
                         )
 
                 grid_list = (

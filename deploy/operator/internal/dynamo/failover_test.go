@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
@@ -214,22 +215,27 @@ func TestAugmentEngineForGMS_EmptyContainers(t *testing.T) {
 }
 
 func TestRemoveGPUFromLimits(t *testing.T) {
+	migResource := corev1.ResourceName("nvidia.com/mig-3g.20gb")
 	c := &corev1.Container{
 		Resources: corev1.ResourceRequirements{
 			Limits: corev1.ResourceList{
 				"nvidia.com/gpu":      k8sresource.MustParse("8"),
+				migResource:           k8sresource.MustParse("1"),
 				corev1.ResourceMemory: k8sresource.MustParse("64Gi"),
 			},
 			Requests: corev1.ResourceList{
 				"nvidia.com/gpu": k8sresource.MustParse("8"),
+				migResource:      k8sresource.MustParse("1"),
 			},
 		},
 	}
 
 	removeGPUFromLimits(c)
 	assert.NotContains(t, c.Resources.Limits, corev1.ResourceName("nvidia.com/gpu"))
+	assert.NotContains(t, c.Resources.Limits, migResource)
 	assert.Contains(t, c.Resources.Limits, corev1.ResourceMemory)
 	assert.NotContains(t, c.Resources.Requests, corev1.ResourceName("nvidia.com/gpu"))
+	assert.NotContains(t, c.Resources.Requests, migResource)
 }
 
 func TestAddGPUToleration_Idempotent(t *testing.T) {
@@ -264,38 +270,39 @@ func TestRemoveEnvVar(t *testing.T) {
 func TestGetGPUCount(t *testing.T) {
 	tests := []struct {
 		name      string
-		resources *v1alpha1.Resources
+		resources corev1.ResourceRequirements
 		want      int32
 	}{
-		{"nil resources", nil, 0},
-		{"nil limits", &v1alpha1.Resources{}, 0},
-		{"empty gpu string", &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: ""}}, 0},
-		{"valid gpu count", &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: "8"}}, 8},
-		{"invalid gpu string", &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: "abc"}}, 0},
+		{"empty resources", corev1.ResourceRequirements{}, 0},
+		{"empty limits", corev1.ResourceRequirements{Limits: corev1.ResourceList{}}, 0},
+		{"valid limit gpu count", corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("8")}}, 8},
+		{"valid request gpu count", corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("4")}}, 4},
+		{"valid MIG limit gpu count", corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName("nvidia.com/mig-3g.20gb"): k8sresource.MustParse("1")}}, 1},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, getGPUCount(tt.resources))
+			got, err := getGPUCount(tt.resources)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
 
 func TestGetDeviceClassName(t *testing.T) {
 	tests := []struct {
-		name      string
-		resources *v1alpha1.Resources
-		want      string
+		name    string
+		gmsSpec *v1beta1.GPUMemoryServiceSpec
+		want    string
 	}{
-		{"nil resources", nil, "gpu.nvidia.com"},
-		{"nil limits", &v1alpha1.Resources{}, "gpu.nvidia.com"},
-		{"empty gpuType", &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{}}, "gpu.nvidia.com"},
-		{"custom gpuType", &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPUType: "gpu.nvidia.com/h100"}}, "gpu.nvidia.com/h100"},
+		{"nil spec", nil, "gpu.nvidia.com"},
+		{"empty device class", &v1beta1.GPUMemoryServiceSpec{}, "gpu.nvidia.com"},
+		{"custom device class", &v1beta1.GPUMemoryServiceSpec{DeviceClassName: "gpu.nvidia.com/h100"}, "gpu.nvidia.com/h100"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, getDeviceClassName(tt.resources))
+			assert.Equal(t, tt.want, getDeviceClassName(tt.gmsSpec))
 		})
 	}
 }
@@ -367,15 +374,15 @@ func TestGmsRCTName(t *testing.T) {
 }
 
 func TestGmsResourceClaimTemplateConfigs_SingleNode(t *testing.T) {
-	resources := &v1alpha1.Resources{
-		Limits: &v1alpha1.ResourceItem{GPU: "8", GPUType: "gpu.nvidia.com/h100"},
-	}
+	resources := corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("8")}}
+	gmsSpec := &v1beta1.GPUMemoryServiceSpec{DeviceClassName: "gpu.nvidia.com/h100"}
 	roles := []ServiceRole{
 		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
 		{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
 	}
 
-	configs := gmsResourceClaimTemplateConfigs("svc", resources, roles)
+	configs, err := gmsResourceClaimTemplateConfigs("svc", gmsSpec, resources, roles)
+	require.NoError(t, err)
 
 	require.Len(t, configs, 1)
 	assert.Equal(t, "svc-gpu-rank-0", configs[0].Name)
@@ -387,9 +394,7 @@ func TestGmsResourceClaimTemplateConfigs_SingleNode(t *testing.T) {
 }
 
 func TestGmsResourceClaimTemplateConfigs_Multinode(t *testing.T) {
-	resources := &v1alpha1.Resources{
-		Limits: &v1alpha1.ResourceItem{GPU: "4"},
-	}
+	resources := corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("4")}}
 	roles := []ServiceRole{
 		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
 		{Name: "svc-ldr", Role: RoleLeader, Rank: 0, Replicas: 3},
@@ -397,7 +402,8 @@ func TestGmsResourceClaimTemplateConfigs_Multinode(t *testing.T) {
 		{Name: "svc-wkr-1", Role: RoleWorker, Rank: 1, Replicas: 3},
 	}
 
-	configs := gmsResourceClaimTemplateConfigs("svc", resources, roles)
+	configs, err := gmsResourceClaimTemplateConfigs("svc", &v1beta1.GPUMemoryServiceSpec{}, resources, roles)
+	require.NoError(t, err)
 
 	require.Len(t, configs, 2)
 	assert.Equal(t, "svc-gpu-rank-0", configs[0].Name)
@@ -635,16 +641,16 @@ func TestBuildFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 // --- IsIntraPodFailoverEnabled ---
 
 func TestIsIntraPodFailoverEnabled(t *testing.T) {
-	assert.True(t, IsIntraPodFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
+	assert.True(t, IsIntraPodFailoverEnabled(betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeIntraPod},
-	}))
-	assert.False(t, IsIntraPodFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
+	})))
+	assert.False(t, IsIntraPodFailoverEnabled(betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
-	}), "inter-pod mode must not trigger intra-pod container cloning")
-	assert.False(t, IsIntraPodFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
+	})), "inter-pod mode must not trigger intra-pod container cloning")
+	assert.False(t, IsIntraPodFailoverEnabled(betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		Failover: &v1alpha1.FailoverSpec{Enabled: false, Mode: v1alpha1.GMSModeIntraPod},
-	}))
-	assert.False(t, IsIntraPodFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{}))
+	})))
+	assert.False(t, IsIntraPodFailoverEnabled(betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{})))
 	assert.False(t, IsIntraPodFailoverEnabled(nil))
 }
 

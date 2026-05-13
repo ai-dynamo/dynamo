@@ -19992,8 +19992,7 @@ spec:
                     - planner
                     - epp
                   type: string
-              required:
-                - backendFramework
+              required: []
               type: object
               x-kubernetes-validations:
                 - message: eppConfig may only be set when type is epp
