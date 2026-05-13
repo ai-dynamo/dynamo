@@ -267,7 +267,15 @@ if [[ "$VLLM_VER_BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && \
     echo "vLLM $VLLM_VER >= 0.21 — skipping vendored patches (assumed merged upstream)"
 elif [ -d "$PATCH_DIR" ] && compgen -G "$PATCH_DIR/*.patch" > /dev/null; then
     echo "\n=== Applying vendored vLLM patches from $PATCH_DIR ==="
-    VLLM_SITE_PACKAGES=$(python3 -c "import vllm, os; print(os.path.dirname(os.path.dirname(vllm.__file__)))")
+    # Run from / so cwd isn't ahead of the venv on sys.path. The build
+    # script is still inside the $INSTALLATION_DIR/vllm source clone here
+    # (from the earlier `cd vllm`), and that clone contains a `vllm/`
+    # package directory. Without the cd, `import vllm` resolves the
+    # source clone, vllm.__file__ points at /opt/vllm/vllm/__init__.py,
+    # and the patch lands on the build-only source tree — not on the
+    # installed wheel that the runtime actually imports. Same pattern as
+    # the post-install verification block above.
+    VLLM_SITE_PACKAGES=$(cd / && python3 -c "import vllm, os; print(os.path.dirname(os.path.dirname(vllm.__file__)))")
     for p in "$PATCH_DIR"/*.patch; do
         echo "  $(basename "$p")"
         patch -p1 -d "$VLLM_SITE_PACKAGES" < "$p"
