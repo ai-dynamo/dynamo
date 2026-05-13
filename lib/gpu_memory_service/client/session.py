@@ -54,7 +54,10 @@ class _GMSClientSession:
     ):
         self._requested_lock_type = lock_type
         self._transport = _GMSRPCTransport(socket_path)
-        self._transport.connect()
+        # Use the caller's timeout_ms (or 5 min default if None) as the socket
+        # connect-retry bound; the handshake gets the caller's timeout_ms
+        # directly.
+        self._transport.connect(timeout_ms=300_000 if timeout_ms is None else timeout_ms)
         try:
             response = self._transport.handshake(lock_type, timeout_ms)
         except Exception:

@@ -18,7 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from gpu_memory_service.common.cuda_utils import list_devices
-from gpu_memory_service.common.utils import get_socket_path, wait_for_weights_socket
+from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.snapshot.storage_client import GMSStorageClient
 
 logging.basicConfig(
@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 
 def _save_device(checkpoint_dir: str, device: int, max_workers: int) -> None:
-    wait_for_weights_socket(device)
     output_dir = os.path.join(checkpoint_dir, f"device-{device}")
     logger.info("Saving GMS checkpoint: device=%d output_dir=%s", device, output_dir)
     t0 = time.monotonic()
