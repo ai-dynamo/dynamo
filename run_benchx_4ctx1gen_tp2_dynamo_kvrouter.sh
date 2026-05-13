@@ -317,7 +317,7 @@ GEN_PIDS=()
 # --- decode worker 0 on $NODE1 GPUs 0,1 (TP2) ---
 GEN_PORT=8085
 echo "[$(date +%H:%M:%S)] Starting gen worker 0 on $NODE1 GPUs 0,1 (DYN_SYSTEM_PORT=${GEN_PORT})..."
-start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE1 --mpi=pmix \
+start_bg srun --overlap --ntasks=2 --ntasks-per-node=2 --nodes=1 --nodelist=$NODE1 --mpi=pmix \
   --output="$RESULTS_DIR/gen_worker_g0.log" \
   --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
   --no-container-entrypoint \

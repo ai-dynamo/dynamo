@@ -49,7 +49,7 @@ def render(p: int, dc: int, dtp: int) -> str:
         block = f"""# --- decode worker {i} on {node_var} GPUs {gpus} (TP{dtp}) ---
 GEN_PORT={port}
 echo "[$(date +%H:%M:%S)] Starting gen worker {i} on {node_var} GPUs {gpus} (DYN_SYSTEM_PORT=${{GEN_PORT}})..."
-start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist={node_var} --mpi=pmix \\
+start_bg srun --overlap --ntasks={dtp} --ntasks-per-node={dtp} --nodes=1 --nodelist={node_var} --mpi=pmix \\
   --output="$RESULTS_DIR/gen_worker_g{i}.log" \\
   --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \\
   --no-container-entrypoint \\

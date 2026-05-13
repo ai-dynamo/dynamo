@@ -321,7 +321,7 @@ GEN_PIDS=()
 # --- decode worker 0 on $NODE1 GPUs 0,1 (TP2) ---
 GEN_PORT=8085
 echo "[$(date +%H:%M:%S)] Starting gen worker 0 on $NODE1 GPUs 0,1 (DYN_SYSTEM_PORT=${GEN_PORT})..."
-start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE1 --mpi=pmix \
+start_bg srun --overlap --ntasks=2 --ntasks-per-node=2 --nodes=1 --nodelist=$NODE1 --mpi=pmix \
   --output="$RESULTS_DIR/gen_worker_g0.log" \
   --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
   --no-container-entrypoint \
@@ -339,7 +339,7 @@ GEN_PIDS+=("${SRUN_PIDS[-1]}")
 # --- decode worker 1 on $NODE1 GPUs 2,3 (TP2) ---
 GEN_PORT=8086
 echo "[$(date +%H:%M:%S)] Starting gen worker 1 on $NODE1 GPUs 2,3 (DYN_SYSTEM_PORT=${GEN_PORT})..."
-start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE1 --mpi=pmix \
+start_bg srun --overlap --ntasks=2 --ntasks-per-node=2 --nodes=1 --nodelist=$NODE1 --mpi=pmix \
   --output="$RESULTS_DIR/gen_worker_g1.log" \
   --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
   --no-container-entrypoint \
@@ -357,7 +357,7 @@ GEN_PIDS+=("${SRUN_PIDS[-1]}")
 # --- decode worker 2 on $NODE2 GPUs 0,1 (TP2) ---
 GEN_PORT=8087
 echo "[$(date +%H:%M:%S)] Starting gen worker 2 on $NODE2 GPUs 0,1 (DYN_SYSTEM_PORT=${GEN_PORT})..."
-start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE2 --mpi=pmix \
+start_bg srun --overlap --ntasks=2 --ntasks-per-node=2 --nodes=1 --nodelist=$NODE2 --mpi=pmix \
   --output="$RESULTS_DIR/gen_worker_g2.log" \
   --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
   --no-container-entrypoint \
