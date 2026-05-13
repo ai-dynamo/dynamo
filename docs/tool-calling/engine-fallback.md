@@ -13,6 +13,13 @@ For Dynamo-native parsers, see [Tool Call Parsing (Dynamo)](dynamo.md). For
 the equivalent reasoning fallback, see
 [Reasoning Parsing (Engine Fallback)](../reasoning/engine-fallback.md).
 
+> [!NOTE]
+> `--dyn-tool-call-parser` selects the **Dynamo-native** parser path, while
+> `--tool-call-parser` selects the **engine fallback** (vLLM or SGLang)
+> parser path. The accepted values for each flag come from a different
+> registry and may differ slightly based on the definitions from each
+> framework (e.g., SGLang's `deepseekv3` vs Dynamo's `deepseek_v3`).
+
 > [!WARNING]
 > **Known Issue:** Engine-fallback tool call parsing does not currently work
 > with [disaggregated serving](../features/disaggregated-serving/README.md).
