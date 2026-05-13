@@ -67,6 +67,12 @@ class _DpRankMetricsCache:
         self._num_gpu_blocks = max(1, num_gpu_blocks)
         self._by_rank: dict[int, Metrics] = {}
 
+    def set_num_gpu_blocks(self, num_gpu_blocks: int) -> None:
+        # Patched after AsyncLLM finishes KV profiling — vLLM only populates
+        # `cache_config.num_gpu_blocks` then, so the cache is constructed
+        # before init and updated once the real value is known.
+        self._num_gpu_blocks = max(1, num_gpu_blocks)
+
     def update(self, dp_rank: int, scheduler_stats: SchedulerStats) -> None:
         kv_used = int(self._num_gpu_blocks * scheduler_stats.kv_cache_usage)
         self._by_rank[dp_rank] = Metrics(kv_used_blocks=kv_used)
@@ -124,8 +130,10 @@ class VllmLLMEngine(LLMEngine):
         self._default_sampling_params: Any = None
         self._prometheus_temp_dir: tempfile.TemporaryDirectory[str] | None = None
         self._model_max_len: int | None = None
-        # `_dp_range` / `_metrics_cache` resolved in `start()` once vllm
-        # has built its engine config and reported `num_gpu_blocks`.
+        # `_dp_range` / `_metrics_cache` resolved in `start()`: the cache
+        # is built before AsyncLLM.from_vllm_config so the stat-logger
+        # factory can bind to it, then patched with the real
+        # `num_gpu_blocks` once vLLM finishes KV profiling.
         self._dp_range: Optional[tuple[int, int]] = None
         self._metrics_cache: Optional[_DpRankMetricsCache] = None
 
@@ -181,14 +189,18 @@ class VllmLLMEngine(LLMEngine):
         self._vllm_config = vllm_config
 
         self._dp_range = get_dp_range_for_worker(vllm_config)
-        num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks or 0
-        self._metrics_cache = _DpRankMetricsCache(num_gpu_blocks=num_gpu_blocks)
+        # `cache_config.num_gpu_blocks` is None until vLLM's worker finishes
+        # KV profiling inside AsyncLLM.from_vllm_config. Construct the cache
+        # before init so loggers can bind to it, then patch the real value in.
+        self._metrics_cache = _DpRankMetricsCache(num_gpu_blocks=0)
 
         self.engine_client = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
             usage_context=UsageContext.OPENAI_API_SERVER,
             stat_loggers=[_UnifiedStatLoggerFactory(self._metrics_cache)],
         )
+        num_gpu_blocks = self.engine_client.vllm_config.cache_config.num_gpu_blocks or 0
+        self._metrics_cache.set_num_gpu_blocks(num_gpu_blocks)
         self._model_max_len = getattr(
             getattr(vllm_config, "model_config", None), "max_model_len", None
         )
