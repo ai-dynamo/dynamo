@@ -301,7 +301,7 @@ func DiscoverGPUHardware(
 		return nil, metricsErr
 	}
 
-	info, err := DiscoverGPUs(ctx, k8sClient)
+	info, err := discoverGPUsFromNodeLabels(ctx, k8sClient, filterSKU)
 	if err == nil {
 		return info, nil
 	}
@@ -717,8 +717,27 @@ func inferIntelHardwareSystem(deviceName, pciDeviceID string, vramMiB int) nvidi
 // This function requires cluster-wide node read permissions and expects nodes
 // to have GFD labels. If no nodes with GPU labels are found, it returns an error.
 func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error) {
+	return discoverGPUsFromNodeLabels(ctx, k8sClient, "")
+}
+
+// discoverGPUsFromNodeLabels queries Kubernetes nodes and extracts GPU information
+// from NVIDIA GPU Feature Discovery (GFD) labels. It supports filtering by SKU
+// when filterSKU is non-empty.
+//
+// When filterSKU is provided:
+//   - Only nodes matching the specified SKU are considered
+//   - The returned NodesWithGPUs counts only matching nodes
+//   - If no matching nodes are found, returns an error
+//
+// When filterSKU is empty:
+//   - All GPU nodes are considered
+//   - The returned NodesWithGPUs counts only nodes with the same SKU as bestGPUInfo
+//
+// Selection criteria: prefer higher GPU count, then higher VRAM.
+func discoverGPUsFromNodeLabels(ctx context.Context, k8sClient client.Reader, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Starting GPU discovery from cluster nodes")
+	logger.Info("Starting GPU discovery from cluster nodes", "filterSKU", filterSKU)
+
 	// List all nodes in the cluster
 	nodeList := &corev1.NodeList{}
 	if err := k8sClient.List(ctx, nodeList); err != nil {
@@ -728,9 +747,15 @@ func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error
 		return nil, fmt.Errorf("no nodes found in cluster")
 	}
 	logger.Info("Found cluster nodes", "count", len(nodeList.Items))
-	// Track the best GPU configuration found
-	var bestGPUInfo *GPUInfo
-	nodesWithGPUs := 0
+
+	type nodeGPUInfo struct {
+		info *GPUInfo
+		node *corev1.Node
+		sku  nvidiacomv1beta1.GPUSKUType
+	}
+
+	// Collect all GPU nodes with their SKU information
+	var gpuNodes []nodeGPUInfo
 	for i := range nodeList.Items {
 		node := &nodeList.Items[i]
 		gpuInfo, err := extractGPUInfoFromNode(node)
@@ -741,26 +766,62 @@ func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error
 				"reason", err.Error())
 			continue
 		}
-		nodesWithGPUs++
+
+		// Infer SKU from GPU model
+		gpuInfo.System = InferHardwareSystem(gpuInfo.Model)
+
+		// Apply SKU filter if specified
+		if filterSKU != "" && gpuInfo.System != filterSKU {
+			logger.V(1).Info("Skipping node with non-matching SKU",
+				"node", node.Name,
+				"nodeSKU", gpuInfo.System,
+				"filterSKU", filterSKU)
+			continue
+		}
+
 		logger.Info("Found GPU node",
 			"node", node.Name,
 			"gpus", gpuInfo.GPUsPerNode,
 			"model", gpuInfo.Model,
-			"vram", gpuInfo.VRAMPerGPU)
-		// Select best configuration: prefer higher GPU count, then higher VRAM
-		if bestGPUInfo == nil ||
-			gpuInfo.GPUsPerNode > bestGPUInfo.GPUsPerNode ||
-			(gpuInfo.GPUsPerNode == bestGPUInfo.GPUsPerNode && gpuInfo.VRAMPerGPU > bestGPUInfo.VRAMPerGPU) {
-			bestGPUInfo = gpuInfo
-		}
+			"vram", gpuInfo.VRAMPerGPU,
+			"sku", gpuInfo.System)
+
+		gpuNodes = append(gpuNodes, nodeGPUInfo{
+			info: gpuInfo,
+			node: node,
+			sku:  gpuInfo.System,
+		})
 	}
-	if bestGPUInfo == nil {
+
+	if len(gpuNodes) == 0 {
+		if filterSKU != "" {
+			return nil, fmt.Errorf("no nodes with NVIDIA GPU Feature Discovery labels matching SKU %q found", filterSKU)
+		}
 		return nil, fmt.Errorf("no nodes with NVIDIA GPU Feature Discovery labels found (checked %d nodes). "+
 			"Ensure GPU nodes have labels: %s, %s, %s",
 			len(nodeList.Items), LabelGPUCount, LabelGPUProduct, LabelGPUMemory)
 	}
-	// Infer hardware system from GPU model
-	bestGPUInfo.System = InferHardwareSystem(bestGPUInfo.Model)
+
+	// Select best configuration: prefer higher GPU count, then higher VRAM
+	var bestGPUInfo *GPUInfo
+	var bestSKU nvidiacomv1beta1.GPUSKUType
+	for _, nodeInfo := range gpuNodes {
+		if bestGPUInfo == nil ||
+			nodeInfo.info.GPUsPerNode > bestGPUInfo.GPUsPerNode ||
+			(nodeInfo.info.GPUsPerNode == bestGPUInfo.GPUsPerNode && nodeInfo.info.VRAMPerGPU > bestGPUInfo.VRAMPerGPU) {
+			bestGPUInfo = nodeInfo.info
+			bestSKU = nodeInfo.sku
+		}
+	}
+
+	// Count only nodes with the same SKU as the selected best GPU
+	nodesWithGPUs := 0
+	for _, nodeInfo := range gpuNodes {
+		if nodeInfo.sku == bestSKU {
+			nodesWithGPUs++
+		}
+	}
+
 	bestGPUInfo.NodesWithGPUs = nodesWithGPUs
 	logger.Info("GPU discovery completed",
 		"gpusPerNode", bestGPUInfo.GPUsPerNode,
@@ -768,7 +829,9 @@ func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error
 		"totalGpus", bestGPUInfo.GPUsPerNode*bestGPUInfo.NodesWithGPUs,
 		"model", bestGPUInfo.Model,
 		"vram", bestGPUInfo.VRAMPerGPU,
-		"system", bestGPUInfo.System)
+		"system", bestGPUInfo.System,
+		"filterSKU", filterSKU)
+
 	return bestGPUInfo, nil
 }
 

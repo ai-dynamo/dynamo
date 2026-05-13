@@ -1281,6 +1281,131 @@ func TestDiscoverGPUHardware_FallsBackToNodeLabels(t *testing.T) {
 	assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeH100SXM, info.System)
 }
 
+func TestDiscoverGPUHardware_FallbackRespectsFilterSKU(t *testing.T) {
+	ctx := context.Background()
+
+	// Two nodes: H100 and A100
+	h100Node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "h100-node",
+			Labels: map[string]string{
+				LabelGPUCount:   "8",
+				LabelGPUProduct: "H100-SXM5-80GB",
+				LabelGPUMemory:  "81920",
+			},
+		},
+	}
+	a100Node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "a100-node",
+			Labels: map[string]string{
+				LabelGPUCount:   "8",
+				LabelGPUProduct: "A100-SXM4-80GB",
+				LabelGPUMemory:  "81920",
+			},
+		},
+	}
+
+	// nil metrics discovery forces fallback to node-label path
+	k8sClient := newFakeClient(h100Node, a100Node)
+
+	t.Run("fallback with filterSKU=h100_sxm returns H100 node", func(t *testing.T) {
+		info, err := DiscoverGPUHardware(ctx, k8sClient, nil, nil, nvidiacomv1beta1.GPUSKUTypeH100SXM, true)
+		require.NoError(t, err)
+		require.NotNil(t, info)
+		assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeH100SXM, info.System)
+		assert.Equal(t, "H100-SXM5-80GB", info.Model)
+		assert.Equal(t, 1, info.NodesWithGPUs)
+	})
+
+	t.Run("fallback with filterSKU=a100_sxm returns A100 node", func(t *testing.T) {
+		info, err := DiscoverGPUHardware(ctx, k8sClient, nil, nil, nvidiacomv1beta1.GPUSKUTypeA100SXM, true)
+		require.NoError(t, err)
+		require.NotNil(t, info)
+		assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeA100SXM, info.System)
+		assert.Equal(t, "A100-SXM4-80GB", info.Model)
+		assert.Equal(t, 1, info.NodesWithGPUs)
+	})
+
+	t.Run("fallback with non-existent SKU returns error", func(t *testing.T) {
+		_, err := DiscoverGPUHardware(ctx, k8sClient, nil, nil, nvidiacomv1beta1.GPUSKUTypeL40S, true)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no nodes with NVIDIA GPU Feature Discovery labels matching SKU")
+	})
+}
+
+func TestDiscoverGPUsFromNodeLabels_HeterogeneousCountsOnlyMatchingSKU(t *testing.T) {
+	ctx := context.Background()
+
+	// 2 H100 nodes + 3 A100 nodes (heterogeneous cluster)
+	// H100 has more VRAM so it wins tie-breaking
+	nodes := []client.Object{
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "h100-node-1",
+				Labels: map[string]string{
+					LabelGPUCount:   "8",
+					LabelGPUProduct: "H100-SXM5-80GB",
+					LabelGPUMemory:  "81920",
+				},
+			},
+		},
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "h100-node-2",
+				Labels: map[string]string{
+					LabelGPUCount:   "8",
+					LabelGPUProduct: "H100-SXM5-80GB",
+					LabelGPUMemory:  "81920",
+				},
+			},
+		},
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "a100-node-1",
+				Labels: map[string]string{
+					LabelGPUCount:   "8",
+					LabelGPUProduct: "A100-SXM4-80GB",
+					LabelGPUMemory:  "40960",
+				},
+			},
+		},
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "a100-node-2",
+				Labels: map[string]string{
+					LabelGPUCount:   "8",
+					LabelGPUProduct: "A100-SXM4-80GB",
+					LabelGPUMemory:  "40960",
+				},
+			},
+		},
+		&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "a100-node-3",
+				Labels: map[string]string{
+					LabelGPUCount:   "8",
+					LabelGPUProduct: "A100-SXM4-80GB",
+					LabelGPUMemory:  "40960",
+				},
+			},
+		},
+	}
+
+	// Test without filter (selects H100 as best, counts only H100 nodes)
+	k8sClient := newFakeClient(nodes...)
+
+	info, err := discoverGPUsFromNodeLabels(ctx, k8sClient, "")
+	require.NoError(t, err)
+	require.NotNil(t, info)
+
+	// Should select H100 (more VRAM than A100)
+	assert.Equal(t, nvidiacomv1beta1.GPUSKUTypeH100SXM, info.System)
+	// Should count only H100 nodes (2), not all 5 nodes
+	assert.Equal(t, 2, info.NodesWithGPUs)
+	assert.Equal(t, 8, info.GPUsPerNode)
+}
+
 func TestListDCGMExporterPods(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
