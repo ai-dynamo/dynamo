@@ -8,6 +8,44 @@ import os
 
 logger = logging.getLogger(__name__)
 
+_logging_configured = False
+
+
+def configure_gms_logging() -> None:
+    """Attach a handler to the gpu_memory_service logger.
+
+    vLLM only configures the ``vllm`` logger. Without this, all
+    ``gpu_memory_service.*`` log messages are silently dropped inside
+    the EngineCore worker process.
+
+    Reuses vLLM's handler and formatter when available so that GMS
+    log lines match the surrounding vLLM output style.
+
+    ModelExpress configures its own logger separately via
+    ``modelexpress.configure_logging()``.
+    """
+    global _logging_configured
+    if _logging_configured:
+        return
+    _logging_configured = True
+
+    vllm_logger = logging.getLogger("vllm")
+    if vllm_logger.handlers:
+        handler = vllm_logger.handlers[0]
+    else:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter(
+                "%(levelname)s %(asctime)s [%(filename)s:%(lineno)d] %(message)s",
+                datefmt="%m-%d %H:%M:%S",
+            )
+        )
+
+    gms_logger = logging.getLogger("gpu_memory_service")
+    if not gms_logger.handlers:
+        gms_logger.addHandler(handler)
+        gms_logger.setLevel(logging.INFO)
+
 
 def configure_gms_lock_mode(engine_args) -> None:
     """Set gms_read_only in model_loader_extra_config based on ENGINE_ID.

@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 import sys
+import uuid
 from contextlib import nullcontext
 from typing import List, Optional
 
@@ -36,11 +38,19 @@ from gpu_memory_service.integrations.common.utils import (
     get_gms_lock_mode,
     get_gms_ro_connect_timeout_ms,
 )
-from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
+from gpu_memory_service.integrations.vllm.model_loader import (
+    get_mx_load_context,
+    register_gms_loader,
+)
 from gpu_memory_service.integrations.vllm.patches import (
     apply_scratch_kv_patches,
     patch_memory_snapshot,
 )
+from gpu_memory_service.integrations.vllm.utils import configure_gms_logging
+
+# Configure logging before anything else — vLLM only sets up "vllm" loggers,
+# so gpu_memory_service and modelexpress logs would be silently dropped.
+configure_gms_logging()
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +65,88 @@ patch_memory_snapshot()
 apply_scratch_kv_patches()
 
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
+
+# MX imports — only when MX_ENABLED=1 (modelexpress is an optional dependency)
+if os.environ.get("MX_ENABLED", "0") == "1":
+    try:
+        from modelexpress import configure_vllm_logging
+        from modelexpress.client import MxClient
+        from modelexpress.load_strategy import (
+            publish_metadata,
+            register_tensors,
+            unpublish_metadata,
+        )
+
+        configure_vllm_logging()
+    except ImportError as e:
+        raise ImportError(
+            "MX_ENABLED=1 but modelexpress is not installed. "
+            "Install with: pip install modelexpress"
+        ) from e
+
+
+def mx_teardown(ctx) -> None:
+    """Release all MX network state on sleep.
+
+    Called from GMSWorker.sleep(). Drops the NIXL agent and MxClient
+    gRPC channel so the process is safe for same-node wake and for
+    cross-node CRIU + cuda-checkpoint restore.
+
+    Preserved across teardown:
+    - ``ctx.tensors`` — the dict of weight tensors discovered at
+      initial load. The torch.Tensor objects survive sleep (GMS is
+      VA-stable; data_ptr() values are unchanged after remap) and
+      CRIU/cuda-checkpoint (which preserves CUDA VAs and Python
+      object identity). Reused verbatim by mx_bringup to skip the
+      post-warmup model walk.
+    - ``ctx.vllm_config`` / ``ctx.model_config`` / ``ctx.identity`` /
+      ``ctx.global_rank`` / ``ctx.device_id`` — plain CPU state.
+
+    TODO: port this helper into modelexpress.load_strategy.
+    """
+    # Heartbeat + worker gRPC + STALE update on MX server
+    unpublish_metadata(ctx)
+
+    if ctx.mx_client is not None:
+        try:
+            ctx.mx_client.close()
+        except Exception as e:
+            logger.warning("[GMS-MX] MxClient close failed: %s", e)
+        ctx.mx_client = None
+
+    if ctx.nixl_manager is not None:
+        try:
+            ctx.nixl_manager.shutdown()
+        except Exception as e:
+            logger.warning("[GMS-MX] NIXL manager shutdown failed: %s", e)
+        ctx.nixl_manager = None
+
+    # NOTE: ctx.tensors is intentionally retained (see docstring).
+
+
+def mx_bringup(ctx, model: torch.nn.Module) -> None:
+    """Rebuild MX state on wake, reusing the discovered tensor set.
+
+    Creates a fresh MxClient and worker_id, re-registers the tensor
+    set from initial load with a new NIXL agent, and republishes
+    metadata. Peers see a new identity and drop any cached references
+    to the pre-sleep instance.
+
+    Uses ``reuse_discovered=True`` so the walker doesn't re-run on the
+    post-warmup model (which has ``aot_compiled_fn`` attached to root
+    from vLLM's torch.compile / CUDA graph capture pass). The weight
+    set is frozen after _load_*_mode's process_weights_after_loading,
+    so rediscovery is unnecessary and has historically tripped on
+    framework internals reachable through compile artifacts.
+
+    TODO: port this helper into modelexpress.load_strategy.
+    """
+    ctx.mx_client = MxClient()
+    ctx.worker_id = uuid.uuid4().hex[:8]
+
+    register_tensors(model, ctx, reuse_discovered=True)
+    publish_metadata(ctx)
+
 
 # Import Worker after patches are applied
 from vllm.v1.worker.gpu_worker import Worker  # noqa: E402
@@ -210,6 +302,11 @@ class GMSWorker(Worker):
         """
         free_bytes_before = torch.cuda.mem_get_info()[0]
 
+        # Full MX teardown before GMS unmap
+        mx_ctx = get_mx_load_context()
+        if mx_ctx is not None:
+            mx_teardown(mx_ctx)
+
         for tag in ("weights", "kv_cache"):
             manager = get_gms_client_memory_manager(tag)
             assert manager is not None, f"GMS {tag} client is not initialized"
@@ -262,6 +359,11 @@ class GMSWorker(Worker):
             except ConnectionError as e:
                 logger.error("Fatal: cannot connect to GMS during remap: %s", e)
                 sys.exit(1)
+
+            # Full MX bring-up after GMS remap
+            mx_ctx = get_mx_load_context()
+            if mx_ctx is not None:
+                mx_bringup(mx_ctx, self.model_runner.model)
 
         if "kv_cache" in tags:
             kv_cache_manager = get_gms_client_memory_manager("kv_cache")
