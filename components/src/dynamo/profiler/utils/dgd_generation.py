@@ -307,7 +307,12 @@ def _is_planner_scalable_worker_service(
         return inferred_type in target_subcomponents
 
     # Some agg templates have one generic worker name and no subComponentType.
-    return planner_mode == "agg" and untyped_worker_count == 1
+    # Mark it as decode so the Kubernetes planner can rediscover the target.
+    if planner_mode == "agg" and untyped_worker_count == 1:
+        service_config["subComponentType"] = "decode"
+        return True
+
+    return False
 
 
 def _planner_scaling_subcomponents(planner_mode: str) -> set[str]:

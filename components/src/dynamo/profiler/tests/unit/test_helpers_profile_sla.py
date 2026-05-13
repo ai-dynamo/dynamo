@@ -624,6 +624,10 @@ class TestAssembleFinalConfig:
         assert dgd_config["spec"]["services"]["TRTLLMWorker"]["scalingAdapter"] == {
             "enabled": True,
         }
+        assert (
+            dgd_config["spec"]["services"]["TRTLLMWorker"]["subComponentType"]
+            == "decode"
+        )
         assert "scalingAdapter" not in dgd_config["spec"]["services"]["Frontend"]
 
     @pytest.mark.pre_merge
