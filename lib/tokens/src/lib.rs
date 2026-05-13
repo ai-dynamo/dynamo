@@ -958,6 +958,7 @@ impl PartialTokenBlock {
     ///
     /// * `Ok(())` - If the token was successfully added.
     /// * `Err(TokenBlockError::Full)` - If the block already contains `block_size` tokens.
+    #[cfg(test)]
     pub(crate) fn push_token(&mut self, token: Token) -> Result<(), TokenBlockError> {
         if self.tokens.0.len() >= self.block_size as usize {
             return Err(TokenBlockError::Full);
@@ -1359,20 +1360,13 @@ impl TokenBlockSequence {
     /// * `Ok(None)` - No block was completed by adding this token.
     /// * `Err(TokenBlockError)` - If an internal error occurs during processing.
     pub fn append(&mut self, token: Token) -> Result<Option<usize>, TokenBlockError> {
-        if self.current_block.remaining() == 0 {
-            let new_block = self.current_block.commit()?;
-            self.blocks.push(new_block);
-        }
-
-        self.current_block.push_token(token)?;
-        if self.current_block.remaining() != 0 {
-            return Ok(None);
-        }
-
-        let completed_idx = self.blocks.len();
-        let new_block = self.current_block.commit()?;
-        self.blocks.push(new_block);
-        Ok(Some(completed_idx))
+        let before = self.blocks.len();
+        self.extend(Tokens::from(vec![token]))?;
+        Ok(if self.blocks.len() > before {
+            Some(before)
+        } else {
+            None
+        })
     }
 
     /// Shortens the sequence, keeping the first `len` tokens and removing the rest.
