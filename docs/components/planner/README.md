@@ -208,10 +208,26 @@ When `PLANNER_PROMETHEUS_PORT` is set, the planner serves its own metrics endpoi
 - TTFT and ITL distributions
 - Input/output sequence lengths
 
+Planner can read these traffic signals from either the public `Frontend` or a pool-local `LocalRouter`. Use `throughput_metrics_source: "frontend"` for a single-DGD deployment. Use `throughput_metrics_source: "router"` for GlobalPlanner / multi-pool deployments so each pool Planner reads its own router traffic instead of the shared public endpoint.
+
+| Planner input | Frontend source | Router source |
+|---|---|---|
+| Request count | `dynamo_frontend_requests_total` | `dynamo_component_router_requests_total` |
+| TTFT | `dynamo_frontend_time_to_first_token_seconds` | `dynamo_component_router_time_to_first_token_seconds` |
+| ITL | `dynamo_frontend_inter_token_latency_seconds` | `dynamo_component_router_inter_token_latency_seconds` |
+| Request duration | `dynamo_frontend_request_duration_seconds` | `dynamo_component_request_duration_seconds` until router-specific duration metrics are available |
+| Input sequence length / ISL | `dynamo_frontend_input_sequence_tokens` | `dynamo_component_router_input_sequence_tokens` |
+| Output sequence length / OSL | `dynamo_frontend_output_sequence_tokens` | `dynamo_component_router_output_sequence_tokens` |
+| KV hit rate | Not available from frontend source | `dynamo_component_router_kv_hit_rate` |
+
+The throughput planner uses request count, ISL, OSL, and optional KV hit rate as the core traffic forecast inputs. TTFT, ITL, and request duration are also scraped and exported as observed diagnostics.
+
 **Load-based scaling** uses ForwardPassMetrics (FPM) from the Dynamo event plane:
 - Per-iteration wall time, scheduled prefill/decode tokens, and queued request status
 - Delivered via `FpmEventSubscriber` with automatic engine discovery and lifecycle tracking
 - No router `/metrics` scraping required
+
+FPM observes engine-side scheduled and queued work. It does not include requests still queued in the `LocalRouter` before engine assignment.
 
 Core gauges on the planner port include replica counts (`dynamo_planner_num_prefill_replicas`, `dynamo_planner_num_decode_replicas`), observed traffic (`dynamo_planner_observed_*`), replica decisions (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), and cumulative `dynamo_planner_gpu_hours`.
 
