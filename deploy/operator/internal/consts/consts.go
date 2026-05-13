@@ -78,9 +78,11 @@ const (
 
 	KubeResourceGPUNvidia = "nvidia.com/gpu"
 
-	// KV transfer policy router env vars
-	EnvRouterKvTransferDomain        = "DYN_ROUTER_KV_TRANSFER_DOMAIN"
-	EnvRouterKvTransferNoMatchPolicy = "DYN_ROUTER_KV_TRANSFER_NO_MATCH_POLICY"
+	// KV transfer policy env vars (worker) — injected when kvTransferPolicy is
+	// configured. Workers publish these in their MDC so the router reads policy
+	// per-worker rather than from its own env.
+	EnvKvTransferDomain        = "DYN_KV_TRANSFER_DOMAIN"
+	EnvKvTransferNoMatchPolicy = "DYN_KV_TRANSFER_NO_MATCH_POLICY"
 
 	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
 	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"
