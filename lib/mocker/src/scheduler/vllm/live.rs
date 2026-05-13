@@ -7,11 +7,13 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::protocols::{DirectRequest, KvEventPublishers, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{
+    DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
+};
 use crate::common::utils::sleep_until_precise;
 use crate::scheduler::{
-    AdmissionEvent, RouterEventVisibility, SchedulerHandle, capture_deferred_kv_publish_sink,
-    publish_deferred_kv_events,
+    AdmissionEvent, DeferredFpmBuffer, RouterEventVisibility, SchedulerHandle,
+    capture_deferred_kv_publish_sink, publish_deferred_fpm, publish_deferred_kv_events,
 };
 
 use super::core::VllmCore;
@@ -66,6 +68,7 @@ impl Scheduler {
         output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
+        fpm_publisher: FpmPublisher,
     ) -> Self {
         Self::new_internal(
             args,
@@ -74,6 +77,7 @@ impl Scheduler {
             kv_event_publishers,
             cancellation_token,
             None,
+            fpm_publisher,
         )
     }
 
@@ -84,6 +88,7 @@ impl Scheduler {
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
+        fpm_publisher: FpmPublisher,
     ) -> Self {
         Self::new_internal(
             args,
@@ -92,6 +97,7 @@ impl Scheduler {
             kv_event_publishers,
             cancellation_token,
             admission_tx,
+            fpm_publisher,
         )
     }
 
@@ -102,6 +108,7 @@ impl Scheduler {
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
+        fpm_publisher: FpmPublisher,
     ) -> Self {
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<DirectRequest>();
         let total_blocks = args.num_gpu_blocks as u64;
@@ -115,6 +122,7 @@ impl Scheduler {
         tokio::spawn(async move {
             let (deferred_kv_events, buffering_publishers) =
                 capture_deferred_kv_publish_sink(kv_event_publishers.raw_enabled());
+            let deferred_fpm = DeferredFpmBuffer::default();
             let mut core = VllmCore::new_with_sink(args, dp_rank, buffering_publishers);
 
             loop {
@@ -128,17 +136,23 @@ impl Scheduler {
                 let iteration_start = Instant::now();
                 let pass = core.execute_pass_internal(None, 0.0, admission_tx.as_ref());
                 let total_time = std::time::Duration::from_secs_f64(pass.end_ms / 1000.0);
+                if let Some(fpm) = pass.fpm {
+                    deferred_fpm.push(fpm);
+                }
                 if pass.router_event_visibility == RouterEventVisibility::PassStart {
                     publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
+                    publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
                 }
                 if total_time > std::time::Duration::ZERO {
                     sleep_until_precise(iteration_start + total_time).await;
                 }
                 if pass.router_event_visibility == RouterEventVisibility::PassEnd {
                     publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
+                    publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
                 }
                 flush_output_signals(&mut core, &output_tx, pass.output_signals);
                 publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
+                publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
                 let _ = metrics_tx.send(MockerMetrics::new(
                     dp_rank,
                     core.kv_manager.num_active_blocks() as u64,

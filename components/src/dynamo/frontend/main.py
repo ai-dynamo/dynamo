@@ -7,7 +7,8 @@
 # - OpenAI HTTP server.
 # - Auto-discovery: Watches etcd for engine/worker registration (via `register_model`).
 # - Pre-processor: Prompt templating and tokenization.
-# - Router, defaulting to round-robin. Use --router-mode to switch (round-robin, random, kv, direct).
+# - Router, defaulting to round-robin. Use --router-mode to switch
+#   (round-robin, random, kv, direct, least-loaded, device-aware-weighted).
 #
 # Pass `--interactive` or `-i` for text chat instead of HTTP server.
 #
@@ -28,6 +29,7 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.llm import (
+    AicPerfConfig,
     EngineType,
     EntrypointArgs,
     KvRouterConfig,
@@ -171,9 +173,14 @@ async def async_main():
         os.environ["DYN_TOKENIZER"] = "fastokens"
     else:
         os.environ.pop("DYN_TOKENIZER", None)
+    max_seq_info = (
+        f", max_seq_len: {config.migration_max_seq_len}"
+        if config.migration_max_seq_len is not None
+        else ""
+    )
     logger.info(
         f"Request migration {'enabled' if config.migration_limit > 0 else 'disabled'} "
-        f"(limit: {config.migration_limit})"
+        f"(limit: {config.migration_limit}{max_seq_info})"
     )
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
@@ -191,26 +198,8 @@ async def async_main():
         if prefix:
             os.environ["DYN_METRICS_PREFIX"] = config.metrics_prefix
 
-    # NATS is needed when:
-    # 1. Request plane is NATS, OR
-    # 2. Durable KV events (JetStream) is explicitly requested, OR
-    # 3. Event plane is NATS AND KV router mode AND (KV events OR replica sync enabled)
-    # Note: NATS Core (without JetStream) is the default for KV events when durable_kv_events=False
-    enable_nats = config.request_plane == "nats" or (
-        config.router_mode == "kv"
-        and (
-            config.durable_kv_events
-            or (
-                config.event_plane == "nats"
-                and (config.use_kv_events or config.router_replica_sync)
-            )
-        )
-    )
-
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(
-        loop, config.discovery_backend, config.request_plane, enable_nats
-    )
+    runtime = DistributedRuntime(loop, config.discovery_backend, config.request_plane)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
@@ -229,6 +218,12 @@ async def async_main():
         kv_router_config = None
     elif config.router_mode == "power-of-two":
         router_mode = RouterMode.PowerOfTwoChoices
+        kv_router_config = None
+    elif config.router_mode == "least-loaded":
+        router_mode = RouterMode.LeastLoaded
+        kv_router_config = None
+    elif config.router_mode == "device-aware-weighted":
+        router_mode = RouterMode.DeviceAwareWeighted
         kv_router_config = None
     else:
         router_mode = RouterMode.RoundRobin
@@ -250,6 +245,8 @@ async def async_main():
         "router_config": router_config,
         "migration_limit": config.migration_limit,
     }
+    if config.migration_max_seq_len is not None:
+        kwargs["migration_max_seq_len"] = config.migration_max_seq_len
 
     if config.model_name:
         kwargs["model_name"] = config.model_name
@@ -297,6 +294,9 @@ async def async_main():
             runtime, router_config, config, sglang_flags
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
+
+    if config.router_prefill_load_model == "aic":
+        kwargs["aic_perf_config"] = AicPerfConfig(**config.aic_perf_kwargs())
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)

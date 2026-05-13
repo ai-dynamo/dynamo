@@ -7,7 +7,10 @@ import logging
 import os
 import tempfile
 import time
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from dynamo.vllm.omni.args import OmniConfig
 
 import uvloop
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
@@ -143,7 +146,10 @@ async def worker() -> None:
         (
             config.namespace,
             config.discovery_backend,
-        ) = snapshot_controller.reload_restore_identity()
+        ) = snapshot_controller.reload_restore_identity(
+            config.namespace,
+            config.discovery_backend,
+        )
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
@@ -156,7 +162,6 @@ async def worker() -> None:
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
-        use_kv_events=config.use_kv_events,
     )
 
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
@@ -183,7 +188,7 @@ async def worker() -> None:
 
 
 def setup_metrics_collection(
-    config: Config, generate_endpoint: Endpoint, logger: logging.Logger
+    config: "Config | OmniConfig", generate_endpoint: Endpoint, logger: logging.Logger
 ) -> None:
     """Set up metrics collection for vLLM and LMCache metrics.
 
@@ -553,6 +558,15 @@ def setup_vllm_engine(
     if fpm_worker_id is not None:
         vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
 
+    # Pass benchmark config to InstrumentedScheduler via additional_config.
+    if hasattr(config, "_benchmark_additional_config"):
+        bench = config._benchmark_additional_config
+        if fpm_worker_id and bench["output_path"] == "/tmp/benchmark_results.json":
+            short_id = fpm_worker_id[-8:]
+            bench["output_path"] = f"/tmp/benchmark_results_{short_id}.json"
+        vllm_config.additional_config["benchmark"] = bench
+        logger.info("Benchmark config injected into additional_config")
+
     factory = []
     if stat_logger:
         factory.append(stat_logger)
@@ -572,6 +586,10 @@ def setup_vllm_engine(
     component_gauges.set_model_load_time(load_time)
 
     logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
+
+    # update block_size in vllm_config based on final engine cache info for later use
+    runtime_values = get_engine_cache_info(engine_client)
+    vllm_config.cache_config.block_size = runtime_values["block_size"]
 
     return (
         engine_client,
@@ -637,6 +655,13 @@ async def register_vllm_model(
     runtime_config.exclude_tools_when_tool_choice_none = (
         config.exclude_tools_when_tool_choice_none
     )
+
+    # Propagate stream_interval so the frontend can respect --stream-interval.
+    # set_engine_specific requires a JSON-encoded string (the Rust binding
+    # parses it with serde_json::from_str); str(int) happens to be valid JSON.
+    stream_interval = getattr(config.engine_args, "stream_interval", None)
+    if stream_interval is not None:
+        runtime_config.set_engine_specific("stream_interval", str(stream_interval))
 
     # Get data_parallel_size from vllm_config (defaults to 1)
     dp_range = get_dp_range_for_worker(vllm_config)

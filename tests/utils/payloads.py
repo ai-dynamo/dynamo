@@ -241,11 +241,14 @@ class ToolCallingChatPayload(ChatPayload):
         self.expected_tool_name = expected_tool_name
 
     def validate(self, response, content: str) -> None:
-        """Validate that tool calls exist in the response."""
-        # First run the standard validation
-        super().validate(response, content)
+        """Validate that tool calls exist in the response.
 
-        # Then validate tool calls specifically
+        Skips the parent's expected_response substring check because tool call
+        responses produce structured JSON arguments, not natural-language text.
+        The expected_response keywords are instead matched against the
+        concatenated tool call arguments so callers can still assert that the
+        model "understood" the input (e.g. expected_response=["purple"]).
+        """
         response_data = response.json()
         choices = response_data.get("choices", [])
         assert choices, "Response missing choices"
@@ -257,13 +260,16 @@ class ToolCallingChatPayload(ChatPayload):
         logger.info(f"Tool calls detected: {len(tool_calls)} call(s)")
 
         # Validate tool call structure
+        all_args = []
         for i, tc in enumerate(tool_calls):
             assert "function" in tc, f"Tool call {i} missing 'function' field"
             function = tc.get("function", {})
             assert "name" in function, f"Tool call {i} missing function name"
             assert "arguments" in function, f"Tool call {i} missing function arguments"
+            args_str = function.get("arguments", "")
+            all_args.append(args_str)
             logger.info(
-                f"  [{i}] Function: {function.get('name')}, Args: {function.get('arguments')[:100]}..."
+                f"  [{i}] Function: {function.get('name')}, Args: {args_str[:100]}..."
             )
 
         # If expected tool name is provided, validate it
@@ -273,6 +279,24 @@ class ToolCallingChatPayload(ChatPayload):
                 self.expected_tool_name in tool_names
             ), f"Expected tool '{self.expected_tool_name}' not found. Available tools: {tool_names}"
             logger.info(f"Expected tool '{self.expected_tool_name}' was called")
+
+        # Check expected_response keywords against tool call arguments (OR logic)
+        if self.expected_response:
+            combined_args = " ".join(all_args).lower()
+            found = [kw for kw in self.expected_response if kw.lower() in combined_args]
+            if not found:
+                logger.error(
+                    f"VALIDATION FAILED - Expected to find at least one of "
+                    f"{self.expected_response} in tool call arguments"
+                )
+                logger.error(f"Tool call arguments: {combined_args}")
+                raise AssertionError(
+                    f"Expected content not found in tool call arguments. "
+                    f"Expected at least one of: {self.expected_response}. "
+                    f"Tool call arguments: {combined_args}"
+                )
+            else:
+                logger.info(f"Found expected keywords in tool args: {found}")
 
 
 @dataclass
@@ -1148,6 +1172,29 @@ class SGLangMetricsPayload(MetricsPayload):
                 )
             )
 
+        return checks
+
+
+@dataclass
+class SGLangDisaggMetricsPayload(SGLangMetricsPayload):
+    """Metrics validation for SGLang disaggregated workers.
+
+    Disagg workers (prefill/decode) expose fewer sglang:* metrics than
+    aggregated workers because each only runs half the scheduler pipeline.
+    Observed: ~14 unique sglang:* metrics vs ~25 for aggregated.
+    """
+
+    def _get_backend_specific_checks(self) -> list[MetricCheck]:
+        checks = super()._get_backend_specific_checks()
+        for check in checks:
+            if check.name == "sglang:*":
+                check.validator = lambda value: len(set(value)) >= 10
+                check.error_msg = lambda name, value: (
+                    f"Expected at least 10 unique sglang:* metrics, but found only {len(set(value))}"
+                )
+                check.success_msg = lambda name, value: (
+                    f"SUCCESS: Found {len(set(value))} unique sglang:* metrics (minimum required: 10)"
+                )
         return checks
 
 

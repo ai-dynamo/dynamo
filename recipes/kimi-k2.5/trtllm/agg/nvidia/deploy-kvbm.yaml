@@ -55,7 +55,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
       replicas: 1
     TrtllmWorker:
       componentType: worker
@@ -95,10 +95,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          # REQUIRED: replace with your patched image tag (run patch/patch-container.sh first).
-          # Upstream TRT-LLM does not support KimiK25ForConditionalGeneration without the patch.
-          # Example: ./patch/patch-container.sh <your-image> -> produces <your-image>-patched
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
           env:
           - name: TRTLLM_ENABLE_PDL
             value: "1"

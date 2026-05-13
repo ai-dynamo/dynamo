@@ -8,6 +8,9 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
+# Use TCP transport for multimodal workloads (base64 images can exceed NATS 1MB limit)
+export DYN_REQUEST_PLANE=tcp
+
 # Default values
 MODEL_NAME="llava-hf/llava-1.5-7b-hf"
 
@@ -17,7 +20,7 @@ MODEL_NAME="llava-hf/llava-1.5-7b-hf"
 #   - Enabling --enforce-eager (disables torch.compile and CUDA graph capture)
 #   - Hardcoding P/D KV cache to 512 MB (skips all memory profiling)
 #   - Limiting --max-model-len to 4096 tokens on P/D workers
-#   - Limiting P/D workers to image=1,video=0,audio=0 (--limit-mm-per-prompt)
+#   - Limiting P/D workers to image=3,video=3,audio=0 (--limit-mm-per-prompt)
 #   - Using lower gpu-memory-utilization fractions to share the GPU
 SINGLE_GPU=false
 
@@ -77,10 +80,17 @@ python -m dynamo.frontend &
 EXTRA_ARGS=""
 PD_EXTRA_ARGS=""
 
-# GPU assignments (override via environment variables)
-DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
-DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-1}
-DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-2}
+# GPU assignments (override via environment variables).
+# In single-GPU mode all 3 workers default to GPU 0.
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
+    DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-0}
+    DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-0}
+else
+    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
+    DYN_PREFILL_WORKER_GPU=${DYN_PREFILL_WORKER_GPU:-1}
+    DYN_DECODE_WORKER_GPU=${DYN_DECODE_WORKER_GPU:-2}
+fi
 
 # GPU memory utilization for workers.
 # NOTE: --kv-cache-memory-bytes (set below for P/D workers) overrides
@@ -93,9 +103,15 @@ if [[ -n "${_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE:-}" ]]; then
     echo "WARNING: _PROFILE_PYTEST_VRAM_FRAC_OVERRIDE is set but has no effect here because" >&2
     echo "  --kv-cache-memory-bytes overrides --gpu-memory-utilization in vLLM." >&2
 fi
-DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
-DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
-DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.1}
+    DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.4}
+    DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.4}
+else
+    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
+    DYN_PREFILL_GPU_MEM=${DYN_PREFILL_GPU_MEM:-0.9}
+    DYN_DECODE_GPU_MEM=${DYN_DECODE_GPU_MEM:-0.9}
+fi
 
 # 512 MB KV cache per P/D worker. Setting --kv-cache-memory-bytes bypasses vLLM's
 # memory profiling entirely (both language model and multimodal encoder), which avoids
@@ -105,7 +121,7 @@ PD_KV_CACHE_BYTES=$((512 * 1024 * 1024))
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
     EXTRA_ARGS="--enforce-eager"
-    PD_EXTRA_ARGS="--max-model-len 4096 --kv-cache-memory-bytes $PD_KV_CACHE_BYTES --limit-mm-per-prompt {\"image\":1,\"video\":0,\"audio\":0}"
+    PD_EXTRA_ARGS="--max-model-len 4096 --kv-cache-memory-bytes $PD_KV_CACHE_BYTES --limit-mm-per-prompt {\"image\":3,\"video\":3,\"audio\":0}"
 fi
 
 # Start encode worker

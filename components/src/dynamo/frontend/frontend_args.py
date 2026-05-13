@@ -8,6 +8,10 @@ from typing import Any, Dict, Optional
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.arg_group import ArgGroup
+from dynamo.common.configuration.groups.aic_perf_args import (
+    AicPerfArgGroup,
+    AicPerfConfigBase,
+)
 from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
@@ -19,6 +23,8 @@ from dynamo.common.configuration.utils import (
 )
 
 from . import __version__
+
+_U32_MAX = 2**32 - 1
 
 
 def validate_model_name(value: str) -> str:
@@ -39,7 +45,21 @@ def validate_model_path(value: str) -> str:
     return value
 
 
-class FrontendConfig(KvRouterConfigBase):
+def _nullable_float(value: str) -> Optional[float]:
+    """Parse a float, or return None for the literal 'None'."""
+    if value is None or value == "None":
+        return None
+    return float(value)
+
+
+def _nullable_int(value: str) -> Optional[int]:
+    """Parse an int, or return None for the literal 'None'."""
+    if value is None or value == "None":
+        return None
+    return int(value)
+
+
+class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
     """Configuration for the Dynamo frontend."""
 
     interactive: bool
@@ -56,6 +76,7 @@ class FrontendConfig(KvRouterConfigBase):
     enforce_disagg: bool
 
     migration_limit: int
+    migration_max_seq_len: Optional[int]
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
@@ -79,6 +100,7 @@ class FrontendConfig(KvRouterConfigBase):
     exclude_tools_when_tool_choice_none: bool
     preprocess_workers: int
     tokenizer_backend: str
+    trust_remote_code: bool
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
 
@@ -87,19 +109,58 @@ class FrontendConfig(KvRouterConfigBase):
             raise ValueError(
                 "--tls-cert-path and --tls-key-path must be provided together"
             )
-        if self.migration_limit < 0 or self.migration_limit > 4294967295:
+        if self.migration_limit < 0 or self.migration_limit > _U32_MAX:
             raise ValueError(
-                "--migration-limit must be between 0 and 4294967295 (0=disabled)"
+                f"--migration-limit must be between 0 and {_U32_MAX} (0=disabled)"
+            )
+        if self.migration_max_seq_len is not None and (
+            self.migration_max_seq_len < 1 or self.migration_max_seq_len > _U32_MAX
+        ):
+            raise ValueError(
+                f"--migration-max-seq-len must be between 1 and {_U32_MAX}"
             )
         if self.min_initial_workers < 0:
             raise ValueError("--router-min-initial-workers must be >= 0")
-        if self.router_enable_cache_control and self.router_mode != "kv":
-            raise ValueError("--enable-cache-control requires --router-mode=kv")
         if self.tokenizer_backend not in self._VALID_TOKENIZER_BACKENDS:
             raise ValueError(
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
+        if self.router_prefill_load_model == "aic":
+            if self.router_mode != "kv":
+                raise ValueError(
+                    "--router-prefill-load-model=aic requires --router-mode=kv"
+                )
+            if self.chat_processor != "dynamo":
+                raise ValueError(
+                    "--router-prefill-load-model=aic currently requires "
+                    "--dyn-chat-processor=dynamo"
+                )
+            missing = [
+                flag
+                for flag, value in (
+                    ("--aic-backend", self.aic_backend),
+                    ("--aic-system", self.aic_system),
+                    ("--aic-model-path", self.aic_model_path),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    "--router-prefill-load-model=aic requires " + ", ".join(missing)
+                )
+            if not self.router_track_prefill_tokens:
+                raise ValueError(
+                    "--router-prefill-load-model=aic requires "
+                    "--router-track-prefill-tokens"
+                )
+        if self.serve_indexer:
+            if self.router_mode != "kv":
+                raise ValueError("--serve-indexer requires --router-mode=kv")
+            if self.use_remote_indexer:
+                raise ValueError(
+                    "--serve-indexer and --use-remote-indexer are mutually exclusive"
+                )
 
 
 @register_encoder(FrontendConfig)
@@ -163,6 +224,14 @@ class FrontendArgGroup(ArgGroup):
             help="HTTP port for the engine (u16).",
             arg_type=int,
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--serve-indexer",
+            env_var="DYN_SERVE_INDEXER",
+            default=False,
+            help="Serve this frontend's local KV indexers over the request plane.",
+            dest="serve_indexer",
+        )
         add_argument(
             g,
             flag_name="--tls-cert-path",
@@ -186,10 +255,20 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_ROUTER_MODE",
             default="round-robin",
             help="How to route the request. power-of-two picks 2 random workers and "
-            "routes to the one with fewer in-flight requests. In disaggregated prefill "
-            "mode, power-of-two skips bootstrap optimization and falls back to the "
-            "synchronous prefill path.",
-            choices=["round-robin", "random", "power-of-two", "kv", "direct"],
+            "routes to the one with fewer in-flight requests. least-loaded routes to "
+            "the worker with the fewest active requests. device-aware-weighted routes "
+            "based on worker device type (CPU/CUDA). In disaggregated prefill mode, "
+            "both power-of-two and least-loaded skip bootstrap optimization and fall "
+            "back to the synchronous prefill path.",
+            choices=[
+                "round-robin",
+                "random",
+                "power-of-two",
+                "kv",
+                "direct",
+                "least-loaded",
+                "device-aware-weighted",
+            ],
         )
         add_argument(
             g,
@@ -208,6 +287,7 @@ class FrontendArgGroup(ArgGroup):
 
         # KV router options (shared with dynamo.router)
         KvRouterArgGroup().add_arguments(parser)
+        AicPerfArgGroup().add_arguments(parser)
 
         add_argument(
             g,
@@ -249,38 +329,53 @@ class FrontendArgGroup(ArgGroup):
 
         add_argument(
             g,
-            flag_name="--active-decode-blocks-threshold",
-            env_var="DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
+            flag_name="--migration-max-seq-len",
+            env_var="DYN_MIGRATION_MAX_SEQ_LEN",
             default=None,
             help=(
-                "Threshold percentage (0.0-1.0) for determining when a worker is considered busy "
-                "based on KV cache block utilization. If not set, blocks-based busy detection is disabled."
+                "Maximum sequence length (prompt + generated tokens) for migration state tracking. "
+                "Once the accumulated token count exceeds this limit, the request becomes "
+                "non-migratable. Prevents unbounded memory growth from caching long sequences. "
+                "Default: no limit."
             ),
-            arg_type=float,
+            arg_type=int,
+        )
+
+        add_argument(
+            g,
+            flag_name="--active-decode-blocks-threshold",
+            env_var="DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
+            default=1.0,
+            help=(
+                "Threshold fraction (0.0-1.0) of KV cache block utilization above which a worker "
+                "is considered busy. Pass 'None' on the CLI to disable this check. Default: 1.0."
+            ),
+            arg_type=_nullable_float,
         )
         add_argument(
             g,
             flag_name="--active-prefill-tokens-threshold",
             env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
-            default=None,
+            default=10_000_000,
             help=(
                 "Literal token count threshold for determining when a worker is considered busy "
                 "based on prefill token utilization. When active prefill tokens exceed this "
-                "threshold, the worker is marked as busy. If not set, tokens-based busy detection is disabled."
+                "threshold, the worker is marked as busy. Pass 'None' on the CLI to disable this "
+                "check. Uses OR logic with --active-prefill-tokens-threshold-frac. Default: 10000000."
             ),
-            arg_type=int,
+            arg_type=_nullable_int,
         )
         add_argument(
             g,
             flag_name="--active-prefill-tokens-threshold-frac",
             env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
-            default=None,
+            default=10.0,
             help=(
                 "Fraction of max_num_batched_tokens for busy detection. Worker is busy when "
-                "active_prefill_tokens > frac * max_num_batched_tokens. Default 1.5 (disabled). "
-                "Uses OR logic with --active-prefill-tokens-threshold."
+                "active_prefill_tokens > frac * max_num_batched_tokens. Pass 'None' on the CLI to "
+                "disable this check. Uses OR logic with --active-prefill-tokens-threshold. Default: 10.0."
             ),
-            arg_type=float,
+            arg_type=_nullable_float,
         )
         add_argument(
             g,
@@ -482,4 +577,15 @@ class FrontendArgGroup(ArgGroup):
                 "Decoding always uses HuggingFace. Has no effect on TikToken models."
             ),
             choices=["default", "fastokens"],
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--trust-remote-code",
+            env_var="DYN_TRUST_REMOTE_CODE",
+            default=False,
+            help=(
+                "Trust remote code when loading the tokenizer. Required for models "
+                "that ship custom tokenizer code (e.g. Qwen, Falcon)."
+            ),
         )

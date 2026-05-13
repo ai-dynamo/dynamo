@@ -209,9 +209,15 @@ impl SharedTcpServer {
             work_item.instance_id,
         );
 
+        let request_id = work_item
+            .headers
+            .get("request-id")
+            .or_else(|| work_item.headers.get("x-dynamo-request-id"))
+            .cloned();
+
         let result = work_item
             .service_handler
-            .handle_payload(work_item.payload)
+            .handle_payload(work_item.payload, request_id)
             .instrument(span)
             .await;
 
@@ -324,10 +330,7 @@ impl SharedTcpServer {
         // Insert handler FIRST to ensure it's ready to receive requests
         self.handlers.insert(endpoint_path, handler);
 
-        // THEN set health status to Ready (after handler is registered and ready)
-        system_health
-            .lock()
-            .set_endpoint_health_status(&endpoint_name, crate::HealthStatus::Ready);
+        system_health.lock().set_endpoint_registered(&endpoint_name);
 
         tracing::info!(
             "Registered endpoint '{fqn_endpoint}' with shared TCP server on {}",
@@ -657,7 +660,11 @@ mod tests {
 
     #[async_trait]
     impl PushWorkHandler for SlowMockHandler {
-        async fn handle_payload(&self, _payload: Bytes) -> Result<(), PipelineError> {
+        async fn handle_payload(
+            &self,
+            _payload: Bytes,
+            _request_id: Option<String>,
+        ) -> Result<(), PipelineError> {
             self.request_in_flight.store(true, Ordering::SeqCst);
             self.request_started.notify_one();
 
@@ -707,6 +714,7 @@ mod tests {
         let system_health = Arc::new(Mutex::new(SystemHealth::new(
             crate::HealthStatus::Ready,
             vec![],
+            false, // health_check_enabled
             "/health".to_string(),
             "/live".to_string(),
         )));
@@ -738,7 +746,7 @@ mod tests {
             let handler = handler.clone();
             async move {
                 let payload = Bytes::from("test payload");
-                handler.handle_payload(payload).await
+                handler.handle_payload(payload, None).await
             }
         });
 
@@ -861,7 +869,11 @@ mod tests {
 
     #[async_trait]
     impl PushWorkHandler for ConcurrencyTrackingHandler {
-        async fn handle_payload(&self, _payload: Bytes) -> Result<(), PipelineError> {
+        async fn handle_payload(
+            &self,
+            _payload: Bytes,
+            _request_id: Option<String>,
+        ) -> Result<(), PipelineError> {
             // Increment concurrent count
             let current = self.concurrent_count.fetch_add(1, Ordering::SeqCst) + 1;
 

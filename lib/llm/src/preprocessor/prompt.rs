@@ -52,9 +52,7 @@ pub enum PromptInput {
 pub trait OAIChatLikeRequest {
     fn model(&self) -> String;
     fn messages(&self) -> Value;
-    fn typed_messages(
-        &self,
-    ) -> Option<&[dynamo_async_openai::types::ChatCompletionRequestMessage]> {
+    fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
         None
     }
     fn tools(&self) -> Option<Value> {
@@ -89,6 +87,10 @@ pub trait OAIChatLikeRequest {
     }
 
     fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
+        None
+    }
+
+    fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
         None
     }
 }

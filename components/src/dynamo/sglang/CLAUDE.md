@@ -85,6 +85,7 @@ BaseGenerativeHandler (handler_base.py)
 
     DecodeWorkerHandler (llm/decode_handler.py)
       Aggregated + disaggregated decode. Token/text streaming.
+      Logprob passthrough via _build_logprob_kwargs() + _extract_logprobs().
 
       DiffusionWorkerHandler (llm/diffusion_handler.py)
         LLM diffusion (DLLM). Simplified decode without disagg.
@@ -185,12 +186,13 @@ capture SGLang's internal signal registrations and defer them. On SIGTERM/SIGINT
 
 ```
 Frontend (Rust, lib/llm/)
-  -> Preprocessor (tokenizes, builds PreprocessedRequest with token_ids + sampling + stop)
+  -> Preprocessor (tokenizes, builds PreprocessedRequest with token_ids + sampling + stop + output_options)
   -> Dynamo RPC to endpoint (dyn://{namespace}.{component}.{endpoint})
   -> Python handler.generate(request_dict, context)
        handler._build_sampling_params(request) -> SGLang-native params
-       engine.async_generate(**params) -> async iterator of dicts
-       handler yields {token_ids, text, finish_reason, ...} back to frontend
+       handler._build_logprob_kwargs(request) -> {return_logprob, top_logprobs_num, logprob_start_len}
+       engine.async_generate(**params, **logprob_kwargs) -> async iterator of dicts
+       handler yields {token_ids, text, finish_reason, log_probs, top_logprobs, ...} back to frontend
   -> Frontend postprocesses into OpenAI-compatible response
 ```
 
@@ -203,6 +205,36 @@ Two request formats depending on `--skip-tokenizer-init`:
 Image/video diffusion handlers receive the full OpenAI-format request dict directly
 (not preprocessed), since the frontend passes through diffusion requests without
 tokenization.
+
+## Logprobs
+
+`DecodeWorkerHandler` supports logprob passthrough, matching the vLLM and TRT-LLM backends.
+Controlled by `output_options` in the preprocessed request (from Rust `OutputOptions` struct
+in `lib/llm/src/protocols/common.rs`).
+
+**Mapping from OutputOptions to SGLang kwargs** (`_build_logprob_kwargs`):
+
+| OutputOptions field | SGLang kwarg | Notes |
+|---------------------|-------------|-------|
+| `logprobs: N` | `return_logprob=True, top_logprobs_num=N` | N top logprobs per output token |
+| `prompt_logprobs: M` | `return_logprob=True, logprob_start_len=0` | Compute from prompt start |
+| Both set | `top_logprobs_num=max(N, M)` | SGLang has a single top_logprobs_num for both |
+
+`logprob_start_len` is SGLang-internal, not exposed in OutputOptions. It controls the
+absolute sequence position where logprob computation starts: `-1` (default) = output tokens
+only (`len(prompt) - 1`), `0` = from prompt start. We set it to 0 when `prompt_logprobs`
+is requested.
+
+**Streaming behavior** (`_extract_logprobs`):
+
+Dynamo forces `stream_output=True` (args.py:374), making `output_ids` disjoint per chunk.
+However, SGLang's `meta_info["output_token_logprobs"]` and `meta_info["output_top_logprobs"]`
+are always **cumulative** — they grow with each chunk. The handler tracks
+`num_output_logprobs_so_far` to slice out only new entries per chunk.
+
+SGLang logprob format: `(logprob, token_id, text_or_None)` tuples.
+Dynamo output format: `log_probs` = list of floats, `top_logprobs` = list of lists of
+`{rank, token_id, token, logprob}` dicts (same as vLLM/TRT-LLM).
 
 ## Health Checks
 
@@ -241,13 +273,24 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
 - **engine=None**: Multimodal encode worker passes `engine=None` to
   BaseWorkerHandler. Any code in the base class that touches engine must guard with
   `if engine is not None`.
-- **GenerationResult is a dataclass**: SGLang 0.5.9 changed `DiffGenerator.generate()`
-  to return `GenerationResult` (not a dict). Use `result.frames`, not `result["frames"]`.
+- **GenerationResult is a dataclass**: SGLang `DiffGenerator.generate()`
+  returns `GenerationResult` (not a dict). Use `result.frames`, not `result["frames"]`.
 - **output_modalities default**: Global default is `["text"]`. Image/video diffusion
   workers must override to `["image"]`/`["video"]` or the Rust registration path tries
   to load `config.json` (which doesn't exist for diffusers models).
+- **Cumulative logprobs in streaming**: SGLang's `output_token_logprobs`/`output_top_logprobs`
+  in `meta_info` are cumulative even though `output_ids` are disjoint (stream_output=True).
+  Always slice with an offset, don't assume per-chunk logprobs.
 - **Zombie GPU processes**: `sgl_diffusion::scheduler` spawns a child process that
   survives parent kill. Always check `nvidia-smi` after teardown.
+- **Session control graceful degradation**: Session control is request-driven --
+  the router's `AgentController` and `StickySessionRouter` are always created but
+  activate lazily. If no worker has `--enable-streaming-session`, the router warns
+  once and ignores `session_control` in requests. On the handler side,
+  `_session_kwargs()` checks `enable_streaming_session` before injecting
+  `session_params` into SGLang calls. Both layers must agree: the router skips
+  lifecycle RPCs, and the handler skips session params. Without both guards,
+  SGLang errors with "session id does not exist".
 
 For troubleshooting (CuDNN, config.json errors, OOM, disagg connectivity), see
 `docs/backends/sglang/sglang-examples.md#troubleshooting`.

@@ -10,7 +10,7 @@ use dynamo_llm::perf::logprobs::analyze_logprob_sensitivity;
 use dynamo_llm::perf::{RecordedStream, TimestampedResponse};
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 
-use dynamo_async_openai::types::{
+use dynamo_protocols::types::{
     ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageContent,
     ChatCompletionStreamResponseDelta, ChatCompletionTokenLogprob, FinishReason, Role, TopLogprobs,
 };
@@ -381,7 +381,6 @@ fn create_response_with_linear_probs(
         index: 0,
         delta: ChatCompletionStreamResponseDelta {
             content: Some(ChatCompletionMessageContent::Text(_content.to_string())),
-            #[expect(deprecated)]
             function_call: None,
             tool_calls: None,
             role: Some(Role::Assistant),
@@ -397,7 +396,7 @@ fn create_response_with_linear_probs(
     };
 
     NvCreateChatCompletionStreamResponse {
-        inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+        inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
             id: "test_id".to_string(),
             choices: vec![choice],
             created: 1234567890,
@@ -463,7 +462,6 @@ fn create_multi_choice_response(
                 index: choice_idx as u32,
                 delta: ChatCompletionStreamResponseDelta {
                     content: Some(ChatCompletionMessageContent::Text("test".to_string())),
-                    #[expect(deprecated)]
                     function_call: None,
                     tool_calls: None,
                     role: Some(Role::Assistant),
@@ -481,7 +479,7 @@ fn create_multi_choice_response(
         .collect();
 
     NvCreateChatCompletionStreamResponse {
-        inner: dynamo_async_openai::types::CreateChatCompletionStreamResponse {
+        inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
             id: "test_id".to_string(),
             choices,
             created: 1234567890,

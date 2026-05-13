@@ -70,12 +70,12 @@ Each engine backend has its own CLI flag to control what fraction of GPU memory 
 | SGLang  | `--mem-fraction-static`          | —                                          | 0.88
 | TRT-LLM | `--free-gpu-memory-fraction`    | `DYN_TRTLLM_FREE_GPU_MEMORY_FRACTION`      | 0.9
 
-Dynamo launch scripts recognize a generic env var, `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` (float 0.0-1.0), and translate it to the engine-specific flag. This is used by `tests/utils/profile_pytest.py` to binary-search the minimum VRAM a test needs. Currently implemented for vLLM launch scripts; SGLang and TRT-LLM support is planned.
+Dynamo launch scripts use absolute KV cache overrides for deterministic, parallel-safe GPU memory control. For vLLM, `_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES` maps to `--kv-cache-memory-bytes`. For SGLang, `_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS` maps to `--max-total-tokens`. These are set by `tests/utils/profile_pytest.py` during binary-search profiling and by `tests/utils/pytest_parallel_gpu.py` at runtime.
 
 Setting a lower memory fraction leaves more headroom for other CUDA allocations (e.g. activation buffers, NCCL buffers) at the cost of a smaller KV cache. Setting it higher allows more concurrent requests but risks OOM from non-KV-cache allocations. Typical production values are 0.85-0.95.
 
 > [!Important]
-> In vLLM, when `--kv-cache-memory-bytes` is set to an explicit value (not None), it **overrides and ignores** `--gpu-memory-utilization` for KV cache sizing ([vLLM CacheConfig docs](https://docs.vllm.ai/en/stable/api/vllm/config/cache/)). This means `_PROFILE_PYTEST_VRAM_FRAC_OVERRIDE` has no effect on actual VRAM usage for scripts that set `--kv-cache-memory-bytes`. For example, `disagg_multimodal_epd.sh` uses `--kv-cache-memory-bytes=512MB` for its prefill/decode workers, so their VRAM consumption is fixed regardless of the memory fraction.
+> In vLLM, when `--kv-cache-memory-bytes` is set to an explicit value (not None), it **overrides and ignores** `--gpu-memory-utilization` for KV cache sizing ([vLLM CacheConfig docs](https://docs.vllm.ai/en/stable/api/vllm/config/cache/)). This is exactly why we use `--kv-cache-memory-bytes` for parallel-safe allocation: it provides a deterministic, absolute KV cache cap that is immune to profiling races.
 
 
 ## Disaggregated Router

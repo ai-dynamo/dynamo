@@ -48,19 +48,23 @@ def should_enable_consolidator(arg_map) -> bool:
         )
         return False
 
-    # Check if KVBM connector is enabled
-    if not isinstance(arg_map, dict):
-        logger.warning("KV Event Consolidator is not enabled: arg_map is not a dict")
-        return False
-
-    kv_connector_config = arg_map.get("kv_connector_config", {})
-    if not isinstance(kv_connector_config, dict):
+    # Check if KVBM connector is enabled by extracting connector_module
+    # from kv_connector_config (works whether arg_map holds raw dicts or typed objects)
+    kv_connector_config = (
+        arg_map.get("kv_connector_config") if isinstance(arg_map, dict) else None
+    )
+    if kv_connector_config is None:
         logger.warning(
-            "KV Event Consolidator is not enabled: kv_connector_config is not a dict"
+            "KV Event Consolidator is not enabled: no kv_connector_config found"
         )
         return False
 
-    connector_module = kv_connector_config.get("connector_module", "")
+    if isinstance(kv_connector_config, dict):
+        connector_module = kv_connector_config.get("connector_module", "")
+    else:
+        # Access directly so AttributeError surfaces if the contract changes
+        connector_module = kv_connector_config.connector_module or ""
+
     has_kvbm_connector = "kvbm.trtllm_integration.connector" in connector_module
 
     if not has_kvbm_connector:

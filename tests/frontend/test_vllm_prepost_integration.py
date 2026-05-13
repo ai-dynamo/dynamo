@@ -43,7 +43,8 @@ SEARCH_TOOL = {
 
 pytestmark = [
     pytest.mark.vllm,
-    # vllm frontend doesn't need or use the GPU, but in CI pytorch seems to look for the Device
+    # gpu_1 not gpu_0: vLLM DeviceConfig(device='auto') fails on CPU-only arm64
+    # runners with "Failed to infer device type" even for mock tests.
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
     pytest.mark.integration,

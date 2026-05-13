@@ -113,12 +113,27 @@ pub fn parse_mm_hash_from_extra_key(s: &str) -> Option<u64> {
     None
 }
 
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum ExtraKeyItem {
+    Hash(String),
+    HashWithSignedOffset((String, i64)),
+    HashWithUnsignedOffset((String, u64)),
+    Bytes(Vec<u8>),
+    Signed(i64),
+    Unsigned(u64),
+    Float(f64),
+    Bool(bool),
+}
+
 /// Convert vLLM BlockStored extra_keys to block-level MM infos.
 /// extra_keys is a list aligned with blocks:
 /// - None => no MM content in that block
 /// - ["hash1", "hash2", ...] => one or more MM objects in that block
+/// - [[hash, start_offset], ...] => one or more MM objects with block-relative
+///   start offsets (vLLM 0.19+)
 pub fn extra_keys_to_block_mm_infos(
-    extra_keys: Option<Vec<Option<Vec<String>>>>,
+    extra_keys: Option<Vec<Option<Vec<ExtraKeyItem>>>>,
 ) -> Option<Vec<Option<BlockExtraInfo>>> {
     let extra_keys = extra_keys?;
     if extra_keys.is_empty() {
@@ -131,10 +146,24 @@ pub fn extra_keys_to_block_mm_infos(
             let mm_objects: Vec<BlockMmObjectInfo> = block_keys
                 .unwrap_or_default()
                 .iter()
-                .filter_map(|key| parse_mm_hash_from_extra_key(key))
+                .filter_map(|key| match key {
+                    ExtraKeyItem::Hash(hash)
+                    | ExtraKeyItem::HashWithSignedOffset((hash, _))
+                    | ExtraKeyItem::HashWithUnsignedOffset((hash, _)) => {
+                        parse_mm_hash_from_extra_key(hash)
+                    }
+                    ExtraKeyItem::Bytes(_)
+                    | ExtraKeyItem::Signed(_)
+                    | ExtraKeyItem::Unsigned(_)
+                    | ExtraKeyItem::Float(_)
+                    | ExtraKeyItem::Bool(_) => None,
+                })
                 .map(|mm_hash| BlockMmObjectInfo {
                     mm_hash,
-                    offsets: vec![], // extra_keys does not carry offsets today
+                    // vLLM extra_keys exposes MM start offsets but not MM lengths.
+                    // Dynamo's block hash only depends on mm_hash today, so keep
+                    // offsets empty rather than inventing a synthetic range.
+                    offsets: vec![],
                 })
                 .collect();
 
@@ -193,7 +222,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut block_size: Option<usize> = None;
         let mut medium: Option<Option<String>> = None;
         let mut lora_name: Option<Option<String>> = None;
-        let mut extra_keys: Option<Option<Vec<Option<Vec<String>>>>> = None;
+        let mut extra_keys: Option<Option<Vec<Option<Vec<ExtraKeyItem>>>>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
 
         while let Some(key) = map.next_key::<String>()? {
@@ -308,7 +337,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let _lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
                 let medium: Option<String> = seq.next_element()?.unwrap_or(None);
                 let lora_name: Option<String> = seq.next_element()?.unwrap_or(None);
-                let extra_keys: Option<Vec<Option<Vec<String>>>> =
+                let extra_keys: Option<Vec<Option<Vec<ExtraKeyItem>>>> =
                     seq.next_element()?.unwrap_or(None);
                 let block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> =
                     seq.next_element()?.unwrap_or(None);

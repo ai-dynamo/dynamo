@@ -17,33 +17,37 @@ pub(crate) enum AggRequestPhase {
 
 pub(crate) struct AggRequestState {
     request: Option<DirectRequest>,
-    phase: AggRequestPhase,
-    prefill_completed: bool,
+    pub(in crate::replay::offline) phase: AggRequestPhase,
+    pub(in crate::replay::offline) prefill_completed: bool,
+    pub(in crate::replay::offline) input_tokens: usize,
+    pub(in crate::replay::offline) output_tokens: usize,
 }
 
 impl AggRequestState {
     pub(crate) fn new_queued(request: DirectRequest) -> Self {
+        let input_tokens = request.tokens.len();
+        let output_tokens = request.max_output_tokens;
         Self {
             request: Some(request),
             phase: AggRequestPhase::QueuedAtRouter,
             prefill_completed: false,
+            input_tokens,
+            output_tokens,
         }
     }
 
-    pub(crate) fn new_running() -> Self {
+    pub(crate) fn new_running(input_tokens: usize, output_tokens: usize) -> Self {
         Self {
             request: None,
             phase: AggRequestPhase::Running,
             prefill_completed: false,
+            input_tokens,
+            output_tokens,
         }
     }
 
-    pub(crate) fn is_queued_at_router(&self) -> bool {
-        self.phase == AggRequestPhase::QueuedAtRouter
-    }
-
     pub(crate) fn take_queued_request(&mut self, uuid: Uuid) -> Result<DirectRequest> {
-        if !self.is_queued_at_router() {
+        if self.phase != AggRequestPhase::QueuedAtRouter {
             bail!("offline replay expected queued request state for {uuid}");
         }
         let request = self
@@ -52,14 +56,6 @@ impl AggRequestState {
             .ok_or_else(|| anyhow!("offline replay missing queued request payload for {uuid}"))?;
         self.phase = AggRequestPhase::Running;
         Ok(request)
-    }
-
-    pub(crate) fn prefill_completed(&self) -> bool {
-        self.prefill_completed
-    }
-
-    pub(crate) fn mark_prefill_completed(&mut self) {
-        self.prefill_completed = true;
     }
 }
 
@@ -76,7 +72,7 @@ pub(crate) struct DisaggRequestState {
     original: Option<DirectRequest>,
     #[cfg(test)]
     arrival_ms: f64,
-    phase: DisaggPhase,
+    pub(in crate::replay::offline) phase: DisaggPhase,
     prefill_worker_idx: Option<usize>,
     decode_worker_idx: Option<usize>,
 }
@@ -104,14 +100,6 @@ impl DisaggRequestState {
         }
     }
 
-    pub(crate) fn is_queued_prefill(&self) -> bool {
-        self.phase == DisaggPhase::QueuedPrefill
-    }
-
-    pub(crate) fn is_queued_decode(&self) -> bool {
-        self.phase == DisaggPhase::QueuedDecode
-    }
-
     pub(crate) fn original_request(&self) -> Result<&DirectRequest> {
         self.original
             .as_ref()
@@ -122,10 +110,6 @@ impl DisaggRequestState {
         let mut request = self.original_request()?.clone();
         request.max_output_tokens = 1;
         Ok(request)
-    }
-
-    pub(crate) fn build_decode_request(&self) -> Result<DirectRequest> {
-        Ok(self.original_request()?.clone())
     }
 
     pub(crate) fn start_prefill(&mut self, worker_idx: usize) {

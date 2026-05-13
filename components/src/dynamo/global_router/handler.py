@@ -134,16 +134,20 @@ class GlobalRouterHandler:
         extra_args = request.get("extra_args") or {}
         ttft_target = extra_args.get("ttft_target") or self.default_ttft_target
 
+        # Extract priority from routing hints (set by nvext.agent_hints.priority)
+        routing = request.get("routing") or {}
+        priority = routing.get("priority")
+
         # Select prefill pool
         pool_idx = self.config.prefill_pool_selection_strategy.select_pool(
-            isl=isl, ttft_target=ttft_target
+            isl=isl, ttft_target=ttft_target, priority=priority
         )
         namespace = self.config.prefill_pool_dynamo_namespaces[pool_idx]
         client = self.prefill_clients[namespace]
 
         logger.info(
-            f"Routing prefill request: ISL={isl}, TTFT_target={ttft_target} -> "
-            f"pool {pool_idx} ({namespace})"
+            f"Routing prefill request: ISL={isl}, TTFT_target={ttft_target}, "
+            f"priority={priority} -> pool {pool_idx} ({namespace})"
         )
 
         # Forward request to local router and stream back responses
@@ -182,15 +186,20 @@ class GlobalRouterHandler:
         extra_args = request.get("extra_args") or {}
         itl_target = extra_args.get("itl_target") or self.default_itl_target
 
+        # Extract priority from routing hints (set by nvext.agent_hints.priority)
+        routing = request.get("routing") or {}
+        priority = routing.get("priority")
+
         # Select decode pool
         pool_idx = self.config.decode_pool_selection_strategy.select_pool(
-            context_length=context_length, itl_target=itl_target
+            context_length=context_length, itl_target=itl_target, priority=priority
         )
         namespace = self.config.decode_pool_dynamo_namespaces[pool_idx]
         client = self.decode_clients[namespace]
 
         logger.info(
-            f"Routing decode request: context_length={context_length}, ITL_target={itl_target} -> "
+            f"Routing decode request: context_length={context_length}, "
+            f"ITL_target={itl_target}, priority={priority} -> "
             f"pool {pool_idx} ({namespace})"
         )
 

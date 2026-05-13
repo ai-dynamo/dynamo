@@ -7,6 +7,8 @@ mod utils;
 mod zmq;
 
 mod leader;
+#[cfg(feature = "nccl")]
+mod nccl_bootstrap;
 mod worker;
 
 pub use g3pb::{
@@ -20,7 +22,9 @@ pub use g3pb::{
     route_g3pb_sequence_hashes_by_owner, route_g3pb_transfer_blocks_by_owner, select_g3pb_owner,
 };
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
-pub use transfer::BlockTransferHandler;
+#[cfg(feature = "nccl")]
+pub use nccl_bootstrap::{NcclBootstrap, NcclCommOwned};
+pub use transfer::{BlockTransferHandler, NcclConfig};
 pub use utils::{
     BlockTransferPool, BlockTransferRequest, ConnectorRequestLeader, ConnectorTransferType,
 };

@@ -52,6 +52,8 @@ typedef struct {
     bool is_disaggregated;
     uint64_t prefill_worker_id;
     uint64_t decode_worker_id;
+    uint32_t prefill_dp_rank;
+    uint32_t decode_dp_rank;
     uint32_t *token_ids;
     size_t token_count;
 } CRoutingResult;
@@ -121,6 +123,10 @@ var (
 	routerHandles      *C.struct_RouterHandles
 	routerHandlesMutex sync.RWMutex
 )
+
+// UnsetDpRank is the ABI sentinel used by the Rust C bindings when a prefill
+// route selected a worker but left the DP rank unresolved.
+const UnsetDpRank = ^uint32(0)
 
 func loadDynamoConfig() {
 	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE_PREFIX", getEnvOrDefault("DYN_NAMESPACE", "vllm-agg"))
@@ -411,6 +417,7 @@ func CallFreeRequest(requestID string) error {
 // RoutingResult holds the result of a prefill or decode routing call.
 type RoutingResult struct {
 	WorkerID  uint64
+	DpRank    uint32
 	TokenData []int64
 }
 
@@ -455,9 +462,10 @@ func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResul
 	}
 
 	workerID := uint64(result.prefill_worker_id)
+	dpRank := uint32(result.prefill_dp_rank)
 	C.free_routing_result(&result)
 
-	return &RoutingResult{WorkerID: workerID, TokenData: tokens64}, nil
+	return &RoutingResult{WorkerID: workerID, DpRank: dpRank, TokenData: tokens64}, nil
 }
 
 // CallRouteDecodeRequest routes a request to the best decode worker.
@@ -501,7 +509,8 @@ func CallRouteDecodeRequest(requestJSON string, podsJSON string, isDisaggregated
 	}
 
 	workerID := uint64(result.decode_worker_id)
+	dpRank := uint32(result.decode_dp_rank)
 	C.free_routing_result(&result)
 
-	return &RoutingResult{WorkerID: workerID, TokenData: tokens64}, nil
+	return &RoutingResult{WorkerID: workerID, DpRank: dpRank, TokenData: tokens64}, nil
 }

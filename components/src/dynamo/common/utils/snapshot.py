@@ -4,9 +4,6 @@
 """Shared Dynamo snapshot helpers for checkpoint lifecycle."""
 
 import asyncio
-import ctypes
-import ctypes.util
-import gc
 import logging
 import os
 import signal
@@ -17,13 +14,13 @@ from dynamo.common.utils.namespace import get_worker_namespace
 
 logger = logging.getLogger(__name__)
 PODINFO_ROOT = "/etc/podinfo"
-REQUIRED_PODINFO_FILES = {
+KUBERNETES_REQUIRED_PODINFO_FILES = {
     "DYN_NAMESPACE": "dyn_namespace",
     "DYN_COMPONENT": "dyn_component",
     "DYN_PARENT_DGD_K8S_NAME": "dyn_parent_dgd_k8s_name",
     "DYN_PARENT_DGD_K8S_NAMESPACE": "dyn_parent_dgd_k8s_namespace",
 }
-OPTIONAL_PODINFO_FILES = {
+KUBERNETES_OPTIONAL_PODINFO_FILES = {
     "DYN_NAMESPACE_WORKER_SUFFIX": "dyn_namespace_worker_suffix",
 }
 EngineT = TypeVar("EngineT")
@@ -203,12 +200,29 @@ class EngineSnapshotController(Generic[EngineT]):
             *self.quiesce_args,
         )
 
-    def reload_restore_identity(self) -> tuple[str, str]:
-        return reload_snapshot_restore_identity()
+    def reload_restore_identity(
+        self,
+        namespace: str,
+        discovery_backend: str,
+    ) -> tuple[str, str]:
+        return reload_snapshot_restore_identity(namespace, discovery_backend)
 
 
-def reload_snapshot_restore_identity() -> tuple[str, str]:
-    for env_name, podinfo_file in REQUIRED_PODINFO_FILES.items():
+def reload_snapshot_restore_identity(
+    namespace: str,
+    discovery_backend: str,
+) -> tuple[str, str]:
+    if discovery_backend != "kubernetes":
+        logger.info(
+            "Snapshot restore reusing configured discovery backend",
+            extra={
+                "dynamo_namespace": namespace,
+                "discovery_backend": discovery_backend,
+            },
+        )
+        return namespace, discovery_backend
+
+    for env_name, podinfo_file in KUBERNETES_REQUIRED_PODINFO_FILES.items():
         podinfo_path = os.path.join(PODINFO_ROOT, podinfo_file)
         if not os.path.isfile(podinfo_path):
             raise RuntimeError(f"snapshot restore requires {podinfo_path}")
@@ -220,7 +234,7 @@ def reload_snapshot_restore_identity() -> tuple[str, str]:
 
         os.environ[env_name] = value
 
-    for env_name, podinfo_file in OPTIONAL_PODINFO_FILES.items():
+    for env_name, podinfo_file in KUBERNETES_OPTIONAL_PODINFO_FILES.items():
         podinfo_path = os.path.join(PODINFO_ROOT, podinfo_file)
         if not os.path.isfile(podinfo_path):
             os.environ.pop(env_name, None)
@@ -234,51 +248,5 @@ def reload_snapshot_restore_identity() -> tuple[str, str]:
 
         os.environ[env_name] = value
 
-    # Snapshot restore only runs in Kubernetes-managed pods, so discovery resets here.
     os.environ["DYN_DISCOVERY_BACKEND"] = "kubernetes"
     return get_worker_namespace(), "kubernetes"
-
-
-def _try_release_memory(label: str) -> None:
-    """Force Python GC and glibc malloc_trim to return freed memory to the OS.
-
-    Logs RSS before/after so you can see how much memory was actually reclaimable.
-    """
-    pid = os.getpid()
-
-    def _get_rss_kb() -> int:
-        try:
-            with open(f"/proc/{pid}/status") as f:
-                for line in f:
-                    if line.startswith("VmRSS:"):
-                        return int(line.split()[1])
-        except Exception:
-            pass
-        return 0
-
-    rss_before = _get_rss_kb()
-
-    collected = gc.collect()
-    rss_after_gc = _get_rss_kb()
-
-    try:
-        libc_name = ctypes.util.find_library("c")
-        if libc_name:
-            libc = ctypes.CDLL(libc_name)
-            libc.malloc_trim(0)
-    except Exception as e:
-        logger.debug("[MemRelease:%s] malloc_trim failed: %s", label, e)
-
-    rss_after_trim = _get_rss_kb()
-
-    logger.info(
-        "[MemRelease:%s] gc.collect freed %d objects, "
-        "RSS: %.2f MiB -> %.2f MiB (gc) -> %.2f MiB (malloc_trim), "
-        "reclaimed=%.2f MiB",
-        label,
-        collected,
-        rss_before / 1024,
-        rss_after_gc / 1024,
-        rss_after_trim / 1024,
-        (rss_before - rss_after_trim) / 1024,
-    )

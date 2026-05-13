@@ -3,36 +3,60 @@
 
 """Shared utilities for GPU Memory Service."""
 
+import logging
 import os
 import tempfile
-import uuid
+from typing import NoReturn
 
-from cuda.bindings import driver as cuda
-from gpu_memory_service.common.cuda_vmm_utils import (
-    check_cuda_result,
-    ensure_cuda_initialized,
-)
+logger = logging.getLogger(__name__)
 
 
-def get_socket_path(device: int) -> str:
-    """Get GMS socket path for the given CUDA device.
+def fail(message: str, *args, exc_info=None) -> NoReturn:
+    logger.critical(message, *args, exc_info=exc_info)
+    logging.shutdown()
+    os._exit(1)
 
-    The socket path is based on GPU UUID resolved by CUDA.
-    CUDA_VISIBLE_DEVICES remapping is handled by CUDA device enumeration.
+
+_uuid_cache: dict[int, str] = {}
+
+
+def invalidate_uuid_cache() -> None:
+    """Clear cached GPU UUIDs. Call after CRIU restore when GPU assignment may change."""
+    _uuid_cache.clear()
+
+
+def get_socket_path(device: int, tag: str = "weights") -> str:
+    """Get GMS socket path for the given CUDA device and tag.
+
+    The socket path is based on GPU UUID, making it stable across different
+    CUDA_VISIBLE_DEVICES configurations. UUIDs are cached per device index.
 
     Args:
         device: CUDA device index.
 
     Returns:
-        Socket path (e.g., "<tempdir>/gms_GPU-12345678-1234-1234-1234-123456789abc.sock").
+        Socket path
+        (e.g., "<tempdir>/gms_GPU-12345678-1234-1234-1234-123456789abc_weights.sock").
     """
-    ensure_cuda_initialized()
+    uuid = _uuid_cache.get(device)
+    if uuid is None:
+        import pynvml  # deferred: not available in all environments
 
-    result, cu_device = cuda.cuDeviceGet(device)
-    check_cuda_result(result, "cuDeviceGet")
+        pynvml.nvmlInit()
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+            uuid = pynvml.nvmlDeviceGetUUID(handle)
+        finally:
+            pynvml.nvmlShutdown()
+        _uuid_cache[device] = uuid
+    socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
+    return os.path.join(socket_dir, f"gms_{uuid}_{tag}.sock")
 
-    result, cu_uuid = cuda.cuDeviceGetUuid(cu_device)
-    check_cuda_result(result, "cuDeviceGetUuid")
 
-    gpu_uuid = f"GPU-{uuid.UUID(bytes=bytes(cu_uuid.bytes))}"
-    return os.path.join(tempfile.gettempdir(), f"gms_{gpu_uuid}.sock")
+def wait_for_weights_socket(device: int) -> None:
+    """Block until the GMS weights socket for the given device exists."""
+    import time
+
+    path = get_socket_path(device, "weights")
+    while not os.path.exists(path):
+        time.sleep(0.1)

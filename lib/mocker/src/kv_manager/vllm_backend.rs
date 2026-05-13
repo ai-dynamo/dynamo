@@ -44,7 +44,7 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_tokens::blocks::UniqueBlock;
 use dynamo_tokens::{BlockHash, SequenceHash};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 pub struct KvManager {
     cache: HashCache,
@@ -351,7 +351,7 @@ impl KvManager {
     }
 
     /// Direct access to active blocks map (for tests).
-    pub fn active_blocks(&self) -> &HashMap<UniqueBlock, usize> {
+    pub fn active_blocks(&self) -> &FxHashMap<UniqueBlock, usize> {
         self.cache.active_blocks()
     }
 

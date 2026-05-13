@@ -3,10 +3,9 @@
 
 use std::time::Duration;
 
-use ordered_float::OrderedFloat;
-
 use super::config::RouterQueuePolicy;
 use super::types::SchedulingRequest;
+use ordered_float::OrderedFloat;
 /// Pluggable scheduling policy that determines queue ordering.
 /// Monomorphized for zero-cost inlining on the hot comparison path.
 ///
@@ -60,9 +59,9 @@ impl SchedulingPolicy for LcfsPolicy {
 
 /// Weighted Shortest Processing Time (Smith's rule):
 /// key = (1 + priority_jump) / new_tokens, where new_tokens estimates the
-/// actual prefill cost by subtracting the max KV cache overlap from ISL.
-/// We use max because the downstream selector routes to the best-overlap
-/// worker, so the realized overlap is well-approximated by the best available.
+/// actual prefill cost by subtracting the effective KV cache overlap from ISL.
+/// Unpinned requests use the best available overlap. Pinned requests use only
+/// the overlap for their exact target worker so queue ordering matches routing.
 ///
 /// Optimizes for average TTFT — minimizes total weighted completion time
 /// (Smith 1956). Short or high-priority requests are scheduled before
@@ -76,8 +75,7 @@ impl SchedulingPolicy for WsptPolicy {
 
     fn enqueue_key(&self, _arrival_offset: Duration, request: &SchedulingRequest) -> Self::Key {
         let weight = 1.0 + request.priority_jump.max(0.0);
-        let max_overlap = request.overlaps.scores.values().copied().max().unwrap_or(0) as usize;
-        let cached_tokens = max_overlap * self.block_size;
+        let cached_tokens = request.overlap_blocks() as usize * self.block_size;
         let new_tokens = request.isl_tokens.saturating_sub(cached_tokens).max(1);
         OrderedFloat(weight / new_tokens as f64)
     }
@@ -116,8 +114,6 @@ impl SchedulingPolicy for RouterSchedulingPolicy {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use rustc_hash::FxHashMap;
 
     use super::*;
@@ -133,14 +129,15 @@ mod tests {
             token_seq: None,
             isl_tokens,
             overlaps,
-            decode_blocks: HashMap::new(),
-            prefill_tokens: HashMap::new(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             update_states: false,
             lora_name: None,
             priority_jump,
             expected_output_tokens: None,
+            pinned_worker: None,
             allowed_worker_ids: None,
             resp_tx: None,
         }
@@ -286,6 +283,28 @@ mod tests {
         );
         let key = policy.enqueue_key(Duration::ZERO, &req);
         let expected = OrderedFloat(1.0 / 64.0);
+        assert_eq!(key, expected);
+    }
+
+    #[test]
+    fn wspt_uses_pinned_worker_overlap_when_present() {
+        let policy = WsptPolicy { block_size: 16 };
+        let mut req = request_with(1024, 0.0, overlaps_from(&[(0, 60), (1, 1)]));
+        req.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+
+        let key = policy.enqueue_key(Duration::ZERO, &req);
+        let expected = OrderedFloat(1.0 / 1008.0);
+        assert_eq!(key, expected);
+    }
+
+    #[test]
+    fn wspt_missing_pinned_overlap_uses_zero() {
+        let policy = WsptPolicy { block_size: 16 };
+        let mut req = request_with(1024, 0.0, overlaps_from(&[(0, 60)]));
+        req.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+
+        let key = policy.enqueue_key(Duration::ZERO, &req);
+        let expected = OrderedFloat(1.0 / 1024.0);
         assert_eq!(key, expected);
     }
 

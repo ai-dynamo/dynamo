@@ -31,6 +31,8 @@ reviews:
       instructions: "Review against .ai/python-guidelines.md"
     - path: "**/tests/**/*.py"
       instructions: "Review against .ai/pytest-guidelines.md"
+    - path: "**/launch/**/*.sh"
+      instructions: "Review against .ai/bash-launch-guidelines.md"
 knowledge_base:
   code_guidelines:
     filePatterns:

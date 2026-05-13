@@ -153,7 +153,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
 ARG WORKSPACE_DIR=/workspace
 WORKDIR ${WORKSPACE_DIR}
 COPY --chmod=775 --chown=dynamo:0 ./ ${WORKSPACE_DIR}/
-RUN chmod g+w ${WORKSPACE_DIR}
 
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA

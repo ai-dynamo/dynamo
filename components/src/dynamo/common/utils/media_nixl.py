@@ -4,7 +4,7 @@
 import logging
 import time
 import uuid
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Literal, Tuple, overload
 
 import numpy as np
 import torch
@@ -13,6 +13,24 @@ from dynamo import nixl_connect
 from dynamo.nixl_connect import OperationKind, RdmaMetadata, SerializedDescriptor
 
 logger = logging.getLogger(__name__)
+
+
+@overload
+async def read_decoded_media_via_nixl(
+    connector: nixl_connect.Connector,
+    decoded_meta: Dict[str, Any],
+    return_metadata: Literal[False] = False,
+) -> np.ndarray:
+    ...
+
+
+@overload
+async def read_decoded_media_via_nixl(
+    connector: nixl_connect.Connector,
+    decoded_meta: Dict[str, Any],
+    return_metadata: Literal[True],
+) -> Tuple[np.ndarray, Dict[str, Any] | None]:
+    ...
 
 
 async def read_decoded_media_via_nixl(

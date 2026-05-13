@@ -67,6 +67,31 @@ spec:
             spec:
               description: DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
               properties:
+                gpuMemoryService:
+                  description: |-
+                    GPUMemoryService enables checkpoint-time GPU Memory Service wiring.
+                    It is intentionally outside spec.identity, so it does not affect the
+                    checkpoint identity hash or deduplication.
+                  properties:
+                    deviceClassName:
+                      default: gpu.nvidia.com
+                      description: DeviceClassName is the DRA DeviceClass to request GPUs from.
+                      type: string
+                    enabled:
+                      description: |-
+                        Enabled activates the GMS sidecar. GPU resources on the main container
+                        are replaced with a DRA ResourceClaim for shared GPU access.
+                      type: boolean
+                    mode:
+                      default: intraPod
+                      description: Mode selects the GMS deployment topology.
+                      enum:
+                        - intraPod
+                        - interPod
+                      type: string
+                  required:
+                    - enabled
+                  type: object
                 identity:
                   description: Identity defines the inputs that determine checkpoint equivalence
                   properties:
@@ -8173,8 +8198,9 @@ spec:
                         - message: sharedMemory.size must not be set when sharedMemory.disabled is true
                           rule: '!(has(self.disabled) && self.disabled && has(self.size))'
                     ttlSecondsAfterFinished:
-                      default: 300
-                      description: TTLSecondsAfterFinished specifies how long to keep the Job after completion
+                      description: |-
+                        Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed
+                        300 second TTL.
                       format: int32
                       minimum: 0
                       type: integer
@@ -8245,7 +8271,7 @@ spec:
                     type: object
                   type: array
                 createdAt:
-                  description: CreatedAt is the timestamp when the checkpoint tar was created
+                  description: CreatedAt is the timestamp when the checkpoint became ready
                   format: date-time
                   type: string
                 identityHash:
@@ -8258,10 +8284,8 @@ spec:
                   type: string
                 location:
                   description: |-
-                    Location is the full URI/path to the checkpoint in the storage backend
-                    For PVC: same as TarPath (e.g., /checkpoints/{hash}.tar)
-                    For S3: s3://bucket/prefix/{hash}.tar
-                    For OCI: oci://registry/repo:{hash}
+                    Deprecated: Location is ignored and no longer populated. It is retained
+                    only so older objects continue to validate.
                   type: string
                 message:
                   description: Message provides additional information about the current state
@@ -8275,7 +8299,9 @@ spec:
                     - Failed
                   type: string
                 storageType:
-                  description: StorageType indicates the storage backend type used for this checkpoint
+                  description: |-
+                    Deprecated: StorageType is ignored and no longer populated. It is retained
+                    only so older objects continue to validate.
                   enum:
                     - pvc
                     - s3

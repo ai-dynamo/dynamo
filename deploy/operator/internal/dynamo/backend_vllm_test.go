@@ -88,7 +88,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			multinodeDeployer:   &LWSMultinodeDeployer{},
 			initialContainer:    &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "8"}},
 			gpuCount:            4,
-			expectedArgs:        []string{"ray start --address=$LWS_LEADER_ADDRESS:6379 --block"},
+			expectedArgs:        []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 			expectProbesRemoved: true,
 		},
 		{
@@ -261,7 +261,7 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 			multinodeDeployer: &LWSMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("python3 -m dynamo.vllm %s 8", dataParallelSizeFlag)}},
 			gpuCount:          4,
-			expectedArgs:      []string{"python3 -m dynamo.vllm --data-parallel-hybrid-lb --data-parallel-size-local 4 --data-parallel-start-rank 0 --data-parallel-address $LWS_LEADER_ADDRESS --data-parallel-rpc-port 13445 --data-parallel-size 8"},
+			expectedArgs:      []string{"python3 -m dynamo.vllm --data-parallel-hybrid-lb --data-parallel-size-local 4 --data-parallel-start-rank 0 --data-parallel-address $(LWS_LEADER_ADDRESS) --data-parallel-rpc-port 13445 --data-parallel-size 8"},
 			description:       "LWS shell commands should use LWS variables",
 		},
 		{
@@ -452,6 +452,9 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 				tensorParallelSizeFlag, commonconsts.VLLMMpMasterPort)},
 		},
 		{
+			// LWS worker: $(LWS_LEADER_ADDRESS) and $(LWS_WORKER_INDEX) are both
+			// kubelet-expanded, so flags are appended directly to Args without an
+			// sh -c wrapper.
 			name:              "worker uses mp (origin version >= threshold) LWS",
 			role:              RoleWorker,
 			multinodeDeployer: &LWSMultinodeDeployer{},
@@ -460,9 +463,34 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			annotations: map[string]string{
 				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
 			},
-			expectedArgs: []string{fmt.Sprintf(
-				"exec python3 -m dynamo.vllm %s 16 --distributed-executor-backend mp --nnodes 2 --master-addr $LWS_LEADER_ADDRESS --master-port %s --node-rank $(LWS_WORKER_INDEX) --headless",
-				tensorParallelSizeFlag, commonconsts.VLLMMpMasterPort)},
+			expectedArgs: []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16", "--distributed-executor-backend", "mp", "--nnodes", "2", "--master-addr", "$(LWS_LEADER_ADDRESS)", "--master-port", commonconsts.VLLMMpMasterPort, "--node-rank", "$(LWS_WORKER_INDEX)", "--headless"},
+		},
+		{
+			// Regression test: LWS leader with direct python command must emit
+			// Kubernetes $(LWS_LEADER_ADDRESS) syntax so the kubelet expands it
+			// from the LWS-injected env var. Emitting the bare shell $VAR causes
+			// vLLM to receive the literal string and fail to resolve the leader.
+			name:              "leader uses mp (origin version >= threshold) LWS",
+			role:              RoleLeader,
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
+			gpuCount:          8,
+			annotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+			},
+			expectedArgs: []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16", "--distributed-executor-backend", "mp", "--nnodes", "2", "--master-addr", "$(LWS_LEADER_ADDRESS)", "--master-port", commonconsts.VLLMMpMasterPort, "--node-rank", "0"},
+		},
+		{
+			// Regression test: LWS leader on the data-parallel path. Same bug
+			// class as the MP leader case above - bare $LWS_LEADER_ADDRESS would
+			// not be expanded by K8s, so we emit $(LWS_LEADER_ADDRESS) instead.
+			name:              "leader with data parallel launch LWS",
+			role:              RoleLeader,
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", dataParallelSizeFlag, "16"}},
+			gpuCount:          8,
+			annotations:       nil,
+			expectedArgs:      []string{"-m", "dynamo.vllm", dataParallelSizeFlag, "16", "--data-parallel-hybrid-lb", "--data-parallel-size-local", "8", "--data-parallel-start-rank", "0", "--data-parallel-address", "$(LWS_LEADER_ADDRESS)", "--data-parallel-rpc-port", "13445"},
 		},
 		{
 			name:              "leader prepends distributed data parallel flags (annotations don't affect DP path)",
@@ -516,7 +544,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			initialContainer:  &corev1.Container{Args: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
 			gpuCount:          8,
 			annotations:       nil,
-			expectedArgs:      []string{"ray start --address=$LWS_LEADER_ADDRESS:6379 --block"},
+			expectedArgs:      []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 		},
 		{
 			name:              "main role does not modify args",
@@ -560,20 +588,18 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 }
 
 func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
-	backend := &VLLMBackend{}
+	backend := &VLLMBackend{ParentGraphDeploymentName: "test-dgd"}
 
 	tests := []struct {
-		name                    string
-		numberOfNodes           int32
-		role                    Role
-		component               *v1alpha1.DynamoComponentDeploymentSharedSpec
-		multinodeDeployer       MultinodeDeployer
-		initialPodSpec          *corev1.PodSpec
-		expectInitContainer     bool
-		expectedInitName        string
-		expectedInitImage       string
-		expectedInitCommandLen  int
-		expectWaitScriptContent string
+		name                string
+		numberOfNodes       int32
+		role                Role
+		component           *v1alpha1.DynamoComponentDeploymentSharedSpec
+		multinodeDeployer   MultinodeDeployer
+		initialPodSpec      *corev1.PodSpec
+		expectInitContainer bool
+		expectedInitImage   string
+		expectedLeaderHost  string
 	}{
 		{
 			name:          "mp worker with Grove deployer injects init container",
@@ -590,11 +616,9 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 					{Name: "main", Image: "vllm:latest"},
 				},
 			},
-			expectInitContainer:     true,
-			expectedInitName:        "wait-for-leader-mp",
-			expectedInitImage:       "vllm:latest",
-			expectedInitCommandLen:  3,
-			expectWaitScriptContent: "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+			expectInitContainer: true,
+			expectedInitImage:   "vllm:latest",
+			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
 		},
 		{
 			name:          "mp worker with LWS deployer injects init container",
@@ -611,11 +635,9 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 					{Name: "main", Image: "vllm:v2"},
 				},
 			},
-			expectInitContainer:     true,
-			expectedInitName:        "wait-for-leader-mp",
-			expectedInitImage:       "vllm:v2",
-			expectedInitCommandLen:  3,
-			expectWaitScriptContent: "$LWS_LEADER_ADDRESS",
+			expectInitContainer: true,
+			expectedInitImage:   "vllm:v2",
+			expectedLeaderHost:  "${LWS_LEADER_ADDRESS}",
 		},
 		{
 			name:          "mp leader does not inject init container",
@@ -682,11 +704,9 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 					{Name: "main", Image: "vllm:latest"},
 				},
 			},
-			expectInitContainer:     true,
-			expectedInitName:        "wait-for-leader-mp",
-			expectedInitImage:       "vllm:latest",
-			expectedInitCommandLen:  3,
-			expectWaitScriptContent: "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+			expectInitContainer: true,
+			expectedInitImage:   "vllm:latest",
+			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
 		},
 	}
 
@@ -695,25 +715,64 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 
 			initialInitCount := len(tt.initialPodSpec.InitContainers)
+			initialVolCount := len(tt.initialPodSpec.Volumes)
 			backend.UpdatePodSpec(tt.initialPodSpec, tt.numberOfNodes, tt.role, tt.component, "test-service", tt.multinodeDeployer)
 
 			if tt.expectInitContainer {
-				g.Expect(len(tt.initialPodSpec.InitContainers)).To(gomega.Equal(initialInitCount + 1))
+				g.Expect(tt.initialPodSpec.InitContainers).To(gomega.HaveLen(initialInitCount + 1))
+				g.Expect(tt.initialPodSpec.Volumes).To(gomega.HaveLen(initialVolCount + 1))
 
 				injected := tt.initialPodSpec.InitContainers[len(tt.initialPodSpec.InitContainers)-1]
-				g.Expect(injected.Name).To(gomega.Equal(tt.expectedInitName))
+				g.Expect(injected.Name).To(gomega.Equal("wait-for-leader-mp"))
 				g.Expect(injected.Image).To(gomega.Equal(tt.expectedInitImage))
-				g.Expect(len(injected.Command)).To(gomega.Equal(tt.expectedInitCommandLen))
-				g.Expect(injected.Command[0]).To(gomega.Equal("python3"))
-				g.Expect(injected.Command[1]).To(gomega.Equal("-c"))
-				g.Expect(injected.Command[2]).To(gomega.ContainSubstring(tt.expectWaitScriptContent))
-				g.Expect(injected.Command[2]).To(gomega.ContainSubstring("socket.create_connection"))
-				g.Expect(injected.Command[2]).To(gomega.ContainSubstring(commonconsts.VLLMMpMasterPort))
+
+				expectedCmd := fmt.Sprintf(
+					`export LEADER_HOST="%s" LEADER_PORT="%s" && exec python3 /scripts/wait-for-leader.py`,
+					tt.expectedLeaderHost, commonconsts.VLLMMpMasterPort)
+				g.Expect(injected.Command).To(gomega.Equal([]string{"sh", "-c", expectedCmd}))
+				g.Expect(injected.Env).To(gomega.BeEmpty())
+
+				g.Expect(injected.VolumeMounts).To(gomega.HaveLen(1))
+				g.Expect(injected.VolumeMounts[0].Name).To(gomega.Equal("wait-leader-script"))
+				g.Expect(injected.VolumeMounts[0].MountPath).To(gomega.Equal("/scripts"))
+				g.Expect(injected.VolumeMounts[0].ReadOnly).To(gomega.BeTrue())
+
+				vol := tt.initialPodSpec.Volumes[len(tt.initialPodSpec.Volumes)-1]
+				g.Expect(vol.Name).To(gomega.Equal("wait-leader-script"))
+				g.Expect(vol.ConfigMap).ToNot(gomega.BeNil())
+				g.Expect(vol.ConfigMap.Name).To(gomega.Equal("test-dgd-wait-leader-script"))
 			} else {
-				g.Expect(len(tt.initialPodSpec.InitContainers)).To(gomega.Equal(initialInitCount))
+				g.Expect(tt.initialPodSpec.InitContainers).To(gomega.HaveLen(initialInitCount))
+				g.Expect(tt.initialPodSpec.Volumes).To(gomega.HaveLen(initialVolCount))
 			}
 		})
 	}
+}
+
+func TestGenerateWaitLeaderConfigMap(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	cm := GenerateWaitLeaderConfigMap("my-dgd", "my-ns")
+
+	g.Expect(cm.Name).To(gomega.Equal("my-dgd-wait-leader-script"))
+	g.Expect(cm.Namespace).To(gomega.Equal("my-ns"))
+	g.Expect(cm.Labels).To(gomega.HaveKeyWithValue(commonconsts.KubeLabelDynamoGraphDeploymentName, "my-dgd"))
+	g.Expect(cm.Data).To(gomega.HaveKey("wait-for-leader.py"))
+
+	script := cm.Data["wait-for-leader.py"]
+	g.Expect(script).To(gomega.ContainSubstring(`os.environ["LEADER_HOST"]`))
+	g.Expect(script).To(gomega.ContainSubstring(`os.environ["LEADER_PORT"]`))
+	g.Expect(script).To(gomega.ContainSubstring("leader_pod_is_healthy"))
+	g.Expect(script).To(gomega.ContainSubstring("kubernetes.default.svc"))
+	g.Expect(script).To(gomega.ContainSubstring("fieldSelector=status.podIP="))
+	g.Expect(script).To(gomega.ContainSubstring("deletionTimestamp"))
+	g.Expect(script).To(gomega.ContainSubstring("socket.create_connection"))
+	g.Expect(script).To(gomega.ContainSubstring("time.sleep(5)"))
+}
+
+func TestGetWaitLeaderConfigMapName(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	g.Expect(GetWaitLeaderConfigMapName("foo")).To(gomega.Equal("foo-wait-leader-script"))
 }
 
 func TestShouldUseMpBackend(t *testing.T) {

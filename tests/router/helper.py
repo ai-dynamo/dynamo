@@ -118,8 +118,13 @@ def verify_response_worker_ids(
     )
 
 
-def verify_response_timing(timing_info: dict[str, Any]) -> None:
-    """Verify timing info has valid values (ttft_ms > 0, total_time_ms > 0)."""
+def verify_response_timing(timing_info: dict[str, Any], disagg: bool = False) -> None:
+    """Verify timing info has valid values (ttft_ms > 0, total_time_ms > 0).
+
+    Args:
+        timing_info: Dict of timing fields from nvext.timing in the response.
+        disagg: If True, also verify kv_transfer_estimated_latency_ms > 0 (disaggregated mode only).
+    """
     ttft_ms = timing_info.get("ttft_ms")
     total_time_ms = timing_info.get("total_time_ms")
 
@@ -133,6 +138,21 @@ def verify_response_timing(timing_info: dict[str, Any]) -> None:
     logger.info(
         f"✓ Verified timing: ttft_ms={ttft_ms:.2f}, total_time_ms={total_time_ms:.2f}"
     )
+
+    if disagg:
+        kv_transfer_estimated_latency_ms = timing_info.get(
+            "kv_transfer_estimated_latency_ms"
+        )
+        assert (
+            kv_transfer_estimated_latency_ms is not None
+            and kv_transfer_estimated_latency_ms > 0
+        ), (
+            f"Expected kv_transfer_estimated_latency_ms > 0 in disaggregated mode, "
+            f"got: {kv_transfer_estimated_latency_ms}"
+        )
+        logger.info(
+            f"✓ Verified kv_transfer_estimated_latency_ms={kv_transfer_estimated_latency_ms:.2f}"
+        )
 
 
 ########################################################

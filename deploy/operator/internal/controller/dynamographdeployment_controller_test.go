@@ -456,7 +456,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 
 	referenced := &v1alpha1.DynamoCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "friendly-checkpoint",
+			Name:      friendlyCheckpointName,
 			Namespace: "default",
 		},
 		Spec: v1alpha1.DynamoCheckpointSpec{
@@ -526,7 +526,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 	if info.Hash != hash {
 		t.Fatalf("checkpoint hash = %s, want %s", info.Hash, hash)
 	}
-	if checkpointStatuses["worker"].CheckpointName != "friendly-checkpoint" {
+	if checkpointStatuses["worker"].CheckpointName != friendlyCheckpointName {
 		t.Fatalf("checkpoint status name = %s, want friendly-checkpoint", checkpointStatuses["worker"].CheckpointName)
 	}
 
@@ -537,8 +537,93 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 	if len(checkpoints.Items) != 1 {
 		t.Fatalf("expected only the referenced checkpoint to exist, found %d", len(checkpoints.Items))
 	}
-	if checkpoints.Items[0].Name != "friendly-checkpoint" {
+	if checkpoints.Items[0].Name != friendlyCheckpointName {
 		t.Fatalf("unexpected checkpoint %s", checkpoints.Items[0].Name)
+	}
+}
+
+func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesReadyReferencedCR(t *testing.T) {
+	if err := v1alpha1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
+	}
+
+	ctx := context.Background()
+	identity := v1alpha1.DynamoCheckpointIdentity{
+		Model:            "meta-llama/Llama-2-7b-hf",
+		BackendFramework: "vllm",
+	}
+	hash, err := checkpoint.ComputeIdentityHash(identity)
+	if err != nil {
+		t.Fatalf("Failed to compute checkpoint hash: %v", err)
+	}
+
+	referenced := &v1alpha1.DynamoCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      friendlyCheckpointName,
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoCheckpointSpec{
+			Identity: identity,
+		},
+		Status: v1alpha1.DynamoCheckpointStatus{
+			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
+			IdentityHash: hash,
+		},
+	}
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(scheme.Scheme).
+			WithObjects(referenced).
+			WithStatusSubresource(referenced).
+			Build(),
+		Config:   &configv1alpha1.OperatorConfiguration{},
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	ref := friendlyCheckpointName
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: string(commonconsts.ComponentTypeWorker),
+					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+						Enabled:       true,
+						Mode:          v1alpha1.CheckpointModeAuto,
+						CheckpointRef: &ref,
+					},
+				},
+			},
+		},
+	}
+
+	checkpointStatuses, checkpointInfos, err := reconciler.reconcileCheckpoints(ctx, dgd)
+	if err != nil {
+		t.Fatalf("reconcileCheckpoints() error = %v", err)
+	}
+
+	info, ok := checkpointInfos["worker"]
+	if !ok {
+		t.Fatalf("expected checkpoint info for worker service")
+	}
+	if !info.Ready {
+		t.Fatalf("expected referenced checkpoint to be ready")
+	}
+	if !info.Exists {
+		t.Fatalf("expected referenced checkpoint to exist")
+	}
+	if info.Hash != hash {
+		t.Fatalf("checkpoint hash = %s, want %s", info.Hash, hash)
+	}
+	if checkpointStatuses["worker"].CheckpointName != friendlyCheckpointName {
+		t.Fatalf("checkpoint status name = %s, want friendly-checkpoint", checkpointStatuses["worker"].CheckpointName)
+	}
+	if !checkpointStatuses["worker"].Ready {
+		t.Fatalf("expected checkpoint status to be ready")
 	}
 }
 
@@ -2608,6 +2693,101 @@ func TestPropagateTopologyCondition(t *testing.T) {
 				eventCount++
 			}
 			g.Expect(eventCount).To(gomega.Equal(tt.wantEventCount))
+		})
+	}
+}
+
+func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
+	tests := []struct {
+		name         string
+		obj          client.Object
+		wantRequests int
+		wantName     string
+		wantNs       string
+	}{
+		{
+			name: "PCSG with PodCliqueSet controller ownerRef returns DGD request",
+			obj: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "dynamo-recipe-0-worker",
+					Namespace: "mwieczorek-dsv32-trtllm-agg",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: grovev1alpha1.SchemeGroupVersion.String(),
+							Kind:       "PodCliqueSet",
+							Name:       "dynamo-recipe",
+							Controller: ptr.To(true),
+						},
+					},
+				},
+			},
+			wantRequests: 1,
+			wantName:     "dynamo-recipe",
+			wantNs:       "mwieczorek-dsv32-trtllm-agg",
+		},
+		{
+			name: "PCSG with no ownerRef returns no requests",
+			obj: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "orphan-pcsg",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 0,
+		},
+		{
+			name: "PCSG with non-controller PodCliqueSet ownerRef returns no requests",
+			obj: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pcsg-with-non-controller-ref",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: grovev1alpha1.SchemeGroupVersion.String(),
+							Kind:       "PodCliqueSet",
+							Name:       "some-pcs",
+							// Controller flag omitted: metav1.GetControllerOf must ignore this ref.
+						},
+					},
+				},
+			},
+			wantRequests: 0,
+		},
+		{
+			name: "PCSG with non-PodCliqueSet ownerRef returns no requests",
+			obj: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "weird-pcsg",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "apps/v1",
+							Kind:       "Deployment",
+							Name:       "not-a-pcs",
+						},
+					},
+				},
+			},
+			wantRequests: 0,
+		},
+		{
+			name:         "non-PCSG object returns no requests",
+			obj:          &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "default"}},
+			wantRequests: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+			r := &DynamoGraphDeploymentReconciler{}
+			reqs := r.mapPodCliqueScalingGroupToRequests(context.Background(), tt.obj)
+
+			g.Expect(reqs).To(gomega.HaveLen(tt.wantRequests))
+			if tt.wantRequests == 1 {
+				g.Expect(reqs[0].Name).To(gomega.Equal(tt.wantName))
+				g.Expect(reqs[0].Namespace).To(gomega.Equal(tt.wantNs))
+			}
 		})
 	}
 }

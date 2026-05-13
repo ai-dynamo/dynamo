@@ -52,42 +52,9 @@ This guide assumes Dynamo is already installed in your current Python environmen
 
 If the model is gated/private, also set `HF_TOKEN`.
 
-### vLLM Patch Requirement (as of 2026-02-25)
+### vLLM Version Requirement
 
-This MM router depends on vLLM PR [`#33304`](https://github.com/vllm-project/vllm/pull/33304) (`[feat] Add per-block extra_keys to KV events`) so Dynamo can reconstruct MM-aware block hashes from KV events.
-
-As of **2026-02-25**:
-- PR [`#33304`](https://github.com/vllm-project/vllm/pull/33304) is merged into `vllm-project/vllm:main` (merged on **2026-02-21**)
-- the latest Dynamo release 1.0.0 includes vLLM v0.16.0 released on **(2026-02-13)**, which predates this PR
-
-If you are using a Dynamo 1.0.0, you likely need to patch vLLM package installed in `site-packages` manually.
-
-Example (patch installed vLLM in-place, `site-packages` layout):
-
-```bash
-SITE_PACKAGES_ROOT="$(python - <<'PY'
-import pathlib
-import vllm
-print(pathlib.Path(vllm.__file__).resolve().parent.parent)
-PY
-)"
-
-cd "$SITE_PACKAGES_ROOT"
-
-# Filter the PR diff to only files under vllm/, since site-packages does not
-# contain the full vLLM repo layout (tests/, docs/, etc.).
-curl -sL https://github.com/vllm-project/vllm/pull/33304.diff | python3 -c '
-import sys
-chunks = sys.stdin.read().split("diff --git ")
-filtered = [c for c in chunks if c.startswith("a/vllm/")]
-print("".join("diff --git " + c for c in filtered), end="")
-' > /tmp/vllm_pr33304_vllm_only.diff
-
-patch --dry-run -p1 < /tmp/vllm_pr33304_vllm_only.diff
-patch -p1 < /tmp/vllm_pr33304_vllm_only.diff
-```
-
-After patching, restart the vLLM backend and MM router processes.
+Requires vLLM >= 0.17.0.
 
 ## Usage
 

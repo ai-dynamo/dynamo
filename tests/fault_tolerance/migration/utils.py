@@ -3,6 +3,7 @@
 
 import json
 import logging
+import re
 import threading
 import time
 
@@ -21,7 +22,12 @@ logger = logging.getLogger(__name__)
 class DynamoFrontendProcess(BaseDynamoFrontendProcess):
     """Fault-tolerance frontend wrapper (keeps env settings from the historical helper)."""
 
-    def __init__(self, request, migration_limit: int):
+    def __init__(
+        self,
+        request,
+        migration_limit: int,
+        migration_max_seq_len: int | None,
+    ):
         extra_env = {
             "DYN_REQUEST_PLANE": request.getfixturevalue("request_plane"),
             # These tests expect full control over requests sent to workers. The canary
@@ -33,6 +39,7 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
             frontend_port=0,  # allocate a free port (xdist-safe)
             router_mode="round-robin",
             migration_limit=migration_limit,
+            migration_max_seq_len=migration_max_seq_len,
             extra_env=extra_env,
             terminate_all_matching_process_names=False,
             display_name="frontend",
@@ -464,8 +471,6 @@ def _parse_migration_metric(
     Returns:
         The metric count, or 0 if not found
     """
-    import re
-
     # Match pattern like:
     # dynamo_frontend_model_migration_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 1
     # Labels can be in any order
@@ -485,10 +490,25 @@ def _parse_migration_metric(
     return 0
 
 
+def _parse_migration_max_seq_len_exceeded_metric(
+    metrics_text: str, model_name: str
+) -> int:
+    """
+    Parse the migration max_seq_len exceeded counter from Prometheus metrics text.
+
+    Returns:
+        The metric count, or 0 if not found
+    """
+    pattern = rf'dynamo_frontend_model_migration_max_seq_len_exceeded_total\{{[^}}]*model="{re.escape(model_name)}"[^}}]*\}}\s+(\d+)'
+    match = re.search(pattern, metrics_text)
+    return int(match.group(1)) if match else 0
+
+
 def verify_migration_metrics(
     frontend_port: int,
     expected_ongoing_request_count: int = 0,
     expected_new_request_count: int = 0,
+    expected_max_seq_len_exceeded_count: int = 0,
 ) -> None:
     """
     Verify migration metrics by querying the frontend's /metrics endpoint.
@@ -497,6 +517,7 @@ def verify_migration_metrics(
         frontend_port: Port where the frontend is running
         expected_ongoing_request_count: Expected count of ongoing_request migrations
         expected_new_request_count: Expected count of new_request migrations
+        expected_max_seq_len_exceeded_count: Expected count of max_seq_len exceeded events
     """
     metrics_url = f"http://localhost:{frontend_port}/metrics"
 
@@ -516,9 +537,14 @@ def verify_migration_metrics(
     new_request_count = _parse_migration_metric(
         metrics_text, FAULT_TOLERANCE_MODEL_NAME, "new_request"
     )
+    max_seq_len_exceeded_count = _parse_migration_max_seq_len_exceeded_metric(
+        metrics_text, FAULT_TOLERANCE_MODEL_NAME
+    )
 
     logger.info(
-        f"Migration metrics - ongoing_request: {ongoing_count}, new_request: {new_request_count}"
+        f"Migration metrics - ongoing_request: {ongoing_count}, "
+        f"new_request: {new_request_count}, "
+        f"max_seq_len_exceeded: {max_seq_len_exceeded_count}"
     )
 
     if expected_ongoing_request_count > 0:
@@ -533,6 +559,11 @@ def verify_migration_metrics(
             f"but got {new_request_count}"
         )
 
+    assert max_seq_len_exceeded_count == expected_max_seq_len_exceeded_count, (
+        f"Expected {expected_max_seq_len_exceeded_count} "
+        f"max_seq_len_exceeded events, but got {max_seq_len_exceeded_count}"
+    )
+
 
 def run_migration_test(
     frontend: DynamoFrontendProcess,
@@ -540,6 +571,7 @@ def run_migration_test(
     worker2: ManagedProcess,
     receiving_pattern: str,
     migration_limit: int,
+    migration_max_seq_len: int | None,
     immediate_kill: bool,
     use_chat_completion: bool,
     stream: bool,
@@ -555,6 +587,7 @@ def run_migration_test(
         worker2: Second worker process
         receiving_pattern: Log pattern to identify which worker received the request
         migration_limit: Migration limit setting (0 = disabled)
+        migration_max_seq_len: Max sequence length for migration (None = no limit)
         immediate_kill: True for immediate kill, False for graceful shutdown
         use_chat_completion: Whether to use chat completion API (True) or completion API (False)
         stream: Whether to use streaming responses
@@ -590,19 +623,18 @@ def run_migration_test(
         )
         terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=10)
 
-    # Step 5: Validate response based on migration setting
-    if migration_limit > 0:
+    # Step 5: Validate response and verify migration occurred.
+    # migration_enabled and not max_seq_len_exceeded -> migration should succeed
+    if migration_limit > 0 and migration_max_seq_len != 1:
         validate_response(request_thread, response_list, validate_delay=stream)
         verify_migration_occurred(frontend)
-        verify_migration_metrics(
-            frontend.frontend_port, expected_ongoing_request_count=1
-        )
     else:
         try:
             validate_response(request_thread, response_list, validate_delay=stream)
-            pytest.fail("Request succeeded unexpectedly when migration was disabled")
+            pytest.fail(
+                "Request succeeded unexpectedly when migration should have failed"
+            )
         except Exception as e:
-            # Request failed as expected - verify it's a known error type
             error_str = str(e)
             assert (
                 "SSE error event received:" in error_str
@@ -611,6 +643,13 @@ def run_migration_test(
 
         try:
             verify_migration_occurred(frontend)
-            pytest.fail("Migration unexpectedly occurred when disabled")
+            pytest.fail("Migration unexpectedly succeeded")
         except AssertionError as e:
             assert "'Cannot recreate stream: ...' error found in logs" in str(e)
+
+    # Step 6: Verify migration metrics
+    verify_migration_metrics(
+        frontend.frontend_port,
+        expected_ongoing_request_count=1 if migration_limit > 0 else 0,
+        expected_max_seq_len_exceeded_count=1 if migration_max_seq_len == 1 else 0,
+    )

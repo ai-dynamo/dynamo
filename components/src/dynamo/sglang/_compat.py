@@ -18,27 +18,32 @@ fallback and any associated polyfills.
 import ipaddress
 import logging
 import socket
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Network utilities: NetworkAddress, get_local_ip_auto, get_zmq_socket
+#
+# 0.5.10+: sglang.srt.utils.network (canonical)
+# 0.5.9:   sglang.srt.utils (get_local_ip_auto, get_zmq_socket only;
+#           NetworkAddress did not exist)
+# ---------------------------------------------------------------------------
 try:
     from sglang.srt.utils.network import (  # noqa: F401
         NetworkAddress,
         get_local_ip_auto,
         get_zmq_socket,
     )
-
-    _SGLANG_HAS_NETWORK_MODULE = True
 except ImportError:
-    # Fallback for sglang <= 0.5.9. Remove when min supported version is 0.6.0+
+    # Fallback for sglang 0.5.9. Remove when min supported version is 0.5.10+
     from sglang.srt.utils import (  # type: ignore[no-redef]  # noqa: F401
         get_local_ip_auto,
         get_zmq_socket,
     )
 
-    _SGLANG_HAS_NETWORK_MODULE = False
     logger.info(
-        "sglang.srt.utils.network not found (sglang <= 0.5.9); "
+        "sglang.srt.utils.network not found (sglang 0.5.9); "
         "using compatibility shim for NetworkAddress"
     )
 
@@ -98,9 +103,73 @@ except ImportError:
             return f"tcp://{self.host}:{self.port}"
 
 
+# ---------------------------------------------------------------------------
+# MMEncoder._encode() adapter
+#
+# 0.5.10+: _encode(mm_items, modality) -> (grid_dim, embedding, aux_data)
+# 0.5.9:   _encode(mm_items)           -> (grid_dim, embedding)
+#
+# Imports are deferred to avoid pulling sgl_kernel (CUDA-only) at module
+# level, which breaks test collection on arm64 CPU-only CI nodes.
+# ---------------------------------------------------------------------------
+
+
+async def mm_encode(encoder: Any, mm_items: Any, modality: Any) -> tuple:
+    """Version-safe wrapper around MMEncoder._encode().
+
+    Always returns (grid_dim, embedding, aux_data). On sglang 0.5.9
+    _encode takes no modality arg and returns a 2-tuple; on 0.5.10+ it
+    takes modality and returns a 3-tuple. We try the new signature first
+    and fall back to the old one.
+    """
+    try:
+        result = await encoder._encode(mm_items, modality)
+    except TypeError:
+        # sglang 0.5.9: _encode(mm_items) -> (grid_dim, embedding)
+        result = await encoder._encode(mm_items)
+
+    if len(result) == 2:
+        return (*result, None)
+    return result
+
+
+def enable_disjoint_streaming_output(server_args: Any) -> None:
+    """
+    Enable SGLang's disjoint streaming output across ServerArgs field renames.
+
+    Covers sglang <= 0.5.x (`stream_output`) and newer releases
+    (`incremental_streaming_output`).
+    """
+    fields = getattr(type(server_args), "__dataclass_fields__", None)
+    if isinstance(fields, dict):
+        if "incremental_streaming_output" in fields:
+            server_args.incremental_streaming_output = True
+            return
+        if "stream_output" in fields:
+            server_args.stream_output = True
+            return
+        raise AttributeError(
+            "SGLang ServerArgs has neither 'incremental_streaming_output' nor "
+            "'stream_output'"
+        )
+
+    if hasattr(server_args, "incremental_streaming_output"):
+        server_args.incremental_streaming_output = True
+        return
+    if hasattr(server_args, "stream_output"):
+        server_args.stream_output = True
+        return
+
+    logger.debug(
+        "Skipping streaming output compatibility for non-ServerArgs object: %s",
+        type(server_args).__name__,
+    )
+
+
 __all__ = [
     "NetworkAddress",
+    "enable_disjoint_streaming_output",
     "get_local_ip_auto",
     "get_zmq_socket",
-    "_SGLANG_HAS_NETWORK_MODULE",
+    "mm_encode",
 ]

@@ -14,6 +14,7 @@ import pytest
 from tests.router.e2e_harness import (
     ManagedEngineProcessMixin,
     run_basic_router_test,
+    run_disagg_router_decisions_test,
     run_indexers_sync_test,
     run_router_decisions_test,
 )
@@ -65,6 +66,9 @@ class SGLangProcess(ManagedEngineProcessMixin):
         request_plane: str = "tcp",
         store_backend: str = "etcd",
         durable_kv_events: bool = False,
+        namespace: Optional[str] = None,
+        gpu_start_index: int = 0,
+        disaggregation_mode: Optional[str] = None,
     ):
         """Initialize SGLang workers with dynamo integration.
 
@@ -85,8 +89,10 @@ class SGLangProcess(ManagedEngineProcessMixin):
         """
         # Generate unique namespace for isolation
         namespace_suffix = generate_random_suffix()
-        self.namespace = f"test-namespace-{namespace_suffix}"
-        self.component_name = "backend"
+        self.namespace = namespace or f"test-namespace-{namespace_suffix}"
+        self.component_name = (
+            "prefill" if disaggregation_mode == "prefill" else "backend"
+        )
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_workers
         self.data_parallel_size = data_parallel_size
@@ -116,10 +122,10 @@ class SGLangProcess(ManagedEngineProcessMixin):
             # Calculate GPU device for this process
             if single_gpu:
                 # Force all processes to GPU 0 (for single-GPU testing)
-                gpu_device = "0"
+                gpu_device = str(gpu_start_index)
             elif data_parallel_size is not None:
                 # Worker sees dp_rank GPUs (each DP rank gets its own GPU)
-                worker_start_gpu = worker_idx * data_parallel_size
+                worker_start_gpu = gpu_start_index + worker_idx * data_parallel_size
                 gpu_device = ",".join(
                     str(i)
                     for i in range(
@@ -128,7 +134,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 )
             else:
                 # No DP; worker sees one GPU
-                gpu_device = str(worker_idx)
+                gpu_device = str(gpu_start_index + worker_idx)
 
             command = [
                 "python3",
@@ -140,9 +146,13 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 str(page_size),
             ]
 
-            # Disable CUDA graphs for faster startup & lower memory
+            # Disable CUDA graphs for faster startup & lower memory.
+            # sglang 0.5.10+ has piecewise CUDA graphs (separate flag) that
+            # consume ~7 GB during capture — must also be disabled for
+            # multi-worker same-GPU tests to avoid OOM.
             if disable_cuda_graph:
                 command.append("--disable-cuda-graph")
+                command.append("--disable-piecewise-cuda-graph")
 
             # Limit VRAM allocation (required for multi-worker on same GPU)
             if mem_fraction_static is not None:
@@ -151,6 +161,10 @@ class SGLangProcess(ManagedEngineProcessMixin):
             # Add optional context_length if specified
             if context_length is not None:
                 command.extend(["--context-length", str(context_length)])
+
+            if disaggregation_mode is not None:
+                command.extend(["--disaggregation-mode", disaggregation_mode])
+                command.extend(["--disaggregation-transfer-backend", "nixl"])
 
             if data_parallel_size is not None:
                 # Add DP configuration
@@ -305,6 +319,41 @@ def test_router_decisions_sglang_dp(
         single_gpu=False,
         test_dp_rank=True,
         extra_process_kwargs={"data_parallel_size": 2},
+    )
+
+
+@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2603")
+@pytest.mark.gpu_2
+@pytest.mark.nightly
+@pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
+@pytest.mark.timeout(600)
+def test_router_decisions_sglang_disagg(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
+):
+    run_disagg_router_decisions_test(
+        engine_process_cls=SGLangProcess,
+        engine_args_name="sglang_args",
+        engine_args=SGLANG_ARGS,
+        request=request,
+        request_plane=request_plane,
+        model_name=MODEL_NAME,
+        block_size=PAGE_SIZE,
+        num_prefill_workers=2,
+        num_decode_workers=1,
+        prefill_process_kwargs={
+            "single_gpu": True,
+            "gpu_start_index": 0,
+            "disaggregation_mode": "prefill",
+        },
+        decode_process_kwargs={
+            "single_gpu": True,
+            "gpu_start_index": 1,
+            "disaggregation_mode": "decode",
+        },
     )
 
 

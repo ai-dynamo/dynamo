@@ -28,12 +28,6 @@ inputs:
   aws_account_id:
     description: 'AWS Account ID'
     required: false
-  aws_access_key_id:
-    description: 'AWS Access Key ID'
-    required: false
-  aws_secret_access_key:
-    description: 'AWS Secret Access Key'
-    required: false
   no_cache:
     description: 'Disable Docker build cache'
     required: false
@@ -71,8 +65,6 @@ runs:
       env:
         AWS_DEFAULT_REGION: ${{ inputs.aws_default_region }}
         SCCACHE_S3_BUCKET:  ${{ inputs.sccache_s3_bucket }}
-        AWS_ACCESS_KEY_ID: ${{ inputs.aws_access_key_id }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws_secret_access_key }}
         PLATFORM: ${{ inputs.platform }}
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
         GITHUB_RUN_ID: ${{ github.run_id }}
@@ -162,12 +154,19 @@ runs:
           done <<< "$EXTRA_BUILD_ARGS"
         fi
 
-        # Pass AWS credentials as build secrets for sccache S3 access.
-        # Dockerfile steps reference these via --mount=type=secret,id=aws-key-id,env=...
+        # Pass IRSA web identity token as build secrets for sccache S3 access.
+        # The runner pod has IRSA which provides AWS_WEB_IDENTITY_TOKEN_FILE and
+        # AWS_ROLE_ARN. We pass the token file and role ARN to BuildKit so sccache
+        # can authenticate via STS AssumeRoleWithWebIdentity -- no static keys needed.
         SECRET_ARGS=""
-        if [ "${{ inputs.use_sccache }}" == "true" ] && [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
-          SECRET_ARGS+=" --secret id=aws-key-id,env=AWS_ACCESS_KEY_ID"
-          SECRET_ARGS+=" --secret id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY"
+        if [ "${{ inputs.use_sccache }}" == "true" ]; then
+          TOKEN_FILE="${AWS_WEB_IDENTITY_TOKEN_FILE:-}"
+          if [ -n "$TOKEN_FILE" ] && [ -f "$TOKEN_FILE" ] && [ -n "${AWS_ROLE_ARN:-}" ]; then
+            SECRET_ARGS+=" --secret id=aws-web-identity-token,src=${TOKEN_FILE}"
+            SECRET_ARGS+=" --secret id=aws-role-arn,env=AWS_ROLE_ARN"
+          else
+            echo "::warning::IRSA web identity token not available; sccache S3 cache will be disabled"
+          fi
         fi
 
         docker buildx build \

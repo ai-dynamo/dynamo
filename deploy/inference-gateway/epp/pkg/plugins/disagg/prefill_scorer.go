@@ -111,15 +111,21 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 	result, err := dynscorer.CallRoutePrefillRequest(requestJSON, podsJSON)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: FFI prefill routing failed")
+		// Overwrite PrefillEnabled to false so the decode scorer falls back
+		// to aggregated routing. Without this, the prefill profile "succeeds"
+		// (picker picks a pod) but the prefill header is not set, causing
+		// the sidecar to reject the request in direct routing mode.
+		cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
 		return uniformScores(pods, 0)
 	}
 
 	prefillWorkerID := strconv.FormatUint(result.WorkerID, 10)
 	logger.V(logutil.DEFAULT).Info("DynPrefillScorer: prefill worker selected",
 		"prefillWorkerID", prefillWorkerID,
+		"prefillDpRank", result.DpRank,
 		"tokenCount", len(result.TokenData))
 
-	// Set the prefill worker ID header directly on the request.
+	// Set the prefill worker ID and DP rank headers directly on the request.
 	// The request object is shared across all profile runs in the scheduling
 	// cycle, so the decode scorer (which runs in the next profile) will see it.
 	// This is more reliable than CycleState which may be scoped per profile.
@@ -127,9 +133,11 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 		req.Headers = map[string]string{}
 	}
 	req.Headers[PrefillWorkerIDHeader] = prefillWorkerID
-
-	// Also write to CycleState for any plugin that needs it via the standard API.
-	cycleState.Write(PrefillWorkerIDStateKey, &PrefillWorkerIDState{WorkerID: prefillWorkerID})
+	if result.DpRank != dynscorer.UnsetDpRank {
+		req.Headers[PrefillDpRankHeader] = strconv.FormatUint(uint64(result.DpRank), 10)
+	} else {
+		delete(req.Headers, PrefillDpRankHeader)
+	}
 
 	// Score: 1.0 for all pods. The label-filter has already restricted to prefill workers,
 	// and the FFI router's internal selection is authoritative.

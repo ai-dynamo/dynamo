@@ -16,46 +16,64 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoCheckpoint
 metadata:
-  name: llama3-8b-bf16
+  name: qwen3-06b-bf16
 spec:
   # Identity - determines the checkpoint hash
   identity:
-    model: "meta-llama/Meta-Llama-3-8B-Instruct"
+    model: "Qwen/Qwen3-0.6B"
     backendFramework: "vllm"
-    dynamoVersion: "0.6.0"
     tensorParallelSize: 1
     pipelineParallelSize: 1
     dtype: "bfloat16"
-    maxModelLen: 8192
-    extraParameters:
-      enableChunkedPrefill: "true"
+    maxModelLen: 2048
+
+  # Optional: enable GMS-specific checkpoint capture and restore helpers.
+  gpuMemoryService:
+    enabled: false
 
   # Job configuration for checkpoint creation
   job:
     activeDeadlineSeconds: 3600
-    ttlSecondsAfterFinished: 300
     podTemplateSpec:
       spec:
+        restartPolicy: Never
+        imagePullSecrets:
+          - name: ngc-secret
+        volumes:
+          - name: hf-cache
+            persistentVolumeClaim:
+              claimName: hf-cache-pvc
         containers:
-          - name: checkpoint-worker
-            image: nvcr.io/nvidia/ai-dynamo/dynamo-vllm:latest
-            command: ["python", "-m", "vllm.entrypoints.openai.api_server"]
+          - name: worker
+            image: registry.example.com/dynamo/vllm-placeholder:1.0.0
+            command:
+              - python3
             args:
+              - "-m"
+              - "dynamo.vllm"
               - "--model"
-              - "meta-llama/Meta-Llama-3-8B-Instruct"
-              - "--tensor-parallel-size"
-              - "1"
+              - "Qwen/Qwen3-0.6B"
               - "--dtype"
               - "bfloat16"
+              - "--tensor-parallel-size"
+              - "1"
               - "--max-model-len"
-              - "8192"
+              - "2048"
+            envFrom:
+              - secretRef:
+                  name: hf-token-secret
             env:
-              - name: HF_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: hf-secret
-                    key: token
+              - name: HF_HOME
+                value: /home/dynamo/.cache/huggingface
+              - name: NCCL_DEBUG
+                value: ERROR
+              - name: TORCH_CPP_LOG_LEVEL
+                value: ERROR
+              - name: TORCH_DISTRIBUTED_DEBUG
+                value: "OFF"
+            volumeMounts:
+              - name: hf-cache
+                mountPath: /home/dynamo/.cache/huggingface
             resources:
               limits:
-                nvidia.com/gpu: 1
-        restartPolicy: Never
+                nvidia.com/gpu: "1"

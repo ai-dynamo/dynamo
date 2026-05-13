@@ -190,4 +190,4 @@ async def test_chat_completion_http_error(http_server, msg_to_code: tuple[str, i
             if msg_to_code[0] == MSG_CONTAINS_ERROR:
                 assert MSG_CONTAINS_ERROR in str(error_json)
             elif msg_to_code[0] == MSG_CONTAINS_INTERNAL_ERROR:
-                assert "a python exception was caught" in str(error_json).lower()
+                assert "simulated internal error" in str(error_json).lower()

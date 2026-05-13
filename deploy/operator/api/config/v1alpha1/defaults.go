@@ -89,15 +89,6 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 	if obj.Checkpoint.ReadyForCheckpointFilePath == "" {
 		obj.Checkpoint.ReadyForCheckpointFilePath = "/tmp/ready-for-checkpoint"
 	}
-	if obj.Checkpoint.Storage.Type == "" {
-		obj.Checkpoint.Storage.Type = CheckpointStorageTypePVC
-	}
-	if obj.Checkpoint.Storage.PVC.PVCName == "" {
-		obj.Checkpoint.Storage.PVC.PVCName = "snapshot-pvc"
-	}
-	if obj.Checkpoint.Storage.PVC.BasePath == "" {
-		obj.Checkpoint.Storage.PVC.BasePath = "/checkpoints"
-	}
 
 	// Logging defaults
 	if obj.Logging.Level == "" {

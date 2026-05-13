@@ -51,6 +51,12 @@ pub enum ErrorType {
     Disconnected,
     /// A connection or request timed out.
     ConnectionTimeout,
+    /// The backend accepted the request but stopped responding (stream inactivity timeout).
+    ResponseTimeout,
+    /// The request was cancelled (e.g., client disconnected).
+    Cancelled,
+    /// The system does not have enough resources to handle the request.
+    ResourceExhausted,
     /// Error originating from a backend engine.
     Backend(BackendError),
 }
@@ -63,7 +69,10 @@ impl fmt::Display for ErrorType {
             ErrorType::CannotConnect => write!(f, "CannotConnect"),
             ErrorType::Disconnected => write!(f, "Disconnected"),
             ErrorType::ConnectionTimeout => write!(f, "ConnectionTimeout"),
-            ErrorType::Backend(sub) => write!(f, "Backend.{sub}"),
+            ErrorType::ResponseTimeout => write!(f, "ResponseTimeout"),
+            ErrorType::Cancelled => write!(f, "Cancelled"),
+            ErrorType::ResourceExhausted => write!(f, "ResourceExhausted"),
+            ErrorType::Backend(sub) => write!(f, "Backend{sub}"),
         }
     }
 }
@@ -75,14 +84,38 @@ impl fmt::Display for ErrorType {
 /// Backend engine error subcategories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackendError {
+    /// Uncategorized or unknown backend error.
+    Unknown,
+    /// The request contains invalid input (e.g., prompt exceeds context length).
+    InvalidArgument,
+    /// Failed to establish a connection to a remote worker.
+    CannotConnect,
+    /// An established connection was lost unexpectedly.
+    Disconnected,
+    /// A connection or request timed out.
+    ConnectionTimeout,
+    /// The backend accepted the request but stopped responding (stream inactivity timeout).
+    ResponseTimeout,
+    /// The request was cancelled (e.g., client disconnected).
+    Cancelled,
     /// The engine process has shut down or crashed.
     EngineShutdown,
+    /// The response stream was terminated before completion (e.g., engine dropped mid-stream).
+    StreamIncomplete,
 }
 
 impl fmt::Display for BackendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            BackendError::Unknown => write!(f, "Unknown"),
+            BackendError::InvalidArgument => write!(f, "InvalidArgument"),
+            BackendError::CannotConnect => write!(f, "CannotConnect"),
+            BackendError::Disconnected => write!(f, "Disconnected"),
+            BackendError::ConnectionTimeout => write!(f, "ConnectionTimeout"),
+            BackendError::ResponseTimeout => write!(f, "ResponseTimeout"),
+            BackendError::Cancelled => write!(f, "Cancelled"),
             BackendError::EngineShutdown => write!(f, "EngineShutdown"),
+            BackendError::StreamIncomplete => write!(f, "StreamIncomplete"),
         }
     }
 }
@@ -427,5 +460,50 @@ mod tests {
     #[test]
     fn test_error_type_display() {
         assert_eq!(ErrorType::Unknown.to_string(), "Unknown");
+        assert_eq!(ErrorType::InvalidArgument.to_string(), "InvalidArgument");
+        assert_eq!(ErrorType::CannotConnect.to_string(), "CannotConnect");
+        assert_eq!(ErrorType::Disconnected.to_string(), "Disconnected");
+        assert_eq!(
+            ErrorType::ConnectionTimeout.to_string(),
+            "ConnectionTimeout"
+        );
+        assert_eq!(ErrorType::ResponseTimeout.to_string(), "ResponseTimeout");
+        assert_eq!(ErrorType::Cancelled.to_string(), "Cancelled");
+        assert_eq!(
+            ErrorType::Backend(BackendError::Unknown).to_string(),
+            "BackendUnknown"
+        );
+        assert_eq!(
+            ErrorType::Backend(BackendError::InvalidArgument).to_string(),
+            "BackendInvalidArgument"
+        );
+        assert_eq!(
+            ErrorType::Backend(BackendError::CannotConnect).to_string(),
+            "BackendCannotConnect"
+        );
+        assert_eq!(
+            ErrorType::Backend(BackendError::Disconnected).to_string(),
+            "BackendDisconnected"
+        );
+        assert_eq!(
+            ErrorType::Backend(BackendError::ConnectionTimeout).to_string(),
+            "BackendConnectionTimeout"
+        );
+        assert_eq!(
+            ErrorType::Backend(BackendError::Cancelled).to_string(),
+            "BackendCancelled"
+        );
+        assert_eq!(
+            ErrorType::Backend(BackendError::EngineShutdown).to_string(),
+            "BackendEngineShutdown"
+        );
+        assert_eq!(
+            ErrorType::Backend(BackendError::StreamIncomplete).to_string(),
+            "BackendStreamIncomplete"
+        );
+        assert_eq!(
+            ErrorType::Backend(BackendError::ResponseTimeout).to_string(),
+            "BackendResponseTimeout"
+        );
     }
 }

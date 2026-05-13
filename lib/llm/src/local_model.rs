@@ -48,6 +48,7 @@ pub struct LocalModelBuilder {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     is_mocker: bool,
     extra_engine_args: Option<PathBuf>,
     runtime_config: ModelRuntimeConfig,
@@ -76,6 +77,7 @@ impl Default for LocalModelBuilder {
             template_file: Default::default(),
             router_config: Default::default(),
             migration_limit: Default::default(),
+            migration_max_seq_len: Default::default(),
             is_mocker: Default::default(),
             extra_engine_args: Default::default(),
             runtime_config: Default::default(),
@@ -180,6 +182,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn migration_max_seq_len(&mut self, max_seq_len: Option<u32>) -> &mut Self {
+        self.migration_max_seq_len = max_seq_len;
+        self
+    }
+
     pub fn is_mocker(&mut self, is_mocker: bool) -> &mut Self {
         self.is_mocker = is_mocker;
         self
@@ -260,6 +267,7 @@ impl LocalModelBuilder {
                 namespace: self.namespace.clone(),
                 namespace_prefix: self.namespace_prefix.clone(),
                 migration_limit: self.migration_limit,
+                migration_max_seq_len: self.migration_max_seq_len,
             });
         }
 
@@ -313,6 +321,7 @@ impl LocalModelBuilder {
             namespace: self.namespace.clone(),
             namespace_prefix: self.namespace_prefix.clone(),
             migration_limit: self.migration_limit,
+            migration_max_seq_len: self.migration_max_seq_len,
         })
     }
 }
@@ -333,6 +342,7 @@ pub struct LocalModel {
     namespace: Option<String>,
     namespace_prefix: Option<String>,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
 }
 
 impl LocalModel {
@@ -398,6 +408,10 @@ impl LocalModel {
 
     pub fn migration_limit(&self) -> u32 {
         self.migration_limit
+    }
+
+    pub fn migration_max_seq_len(&self) -> Option<u32> {
+        self.migration_max_seq_len
     }
 
     pub fn namespace(&self) -> Option<&str> {

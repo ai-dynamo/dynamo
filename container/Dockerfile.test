@@ -26,3 +26,4 @@ USER dynamo
 
 # Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
+COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/

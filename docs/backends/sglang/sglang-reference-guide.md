@@ -35,8 +35,8 @@ These arguments are added by Dynamo on top of SGLang's native arguments.
 |----------|---------|---------|-------------|
 | `--endpoint` | `DYN_ENDPOINT` | Auto-generated | Dynamo endpoint in `dyn://namespace.component.endpoint` format |
 | `--use-sglang-tokenizer` | `DYN_SGL_USE_TOKENIZER` | `false` | **[Deprecated]** Use `--dyn-chat-processor sglang` on the frontend instead. See [SGLang Chat Processor](sglang-chat-processor.md). |
-| `--dyn-tool-call-parser` | `DYN_TOOL_CALL_PARSER` | `None` | [Tool call](../../agents/tool-calling.md) parser (overrides SGLang's `--tool-call-parser`) |
-| `--dyn-reasoning-parser` | `DYN_REASONING_PARSER` | `None` | Reasoning parser for chain-of-thought models |
+| `--dyn-tool-call-parser` | `DYN_TOOL_CALL_PARSER` | `None` | [Tool call](../../agents/tool-calling.md#supported-tool-call-parsers) parser (overrides SGLang's `--tool-call-parser`) |
+| `--dyn-reasoning-parser` | `DYN_REASONING_PARSER` | `None` | [Reasoning](../../agents/reasoning.md#supported-reasoning-parsers) parser for chain-of-thought models |
 | `--custom-jinja-template` | `DYN_CUSTOM_JINJA_TEMPLATE` | `None` | Custom chat template path (incompatible with `--use-sglang-tokenizer`) |
 | `--embedding-worker` | `DYN_SGL_EMBEDDING_WORKER` | `false` | Run as embedding worker (also sets SGLang's `--is-embedding`) |
 | `--multimodal-encode-worker` | `DYN_SGL_MULTIMODAL_ENCODE_WORKER` | `false` | Run as [multimodal](../../features/multimodal/multimodal-sglang.md) encode worker (frontend-facing) |
@@ -49,6 +49,8 @@ These arguments are added by Dynamo on top of SGLang's native arguments.
 <Note>
 `--disagg-config` and `--disagg-config-key` must be provided together. The selected section is written to a temp YAML file and passed to SGLang's `--config` flag.
 </Note>
+
+The current supported parser names for both flags are documented in [Tool Calling](../../agents/tool-calling.md#supported-tool-call-parsers) and [Reasoning](../../agents/reasoning.md#supported-reasoning-parsers).
 
 ## Tokenizer Behavior
 
@@ -138,4 +140,4 @@ SGLang workers expose operational endpoints via Dynamo's system server:
 - **[Examples](sglang-examples.md)**: All deployment patterns
 - **[Disaggregation](sglang-disaggregation.md)**: P/D architecture and KV transfer
 - **[Diffusion](sglang-diffusion.md)**: LLM, image, and video diffusion models
-- **[Router Guide](../../components/router/router-guide.md)**: KV-aware routing configuration
+- **[Configuration and Tuning](../../components/router/router-configuration.md)**: KV-aware routing configuration

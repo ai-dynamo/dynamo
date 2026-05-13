@@ -51,6 +51,8 @@ pub enum RouterMode {
     /// Direct routing - reads worker ID from each request's routing hints.
     /// Used when an external orchestrator (e.g., EPP) handles worker selection.
     Direct,
+    LeastLoaded,
+    DeviceAwareWeighted,
 }
 
 impl From<RouterMode> for RsRouterMode {
@@ -61,12 +63,15 @@ impl From<RouterMode> for RsRouterMode {
             RouterMode::PowerOfTwoChoices => Self::PowerOfTwoChoices,
             RouterMode::KV => Self::KV,
             RouterMode::Direct => Self::Direct,
+            RouterMode::LeastLoaded => Self::LeastLoaded,
+            RouterMode::DeviceAwareWeighted => Self::DeviceAwareWeighted,
         }
     }
 }
 
 mod context;
 mod engine;
+pub mod errors;
 mod http;
 mod kserve_grpc;
 mod llm;
@@ -166,11 +171,13 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
+    m.add_class::<llm::entrypoint::AicPerfConfig>()?;
     m.add_class::<llm::entrypoint::RouterConfig>()?;
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
     m.add_class::<llm::replay::ReasoningConfig>()?;
     m.add_class::<llm::replay::SglangArgs>()?;
     m.add_class::<llm::replay::MockEngineArgs>()?;
+    m.add_class::<llm::replay::PlannerReplayBridge>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?; // Internal: only in _internal, not public API
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
@@ -196,6 +203,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<planner::PlannerDecision>()?;
 
     engine::add_to_module(m)?;
+    errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
@@ -585,6 +593,20 @@ impl DistributedRuntime {
         request_plane: String,
         enable_nats: Option<bool>,
     ) -> PyResult<Self> {
+        if enable_nats.is_some() {
+            Python::with_gil(|py| {
+                let warnings = py.import("warnings")?;
+                warnings.call_method1(
+                    "warn",
+                    (
+                        "The 'enable_nats' parameter is deprecated and will be removed in a future release. NATS enablement is now determined automatically from the event-plane configuration.",
+                        py.import("builtins")?.getattr("DeprecationWarning")?,
+                        2i32, // stacklevel
+                    ),
+                )?;
+                Ok::<(), PyErr>(())
+            })?;
+        }
         let discovery_backend_config = match discovery_backend.as_str() {
             "kubernetes" => DiscoveryBackend::Kubernetes,
             other => {
@@ -622,19 +644,18 @@ impl DistributedRuntime {
             });
         }
 
-        // NATS is used for more than just the NATS request-plane:
-        // - KV router events (JetStream or NATS core + local indexer)
-        // - inter-router replica sync (NATS core)
-        //
-        // NATS initialization logic:
-        // 1. If request_plane is NATS, always enable NATS
-        // 2. Otherwise, use enable_nats parameter (defaults to true for backward compat)
-        //    Pass false to disable NATS (e.g., for approximate KV routing mode)
-        let enable_nats = enable_nats.unwrap_or(true); // Default to true
+        let event_plane_is_nats =
+            std::env::var(config::environment_names::event_plane::DYN_EVENT_PLANE)
+                .map(|v| v.eq_ignore_ascii_case("nats"))
+                .unwrap_or(true);
+
+        let nats_enabled = request_plane.is_nats()
+            || std::env::var(config::environment_names::nats::NATS_SERVER).is_ok()
+            || event_plane_is_nats;
 
         let runtime_config = DistributedConfig {
             discovery_backend: discovery_backend_config,
-            nats_config: if request_plane.is_nats() || enable_nats {
+            nats_config: if nats_enabled {
                 Some(dynamo_runtime::transports::nats::ClientOptions::default())
             } else {
                 None

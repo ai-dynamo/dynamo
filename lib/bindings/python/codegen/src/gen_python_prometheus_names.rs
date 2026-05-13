@@ -46,9 +46,11 @@ impl<'a> PythonGenerator<'a> {
         let mut module_names: Vec<&String> = self.modules.keys().collect();
         module_names.sort();
 
+        let total = module_names.len();
+
         // Generate simple classes with constants as class attributes
-        for module_name in module_names {
-            let module = &self.modules[module_name];
+        for (idx, module_name) in module_names.iter().enumerate() {
+            let module = &self.modules[module_name.as_str()];
             lines.push(format!("class {}:", module_name));
 
             // Use doc comment from module if available
@@ -58,19 +60,29 @@ impl<'a> PythonGenerator<'a> {
                     lines.push(format!("    \"\"\"{}\"\"\"", first_line));
                 }
             }
-            lines.push("".to_string());
 
-            for constant in &module.constants {
-                if !constant.doc_comment.is_empty() {
-                    for comment_line in constant.doc_comment.lines() {
-                        lines.push(format!("    # {}", comment_line));
+            if !module.constants.is_empty() {
+                lines.push("".to_string());
+                for constant in &module.constants {
+                    if !constant.doc_comment.is_empty() {
+                        for comment_line in constant.doc_comment.lines() {
+                            lines.push(format!("    # {}", comment_line));
+                        }
                     }
+                    lines.push(format!("    {} = \"{}\"", constant.name, constant.value));
                 }
-                lines.push(format!("    {} = \"{}\"", constant.name, constant.value));
             }
 
-            lines.push("".to_string());
+            // PEP 8 / black requires two blank lines between top-level class definitions,
+            // but no trailing blank lines at end of file.
+            if idx + 1 < total {
+                lines.push("".to_string());
+                lines.push("".to_string());
+            }
         }
+
+        // End file with a single trailing newline (no blank lines after last class)
+        lines.push("".to_string());
 
         lines.join("\n")
     }

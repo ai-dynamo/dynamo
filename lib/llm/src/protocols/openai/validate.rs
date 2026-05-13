@@ -119,9 +119,9 @@ pub fn validate_no_unsupported_fields(
 ///
 /// `{"type":"text"}` is accepted and means no structured constraint.
 pub fn validate_response_format(
-    response_format: &Option<dynamo_async_openai::types::ResponseFormat>,
+    response_format: &Option<dynamo_protocols::types::ResponseFormat>,
 ) -> Result<(), anyhow::Error> {
-    use dynamo_async_openai::types::ResponseFormat;
+    use dynamo_protocols::types::ResponseFormat;
 
     let Some(fmt) = response_format else {
         return Ok(());
@@ -355,15 +355,15 @@ pub fn validate_user(user: Option<&str>) -> Result<(), anyhow::Error> {
 }
 
 /// Validates stop sequences
-pub fn validate_stop(stop: &Option<dynamo_async_openai::types::Stop>) -> Result<(), anyhow::Error> {
+pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(), anyhow::Error> {
     if let Some(stop_value) = stop {
         match stop_value {
-            dynamo_async_openai::types::Stop::String(s) => {
+            dynamo_protocols::types::Stop::String(s) => {
                 if s.is_empty() {
                     anyhow::bail!("Stop sequence cannot be empty");
                 }
             }
-            dynamo_async_openai::types::Stop::StringArray(sequences) => {
+            dynamo_protocols::types::Stop::StringArray(sequences) => {
                 if sequences.is_empty() {
                     anyhow::bail!("Stop sequences array cannot be empty");
                 }
@@ -391,7 +391,7 @@ pub fn validate_stop(stop: &Option<dynamo_async_openai::types::Stop>) -> Result<
 
 /// Validates messages array
 pub fn validate_messages(
-    messages: &[dynamo_async_openai::types::ChatCompletionRequestMessage],
+    messages: &[dynamo_protocols::types::ChatCompletionRequestMessage],
 ) -> Result<(), anyhow::Error> {
     if messages.is_empty() {
         anyhow::bail!("Messages array cannot be empty");
@@ -415,7 +415,7 @@ pub fn validate_top_logprobs(top_logprobs: Option<u8>) -> Result<(), anyhow::Err
 
 /// Validates tools array
 pub fn validate_tools(
-    tools: &Option<&[dynamo_async_openai::types::ChatCompletionTool]>,
+    tools: &Option<&[dynamo_protocols::types::ChatCompletionTool]>,
 ) -> Result<(), anyhow::Error> {
     let tools = match tools {
         Some(val) => val,
@@ -448,7 +448,7 @@ pub fn validate_tools(
 
 /// Validates reasoning effort parameter
 pub fn validate_reasoning_effort(
-    _reasoning_effort: &Option<dynamo_async_openai::types::ReasoningEffort>,
+    _reasoning_effort: &Option<dynamo_protocols::types::ReasoningEffort>,
 ) -> Result<(), anyhow::Error> {
     // TODO ADD HERE
     // ReasoningEffort is an enum, so if it exists, it's valid by definition
@@ -458,7 +458,7 @@ pub fn validate_reasoning_effort(
 
 /// Validates service tier parameter
 pub fn validate_service_tier(
-    _service_tier: &Option<dynamo_async_openai::types::ServiceTier>,
+    _service_tier: &Option<dynamo_protocols::types::ServiceTier>,
 ) -> Result<(), anyhow::Error> {
     // TODO ADD HERE
     // ServiceTier is an enum, so if it exists, it's valid by definition
@@ -471,14 +471,14 @@ pub fn validate_service_tier(
 //
 
 /// Validates prompt
-pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<(), anyhow::Error> {
+pub fn validate_prompt(prompt: &dynamo_protocols::types::Prompt) -> Result<(), anyhow::Error> {
     match prompt {
-        dynamo_async_openai::types::Prompt::String(s) => {
+        dynamo_protocols::types::Prompt::String(s) => {
             if s.is_empty() {
                 anyhow::bail!("Prompt string cannot be empty");
             }
         }
-        dynamo_async_openai::types::Prompt::StringArray(arr) => {
+        dynamo_protocols::types::Prompt::StringArray(arr) => {
             if arr.is_empty() {
                 anyhow::bail!("Prompt string array cannot be empty");
             }
@@ -488,12 +488,12 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
                 }
             }
         }
-        dynamo_async_openai::types::Prompt::IntegerArray(arr) => {
+        dynamo_protocols::types::Prompt::IntegerArray(arr) => {
             if arr.is_empty() {
                 anyhow::bail!("Prompt integer array cannot be empty");
             }
         }
-        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
+        dynamo_protocols::types::Prompt::ArrayOfIntegerArray(arr) => {
             if arr.is_empty() {
                 anyhow::bail!("Prompt array of integer arrays cannot be empty");
             }
@@ -516,7 +516,7 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
 ///
 /// Format for prompt_embeds: PyTorch tensor serialized with torch.save() and base64-encoded
 pub fn validate_prompt_or_embeds(
-    prompt: Option<&dynamo_async_openai::types::Prompt>,
+    prompt: Option<&dynamo_protocols::types::Prompt>,
     prompt_embeds: Option<&str>,
 ) -> Result<(), anyhow::Error> {
     // Check that at least one is provided

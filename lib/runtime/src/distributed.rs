@@ -1,19 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::component::{Component, Instance};
+use crate::component::{
+    self, Component, ComponentBuilder, Endpoint, Instance, Namespace, RoutingOccupancyState,
+};
+use crate::config::environment_names::tcp_response_stream;
 use crate::pipeline::PipelineError;
 use crate::pipeline::network::manager::NetworkManager;
 use crate::service::{ServiceClient, ServiceSet};
 use crate::storage::kv;
+use crate::{discovery, system_status_server, transports};
 use crate::{
-    component::{self, ComponentBuilder, Endpoint, Namespace},
     discovery::Discovery,
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
     transports::{etcd, nats, tcp},
 };
-use crate::{discovery, system_status_server, transports};
 
 use super::utils::GracefulShutdownTracker;
 use crate::SystemHealth;
@@ -35,6 +37,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 type InstanceMap = HashMap<Endpoint, Weak<Receiver<Vec<Instance>>>>;
+type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
 
 /// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
 /// communication protocols and transports.
@@ -64,6 +67,7 @@ pub struct DistributedRuntime {
     component_registry: component::Registry,
 
     instance_sources: Arc<tokio::sync::Mutex<InstanceMap>>,
+    routing_occupancy_states: Arc<tokio::sync::Mutex<RoutingOccupancyMap>>,
 
     // Health Status
     system_health: Arc<parking_lot::Mutex<SystemHealth>>,
@@ -89,6 +93,10 @@ impl MetricsHierarchy for DistributedRuntime {
 
     fn get_metrics_registry(&self) -> &MetricsRegistry {
         &self.metrics_registry
+    }
+
+    fn connection_id(&self) -> Option<u64> {
+        Some(self.discovery_client.instance_id())
     }
 }
 
@@ -123,6 +131,7 @@ impl DistributedRuntime {
         let system_health = Arc::new(parking_lot::Mutex::new(SystemHealth::new(
             starting_health_status,
             use_endpoint_health_status,
+            config.health_check_enabled,
             health_endpoint_path,
             live_endpoint_path,
         )));
@@ -185,6 +194,7 @@ impl DistributedRuntime {
             discovery_metadata,
             component_registry,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
+            routing_occupancy_states: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
             request_plane,
@@ -340,7 +350,34 @@ impl DistributedRuntime {
         Ok(self
             .tcp_server
             .get_or_try_init(async move {
-                let options = tcp::server::ServerOptions::default();
+                let port = match std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT) {
+                    Ok(p) => p.parse::<u16>().map_err(|_| {
+                        PipelineError::Generic(format!(
+                            "invalid {}: '{}' is not a valid port number",
+                            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
+                            p
+                        ))
+                    })?,
+                    Err(_) => 0,
+                };
+                let interface = std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST)
+                    .ok()
+                    .filter(|h| !h.is_empty());
+
+                let host_suffix = interface
+                    .as_ref()
+                    .map_or(String::new(), |h| format!(" on host {h}"));
+                if port == 0 {
+                    tracing::info!(
+                        "TCP response stream server using OS-assigned port{host_suffix}"
+                    );
+                } else {
+                    tracing::info!(
+                        "TCP response stream server using fixed port {port}{host_suffix}"
+                    );
+                }
+
+                let options = tcp::server::ServerOptions { port, interface };
                 let server = tcp::server::TcpStreamServer::new(options).await?;
                 Ok::<_, PipelineError>(server)
             })
@@ -388,6 +425,10 @@ impl DistributedRuntime {
 
     pub fn instance_sources(&self) -> Arc<Mutex<InstanceMap>> {
         self.instance_sources.clone()
+    }
+
+    pub(crate) fn routing_occupancy_states(&self) -> Arc<Mutex<RoutingOccupancyMap>> {
+        self.routing_occupancy_states.clone()
     }
 
     /// TODO: This is a temporary KV router measure for component/component.rs EventPublisher impl for
@@ -545,9 +586,18 @@ impl DistributedConfig {
         //
         // Historically we only connected to NATS when the request plane was NATS, which made
         // `DYN_REQUEST_PLANE=tcp|http` incompatible with KV routing modes that rely on NATS.
-        // If a NATS server is configured via env, enable the client regardless of request plane.
+        // Enable the NATS client when any of these hold:
+        // 1. Request plane is NATS
+        // 2. NATS_SERVER is explicitly configured
+        // 3. Event plane is NATS (the default)
+        let event_plane_is_nats =
+            std::env::var(crate::config::environment_names::event_plane::DYN_EVENT_PLANE)
+                .map(|v| v.eq_ignore_ascii_case("nats"))
+                .unwrap_or(true);
+
         let nats_enabled = request_plane.is_nats()
-            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok();
+            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok()
+            || event_plane_is_nats;
 
         // DYN_DISCOVERY_BACKEND selects the discovery mechanism
         // Valid values: "kubernetes", "etcd" (default), "file", "mem"
@@ -587,8 +637,13 @@ impl DistributedConfig {
             ..Default::default()
         };
         let request_plane = RequestPlaneMode::from_env();
+        let event_plane_is_nats =
+            std::env::var(crate::config::environment_names::event_plane::DYN_EVENT_PLANE)
+                .map(|v| v.eq_ignore_ascii_case("nats"))
+                .unwrap_or(true);
         let nats_enabled = request_plane.is_nats()
-            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok();
+            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok()
+            || event_plane_is_nats;
         DistributedConfig {
             discovery_backend: DiscoveryBackend::KvStore(kv::Selector::Etcd(Box::new(etcd_config))),
             nats_config: if nats_enabled {

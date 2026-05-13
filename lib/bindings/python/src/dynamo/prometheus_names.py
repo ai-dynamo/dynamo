@@ -47,6 +47,14 @@ class frontend_perf:
 
     # Per-stage latency histogram (label: stage = preprocess|route|transport_roundtrip|postprocess)
     STAGE_DURATION_SECONDS = "stage_duration_seconds"
+    # Per-stage inflight request gauge (labels: stage, phase)
+    # Tracks how many requests are currently in each pipeline stage.
+    # Phase values: "prefill", "decode", "aggregated" (for route/dispatch); empty for preprocess.
+    STAGE_REQUESTS = "stage_requests"
+    # Stage label values for STAGE_REQUESTS and STAGE_DURATION_SECONDS.
+    STAGE_PREPROCESS = "preprocess"
+    STAGE_ROUTE = "route"
+    STAGE_DISPATCH = "dispatch"
     # Tokenization time in preprocessor
     TOKENIZE_SECONDS = "tokenize_seconds"
     # Template application time in preprocessor
@@ -73,6 +81,9 @@ class frontend_service:
     # Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
     # Note: This is a gauge metric (current state) that can go up and down, so no _total suffix
     INFLIGHT_REQUESTS = "inflight_requests"
+    # Number of requests currently being handled by the frontend, from HTTP handler
+    # entry to response completion. Clearer name for what inflight_requests measures.
+    ACTIVE_REQUESTS = "active_requests"
     # Number of disconnected clients (gauge that can go up and down)
     DISCONNECTED_CLIENTS = "disconnected_clients"
     # Duration of LLM requests
@@ -83,6 +94,8 @@ class frontend_service:
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "kv_hit_rate"
+    # Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
+    KV_TRANSFER_ESTIMATED_LATENCY_SECONDS = "kv_transfer_estimated_latency_seconds"
     # Number of cached tokens (prefix cache hits) per request
     CACHED_TOKENS = "cached_tokens"
     # Tokenizer latency in milliseconds
@@ -110,6 +123,15 @@ class frontend_service:
     MODEL_MIGRATION_LIMIT = "model_migration_limit"
     # Total number of request migrations due to worker unavailability
     MODEL_MIGRATION_TOTAL = "model_migration_total"
+    # Total number of times migration was disabled because the sequence length
+    # exceeded the configured max_seq_len limit
+    MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL = (
+        "model_migration_max_seq_len_exceeded_total"
+    )
+    # Total number of request cancellations
+    MODEL_CANCELLATION_TOTAL = "model_cancellation_total"
+    # Total number of requests rejected due to resource exhaustion
+    MODEL_REJECTION_TOTAL = "model_rejection_total"
     # Active decode blocks (KV cache blocks) per worker
     # Gauge metric tracking current KV cache block utilization for each worker
     WORKER_ACTIVE_DECODE_BLOCKS = "worker_active_decode_blocks"
@@ -239,25 +261,29 @@ class model_info:
 
 
 class name_prefix:
-    """Metric name prefixes used across the metrics system"""
+    """Metric name prefixes used across the metrics system."""
 
-    # Prefix for all Prometheus metric names.
+    # Prefix for component-scoped metrics, auto-labeled with namespace/endpoint.
     COMPONENT = "dynamo_component"
-    # Prefix for frontend service metrics
+    # Prefix for frontend HTTP service metrics (requests, TTFT, ITL, disconnects).
     FRONTEND = "dynamo_frontend"
-    # Prefix for KV router metrics (used with router_id label)
+    # Prefix for KV router instance metrics (carries `router_id` label).
     ROUTER = "dynamo_router"
-    # Prefix for request-plane (transport-agnostic) metrics at AddressedPushRouter
-    REQUEST_PLANE = "dynamo_request_plane"
-    # Prefix for tokio runtime metrics
-    TOKIO = "dynamo_tokio"
     # Prefix for standalone KV indexer metrics
     KVINDEXER = "dynamo_kvindexer"
-    # Prefix for transport-layer metrics (TCP / NATS)
+    # Prefix for request-plane metrics at AddressedPushRouter.
+    # Transport-agnostic: measures request lifecycle latency and concurrency
+    # (queue → send → roundtrip TTFT, inflight gauge).
+    REQUEST_PLANE = "dynamo_request_plane"
+    # Prefix for transport-layer metrics (TCP / NATS).
+    # Protocol-specific: measures wire-level health (bytes sent/received, error counts).
     TRANSPORT = "dynamo_transport"
     # Prefix for work-handler transport breakdown metrics (backend side)
     WORK_HANDLER = "dynamo_work_handler"
-    # Prefix for routing overhead metrics (raw Prometheus, not component-scoped)
+    # Prefix for tokio runtime metrics (poll times, queue depths, stalls).
+    TOKIO = "dynamo_tokio"
+    # Prefix for per-phase routing overhead latency (hashing, scheduling).
+    # Raw Prometheus, not component-scoped.
     ROUTING_OVERHEAD = "dynamo_routing_overhead"
 
 
@@ -279,6 +305,10 @@ class router:
 
     # Total number of requests processed by the router
     REQUESTS_TOTAL = "router_requests_total"
+    # Total number of remote indexer overlap queries that failed
+    REMOTE_INDEXER_QUERY_FAILURES_TOTAL = "router_remote_indexer_query_failures_total"
+    # Total number of remote indexer routing-decision writes that failed
+    REMOTE_INDEXER_WRITE_FAILURES_TOTAL = "router_remote_indexer_write_failures_total"
     # Time to first token observed at the router (seconds)
     TIME_TO_FIRST_TOKEN_SECONDS = "router_time_to_first_token_seconds"
     # Average inter-token latency observed at the router (seconds)
@@ -287,6 +317,8 @@ class router:
     INPUT_SEQUENCE_TOKENS = "router_input_sequence_tokens"
     # Output sequence length in tokens observed at the router
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
+    # Predicted KV cache hit rate at routing time (0.0-1.0)
+    KV_HIT_RATE = "router_kv_hit_rate"
 
 
 class router_request:
@@ -349,22 +381,6 @@ class tokio_perf:
 class transport:
     """Transport-specific metrics (TCP / NATS)"""
 
-    # NOTE: Nested classes added manually because the codegen does not yet
-    # handle Rust submodules (see TODO in prometheus_parser.rs).
-    # Re-running gen-python-prometheus-names will overwrite this file and
-    # lose these classes until the codegen is updated.
-
-    class tcp:
-        POOL_ACTIVE = "tcp_pool_active"
-        POOL_IDLE = "tcp_pool_idle"
-        BYTES_SENT_TOTAL = "tcp_bytes_sent_total"
-        BYTES_RECEIVED_TOTAL = "tcp_bytes_received_total"
-        ERRORS_TOTAL = "tcp_errors_total"
-        SERVER_QUEUE_DEPTH = "tcp_server_queue_depth"
-
-    class nats:
-        ERRORS_TOTAL = "nats_errors_total"
-
 
 class trtllm_additional:
     """Additional TRT-LLM worker metrics beyond what the engine natively provides."""
@@ -401,6 +417,8 @@ class work_handler:
     REQUEST_DURATION_SECONDS = "request_duration_seconds"
     # Total number of errors in work handler processing
     ERRORS_TOTAL = "errors_total"
+    # Total number of requests cancelled by work handler (client stop/kill or disconnect)
+    CANCELLATION_TOTAL = "cancellation_total"
     # Network transit: frontend send to backend receive (wall-clock, cross-process)
     NETWORK_TRANSIT_SECONDS = "network_transit_seconds"
     # Backend processing: handle_payload entry to first response sent

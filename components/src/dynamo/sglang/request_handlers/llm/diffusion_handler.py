@@ -7,6 +7,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 import sglang as sgl
 
 from dynamo._core import Context
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
@@ -76,7 +77,7 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
         sampling_params = self._build_sampling_params(request)
 
         # Generate trace info if tracing is enabled
-        trace_header = self._get_trace_header(context) if self.enable_trace else None
+        trace_header = build_trace_headers(context) if self.enable_trace else None
         trace_id = context.id() if trace_header else None
 
         async_gen = await self.engine.async_generate(
@@ -88,7 +89,7 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
         )
 
         # Process stream output (token-based or text-based)
-        if self.skip_tokenizer_init:
+        if not self.use_sglang_tokenizer:
             async for out in self._process_token_stream(async_gen, context):
                 yield out
         else:

@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_async_openai::types::{
+use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionRequestAssistantMessage,
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
 };
