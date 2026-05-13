@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: pythonic
+mode: batch
+cases:
+  PARSER.batch.6.a:
+    description: Empty parens (no args)
+    ref: dynamo
+    model_text: '[get_time()]'
+    tools:
+    - &id001
+      name: get_time
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      calls:
+      - name: get_time
+        arguments: {}
+      normal_text: ''
+  PARSER.batch.6.b:
+    description: Whitespace inside parens
+    ref: dynamo
+    model_text: '[get_time( )]'
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: '[get_time( )]'
