@@ -230,7 +230,8 @@ uv run --no-sync python -m dynamo.replay /tmp/dynamo-agent-trace.mooncake.jsonl 
 
 Converted rows use **per-request timestamps** as wall-clock arrivals; Mooncake `session_id` is left unset so overlapping LLM calls from the same trajectory replay in parallel. Mocker **simulates** KV behavior from engine/router settings.
 
-ATIF alignment</summary>
+<details>
+<summary>ATIF alignment</summary>
 
 Dynamo emits `dynamo.agent.trace.v1`, not full ATIF logs—but identifiers match [ATIF][atif-rfc] / [Harbor](https://github.com/harbor-framework/harbor) so you can join harness trajectories to Dynamo rows on `session_id` + `trajectory_id`. Dynamo omits conversational payload by design.
 

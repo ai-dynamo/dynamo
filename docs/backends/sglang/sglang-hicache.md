@@ -58,19 +58,21 @@ By default the router's radix tree only reflects blocks resident in **GPU HBM** 
 
 SGLang's `HiRadixCache` emits `BlockStored` / `BlockRemoved` events carrying a `medium` field on every tier transition:
 
-| Transition                                      | Event emitted |
-| ----------------------------------------------- | ------------- |
-| Fresh prefill writes blocks to GPU              | `store(GPU)`  |
-| GPU → Host copy (after async DMA completes)     | `store(CPU)`  |
-| GPU evicted, block still resident on Host       | `remove(GPU)` |
-| Host evicted (block gone from all worker tiers) | `remove(CPU)` |
-| Host → GPU promotion (`load_back`)              | `store(GPU)`  |
-| External → Host prefetch (L2 materialization)   | `store(CPU)`  |
+| Transition                                      | Event emitted        |
+| ----------------------------------------------- | -------------------- |
+| Fresh prefill writes blocks to GPU              | `store(GPU)`         |
+| GPU → Host copy (after async DMA completes)     | `store(CPU_PINNED)`  |
+| GPU evicted, block still resident on Host       | `remove(GPU)`        |
+| Host evicted (block gone from all worker tiers) | `remove(CPU_PINNED)` |
+| Host → GPU promotion (`load_back`)              | `store(GPU)`         |
+| External → Host prefetch (L2 materialization)   | `store(CPU_PINNED)`  |
+
+`CPU_PINNED` is the value SGLang's `HiRadixCache` actually emits for host-tier blocks (page-locked memory). The rest of this guide uses `CPU_PINNED` to match the on-the-wire string; "Host" is the conceptual tier name.
 
 A few properties the router relies on:
 
 - **Ordering.** `store(new_tier)` is emitted before `remove(old_tier)` so the block is never invisible to the router during a transition.
-- **DMA safety.** `store(CPU)` for a GPU→Host copy is deferred until `finish_event.synchronize()` confirms the DMA landed — events never fire before bytes are resident.
+- **DMA safety.** `store(CPU_PINNED)` for a GPU→Host copy is deferred until `finish_event.synchronize()` confirms the DMA landed — events never fire before bytes are resident.
 - **Per-tier tracking.** A block can be on GPU and Host simultaneously. The router records both and picks the highest-priority tier when scoring overlap.
 
 ### How it works
