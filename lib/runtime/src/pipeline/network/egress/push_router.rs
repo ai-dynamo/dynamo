@@ -818,12 +818,14 @@ where
                         total_workers = all_instances.len(),
                         "Rejecting request: all workers are busy"
                     );
-                    let cause = PipelineError::ServiceOverloaded(
-                        "All workers are busy, please retry later".to_string(),
-                    );
+                    let msg = "All workers are busy, please retry later. \
+                        To increase capacity, raise or disable the busy thresholds \
+                        (e.g. --active-decode-blocks-threshold None \
+                        --active-prefill-tokens-threshold None).";
+                    let cause = PipelineError::ServiceOverloaded(msg.to_string());
                     return Err(DynamoError::builder()
                         .error_type(ErrorType::ResourceExhausted)
-                        .message("All workers are busy, please retry later")
+                        .message(msg)
                         .cause(cause)
                         .build()
                         .into());

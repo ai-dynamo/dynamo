@@ -2720,21 +2720,20 @@ mod tests {
         use dynamo_runtime::error::{DynamoError, ErrorType};
         use dynamo_runtime::pipeline::error::PipelineError;
 
-        let cause = PipelineError::ServiceOverloaded(
-            "All workers are busy, please retry later".to_string(),
-        );
+        let msg = "All workers are busy, please retry later. \
+            To increase capacity, raise or disable the busy thresholds \
+            (e.g. --active-decode-blocks-threshold None \
+            --active-prefill-tokens-threshold None).";
+        let cause = PipelineError::ServiceOverloaded(msg.to_string());
         let err: anyhow::Error = DynamoError::builder()
             .error_type(ErrorType::ResourceExhausted)
-            .message("All workers are busy, please retry later")
+            .message(msg)
             .cause(cause)
             .build()
             .into();
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            response.1.message,
-            "ResourceExhausted: All workers are busy, please retry later"
-        );
+        assert_eq!(response.1.message, format!("ResourceExhausted: {msg}"));
     }
 
     #[test]
