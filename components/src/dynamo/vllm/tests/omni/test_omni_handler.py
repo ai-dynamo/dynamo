@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -95,16 +95,24 @@ class TestBuildEngineInputs:
             "messages": [{"role": "user", "content": "hello"}],
             "modalities": ["audio"],
         }
+        tokenizer = MagicMock()
 
         class FakeOmniChatPreprocessor:
-            async def _preprocess_chat(self, request, messages, **kwargs):
+            async def _preprocess_chat(
+                self, request, tokenizer_arg, messages, **kwargs
+            ):
+                assert tokenizer_arg is tokenizer
                 assert request.messages == messages
-                assert kwargs["renderer"] is handler.engine_client.renderer
-                assert kwargs["default_template_content_format"] == "auto"
-                return ["conversation"], [{"prompt": "<rendered>hello"}]
+                assert kwargs["chat_template_content_format"] == "auto"
+                assert "renderer" not in kwargs
+                return (
+                    ["conversation"],
+                    ["request_prompt"],
+                    [{"prompt": "<rendered>hello"}],
+                )
 
-        handler.engine_client.renderer = MagicMock()
         handler.engine_client.model_config = MagicMock()
+        handler.engine_client.get_tokenizer = AsyncMock(return_value=tokenizer)
         handler._omni_chat_preprocessor = FakeOmniChatPreprocessor()
 
         inputs = await handler.build_engine_inputs(raw, RequestType.CHAT_COMPLETION)

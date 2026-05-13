@@ -42,7 +42,7 @@ class OmniChatPreprocessor(OmniOpenAIServingChat):
 
     Full OmniOpenAIServingChat initialization wires the HTTP serving stack.
     Dynamo only needs `_preprocess_chat`, which relies on model_config and
-    speaker-cache state while the renderer is passed per call.
+    speaker-cache state.
     """
 
     def __init__(self, model_config: Any):
@@ -333,27 +333,34 @@ class OmniHandler(BaseOmniHandler):
     ) -> Dict[str, Any] | None:
         """Render chat through vLLM-Omni's OpenAI chat preprocessing."""
         try:
-            renderer = self.engine_client.renderer
             model_config = self.engine_client.model_config
-            if renderer is None or model_config is None:
+            if model_config is None:
                 return None
 
             chat_request = ChatCompletionRequest.model_validate(request)
+            tokenizer = await self.engine_client.get_tokenizer()
 
-            _, engine_prompts = await self._omni_chat_preprocessor._preprocess_chat(
+            (
+                _conversation,
+                _request_prompts,
+                engine_prompts,
+            ) = await self._omni_chat_preprocessor._preprocess_chat(
                 chat_request,
+                tokenizer,
                 chat_request.messages,
-                default_template=chat_request.chat_template,
-                default_template_content_format="auto",
+                chat_template=chat_request.chat_template,
+                chat_template_content_format="auto",
                 tool_dicts=(
                     [tool.model_dump() for tool in chat_request.tools]
                     if chat_request.tools is not None
                     else None
                 ),
-                renderer=renderer,
                 add_generation_prompt=chat_request.add_generation_prompt,
                 continue_final_message=chat_request.continue_final_message,
                 documents=getattr(chat_request, "documents", None),
+                chat_template_kwargs=getattr(
+                    chat_request, "chat_template_kwargs", None
+                ),
                 add_special_tokens=chat_request.add_special_tokens,
             )
             if not engine_prompts:
