@@ -346,9 +346,22 @@ no-op.
 
 ### `cleanup()`
 
-Called once on shutdown, exactly once if `start()` succeeded. The
-framework's state machine guarantees no concurrent or repeat calls,
-so your implementation doesn't need to defend against them:
+Two real requirements, both pinned by the Rust-side conformance kit:
+
+- **Null-safe against partial `start()` failure.** If `start()` raises
+  partway through, fields you allocate incrementally may still be
+  `None`. `cleanup()` must guard each resource (`if self._engine is
+  not None: …`) so the post-failure call doesn't crash on
+  half-initialized state.
+- **Idempotent.** A second call after a successful first must return
+  cleanly without re-entering teardown.
+
+The Rust `Worker` drives both: it calls `cleanup()` after `start()`
+returns Ok on shutdown, and the conformance kit (`run_conformance`)
+additionally calls `cleanup()` on a never-started engine and twice in a
+row, failing your tests with `CleanupWithoutStartFailed` /
+`SecondCleanupFailed` if either invariant breaks. The guarded
+single-shot pattern below covers both:
 
 ```python
 async def cleanup(self) -> None:
