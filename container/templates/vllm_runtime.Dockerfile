@@ -94,8 +94,10 @@ COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
+{% if device != "cuda" %}
+# Match NIXL meta package and all device variants with our built version.
 # The nixl meta package imports device-specific packages, so all must be at the same version.
-# This is needed for both runtime and dev targets to ensure version consistency for maturin/cargo builds.
+# https://github.com/ai-dynamo/nixl/blob/v1.0.1/src/bindings/python/nixl-meta/nixl/__init__.py
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eu; \
     export UV_CACHE_DIR=/root/.cache/uv; \
@@ -105,6 +107,11 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         "nixl==${NIXL_VERSION}" \
         "nixl-cu12==${NIXL_VERSION}" \
         "nixl-cu13==${NIXL_VERSION}"
+{% endif %}
+
+# Copy attribution files and wheels
+COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 # Install device-specific NIXL wheels for non-CUDA devices.
 # These are custom-built in wheel_builder and required for dev builds to link against NIXL libraries.
