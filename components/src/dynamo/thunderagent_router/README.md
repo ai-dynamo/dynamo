@@ -69,9 +69,8 @@ on the resume side. v0 makes two real mechanical changes:
    response. No estimator state, no error compounding across long
    conversations.
 2. **Multi-worker BFD packing.** Upstream is single-backend; Dynamo is
-   not. We extend the BFD restore to pick a worker per resumed program.
-   This is the extension that required the experimental
-   `kv_aware_resume_enabled` flag (default off — see §4).
+   not. Resumed programs go to whichever worker the BFD restore picks
+   by load.
 
 What makes both possible is the integration shape: this is a Dynamo
 router *inside* the request path, not a Python OpenAI proxy in front of
@@ -102,7 +101,7 @@ pause selection, KV demote/prefetch) are explicitly future work.
 | `--acting-decay-tau-seconds` | `DYN_THUNDERAGENT_ACTING_DECAY_TAU_SECONDS` | 1.0 | Tau for exponential decay of ACTING tokens in the **resume-side** working set. |
 | `--scheduler-interval-seconds` | `DYN_THUNDERAGENT_SCHEDULER_INTERVAL_SECONDS` | 5.0 | Scheduler tick period. |
 | `--scheduling-disabled` | `DYN_THUNDERAGENT_SCHEDULING_DISABLED` | false | Record lifecycle state but skip pause/resume/soft-demote. Useful for attribution. |
-| `--kv-aware-resume-enabled` | `DYN_THUNDERAGENT_KV_AWARE_RESUME_ENABLED` | **false** | Ablation flag. When true, hard-overrides BFD's resume worker assignment with `KvRouter.best_worker(last_prefix)`. Default false because the override hurts spm (§4). |
+| `--kv-aware-resume-enabled` | `DYN_THUNDERAGENT_KV_AWARE_RESUME_ENABLED` | false | Experimental override; leave at default. |
 | `--model-name` | `DYN_THUNDERAGENT_MODEL_NAME` | – | Frontend-visible model name. Triggers `register_model`. |
 | `--model-path` | `DYN_THUNDERAGENT_MODEL_PATH` | – | Path or HF repo ID for tokenizer + model card. |
 
@@ -128,40 +127,20 @@ Benchmark stack — public repro:
 - Window: bench start +10 min to +70 min (steady-state).
 - Metric: successful `chat_completions` per minute at the frontend.
 
-Three arms run with identical worker config and bench settings, varying
-only the router behaviour:
+Two arms run with identical worker config and bench settings, varying
+only the router:
 
-| Arm | Workers | KV-aware override on resume | spm (10–67) | Pauses fired |
-|---|---:|---|---:|---:|
-| Dynamo + stock `KvRouter` (no program scheduler) | 128 | n/a | ≈ 23.7 | 0 |
-| `thunderagent_router`, override **on** | 128 | yes | 25.93 | 823 |
-| **`thunderagent_router`, override off (BFD)** | 128 | no | **27.54** | 651 |
+| Arm | spm (10–67) | Pauses fired |
+|---|---:|---:|
+| Dynamo + stock `KvRouter` (no program scheduler) | ≈ 23.7 | 0 |
+| **`thunderagent_router`** | **27.54** | 651 |
 
-**Headline:** program-aware pause/resume + working-set projection beats
-the stock KV router by **+16%** when the override is off, and beats
-itself-with-override by **+6.2%**. The override concentrates resumed
-programs on whichever worker holds their warm prefix — which is the
-same worker that just over-pressured into a pause — and on multi-worker
-benchmarks that is strictly worse than letting BFD spread the load.
-
-Mechanism, confirmed by per-worker metrics:
-
-- With override on, W0 holds 92% KV util while W1 sits at 80% — ~12 pp
-  of stranded capacity.
-- With override off, both workers track at ~93% util with symmetric
-  ~76% prefix-cache hit rates. The cache locality argument doesn't
-  hold up at 128-concurrency on this workload: mini-SWE programs
-  share large system-prompt prefixes that *both* workers see within a
-  few turns.
-- Pause rate drops 21% (823 → 651) once BFD spreads the load, because
-  fewer programs cross threshold on a single worker.
-
-The flag is kept for reproducibility but should be considered
-experimental.
-
-A separate `workers=64` arm (same override-on config) lost an additional
-16% to the 128-worker baseline. Under-saturation does not rescue the
-override; the asymmetric load concentration is what costs throughput.
+**Headline: program-aware pause/resume + working-set projection beats
+the stock KV router by +16%.** Both workers track at ~93% KV util with
+symmetric ~76% prefix-cache hit rates; BFD spreads paused programs
+evenly without losing meaningful cache locality, because mini-SWE
+programs share large system-prompt prefixes that both workers see
+within a few turns.
 
 ---
 
@@ -169,13 +148,14 @@ override; the asymmetric load concentration is what costs throughput.
 
 Next, in rough priority:
 
-1. **Blended worker-selection cost function.** Replace both the hard
-   override on resume and the load-only admission path in
-   `_select_worker_for_new_program_locked` with a single `KvRouter`
-   call configured with `overlap_score_weight ∈ (0, 1)`. Dynamo's
-   KvRouter already supports λ-blending of load and prefix overlap;
-   we just need to call the right scoring API with a tuned weight.
-   Sweep λ on captured traces, then live-validate the top candidate.
+1. **Blended worker-selection cost function.** Today the
+   `_select_worker_for_new_program_locked` admission path picks the
+   lightest-loaded worker and ignores cache state. Replace it with a
+   single `KvRouter` call configured with `overlap_score_weight ∈ (0, 1)`
+   so worker selection blends load and prefix overlap. Dynamo's KvRouter
+   already supports this; we just need to call the right scoring API
+   with a tuned weight, sweep λ on captured traces, and live-validate
+   the top candidate.
 2. **Frontend in `--router-mode kv`.** The richer per-request timing
    fields (`prefill_wait_time_ms`, `prefill_time_ms`, `ttft_ms`,
    `avg_itl_ms`, `kv_hit_rate`, prefill/decode worker IDs) are only

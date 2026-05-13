@@ -194,13 +194,10 @@ class ThunderAgentArgGroup(ArgGroup):
             flag_name="--kv-aware-resume-enabled",
             env_var="DYN_THUNDERAGENT_KV_AWARE_RESUME_ENABLED",
             default=False,
-            help="Ablation flag. When True, select_worker hard-overrides BFD's "
-            "worker assignment with KvRouter.best_worker(last_prefix) for "
-            "paused programs to preserve cache locality. Default False: "
-            "let BFD pick the lighter worker. Empirically the override "
-            "concentrates load on the warm-cache worker (which is also the "
-            "one that just over-pressured into a pause) and costs 6-11% spm "
-            "vs pure BFD at 128 concurrent agents (see DESIGN.md sec 5).",
+            help="Experimental override on resume worker selection; leave "
+            "at default (False). When True, select_worker uses "
+            "KvRouter.best_worker(last_prefix) instead of BFD's load "
+            "assignment. Kept for ablation reproducibility.",
             arg_type=bool,
         )
         add_argument(

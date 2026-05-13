@@ -16,10 +16,6 @@ proxy in front of the engine -- is what makes both of those possible
 and unlocks the optional ``dynamo.agent.trace.v1`` event stream for
 offline analysis.
 
-An opt-in ``kv_aware_resume_enabled`` flag exists for the hard-override
-ablation on resume worker selection. Default off; the override costs
-6-11% spm vs BFD at 128 concurrent agents (README section 4).
-
 The more substantial deviations from upstream (blended cost-function
 worker selection, workflow-profile-aware pause, KV demote/prefetch) are
 explicitly future work.

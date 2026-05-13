@@ -12,11 +12,6 @@ side. v0 makes two mechanical changes versus upstream:
   ``chars / 5`` estimator;
 * multi-worker BFD restore (upstream is single-backend).
 
-An opt-in ``kv_aware_resume_enabled`` flag exists for the hard-override
-ablation on resume worker selection; multi-worker benchmarks showed it
-concentrates load on the warm-cache worker and costs 6-11% spm vs BFD,
-so it defaults off (see README section 4).
-
 Status: experimental. The more substantial deviations (blended
 cost-function for worker selection, workflow-profile-aware pause, KV
 demote/prefetch) are future work.
@@ -142,12 +137,10 @@ class ThunderAgentConfig:
     """Headroom reserved per program when BFD-packing during resume."""
 
     kv_aware_resume_enabled: bool = False
-    """Ablation flag. When True, `select_worker` hard-overrides BFD's worker
-    assignment with KvRouter.best_worker(last_prefix) for paused programs.
-    Default False: empirically the override concentrates load on the
-    warm-cache worker -- which is the same worker that just over-pressured
-    into a pause -- and loses 6-11% spm vs pure BFD on 2xTP4 / 128 agents
-    (see README section 4). Set True to reproduce the prior behaviour."""
+    """Experimental override on resume worker selection. When True,
+    ``select_worker`` uses ``KvRouter.best_worker(last_prefix)`` instead of
+    BFD's load assignment. Default False; kept for ablation
+    reproducibility."""
 
 
 class KvThunderAgentRouter:
