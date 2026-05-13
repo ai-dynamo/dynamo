@@ -2457,7 +2457,7 @@ mod local_indexer_tests {
 
     #[tokio::test]
     async fn test_local_indexer_buffer_and_serialization() {
-        let worker_id = 42u64;
+        let worker_id = 42;
         let token = CancellationToken::new();
         let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
         let local_indexer = Arc::new(LocalKvIndexer::new(token, 4, metrics, 100));
