@@ -47,7 +47,12 @@ print_launch_banner "Launching Disaggregated on Same GPU (1 GPU)" "$MODEL" "$HTT
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-python3 -m dynamo.frontend &
+# Set DYN_CHAT_PROCESSOR=vllm to exercise the Python pre/post processor instead of Rust.
+FRONTEND_ARGS=()
+if [[ -n "${DYN_CHAT_PROCESSOR:-}" ]]; then
+    FRONTEND_ARGS+=(--dyn-chat-processor "$DYN_CHAT_PROCESSOR")
+fi
+python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
 
 # run decode worker with metrics on port 8081
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
