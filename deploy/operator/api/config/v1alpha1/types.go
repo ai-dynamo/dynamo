@@ -313,9 +313,10 @@ type CheckpointConfiguration struct {
 	// restore pods. A nil value means "use the default profile"; set
 	// Seccomp.Disabled=true to disable seccomp injection entirely.
 	Seccomp *CheckpointSeccompConfiguration `json:"seccomp,omitempty"`
-	// Deprecated: Storage is retained for compatibility and ignored by the
-	// current snapshot flow. Snapshot storage is discovered from the
-	// snapshot-agent DaemonSet instead.
+	// Storage optionally configures the namespace-local checkpoint PVC that
+	// workload pods mount. When omitted, the operator preserves the legacy
+	// behavior of discovering storage from a snapshot-agent DaemonSet in the
+	// workload namespace.
 	Storage CheckpointStorageConfiguration `json:"storage"`
 }
 
@@ -337,8 +338,8 @@ type CheckpointSeccompConfiguration struct {
 }
 
 // EffectiveSeccompProfile returns the seccomp profile to use, or "" to disable.
-// nil substruct or zero-value substruct → DefaultSeccompProfile. Disabled=true
-// → "". Profile override takes effect when Disabled is false.
+// A nil substruct or zero-value substruct uses DefaultSeccompProfile. Disabled=true
+// disables injection. Profile override takes effect when Disabled is false.
 func (c *CheckpointConfiguration) EffectiveSeccompProfile() string {
 	if c.Seccomp == nil {
 		return DefaultSeccompProfile
@@ -352,26 +353,35 @@ func (c *CheckpointConfiguration) EffectiveSeccompProfile() string {
 	return c.Seccomp.Profile
 }
 
-// Deprecated: CheckpointStorageConfiguration is retained for compatibility and
-// ignored by the current snapshot flow.
+// CheckpointStorageConfiguration configures checkpoint storage for operator
+// pod mutations. Only PVC storage is implemented today.
 type CheckpointStorageConfiguration struct {
-	// Type is the legacy storage backend type: pvc, s3, or oci.
+	// Type is the storage backend type. Only pvc is implemented today.
 	Type string `json:"type"`
-	// PVC configuration for legacy pvc-based settings.
+	// PVC configuration for pvc-based settings.
 	PVC CheckpointPVCConfig `json:"pvc"`
-	// S3 configuration for legacy s3-based settings.
+	// Deprecated: S3 is retained for compatibility and ignored.
 	S3 CheckpointS3Config `json:"s3"`
-	// OCI configuration for legacy oci-based settings.
+	// Deprecated: OCI is retained for compatibility and ignored.
 	OCI CheckpointOCIConfig `json:"oci"`
 }
 
-// Deprecated: CheckpointPVCConfig is retained for compatibility and ignored by
-// the current snapshot flow.
+// CheckpointPVCConfig configures the namespace-local PVC mounted into
+// checkpoint and restore workload pods.
 type CheckpointPVCConfig struct {
-	// PVCName is the legacy PVC name.
+	// PVCName is the PVC name in each workload namespace.
 	PVCName string `json:"pvcName"`
-	// BasePath is the legacy base directory within the PVC.
+	// BasePath is the mount path inside checkpoint and restore workload pods.
 	BasePath string `json:"basePath"`
+	// Create tells the operator to create the PVC in workload namespaces when
+	// it is missing. When false, the PVC must already exist.
+	Create bool `json:"create"`
+	// Size is the storage request used when Create is true.
+	Size string `json:"size"`
+	// StorageClassName is the optional StorageClass name used when Create is true.
+	StorageClassName string `json:"storageClassName"`
+	// AccessMode is the PVC access mode used when Create is true.
+	AccessMode string `json:"accessMode"`
 }
 
 // Deprecated: CheckpointS3Config is retained for compatibility and ignored by

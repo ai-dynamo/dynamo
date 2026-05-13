@@ -441,8 +441,8 @@ class NativePlannerBase:
 
     async def _get_worker_counts_raw(self) -> tuple[int, int, bool]:
         """Returns (num_prefill, num_decode, is_stable) from connector or runtime."""
-        if hasattr(self, "connector") and isinstance(
-            self.connector, KubernetesConnector
+        if hasattr(self, "connector") and hasattr(
+            self.connector, "get_actual_worker_counts"
         ):
             (
                 prefill_count,
@@ -644,15 +644,13 @@ class NativePlannerBase:
 
     async def _collect_worker_counts(self) -> WorkerCounts:
         num_p, num_d, is_stable = await self._get_worker_counts_raw()
+        expected_p = num_p if is_stable else None
+        expected_d = num_d if is_stable else None
         return WorkerCounts(
             ready_num_prefill=num_p if self.require_prefill else None,
             ready_num_decode=num_d if self.require_decode else None,
-            expected_num_prefill=(num_p if is_stable else None)
-            if self.require_prefill
-            else None,
-            expected_num_decode=(num_d if is_stable else None)
-            if self.require_decode
-            else None,
+            expected_num_prefill=expected_p if self.require_prefill else None,
+            expected_num_decode=expected_d if self.require_decode else None,
         )
 
     # ------------------------------------------------------------------

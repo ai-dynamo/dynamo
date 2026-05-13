@@ -585,6 +585,7 @@ spec:
                             - h100_pcie
                             - a100_sxm
                             - a100_pcie
+                            - a30
                             - l40s
                             - l40
                             - l4
@@ -601,6 +602,7 @@ spec:
                             - h100_pcie
                             - a100_sxm
                             - a100_pcie
+                            - a30
                             - l40s
                             - l40
                             - l4

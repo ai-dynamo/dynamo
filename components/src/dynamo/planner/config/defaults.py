@@ -28,6 +28,12 @@ class BasePlannerDefaults:
     log_dir = None
     throughput_adjustment_interval_seconds = 180
     max_gpu_budget = 8
+    # GPU floor for the local planner (per-DGD scope). -1 disables.
+    # When set alongside max_gpu_budget (with min == max), pins the total
+    # and the planner only redistributes replicas between pools.
+    # See dynamo.planner.core.budget.proportional_clamp_pair for the
+    # tolerance band semantics.
+    min_gpu_budget = -1
     min_endpoint = 1  # applies to both decode and prefill
     decode_engine_num_gpu = 1
     prefill_engine_num_gpu = 1

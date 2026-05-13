@@ -13,6 +13,7 @@ mod downloader;
 pub mod load_estimator;
 pub mod routing;
 mod source;
+pub mod state_tracker;
 
 pub use cache::LoRACache;
 pub use downloader::LoRADownloader;
@@ -22,3 +23,4 @@ pub use routing::{
     create_lora_allocator,
 };
 pub use source::{LoRASource, LocalLoRASource, S3LoRASource};
+pub use state_tracker::LoraStateTracker;
