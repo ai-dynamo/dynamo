@@ -237,6 +237,17 @@ class Client:
         """
         ...
 
+    async def wait_for_instance_by_runtime_data(
+            self,
+            key: str,
+            value: str,
+            timeout_s: float | None = None,
+        ) -> int:
+        """
+        Wait for exactly one instance whose MDC runtime_data contains the given string value.
+        """
+        ...
+
     async def random(
             self,
             request: JsonLike,
@@ -2354,6 +2365,7 @@ class backend:
             max_num_batched_tokens: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
+            runtime_data: Optional[Dict[str, Any]] = None,
         ) -> None: ...
         @property
         def model(self) -> str: ...
@@ -2373,6 +2385,8 @@ class backend:
         def bootstrap_host(self) -> Optional[str]: ...
         @property
         def bootstrap_port(self) -> Optional[int]: ...
+        @property
+        def runtime_data(self) -> Dict[str, Any]: ...
 
     class RuntimeConfig:
         def __init__(

@@ -6,11 +6,16 @@ from types import SimpleNamespace
 import pytest
 
 import dynamo.sglang.publisher as publisher_mod
+import dynamo.sglang.worker_group as worker_group_mod
 from dynamo.sglang.publisher import (
     DynamoSglangPublisher,
     get_local_dp_rank_range,
     resolve_multinode_leader_worker_id,
     set_forward_pass_metrics_worker_id,
+)
+from dynamo.sglang.worker_group import (
+    SGLANG_WORKER_GROUP_ID_KEY,
+    get_sglang_worker_group_id,
 )
 
 pytestmark = [
@@ -63,6 +68,63 @@ def test_set_forward_pass_metrics_worker_id_is_noop_when_disabled():
     assert not hasattr(server_args, "forward_pass_metrics_worker_id")
 
 
+class FakeNetworkAddress:
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+
+    @staticmethod
+    def parse(value: str):
+        host, port = value.rsplit(":", 1)
+        return FakeNetworkAddress(host, int(port))
+
+    def resolved(self):
+        return self
+
+    def to_tcp(self):
+        return f"tcp://{self.host}:{self.port}"
+
+
+def test_sglang_worker_group_id_matches_across_node_ranks(monkeypatch):
+    monkeypatch.setattr(worker_group_mod, "NetworkAddress", FakeNetworkAddress)
+    node0_args = SimpleNamespace(nnodes=2, node_rank=0, dist_init_addr="10.0.0.1:2345")
+    node1_args = SimpleNamespace(nnodes=2, node_rank=1, dist_init_addr="10.0.0.1:2345")
+
+    assert get_sglang_worker_group_id(node0_args) == get_sglang_worker_group_id(
+        node1_args
+    )
+
+
+def test_sglang_worker_group_id_differs_by_dist_init_addr(monkeypatch):
+    monkeypatch.setattr(worker_group_mod, "NetworkAddress", FakeNetworkAddress)
+    group_a = get_sglang_worker_group_id(
+        SimpleNamespace(nnodes=2, dist_init_addr="10.0.0.1:2345")
+    )
+    group_b = get_sglang_worker_group_id(
+        SimpleNamespace(nnodes=2, dist_init_addr="10.0.0.2:2345")
+    )
+
+    assert group_a != group_b
+
+
+def test_sglang_worker_group_id_returns_none_without_dist_init_addr():
+    server_args = SimpleNamespace(nnodes=2, node_rank=1)
+
+    assert get_sglang_worker_group_id(server_args) is None
+
+
+def test_sglang_worker_group_id_returns_none_when_unparseable(monkeypatch):
+    class BrokenNetworkAddress:
+        @staticmethod
+        def parse(value: str):
+            raise ValueError(f"bad address: {value}")
+
+    monkeypatch.setattr(worker_group_mod, "NetworkAddress", BrokenNetworkAddress)
+    server_args = SimpleNamespace(nnodes=2, dist_init_addr="not an address")
+
+    assert get_sglang_worker_group_id(server_args) is None
+
+
 @pytest.mark.asyncio
 async def test_resolve_multinode_leader_worker_id_uses_single_instance():
     class FakeClient:
@@ -78,6 +140,38 @@ async def test_resolve_multinode_leader_worker_id_uses_single_instance():
     worker_id = await resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
 
     assert worker_id == 1234
+
+
+@pytest.mark.asyncio
+async def test_resolve_multinode_leader_worker_id_uses_worker_group(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        async def wait_for_instance_by_runtime_data(self, key, value, timeout_s=None):
+            calls.append((key, value, timeout_s))
+            return 1234
+
+    class FakeEndpoint:
+        async def client(self):
+            return FakeClient()
+
+    monkeypatch.setattr(
+        publisher_mod,
+        "get_sglang_worker_group_id",
+        lambda server_args: "dist_init:tcp://10.0.0.1:2345",
+    )
+    server_args = SimpleNamespace(nnodes=2, node_rank=1, dist_timeout=5)
+
+    worker_id = await resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
+
+    assert worker_id == 1234
+    assert calls == [
+        (
+            SGLANG_WORKER_GROUP_ID_KEY,
+            "dist_init:tcp://10.0.0.1:2345",
+            5.0,
+        )
+    ]
 
 
 @pytest.mark.asyncio

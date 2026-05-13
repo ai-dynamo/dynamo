@@ -34,6 +34,10 @@ from dynamo.llm import ModelInput
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import compute_bootstrap_address, warmup_prefill_engine
 from dynamo.sglang.args import parse_args
+from dynamo.sglang.worker_group import (
+    SGLANG_WORKER_GROUP_ID_KEY,
+    get_sglang_worker_group_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +54,13 @@ _DYN_SGLANG_SKIP_WARMUP_ENV = "DYN_SGLANG_SKIP_PREFILL_WARMUP"
 def _warmup_enabled() -> bool:
     raw = os.environ.get(_DYN_SGLANG_SKIP_WARMUP_ENV, "")
     return raw.strip().lower() not in ("1", "true", "yes", "on")
+
+
+def _get_runtime_data(server_args) -> dict[str, Any] | None:
+    worker_group_id = get_sglang_worker_group_id(server_args)
+    if worker_group_id is None:
+        return None
+    return {SGLANG_WORKER_GROUP_ID_KEY: worker_group_id}
 
 
 class SglangLLMEngine(LLMEngine):
@@ -142,6 +153,7 @@ class SglangLLMEngine(LLMEngine):
             # Prefill-only — drives PrefillRouter's Bootstrap path.
             bootstrap_host=self._bootstrap_host,
             bootstrap_port=self._bootstrap_port,
+            runtime_data=_get_runtime_data(self.server_args),
         )
 
     async def generate(

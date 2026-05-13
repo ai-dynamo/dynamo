@@ -36,6 +36,12 @@ from dynamo.common.utils.prometheus import (
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
 from dynamo.sglang.args import Config
+from dynamo.sglang.worker_group import (
+    SGLANG_WORKER_GROUP_ID_KEY,
+    get_sglang_worker_group_id,
+)
+
+SGLANG_WORKER_GROUP_LOOKUP_TIMEOUT_S = 300.0
 
 
 def require_sglang_dependency(value, name: str):
@@ -87,7 +93,33 @@ async def resolve_multinode_leader_worker_id(
     if node_rank <= 0 or nnodes <= 1:
         return None
 
+    worker_group_id = get_sglang_worker_group_id(server_args)
     client = await generate_endpoint.client()
+    if worker_group_id is not None:
+        timeout_s = getattr(server_args, "dist_timeout", None)
+        if timeout_s is None:
+            timeout_s = SGLANG_WORKER_GROUP_LOOKUP_TIMEOUT_S
+        try:
+            worker_id = await client.wait_for_instance_by_runtime_data(
+                SGLANG_WORKER_GROUP_ID_KEY,
+                worker_group_id,
+                timeout_s=float(timeout_s),
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "Failed to resolve SGLang leader worker_id for non-leader "
+                f"KV event attribution using {SGLANG_WORKER_GROUP_ID_KEY}="
+                f"{worker_group_id!r}"
+            ) from e
+
+        logging.info(
+            "Using SGLang leader worker_id=%s for non-leader KV event "
+            "publishing via worker_group_id=%s",
+            worker_id,
+            worker_group_id,
+        )
+        return int(worker_id)
+
     instances = await client.wait_for_instances()
     if len(instances) == 1:
         worker_id = int(instances[0])
