@@ -169,6 +169,12 @@ class TrtllmLLMEngine(LLMEngine):
             "scheduler_config": SchedulerConfig(),
             "tensor_parallel_size": config.tensor_parallel_size,
             "pipeline_parallel_size": config.pipeline_parallel_size,
+            "moe_expert_parallel_size": config.expert_parallel_size,
+            # Required for attention-DP routing: TRT-LLM only exposes
+            # per-rank KV events / stats when attention_dp is on, and
+            # `get_attention_dp_size()` reads this flag back to size the
+            # publishers (engine.py:118-120).
+            "enable_attention_dp": config.enable_attention_dp,
             "backend": Backend.PYTORCH,
             "kv_cache_config": KvCacheConfig(
                 free_gpu_memory_fraction=config.free_gpu_memory_fraction,
