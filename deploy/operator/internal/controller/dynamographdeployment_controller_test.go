@@ -546,6 +546,43 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_DRAV
 	}
 }
 
+func TestDynamoGraphDeploymentReconciler_reconcileResources_ValidatesGMSResourceClaimTemplatesBeforePathway(t *testing.T) {
+	ctx := context.Background()
+	g := gomega.NewGomegaWithT(t)
+	s := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "decode",
+					ComponentType: v1beta1.ComponentTypeDecode,
+					Experimental: &v1beta1.ExperimentalSpec{
+						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{},
+					},
+				},
+			},
+		},
+	}
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(dgd).
+			Build(),
+		Recorder: record.NewFakeRecorder(100),
+		Config: &configv1alpha1.OperatorConfiguration{
+			Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"},
+		},
+		RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: false},
+	}
+
+	_, err := reconciler.reconcileResources(ctx, dgd)
+	g.Expect(err).To(gomega.HaveOccurred())
+	g.Expect(err.Error()).To(gomega.ContainSubstring("requires DRA"))
+	g.Expect(err.Error()).To(gomega.ContainSubstring("explicitly disabled"))
+}
+
 func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_ToleratesNonGMSComponents(t *testing.T) {
 	ctx := context.Background()
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
@@ -1384,25 +1421,6 @@ func Test_reconcileGroveResources(t *testing.T) {
 					},
 				},
 			},
-		},
-		{
-			name: "inter-pod GMS failover requires DRA - returns clear error when DRA is disabled",
-			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
-				BackendFramework: "vllm",
-				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-					"decode": {
-						ComponentType: string(commonconsts.ComponentTypeDecode),
-						Replicas:      ptr.To(int32(1)),
-						Failover: &v1alpha1.FailoverSpec{
-							Enabled:    true,
-							Mode:       v1alpha1.GMSModeInterPod,
-							NumShadows: 1,
-						},
-					},
-				},
-			},
-			draEnabled:       false,
-			wantErrSubstring: "requires DRA",
 		},
 	}
 

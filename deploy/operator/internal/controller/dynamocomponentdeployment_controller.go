@@ -29,7 +29,6 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"emperror.dev/errors"
@@ -39,7 +38,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
@@ -184,10 +182,6 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		}
 	}
 
-	if err := r.reconcileGMSResourceClaimTemplate(ctx, dynamoComponentDeployment); err != nil {
-		return ctrl.Result{}, err
-	}
-
 	// Create the appropriate workload resource based on deployment type
 	var componentReconcileResult ComponentReconcileResult
 	if r.RuntimeConfig.LWSEnabled && dynamoComponentDeployment.IsMultinode() {
@@ -249,37 +243,6 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	}
 
 	return
-}
-
-func (r *DynamoComponentDeploymentReconciler) reconcileGMSResourceClaimTemplate(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) error {
-	spec := &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec
-	gmsSpec := dynamo.GetGPUMemoryService(spec)
-	if !r.RuntimeConfig.DRAEnabled {
-		if gmsSpec == nil {
-			return nil
-		}
-		return fmt.Errorf(
-			"gpuMemoryService requires DRA (Dynamic Resource Allocation), but the resource.k8s.io/v1 API " +
-				"is not available on this cluster (requires Kubernetes 1.34+)")
-	}
-
-	componentName := dynamo.GetDCDComponentName(dynamoComponentDeployment)
-	gpuCount, deviceClassName, err := dra.ExtractGPUParamsFromResourceRequirements(gmsSpec, dynamo.GetMainContainerResources(spec))
-	if err != nil {
-		return fmt.Errorf("invalid GPU resource requirements for GMS ResourceClaimTemplate: %w", err)
-	}
-	parentName := dynamoComponentDeployment.GetParentGraphDeploymentName()
-	if parentName == "" {
-		parentName = dynamoComponentDeployment.Name
-	}
-	claimTemplateName := dra.ResourceClaimTemplateName(parentName, componentName)
-	_, _, err = commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
-		return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoComponentDeployment.Namespace, gpuCount, deviceClassName)
-	})
-	if err != nil {
-		return fmt.Errorf("failed to sync GMS ResourceClaimTemplate: %w", err)
-	}
-	return nil
 }
 
 type ComponentReconcileResult struct {

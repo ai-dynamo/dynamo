@@ -421,6 +421,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	restartStatus := r.computeRestartStatus(ctx, dynamoDeployment)
 	restartState := dynamo.DetermineRestartState(dynamoDeployment, restartStatus)
 
+	if err := r.reconcileGMSResourceClaimTemplates(ctx, dynamoDeployment); err != nil {
+		return ReconcileResult{}, err
+	}
+
 	var result ReconcileResult
 	if r.isGrovePathway(dynamoDeployment) {
 		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
@@ -901,10 +905,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGMSResourceClaimTemplates(ctx
 
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
-
-	if err := r.reconcileGMSResourceClaimTemplates(ctx, dynamoDeployment); err != nil {
-		return ReconcileResult{}, err
-	}
 
 	renderDeployment, existingPodCliqueSet, err := r.prepareGroveRenderDeployment(ctx, dynamoDeployment)
 	if err != nil {
