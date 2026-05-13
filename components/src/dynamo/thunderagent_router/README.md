@@ -58,38 +58,32 @@ and pause/resume targeting tool boundaries (not arbitrary tokens).
 
 ## 3. How we built on ThunderAgent
 
-We re-implemented the program scheduler inside a Dynamo router service.
-Where the reference implementation makes choices that don't generalise
-to Dynamo's surface area, we deviate. Five deliberate changes:
+The scheduler algorithm here is upstream's: same lifecycle model
+(`REASONING / ACTING × ACTIVE / PAUSED`), same "pause smallest ACTING
+first" selection, same BFD restore, same `2^(-t/τ)` decay applied only
+on the resume side. v0 makes two real mechanical changes:
 
-1. **FPM-driven capacity, not Prometheus polling.** Upstream polls
-   Prometheus every 5 s. Dynamo's forward-pass metrics (FPM) event plane
-   delivers per-worker `active_decode_kv_tokens`, `active_prefill_tokens`,
-   `queued_prefill_tokens` at sub-second cadence. We subscribe to the
-   stream instead.
-2. **Real token accounting.** Upstream estimates `total_tokens` as
-   `len(json.dumps(payload)) / chars_per_token_ratio`. We use the
-   `prompt_tokens + completion_tokens` already on every chat-completions
-   response. No estimator state, no momentum-updated ratio, no
-   error compounding across long conversations.
-3. **Working-set projection with `pause_target`.** The trigger is
-   `Σ token_total + per-program buffer >= pause_threshold * pool`, and
-   pauses keep firing until projected util drops to `pause_target`. The
-   target is what fixes the "stall just under threshold" failure mode.
-4. **Asymmetric decay.** ACTING programs are weighted at full
-   `acting_token_weight` on the **pause** side (conservative) and decay
-   exponentially with `acting_decay_tau_seconds` on the **resume** side
-   (optimistic). Mirrors the paper's `remaining_capacity_with_decay`.
-   The decay replaces a hard TTL/GC for zombie programs.
-5. **Pure BFD load-balance on resume worker selection.** Resumed
-   programs go to whichever Dynamo worker BFD picks (lightest load).
-   We initially tried a hard-override that pinned resumed programs back
-   to the worker with the warmest prefix; on multi-worker benchmarks
-   that override turned out to be a net negative (§4) and is now an
-   opt-in ablation flag, not the default.
+1. **Real-token accounting.** Upstream estimates `total_tokens` from
+   `len(json.dumps(payload)) / chars_per_token_ratio`. We read
+   `prompt_tokens + completion_tokens` from the chat-completions
+   response. No estimator state, no error compounding across long
+   conversations.
+2. **Multi-worker BFD packing.** Upstream is single-backend; Dynamo is
+   not. We extend the BFD restore to pick a worker per resumed program.
+   This is the extension that required the experimental
+   `kv_aware_resume_enabled` flag (default off — see §4).
 
-Single in-memory service for now; pause state is lost on restart and a
-Rust port is on the roadmap.
+What makes both possible is the integration shape: this is a Dynamo
+router *inside* the request path, not a Python OpenAI proxy in front of
+the engine. Same shape gives us `nvext.agent_context` propagation and
+an opt-in `dynamo.agent.trace.v1` event stream for offline analysis.
+The scheduler knobs in the table below are upstream values exposed as
+flags, not new mechanisms.
+
+Single in-memory service for now; pause state is lost on restart, a
+Rust port is on the roadmap, and the more substantial deviations
+(blended cost function for worker selection, workflow-profile-aware
+pause selection, KV demote/prefetch) are explicitly future work.
 
 ### Knobs (full table)
 

@@ -1,27 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""KvThunderAgentRouter -- ThunderAgent-style program scheduler with Dynamo-native signals.
+"""KvThunderAgentRouter -- ThunderAgent program scheduler inside a Dynamo router.
 
-Composes Dynamo's native ``KvRouter`` (KV-aware placement) with:
+The algorithm is upstream ThunderAgent's: program lifecycle
+(REASONING / ACTING; ACTIVE / PAUSED), pause-smallest-ACTING-first,
+BFD restore, exponential decay (2^(-t/tau)) applied only on the resume
+side. v0 makes two mechanical changes versus upstream:
 
-* a per-``program_id`` lifecycle table (REASONING / ACTING; ACTIVE / PAUSED);
-* engine-true capacity from the FPM event plane (sub-second cadence vs
-  upstream's 5 s Prometheus poll);
-* real token accounting from chat-completions ``usage``, not a chars/5
-  estimator;
-* working-set projection with ``pause_target`` setpoint;
-* asymmetric ACTING-token weighting -- full weight on the pause side
-  (conservative), exponential decay on the resume side (optimistic);
-* soft-pause-then-hard-pause priority demotion;
-* BFD load-balanced resume worker selection by default. An opt-in
-  ``kv_aware_resume_enabled`` flag exists for the hard-override
-  ablation; multi-worker benchmarks showed it concentrates load on the
-  warm-cache worker and costs 6-11% spm vs BFD (see README section 4).
+* real-token accounting from chat-completions ``usage`` instead of a
+  ``chars / 5`` estimator;
+* multi-worker BFD restore (upstream is single-backend).
 
-Status: experimental. See README for the empirical results that motivate
-the defaults, and the roadmap for the planned blended-cost-function
-replacement of the override path.
+An opt-in ``kv_aware_resume_enabled`` flag exists for the hard-override
+ablation on resume worker selection; multi-worker benchmarks showed it
+concentrates load on the warm-cache worker and costs 6-11% spm vs BFD,
+so it defaults off (see README section 4).
+
+Status: experimental. The more substantial deviations (blended
+cost-function for worker selection, workflow-profile-aware pause, KV
+demote/prefetch) are future work.
 """
 
 from __future__ import annotations

@@ -1,37 +1,28 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""ThunderAgent-style program-level scheduler for Dynamo. **Experimental.**
+"""ThunderAgent program scheduler inside a Dynamo router service. **Experimental.**
 
-A standalone routing service that wraps Dynamo's native ``KvRouter`` with
-program lifecycle tracking (REASONING/ACTING/PAUSED) and tool-boundary
-pause/resume.
+The scheduler algorithm is upstream ThunderAgent's. v0 makes two
+mechanical changes:
 
-Mirrors the integration pattern of ``dynamo.thompson_router`` (PR #8522): it is
-a ``dynamo_worker`` that owns its own ``KvRouter`` instance and serves
-``{namespace}.thunderagent_router.generate``. The frontend discovers this
-endpoint and dispatches to it.
-
-Differs from the original ThunderAgent (Python proxy):
-
-1. Real token accounting from the chat-completions ``usage`` field, not a
+1. Real-token accounting from chat-completions ``usage`` instead of a
    ``chars / 5`` estimator.
-2. Engine-true capacity from the FPM event plane at sub-second cadence,
-   not 5-second Prometheus polling.
-3. Working-set projection with a ``pause_target`` setpoint, so pause
-   cycles drive util back to a stable point instead of stalling under
-   threshold.
-4. Asymmetric ACTING-token weighting: full weight on the pause side,
-   exponential decay on the resume side (mirrors upstream's
-   ``remaining_capacity_with_decay``).
-5. Soft pause via priority demotion before hard pause.
-6. BFD load-balance on resume worker selection by default. An opt-in
-   ``kv_aware_resume_enabled`` flag exists for the hard-override
-   ablation; multi-worker benchmarks showed it concentrates load and
-   costs throughput. See README section 4.
+2. Multi-worker BFD packing on resume (upstream is single-backend).
 
-Workflow-profile-aware pause selection, subagent-aware lifecycle, and
-fairness aging are tracked on the roadmap (README section 5).
+The integration shape -- a ``dynamo_worker`` inside the request path
+that owns its own ``KvRouter`` instance, rather than a Python OpenAI
+proxy in front of the engine -- is what makes both of those possible
+and unlocks the optional ``dynamo.agent.trace.v1`` event stream for
+offline analysis.
+
+An opt-in ``kv_aware_resume_enabled`` flag exists for the hard-override
+ablation on resume worker selection. Default off; the override costs
+6-11% spm vs BFD at 128 concurrent agents (README section 4).
+
+The more substantial deviations from upstream (blended cost-function
+worker selection, workflow-profile-aware pause, KV demote/prefetch) are
+explicitly future work.
 
 Usage:
     python -m dynamo.thunderagent_router \\
