@@ -26,7 +26,7 @@ use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
 use crate::replay::TraceCollector;
 use crate::scheduler::{
     AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, ForwardPassSnapshot,
-    RouterEventVisibility, WelfordAcc, capture_router_event_sink,
+    RouterEventVisibility, build_fpm_snapshot, capture_router_event_sink,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -689,57 +689,38 @@ impl VllmCore {
         scheduled: &FxHashMap<Uuid, ScheduledWork>,
         wall_time_secs: f64,
     ) -> ForwardPassSnapshot {
-        let mut prefill_acc = WelfordAcc::default();
-        let mut decode_acc = WelfordAcc::default();
-        let mut sum_prefill_tokens = 0u64;
-        let mut sum_prefill_kv_tokens = 0u64;
+        let scheduled_prefills = scheduled.values().filter_map(|work| {
+            (work.prompt_tokens > 0).then_some((
+                work.prompt_len as u64,
+                work.prefix_tokens as u64,
+                work.total_tokens as u64,
+            ))
+        });
 
-        for work in scheduled.values() {
-            if work.prompt_tokens > 0 {
-                sum_prefill_tokens += work.total_tokens as u64;
-                sum_prefill_kv_tokens += work.prefix_tokens as u64;
-                prefill_acc.add(work.prompt_len as f64);
-            } else {
-                decode_acc.add(work.sequence_len as f64);
-            }
-        }
+        let scheduled_decodes = scheduled
+            .values()
+            .filter_map(|work| (work.prompt_tokens == 0).then_some(work.sequence_len as u64));
 
-        let mut queued_prefill_acc = WelfordAcc::default();
-        let mut queued_decode_acc = WelfordAcc::default();
-        for uuid in &self.state.waiting {
-            let Some(request) = self.state.requests.get(uuid) else {
-                continue;
-            };
-            match request.status {
-                RequestStatus::Waiting => {
-                    queued_prefill_acc.add(request.sequence.num_input_tokens() as f64);
-                }
-                RequestStatus::Preempted => {
-                    queued_decode_acc.add(
-                        (request.sequence.num_input_tokens() + request.sequence.generated_tokens())
-                            as f64,
-                    );
-                }
-                RequestStatus::Running => {}
-            }
-        }
+        let queued_prefills = self.state.waiting.iter().filter_map(|uuid| {
+            let request = self.state.requests.get(uuid)?;
+            matches!(request.status, RequestStatus::Waiting)
+                .then_some(request.sequence.num_input_tokens() as u64)
+        });
 
-        ForwardPassSnapshot {
-            num_prefill_requests: prefill_acc.count,
-            sum_prefill_tokens,
-            var_prefill_length: prefill_acc.variance(),
-            sum_prefill_kv_tokens,
-            num_decode_requests: decode_acc.count,
-            sum_decode_kv_tokens: decode_acc.sum as u64,
-            var_decode_kv_tokens: decode_acc.variance(),
-            num_queued_prefill: queued_prefill_acc.count,
-            sum_queued_prefill_tokens: queued_prefill_acc.sum as u64,
-            var_queued_prefill_length: queued_prefill_acc.variance(),
-            num_queued_decode: queued_decode_acc.count,
-            sum_queued_decode_kv_tokens: queued_decode_acc.sum as u64,
-            var_queued_decode_kv_tokens: queued_decode_acc.variance(),
+        let queued_decodes = self.state.waiting.iter().filter_map(|uuid| {
+            let request = self.state.requests.get(uuid)?;
+            matches!(request.status, RequestStatus::Preempted).then_some(
+                (request.sequence.num_input_tokens() + request.sequence.generated_tokens()) as u64,
+            )
+        });
+
+        build_fpm_snapshot(
+            scheduled_prefills,
+            scheduled_decodes,
+            queued_prefills,
+            queued_decodes,
             wall_time_secs,
-        }
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
