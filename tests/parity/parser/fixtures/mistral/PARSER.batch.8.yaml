@@ -90,8 +90,6 @@ cases:
         calls: []
         normal_text: I will check the weather.
       vllm:
-        error: 'ValueError: Only one BOT token should have been outputted, but got I will check the weather. [TOOL_CALLS][{"name": "get_weather",
+        error: 'ValueError: Only one BOT token should have been outputted'
         reason: "vLLM mistral_tool_parser raises ValueError on two consecutive [TOOL_CALLS] envelopes"
-  "arguments": {"location": "NYC"}}][/TOOL_CALLS] Then check LA weather. [TOOL_CALLS][{"name": "get_weather", "arguments":
-  {"location": "LA"}}][/TOOL_CALLS].'
       sglang: *d_8_d

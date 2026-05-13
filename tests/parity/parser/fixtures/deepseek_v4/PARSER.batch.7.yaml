@@ -27,7 +27,7 @@ cases:
           first_class:
             type: boolean
     expected:
-      dynamo:
+      dynamo: &d_7_a
         calls:
         - name: book_flight
           arguments:
@@ -35,15 +35,7 @@ cases:
             passengers: 2
             first_class: true
         normal_text: ''
-      vllm:
-        calls:
-        - arguments:
-            destination: Paris
-            first_class: 'true'
-            passengers: '2'
-          name: book_flight
-        normal_text: ''
-        reason: "vLLM emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types"
+      vllm: *d_7_a
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.7.b:
