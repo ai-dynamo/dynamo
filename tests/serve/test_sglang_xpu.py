@@ -72,14 +72,20 @@ sglang_configs = {
         name="aggregated",
         directory=sglang_dir,
         script_name="agg.sh",
+        script_args=[
+            "--device",
+            "xpu",
+            "--attention-backend",
+            "intel_xpu",
+        ],
         marks=[
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(
-                3.7
+                4.5
             ),  # actual peak at recommended token count
             pytest.mark.requested_sglang_kv_tokens(
-                96
-            ),  # KV cache cap (2x safety over min=48)
+                4096
+            ),  # XPU intel_xpu forces page_size=128; need >=32 blocks
             pytest.mark.timeout(195),  # profiled 33s on RTX 6000 Ada
             pytest.mark.pre_merge,
         ],
@@ -106,11 +112,17 @@ sglang_configs = {
         name="aggregated_unified",
         directory=sglang_dir,
         script_name="agg.sh",
-        script_args=["--unified"],
+        script_args=[
+            "--unified",
+            "--device",
+            "xpu",
+            "--attention-backend",
+            "intel_xpu",
+        ],
         marks=[
             pytest.mark.xpu_1,
-            pytest.mark.profiled_vram_gib(3.7),
-            pytest.mark.requested_sglang_kv_tokens(96),
+            pytest.mark.profiled_vram_gib(4.5),
+            pytest.mark.requested_sglang_kv_tokens(4096),  # XPU intel_xpu page_size=128
             pytest.mark.timeout(195),
             pytest.mark.pre_merge,
         ],
@@ -125,7 +137,8 @@ sglang_configs = {
     "kv_events": SGLangConfig(
         name="kv_events",
         directory=sglang_dir,
-        script_name="agg_router.sh",
+        script_name="xpu/agg_router_xpu.sh",
+        script_args=[],
         marks=[
             pytest.mark.xpu_2,
             pytest.mark.pre_merge,
@@ -197,6 +210,10 @@ sglang_configs = {
             "Qwen/Qwen2.5-VL-7B-Instruct",
             "--chat-template",
             "qwen2-vl",
+            "--device",
+            "xpu",
+            "--attention-backend",
+            "intel_xpu",
         ],
         delayed_start=0,
         timeout=360,
@@ -232,21 +249,25 @@ sglang_configs = {
         directory=sglang_dir,
         script_name="agg_vision.sh",
         marks=[
-            pytest.mark.skip(reason="XPU UR_RESULT_ERROR_DEVICE_LOST during decode"),
-            pytest.mark.xpu_1,
-            # Bisected with tests/utils/profile_pytest.py: minimum = 4368
-            # tokens, 2x safety = 8736. Peak 20.5 GiB at 8736 tokens. Without
-            # the cap, sglang's default 65% fraction allocates ~278k tokens
-            # and peaks at ~35 GiB (won't fit L4).
+            pytest.mark.xpu_2,
             pytest.mark.profiled_vram_gib(20.5),
             pytest.mark.requested_sglang_kv_tokens(8736),
             pytest.mark.timeout(360),
             pytest.mark.post_merge,
         ],
         model="Qwen/Qwen2-VL-7B-Instruct",
+        env={
+            "CCL_ATL_TRANSPORT": "ofi",
+            "CCL_ATL_SHM": "1",
+            "CCL_PROCESS_LAUNCHER": "none",
+        },
         script_args=[
             "--model-path",
             "Qwen/Qwen2-VL-7B-Instruct",
+            "--device",
+            "xpu",
+            "--attention-backend",
+            "intel_xpu",
         ],
         timeout=360,
         frontend_port=DefaultPort.FRONTEND.value,
@@ -270,14 +291,20 @@ sglang_configs = {
         name="embedding_agg",
         directory=sglang_dir,
         script_name="agg_embed.sh",
+        script_args=[
+            "--device",
+            "xpu",
+            "--attention-backend",
+            "intel_xpu",
+        ],
         marks=[
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(
-                9.8
+                10.5
             ),  # actual peak at recommended token count
             pytest.mark.requested_sglang_kv_tokens(
-                128
-            ),  # KV cache cap (2x safety over min=64)
+                2048
+            ),  # XPU intel_xpu page_size=128; need >=16 blocks
             # Qwen3-Embedding-4B (~8 GB bf16) cold-loads + warms up in 130-150s
             # on L4 CI before the first request; the 24s "profiled" figure is
             # the steady-state run only. 147s left no headroom for startup and
@@ -321,11 +348,11 @@ sglang_configs = {
         marks=[
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(
-                14.7
+                15.5
             ),  # actual peak at recommended token count
             pytest.mark.requested_sglang_kv_tokens(
-                64
-            ),  # KV cache cap (2x safety over min=32)
+                2048
+            ),  # XPU intel_xpu page_size=128; need >=16 blocks
             pytest.mark.timeout(341),  # profiled 57s on RTX 6000 Ada
             pytest.mark.post_merge,
         ],
@@ -335,6 +362,10 @@ sglang_configs = {
             "deepseek-ai/deepseek-llm-7b-base",
             "--dyn-endpoint-types",
             "completions",
+            "--device",
+            "xpu",
+            "--attention-backend",
+            "intel_xpu",
         ],
         request_payloads=[
             completion_payload_default(max_tokens=32),
@@ -345,11 +376,21 @@ sglang_configs = {
         name="diffusion_t2i_z_image_turbo",
         directory=sglang_dir,
         script_name="image_diffusion.sh",
-        script_args=["--model-path", "Tongyi-MAI/Z-Image-Turbo"],
+        script_args=[
+            "--model-path",
+            "Tongyi-MAI/Z-Image-Turbo",
+            "--device",
+            "xpu",
+            "--attention-backend",
+            "intel_xpu",
+        ],
         marks=[
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(19.3),
             pytest.mark.timeout(240),
+            # TODO: sglang#24573 has been merged in main branch. Remove this mark if XPU
+            # supports sglang v0.5.12 or higher
+            pytest.mark.skip(reason="https://github.com/sgl-project/sglang/pull/24573"),
             pytest.mark.nightly,
         ],
         model="Tongyi-MAI/Z-Image-Turbo",
@@ -383,14 +424,26 @@ sglang_configs = {
             "256",
             "--width",
             "256",
+            "--device",
+            "xpu",
+            "--attention-backend",
+            "intel_xpu",
         ],
         marks=[
             pytest.mark.xpu_1,
             pytest.mark.profiled_vram_gib(17.6),
             pytest.mark.timeout(180),
+            # TODO: sglang#24573 has been merged in main branch. Remove this mark if XPU
+            # supports sglang v0.5.12 or higher
+            pytest.mark.skip(reason="https://github.com/sgl-project/sglang/pull/24573"),
             pytest.mark.nightly,
         ],
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+        env={
+            "CCL_ATL_TRANSPORT": "ofi",
+            "CCL_ATL_SHM": "1",
+            "CCL_PROCESS_LAUNCHER": "none",
+        },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             VideoGenerationPayload(
@@ -413,6 +466,12 @@ sglang_configs = {
         name="anthropic_messages",
         directory=sglang_dir,
         script_name="agg.sh",
+        script_args=[
+            "--device",
+            "xpu",
+            "--attention-backend",
+            "intel_xpu",
+        ],    
         marks=[
             pytest.mark.xpu_1,
             pytest.mark.post_merge,
