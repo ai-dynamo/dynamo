@@ -17,11 +17,17 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo: &d_5_a
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *d_5_a
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
   PARSER.batch.5.b:
     description: Closing [/TOOL_CALLS] without matching [TOOL_CALLS] open
     ref: dynamo
@@ -29,8 +35,11 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]'
+      dynamo: &d_5_b
+        calls: []
+        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}][/TOOL_CALLS]'
+      vllm: *d_5_b
+      sglang: *d_5_b
   PARSER.batch.5.c:
     description: Truncation mid-arguments JSON
     ref: dynamo
@@ -38,9 +47,13 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"loc'
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '[{"name": "get_weather", "arguments": {"loc'
+      dynamo:
+        calls: []
+        normal_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"loc'
+      vllm:
+        calls: []
+        normal_text: '[{"name": "get_weather", "arguments": {"loc'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        calls: []
+        normal_text: ''

@@ -14,7 +14,8 @@ tests/parity/
 └── parser/
     ├── fixtures/                   ← static YAML, generated from Dynamo as oracle
     │   └── <family>/PARSER.batch.yaml         (and per-top-level-case files like PARSER.batch.8.yaml; see Fixture file schema)
-    ├── regenerate_fixtures.py      ← (re-)build fixtures by running Dynamo's parser
+    ├── capture_parser_outputs.py     ← drift-check (default) or merge any impl's output into `expected.{dynamo,vllm,sglang}`
+    ├── generate_parity_chart.py    ← print the parity-status chart (run on demand; not checked in)
     │
     ├── dynamo.py                   ← M2 in-process wrapper (PyO3 binding)
     ├── vllm.py                     ← M2 in-process wrapper (ToolParserManager)
@@ -104,7 +105,7 @@ Both servers receive identical chat-completion requests with `structured_outputs
 | **CI markers** | (TBD) | `unit, pre_merge, gpu_0` | `e2e, pre_merge, gpu_1` |
 
 All three methods (when implemented) share the same fixtures,
-`ParseResult` shape, and `KNOWN_DIVERGENCES` registry pattern.
+`ParseResult` shape, and the per-case `expected.{dynamo,vllm,sglang}` schema in YAML.
 They're stacked diagnostics:
 
 - M2 says: *"the parser class disagrees"*
@@ -127,51 +128,65 @@ single column; the other buckets (`2`, `4`, `5`, `6`, `7`, `8`) split
 into `.a`–`.d` sub-cases per the per-bucket axes documented in the
 PR description.
 
-Cell values show divergence from Dynamo (the oracle):
+Cell values show how each engine's recorded `expected.<impl>` block relates to Dynamo (the oracle). **Convention:** a divergent peer block carries a `reason:` field iff the divergence is *intentional* (documented contract difference, vendor behavior, etc.). No `reason:` = **research-needed** — we observed the divergence but haven't classified it yet.
 
-- `✓` — both vLLM and SGLang match Dynamo's expected output.
-- `V` — vLLM diverges (xfailed via `KNOWN_DIVERGENCES`).
-- `S` — SGLang diverges.
-- `VS` — both diverge.
-- `n/a` — **not applicable**: no peer parser registered for that
-  family, OR the sub-case shape doesn't apply to this grammar (e.g.
-  attribute-encoded DSML families have no `4.b` because there's no
-  embedded JSON to malform).
+- `=` — both engines match Dynamo (peer block is an anchor ref `*d_<case>` to dynamo's).
+- `V` — vLLM diverges, **intentional** (engine block has `reason:` field). Rendered the same color as = in the HTML chart since the divergence is accounted for.
+- `V?` — vLLM diverges, **research-needed** (engine block has no `reason:` yet; we observed the divergence but haven't classified it).
+- `V!` — vLLM is expected to crash; `expected.vllm.error: <substring>` records the matching error.
+- `S`, `S?`, `S!` — same as V/V?/V! for SGLang.
+- `VS`, `VS?`, `V?S`, `V!S`, `VS!`, `V?S?`, `V!S!`, … — combinations (both engines diverge with any mix of intentional/research-needed/error).
+- `n/a` — **not applicable**: engine marked `unavailable` (no parser registered for that family), OR the sub-case shape doesn't apply to this grammar (e.g. attribute-encoded DSML families have no `4.b` because there's no embedded JSON to malform).
 
 19 parsers total — split into the **Top-N models** we prioritize and
 **Others** wired into the harness for completeness. Both sections sorted
 alphabetically within themselves.
 
-| model | parser | 1 | 2.a | 2.b | 2.c | 2.d | 3 | 4.a | 4.b | 4.c | 4.d | 5.a | 5.b | 5.c | 6.a | 6.b | 6.c | 7.a | 7.b | 7.c | 7.d | 8.a | 8.b | 8.c | 8.d | 9 | 10 |
-|---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| **Top-N models** |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |
-| DeepSeek V4 | deepseek_v4 § | ✓ | ✓ | V | V | ✓ | ✓ | V | n/a | V | ✓ | V | ✓ | V | ✓ | ✓ | n/a | V | ✓ | n/a | n/a | ✓ | V | V | V | ✓ | ✓ |
-| Gemma 4 | gemma4 § | ✓ | ✓ | n/a | V | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | V | V | V | ✓ | ✓ |
-| GLM 5.1 | glm47 | ✓ | ✓ | n/a | V | ✓ | ✓ | VS | n/a | n/a | ✓ | VS | ✓ | VS | ✓ | S | n/a | ✓ | ✓ | n/a | n/a | V | V | V | V | ✓ | ✓ |
-| gpt-oss | harmony † | S | S | n/a | S | S | ✓ | S | S | ✓ | n/a | S | ✓ | S | S | S | ✓ | S | S | S | S | S | S | S | S | ✓ | S |
-| Kimi K2.6 | kimi_k2 | ✓ | ✓ | ✓ | VS | ✓ | ✓ | ✓ | S | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | VS | VS | VS | VS | ✓ | ✓ |
-| MiniMax 2.7 | minimax_m2 | ✓ | ✓ | S | S | ✓ | ✓ | V | n/a | V | V | VS | ✓ | VS | ✓ | ✓ | n/a | V | ✓ | n/a | n/a | ✓ | S | S | S | ✓ | ✓ |
-| Nemotron (DeciLM) | nemotron_deci †§ | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
-| Qwen 3 Coder | qwen3_coder | ✓ | ✓ | n/a | ✓ | ✓ | ✓ | V | n/a | n/a | ✓ | ✓ | V | ✓ | ✓ | ✓ | n/a | VS | ✓ | n/a | n/a | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| **Others** |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |
-| DeepSeek V3 | deepseek_v3 | ✓ | ✓ | ✓ | S | ✓ | ✓ | VS | V | VS | VS | VS | ✓ | VS | ✓ | V | V | ✓ | ✓ | ✓ | ✓ | S | ✓ | S | S | ✓ | ✓ |
-| DeepSeek V3.1 | deepseek_v3_1 | ✓ | ✓ | ✓ | S | ✓ | ✓ | VS | V | VS | VS | VS | ✓ | VS | ✓ | ✓ | V | ✓ | ✓ | ✓ | ✓ | S | ✓ | S | S | ✓ | ✓ |
-| DeepSeek V3.2 | deepseek_v3_2 | ✓ | ✓ | VS | VS | ✓ | ✓ | V | n/a | V | ✓ | V | ✓ | V | ✓ | ✓ | n/a | V | ✓ | n/a | n/a | S | VS | VS | VS | ✓ | ✓ |
-| Hermes-3 / Llama variants | hermes | ✓ | ✓ | n/a | V | ✓ | ✓ | ✓ | VS | S | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | S | ✓ | ✓ | ✓ | ✓ | V | ✓ | V | V | ✓ | ✓ |
-| AI21 Jamba | jamba § | ✓ | ✓ | n/a | V | ✓ | ✓ | ✓ | ✓ | V | V | V | ✓ | ✓ | ✓ | ✓ | V | ✓ | ✓ | ✓ | ✓ | V | ✓ | V | V | ✓ | ✓ |
-| Llama 3 (JSON fmt) | llama3_json § | ✓ | V | n/a | V | V | ✓ | V | V | V | n/a | V | n/a | V | ✓ | ✓ | V | ✓ | ✓ | ✓ | ✓ | V | ✓ | V | V | ✓ | V |
-| Mistral series | mistral | S | S | n/a | VS | S | ✓ | VS | VS | V | S | S | ✓ | VS | S | S | V | S | S | S | S | VS | S | VS | V | ✓ | S |
-| Nemotron Nano | nemotron_nano †§ | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
-| Phi-4 | phi4 § | ✓ | ✓ | n/a | V | ✓ | ✓ | ✓ | ✓ | V | V | V | V | V | ✓ | ✓ | V | ✓ | ✓ | ✓ | V | V | ✓ | V | V | ✓ | ✓ |
-| Llama 4 (pythonic fmt) | pythonic | ✓ | ✓ | n/a | VS | ✓ | ✓ | ✓ | ✓ | n/a | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | n/a | ✓ | ✓ | ✓ | ✓ | VS | VS | VS | VS | ✓ | ✓ |
-| Qwen 2.5 | qwen25 † | S | S | n/a | S | S | ✓ | ✓ | S | ✓ | S | S | ✓ | ✓ | S | S | ✓ | S | S | S | S | S | S | S | S | ✓ | S |
+The chart isn't checked in — it would drift behind the YAML every time a
+case is added or a peer block flips. Generate it on demand and save it
+somewhere you can browse:
+
+```bash
+# Markdown — paste into a PR description or browse in any editor.
+python3 tests/parity/parser/generate_parity_chart.py > PARITY.md
+
+# HTML — clickable cells link to the source fixture YAML; hover over any
+# non-= cell to see the case description and the divergence reason.
+python3 tests/parity/parser/generate_parity_chart.py --html > PARITY.html
+```
+
+Run from the repo root so the HTML's relative `<a href=...>` links to
+fixture YAMLs resolve when you open `PARITY.html` in a browser. Both
+`PARITY.md` and `PARITY.html` are for local viewing only — don't check
+them in; the generator is the contract. Rows are the 19 parsers (Top-N
+first, then Others, alphabetical within each). Columns are the sub-case
+IDs from [`PARSER_CASES.md`](../../lib/parsers/PARSER_CASES.md). The
+generator reads every `fixtures/<family>/PARSER.*.yaml` and emits one
+cell per `(family, sub-case)` using the legend above.
+
+**Example output** (illustrative — cell values are made up, **not** a
+snapshot of current fixtures; run the script for the real chart):
+
+```text
+| model       | parser     | 1 | 2.a | 2.b | 2.c | 2.d | 3 | ... | 9 | 10 |
+|---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| **Top-N models** |   |   |   |   |   |   |   |   |   |   |
+| Kimi K2.6   | kimi_k2    | = | =   | =   | VS  | =   | = | ... | = | =  |
+| GLM 5.1     | glm47      | = | =   | n/a | V   | =   | = | ... | = | =  |
+| gpt-oss     | harmony †  | S | S   | n/a | S?  | S?  | = | ... | = | S  |
+```
+
+Read a row left-to-right: `=` = both engines match Dynamo, `V` / `S` =
+that engine diverges with a documented reason (rendered same color as =
+in the HTML chart), `V?` / `S?` = divergence not yet classified
+(research-needed), `n/a` = case doesn't apply or peer is unavailable.
 
 ### Footnotes
 
-† vLLM has no peer parser (or returns `UNAVAILABLE` at runtime, e.g.
+† vLLM has no engine peer (or returns `UNAVAILABLE` at runtime, e.g.
   `harmony#vllm` requires token IDs not text). Cells show SGLang status
   only when SGLang is wired; otherwise the row is fully `n/a`.
-§ SGLang has no peer detector for this family. Cells show vLLM status
+§ SGLang has no engine peer for this family. Cells show vLLM status
   only when vLLM is wired; otherwise the row is fully `n/a`.
 
 `nemotron_deci` and `nemotron_nano` carry both daggers (`†§`) — neither
@@ -225,34 +240,36 @@ to run (otherwise they skip cleanly).
 `docker exec <container> bash -c 'cd /workspace && …'`. Find the
 container with `docker ps --format '{{.Names}}' | grep vsc-dynamo2 | head -1`.
 
-**Baseline:** on `main` post-#9338, expect ~378 passed / ~299 skipped
-/ ~64 xfailed in ~5 s. The **xfailed count is the size of `KNOWN_DIVERGENCES`**
-— perfect parity is when that count is zero (all three impls produce
-byte-identical output on every fixture).
+**Baseline:** on `main` post-Variant-A, expect roughly **1,150 passed /
+275 skipped / ~5 s** wall clock across 450 cases × 3 impls (Dynamo +
+vLLM + SGLang). There is no `xfail` count — divergent peers are
+recorded with concrete `expected.<impl>` blocks and assert positively
+against them. Failure modes are **assertion mismatches** when an engine
+drifts away from its recorded block; perfect parity is when every cell
+is `=` (all three engines produce byte-identical output on every
+fixture).
 
 ## Resolving divergences (8 steps)
 
-Each non-`✓` cell in the matrix above is an entry in
-`KNOWN_DIVERGENCES` (`tests/parity/parser/test_parity_parser.py`).
-Goal: drive that count to zero. Walk these steps for one cell at a
-time. Worked example: `kimi_k2 / PARSER.batch.8.b → V` (vLLM drops
-trailing text after the wrapper).
+Each non-`=` cell in the generated chart is a divergent `expected.<impl>` block
+in the family's YAML fixture (concrete `calls` + `normal_text`, or
+`{error: <substring>}`, or `{unavailable: <reason>}`). Cells that
+match Dynamo are stored as anchor refs `*d_<case>` to the dynamo
+block. Goal: drive the non-`=` count toward zero by fixing whichever
+side is wrong. Worked example: `kimi_k2 / PARSER.batch.8.b → V`
+(vLLM drops trailing text after the wrapper).
 
 ### 1. Pick a cell
 
-Any `V` / `S` / `VS` cell from the matrix above.
+Run `generate_parity_chart.py`; pick any `V` / `S` / `VS` cell from the
+output.
 
-### 2. Look up the reason + the side-by-side diff
+### 2. Look up the side-by-side diff in the YAML
 
-```bash
-grep -A 1 '"vllm", "kimi_k2", "PARSER.batch.8.b"' \
-  tests/parity/parser/test_parity_parser.py
-```
-
-Then open `tests/parity/parser/fixtures/kimi_k2/PARSER.batch.8.yaml`
-and find the `PARSER.batch.8.b:` block. The `TODO(research)` comment
-right after `expected:` is the side-by-side — Dynamo's output vs
-the impl's. **No harness run needed to read it.**
+Open `tests/parity/parser/fixtures/kimi_k2/PARSER.batch.8.yaml` and
+find the `PARSER.batch.8.b:` block. The `expected:` block carries all
+three engines' actual recorded output, so the diff is right there —
+**no harness run needed to read it.**
 
 ```yaml
 PARSER.batch.8.b:
@@ -261,20 +278,23 @@ PARSER.batch.8.b:
   model_text: |-
     <|tool_calls_section_begin|>...
   expected:
-    calls: [...]
-    normal_text: <Dynamo's output>
-  # TODO(research): vllm diverges — <reason from KNOWN_DIVERGENCES>
-  # vllm produces:
-  #   calls: [...]
-  #   normal_text: <vLLM's actual output>
+    dynamo: &d_8_b
+      calls: [...]
+      normal_text: "Let me know if you need more."   # Dynamo
+    vllm:
+      calls: [...]
+      normal_text: ''                                 # vLLM (drops trailing)
+      reason: "drops trailing normal_text after tool-call wrapper end"
+    sglang: *d_8_b                                    # SGLang matches Dynamo
 ```
 
-If the reason is generic (e.g. `"sglang diverges on this sub-case
-(CI-surfaced)"`), the `TODO(research)` block is the *only* place with
-the actual diff — bulk-registered entries skip per-case analysis.
+Read the three blocks side-by-side: dynamo block is the oracle, peer
+blocks show that engine's concrete output (or `*d_<case>` if it
+matched). The `reason:` line (when present) classifies the divergence
+as intentional; absence = research-needed.
 
 If `ref: originated from <url>` is present, the URL points at the
-upstream vLLM test the shape was derived from (useful context).
+upstream vLLM/SGLang test the shape was derived from (useful context).
 
 ### 3. Reproduce locally
 
@@ -297,7 +317,8 @@ Impl tag is `#vllm` or `#sglang`.
 ### 5. Fix the parser
 
 Edit `lib/parsers/src/tool_calling/<family>/...rs`. Rebuild the PyO3
-binding so the fixture regenerator runs against your change:
+binding so `capture_parser_outputs --impl dynamo --merge --overwrite-if-exists`
+runs against your change:
 
 ```bash
 cd lib/bindings/python && maturin develop --uv && cd -
@@ -306,83 +327,90 @@ cd lib/bindings/python && maturin develop --uv && cd -
 See [the build guide](../../docs/getting-started/building-from-source.md)
 for prerequisites.
 
-### 6. Regenerate fixtures
+### 6. Refresh `expected.dynamo` + re-capture engine outputs
+
+Step 1 — refresh Dynamo's oracle output (your fix changed it):
 
 ```bash
 PYTHONPATH=lib/bindings/python/src python3 \
-  -m tests.parity.parser.regenerate_fixtures --overwrite-if-exists
+  -m tests.parity.parser.capture_parser_outputs \
+  --impl dynamo --merge --overwrite-if-exists
 ```
 
-Dynamo is the oracle — your fix changes Dynamo's output, so the
-`expected:` blocks rewrite to match. Skip this and your fix reads as
-a *new* divergence.
+Step 2 — re-capture vLLM and SGLang outputs against the now-current
+fixtures so anchor refs (`*d_<case>`) flip on/off correctly. Run in
+each engine's container:
 
-### 7. Re-run pytest, watch for XPASS-strict
+```bash
+# vllm container — drift check (default, read-only)
+python3 -m tests.parity.parser.capture_parser_outputs --impl vllm
+# sglang container — drift check (default, read-only)
+python3 -m tests.parity.parser.capture_parser_outputs --impl sglang
+```
+
+The default (no flag) drift-check reports which cases have engine
+output differing from the recorded fixture. Once you've sanity-checked
+the drift, re-run with `--merge --overwrite-if-exists` to write the new
+engine outputs into the YAMLs (matching engines become anchor refs;
+divergent ones become concrete blocks).
+
+### 7. Re-run pytest
 
 ```bash
 PYTHONPATH=lib/bindings/python/src python3 -m pytest \
   tests/parity/parser/test_parity_parser.py -q --tb=no
 ```
 
-If all impls now agree on the cell, the harness flags the registry
-as stale:
+The test asserts each engine's actual output equals its recorded
+`expected.<impl>` block. If an engine drifts (e.g. you fixed Dynamo
+but didn't re-capture peer outputs), the test fails with a diff
+pointing at the YAML edit needed:
 
 ```text
-FAILED ...test_parity[kimi_k2/PARSER.batch.8.b#vllm]
-       XPASS-strict: known divergence (vllm,kimi_k2,PARSER.batch.8.b)
-       now matches expected — remove from KNOWN_DIVERGENCES.
+FAILED tests/parity/parser/test_parity_parser.py::test_parity[kimi_k2/PARSER.batch.8.b#vllm]
+       expected: {'calls': [...], 'normal_text': ''}
+       got:      {'calls': [...], 'normal_text': 'Let me know if you need more.'}
 ```
 
-### 8. Remove the entry + add spec_ref + refresh comments + commit
+### 8. Collapse the peer block to an anchor ref + add spec_ref + commit
 
-Delete the line from `KNOWN_DIVERGENCES`:
+When an engine now matches Dynamo, the concrete peer block becomes
+an anchor reference (`*d_<case>`) to dynamo's block. The Step 6
+`capture_parser_outputs.py` re-run with merge does this
+automatically; if you're editing by hand, replace the concrete block
+verbatim:
 
-```python
-("vllm", "kimi_k2", "PARSER.batch.8.b"): "...",   # ← delete
+```yaml
+expected:
+  dynamo: &d_8_b
+    calls: [...]
+    normal_text: '...'
+  vllm: *d_8_b        # ← was a concrete `vllm:` block; now ref to dynamo
+  sglang: *d_8_b      # (same, if SGLang also now matches)
 ```
 
-Add a `spec_ref:` field to the case's INPUTS entry in
-`regenerate_fixtures.py` so the paper trail survives — point at
-whatever made V/S right (spec section, model card, GH issue, upstream
-PR, or the team-decision doc):
-
-```python
-("kimi_k2", "PARSER.batch.8.b"): {
-    "description": "Narration after tool call only",
-    "ref": "originated from https://github.com/vllm-project/vllm/.../test_kimi_k2_tool_parser.py#L435",
-    "spec_ref": "https://platform.moonshot.ai/docs/tool-call-spec#L42  (or GH issue / PR url)",
-    "text": ...,
-    "tools": [...],
-},
-```
-
-Then re-run regen so the field flows into the fixture YAML, and embed
-to drop the now-stale `TODO(research)` block:
-
-```bash
-PYTHONPATH=lib/bindings/python/src python3 \
-  -m tests.parity.parser.regenerate_fixtures --overwrite-if-exists
-PYTHONPATH=lib/bindings/python/src python3 \
-  -m tests.parity.parser.embed_divergence_comments
-```
-
-Optionally also leave an inline comment next to the case in the YAML
-for human readers (note: this currently gets dropped on the next
-`regenerate_fixtures` run — preserving it is a follow-up tooling
-item):
+Add a `spec_ref:` field directly to the case in its fixture YAML so
+the paper trail survives — point at whatever made V/S right (spec
+section, model card, GH issue, upstream PR, or the team-decision doc):
 
 ```yaml
 PARSER.batch.8.b:
   description: Narration after tool call only
-  ref: originated from https://...
-  spec_ref: https://...
-  # aligned with V+S+spec on YYYY-MM-DD — was a Dynamo-only divergence;
-  #   parser updated to drop trailing text after wrapper end.
-  model_text: ...
+  ref: originated from https://github.com/vllm-project/vllm/.../test_kimi_k2_tool_parser.py#L435
+  spec_ref: https://platform.moonshot.ai/docs/tool-call-spec#L42  # or GH issue / PR url
+  model_text: |-
+    ...
+  tools:
+  - ...
 ```
 
-Pytest should now be fully green; cell flips to `✓` on next matrix
-regen.
+Then regenerate the chart so the cell flips:
+
+```bash
+python3 tests/parity/parser/generate_parity_chart.py > PARITY.md
+```
+
+Pytest should now be fully green; the chart cell flips to `=`.
 
 ```bash
 git add lib/parsers/ tests/parity/parser/
@@ -392,8 +420,8 @@ git push
 
 ## When *not* to fix — permanent divergences
 
-The registry should shrink, not grow. But a few classes stay
-registered forever:
+The set of concrete divergent blocks should shrink, not grow. But a
+few classes stay recorded forever (intentional, by design):
 
 - **`PARSER.batch.4` (malformed args) and `PARSER.batch.5`
   (missing end-token)** — impl-defined recovery per
@@ -404,7 +432,9 @@ registered forever:
   parsers coerce at the parser layer, others preserve raw and
   defer coercion downstream. Both defensible.
 
-Everything else is a candidate to fix.
+Everything else is a candidate to fix. Permanent divergences should
+carry a `reason:` field that classifies them as intentional (so the
+chart shows `V`/`S`, not `V?`/`S?`).
 
 ## Fixture file schema
 
@@ -420,7 +450,9 @@ Once any sub-case `PARSER.batch.<n>.<sub>` is introduced, the bare
 `PARSER.batch.<n>` key migrates out of the flat file into the per-case
 file. Case-ID uniqueness across the two files is the merge invariant.
 
-Both file shapes use the same schema:
+Both file shapes use the same Variant A schema (per-case `expected:`
+keyed by impl, peers as anchor refs when matching dynamo, concrete
+blocks when diverging):
 
 ```yaml
 family: kimi_k2
@@ -434,16 +466,39 @@ cases:
     - name: ...
       parameters: {...}
     expected:
-      calls:
-      - name: ...
-        arguments: {...}
-      normal_text: ''
-  PARSER.batch.8.a:                    # sub-case keys also valid
+      dynamo: &d_1
+        calls:
+        - name: ...
+          arguments: {...}
+        normal_text: ''
+      vllm: *d_1           # vLLM matches Dynamo
+      sglang: *d_1         # SGLang matches Dynamo
+  PARSER.batch.8.a:        # sub-case keys also valid
     description: Narration before tool call only
     ref: originated from https://github.com/vllm-project/vllm/blob/<sha>/tests/tool_parsers/test_<family>_tool_parser.py#L<line>
     model_text: |-
       ...
+    expected:
+      dynamo: &d_8_a
+        calls: [...]
+        normal_text: 'I will check the weather.'
+      vllm:                # vLLM diverges — concrete output recorded
+        calls: [...]
+        normal_text: 'I will check the weather. '
+        reason: "preserves trailing space; Dynamo trims it"
+      sglang:              # SGLang has no peer parser for this family
+        unavailable: "SGLang has no detector for family='kimi_k2'"
 ```
+
+**Peer block forms** (one of):
+- **`*d_<case>`** anchor ref — engine matches Dynamo's output.
+- **`{calls, normal_text}`** — engine produces a different concrete
+  output. Optional `reason: <string>` classifies as intentional;
+  absence = research-needed.
+- **`{error: <substring>}`** — engine is expected to crash. Test
+  passes if the engine's actual error contains the substring.
+- **`{unavailable: <msg>}`** — no parser registered for this family.
+  Test skips with the message.
 
 The `ref` field is required on per-sub-case files
 (`PARSER.<mode>.<n>.yaml`) and takes one of two forms:
@@ -462,39 +517,24 @@ Every sub-case carries one of these two states; there's no "no
 provenance" state. The legacy flat `PARSER.<mode>.yaml` (cases without
 sub-cases) does NOT carry `ref` — those entries predate the convention.
 
-#### Embedded divergence comments
+#### Legacy: `TODO(research)` comments
 
-Each per-sub-case fixture for which there's a registered cross-impl
-divergence (`KNOWN_DIVERGENCES` in `test_parity_parser.py`) carries a
-YAML comment block right after the case's `expected:` data showing what
-the diverging impl actually produces, marked `TODO(research)`:
+Some older fixtures (pre-Variant-A) still carry inline YAML comments
+of the form `# TODO(research): <impl> diverges — <reason>` below the
+case body. Those were the side-by-side diff under the previous schema
+where peer divergences lived in a Python registry, not in YAML. With
+Variant A's `expected.<impl>` blocks, the comments are redundant — the
+authoritative per-engine output is in the YAML data itself.
 
-```yaml
-PARSER.batch.8.b:
-  ...
-  expected:
-    calls: [...]
-    normal_text: "Let me know if you need more."     # Dynamo's output
-  # TODO(research): vllm diverges — drops trailing normal_text...
-  # vllm produces:
-  #   calls: [{'name': 'get_weather', 'arguments': {'location': 'Dallas'}}]
-  #   normal_text: None
-```
-
-That way the divergence is visible at the fixture level without running
-the harness, and each one carries an explicit "decide whether to switch"
-prompt. Comments are written by `embed_divergence_comments.py` (run
-after the regenerator, since `yaml.dump` strips comments on rewrite):
-
-```bash
-PYTHONPATH=lib/bindings/python/src python3 -m tests.parity.parser.regenerate_fixtures --overwrite-if-exists
-PYTHONPATH=lib/bindings/python/src python3 -m tests.parity.parser.embed_divergence_comments
-```
+The `embed_divergence_comments.py` helper still exists for re-embedding
+those comments after a regen pass, but new divergences should record
+their reasoning in the `reason:` field of the peer block, not in a
+comment.
 
 Case keys are the full IDs from
 [`lib/parsers/PARSER_CASES.md`](../../lib/parsers/PARSER_CASES.md)
 (`PARSER.batch.1` … `PARSER.batch.10`, plus sub-cases like
-`PARSER.batch.8.a`). They match the `KNOWN_DIVERGENCES` keys and pytest
+`PARSER.batch.8.a`). They match the pytest
 parametrize IDs directly, so a single `grep PARSER.batch.8.a` finds the
 case across docs, fixtures, and Rust source comments.
 
@@ -530,8 +570,7 @@ Open any two family files side-by-side and the case shells look
 nearly identical: same `description` strings, same `tools` schemas,
 same case keys `"PARSER.batch.1"`–`"PARSER.batch.10"`. **That's by
 design** — `PARSER.batch.N` is the same logical scenario across every
-family (full list in the [Current parity status](#current-parity-status-m2-batch-mode)
-section above).
+family (run `generate_parity_chart.py` for the full list).
 
 So a reviewer can grep `PARSER.batch.4` across all 10 families and
 immediately see how each parser handles the same scenario. The
@@ -572,7 +611,7 @@ qwen3_coder/batch.4 expected.calls[0].arguments = {"location": "NYC"}
 
 Both are valid per-family Dynamo contracts. Cross-impl divergences
 (vLLM and SGLang doing something *different* from Dynamo on the
-same case) are tracked in each test's `KNOWN_DIVERGENCES` registry
+same case) are visible by reading the per-case `expected.{dynamo,vllm,sglang}` triple in the YAML fixture — anchor refs (`*d_<case>`) mark agreement, concrete blocks mark divergence
 as `xfail` entries with a one-sentence reason.
 
 **3. `tools`** — sometimes minor parameter-name differences
@@ -587,15 +626,22 @@ same thing everywhere.
 ## Regenerating fixtures
 
 Run from the repo root inside a container with `dynamo._core` built
-(M2's PyO3 binding):
+(M2's PyO3 binding). The same `capture_parser_outputs` script handles
+all three impls — pass `--impl dynamo|vllm|sglang`:
 
 ```bash
-# Default: non-destructive — new cases written, existing left alone.
-python3 -m tests.parity.parser.regenerate_fixtures
+# Default: drift-check (read-only). Reports cases where the recorded
+# `expected.<impl>` disagrees with what the parser now produces.
+python3 -m tests.parity.parser.capture_parser_outputs --impl dynamo
 
-# Refresh: re-run Dynamo for every case in INPUTS, overwrite on disk.
-# Use this only when Dynamo's parser behavior intentionally changed.
-python3 -m tests.parity.parser.regenerate_fixtures --overwrite-if-exists
+# Non-destructive populate: fill `expected.<impl>` only for cases that
+# don't have it yet (newly authored cases).
+python3 -m tests.parity.parser.capture_parser_outputs --impl dynamo --merge
+
+# Refresh: re-run the parser for every case on disk and overwrite the
+# recorded block. Use this only when parser behavior intentionally changed.
+python3 -m tests.parity.parser.capture_parser_outputs \
+  --impl dynamo --merge --overwrite-if-exists
 ```
 
 (The `-m` invocation is required — running the script directly puts
@@ -603,10 +649,10 @@ python3 -m tests.parity.parser.regenerate_fixtures --overwrite-if-exists
 `dynamo.py` wrapper shadow the real `dynamo` package.)
 
 After regenerating, run `git diff tests/parity/parser/fixtures/` to
-review the change before staging. Cases on disk that aren't in
-`INPUTS` today are always preserved, regardless of flag, so editing
-your `INPUTS` section can't accidentally delete other contributors'
-cases.
+review the change before staging. Any peer blocks (`expected.vllm`,
+`expected.sglang`) attached to a case are preserved across
+`--overwrite-if-exists` runs, so refreshing `expected.dynamo` won't
+accidentally drop someone else's captured engine output.
 
 ## Future stages (sibling directories)
 
@@ -650,7 +696,7 @@ What that buys:
 - **No duplicated test data.** Adding a case in YAML immediately
   covers Dynamo (Rust harness), Dynamo-via-PyO3 (M2), and
   vLLM/SGLang servers (M3). Today, adding a Rust test means
-  hand-mirroring the case into M2's `INPUTS` if you want
+  hand-mirroring the case into M2's YAML fixtures if you want
   cross-impl coverage.
 - **Rust devs keep their fast feedback loop.** `cargo test`
   still finishes in ~0.5 s; no Python build needed.
@@ -687,15 +733,29 @@ real value-add is the cross-impl half (vLLM and SGLang).
 ## Adding a new parser family
 
 1. Add the family name to Dynamo's parser registry (Rust side).
-2. Run M2's existing tests — the new family's `dynamo` wrapper
-   tests will fail because no fixtures exist yet.
-3. Add a section to `INPUTS` in `regenerate_fixtures.py` for every
-   `(family, "PARSER.batch.<n>")` you want to cover (mirror the
-   case shape from an existing family).
-4. Run the regenerator to materialize `<family>/PARSER.batch.yaml`.
-5. Add the family's vLLM and SGLang dispatch entries to
+2. Author a fixture YAML at
+   `tests/parity/parser/fixtures/<family>/PARSER.batch.yaml` covering
+   the `PARSER.batch.<n>` cases that apply (mirror an existing
+   family's case shape — see `fixtures/kimi_k2/PARSER.batch.yaml`).
+   Each case minimally needs `description`, `ref`, `model_text`,
+   and `tools`. Author by hand, copy-edit from an upstream test,
+   or have an AI fill in cases against `PARSER_CASES.md`.
+3. Run `python3 -m tests.parity.parser.capture_parser_outputs --impl dynamo --merge`
+   to fill in each case's `expected.dynamo` by running Dynamo against
+   `model_text` + `tools`. Cases that already have `expected.dynamo`
+   are left alone.
+4. Add the family's vLLM and SGLang dispatch entries to
    `_FAMILY_TO_VLLM_KEY` (`vllm.py`) and
    `_FAMILY_TO_SGLANG_DETECTOR` (`sglang.py`).
-6. Run pytest. Any cross-impl divergences surface as failures —
-   classify each, add a one-sentence reason to `KNOWN_DIVERGENCES`,
-   and the test goes to xfail.
+5. Populate vLLM and SGLang outputs for the new family by running
+   `python3 -m tests.parity.parser.capture_parser_outputs --impl <vllm|sglang> --merge`
+   inside each engine's container. The merge writes anchor refs to
+   dynamo for matching engines, concrete `{calls, normal_text}` for
+   divergent ones, and `{unavailable: <reason>}` when the wrapper marks
+   the case as such. Cases where the engine raised (any error other
+   than UNAVAILABLE) are skipped — hand-record those as
+   `{error: <substring>}` so the test asserts on a stable signature
+   rather than the full volatile message. Add a `reason:` field to
+   intentional divergences so they show as `V`/`S` not `V?`/`S?` in the
+   chart.
+6. Regenerate the chart: `python3 tests/parity/parser/generate_parity_chart.py > PARITY.md`.

@@ -20,12 +20,18 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<tool_call>\nrandom text without function tag\n</tool_call>'
+      dynamo: &d_4_a
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<tool_call>
+
+          random text without function tag
+
+          </tool_call>'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang: *d_4_a
   PARSER.batch.4.d:
     description: Missing </parameter> closing tag
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_qwen3coder_tool_parser.py#L729
@@ -39,8 +45,11 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo: &d_4_d
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *d_4_d
+      sglang: *d_4_d

@@ -20,12 +20,19 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<｜DSML｜tool_calls>\nnot a valid invoke\n</｜DSML｜tool_calls>'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<｜DSML｜tool_calls>
+
+          not a valid invoke
+
+          </｜DSML｜tool_calls>'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
   # PARSER.batch.4.b (invalid JSON args) n/a: DSML uses attribute-encoded args, not JSON.
   PARSER.batch.4.c:
     description: Invoke without name attribute
@@ -39,12 +46,23 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<｜DSML｜tool_calls>\n<｜DSML｜invoke>\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<｜DSML｜tool_calls>
+
+          <｜DSML｜invoke>
+
+          <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+
+          </｜DSML｜invoke>
+
+          </｜DSML｜tool_calls>'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.4.d:
     description: Missing </｜DSML｜parameter> end tag
     ref: dynamo
@@ -57,7 +75,11 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments: {}
-      normal_text: ''
+      dynamo: &d_4_d
+        calls:
+        - name: get_weather
+          arguments: {}
+        normal_text: ''
+      vllm: *d_4_d
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
