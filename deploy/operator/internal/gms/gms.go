@@ -8,8 +8,6 @@
 package gms
 
 import (
-	"path/filepath"
-
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
@@ -33,12 +31,14 @@ const (
 
 	// ServerModule is the Python module for the GMS server entry point.
 	ServerModule = "gpu_memory_service.cli.server"
-
-	readyFile = "gms-ready"
 )
 
-// EnsureServerSidecar adds the GMS server as a restartable init sidecar with a
-// startup probe. Idempotent — safe to call from both the DGD and checkpoint paths.
+// EnsureServerSidecar adds the GMS server as a native sidecar (init +
+// restartPolicy=Always). With no StartupProbe, kubelet considers it Started
+// as soon as the process is running — clients ride out the sub-second
+// socket-bind via connect-retry. Native sidecar status is kept so kubelet
+// terminates the server when the Job's regular containers exit; a regular
+// container here would keep the Pod in Running forever. Idempotent.
 func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container) {
 	if podSpec == nil || mainContainer == nil {
 		return
@@ -48,15 +48,6 @@ func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Containe
 
 	sidecar := Container(ServerContainerName, ServerModule, mainContainer.Image)
 	sidecar.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
-	sidecar.StartupProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{
-				Command: []string{"test", "-f", filepath.Join(SharedMountPath, readyFile)},
-			},
-		},
-		PeriodSeconds:    1,
-		FailureThreshold: 300, // 1s * 300 = 5 min
-	}
 	for i := range podSpec.InitContainers {
 		if podSpec.InitContainers[i].Name == sidecar.Name {
 			return
