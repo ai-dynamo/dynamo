@@ -26,7 +26,7 @@ use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
 use crate::replay::TraceCollector;
 use crate::scheduler::{
     AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, ForwardPassSnapshot,
-    RouterEventVisibility, build_fpm_snapshot, capture_router_event_sink,
+    RouterEventVisibility, WelfordAcc, capture_router_event_sink,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +110,7 @@ impl SchedulerState {
         self.waiting_members.remove(&uuid);
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
     fn next_waiting_uuid(&mut self) -> Option<Uuid> {
         loop {
             let uuid = *self.waiting.front()?;
@@ -126,6 +127,7 @@ impl SchedulerState {
         }
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
     fn compact_running(&mut self) {
         let mut compacted = VecDeque::with_capacity(self.running.len());
         while let Some(uuid) = self.running.pop_front() {
@@ -168,6 +170,7 @@ impl SchedulerState {
             .map(|request| &mut request.sequence)
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
     fn preempt(&mut self, mode: PreemptionMode) -> Option<PreemptedRequest> {
         let uuid = loop {
             let candidate = match mode {
@@ -519,6 +522,7 @@ impl VllmCore {
         SwapInAdmissionAttempt::Parked
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
     pub(super) fn execute_pass_internal(
         &mut self,
         mut collector: Option<&mut TraceCollector>,
@@ -531,10 +535,16 @@ impl VllmCore {
         self.state.compact_running();
         let mut token_budget = self.args.max_num_batched_tokens.unwrap_or(usize::MAX);
         let mut scheduled = FxHashMap::default();
+        scheduled.reserve(
+            self.state
+                .running
+                .len()
+                .saturating_add(self.state.waiting.len().min(16)),
+        );
         let mut batch_count = 0usize;
         let mut batch_total_isl = 0usize;
         let mut batch_total_prefix = 0usize;
-        let mut admissions = Vec::new();
+        let mut admissions = Vec::with_capacity(self.state.waiting.len().min(16));
         let mut preempted_any = false;
 
         let mut req_index = 0usize;
@@ -675,46 +685,67 @@ impl VllmCore {
     /// at schedule time, so this method does not depend on `self.state.requests` for
     /// scheduled requests — completed requests may have already been removed.
     /// Queue metrics are derived from `self.state.waiting` at the moment of the call.
+    #[cfg_attr(feature = "profile", inline(never))]
     fn compute_fpm(
         &self,
         scheduled: &FxHashMap<Uuid, ScheduledWork>,
         wall_time_secs: f64,
     ) -> ForwardPassSnapshot {
-        let scheduled_prefills = scheduled.values().filter_map(|work| {
-            (work.prompt_tokens > 0).then_some((
-                work.prompt_len as u64,
-                work.prefix_tokens as u64,
-                work.total_tokens as u64,
-            ))
-        });
+        let mut prefill_acc = WelfordAcc::default();
+        let mut decode_acc = WelfordAcc::default();
+        let mut sum_prefill_tokens = 0u64;
+        let mut sum_prefill_kv_tokens = 0u64;
 
-        let scheduled_decodes = scheduled
-            .values()
-            .filter_map(|work| (work.prompt_tokens == 0).then_some(work.sequence_len as u64));
+        for work in scheduled.values() {
+            if work.prompt_tokens > 0 {
+                sum_prefill_tokens += work.total_tokens as u64;
+                sum_prefill_kv_tokens += work.prefix_tokens as u64;
+                prefill_acc.add(work.prompt_len as f64);
+            } else {
+                decode_acc.add(work.sequence_len as f64);
+            }
+        }
 
-        let queued_prefills = self.state.waiting.iter().filter_map(|uuid| {
-            let request = self.state.requests.get(uuid)?;
-            matches!(request.status, RequestStatus::Waiting)
-                .then_some(request.sequence.num_input_tokens() as u64)
-        });
+        let mut queued_prefill_acc = WelfordAcc::default();
+        let mut queued_decode_acc = WelfordAcc::default();
+        for uuid in &self.state.waiting {
+            let Some(request) = self.state.requests.get(uuid) else {
+                continue;
+            };
+            match request.status {
+                RequestStatus::Waiting => {
+                    queued_prefill_acc.add(request.sequence.num_input_tokens() as f64);
+                }
+                RequestStatus::Preempted => {
+                    queued_decode_acc.add(
+                        (request.sequence.num_input_tokens() + request.sequence.generated_tokens())
+                            as f64,
+                    );
+                }
+                RequestStatus::Running => {}
+            }
+        }
 
-        let queued_decodes = self.state.waiting.iter().filter_map(|uuid| {
-            let request = self.state.requests.get(uuid)?;
-            matches!(request.status, RequestStatus::Preempted).then_some(
-                (request.sequence.num_input_tokens() + request.sequence.generated_tokens()) as u64,
-            )
-        });
-
-        build_fpm_snapshot(
-            scheduled_prefills,
-            scheduled_decodes,
-            queued_prefills,
-            queued_decodes,
+        ForwardPassSnapshot {
+            num_prefill_requests: prefill_acc.count,
+            sum_prefill_tokens,
+            var_prefill_length: prefill_acc.variance(),
+            sum_prefill_kv_tokens,
+            num_decode_requests: decode_acc.count,
+            sum_decode_kv_tokens: decode_acc.sum as u64,
+            var_decode_kv_tokens: decode_acc.variance(),
+            num_queued_prefill: queued_prefill_acc.count,
+            sum_queued_prefill_tokens: queued_prefill_acc.sum as u64,
+            var_queued_prefill_length: queued_prefill_acc.variance(),
+            num_queued_decode: queued_decode_acc.count,
+            sum_queued_decode_kv_tokens: queued_decode_acc.sum as u64,
+            var_queued_decode_kv_tokens: queued_decode_acc.variance(),
             wall_time_secs,
-        )
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(feature = "profile", inline(never))]
     fn schedule_request(
         &mut self,
         uuid: Uuid,
@@ -891,24 +922,26 @@ impl VllmCore {
         }
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
     fn emit_ready_tokens(
         &mut self,
         mut collector: Option<&mut TraceCollector>,
         decode_start_ms: f64,
     ) -> (Duration, Vec<OutputSignal>) {
-        let ready = self
-            .state
-            .running
-            .iter()
-            .copied()
-            .filter(|uuid| {
-                let Some(request) = self.state.requests.get(uuid) else {
-                    return false;
-                };
-                request.num_computed_tokens >= request.sequence.len()
-                    && request.sequence.generated_tokens() < request.sequence.max_output_tokens()
-            })
-            .collect::<Vec<_>>();
+        let mut ready = Vec::with_capacity(self.state.running.len());
+        let mut total_length = 0usize;
+        for uuid in self.state.running.iter().copied() {
+            let Some(request) = self.state.requests.get(&uuid) else {
+                continue;
+            };
+            if request.num_computed_tokens < request.sequence.len()
+                || request.sequence.generated_tokens() >= request.sequence.max_output_tokens()
+            {
+                continue;
+            }
+            ready.push(uuid);
+            total_length += request.sequence.len();
+        }
         if ready.is_empty() {
             return (Duration::ZERO, Vec::new());
         }
@@ -920,11 +953,6 @@ impl VllmCore {
         } else {
             let active_kv_tokens = self.kv_manager.num_active_blocks() * self.args.block_size;
             let total_kv_tokens = self.args.num_gpu_blocks * self.args.block_size;
-            let total_length = ready
-                .iter()
-                .filter_map(|uuid| self.state.requests.get(uuid))
-                .map(|request| request.sequence.len())
-                .sum::<usize>();
             let context_length = total_length / ready.len();
             let decode_ms = self.args.perf_model.predict_decode_time(
                 ready.len(),
@@ -937,6 +965,7 @@ impl VllmCore {
         };
 
         let mut output_signals = Vec::with_capacity(ready.len());
+        let mut running_changed = false;
         for uuid in ready {
             let mut emitted = false;
             let mut completed = false;
@@ -946,8 +975,10 @@ impl VllmCore {
                     break;
                 };
                 let signals = sequence.generate();
-                if process_signals(&mut self.kv_manager, &signals) {
-                    if sequence.generated_tokens() < sequence.max_output_tokens() {
+                if signals.is_empty() || process_signals(&mut self.kv_manager, &signals) {
+                    if !signals.is_empty()
+                        && sequence.generated_tokens() < sequence.max_output_tokens()
+                    {
                         sequence.commit_allocation(sequence.len());
                     }
                     emitted = true;
@@ -959,6 +990,7 @@ impl VllmCore {
                 let Some(preempted) = self.state.preempt(self.args.preemption_mode) else {
                     break;
                 };
+                running_changed = true;
                 for signal in preempted.signals {
                     self.kv_manager.process(&signal);
                 }
@@ -996,14 +1028,20 @@ impl VllmCore {
             }
             if completed {
                 self.state.complete(&uuid);
+                running_changed = true;
             }
         }
 
         if output_signals.is_empty() {
+            if running_changed {
+                self.state.compact_running();
+            }
             return (Duration::ZERO, output_signals);
         }
 
-        self.state.compact_running();
+        if running_changed {
+            self.state.compact_running();
+        }
         (decode_time, output_signals)
     }
 }

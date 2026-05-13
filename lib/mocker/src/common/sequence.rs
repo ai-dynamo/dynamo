@@ -122,6 +122,7 @@ impl ActiveSequence {
     /// Build a `MoveBlock::Use` signal for blocks up to `cumulative_tokens`
     /// without updating internal state. Returns `None` if no new blocks are needed.
     /// Call `commit_allocation` after the signal is successfully processed.
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn prepare_allocation(&self, cumulative_tokens: usize) -> Option<MoveBlock> {
         let prev_blocks = self
             .num_allocated_tokens
@@ -212,6 +213,7 @@ impl ActiveSequence {
     }
 
     /// Push a token to the sequence
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn push(&mut self, token: u32) -> Option<Vec<MoveBlock>> {
         self.tokens.append(token).expect("Token push failed.");
         self.generated_tokens += 1;
@@ -292,6 +294,7 @@ impl ActiveSequence {
     ///
     /// Calling this function when max_output_tokens has already been reached will cause a panic.
     /// Always check `generated_tokens < max_output_tokens` before calling this method.
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn generate(&mut self) -> Vec<MoveBlock> {
         // Assert that we haven't reached the maximum output tokens
         assert!(
@@ -320,6 +323,7 @@ impl ActiveSequence {
         signals
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
     fn free_signal_for_tokens(&self, active_tokens: usize) -> Vec<MoveBlock> {
         let active_blocks = active_tokens
             .div_ceil(self.block_size)

@@ -653,6 +653,7 @@ impl KvManager {
     ///
     /// For `Deref` / `Promote`, returns 1 on success and panics on
     /// invalid state (consistent with the old `vllm_backend` semantics).
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn process(&mut self, event: &MoveBlock) -> usize {
         match event {
             MoveBlock::Use(blocks, local_hashes, plhs, token_ids, parent) => self.process_use(
@@ -816,6 +817,7 @@ impl KvManager {
         false
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
     fn process_use(
         &mut self,
         blocks: &[UniqueBlock],
@@ -1101,6 +1103,7 @@ impl KvManager {
         self.publish_g2_router_events(g2_events);
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
     fn process_deref(&mut self, blocks: &[UniqueBlock]) {
         for block in blocks {
             match block {
@@ -1123,6 +1126,7 @@ impl KvManager {
         }
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
     fn process_promote(
         &mut self,
         uuid: Uuid,
@@ -1223,6 +1227,7 @@ impl KvManager {
     /// order and counting the longest prefix that is cached (active or
     /// inactive). Stops at first cache miss — KV states are computed
     /// sequentially, so anything after a miss must be recomputed.
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn get_prefill_cost(&self, sequence: &ActiveSequence) -> PrefillCost {
         let seq_blocks = sequence.unique_blocks();
 
