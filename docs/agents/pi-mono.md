@@ -5,13 +5,13 @@ title: Use Pi-Mono with Dynamo
 subtitle: Drive a real coding agent through Dynamo with agent context and tool tracing
 ---
 
-[Pi-Mono](https://github.com/mariozechner/pi-mono) is an open-source coding-agent harness whose clean plugin architecture has made it a popular substrate for patterns like subagents and planner/implementer loops. The [`pi-dynamo-provider`](https://github.com/ai-dynamo/pi-dynamo-provider) extension uses that plugin surface to register Dynamo as a Pi model provider — it is **not** a proxy or interceptor. It runs in-process, adds Dynamo's [`agent_context`](agent-tracing.md) and [`agent_hints`](agent-hints.md) to each request, and emits Pi's tool lifecycle events to Dynamo over ZMQ. No harness patches, no sidecar.
+[Pi-Mono](https://github.com/mariozechner/pi-mono) is an open-source coding-agent harness whose clean plugin architecture has made it a popular substrate for patterns like subagents and planner/implementer loops. The [`pi-dynamo-provider`](https://github.com/ai-dynamo/pi-dynamo-provider) extension uses that plugin surface to register Dynamo as a Pi model provider. It runs in-process, adds Dynamo's [`agent_context`](agent-tracing.md) and [`agent_hints`](agent-hints.md) to each request, and emits Pi's tool lifecycle events to Dynamo over ZMQ.
 
-This is the recommended way to exercise agent tracing and agent hints end-to-end.
+This page is one worked example of how to wire a harness up to Dynamo's tracing and hint APIs — use it as a reference, not a prescription.
 
 ## Why run Pi through Dynamo
 
-You can already point Pi at any OpenAI-compatible endpoint (Ollama, vLLM, a hosted API). Routing through Dynamo gives you two things you don't get from a plain hosting layer:
+You can already point Pi at any OpenAI-compatible endpoint — Ollama, vLLM, a hosted API, or Dynamo out of the box. Routing through Dynamo *with this extension* gives you two things you don't get from plain hosting:
 
 - **Harness-aware observability.** Pi's session and trajectory IDs flow into Dynamo's `request_end` traces, and Pi's tool spans land on the same timeline. One Perfetto view shows LLM requests, prefill/decode stages, and tool calls together.
 - **Harness-aware orchestration.** Once Dynamo knows which trajectory a request belongs to, it can act on agent hints (priority, expected output length, speculative prefill) for smarter scheduling and KV-aware routing. That same trajectory awareness is what lets backends like [SGLang](../backends/sglang/agents.md) apply priority-based radix eviction and session-scoped KV isolation.
@@ -46,11 +46,7 @@ sequenceDiagram
 
 ### 1. Install the provider
 
-```bash
-pi install npm:pi-dynamo-provider
-```
-
-Or from source:
+Build from source and install it into Pi:
 
 ```bash
 git clone git@github.com:ai-dynamo/pi-dynamo-provider.git
@@ -61,23 +57,22 @@ pi install /absolute/path/to/pi-dynamo-provider
 
 ### 2. Launch Dynamo with tracing enabled
 
-The repo ships a launcher that builds Dynamo, starts an OpenAI-compatible frontend plus one SGLang worker, and turns on JSONL agent tracing and the ZMQ tool-event ingest:
+Use the in-repo SGLang launcher (`examples/backends/sglang/launch/agg_agent.sh`), which starts a frontend with KV routing plus one SGLang worker with streaming sessions, KV events, and reasoning/tool parsers wired up. Export the agent-trace env vars first so the worker records traces to a JSONL file and binds the ZMQ socket Pi will connect to:
 
 ```bash
-./scripts/install-dynamo.sh
-./scripts/launch-agg-agent.sh
+export DYN_AGENT_TRACE_SINKS=jsonl
+export DYN_AGENT_TRACE_OUTPUT_PATH=/tmp/dynamo-agent-trace.jsonl
+export DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390
+
+./examples/backends/sglang/launch/agg_agent.sh
 ```
 
-By default this serves `zai-org/GLM-4.7-Flash` on one GPU. When it's ready it prints the exact Pi environment variables to paste into another shell. The launcher is bundled for convenience — the provider works equally well against any Dynamo backend (vLLM, SGLang, TRT-LLM) started by your own deployment, as long as the agent-trace env vars below are set.
-
-<Note>
-Equivalent manual launch: set `DYN_AGENT_TRACE_SINKS=jsonl`, `DYN_AGENT_TRACE_OUTPUT_PATH=<path>`, and `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390` before starting `dynamo.frontend` and your worker. See [Agent Tracing → Enable output](agent-tracing.md#enable-output) for the full variable reference.
-</Note>
+By default this serves `zai-org/GLM-4.7-Flash` on TP 2. Override with `--model-path` / `--tp` if needed. See [Agent Tracing → Enable output](agent-tracing.md#enable-output) for the full env-var reference. The provider works equally well against any Dynamo backend (vLLM, SGLang, TRT-LLM); the SGLang launcher is just the most batteries-included starting point.
 
 ### 3. Point Pi at Dynamo
 
 ```bash
-export DYNAMO_BASE_URL=http://127.0.0.1:18083/v1
+export DYNAMO_BASE_URL=http://127.0.0.1:8000/v1
 export DYNAMO_API_KEY=dummy
 
 export DYN_AGENT_SESSION_TYPE_ID=pi_coding_agent
@@ -106,20 +101,23 @@ Open the result at [ui.perfetto.dev](https://ui.perfetto.dev). You'll see:
 - `dynamo.llm.stage` spans for prefill/decode when Dynamo records them.
 - `dynamo.agent.tool` spans for every Pi tool invocation.
 
-## Pi environment variables
+<details>
+<summary>Pi environment variables</summary>
 
-| Variable                             | Default                    | Purpose                                                                |
-| ------------------------------------ | -------------------------- | ---------------------------------------------------------------------- |
-| `DYNAMO_BASE_URL`                    | `http://127.0.0.1:8000/v1` | Dynamo OpenAI-compatible endpoint root.                                |
-| `DYNAMO_API_KEY`                     | `dynamo-local`             | Bearer token. Local Dynamo usually accepts any value.                  |
-| `DYN_AGENT_SESSION_TYPE_ID`          | `pi_coding_agent`          | Stable workload class for the trace.                                   |
-| `DYN_AGENT_SESSION_ID`               | unset                      | Session/run id. Falls back to Pi's session id for tool events.         |
-| `DYN_AGENT_TRAJECTORY_ID`            | unset                      | Trajectory id override; defaults to Pi's session id per request.       |
-| `DYN_AGENT_PARENT_TRAJECTORY_ID`     | unset                      | Parent trajectory id for nested or subagent workflows.                 |
-| `DYN_AGENT_TOOL_EVENTS_ZMQ_ENDPOINT` | unset                      | Dynamo-bound ZMQ PULL endpoint Pi connects to for tool events.         |
-| `DYN_AGENT_TOOL_EVENTS_ZMQ_TOPIC`    | `agent-tool-events`        | First ZMQ frame; must match `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC`.   |
+| Variable                             | Default                    | Purpose                                                              |
+| ------------------------------------ | -------------------------- | -------------------------------------------------------------------- |
+| `DYNAMO_BASE_URL`                    | `http://127.0.0.1:8000/v1` | Dynamo OpenAI-compatible endpoint root.                              |
+| `DYNAMO_API_KEY`                     | `dynamo-local`             | Bearer token. Local Dynamo usually accepts any value.                |
+| `DYN_AGENT_SESSION_TYPE_ID`          | `pi_coding_agent`          | Stable workload class for the trace.                                 |
+| `DYN_AGENT_SESSION_ID`               | unset                      | Session/run id. Falls back to Pi's session id for tool events.       |
+| `DYN_AGENT_TRAJECTORY_ID`            | unset                      | Trajectory id override; defaults to Pi's session id per request.     |
+| `DYN_AGENT_PARENT_TRAJECTORY_ID`     | unset                      | Parent trajectory id for nested or subagent workflows.               |
+| `DYN_AGENT_TOOL_EVENTS_ZMQ_ENDPOINT` | unset                      | Dynamo-bound ZMQ PULL endpoint Pi connects to for tool events.       |
+| `DYN_AGENT_TOOL_EVENTS_ZMQ_TOPIC`    | `agent-tool-events`        | First ZMQ frame; must match `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC`. |
 
 See the [provider README](https://github.com/ai-dynamo/pi-dynamo-provider) for the full variable list, aliases, and ZMQ wire format.
+
+</details>
 
 ## Troubleshooting
 
