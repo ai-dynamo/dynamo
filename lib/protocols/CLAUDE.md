@@ -1,7 +1,5 @@
 # dynamo-protocols
 
-> Also available as a standalone crate at **[ai-dynamo/frontend-crates](https://github.com/ai-dynamo/frontend-crates)**. That repo is the canonical home for publishing to crates.io; this in-tree copy is kept in sync manually for workspace builds.
-
 OpenAI-compatible request/response types for inference servers. Built on top of the `async-openai` crate, with selective crate-owned overrides where we need behaviors upstream won't accept or hasn't merged yet.
 
 If you're extending or debugging types here, read this whole file before editing. The central question every change hinges on is: **do we re-export this upstream, or do we own it?** This document exists so the answer is consistent.

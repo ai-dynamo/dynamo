@@ -1,7 +1,5 @@
 # dynamo-tokenizers
 
-> Also available as a standalone crate at **[ai-dynamo/frontend-crates](https://github.com/ai-dynamo/frontend-crates)**. That repo is the canonical home for publishing to crates.io; this in-tree copy is kept in sync manually for workspace builds.
-
 Efficient, versatile tokenization for LLM inference. Wraps HuggingFace and TikToken tokenizers (plus a FastTokenizer hybrid mode) behind a small encode/decode/sequence API designed for streaming detokenization.
 
 ## Features

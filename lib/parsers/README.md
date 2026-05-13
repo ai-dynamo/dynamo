@@ -1,7 +1,5 @@
 # dynamo-parsers
 
-> Also available as a standalone crate at **[ai-dynamo/frontend-crates](https://github.com/ai-dynamo/frontend-crates)**. That repo is the canonical home for publishing to crates.io; this in-tree copy is kept in sync manually for workspace builds.
-
 Rust crate for parsing **tool calls** and **reasoning content** out of raw LLM output. Wire-format-aware, streaming-first, model-family-aware.
 
 Given a token stream from any inference engine (vLLM, SGLang, etc.), extract structured `Vec<ToolCallResponse>` + `reasoning_content` ready to be returned to the client. Prompt formatting (the pre-model side) is out of scope.
