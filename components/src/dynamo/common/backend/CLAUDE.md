@@ -21,7 +21,15 @@ from_args(argv) -> start() -> generate()/abort() -> drain() -> cleanup()
 5. `drain()` -- backend-side drain before cleanup (optional, default no-op).
    Called after the discovery unregister + grace period; use it for in-flight
    NIXL transfers (issue #7319) that must complete while the runtime is alive.
-6. `cleanup()` -- called once on shutdown.
+6. `cleanup()` -- called exactly once. Runs after `start()` succeeded
+   on shutdown, **and** after `start()` raised — so implementations
+   must be null-safe against partial state (inner engine handle,
+   sockets, background tasks). All current engines guard each
+   resource with `if self.engine is not None`. Must also be
+   idempotent: a second call after a successful first is a no-op.
+   Not called when `start()` was never invoked (e.g. pre-start
+   shutdown); use `__del__` for resources allocated in the
+   constructor.
 
 ## Design Constraints
 
@@ -83,6 +91,49 @@ Build the `completion_usage` dict inline. Finish reason normalization
 3. `from_args()` must parse args and return `(engine, WorkerConfig)`
 4. Create `<backend>/unified_main.py` calling `run(<YourEngine>)`
 5. Use `sample_engine.py` as the reference implementation
+
+## Disaggregated Serving
+
+`WorkerConfig.disaggregation_mode` is the single source of truth for the
+worker's role. Default `DisaggregationMode.AGGREGATED` keeps existing
+callers unchanged.
+
+What the **runtime** does with the mode (Rust `Worker` in `lib/backend-common`):
+
+- `Prefill` → register with `ModelType::Prefill` so the frontend's
+  `PrefillRouter` targets this worker, regardless of `endpoint_types`.
+- `Decode` → keep `endpoint_types`, but force-disable
+  `enable_local_indexer` (decode workers don't host the indexer endpoint).
+- `Aggregated` → register with the parsed `endpoint_types`.
+
+What the **engine** does with the mode (consumed in each backend's
+`generate()`):
+
+- `Prefill`: cap output to one token, run the engine through its
+  prefill-only path, pack the resulting handoff payload (vLLM's
+  `kv_transfer_params`, SGLang's bootstrap triple, TRT-LLM's encoded
+  `LlmDisaggregatedParams`) into the terminal chunk's
+  `disaggregated_params`.
+- `Decode`: read `request.prefill_result.disaggregated_params`, fail
+  loudly if missing (`require_prefill_result`), feed it into the
+  engine's resume-from-KV-transfer call.
+- `Aggregated`: existing path, no branching.
+
+`drain()` is the prefill-shutdown hook: prefill engines should poll
+their scheduler until in-flight NIXL transfers finish before GPU
+memory is released (issue #7319). Aggregated/decode engines leave the
+default no-op.
+
+`disagg.py` ships `enforce_prefill_max_tokens`, `extract_prefill_result`,
+and `require_prefill_result` — small helpers backends call from inside
+`generate()` to avoid reinventing the same patterns. They are utilities,
+not abstractions; backends free to inline the logic when their generate
+path is shaped differently.
+
+The sample engine (`sample_engine.py`) implements the full dispatch in
+pure Python with synthetic handoff payloads — useful as a reference
+when wiring a new backend, and as a CPU-only smoke test for the
+disaggregated wire format (`examples/backends/sample/launch/disagg.sh`).
 
 ## Error Handling
 

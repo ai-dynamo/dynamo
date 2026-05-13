@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3_2
+mode: batch
+cases:
+  PARSER.batch.7.a:
+    description: Multiple parameters
+    ref: dynamo
+    model_text: |-
+      <｜DSML｜function_calls>
+      <｜DSML｜invoke name="book_flight">
+      <｜DSML｜parameter name="destination" string="true">Paris</｜DSML｜parameter>
+      <｜DSML｜parameter name="passengers" string="false">2</｜DSML｜parameter>
+      <｜DSML｜parameter name="first_class" string="false">true</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜function_calls>
+    tools:
+    - name: book_flight
+      parameters:
+        type: object
+        properties:
+          destination:
+            type: string
+          passengers:
+            type: integer
+          first_class:
+            type: boolean
+    expected:
+      calls:
+      - name: book_flight
+        arguments:
+          destination: Paris
+          passengers: 2
+          first_class: true
+      normal_text: ''
+    # TODO(research): vllm diverges — vLLM emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types
+    # vllm produces:
+    #   calls: [{'name': 'book_flight', 'arguments': {'destination': 'Paris', 'passengers': '2', 'first_class': 'true'}}]
+    #   normal_text: None
+  PARSER.batch.7.b:
+    description: Unicode in parameter
+    ref: dynamo
+    model_text: |-
+      <｜DSML｜function_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">Tōkyō central</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜function_calls>
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: Tōkyō central
+      normal_text: ''

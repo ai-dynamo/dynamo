@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: pythonic
+mode: batch
+cases:
+  PARSER.batch.2.a:
+    description: Parallel calls in single bracket
+    ref: dynamo
+    model_text: '[get_weather(location="NYC"), get_time(timezone="EST")]'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    - &id002
+      name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_time
+        arguments:
+          timezone: EST
+      normal_text: ''
+  PARSER.batch.2.c:
+    description: With surrounding narration
+    ref: dynamo
+    model_text: 'Both: [get_weather(location="NYC"), get_time(timezone="EST")] Done.'
+    tools:
+    - *id001
+    - *id002
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_time
+        arguments:
+          timezone: EST
+      normal_text: 'Both:'
+    # TODO(research): vllm diverges — vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the calls
+    # vllm produces:
+    #   calls: []
+    #   normal_text: 'Both: [get_weather(location="NYC"), get_time(timezone="EST")] Done.'
+  PARSER.batch.2.d:
+    description: Same-name twice
+    ref: dynamo
+    model_text: '[get_weather(location="NYC"), get_weather(location="LA")]'
+    tools:
+    - *id001
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_weather
+        arguments:
+          location: LA
+      normal_text: ''

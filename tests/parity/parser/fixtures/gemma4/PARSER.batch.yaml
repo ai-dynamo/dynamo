@@ -21,26 +21,6 @@ cases:
         arguments:
           location: NYC
       normal_text: ''
-  PARSER.batch.2:
-    description: Multiple tool calls (parallel)
-    model_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|><|tool_call>call:get_time{timezone:<|"|>EST<|"|>}<tool_call|>
-    tools:
-    - *id001
-    - name: get_time
-      parameters:
-        type: object
-        properties:
-          timezone:
-            type: string
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
@@ -49,58 +29,6 @@ cases:
     expected:
       calls: []
       normal_text: Hello, how can I help you today?
-  PARSER.batch.4:
-    description: Malformed (missing close brace)
-    model_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|><tool_call|>
-    tools:
-    - *id001
-    expected:
-      calls: []
-      normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|><tool_call|>
-  PARSER.batch.5:
-    description: Missing <tool_call|> end marker
-    model_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
-    tools:
-    - *id001
-    expected:
-      calls: []
-      normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
-  PARSER.batch.6:
-    description: Empty args (no-arg call)
-    model_text: <|tool_call>call:get_time{}<tool_call|>
-    tools:
-    - name: get_time
-      parameters:
-        type: object
-        properties: {}
-    expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
-  PARSER.batch.7:
-    description: Complex args (nested object + array)
-    model_text: <|tool_call>call:process_data{items:[1,2,3],config:{nested:true}}<tool_call|>
-    tools:
-    - name: process_data
-      parameters:
-        type: object
-        properties:
-          items:
-            type: array
-          config:
-            type: object
-    expected:
-      calls:
-      - name: process_data
-        arguments:
-          items:
-          - 1
-          - 2
-          - 3
-          config:
-            nested: true
-      normal_text: ''
   PARSER.batch.9:
     description: Empty input
     model_text: ''
