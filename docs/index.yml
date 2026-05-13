@@ -238,7 +238,7 @@ navigation:
             path: fault-tolerance/testing.md
       - page: Benchmarking
         path: benchmarks/benchmarking.md
-      - section: Mocker
+      - section: Simulation with Mocker
         contents:
           - page: Testing with Mocker
             path: mocker/mocker.md
@@ -332,6 +332,8 @@ navigation:
         contents:
           - page: Planner Guide
             path: components/planner/planner-guide.md
+          - page: Global Planner Guide
+            path: components/planner/global-planner.md
           - page: Planner Examples
             path: components/planner/planner-examples.md
       - section: Profiler
@@ -472,8 +474,8 @@ navigation:
       # -- Benchmarks --
       - page: KV Router A/B Testing
         path: benchmarks/kv-router-ab-testing.md
-      # -- Mocker --
-      - page: Mocker
+      # -- Simulation with Mocker --
+      - page: Simulation with Mocker
         path: mocker/mocker.md
       # -- Templates --
       - section: Templates

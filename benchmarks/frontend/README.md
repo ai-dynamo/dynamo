@@ -235,7 +235,7 @@ artifacts/sweep_20260330_143000/
 
 The `dgd/templates/` directory contains DynamoGraphDeployment YAML templates
 for k8s mode. Template variables (e.g., `${DGD_NAME}`, `${IMAGE}`,
-`${DYN_TOKENIZER_BACKEND}`) are substituted by the sweep runner at deploy time.
+`${DYN_TOKENIZER}`) are substituted by the sweep runner at deploy time.
 
 | Template | Backend | GPU required | Description |
 |----------|---------|-------------|-------------|
