@@ -387,7 +387,7 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 
 	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, weightsServer.Command)
 	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *weightsServer.RestartPolicy)
-	require.NotNil(t, weightsServer.StartupProbe)
+	assert.Nil(t, weightsServer.StartupProbe, "no probe — clients drive readiness via connect-retry")
 	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.saver"}, saver.Command)
 
 	saverMounts := map[string]string{}
