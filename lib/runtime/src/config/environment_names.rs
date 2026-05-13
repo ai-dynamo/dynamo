@@ -424,6 +424,13 @@ pub mod model {
 
         /// Model Express cache path
         pub const MODEL_EXPRESS_CACHE_PATH: &str = "MODEL_EXPRESS_CACHE_PATH";
+
+        /// Disable shared-storage mode for the Model Express client. When set,
+        /// the client streams model files from the server over gRPC instead of
+        /// relying on a shared filesystem path. Required when the Model Express
+        /// server and worker pods do not share a filesystem (e.g. RWO PVCs,
+        /// cross-namespace deployments). Set to "1" or "true" to enable.
+        pub const MODEL_EXPRESS_NO_SHARED_STORAGE: &str = "MODEL_EXPRESS_NO_SHARED_STORAGE";
     }
 
     /// Hugging Face configuration
@@ -656,6 +663,7 @@ mod tests {
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
+            model::model_express::MODEL_EXPRESS_NO_SHARED_STORAGE,
             model::huggingface::HF_TOKEN,
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,

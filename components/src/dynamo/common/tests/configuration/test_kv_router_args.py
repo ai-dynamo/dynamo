@@ -274,6 +274,19 @@ def test_load_aware_preserves_prefill_load_scale() -> None:
     assert kwargs["prefill_load_scale"] == 2.5
 
 
+def test_load_aware_clears_predicted_ttl() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--load-aware", "--router-predicted-ttl-secs", "5"])
+
+    config = KvRouterConfigBase.from_cli_args(args)
+    kwargs = config.kv_router_kwargs()
+
+    assert kwargs["use_kv_events"] is False
+    assert kwargs["router_predicted_ttl_secs"] is None
+
+
 def test_load_aware_preserves_deprecated_overlap_score_weight_env(monkeypatch) -> None:
     monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "2.5")
 

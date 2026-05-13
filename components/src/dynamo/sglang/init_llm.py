@@ -8,6 +8,7 @@ import time
 from typing import Awaitable, Callable, Optional
 
 import sglang as sgl
+from sglang.srt.observability.trace import set_global_trace_level
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
@@ -32,31 +33,12 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     """Perform warmup request for prefill engine to reduce initial TTFT.
 
     Raises on failure so the caller can prevent the worker from registering
-    with a broken engine (silent request drops).
+    with a broken engine (silent request drops). Shared with the unified
+    backend (`dynamo.sglang.llm_engine`) via `_disagg.warmup_prefill_engine`.
     """
-    logging.info("Start of prefill disaggregation warmup ...")
-    from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
+    from dynamo.sglang._disagg import warmup_prefill_engine
 
-    sampling_params = {
-        "temperature": 0.0,
-        "max_new_tokens": 8,
-        "ignore_eos": True,
-    }
-
-    async def _do_warmup():
-        results = await engine.async_generate(
-            input_ids=[0, 1, 2, 3],
-            sampling_params=sampling_params,
-            stream=True,
-            bootstrap_host=FAKE_BOOTSTRAP_HOST,
-            bootstrap_port=server_args.disaggregation_bootstrap_port,
-            bootstrap_room=999999,
-        )
-        async for _ in results:
-            pass
-
-    await asyncio.wait_for(_do_warmup(), timeout=1800)
-    logging.info("Prefill warmup completed")
+    await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
 
 
 async def init_decode(
@@ -93,6 +75,9 @@ async def init_decode(
         engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
 
+    if server_args.enable_trace:
+        set_global_trace_level(dynamo_args.sglang_trace_level)
+
     load_lora_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"
     )
@@ -119,7 +104,12 @@ async def init_decode(
     ready_event = asyncio.Event()
 
     handler = DecodeWorkerHandler(
-        engine, config, publisher, generate_endpoint, shutdown_event
+        engine,
+        config,
+        publisher,
+        generate_endpoint,
+        shutdown_event,
+        enable_frontend_decoding=dynamo_args.frontend_decoding,
     )
     handler.register_engine_routes(runtime)
 
@@ -229,6 +219,9 @@ async def init_prefill(
         start_time = time.time()
         engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
+
+    if server_args.enable_trace:
+        set_global_trace_level(dynamo_args.sglang_trace_level)
 
     load_lora_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.load_lora"

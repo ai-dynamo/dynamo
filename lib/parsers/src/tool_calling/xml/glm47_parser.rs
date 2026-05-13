@@ -35,16 +35,39 @@ pub fn detect_tool_call_start_glm47(chunk: &str, config: &Glm47ParserConfig) -> 
     false
 }
 
-/// Find the end position of a GLM-4.7 tool call.
-/// Returns the position after </tool_call> or the length of the chunk if not found.
+/// Find the end position of all consecutive GLM-4.7 tool calls.
+/// When a model emits multiple parallel tool calls in one chunk
+/// (e.g. `<tool_call>A</tool_call><tool_call>B</tool_call>`), this
+/// function advances past every consecutive start→end pair so the
+/// entire group is captured as a single jailed region.  Returns the
+/// position after the last `</tool_call>` found, or the length of the
+/// chunk when no end token is present.
 pub fn find_tool_call_end_position_glm47(chunk: &str, config: &Glm47ParserConfig) -> usize {
+    let start_token = &config.tool_call_start;
     let end_token = &config.tool_call_end;
 
-    if let Some(pos) = chunk.find(end_token.as_str()) {
-        pos + end_token.len()
-    } else {
-        chunk.len()
+    let Some(first_end) = chunk.find(end_token.as_str()) else {
+        return chunk.len();
+    };
+
+    let mut cursor = first_end + end_token.len();
+
+    loop {
+        let rest = &chunk[cursor..];
+        let trimmed = rest.trim_start();
+        if !trimmed.starts_with(start_token.as_str()) {
+            break;
+        }
+        let trim_offset = rest.len() - trimmed.len();
+        let search_from = cursor + trim_offset + start_token.len();
+        if let Some(end_pos) = chunk[search_from..].find(end_token.as_str()) {
+            cursor = search_from + end_pos + end_token.len();
+        } else {
+            break;
+        }
     }
+
+    cursor
 }
 
 /// Try to parse GLM-4.7 formatted tool calls from a message.
@@ -432,6 +455,73 @@ mod tests {
         assert_eq!(
             &chunk[..end_pos],
             "<tool_call>func<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>"
+        );
+    }
+
+    #[test] // helper — parallel calls: end position must advance past ALL blocks
+    fn test_find_tool_call_end_position_parallel() {
+        let config = get_test_config();
+        let chunk = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>SF</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>trailing";
+
+        let end_pos = find_tool_call_end_position_glm47(chunk, &config);
+        assert_eq!(
+            &chunk[..end_pos],
+            "<tool_call>get_weather<arg_key>location</arg_key><arg_value>SF</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>",
+            "Must advance past ALL consecutive tool call blocks"
+        );
+    }
+
+    #[test] // helper — parallel calls with whitespace between blocks
+    fn test_find_tool_call_end_position_parallel_with_whitespace() {
+        let config = get_test_config();
+        let chunk = "<tool_call>a<arg_key>k</arg_key><arg_value>1</arg_value></tool_call>\n<tool_call>b<arg_key>k</arg_key><arg_value>2</arg_value></tool_call>";
+
+        let end_pos = find_tool_call_end_position_glm47(chunk, &config);
+        assert_eq!(
+            end_pos,
+            chunk.len(),
+            "Must handle whitespace/newlines between consecutive blocks"
+        );
+    }
+
+    #[test] // helper — parallel calls: second block incomplete (streaming)
+    fn test_find_tool_call_end_position_parallel_second_incomplete() {
+        let config = get_test_config();
+        let chunk = "<tool_call>a<arg_key>k</arg_key><arg_value>1</arg_value></tool_call><tool_call>b<arg_key>k</arg_key><arg_value>2</arg_value>";
+
+        let end_pos = find_tool_call_end_position_glm47(chunk, &config);
+        assert_eq!(
+            &chunk[..end_pos],
+            "<tool_call>a<arg_key>k</arg_key><arg_value>1</arg_value></tool_call>",
+            "Must stop at first complete block when second is incomplete"
+        );
+    }
+
+    #[test] // PARSER.batch.2 + PARSER.batch.8 — bug report repro: text + parallel calls
+    fn test_parse_text_then_parallel_calls() {
+        let config = get_test_config();
+        let message = "I'll check the weather for both cities at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>San Francisco</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>New York</arg_value></tool_call>";
+
+        let (calls, normal_text) = try_tool_call_parse_glm47(message, &config, None).unwrap();
+
+        assert_eq!(calls.len(), 2, "Both parallel calls must be extracted");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_weather");
+
+        let args0: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args1: HashMap<String, Value> =
+            serde_json::from_str(&calls[1].function.arguments).unwrap();
+        assert_eq!(
+            args0.get("location").unwrap().as_str().unwrap(),
+            "San Francisco"
+        );
+        assert_eq!(args1.get("location").unwrap().as_str().unwrap(), "New York");
+
+        let text = normal_text.unwrap();
+        assert_eq!(
+            text,
+            "I'll check the weather for both cities at the same time!"
         );
     }
 

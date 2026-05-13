@@ -14,7 +14,7 @@ The Global Router supports two modes:
 - **Disagg mode** (default): Registers as both prefill and decode worker. Routes prefill requests based on (ISL, TTFT) and decode requests based on (context_length, ITL) to separate pool types.
 - **Agg mode**: Registers as a single generate worker. Routes all requests based on (TTFT target, ITL target) to unified pools that handle both prefill and decode.
 
-Both modes support priority-based pool overrides from agent hints.
+Both modes support priority-based pool overrides from agent hints and optional priority retry to faster pools.
 
 ## Supported Backends
 
@@ -102,10 +102,13 @@ The configuration file format depends on the mode. The `mode` field determines w
 ```jsonc
 {
     "mode": "disagg",                     // Optional, defaults to "disagg"
+    "enable_priority_retry": false,        // Optional, retry failed requests on faster pools
     "num_prefill_pools": <int>,
     "num_decode_pools": <int>,
     "prefill_pool_dynamo_namespaces": [],
     "decode_pool_dynamo_namespaces": [],
+    "prefill_pool_priorities": [],         // Optional, lower integer = faster pool
+    "decode_pool_priorities": [],          // Optional, lower integer = faster pool
 
     "prefill_pool_selection_strategy": {
         "isl_min": <int>,
@@ -136,8 +139,10 @@ The configuration file format depends on the mode. The `mode` field determines w
 ```jsonc
 {
     "mode": "agg",
+    "enable_priority_retry": false,        // Optional, retry failed requests on faster pools
     "num_agg_pools": <int>,
     "agg_pool_dynamo_namespaces": [],
+    "agg_pool_priorities": [],             // Optional, lower integer = faster pool
 
     "agg_pool_selection_strategy": {
         "ttft_min_ms": <float>,              // Minimum TTFT target (ms)
@@ -215,42 +220,25 @@ Priority is set by the client via the NVIDIA OpenAI extension:
 }
 ```
 
-### Priority-Based Pool Override
+### Priority Retry
 
-Both prefill and decode strategies support optional `priority_overrides` rules.
-When a request carries a priority value (from `nvext.agent_hints.priority`), the
-global router evaluates the override rules **after** the grid lookup. The first
-rule whose `[min_priority, max_priority]` range contains the request priority
-wins, and the request is routed to that rule's `target_pool` instead of the
-grid result. If no rule matches (or no priority is present), the grid result
-is used as normal.
+Set `enable_priority_retry` to `true` to retry a request on faster pools when forwarding to the selected pool fails before any response has been streamed. Pool speed is configured with `prefill_pool_priorities`, `decode_pool_priorities`, or `agg_pool_priorities` depending on the mode. Lower integer values mean faster pools.
 
-This is useful for straggler mitigation in RL workloads: the RL framework can
-tag slow requests with a high priority, and the global router redirects them to
-a dedicated min-latency pool.
+If a priority list is omitted, the global router uses pool order as the default priority: pool `0` has priority `0`, pool `1` has priority `1`, and so on. With default priorities, pool `0` is the fastest pool.
+
+Retry order starts with the selected pool and then walks faster pools from slow to fast. For example:
 
 ```jsonc
-"priority_overrides": [
-    {
-        "min_priority": 10,     // inclusive lower bound
-        "max_priority": 100,    // inclusive upper bound
-        "target_pool": 1        // pool index to route to
-    }
-]
-```
-
-Priority is set by the client via the NVIDIA OpenAI extension:
-
-```json
 {
-    "messages": [...],
-    "nvext": {
-        "agent_hints": {
-            "priority": 50
-        }
-    }
+    "enable_priority_retry": true,
+    "prefill_pool_dynamo_namespaces": ["prefill-fast", "prefill-mid", "prefill-slow"],
+    "prefill_pool_priorities": [0, 1, 2]
 }
 ```
+
+If the grid selects `prefill-slow` (pool `2`) and that request fails, the global router retries pool `1` and then pool `0`. If the grid selects the fastest pool, there is no faster pool to retry.
+
+In disaggregated mode, prefill and decode retry are independent. A prefill failure retries through `prefill_pool_priorities`; a decode failure retries through `decode_pool_priorities`. If a failed decode attempt already caused the prefill engine to retire or drop the request's KV cache, the retry is still allowed; the backend should handle any resulting cache miss or failure on the new attempt. Current Dynamo backends do not support this yet.
 
 ### Passing SLA Targets
 
@@ -275,20 +263,23 @@ If not provided, the middle of the configured range is used as default. For disa
 1. Frontend receives request and sends to Global Router (registered as prefill)
 2. Global Router selects prefill pool based on (ISL, TTFT_target, priority)
 3. Request is forwarded to local router in the selected prefill pool namespace
-4. Local router forwards to a prefill worker
-5. Prefill response returns with `disaggregated_params`
-6. Frontend sends decode request to Global Router (registered as decode)
-7. Global Router selects decode pool based on (context_length, ITL_target, priority)
-8. Request is forwarded to local router in the selected decode pool namespace
-9. Tokens stream back through the chain
+4. If forwarding fails before streaming a response and priority retry is enabled, Global Router retries faster prefill pools
+5. Local router forwards to a prefill worker
+6. Prefill response returns with `disaggregated_params`
+7. Frontend sends decode request to Global Router (registered as decode)
+8. Global Router selects decode pool based on (context_length, ITL_target, priority)
+9. Request is forwarded to local router in the selected decode pool namespace
+10. If forwarding fails before streaming tokens and priority retry is enabled, Global Router retries faster decode pools
+11. Tokens stream back through the chain
 
 ### Agg Mode
 
 1. Frontend receives request and sends to Global Router (registered as Chat + Completions)
 2. Global Router selects agg pool based on (TTFT_target, ITL_target, priority)
 3. Request is forwarded to local router in the selected agg pool namespace
-4. Local router forwards to a worker that handles both prefill and decode
-5. Tokens stream back through the chain
+4. If forwarding fails before streaming tokens and priority retry is enabled, Global Router retries faster agg pools
+5. Local router forwards to a worker that handles both prefill and decode
+6. Tokens stream back through the chain
 
 ## Example
 

@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: kimi_k2
+mode: batch
+cases:
+  PARSER.batch.4.a:
+    description: Garbage between section fences (no call_begin)
+    ref: dynamo
+    model_text: <|tool_calls_section_begin|>nonsense<|tool_calls_section_end|>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls: []
+      normal_text: ''
+  PARSER.batch.4.b:
+    description: Invalid JSON args (missing close brace)
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_kimi_k2_tool_parser.py#L151
+    model_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"<|tool_call_end|><|tool_calls_section_end|>
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments: '{"location":"NYC"'
+      normal_text: ''
+  PARSER.batch.4.c:
+    description: Missing function name (call_begin without functions.X:N)
+    ref: dynamo
+    model_text: <|tool_calls_section_begin|><|tool_call_begin|><|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: ''
+  PARSER.batch.4.d:
+    description: Mismatched fences (call_end before call_begin closes)
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_kimi_k2_tool_parser.py#L165
+    model_text: <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_calls_section_end|>
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: ''
