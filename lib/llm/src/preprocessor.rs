@@ -1014,6 +1014,20 @@ impl OpenAIPreprocessor {
             .collect();
         let n_total: usize = n_tokens.iter().sum();
 
+        // DYN_MM_ROUTING_BACKEND=sglang: substitute per-image pad_value at
+        // image positions and emit no block_mm_infos, matching sglang's
+        // BlockStored event bytes. Default mirrors vLLM's protocol.
+        let sglang_pad_value_mode = std::env::var("DYN_MM_ROUTING_BACKEND")
+            .map(|v| v.eq_ignore_ascii_case("sglang"))
+            .unwrap_or(false);
+        // Mirrors sglang's _compute_pad_value; must follow upstream if either
+        // constant changes.
+        const MM_PAD_SHIFT_VALUE: u64 = 1_000_000;
+        const MM_PAD_HASH_MASK: u64 = (1 << 30) - 1;
+        let pad_value_for_sglang = |mm_hash: u64| -> crate::protocols::TokenIdType {
+            (MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)) as crate::protocols::TokenIdType
+        };
+
         let mut expanded: Vec<crate::protocols::TokenIdType> =
             Vec::with_capacity(normalized_token_ids.len() + n_total);
         let mut img_ranges: Vec<(usize, usize)> = Vec::with_capacity(mm_image_entries.len());
@@ -1021,7 +1035,12 @@ impl OpenAIPreprocessor {
         for &t in normalized_token_ids.iter() {
             if t == image_token_id && i < mm_image_entries.len() {
                 let start = expanded.len();
-                expanded.extend(std::iter::repeat_n(image_token_id, n_tokens[i]));
+                let fill_token: crate::protocols::TokenIdType = if sglang_pad_value_mode {
+                    pad_value_for_sglang(mm_image_entries[i].mm_hash)
+                } else {
+                    image_token_id
+                };
+                expanded.extend(std::iter::repeat_n(fill_token, n_tokens[i]));
                 img_ranges.push((start, start + n_tokens[i]));
                 i += 1;
             } else {
@@ -1040,17 +1059,22 @@ impl OpenAIPreprocessor {
             expanded.resize(total_tokens, 0);
         }
 
-        // Build request-level MM info, then derive per-block info.
-        let mm_objects: Vec<RequestMmObjectInfo> = mm_image_entries
-            .iter()
-            .zip(img_ranges.iter())
-            .map(|(entry, &(s, e))| RequestMmObjectInfo {
-                mm_hash: entry.mm_hash,
-                offsets: vec![(s, e)],
-            })
-            .collect();
-        let block_mm_infos =
-            RequestExtraInfo { mm_objects }.to_block_level(block_size, total_tokens);
+        // Build request-level MM info, then derive per-block info. In sglang
+        // mode skip block_mm_infos: pad_value already encodes mm_hash in the
+        // bytes the router hashes; sglang's events carry no extra_keys.
+        let block_mm_infos = if sglang_pad_value_mode {
+            Vec::new()
+        } else {
+            let mm_objects: Vec<RequestMmObjectInfo> = mm_image_entries
+                .iter()
+                .zip(img_ranges.iter())
+                .map(|(entry, &(s, e))| RequestMmObjectInfo {
+                    mm_hash: entry.mm_hash,
+                    offsets: vec![(s, e)],
+                })
+                .collect();
+            RequestExtraInfo { mm_objects }.to_block_level(block_size, total_tokens)
+        };
 
         tracing::debug!(
             target: "mm_routing",
