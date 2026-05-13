@@ -26,6 +26,7 @@ jobs:
       core: ${{ steps.changes.outputs.core }}
       planner: ${{ steps.changes.outputs.planner }}
       operator: ${{ steps.changes.outputs.operator }}
+      snapshot: ${{ steps.changes.outputs.snapshot }}
       deploy: ${{ steps.changes.outputs.deploy }}
       vllm: ${{ steps.changes.outputs.vllm }}
       sglang: ${{ steps.changes.outputs.sglang }}
@@ -155,7 +156,7 @@ jobs:
 
   snapshot-agent:
     needs: changed-files
-    if: needs.changed-files.outputs.deploy == 'true'
+    if: needs.changed-files.outputs.snapshot == 'true'
     name: Snapshot Agent
     runs-on: prod-default-v2
     steps:
