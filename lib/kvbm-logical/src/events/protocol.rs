@@ -103,7 +103,7 @@ mod tests {
         let seq = TokenBlockSequence::from_slice(
             &tokens,
             tokens.len() as u32,
-            Some(dynamo_tokens::SaltHash(1337)),
+            Some(1337u64),
         );
         let seq_hash = seq.blocks()[0].kvbm_sequence_hash();
 
@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn test_batch_events_serialization() {
         let tokens = vec![1u32, 2, 3, 4, 5, 6, 7, 8];
-        let seq = TokenBlockSequence::from_slice(&tokens, 4, Some(dynamo_tokens::SaltHash(1337)));
+        let seq = TokenBlockSequence::from_slice(&tokens, 4, Some(1337u64));
         let seq_hashes: Vec<_> = seq
             .blocks()
             .iter()
@@ -144,7 +144,7 @@ mod tests {
         let seq = TokenBlockSequence::from_slice(
             &tokens,
             tokens.len() as u32,
-            Some(dynamo_tokens::SaltHash(1337)),
+            Some(1337u64),
         );
         let seq_hash = seq.blocks()[0].kvbm_sequence_hash();
 

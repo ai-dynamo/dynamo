@@ -1568,7 +1568,7 @@ mod integration_tests {
             let token_seq = dynamo_tokens::TokenBlockSequence::from_slice(
                 &tokens,
                 4,
-                Some(dynamo_tokens::SaltHash(42)),
+                Some(42u64),
             );
             token_seq.blocks().to_vec()
         };

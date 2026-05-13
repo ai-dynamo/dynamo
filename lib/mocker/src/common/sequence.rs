@@ -4,7 +4,7 @@
 use crate::common::protocols::MoveBlock;
 use derive_getters::Getters;
 use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::{BlockHash, PositionalLineageHash, SaltHash, TokenBlockSequence, Tokens};
+use dynamo_tokens::{BlockHash, PositionalLineageHash, TokenBlockSequence, Tokens};
 use rand::random;
 use validator::Validate;
 
@@ -86,7 +86,7 @@ impl ActiveSequence {
         let block_size = block_size.unwrap_or(64);
         let num_input_tokens = tokens.len();
 
-        let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(SaltHash(1337)));
+        let tokens = Tokens::from(tokens).into_sequence(block_size as u32, Some(1337u64));
         let (unique_blocks, block_hashes, plhs) =
             create_sequence_cache(&tokens, block_size, enable_prefix_caching);
 

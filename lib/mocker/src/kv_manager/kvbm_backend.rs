@@ -583,7 +583,7 @@ impl KvManager {
                     .map(|(i, global_hash)| KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(global_hash),
                         tokens_hash: LocalBlockHash(
-                            local_hashes.get(i).copied().unwrap_or_default().0,
+                            local_hashes.get(i).copied().unwrap_or_default(),
                         ),
                         mm_extra_info: None,
                     })
@@ -1456,7 +1456,7 @@ mod tests {
             uuid,
             42,
             None,
-            BlockHash(0),
+            0u64,
             plh(500),
             None,
         ));
@@ -1473,7 +1473,7 @@ mod tests {
             Uuid::new_v4(),
             42,
             None,
-            BlockHash(0),
+            0u64,
             plh(500),
             None,
         ));

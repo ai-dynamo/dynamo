@@ -242,7 +242,7 @@ mod tests {
         let seq = TokenBlockSequence::from_slice(
             &tokens,
             tokens_per_block as u32,
-            Some(kvbm_common::tokens::SaltHash(1337)),
+            Some(1337u64),
         );
         seq.blocks()[position].kvbm_sequence_hash()
     }
