@@ -6,9 +6,8 @@ subtitle: Use upstream vLLM or SGLang reasoning parsers when Dynamo does not shi
 ---
 
 When Dynamo's registry does not list a reasoning parser for your model, fall
-back to the upstream engine's parser. Two paths are available: **chat-processor
-swap** (keeps frontend tokenization and KV routing) and **tokenizer
-delegation** (engine owns tokenization, no KV routing).
+back to the upstream engine's parser via a **chat-processor swap**, which
+keeps frontend tokenization and KV routing.
 
 For Dynamo-native parsers, see [Reasoning Parsing (Dynamo)](dynamo.md). For
 the equivalent tool-call fallback, see
@@ -24,46 +23,30 @@ the equivalent tool-call fallback, see
 
 | | Frontend flags | Worker flags | KV routing | Notes |
 |---|---|---|---|---|
-| **vLLM chat processor** | `--dyn-chat-processor vllm --reasoning-parser <name>` | *(none)* | Yes | Parsing runs in vLLM's Python preprocessor. |
+| **vLLM chat processor** | `--dyn-chat-processor vllm --reasoning-parser <name>` | *(none)* | Yes | Parsing runs in vLLM's Python preprocessor. See [vLLM Chat Processor](../backends/vllm/vllm-chat-processor.md). |
 | **SGLang chat processor** | `--dyn-chat-processor sglang --reasoning-parser <name>` | *(none)* | Yes | Parsing runs in SGLang's Python preprocessor. See [SGLang Chat Processor](../backends/sglang/sglang-chat-processor.md). |
-| **vLLM tokenizer delegation** | `--router-mode round-robin` | `--use-vllm-tokenizer` | No | Engine owns tokenization. Day-0 model fallback. |
-| **SGLang tokenizer delegation** | `--router-mode round-robin` | `--use-sglang-tokenizer` | No | **Deprecated.** Use SGLang chat processor instead. |
 
 Upstream parser names come from the engine's registry and may differ from
 Dynamo's name for the same model (e.g., vLLM's `nemotron_v3` vs Dynamo's
 `nemotron3`). They are pinned to the engine version shipped in the Dynamo
 container.
 
-## Pitfalls
-
-- **Tokenizer delegation + `--router-mode kv`** -- silent cache misses from
-  prefix-hash mismatches. Pair tokenizer delegation with `round-robin` or
-  `random`.
-- **`--use-vllm-tokenizer` on an SGLang worker** (or vice versa) -- rejected
-  at startup. The flag must match the engine.
-- **`--use-sglang-tokenizer` is deprecated** -- migrate to
-  `--dyn-chat-processor sglang`. See
-  [Migration from --use-sglang-tokenizer](../backends/sglang/sglang-chat-processor.md#migration-from---use-sglang-tokenizer).
-
 ## Examples
 
 ```bash
-# vLLM chat processor
+# vLLM chat processor (supports KV Routing)
 python -m dynamo.vllm ...
 python -m dynamo.frontend --dyn-chat-processor vllm --reasoning-parser deepseek_r1
 
-# SGLang chat processor
+# SGLang chat processor (supports KV Routing)
 python -m dynamo.sglang ...
 python -m dynamo.frontend --dyn-chat-processor sglang --reasoning-parser kimi_k25
-
-# vLLM tokenizer delegation (no KV routing)
-python -m dynamo.vllm --use-vllm-tokenizer ...
-python -m dynamo.frontend --router-mode round-robin
 ```
 
 ## See Also
 
 - [Reasoning Parsing (Dynamo)](dynamo.md) -- Dynamo-native parsers and common pairings
 - [Tool Call Parsing (Engine Fallback)](../tool-calling/engine-fallback.md) -- Equivalent fallback for tool-call parsers
+- [vLLM Chat Processor](../backends/vllm/vllm-chat-processor.md) -- vLLM chat-processor details
 - [SGLang Chat Processor](../backends/sglang/sglang-chat-processor.md) -- SGLang chat-processor details
 - [Frontend Configuration Reference](../components/frontend/configuration.md) -- Full CLI flag reference
