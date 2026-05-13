@@ -140,6 +140,16 @@ class PlannerConfig(BaseModel):
         ),
         exclude=True,
     )
+    metric_pulling_prometheus_token: Optional[str] = Field(
+        default_factory=lambda: os.environ.get("PROMETHEUS_TOKEN"),
+        exclude=True,
+        description=(
+            "Optional bearer token sent as `Authorization: Bearer <token>` on "
+            "every PromQL request. Useful for hardened monitoring stacks "
+            "(OpenShift thanos-querier, OAuth-proxied Prometheus). Token is "
+            "read once at startup."
+        ),
+    )
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
     )

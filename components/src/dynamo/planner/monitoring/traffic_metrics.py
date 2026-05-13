@@ -93,9 +93,14 @@ class FrontendMetricContainer(BaseModel):
 
 class PrometheusAPIClient:
     def __init__(
-        self, url: str, dynamo_namespace: str, metrics_source: str = "frontend"
+        self,
+        url: str,
+        dynamo_namespace: str,
+        metrics_source: str = "frontend",
+        bearer_token: Optional[str] = None,
     ):
-        self.prom = PrometheusConnect(url=url, disable_ssl=True)
+        headers = {"Authorization": f"Bearer {bearer_token}"} if bearer_token else None
+        self.prom = PrometheusConnect(url=url, disable_ssl=True, headers=headers)
         self.dynamo_namespace = dynamo_namespace
         self.metrics_source = metrics_source  # "frontend" | "router"
 
