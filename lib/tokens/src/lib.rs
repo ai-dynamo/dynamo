@@ -1903,10 +1903,7 @@ mod tests {
         let computed_hash_1_4 = compute_block_hash(cast_slice(tokens_1_4), salt);
         assert_eq!(computed_hash_1_4, HASH_1_4, "Mismatch for HASH_1_4");
         // First block's sequence hash is its block hash
-        assert_eq!(
-            computed_hash_1_4, SEQ_HASH_1_4,
-            "Mismatch for SEQ_HASH_1_4"
-        );
+        assert_eq!(computed_hash_1_4, SEQ_HASH_1_4, "Mismatch for SEQ_HASH_1_4");
 
         // Block 2: [5, 6, 7, 8]
         let tokens_5_8 = &[5u32, 6, 7, 8];

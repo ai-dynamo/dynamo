@@ -239,11 +239,7 @@ mod tests {
         let tokens_per_block = 4;
         let total_tokens = (position + 1) * tokens_per_block;
         let tokens: Vec<u32> = (0..total_tokens as u32).collect();
-        let seq = TokenBlockSequence::from_slice(
-            &tokens,
-            tokens_per_block as u32,
-            Some(1337u64),
-        );
+        let seq = TokenBlockSequence::from_slice(&tokens, tokens_per_block as u32, Some(1337u64));
         seq.blocks()[position].kvbm_sequence_hash()
     }
 
