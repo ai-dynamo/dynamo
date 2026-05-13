@@ -562,6 +562,10 @@ class ModelRuntimeConfig:
     taints: Set[str]
     stable_routing_id: str | None
     runtime_data: dict[str, Any]
+    topology_domains: dict[str, str]
+    kv_transfer_domain: str | None
+    kv_transfer_enforcement: str | None
+    kv_transfer_preferred_weight: float | None
     tensor_model_config: Any | None
     bootstrap_host: str | None
     bootstrap_port: int | None
