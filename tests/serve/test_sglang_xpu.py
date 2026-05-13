@@ -471,7 +471,7 @@ sglang_configs = {
             "xpu",
             "--attention-backend",
             "intel_xpu",
-        ],    
+        ],
         marks=[
             pytest.mark.xpu_1,
             pytest.mark.post_merge,
