@@ -5403,7 +5403,6 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				"test-service",
 				nil, // No checkpoint info in tests
 				nil, // Use default deployer
-				nil, // No KV transfer policy in tests
 			)
 
 			if (err != nil) != tt.wantErr {
@@ -5481,7 +5480,6 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 				"test-service",
 				nil, // No checkpoint info in tests
 				nil, // Use default deployer
-				nil, // No KV transfer policy in tests
 			)
 
 			if err != nil {
@@ -5606,7 +5604,6 @@ func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
 				"test-service",
 				nil, // No checkpoint info in tests
 				nil, // Use default deployer
-				nil, // No KV transfer policy in tests
 			)
 
 			if err != nil {
@@ -5714,7 +5711,6 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 				"test-service",
 				nil, // No checkpoint info in tests
 				nil, // Use default deployer
-				nil, // No KV transfer policy in tests
 			)
 			if !assert.NoError(t, err) {
 				return
@@ -5886,7 +5882,6 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 				"test-service",
 				nil, // No checkpoint info in tests
 				nil, // Use default deployer
-				nil, // No KV transfer policy in tests
 			)
 
 			if err != nil {
@@ -6017,7 +6012,6 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 				"test-service",
 				nil, // No checkpoint info in tests
 				nil, // Use default deployer
-				nil, // No KV transfer policy in tests
 			)
 
 			if tt.expectError {
@@ -6099,7 +6093,6 @@ func TestGenerateBasePodSpec_TRTLLMSSHMountUsesSecretVolume(t *testing.T) {
 		},
 		commonconsts.MultinodeDeploymentTypeGrove,
 		"worker",
-		nil,
 		nil,
 		nil,
 	)
@@ -6300,7 +6293,6 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 				"test-service",
 				nil, // No checkpoint info in tests
 				nil, // Use default deployer
-				nil, // No KV transfer policy in tests
 			)
 
 			if tt.expectError {
@@ -6514,7 +6506,6 @@ func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) 
 				"test-service",
 				nil, // No checkpoint info in tests
 				nil, // Use default deployer
-				nil, // No KV transfer policy in tests
 			)
 
 			if tt.expectError {
@@ -6702,7 +6693,6 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 				"test-service",
 				nil, // No checkpoint info in tests
 				nil, // Use default deployer
-				nil, // No KV transfer policy in tests
 			)
 
 			if err != nil {
@@ -8380,7 +8370,6 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 				"test-service",
 				nil, // checkpointInfo
 				nil, // deployerOverride
-				nil, // No KV transfer policy in tests
 			)
 
 			if (err != nil) != tt.wantErr {

@@ -1756,7 +1756,6 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 		componentName,
 		nil, // No checkpoint info for checkpoint creation jobs
 		nil, // Use default deployer
-		nil, // No KV transfer policy for checkpoint jobs
 	)
 	if err != nil {
 		return corev1.PodTemplateSpec{}, fmt.Errorf("failed to generate base pod spec: %w", err)

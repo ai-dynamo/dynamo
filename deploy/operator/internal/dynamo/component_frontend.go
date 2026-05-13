@@ -83,12 +83,6 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 		},
 	}...)
 
-	// KV transfer policy: inject router env vars so the frontend can enforce
-	// topology-aware decode worker selection.
-	if context.KvTransferPolicy != nil {
-		container.Env = append(container.Env, KvTransferPolicyEnvVars(context.KvTransferPolicy)...)
-	}
-
 	return container, nil
 }
 

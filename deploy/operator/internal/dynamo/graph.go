@@ -1382,12 +1382,10 @@ func GenerateBasePodSpec(
 	serviceName string,
 	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by ResolveCheckpointForService)
 	deployerOverride MultinodeDeployer, // Optional: overrides factory-created deployer when non-nil
-	kvTransferPolicy *v1beta1.KvTransferPolicy, // Optional: DGD-level KV transfer policy for frontend router env vars
 ) (*corev1.PodSpec, error) {
 	// Start with base container generated per component type
 	annotations := GetPodTemplateAnnotations(component)
 	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, annotations))
-	componentContext.KvTransferPolicy = kvTransferPolicy
 	componentDefaults := ComponentDefaultsFactory(string(component.ComponentType))
 	container, err := componentDefaults.GetBaseContainer(componentContext)
 	if err != nil {
@@ -1736,7 +1734,7 @@ func GeneratePodSpecForComponent(
 		operatorConfig = &configv1alpha1.OperatorConfiguration{}
 	}
 
-	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo, deployerOverride, dynamoDeployment.Spec.KvTransferPolicy)
+	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo, deployerOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -2497,7 +2495,6 @@ func GenerateBasePodSpecForController(
 		componentName,
 		checkpointInfo,
 		nil, // use default deployer
-		nil, // no DGD-level KV transfer policy in DCD path
 	)
 	if err != nil {
 		return nil, err
