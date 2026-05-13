@@ -33,11 +33,6 @@ the equivalent reasoning fallback, see
 | **vLLM chat processor** | `--dyn-chat-processor vllm --tool-call-parser <name>` | *(none)* | Yes | Parsing runs in vLLM's Python preprocessor. See [vLLM Chat Processor](../backends/vllm/vllm-chat-processor.md). |
 | **SGLang chat processor** | `--dyn-chat-processor sglang --tool-call-parser <name>` | *(none)* | Yes | Parsing runs in SGLang's Python preprocessor. See [SGLang Chat Processor](../backends/sglang/sglang-chat-processor.md). |
 
-Upstream parser names come from the engine's registry and may differ from
-Dynamo's name for the same model (e.g., SGLang's `deepseekv3` vs Dynamo's
-`deepseek_v3`). They are pinned to the engine version shipped in the Dynamo
-container.
-
 ## Examples
 
 ```bash
