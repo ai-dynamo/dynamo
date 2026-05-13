@@ -110,7 +110,7 @@ export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
 /sbin/ldconfig
 ```
 
-For example, refer to the following from [`examples/deployments/GKE/vllm/disagg.yaml`](./vllm/disagg.yaml)
+For example, refer to the following from [`examples/deployments/GKE/vllm/disagg.yaml`](./vllm/v1beta1/disagg.yaml)
 
 ```yaml
 metadata:
