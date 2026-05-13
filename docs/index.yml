@@ -206,8 +206,6 @@ navigation:
             path: agents/agent-tracing.md
           - page: Agent Hints
             path: agents/agent-hints.md
-          - page: SGLang for Agentic Workloads
-            path: backends/sglang/agents.md
       - section: Observability (Local)
         path: observability/README.md
         contents:
