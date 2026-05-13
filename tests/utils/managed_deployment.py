@@ -487,6 +487,10 @@ class PodStatusDetail:
     message: str = ""
     exit_code: Optional[int] = None
     restart_count: int = 0
+    pod_phase: str = ""
+    node_name: Optional[str] = None
+    scheduling_reason: Optional[str] = None
+    scheduling_message: Optional[str] = None
 
     def format(self) -> str:
         result = f"{self.pod_name}/{self.container_name}: {self.state}"
@@ -498,6 +502,17 @@ class PodStatusDetail:
             result += f" (exit_code={self.exit_code})"
         if self.restart_count > 0:
             result += f" [restarts={self.restart_count}]"
+        if self.pod_phase:
+            result += f" phase={self.pod_phase}"
+        if self.node_name:
+            result += f" node={self.node_name}"
+        elif self.pod_phase == "Pending":
+            result += " node=<unbound>"
+        if self.scheduling_reason:
+            sched = f" PodScheduled={self.scheduling_reason}"
+            if self.scheduling_message:
+                sched += f": {self.scheduling_message}"
+            result += sched
         return result
 
 
@@ -704,9 +719,25 @@ class ManagedDeployment:
                                 self._logger.info(f"  Pod status: {d.format()}")
                         pod_events = await self._get_pod_events()
                         if pod_events:
-                            self._logger.info("  Pod warning events:")
+                            self._logger.info(
+                                "  Pod events (this DGD only, last few per pod):"
+                            )
                             for ev in pod_events:
                                 self._logger.info(f"    {ev}")
+                        # If any owned pod is Pending, also log node/GPU
+                        # availability so we can tell scheduler exhaustion
+                        # from affinity/taint problems at a glance.
+                        if any(
+                            d.pod_phase == "Pending" or d.scheduling_reason
+                            for d in pod_details
+                        ):
+                            node_summary = await self._get_node_resource_summary()
+                            if node_summary:
+                                self._logger.info(
+                                    "  Node resources (Pending pod present):"
+                                )
+                                for line in node_summary:
+                                    self._logger.info(f"    {line}")
 
             except exceptions.ApiException as e:
                 self._logger.info(
@@ -719,8 +750,12 @@ class ManagedDeployment:
                 )
             await asyncio.sleep(sleep)
 
-        # Collect pod diagnostics before raising
+        # Collect pod diagnostics before raising. Include pod-scoped events
+        # and (if any pod is Pending) a per-node GPU/taint summary so the
+        # failure message itself carries enough info to root-cause without
+        # rerunning with extra ``kubectl describe`` calls.
         pod_details = await self._get_pod_status_details()
+        pod_events = await self._get_pod_events()
         elapsed = time.time() - start_time
         msg = (
             f"Deployment {self._deployment_name} failed to reach "
@@ -730,6 +765,14 @@ class ManagedDeployment:
         if pod_details:
             detail_lines = "\n".join(f"  {d.format()}" for d in pod_details)
             msg += f"\n\nPod status at timeout:\n{detail_lines}"
+        if pod_events:
+            event_lines = "\n".join(f"  {ev}" for ev in pod_events)
+            msg += f"\n\nPod events at timeout (this DGD only):\n{event_lines}"
+        if any(d.pod_phase == "Pending" or d.scheduling_reason for d in pod_details):
+            node_summary = await self._get_node_resource_summary()
+            if node_summary:
+                node_lines = "\n".join(f"  {line}" for line in node_summary)
+                msg += f"\n\nNode resources at timeout:\n{node_lines}"
         raise TimeoutError(msg)
 
     async def _get_pod_status_details(self) -> List[PodStatusDetail]:
@@ -737,6 +780,11 @@ class ManagedDeployment:
 
         Returns a list of PodStatusDetail objects. Returns empty list on any
         API failure so callers never need to guard against exceptions.
+
+        Also captures pod-level scheduling diagnostics (phase, node, and the
+        ``PodScheduled`` condition) so that a Pending pod surfaces the
+        scheduler's reason (e.g. ``Unschedulable: 0/N nodes are available...``)
+        instead of the generic "no container status".
         """
         try:
             assert self._core_api is not None, "Kubernetes API not initialized"
@@ -750,6 +798,16 @@ class ManagedDeployment:
                 pod_name = pod.metadata.name
                 pod_status = pod.status
                 phase = pod_status.phase if pod_status else "Unknown"
+                node_name = pod.spec.node_name if pod.spec else None
+
+                scheduling_reason: Optional[str] = None
+                scheduling_message: Optional[str] = None
+                if pod_status and pod_status.conditions:
+                    for cond in pod_status.conditions:
+                        if cond.type == "PodScheduled" and cond.status != "True":
+                            scheduling_reason = cond.reason or "NotScheduled"
+                            scheduling_message = cond.message or ""
+                            break
 
                 container_statuses = (
                     pod_status.container_statuses if pod_status else None
@@ -761,6 +819,10 @@ class ManagedDeployment:
                             container_name="*",
                             state="Unknown",
                             reason=f"{phase} (no container status)",
+                            pod_phase=phase,
+                            node_name=node_name,
+                            scheduling_reason=scheduling_reason,
+                            scheduling_message=scheduling_message,
                         )
                     )
                     continue
@@ -793,6 +855,10 @@ class ManagedDeployment:
                             message=message,
                             exit_code=exit_code,
                             restart_count=cs.restart_count or 0,
+                            pod_phase=phase,
+                            node_name=node_name,
+                            scheduling_reason=scheduling_reason,
+                            scheduling_message=scheduling_message,
                         )
                     )
 
@@ -802,21 +868,122 @@ class ManagedDeployment:
             self._logger.debug(f"Failed to collect pod status details: {e}")
             return []
 
-    async def _get_pod_events(self) -> List[str]:
-        """Fetch warning events for pods in this deployment's namespace."""
+    async def _get_pod_names(self) -> List[str]:
+        """Return the names of pods owned by this DGD."""
         try:
             assert self._core_api is not None, "Kubernetes API not initialized"
+            label = f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name}"
+            pods = await self._core_api.list_namespaced_pod(
+                self.namespace, label_selector=label
+            )
+            return [p.metadata.name for p in pods.items if p.metadata]
+        except Exception as e:
+            self._logger.debug(f"Failed to list DGD pods: {e}")
+            return []
+
+    async def _get_pod_events(self, max_per_pod: int = 5) -> List[str]:
+        """Fetch the most recent events for pods owned by this deployment.
+
+        Filters by DGD-owned pod names so we do not log noise from unrelated
+        graphs in the same namespace (which is what masked the real failure
+        in the GAIE post-merge run -- the namespace-wide event list was
+        dominated by other ``vllm-agg-*`` / ``trtllm-agg-*`` pods). Includes
+        ``Normal`` events too because the scheduler's ``FailedScheduling``
+        reason is the actionable signal for Pending pods.
+        """
+        try:
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            owned_pods = set(await self._get_pod_names())
+            if not owned_pods:
+                return []
             events = await self._core_api.list_namespaced_event(self.namespace)
-            warnings = []
+            per_pod: dict[str, list[tuple[Any, str]]] = {}
             for event in events.items:
-                if event.type != "Normal" and event.involved_object.kind == "Pod":
-                    name = event.involved_object.name or "unknown"
-                    reason = event.reason or ""
-                    msg = event.message or ""
-                    warnings.append(f"{name}: {reason} - {msg}")
-            return warnings[-10:]
+                involved = event.involved_object
+                if not involved or involved.kind != "Pod":
+                    continue
+                name = involved.name or ""
+                if name not in owned_pods:
+                    continue
+                reason = event.reason or ""
+                msg = event.message or ""
+                etype = event.type or ""
+                ts = event.last_timestamp or event.event_time or event.first_timestamp
+                per_pod.setdefault(name, []).append(
+                    (ts, f"{name} [{etype}] {reason}: {msg}")
+                )
+            out: List[str] = []
+            for name in sorted(per_pod.keys()):
+                entries = per_pod[name]
+                entries.sort(key=lambda x: x[0] or 0)
+                for _, line in entries[-max_per_pod:]:
+                    out.append(line)
+            return out
         except Exception as e:
             self._logger.debug(f"Failed to collect pod events: {e}")
+            return []
+
+    async def _get_node_resource_summary(self) -> List[str]:
+        """Summarize per-node GPU allocatable, GPU requested, and taints.
+
+        Helps distinguish "Pending due to GPU exhaustion" from
+        "Pending due to affinity/taint" without having to shell out to
+        ``kubectl describe``. Best-effort: returns an empty list on any
+        permissions or API failure.
+        """
+        try:
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            nodes = await self._core_api.list_node()
+            all_pods = await self._core_api.list_pod_for_all_namespaces()
+
+            gpu_used_by_node: dict[str, int] = {}
+            for pod in all_pods.items:
+                if not pod.spec or not pod.spec.node_name:
+                    continue
+                if pod.status and pod.status.phase in ("Succeeded", "Failed"):
+                    continue
+                used = 0
+                for c in pod.spec.containers or []:
+                    requests = (
+                        getattr(c.resources, "requests", None) if c.resources else None
+                    )
+                    if not requests:
+                        continue
+                    val = requests.get("nvidia.com/gpu")
+                    if val:
+                        try:
+                            used += int(val)
+                        except (TypeError, ValueError):
+                            pass
+                gpu_used_by_node[pod.spec.node_name] = (
+                    gpu_used_by_node.get(pod.spec.node_name, 0) + used
+                )
+
+            out: List[str] = []
+            for node in nodes.items:
+                name = node.metadata.name if node.metadata else "?"
+                alloc = (node.status.allocatable or {}) if node.status else {}
+                gpu_alloc = alloc.get("nvidia.com/gpu", "0")
+                used = gpu_used_by_node.get(name, 0)
+                taints = []
+                for t in (node.spec.taints or []) if node.spec else []:
+                    taints.append(
+                        f"{t.key}={t.value or ''}:{t.effect}"
+                        if t.value
+                        else f"{t.key}:{t.effect}"
+                    )
+                ready = "Unknown"
+                for cond in (node.status.conditions or []) if node.status else []:
+                    if cond.type == "Ready":
+                        ready = cond.status
+                        break
+                out.append(
+                    f"{name}: ready={ready} gpu_alloc={gpu_alloc} gpu_used={used}"
+                    + (f" taints=[{', '.join(taints)}]" if taints else "")
+                )
+            return out
+        except Exception as e:
+            self._logger.debug(f"Failed to collect node resource summary: {e}")
             return []
 
     async def _restart_nats(self):

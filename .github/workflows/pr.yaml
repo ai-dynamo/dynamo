@@ -74,6 +74,7 @@ jobs:
       - planner-build
       - planner-test
       - frontend-build
+      - frontend-copy-to-acr
     if: always()
     steps:
       - name: Check all dependent jobs
@@ -82,7 +83,7 @@ jobs:
 
   deploy-status-check:
     runs-on: ubuntu-latest
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
     if: always()
     steps:
       - name: Check all deploy test jobs
@@ -284,7 +285,10 @@ jobs:
   frontend-build:
     name: frontend
     needs: [changed-files]
-    if: needs.changed-files.outputs.frontend == 'true'
+    # Also fires on `deploy` so GAIE deploy test (which consumes the
+    # frontend image as the EPP / sidecar) gets a fresh build when
+    # tests/deploy/** or other deploy paths change.
+    if: needs.changed-files.outputs.frontend == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -537,13 +541,30 @@ jobs:
     needs: [changed-files, vllm-build, vllm-test]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.frontend == 'true') &&
       needs.vllm-build.result == 'success' &&
       (needs.vllm-test.result == 'success' || needs.vllm-test.result == 'skipped')
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
+      # GAIE deploy test pulls vllm-runtime-cuda12 (see deploy-test-gaie below);
+      # the standard vllm/sglang/trtllm deploy tests pull vllm-runtime-cuda13.
+      cuda_version: '["12.9", "13.0"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 10
+    secrets: inherit
+
+  frontend-copy-to-acr:
+    name: frontend # This name overlaps with other frontend jobs to group them in the UI
+    needs: [changed-files, frontend-build]
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.frontend == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      needs.frontend-build.result == 'success'
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
+      cuda_version: '[""]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
@@ -590,7 +611,8 @@ jobs:
       (needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
+       needs.changed-files.outputs.deploy == 'true' ||
+       needs.changed-files.outputs.frontend == 'true') &&
       (needs.operator.result == 'success' || needs.operator.result == 'skipped')
     needs: [changed-files, operator]
     runs-on: prod-default-small-v2
@@ -659,9 +681,84 @@ jobs:
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
 
+  # ============================================================================
+  # GAIE DEPLOY TEST (PR validation mirror of post-merge-ci.yml deploy-test-gaie)
+  # Fires when files affecting the inference-gateway path change so contributors
+  # can validate the full Gateway → EPP → vLLM disagg flow on a PR without
+  # waiting for post-merge.
+  # ============================================================================
+  deploy-test-gaie:
+    name: GAIE Deploy Test
+    runs-on: prod-default-small-v2
+    needs: [changed-files, deploy-operator, frontend-copy-to-acr, vllm-copy-to-acr]
+    if: |
+      !cancelled() && !failure() &&
+      (needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.frontend == 'true' ||
+       needs.changed-files.outputs.deploy == 'true') &&
+      needs.deploy-operator.result == 'success' &&
+      needs.frontend-copy-to-acr.result == 'success' &&
+      needs.vllm-copy-to-acr.result == 'success'
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          host_kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Install GAIE prerequisites (Gateway API, agentgateway, Inference Extension CRDs)
+        shell: bash
+        env:
+          KUBECONFIG_B64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+        run: |
+          echo "${KUBECONFIG_B64}" | base64 -d > ${{ github.workspace }}/.kubeconfig_gaie
+          export KUBECONFIG=${{ github.workspace }}/.kubeconfig_gaie
+          export NAMESPACE=default
+          bash deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
+          rm -f ${{ github.workspace }}/.kubeconfig_gaie
+      - name: Run GAIE Deploy Test
+        id: deploy-test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          test_name: gaie
+          extra_pytest_args: >-
+            -m framework_with_gaie
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
+            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12
+
   deploy-cleanup:
     if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
     runs-on: prod-default-small-v2
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -687,6 +784,8 @@ jobs:
       - sglang-multi-gpu-test
       - trtllm-copy-to-acr
       - trtllm-multi-gpu-test
+      - frontend-build
+      - frontend-copy-to-acr
       - dynamo-pipeline
     steps:
       - name: Checkout repository
@@ -727,6 +826,7 @@ jobs:
       - deploy-test-vllm
       - deploy-test-sglang
       - deploy-test-trtllm
+      - deploy-test-gaie
     if: false
     # Disabled: gh-pages branch bloated to ~1GB after 72 commits of Allure reports
     # if: ${{ !cancelled() }}

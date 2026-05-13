@@ -13,8 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# NOTE: You can remove metadata.namespace if using kubectl apply -n
-# The backendRefs.namespace field should match where your InferencePool is deployed
+# Apply with `kubectl apply -n <ns> -f http-route.yaml`, where <ns> is the
+# namespace that contains both the `inference-gateway` Gateway (created by
+# deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh) and the
+# `qwen-pool` InferencePool (created by the operator from disagg.yaml).
+#
+# If the Gateway is in a different namespace, add `namespace: <gw-ns>` under
+# parentRefs. If the InferencePool is in a different namespace, add
+# `namespace: <pool-ns>` under backendRefs.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -24,7 +30,6 @@ spec:
     - group: gateway.networking.k8s.io
       kind: Gateway
       name: inference-gateway
-      namespace: my-model # the namespace where your gateway is deployed.
   rules:
     - backendRefs:
         - group: inference.networking.k8s.io
