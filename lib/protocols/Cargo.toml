@@ -12,12 +12,12 @@
 name = "dynamo-protocols"
 description = "Protocol types for OpenAI-compatible inference APIs with inference-serving extensions."
 license = "Apache-2.0 AND MIT"
+readme = "CLAUDE.md"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
-readme.workspace = true
 
 [dependencies]
 # Upstream OpenAI types (types-only, no HTTP client)
