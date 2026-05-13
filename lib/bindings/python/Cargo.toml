@@ -98,11 +98,8 @@ dynamo-llm = { path = "../../llm" }
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 dynamo-llm = { path = "../../llm", default-features = false }
 
-# jemalloc is only pulled in on platforms where it builds reliably.
-# Excluded on Windows (jemalloc upstream doesn't support it) and on musl
-# (linux-musl targets don't ship a system libc compatible with jemalloc's
-# build assumptions; `target_os = "linux"` alone would still match them,
-# so we exclude `target_env = "musl"` explicitly).
+# jemalloc is excluded on musl: `target_os = "linux"` alone matches musl,
+# so we add `not(target_env = "musl")` to keep musl on the system allocator.
 #
 # `disable_initial_exec_tls`: we're a cdylib that gets dlopen()-ed by Python,
 # so jemalloc's TLS must use general-dynamic, not initial-exec — otherwise

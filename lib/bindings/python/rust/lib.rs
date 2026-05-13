@@ -3,10 +3,9 @@
 
 // jemalloc as the Rust global allocator. Issue #9466 traced FE saturation to
 // glibc malloc's per-arena mutex under tokenizer + bytes::Bytes drop churn;
-// jemalloc's per-thread tcaches sidestep the arena lock. Linux (glibc) +
-// macOS only — Windows isn't supported upstream, and musl (which matches
-// target_os = "linux" but uses a different libc) is excluded explicitly via
-// target_env. Kept in sync with the same cfg in Cargo.toml.
+// jemalloc's per-thread tcaches sidestep the arena lock. Excluded on musl
+// (different libc, doesn't play well with tikv-jemalloc-sys's build) — see
+// the matching cfg in Cargo.toml.
 #[cfg(all(
     feature = "jemalloc",
     any(
@@ -30,27 +29,21 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 // symbol or `MALLOC_CONF` env var is silently ignored on this build.
 //
 // Only CPU-count-independent knobs are baked here, so the same binary is
-// safe from a 4-CPU pod up to a 64-CPU host:
+// safe across hardware sizes:
 //
 // - `tcache:true` — explicit per-thread cache (default; kept for clarity).
 // - `tcache_max:32768` — per-thread cache covers allocations up to 32 KB
 //   (default 8 KB), keeping bytes::Bytes and HF tokenizer mid-sized allocs
-//   lock-free instead of routing through an arena. (Older jemalloc used
-//   `lg_tcache_max:15` for the same effect; the new name is `tcache_max`
-//   and takes the byte size directly.)
+//   lock-free instead of routing through an arena.
 // - `dirty_decay_ms:5000`, `muzzy_decay_ms:5000` — halve the default decay
 //   times (10 s → 5 s) so dirty pages return to the OS faster. Mitigates
-//   the OOMKill-after-32-minutes failure mode the #9466 reporter described
-//   under sustained load.
+//   sustained-load memory growth.
 //
 // `narenas` is intentionally NOT set: jemalloc's default of `4 * ncpu`
-// scales with hardware. The reporter's `narenas:32` recommendation
-// happened to match the default for their 8-CPU pod and shouldn't be
-// baked in for arbitrary deployments.
+// scales with hardware.
 //
-// Per jemalloc's precedence (build flag < global symbol < /etc/malloc.conf
-// < env var), operators can override any of these at runtime via
-// `_RJEM_MALLOC_CONF`.
+// Operators override via the `_RJEM_MALLOC_CONF` env var (jemalloc's
+// precedence: build < global symbol < /etc/malloc.conf < env).
 #[cfg(all(
     feature = "jemalloc",
     any(
