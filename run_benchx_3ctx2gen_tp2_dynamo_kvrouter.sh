@@ -1,0 +1,519 @@
+#!/bin/bash
+#SBATCH --job-name=core_dlfw_ci-benchx.3ctx2gen_tp2.dynamo.kvrouter
+#SBATCH --nodes=2
+#SBATCH --partition=gb200
+#SBATCH --account=core_dlfw_ci
+#SBATCH --time=04:00:00
+#SBATCH --output=bench/logs/run_benchx_3ctx2gen_tp2_dynamo_kvrouter_%j.log
+#SBATCH --error=bench/logs/run_benchx_3ctx2gen_tp2_dynamo_kvrouter_%j.err
+
+# =============================================================================
+# benchx (feat/bench_x sha 11e16c) — 3 ctx TP1 + 2 gen TP2 with kv router,
+# driven by dynamo.trtllm (etcd + nats + dynamo frontend).
+#
+# Layout:
+#   NODE0 — etcd + nats + dynamo frontend + 3 ctx worker(s) (GPUs 0-2) TP1
+#   NODE1 — gen worker 0 GPUs 0,1 (TP2)
+#   NODE1 — gen worker 1 GPUs 2,3 (TP2)
+#
+# Driven by dynamo.trtllm (etcd + nats + dynamo frontend) instead of
+# trtllm-serve disaggregated.
+#
+# RWLT sends X-Session-ID + X-Correlation-ID via send_conversation_routing_headers.
+#
+# Env:
+#   CONCURRENCY    — comma-separated concurrency sweep
+#                    (default: 1,2,3,6,8,10,16,32,48,64,80,96,112,128)
+#   HOSTCACHE      — 1 = enable kv_cache_config.host_cache_size: 80GB on ctx
+#                    0 = no host offloading (default)
+#   WORKER_METRICS — 1 = pass --publish-events-and-metrics to dynamo.trtllm workers
+#                        AND run capture_metrics.py sidecar against worker /metrics
+#                    0 = neither (default; reduces publisher GIL pressure on workers)
+#
+# Submit:
+#   sbatch --export=ALL,HOSTCACHE=0,WORKER_METRICS=0 bench/run_benchx_3ctx2gen_tp2_dynamo_kvrouter.sh
+#   sbatch --export=ALL,CONCURRENCY=48,HOSTCACHE=0,WORKER_METRICS=0 bench/run_benchx_3ctx2gen_tp2_dynamo_kvrouter.sh
+# =============================================================================
+
+set -uo pipefail
+
+CONCURRENCY="${CONCURRENCY:-1,2,3,6,8,10,16,32,48,64,80,96,112,128}"
+C_TAG=$(echo "$CONCURRENCY" | tr ',' '-')
+HOSTCACHE="${HOSTCACHE:-0}"
+WORKER_METRICS="${WORKER_METRICS:-0}"
+
+if [ "$HOSTCACHE" = "1" ]; then HCTAG="hcon"; else HCTAG="hcoff"; fi
+
+if [ "$WORKER_METRICS" = "1" ]; then
+    WORKER_METRICS_FLAG="--publish-events-and-metrics"
+else
+    WORKER_METRICS_FLAG=""
+fi
+
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/core_dlfw_ci/rihuo/dynamo-trtllm-rihuo-arm64-1-2-0-0dd537-publisherfix.sqsh}"
+EXP_NAME="run_benchx_3ctx2gen_tp2_dynamo_kvrouter_${HCTAG}_c${C_TAG}"
+
+HF_TOKEN="${HF_TOKEN:-}"
+REPO_DIR="${REPO_DIR:-/lustre/fsw/core_dlfw_ci/rihuo/artificial-analysis}"
+USER_DIR=$(dirname "$REPO_DIR")
+MODEL_PATH="/lustre/fsw/core_dlfw_ci/rihuo/openai_gpt-oss-120b"
+MODEL="openai/gpt-oss-120b"
+TRAJECTORY_PATH="${REPO_DIR}/data/agentic_coding_v2_full.jsonl"
+CONTAINER_MOUNTS="/lustre/:/lustre/"
+
+NODE0=$(scontrol show hostnames $SLURM_NODELIST | sed -n '1p')
+NODE1=$(scontrol show hostnames $SLURM_NODELIST | sed -n '2p')
+
+# Dynamo ports
+ETCD_PORT=2379
+NATS_PORT=4222
+FRONTEND_PORT=8000
+DYNAMO_REQUEST_PLANE=tcp
+
+# DYN_SYSTEM_PORT assignments (one per worker)
+DYN_SYS_PORT_CTX_0=8081
+DYN_SYS_PORT_CTX_1=8082
+DYN_SYS_PORT_CTX_2=8083
+DYN_SYS_PORT_GEN_0=8085
+DYN_SYS_PORT_GEN_1=8086
+
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+RESULTS_DIR="$REPO_DIR/bench/results/dynamo/${EXP_NAME}_${TIMESTAMP}_${SLURM_JOB_ID:-unknown}"
+mkdir -p "$RESULTS_DIR" "$RESULTS_DIR/metrics" "$REPO_DIR/bench/logs"
+cp -- "${BASH_SOURCE[0]}" "$RESULTS_DIR/" 2>/dev/null || true
+
+{
+    echo "exp_name: $EXP_NAME"
+    echo "job_id: ${SLURM_JOB_ID:-unknown}"
+    echo "timestamp: $TIMESTAMP"
+    echo "container_image: $CONTAINER_IMAGE"
+    echo "concurrency: $CONCURRENCY"
+} > "$RESULTS_DIR/job_info.txt"
+
+SRUN_PIDS=()
+ROUTER_METRICS_PID=""
+METRICS_PID=""
+
+cleanup() {
+    local exit_code=$?
+    if [ -n "${METRICS_PID}" ] && kill -0 "${METRICS_PID}" 2>/dev/null; then
+        echo "Stopping metrics sidecar (PID ${METRICS_PID})..."
+        kill -TERM "${METRICS_PID}" 2>/dev/null || true
+        wait "${METRICS_PID}" 2>/dev/null || true
+    fi
+    if [ -n "${ROUTER_METRICS_PID}" ] && kill -0 "${ROUTER_METRICS_PID}" 2>/dev/null; then
+        kill -TERM "${ROUTER_METRICS_PID}" 2>/dev/null || true
+        wait "${ROUTER_METRICS_PID}" 2>/dev/null || true
+    fi
+    if [ "${#SRUN_PIDS[@]}" -gt 0 ]; then
+        echo "Cleaning up ${#SRUN_PIDS[@]} background srun steps..."
+        kill "${SRUN_PIDS[@]}" 2>/dev/null || true
+        wait "${SRUN_PIDS[@]}" 2>/dev/null || true
+    fi
+    if [ $exit_code -eq 0 ]; then
+        echo "Completed successfully"
+    else
+        echo "Failed (exit code: $exit_code)"
+    fi
+}
+trap cleanup EXIT
+
+start_bg() {
+    "$@" &
+    SRUN_PIDS+=($!)
+}
+
+require_alive() {
+    local pid="$1"
+    local name="$2"
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo "ERROR: ${name} exited unexpectedly"
+        wait "$pid" || true
+        exit 1
+    fi
+}
+
+wait_for_port() {
+    local host="$1"
+    local port="$2"
+    local timeout="${3:-300}"
+    local deadline=$((SECONDS + timeout))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if bash -c "echo > /dev/tcp/${host}/${port}" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "ERROR: port ${host}:${port} is not open after waiting ${timeout} seconds"
+    return 1
+}
+
+wait_for_dynamo_workers() {
+    local host="$1"
+    local port="$2"
+    local expected_prefill="$3"
+    local expected_decode="$4"
+    local timeout="${5:-2700}"
+    local report_interval="${6:-60}"
+    local deadline=$((SECONDS + timeout))
+    local last_report=$SECONDS
+
+    echo "Polling http://${host}:${port}/health every 10s for ${expected_prefill} prefills and ${expected_decode} decodes"
+
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        local response
+        if response=$(curl -fsS --max-time 5 "http://${host}:${port}/health" 2>/dev/null); then
+            local prefill_count decode_count
+            prefill_count=$(echo "${response}" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+print(sum(1 for i in data.get('instances', [])
+          if i.get('endpoint') == 'generate' and i.get('component') == 'prefill'))
+" 2>/dev/null || echo "0")
+            decode_count=$(echo "${response}" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+print(sum(1 for i in data.get('instances', [])
+          if i.get('endpoint') == 'generate' and i.get('component') in ('decode', 'tensorrt_llm', 'backend')))
+" 2>/dev/null || echo "0")
+
+            if [ "${prefill_count}" -ge "${expected_prefill}" ] && [ "${decode_count}" -ge "${expected_decode}" ]; then
+                echo "All workers ready: ${prefill_count} prefills, ${decode_count} decodes"
+                return 0
+            fi
+
+            if [ $((SECONDS - last_report)) -ge "${report_interval}" ]; then
+                echo "Waiting: have ${prefill_count}/${expected_prefill} prefills, ${decode_count}/${expected_decode} decodes"
+                last_report=$SECONDS
+            fi
+        else
+            if [ $((SECONDS - last_report)) -ge "${report_interval}" ]; then
+                echo "Waiting: frontend not responding yet"
+                last_report=$SECONDS
+            fi
+        fi
+        sleep 10
+    done
+
+    echo "ERROR: workers did not register within ${timeout}s"
+    return 1
+}
+
+verify_model_ready() {
+    local host="$1"
+    local port="$2"
+    local timeout="${3:-120}"
+    local deadline=$((SECONDS + timeout))
+
+    echo "Verifying model is ready via /v1/models..."
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        local response
+        if response=$(curl -fsS --max-time 5 "http://${host}:${port}/v1/models" 2>/dev/null); then
+            local model_count
+            model_count=$(echo "${response}" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+models = data.get('data', [])
+for m in models:
+    print(f\"  model: {m.get('id', 'unknown')}\", file=sys.stderr)
+print(len(models))
+" 2>/dev/null || echo "0")
+            if [ "${model_count}" -gt 0 ]; then
+                echo "Model is serving (${model_count} model(s) available)"
+                return 0
+            fi
+        fi
+        sleep 5
+    done
+    echo "ERROR: /v1/models did not return any models within ${timeout}s"
+    return 1
+}
+
+echo "============================================"
+echo "$EXP_NAME (job $SLURM_JOB_ID) ctx=$NODE0 gen=$NODE1  CONCURRENCY=$CONCURRENCY HOSTCACHE=$HOSTCACHE WORKER_METRICS=$WORKER_METRICS"
+echo "Container: $CONTAINER_IMAGE"
+echo "Results: $RESULTS_DIR"
+echo "============================================"
+
+CTX_CONFIG_SRC="${REPO_DIR}/bench/ctx_config.yaml"
+GEN_CONFIG_SRC="${REPO_DIR}/bench/gen_config_tp2.yaml"
+
+if [ ! -f "$CTX_CONFIG_SRC" ]; then echo "ERROR: ctx config not found at $CTX_CONFIG_SRC"; exit 1; fi
+if [ ! -f "$GEN_CONFIG_SRC" ]; then echo "ERROR: gen config not found at $GEN_CONFIG_SRC"; exit 1; fi
+
+cp "$CTX_CONFIG_SRC" "$RESULTS_DIR/ctx.yaml"
+cp "$GEN_CONFIG_SRC" "$RESULTS_DIR/gen.yaml"
+
+if [ "$HOSTCACHE" = "1" ]; then
+    sed -i '/^kv_cache_config:/a\  host_cache_size: 85899345920' "$RESULTS_DIR/ctx.yaml"
+fi
+
+COMMON_ENV="export TRTLLM_SERVER_DISABLE_GC=1 && \
+export TRTLLM_WORKER_DISABLE_GC=1 && \
+export DYN_ROUTER_QUEUE_THRESHOLD=100000"
+
+DYN_TCP_WORKER_POOL_SIZE=100000
+DYN_TCP_QUEUE_SIZE=$((DYN_TCP_WORKER_POOL_SIZE * 4))
+DYNAMO_WORKER_ENV="export ETCD_ENDPOINTS=http://${NODE0}:${ETCD_PORT} && \
+export NATS_SERVER=nats://${NODE0}:${NATS_PORT} && \
+export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && \
+export DYN_TCP_WORKER_POOL_SIZE=${DYN_TCP_WORKER_POOL_SIZE} && \
+export DYN_TCP_WORK_QUEUE_SIZE=${DYN_TCP_QUEUE_SIZE}"
+
+# ==============================================================================
+# Stage 1: Start infrastructure services (etcd + nats) on NODE0
+# ==============================================================================
+echo "[$(date +%H:%M:%S)] Starting etcd and nats on $NODE0..."
+
+start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
+  --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
+  --container-workdir="$USER_DIR" --container-remap-root --container-writable \
+  --no-container-entrypoint \
+  bash -c '
+    set -euo pipefail
+    rm -rf /tmp/etcd /tmp/nats
+    mkdir -p /tmp/etcd /tmp/nats
+
+    HOST_IP=$(hostname -I | awk "{print \$1}")
+    echo "Infra node IP: ${HOST_IP}"
+
+    echo "Starting nats-server..."
+    nats-server -js -sd /tmp/nats &
+    NATS_PID=$!
+
+    echo "Starting etcd..."
+    etcd \
+        --data-dir /tmp/etcd \
+        --listen-client-urls http://0.0.0.0:'"${ETCD_PORT}"' \
+        --advertise-client-urls http://${HOST_IP}:'"${ETCD_PORT}"' &
+    ETCD_PID=$!
+
+    for i in $(seq 1 300); do
+        if echo > /dev/tcp/localhost/'"${NATS_PORT}"' 2>/dev/null && \
+           echo > /dev/tcp/localhost/'"${ETCD_PORT}"' 2>/dev/null; then
+            echo "etcd and nats are ready"
+            break
+        fi
+        sleep 1
+    done
+
+    echo "Infrastructure services running (nats PID: ${NATS_PID}, etcd PID: ${ETCD_PID})"
+    wait
+  '
+INFRA_PID="${SRUN_PIDS[-1]}"
+require_alive "${INFRA_PID}" "INFRA_PID"
+
+echo "Waiting for nats (port ${NATS_PORT}) on ${NODE0}..."
+wait_for_port "${NODE0}" "${NATS_PORT}" 300
+
+echo "Waiting for etcd (port ${ETCD_PORT}) on ${NODE0}..."
+wait_for_port "${NODE0}" "${ETCD_PORT}" 300
+echo "Infrastructure services are ready"
+
+# ==============================================================================
+# Stage 2: Start TRTLLM workers via dynamo.trtllm
+# ==============================================================================
+
+GEN_PIDS=()
+# --- decode worker 0 on $NODE1 GPUs 0,1 (TP2) ---
+GEN_PORT=8085
+echo "[$(date +%H:%M:%S)] Starting gen worker 0 on $NODE1 GPUs 0,1 (DYN_SYSTEM_PORT=${GEN_PORT})..."
+start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE1 --mpi=pmix \
+  --output="$RESULTS_DIR/gen_worker_g0.log" \
+  --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
+  --no-container-entrypoint \
+  --no-container-mount-home \
+  bash -c "cd $REPO_DIR && export CUDA_VISIBLE_DEVICES=0,1 && $COMMON_ENV && $DYNAMO_WORKER_ENV && \
+    export DYN_SYSTEM_PORT=${GEN_PORT} && \
+    trtllm-llmapi-launch python3 -m dynamo.trtllm \
+      --model-path $MODEL_PATH --served-model-name $MODEL \
+      --disaggregation-mode decode \
+      --extra-engine-args $RESULTS_DIR/gen.yaml \
+      --request-plane ${DYNAMO_REQUEST_PLANE} \
+      ${WORKER_METRICS_FLAG}"
+GEN_PIDS+=("${SRUN_PIDS[-1]}")
+
+# --- decode worker 1 on $NODE1 GPUs 2,3 (TP2) ---
+GEN_PORT=8086
+echo "[$(date +%H:%M:%S)] Starting gen worker 1 on $NODE1 GPUs 2,3 (DYN_SYSTEM_PORT=${GEN_PORT})..."
+start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE1 --mpi=pmix \
+  --output="$RESULTS_DIR/gen_worker_g1.log" \
+  --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
+  --no-container-entrypoint \
+  --no-container-mount-home \
+  bash -c "cd $REPO_DIR && export CUDA_VISIBLE_DEVICES=2,3 && $COMMON_ENV && $DYNAMO_WORKER_ENV && \
+    export DYN_SYSTEM_PORT=${GEN_PORT} && \
+    trtllm-llmapi-launch python3 -m dynamo.trtllm \
+      --model-path $MODEL_PATH --served-model-name $MODEL \
+      --disaggregation-mode decode \
+      --extra-engine-args $RESULTS_DIR/gen.yaml \
+      --request-plane ${DYNAMO_REQUEST_PLANE} \
+      ${WORKER_METRICS_FLAG}"
+GEN_PIDS+=("${SRUN_PIDS[-1]}")
+
+# --- 3 ctx worker(s) on $NODE0 GPUs 0-2 (prefill, TP1) ---
+CTX_PIDS=()
+for GPU in 0 1 2; do
+  PORT_VAR="DYN_SYS_PORT_CTX_${GPU}"
+  CTX_PORT="${!PORT_VAR}"
+  echo "[$(date +%H:%M:%S)] Starting ctx worker on $NODE0 GPU $GPU (DYN_SYSTEM_PORT=${CTX_PORT})..."
+  start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
+    --output="$RESULTS_DIR/ctx_worker_g${GPU}.log" \
+    --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
+    --no-container-entrypoint \
+    --no-container-mount-home \
+    bash -c "cd $REPO_DIR && export CUDA_VISIBLE_DEVICES=${GPU} && $COMMON_ENV && $DYNAMO_WORKER_ENV && \
+      export DYN_SYSTEM_PORT=${CTX_PORT} && \
+      trtllm-llmapi-launch python3 -m dynamo.trtllm \
+        --model-path $MODEL_PATH --served-model-name $MODEL \
+        --disaggregation-mode prefill \
+        --extra-engine-args $RESULTS_DIR/ctx.yaml \
+        --request-plane ${DYNAMO_REQUEST_PLANE} \
+        ${WORKER_METRICS_FLAG}"
+  CTX_PIDS+=("${SRUN_PIDS[-1]}")
+done
+
+for i in "${!GEN_PIDS[@]}"; do
+  require_alive "${GEN_PIDS[$i]}" "GEN_PID_g${i}"
+done
+for i in "${!CTX_PIDS[@]}"; do
+  require_alive "${CTX_PIDS[$i]}" "CTX_PID_g${i}"
+done
+
+# ==============================================================================
+# Stage 3: Start dynamo frontend on NODE0
+# ==============================================================================
+echo "[$(date +%H:%M:%S)] Starting dynamo frontend on $NODE0..."
+start_bg srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
+  --output="$RESULTS_DIR/frontend.log" \
+  --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
+  --no-container-entrypoint \
+  --no-container-mount-home \
+  bash -c "$COMMON_ENV && \
+    export ETCD_ENDPOINTS=http://${NODE0}:${ETCD_PORT} && \
+    export NATS_SERVER=nats://${NODE0}:${NATS_PORT} && \
+    export DYN_REQUEST_PLANE=${DYNAMO_REQUEST_PLANE} && \
+    python3 -m dynamo.frontend \
+      --http-port ${FRONTEND_PORT} \
+      --request-plane ${DYNAMO_REQUEST_PLANE} \
+      --router-mode kv \
+      --no-router-kv-events \
+      --router-ttl-secs 480.0"
+FRONTEND_PID="${SRUN_PIDS[-1]}"
+require_alive "${FRONTEND_PID}" "FRONTEND_PID"
+
+# ==============================================================================
+# Stage 4: Wait for all workers to register, then verify model is serving
+# ==============================================================================
+echo "[$(date +%H:%M:%S)] Waiting for servers (3 prefill + 2 decode)..."
+if ! wait_for_dynamo_workers "${NODE0}" "${FRONTEND_PORT}" 3 2 2700 60; then
+    echo "ERROR: workers did not become healthy"
+    for f in $RESULTS_DIR/*.log; do echo "=== $(basename $f) ==="; tail -30 "$f"; done
+    exit 1
+fi
+
+if ! verify_model_ready "${NODE0}" "${FRONTEND_PORT}" 120; then
+    echo "ERROR: model is not serving"
+    for f in $RESULTS_DIR/*.log; do echo "=== $(basename $f) ==="; tail -30 "$f"; done
+    exit 1
+fi
+
+echo "[$(date +%H:%M:%S)] All workers healthy and model is serving"
+
+# --- metrics sidecar (gated by WORKER_METRICS) ---
+if [ "$WORKER_METRICS" = "1" ]; then
+  echo "[$(date +%H:%M:%S)] Starting metrics capture sidecar (interval=2s)..."
+  python3 "$REPO_DIR/bench/capture_metrics.py" \
+    --endpoints "${NODE0}:8081,${NODE0}:8082,${NODE0}:8083,${NODE1}:8085,${NODE1}:8086" \
+    --labels "ctx_g0,ctx_g1,ctx_g2,gen_g0,gen_g1" \
+    --output-dir "$RESULTS_DIR/metrics" \
+    --interval 2 \
+    > "$RESULTS_DIR/metrics/capture.stderr.log" 2>&1 &
+  METRICS_PID=$!
+  sleep 2
+else
+  echo "[$(date +%H:%M:%S)] WORKER_METRICS=0 — skipping per-worker metrics sidecar"
+fi
+
+# --- RWLT @ CONCURRENCY ---
+cat > "$RESULTS_DIR/rwlt_config.yaml" << RWLTEOF
+base_url: http://${NODE0}:${FRONTEND_PORT}/v1
+model: $MODEL
+concurrencies: [${CONCURRENCY}]
+phase_timeout_seconds: 1800
+user_spawn_rate: 1.0
+settling_time_seconds: 60
+min_measurement_seconds: 300.0
+min_total_trajectories: 30
+min_trajectories_per_user: 3
+trajectory_path: $TRAJECTORY_PATH
+trajectories_per_user: 30
+max_starting_line_offset: 10
+seed: 42
+timeout_seconds: 300.0
+max_tokens: 16384
+reasoning_effort: high
+record_err_reasons: true
+record_err_reasons_include_input: false
+tool_calls_args_only: true
+send_conversation_routing_headers: true
+exp_prefix: ${EXP_NAME}
+results_dir: $RESULTS_DIR/rwlt_results
+RWLTEOF
+
+echo "Snapshotting frontend metrics (pre-bench)..."
+curl -fsS --max-time 5 "http://${NODE0}:${FRONTEND_PORT}/metrics" \
+  > "$RESULTS_DIR/frontend_metrics_pre.prom" || echo "  WARN: pre snapshot failed"
+
+echo "Starting periodic frontend metrics scraper (interval=10s)..."
+(
+  while true; do
+    TS=$(date +%s)
+    if RESP=$(curl -fsS --max-time 5 "http://${NODE0}:${FRONTEND_PORT}/metrics" 2>/dev/null); then
+      echo "$RESP" | awk -v ts="$TS" '/^[a-zA-Z]/ {print ts" "$0}' \
+        >> "$RESULTS_DIR/frontend_metrics_timeseries.prom"
+    fi
+    sleep 10
+  done
+) &
+ROUTER_METRICS_PID=$!
+
+echo "==== Running RWLT @ c=${CONCURRENCY} (X-Session-ID enabled) ===="
+srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
+  --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
+  --no-container-entrypoint \
+  bash -c "cd $REPO_DIR && $COMMON_ENV && \
+    uv run --isolated --with openai --with httpx --with pyyaml --with pydantic \
+      python rwlt/run.py --config $RESULTS_DIR/rwlt_config.yaml" \
+  > "$RESULTS_DIR/benchmark.log" 2>&1
+echo "Bench exit: $?"
+
+kill -TERM "$ROUTER_METRICS_PID" 2>/dev/null; wait "$ROUTER_METRICS_PID" 2>/dev/null || true
+ROUTER_METRICS_PID=""
+
+if [ -n "$METRICS_PID" ]; then
+    kill -TERM "$METRICS_PID" 2>/dev/null; wait "$METRICS_PID" 2>/dev/null || true
+    METRICS_PID=""
+fi
+
+echo "Snapshotting frontend metrics (post-bench)..."
+curl -fsS --max-time 5 "http://${NODE0}:${FRONTEND_PORT}/metrics" \
+  > "$RESULTS_DIR/frontend_metrics_post.prom" || echo "  WARN: post snapshot failed"
+echo "  pre:  $(wc -l < "$RESULTS_DIR/frontend_metrics_pre.prom"  2>/dev/null || echo 0) lines"
+echo "  post: $(wc -l < "$RESULTS_DIR/frontend_metrics_post.prom" 2>/dev/null || echo 0) lines"
+echo "  ts:   $(wc -l < "$RESULTS_DIR/frontend_metrics_timeseries.prom" 2>/dev/null || echo 0) lines"
+
+# --- full unified iter-stats plot ---
+echo "==== Plotting iter_stats_unified.png ===="
+srun --overlap --ntasks=1 --nodes=1 --nodelist=$NODE0 --mpi=pmix \
+  --container-image="$CONTAINER_IMAGE" --container-mounts="$CONTAINER_MOUNTS" \
+  --no-container-entrypoint \
+  bash -c "cd $REPO_DIR && uv run --isolated --with matplotlib python analysis/plot_unified.py $RESULTS_DIR" \
+  > "$RESULTS_DIR/plot_iter_stats.log" 2>&1
+echo "plot exit: $?"
+
+echo "==== DONE ===="
+echo "Outputs:"
+echo "  RWLT summary:    $RESULTS_DIR/rwlt_results/*.txt"
+echo "  Iter-stats plot: $RESULTS_DIR/iter_stats_unified.png"
+echo "  Logs:            $RESULTS_DIR/"
