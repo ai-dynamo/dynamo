@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Case 2 (XPU): AIC supported model, rapid, without planner, input load (request rate)
+# XPU variant: b60 + vllm (AIC supports vllm on b60)
+model: "Qwen/Qwen3-32B"
+backend: vllm
+image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest"
+hardware:
+  gpuSku: b60
+  totalGpus: 64
+  numGpusPerNode: 8
+workload:
+  requestRate: 5.0
+sla:
+  itl: 50.0

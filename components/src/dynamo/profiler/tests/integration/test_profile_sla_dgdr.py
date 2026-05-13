@@ -66,6 +66,7 @@ def _make_ops(tmp_path, **overrides) -> ProfilerOperationalConfig:
 
 
 CONFIGS_DIR = Path(__file__).parent.parent / "data" / "configs"
+XPU_CONFIGS_DIR = CONFIGS_DIR / "xpu"
 
 
 class TestRapidSupported:
@@ -604,3 +605,288 @@ class TestThoroughMoEGpuBudget:
                     f"Candidate {candidate_dir.name} service {svc_name} requests "
                     f"{gpu_limit} GPUs but numGpusPerNode is {num_gpus_per_node}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# XPU (Intel b60) test classes
+# ---------------------------------------------------------------------------
+# Mirror the GPU tests above but load configs from configs/xpu/ which use
+# gpuSku: b60.  For rapid+planner tests the backend is vllm (AIC supports
+# vllm on b60); for thorough tests the original backend is kept.
+# ---------------------------------------------------------------------------
+
+
+class TestXPURapidSupported:
+    """Rapid strategy with AIC-supported model on Intel XPU (b60 + vllm)."""
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_no_planner_no_load(self, tmp_path):
+        """Case 1 (XPU): default picking mode, no planner, no target load."""
+        dgdr = _load_dgdr(XPU_CONFIGS_DIR / "1_rapid_supported_no_planner_no_load.yaml")
+        ops = _make_ops(tmp_path)
+        asyncio.run(run_profile(dgdr, ops))
+
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists()
+        config = yaml.safe_load(output.read_text())
+        assert config, "final_config.yaml should not be empty"
+        assert "spec" in config
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_no_planner_with_load(self, tmp_path):
+        """Case 2 (XPU): load-match picking mode with requestRate."""
+        dgdr = _load_dgdr(
+            XPU_CONFIGS_DIR / "2_rapid_supported_no_planner_with_load.yaml"
+        )
+        ops = _make_ops(tmp_path)
+        asyncio.run(run_profile(dgdr, ops))
+
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists()
+        config = yaml.safe_load(output.read_text())
+        assert config
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_pvc_no_planner_with_load(self, tmp_path):
+        """Case 2b (XPU): load-match with PVC model cache."""
+        dgdr = _load_dgdr(
+            XPU_CONFIGS_DIR / "2b_rapid_supported_pvc_no_planner_with_load.yaml"
+        )
+        ops = _make_ops(tmp_path)
+        asyncio.run(run_profile(dgdr, ops))
+
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists()
+        config = yaml.safe_load(output.read_text())
+        assert config
+        spec = config.get("spec", {})
+        pvcs = spec.get("pvcs", [])
+        assert any(
+            p.get("name") == "model-cache" for p in pvcs
+        ), "PVC should be mounted"
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_e2e_latency_sla(self, tmp_path):
+        """Case 2c (XPU): e2eLatency SLA instead of ttft/itl."""
+        dgdr = _load_dgdr(XPU_CONFIGS_DIR / "2c_rapid_supported_e2e_latency.yaml")
+        ops = _make_ops(tmp_path)
+        asyncio.run(run_profile(dgdr, ops))
+
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists()
+        config = yaml.safe_load(output.read_text())
+        assert config
+        assert dgdr.sla.ttft is None
+        assert dgdr.sla.itl is None
+        assert dgdr.sla.e2eLatency == 200000.0
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_both_concurrency_and_rate_rejected(self, tmp_path):
+        """Case 2d (XPU): both concurrency and requestRate should fail."""
+        dgdr = _load_dgdr(
+            XPU_CONFIGS_DIR / "2d_rapid_both_concurrency_and_rate_error.yaml"
+        )
+        ops = _make_ops(tmp_path)
+        with pytest.raises(ValueError, match="concurrency.*requestRate"):
+            asyncio.run(run_profile(dgdr, ops))
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_planner_rapid_sweep(self, tmp_path):
+        """Case 3 (XPU): autoscale picking with planner + rapid pre-deployment sweep."""
+        dgdr = _load_dgdr(
+            XPU_CONFIGS_DIR / "3_rapid_supported_planner_rapid_sweep.yaml"
+        )
+        ops = _make_ops(tmp_path)
+        asyncio.run(run_profile(dgdr, ops))
+
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists()
+        raw = output.read_text()
+        docs = list(yaml.safe_load_all(raw))
+        assert len(docs) >= 2, "Planner config should produce multi-doc YAML"
+        dgd = docs[-1]
+        assert "Planner" in dgd.get("spec", {}).get(
+            "services", {}
+        ), "Planner service should be added"
+
+
+class TestXPUThoroughDryRun:
+    """Thorough strategy on Intel XPU (b60) tested with --dry-run."""
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_no_planner_with_load(self, tmp_path):
+        """Case 6 (XPU): thorough + load-match, dry-run."""
+        dgdr = _load_dgdr(XPU_CONFIGS_DIR / "6_thorough_no_planner_with_load.yaml")
+        ops = _make_ops(tmp_path, dry_run=True)
+        asyncio.run(run_profile(dgdr, ops))
+
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists()
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_planner_rapid_sweep(self, tmp_path):
+        """Case 7 (XPU): thorough + planner + rapid pre-deployment sweep, dry-run."""
+        dgdr = _load_dgdr(XPU_CONFIGS_DIR / "7_thorough_planner_rapid_sweep.yaml")
+        ops = _make_ops(tmp_path, dry_run=True)
+        asyncio.run(run_profile(dgdr, ops))
+
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists()
+
+
+class TestXPUMockerEnabled:
+    """Mocker feature flag on Intel XPU (b60)."""
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_mocker_config_selected(self, tmp_path):
+        """Case 3b (XPU): planner + mocker enabled, should produce mocker DGD."""
+        config_path = (
+            XPU_CONFIGS_DIR / "3b_rapid_supported_planner_rapid_sweep_mocker.yaml"
+        )
+        if not config_path.exists():
+            pytest.skip("3b XPU mocker config not found")
+        dgdr = _load_dgdr(config_path)
+        ops = _make_ops(tmp_path)
+        asyncio.run(run_profile(dgdr, ops))
+
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists()
+
+
+class TestXPUAutoBackend:
+    """Auto backend resolution on Intel XPU (b60)."""
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_no_planner_no_load(self, tmp_path):
+        """Case 11 (XPU): auto backend, rapid, no planner, no target load."""
+        dgdr = _load_dgdr(XPU_CONFIGS_DIR / "11_auto_rapid_no_planner_no_load.yaml")
+        assert dgdr.backend == BackendType.Auto
+        ops = _make_ops(tmp_path)
+        asyncio.run(run_profile(dgdr, ops))
+
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists()
+        config = yaml.safe_load(output.read_text())
+        assert config, "final_config.yaml should not be empty"
+        assert "spec" in config
+
+
+class TestXPUThoroughMocked:
+    """Thorough mode on Intel XPU (b60) with mocked K8s deployments."""
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_thorough_no_planner_with_load(self, tmp_path):
+        """Case 6 (XPU, mocked): thorough + load-match, full pipeline without real GPUs."""
+        dgdr = _load_dgdr(XPU_CONFIGS_DIR / "6_thorough_no_planner_with_load.yaml")
+        ops = _make_ops(tmp_path)
+
+        with _patch_kv_cache_log("trtllm"):
+            for p in _THOROUGH_PATCHES:
+                p.start()
+            try:
+                asyncio.run(run_profile(dgdr, ops))
+            finally:
+                for p in _THOROUGH_PATCHES:
+                    p.stop()
+
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists()
+        config = yaml.safe_load(output.read_text())
+        assert config, "Mocked thorough should produce a non-empty config"
+        assert "spec" in config
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_thorough_planner_thorough_sweep(self, tmp_path):
+        """Case 7b (XPU, mocked): thorough search + thorough interpolation."""
+        dgdr = _load_dgdr(XPU_CONFIGS_DIR / "7b_thorough_planner_thorough_sweep.yaml")
+        ops = _make_ops(tmp_path)
+
+        def mock_profile_prefill(work_dir, *args, **kwargs):
+            _save_dummy_npz(ops.output_dir)
+
+        def mock_profile_decode(work_dir, *args, **kwargs):
+            _save_dummy_npz(ops.output_dir)
+
+        interp_patches = [
+            patch(
+                "dynamo.profiler.interpolation.DynamoDeploymentClient",
+                side_effect=lambda **kw: _mock_deployment_client(),
+            ),
+            patch(
+                "dynamo.profiler.interpolation.profile_prefill",
+                side_effect=mock_profile_prefill,
+            ),
+            patch(
+                "dynamo.profiler.interpolation.profile_decode",
+                side_effect=mock_profile_decode,
+            ),
+            patch(
+                "dynamo.profiler.interpolation.pick_decode_component",
+                return_value="TRTLLMWorker",
+            ),
+        ]
+
+        with _patch_kv_cache_log("trtllm"):
+            all_patches = _THOROUGH_PATCHES + interp_patches
+            for p in all_patches:
+                p.start()
+            try:
+                asyncio.run(run_profile(dgdr, ops))
+            finally:
+                for p in all_patches:
+                    p.stop()
+
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists()
+        raw = output.read_text()
+        docs = list(yaml.safe_load_all(raw))
+        assert len(docs) >= 2, "Planner + profiling data should produce multi-doc YAML"
+
+
+class TestXPUThoroughMockedOverrides:
+    """Thorough + DGD overrides on Intel XPU (b60)."""
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_9a_sglang_overrides(self, tmp_path):
+        """Case 9a (XPU): SGLang thorough sweep with DSR1 overrides."""
+        dgdr = _load_dgdr(XPU_CONFIGS_DIR / "9a_thorough_dsr1_sglang_overrides.yaml")
+        ops = _make_ops(tmp_path)
+        _run_mocked_thorough(dgdr, ops, "sglang")
+        _assert_overrides_applied(
+            tmp_path / "profiling_results" / "final_config.yaml",
+            dgdr,
+        )
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_10_override_security_context(self, tmp_path):
+        """Case 10 (XPU): imagePullSecrets injected via overrides."""
+        dgdr = _load_dgdr(
+            XPU_CONFIGS_DIR / "10_thorough_override_security_context.yaml"
+        )
+        ops = _make_ops(tmp_path)
+        _run_mocked_thorough(dgdr, ops, "trtllm")
+
+        output = tmp_path / "profiling_results" / "final_config.yaml"
+        assert output.exists(), "final_config.yaml should exist"
+        config = yaml.safe_load(output.read_text())
+        assert config and "spec" in config
+
+        secrets = config["spec"].get("imagePullSecrets")
+        assert secrets is not None, "imagePullSecrets should be present"
+        secret_names = [s["name"] for s in secrets]
+        assert "my-registry-secret" in secret_names
+        assert "nvcr-pull-secret" in secret_names

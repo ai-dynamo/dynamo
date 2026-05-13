@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Case 6 (XPU): Thorough, without planner, input load (test with --dry-run)
+# XPU variant: b60 + trtllm (thorough mode does not require AIC rapid support)
+model: "Qwen/Qwen3-32B"
+backend: trtllm
+image: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:latest"
+hardware:
+  gpuSku: b60
+  totalGpus: 64
+  numGpusPerNode: 8
+workload:
+  requestRate: 5.0
+sla:
+  itl: 50.0
+searchStrategy: thorough

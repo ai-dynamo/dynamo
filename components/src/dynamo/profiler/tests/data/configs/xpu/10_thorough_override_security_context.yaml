@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Case 10 (XPU): Thorough sweep with DGD overrides for imagePullSecrets.
+# XPU variant: b60 + trtllm (thorough mode does not require AIC rapid support)
+model: "Qwen/Qwen3-32B"
+backend: trtllm
+image: "nvcr.io/nvidia/dynamo:latest"
+hardware:
+  gpuSku: b60
+  totalGpus: 8
+  numGpusPerNode: 8
+searchStrategy: thorough
+overrides:
+  dgd:
+    spec:
+      imagePullSecrets:
+        - name: my-registry-secret
+        - name: nvcr-pull-secret
