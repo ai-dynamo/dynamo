@@ -494,6 +494,40 @@ async def test_raw_stage0_ignores_client_final_stage_id():
 
 
 @pytest.mark.asyncio
+async def test_raw_stage0_uses_vllm_omni_chat_preprocessor():
+    """Stage 0 should not fall back to raw text when Omni can render chat."""
+    engine = _MockEngine(output={"output": "stage0", "finished": True})
+    worker = _make_worker(
+        engine=engine,
+        output_modalities=["text", "audio"],
+    )
+
+    class FakeOmniChatPreprocessor:
+        async def _preprocess_chat(self, request, messages, **kwargs):
+            assert request.messages == messages
+            assert kwargs["renderer"] is renderer
+            return ["conversation"], [{"prompt": "<rendered>hello"}]
+
+    renderer = object()
+    worker._omni_chat_preprocessor = FakeOmniChatPreprocessor()
+    worker.engine.renderer = renderer
+    request = {
+        "request_id": "router-req",
+        "messages": [{"role": "user", "content": "hello"}],
+        "modalities": ["audio"],
+    }
+
+    with patch("dynamo.vllm.omni.stage_worker.shm_write_bytes") as shm_write:
+        chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
+
+    assert engine.received_prompt == {"prompt": "<rendered>hello"}
+    shm_write.assert_called_once()
+    assert chunks == [
+        {"shm_meta": shm_write.return_value, "finished": True, "final_stage_id": 0}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_engine_error_yields_error_chunk():
     """Engine raises → yields {error: ..., finished: True}, no crash."""
     worker = _make_worker(engine=_ErrorEngine())

@@ -34,7 +34,11 @@ from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.omni.types import StageEngine, StageRequest, _int_keyed
-from dynamo.vllm.omni.utils import _build_sampling_params, parse_omni_request
+from dynamo.vllm.omni.utils import (
+    OmniChatPreprocessor,
+    _build_sampling_params,
+    parse_omni_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +91,10 @@ class OmniStageWorker:
         )
         self._requires_mm: bool = getattr(
             stage_config, "requires_multimodal_data", False
+        )
+        model_config = getattr(engine, "model_config", None)
+        self._omni_chat_preprocessor = (
+            OmniChatPreprocessor(model_config) if model_config is not None else None
         )
 
     async def generate(self, request: dict, context) -> AsyncGenerator[dict, None]:
@@ -149,6 +157,8 @@ class OmniStageWorker:
                 self._output_modalities,
                 self._default_video_fps,
                 tokenizer_getter=self.engine.get_tokenizer,
+                chat_preprocessor=self._omni_chat_preprocessor,
+                renderer=getattr(self.engine, "renderer", None),
             )
             prompt = parsed["engine_inputs"]
             original_prompt = parsed["original_prompt"]

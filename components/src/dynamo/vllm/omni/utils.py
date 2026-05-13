@@ -3,14 +3,17 @@
 
 """Shared utilities for the vLLM-Omni backend."""
 
+import asyncio
 import json
 import logging
 from pathlib import Path
 from typing import Any, cast
 
 from huggingface_hub import scan_cache_dir
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.sampling_params import SamplingParams
 from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
+from vllm_omni.entrypoints.openai.serving_chat import OmniOpenAIServingChat
 from vllm_omni.entrypoints.stage_utils import shm_read_bytes
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
@@ -19,6 +22,58 @@ from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 
 DEFAULT_IMAGE_SIZE = "1024x1024"
 DEFAULT_VIDEO_SIZE = "832x480"
+
+
+class OmniChatPreprocessor(OmniOpenAIServingChat):
+    """Adapter for vLLM-Omni's OpenAI chat preprocessing."""
+
+    def __init__(self, model_config: Any):
+        self.model_config = model_config
+        self._supported_speakers = None
+
+
+async def preprocess_chat_with_omni(
+    request: dict[str, Any],
+    chat_preprocessor: Any,
+    renderer: Any,
+) -> dict[str, Any] | None:
+    """Render chat through vLLM-Omni's OpenAI chat preprocessing."""
+    if chat_preprocessor is None or renderer is None:
+        return None
+
+    try:
+        chat_request = ChatCompletionRequest.model_validate(request)
+        (
+            _conversation,
+            engine_prompts,
+        ) = await chat_preprocessor._preprocess_chat(
+            chat_request,
+            chat_request.messages,
+            default_template=chat_request.chat_template,
+            default_template_content_format="auto",
+            default_template_kwargs=getattr(chat_request, "chat_template_kwargs", None),
+            tool_dicts=(
+                [tool.model_dump() for tool in chat_request.tools]
+                if chat_request.tools is not None
+                else None
+            ),
+            renderer=renderer,
+            add_generation_prompt=chat_request.add_generation_prompt,
+            continue_final_message=chat_request.continue_final_message,
+            documents=getattr(chat_request, "documents", None),
+            add_special_tokens=chat_request.add_special_tokens,
+        )
+        if not engine_prompts:
+            return None
+        return engine_prompts[0] if isinstance(engine_prompts[0], dict) else None
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logging.getLogger(__name__).debug(
+            "Failed to render chat with vLLM-Omni; falling back",
+            exc_info=True,
+        )
+        return None
 
 
 def shm_deserialize(shm_meta: dict) -> Any:
@@ -125,6 +180,8 @@ async def parse_omni_request(
     output_modalities: list,
     default_video_fps: int = 16,
     tokenizer_getter=None,
+    chat_preprocessor: Any | None = None,
+    renderer: Any | None = None,
 ) -> dict:
     """Parse a raw frontend request into engine_inputs, original_prompt, sampling_params_list.
 
@@ -184,21 +241,6 @@ async def parse_omni_request(
         request.get("prompt", ""),
     )
 
-    # Apply chat template when a tokenizer is available.  The native
-    # OpenAI API server applies the template before the engine sees it;
-    # without it the thinker receives bare text instead of the full
-    # chat-formatted prompt.
-    if messages and tokenizer_getter is not None:
-        try:
-            tokenizer = await tokenizer_getter()
-            text = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-        except Exception:
-            logging.getLogger(__name__).debug(
-                "Chat template not available, using raw text"
-            )
-
     if any(str(modality).lower() == "image" for modality in output_modalities):
         width, height = image_generation_size_from_request(request)
         engine_prompt = build_image_generation_prompt(
@@ -215,6 +257,33 @@ async def parse_omni_request(
                 request, height, width
             ),
         }
+
+    if messages:
+        native_prompt = await preprocess_chat_with_omni(
+            request,
+            chat_preprocessor,
+            renderer,
+        )
+        if native_prompt is not None:
+            return {
+                "engine_inputs": native_prompt,
+                "original_prompt": native_prompt,
+                "sampling_params_list": None,
+            }
+
+    # Apply chat template when a tokenizer is available. Some Omni models,
+    # including Qwen3-Omni, do not publish tokenizer.chat_template; those
+    # models rely on vLLM-Omni's renderer path above.
+    if messages and tokenizer_getter is not None:
+        try:
+            tokenizer = await tokenizer_getter()
+            text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Chat template not available, using raw text"
+            )
 
     return {
         "engine_inputs": text,

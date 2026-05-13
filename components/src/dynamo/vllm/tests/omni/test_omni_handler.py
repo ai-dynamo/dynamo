@@ -489,6 +489,35 @@ class TestParseOmniRequest:
             "guidance_scale": 1.5,
         }
 
+    @pytest.mark.asyncio
+    async def test_text_audio_chat_request_uses_vllm_omni_preprocessor(self):
+        request = {
+            "messages": [{"role": "user", "content": "hello"}],
+            "modalities": ["audio"],
+        }
+
+        class FakeOmniChatPreprocessor:
+            async def _preprocess_chat(self, request, messages, **kwargs):
+                assert request.messages == messages
+                assert kwargs["default_template"] == request.chat_template
+                assert kwargs["default_template_content_format"] == "auto"
+                assert kwargs["renderer"] is renderer
+                assert "tokenizer" not in kwargs
+                return ["conversation"], [{"prompt": "<rendered>hello"}]
+
+        renderer = object()
+
+        result = await parse_omni_request(
+            request,
+            ["text", "audio"],
+            chat_preprocessor=FakeOmniChatPreprocessor(),
+            renderer=renderer,
+        )
+
+        assert result["engine_inputs"] == {"prompt": "<rendered>hello"}
+        assert result["original_prompt"] == {"prompt": "<rendered>hello"}
+        assert result["sampling_params_list"] is None
+
 
 # ---------------------------------------------------------------------------
 # AudioGenerationHandler — data_source / response_format field mapping

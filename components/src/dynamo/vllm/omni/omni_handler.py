@@ -8,9 +8,7 @@ from typing import Any, AsyncGenerator, Dict, Optional, Union, cast
 
 import PIL.Image
 from fsspec.implementations.dirfs import DirFileSystem
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.sampling_params import SamplingParams
-from vllm_omni.entrypoints.openai.serving_chat import OmniOpenAIServingChat
 from vllm_omni.entrypoints.utils import coerce_param_message_types
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
@@ -26,28 +24,17 @@ from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
 from dynamo.vllm.omni.output_formatter import OutputFormatter
 from dynamo.vllm.omni.utils import (
+    OmniChatPreprocessor,
     build_image_generation_prompt,
     image_generation_negative_prompt_from_request,
     image_generation_sampling_overrides,
     image_generation_size_from_request,
+    preprocess_chat_with_omni,
 )
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_VIDEO_FPS = 16
-
-
-class OmniChatPreprocessor(OmniOpenAIServingChat):
-    """Small adapter for vLLM-Omni's OpenAI chat preprocessing.
-
-    Full OmniOpenAIServingChat initialization wires the HTTP serving stack.
-    Dynamo only needs `_preprocess_chat`, which relies on model_config and
-    speaker-cache state while the renderer is passed per call.
-    """
-
-    def __init__(self, model_config: Any):
-        self.model_config = model_config
-        self._supported_speakers = None
 
 
 @dataclass
@@ -332,47 +319,15 @@ class OmniHandler(BaseOmniHandler):
         request: Dict[str, Any],
     ) -> Dict[str, Any] | None:
         """Render chat through vLLM-Omni's OpenAI chat preprocessing."""
-        try:
-            renderer = self.engine_client.renderer
-            model_config = self.engine_client.model_config
-            if renderer is None or model_config is None:
-                return None
-
-            chat_request = ChatCompletionRequest.model_validate(request)
-
-            (
-                _conversation,
-                engine_prompts,
-            ) = await self._omni_chat_preprocessor._preprocess_chat(
-                chat_request,
-                chat_request.messages,
-                default_template=chat_request.chat_template,
-                default_template_content_format="auto",
-                default_template_kwargs=getattr(
-                    chat_request, "chat_template_kwargs", None
-                ),
-                tool_dicts=(
-                    [tool.model_dump() for tool in chat_request.tools]
-                    if chat_request.tools is not None
-                    else None
-                ),
-                renderer=renderer,
-                add_generation_prompt=chat_request.add_generation_prompt,
-                continue_final_message=chat_request.continue_final_message,
-                documents=getattr(chat_request, "documents", None),
-                add_special_tokens=chat_request.add_special_tokens,
-            )
-            if not engine_prompts:
-                return None
-            return engine_prompts[0] if isinstance(engine_prompts[0], dict) else None
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.debug(
-                "Failed to render chat with vLLM renderer; falling back",
-                exc_info=True,
-            )
+        renderer = self.engine_client.renderer
+        model_config = self.engine_client.model_config
+        if renderer is None or model_config is None:
             return None
+        return await preprocess_chat_with_omni(
+            request,
+            getattr(self, "_omni_chat_preprocessor", None),
+            renderer,
+        )
 
     @staticmethod
     def _update_if_not_none(object: Any, key: str, val: Any) -> None:
