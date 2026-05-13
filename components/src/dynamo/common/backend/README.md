@@ -1,10 +1,13 @@
 # Dynamo Python Backend
 
-> **Work in progress.** The unified backend supports aggregated and
-> disaggregated (prefill/decode) inference; multimodal, LoRA, logprobs,
-> guided decoding, and engine-level metrics are still on the
-> non-unified path. See [Feature Gaps](#feature-gaps) for the full
-> matrix.
+**Supported today:** aggregated inference, disaggregated
+(prefill/decode) serving with bootstrap (SGLang) or internal KV
+transport (vLLM, TRT-LLM), request cancellation, graceful shutdown,
+`drain()` hook, error chain wrapping.
+
+> **Work in progress.** Multimodal, LoRA, logprobs, guided decoding,
+> and engine-level metrics are still on the non-unified path. See
+> [Feature Gaps](#feature-gaps) for the full matrix.
 
 > **Looking for a walkthrough?** Start with the
 > [Writing a Python Unified Backend](../../../../../docs/development/python-backend-guide.md)
