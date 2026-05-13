@@ -39,6 +39,84 @@ from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_bac
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
 )
+# ---------------------------------------------------------------------------
+# Per-layer KV axis discovery
+# ---------------------------------------------------------------------------
+#
+# `register_cross_layers_kv_cache` needs to verify that the backend's
+# stride-order permutation produces the byte layout
+# `[num_blocks, num_layers, K/V, page_size, heads, head_size]` that
+# `FullyContiguousLayout` assumes. Probe `attn_backend.get_kv_cache_shape(...)`
+# with distinct marker values and read back each axis's logical position;
+# `get_kv_cache_stride_order(include_num_layers=True)` is then consulted at
+# the call site to verify the physical permutation.
+
+# Unique per-axis probe values. `block_size` must be a multiple of 16 (FA,
+# FlashInfer, Triton all enforce this in `get_kv_cache_shape`); the others
+# must be != 2 so the K/V dim (always literally 2) is unambiguous.
+_PROBE_BLOCKS = 1024
+_PROBE_PAGE_SIZE = 32
+_PROBE_KVHEADS = 7
+_PROBE_HEAD_SIZE = 64
+_KV_DIM_VALUE = 2  # K/V axis is always size 2 in standard attention
+
+
+@dataclass(frozen=True)
+class KvAxisMap:
+    """Logical positions of each named axis in a per-layer KV cache shape.
+
+    Indices are into the per-layer shape returned by
+    `attn_backend.get_kv_cache_shape(...)`. For cross-layer tensors (where
+    vLLM prepends a `num_layers` axis at logical position 0), every index
+    here should be shifted by +1 when comparing against a stride_order
+    that was obtained with `include_num_layers_dimension=True`.
+    """
+
+    blocks: int  # axis carrying num_blocks
+    kv: int  # K/V outer axis (always size 2 for standard attention)
+    page_size: int  # axis carrying block_size
+    heads: int  # axis carrying num_kv_heads
+    head_size: int  # axis carrying head_size
+
+
+def probe_per_layer_axes(attn_backend: type) -> KvAxisMap:
+    """Discover the logical position of each named axis in a backend's
+    per-layer KV cache shape.
+
+    Calls `attn_backend.get_kv_cache_shape(num_blocks=1024, block_size=32,
+    num_kv_heads=7, head_size=64)` and locates each marker. Used by the FC
+    path to validate the stride-order permutation.
+
+    Standard attention only — MLA's per-layer shape has no K/V axis and is
+    handled separately by callers.
+    """
+    per_layer_shape = tuple(
+        attn_backend.get_kv_cache_shape(
+            num_blocks=_PROBE_BLOCKS,
+            block_size=_PROBE_PAGE_SIZE,
+            num_kv_heads=_PROBE_KVHEADS,
+            head_size=_PROBE_HEAD_SIZE,
+        )
+    )
+
+    def _find(marker: int, name: str) -> int:
+        try:
+            return per_layer_shape.index(marker)
+        except ValueError as e:
+            raise RuntimeError(
+                f"KVBM cannot locate {name} (marker={marker}) in "
+                f"{attn_backend.__name__} per-layer shape {per_layer_shape}"
+            ) from e
+
+    return KvAxisMap(
+        blocks=_find(_PROBE_BLOCKS, "num_blocks"),
+        kv=_find(_KV_DIM_VALUE, "K/V"),
+        page_size=_find(_PROBE_PAGE_SIZE, "block_size"),
+        heads=_find(_PROBE_KVHEADS, "num_kv_heads"),
+        head_size=_find(_PROBE_HEAD_SIZE, "head_size"),
+    )
+
+
 
 # Import KvbmRuntime and ConnectorWorker from Rust bindings (requires v2 feature)
 if kvbm.v2.is_available():
@@ -336,15 +414,15 @@ class SchedulerConnectorWorker:
         # FullyContiguousLayout requires the physical byte layout to be
         # `[num_blocks, num_layers, K/V, page_size, num_kv_heads, head_size]`
         # (the last two collapse into inner_dim). Backends order their
-        # per-layer logical shape differently — FlashAttention NHD returns
+        # per-layer logical shape differently — FA NHD returns
         # `(2, num_blocks, block_size, h, d)` (K/V first) while FlashInfer
         # and Triton NHD return `(num_blocks, 2, block_size, h, d)` (blocks
         # first). After vLLM prepends a num_layers axis, the *logical*
         # position of num_blocks/K/V therefore differs by backend, but the
-        # *physical* layout we need is the same. Probe the per-layer shape
-        # with distinct markers to discover which logical axis each
-        # dimension occupies, then assert the stride_order permutation
-        # lands every axis where FullyContiguousLayout expects it.
+        # *physical* layout we need is the same. Use the shared probe to
+        # discover per-layer axis positions, shift by +1 for the prepended
+        # num_layers axis, then assert the stride-order permutation lands
+        # every axis where FullyContiguousLayout expects it.
         try:
             stride_order = attn_backend.get_kv_cache_stride_order(
                 include_num_layers_dimension=True
@@ -356,38 +434,15 @@ class SchedulerConnectorWorker:
                 f"(include_num_layers_dimension=True); got {type(e).__name__}: {e}"
             ) from e
 
-        # Markers: each value is unique across the per-layer shape so we
-        # can identify every axis via list.index(). The "2" marker is the
-        # K/V outer dim itself — every other marker is non-2 to avoid
-        # collisions. `block_size` must be a multiple of 16 (FA, FlashInfer,
-        # Triton all enforce this in their get_kv_cache_shape probe), so we
-        # use 1024 / 32 / 7 / 64 to stay valid across backends.
-        BLOCK_MARKER, BSIZE_MARKER, KVHEADS_MARKER, HEAD_MARKER = 1024, 32, 7, 64
-        per_layer_shape = tuple(
-            attn_backend.get_kv_cache_shape(
-                num_blocks=BLOCK_MARKER,
-                block_size=BSIZE_MARKER,
-                num_kv_heads=KVHEADS_MARKER,
-                head_size=HEAD_MARKER,
-            )
-        )
+        axes = probe_per_layer_axes(attn_backend)
 
-        def _logical_axis(marker: int) -> int:
-            # +1 because vLLM prepends num_layers at logical position 0.
-            try:
-                return per_layer_shape.index(marker) + 1
-            except ValueError as e:
-                raise RuntimeError(
-                    f"KVBM cross-layer registration cannot locate marker "
-                    f"{marker} in {attn_backend.__name__} per-layer shape "
-                    f"{per_layer_shape}"
-                ) from e
-
-        num_blocks_log = _logical_axis(BLOCK_MARKER)
-        kv_log = _logical_axis(2)  # the literal K/V outer dim
-        block_size_log = _logical_axis(BSIZE_MARKER)
-        heads_log = _logical_axis(KVHEADS_MARKER)
-        head_size_log = _logical_axis(HEAD_MARKER)
+        # vLLM prepends num_layers at logical position 0, so every per-layer
+        # axis position bumps by 1 in the cross-layer logical order.
+        num_blocks_log = axes.blocks + 1
+        kv_log = axes.kv + 1
+        block_size_log = axes.page_size + 1
+        heads_log = axes.heads + 1
+        head_size_log = axes.head_size + 1
 
         def _physical_axis(logical: int) -> int:
             return stride_order.index(logical)
@@ -409,7 +464,7 @@ class SchedulerConnectorWorker:
                 f"KVBM cross-layer registration requires physical byte order "
                 f"[num_blocks, num_layers, K/V, page_size, heads, head_size]; "
                 f"{attn_backend.__name__} stride_order={stride_order} over "
-                f"per-layer shape {per_layer_shape} fails: {failed}. "
+                f"per-layer axes {axes} fails: {failed}. "
                 f"Use a NHD-compatible backend (FLASH_ATTN, FLASHINFER, "
                 f"TRITON_ATTN) or disable cross-layer support."
             )

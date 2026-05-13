@@ -3936,6 +3936,7 @@ dependencies = [
  "kvbm-common",
  "nix 0.30.1",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
