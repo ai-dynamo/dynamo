@@ -466,28 +466,33 @@ class _StubContext:
 async def test_generate_emits_terminal_chunk():
     engine = MyBackend(model_name="m", max_tokens=3)
     await engine.start(worker_id=0)
-    chunks = [
-        chunk
-        async for chunk in engine.generate(
-            {"token_ids": [1, 2, 3]}, _StubContext()
-        )
-    ]
-    assert chunks[-1]["finish_reason"] in ("stop", "length")
-    assert chunks[-1]["completion_usage"]["completion_tokens"] == 3
-    await engine.cleanup()
+    try:
+        chunks = [
+            chunk
+            async for chunk in engine.generate(
+                {"token_ids": [1, 2, 3]}, _StubContext()
+            )
+        ]
+        assert chunks[-1]["finish_reason"] in ("stop", "length")
+        assert chunks[-1]["completion_usage"]["completion_tokens"] == 3
+    finally:
+        await engine.cleanup()
 
 
 @pytest.mark.asyncio
 async def test_generate_observes_cancellation():
     engine = MyBackend(model_name="m", max_tokens=1000)
-    ctx = _StubContext()
-    collected = []
-    async for chunk in engine.generate({"token_ids": [1]}, ctx):
-        collected.append(chunk)
-        if len(collected) >= 2:
-            ctx.stop()
-    assert collected[-1]["finish_reason"] == "cancelled"
-    await engine.cleanup()
+    await engine.start(worker_id=0)
+    try:
+        ctx = _StubContext()
+        collected = []
+        async for chunk in engine.generate({"token_ids": [1]}, ctx):
+            collected.append(chunk)
+            if len(collected) >= 2:
+                ctx.stop()
+        assert collected[-1]["finish_reason"] == "cancelled"
+    finally:
+        await engine.cleanup()
 ```
 
 Cover the happy path, cancellation, and any backend-specific edge
