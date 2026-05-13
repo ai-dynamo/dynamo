@@ -77,7 +77,7 @@ parser exists for this format.
 
 ```bash
 # launch backend worker
-python -m dynamo.vllm --model openai/gpt-oss-20b --dyn-tool-call-parser harmony
+python -m dynamo.vllm --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3
 
 # launch frontend worker
 python -m dynamo.frontend
@@ -112,7 +112,7 @@ tools = [{
 }]
 
 response = client.chat.completions.create(
-    model="openai/gpt-oss-20b",
+    model="Qwen/Qwen3.5-4B",
     messages=[{"role": "user", "content": "What's the weather like in San Francisco in Celsius?"}],
     tools=tools,
     tool_choice="auto",

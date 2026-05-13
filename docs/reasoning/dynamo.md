@@ -72,3 +72,15 @@ Some models need both parsers configured together. Common pairings include:
 ## Tool Calling Interplay
 
 Reasoning parsing happens before tool call parsing. If a model emits both reasoning content and tool calls, configure both parsers so Dynamo can first separate reasoning text and then parse tool calls from the remaining assistant output.
+
+## Examples
+
+### Launch Dynamo Frontend and Backend
+
+```bash
+# launch backend worker
+python -m dynamo.vllm --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3
+
+# launch frontend worker
+python -m dynamo.frontend
+```
