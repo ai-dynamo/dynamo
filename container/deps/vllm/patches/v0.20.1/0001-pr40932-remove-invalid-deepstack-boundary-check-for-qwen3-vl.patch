@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-License-Identifier: Apache-2.0
+
 From 22631f80a01a04b06398952e77d7890ab660ab10 Mon Sep 17 00:00:00 2001
 From: Isotr0py <mozf@mail2.sysu.edu.cn>
 Date: Mon, 27 Apr 2026 15:27:06 +0800
