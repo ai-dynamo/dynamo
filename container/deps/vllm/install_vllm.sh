@@ -250,6 +250,22 @@ if [ "$DEVICE" = "cpu" ]; then
     python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
     uv pip install dist/*.whl
 fi
+
+# Apply vendored patches for this vLLM ref. Used to carry upstream fixes that
+# are missing from the pinned release wheel (e.g. PR backports dropped between
+# rc and final tags). Each subdir is keyed by --vllm-ref so a version bump
+# automatically stops applying stale patches.
+PATCH_DIR="/tmp/deps/vllm/patches/${VLLM_REF}"
+if [ -d "$PATCH_DIR" ] && compgen -G "$PATCH_DIR/*.patch" > /dev/null; then
+    echo "\n=== Applying vendored vLLM patches from $PATCH_DIR ==="
+    VLLM_SITE_PACKAGES=$(python3 -c "import vllm, os; print(os.path.dirname(os.path.dirname(vllm.__file__)))")
+    for p in "$PATCH_DIR"/*.patch; do
+        echo "  $(basename "$p")"
+        patch -p1 -d "$VLLM_SITE_PACKAGES" < "$p"
+    done
+    echo "✓ vLLM patches applied"
+fi
+
 echo "✓ vLLM installation completed"
 
 echo "\n=== Installing LMCache from source ==="
