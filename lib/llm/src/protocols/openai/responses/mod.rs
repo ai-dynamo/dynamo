@@ -537,7 +537,7 @@ fn convert_input_items_to_messages(
                         text.clone()
                     }
                     dynamo_protocols::types::responses::EasyInputContent::ContentList(parts) => {
-                        convert_upstream_input_content_to_text(parts)
+                        convert_input_content_to_text(parts)
                     }
                 };
                 match easy.role {
