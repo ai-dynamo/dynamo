@@ -840,7 +840,8 @@ impl DistributedRuntime {
     /// Fire the activity notifier with the given name (wake its Waiter).
     /// Returns true if the notifier was found and fired, false if not registered (no-op).
     fn fire_activity_notifier(&self, name: String) -> PyResult<bool> {
-        let health = self.inner.system_health().lock();
+        let sh = self.inner.system_health();
+        let health = sh.lock();
         if let Some(notifier) = health.get_endpoint_activity_check_notifier(&name) {
             notifier.notify_one();
             Ok(true)
