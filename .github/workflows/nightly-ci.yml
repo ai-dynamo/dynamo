@@ -158,7 +158,7 @@ jobs:
       target: runtime
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
     secrets: inherit
@@ -172,7 +172,7 @@ jobs:
       target: runtime
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
     secrets: inherit
@@ -186,7 +186,7 @@ jobs:
       target: runtime
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 120
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
     secrets: inherit
