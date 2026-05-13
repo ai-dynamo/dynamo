@@ -449,9 +449,7 @@ async def init_llm_worker(
             )
             connector = None
     else:
-        logging.info(
-            "Skipping NIXL Connect initialization (aggregated mode)."
-        )
+        logging.info("Skipping NIXL Connect initialization (aggregated mode).")
 
     dump_config(
         config.dump_config_to, {"engine_args": engine_args, "dynamo_args": config}
