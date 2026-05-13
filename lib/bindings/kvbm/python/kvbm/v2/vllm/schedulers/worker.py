@@ -34,38 +34,197 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.model_executor.models.utils import extract_layer_index
 
+# ---------------------------------------------------------------------------
+# Per-layer KV axis discovery
+# ---------------------------------------------------------------------------
+#
+# Both registration paths need to identify named axes in the KV cache tensor:
+# - LW (`register_kv_caches`) needs `inner_dim` (the packed `heads*head_size`
+#   tail), which depends on where the backend places those axes.
+# - FC (`register_cross_layers_kv_cache`) needs to verify that the backend's
+#   stride-order permutation produces the byte layout
+#   `[num_blocks, num_layers, K/V, page_size, heads, head_size]` that
+#   `FullyContiguousLayout` assumes.
+#
+# Both can be served by probing `attn_backend.get_kv_cache_shape(...)` with
+# distinct marker values and reading back each axis's logical position.
+# FC additionally consults `get_kv_cache_stride_order(include_num_layers=True)`
+# to verify the physical permutation; LW just needs the positions.
+
+# Unique per-axis probe values. `block_size` must be a multiple of 16 (FA,
+# FlashInfer, Triton all enforce this in `get_kv_cache_shape`); the others
+# must be != 2 so the K/V dim (always literally 2) is unambiguous.
+_PROBE_BLOCKS = 1024
+_PROBE_PAGE_SIZE = 32
+_PROBE_KVHEADS = 7
+_PROBE_HEAD_SIZE = 64
+_KV_DIM_VALUE = 2  # K/V axis is always size 2 in standard attention
+
+
+@dataclass(frozen=True)
+class KvAxisMap:
+    """Logical positions of each named axis in a per-layer KV cache shape.
+
+    Indices are into the per-layer shape returned by
+    `attn_backend.get_kv_cache_shape(...)`. For cross-layer tensors (where
+    vLLM prepends a `num_layers` axis at logical position 0), every index
+    here should be shifted by +1 when comparing against a stride_order
+    that was obtained with `include_num_layers_dimension=True`.
+    """
+
+    blocks: int  # axis carrying num_blocks
+    kv: int  # K/V outer axis (always size 2 for standard attention)
+    page_size: int  # axis carrying block_size
+    heads: int  # axis carrying num_kv_heads
+    head_size: int  # axis carrying head_size
+
+
+def probe_per_layer_axes(attn_backend: type) -> KvAxisMap:
+    """Discover the logical position of each named axis in a backend's
+    per-layer KV cache shape.
+
+    Calls `attn_backend.get_kv_cache_shape(num_blocks=1024, block_size=32,
+    num_kv_heads=7, head_size=64)` and locates each marker. Used by both
+    the LW path (to compute `inner_dim` from the *actual* heads/head_size
+    positions, not a hardcoded `shape[3:]` assumption) and the FC path
+    (to validate the stride-order permutation).
+
+    Standard attention only — MLA's per-layer shape has no K/V axis and is
+    handled separately by callers.
+    """
+    per_layer_shape = tuple(
+        attn_backend.get_kv_cache_shape(
+            num_blocks=_PROBE_BLOCKS,
+            block_size=_PROBE_PAGE_SIZE,
+            num_kv_heads=_PROBE_KVHEADS,
+            head_size=_PROBE_HEAD_SIZE,
+        )
+    )
+
+    def _find(marker: int, name: str) -> int:
+        try:
+            return per_layer_shape.index(marker)
+        except ValueError as e:
+            raise RuntimeError(
+                f"KVBM cannot locate {name} (marker={marker}) in "
+                f"{attn_backend.__name__} per-layer shape {per_layer_shape}"
+            ) from e
+
+    return KvAxisMap(
+        blocks=_find(_PROBE_BLOCKS, "num_blocks"),
+        kv=_find(_KV_DIM_VALUE, "K/V"),
+        page_size=_find(_PROBE_PAGE_SIZE, "block_size"),
+        heads=_find(_PROBE_KVHEADS, "num_kv_heads"),
+        head_size=_find(_PROBE_HEAD_SIZE, "head_size"),
+    )
+
 
 @dataclass
 class KvTensorLayout:
     """Semantic description of the KV cache tensor layout.
 
     Python derives this from VllmConfig (which has the model architecture)
-    so that Rust doesn't have to guess from raw tensor shapes.
+    so that Rust does not need to guess from raw tensor shapes.
 
-    For MLA models, outer_dim and inner_dim are set explicitly because Rust's
-    shape-based inference cannot distinguish the fused KV latent axis from the
-    block/page axis. For standard attention the fields are None, which tells
-    Rust to fall back to its own contiguity-based inference (already correct).
+    For both MLA and standard attention, dimensions are computed explicitly
+    from vLLM config and passed down to Rust. Tensor shape is only used for
+    sanity validation (e.g., block-axis presence / packed-tail checks).
 
     Mirrors the v1 helper in
     lib/bindings/kvbm/python/kvbm/vllm_integration/connector_worker.py.
     """
 
-    outer_dim: Optional[int]  # None = let Rust infer; 1 for MLA
-    inner_dim: Optional[int]  # None = let Rust infer; head_size for MLA
+    outer_dim: Optional[int]
+    inner_dim: Optional[int]
 
     @classmethod
     def from_vllm_config(
-        cls, shape: "torch.Size", use_mla: bool = False
+        cls,
+        vllm_config: "VllmConfig",
+        shape: "torch.Size",
+        num_device_blocks: int,
+        use_mla: bool = False,
+        attn_backend: Optional[type] = None,
     ) -> "KvTensorLayout":
+        """Resolve `outer_dim` / `inner_dim` from vLLM config + tensor shape.
+
+        When `attn_backend` is supplied, `probe_per_layer_axes` is used to
+        locate the heads / head_size axes — robust against backends that
+        permute the per-layer tail. When it's omitted (the current LW call
+        site, since vLLM v1 doesn't carry the backend on the
+        `register_kv_caches` callback), we fall back to the documented
+        `shape[3:]` assumption that heads and head_size are the last two
+        axes; this is true for FA / FlashInfer / Triton today and is
+        validated by the config cross-check below.
+        """
         if use_mla:
             # MLA tensors are 3D: [num_blocks, page_size, head_size].
             # No outer_dim axis — K and V are fused into a single latent.
             return cls(outer_dim=1, inner_dim=int(shape[-1]))
-        # Standard attention: Rust already infers outer_dim/inner_dim correctly
-        # from tensor shape. Don't guess here — the block dimension can be at
-        # position 0 or 1 depending on the attention backend.
-        return cls(outer_dim=None, inner_dim=None)
+        # Standard attention:
+        # - outer_dim is K/V axis = 2
+        # - inner_dim is per-rank kv feature width
+        #
+        # vLLM API surfaces can differ by version/model family:
+        # `get_total_num_kv_heads()` may be global or already per-rank.
+        # Resolve this robustly by checking which config interpretation matches
+        # the observed packed tail in tensor shape.
+        total_kv_heads = int(vllm_config.model_config.get_total_num_kv_heads())
+        head_size = int(vllm_config.model_config.get_head_size())
+        tp_size = int(vllm_config.parallel_config.tensor_parallel_size)
+        if tp_size <= 0:
+            raise ValueError(f"Invalid tensor_parallel_size={tp_size}")
+        outer_dim = 2
+        if head_size <= 0 or total_kv_heads <= 0:
+            raise ValueError(
+                "Invalid standard attention inner_dim derived from config: "
+                f"total_num_kv_heads={total_kv_heads}, head_size={head_size}"
+            )
+
+        # Sanity checks against actual tensor shape so we fail loudly if vLLM
+        # changes layout semantics.
+        if len(shape) < 4:
+            raise ValueError(
+                "Standard attention KV tensor must have >=4 dims; "
+                f"got shape={tuple(shape)}"
+            )
+        if int(shape[0]) < num_device_blocks and int(shape[1]) < num_device_blocks:
+            raise ValueError(
+                "Cannot locate num_device_blocks in standard KV tensor shape; "
+                f"shape[:2]={tuple(shape[:2])}, num_device_blocks={num_device_blocks}"
+            )
+
+        # inner_dim from tensor shape: prefer probe-derived axis positions
+        # when the backend is available, otherwise use the shape[3:] tail.
+        if attn_backend is not None:
+            axes = probe_per_layer_axes(attn_backend)
+            inferred_inner_from_shape = int(shape[axes.heads]) * int(
+                shape[axes.head_size]
+            )
+        else:
+            inferred_inner_from_shape = int(math.prod(shape[3:]))
+
+        config_inner_candidates = [total_kv_heads * head_size]
+        if total_kv_heads % tp_size == 0:
+            config_inner_candidates.append((total_kv_heads // tp_size) * head_size)
+
+        matched_inner = None
+        for candidate in config_inner_candidates:
+            if candidate == inferred_inner_from_shape:
+                matched_inner = candidate
+                break
+
+        if matched_inner is None:
+            raise ValueError(
+                "KV layout mismatch between vLLM config and tensor shape: "
+                f"config_inner_candidates={config_inner_candidates}, "
+                f"shape_inner_dim={inferred_inner_from_shape}, "
+                f"shape={tuple(shape)}, total_num_kv_heads={total_kv_heads}, "
+                f"head_size={head_size}, tp_size={tp_size}"
+            )
+        inner_dim = matched_inner
+
+        return cls(outer_dim=outer_dim, inner_dim=inner_dim)
 
 
 # Import KvbmRuntime and ConnectorWorker from Rust bindings (requires v2 feature)
@@ -213,26 +372,67 @@ class SchedulerConnectorWorker:
                 "Hybrid models with different KV cache shapes are not supported yet."
             )
 
-        # Derive layout semantics from the vLLM model config so Rust doesn't
-        # have to guess the outer_dim/inner_dim from potentially-ambiguous
-        # tensor shapes (MLA caches are 3D without a K/V axis).
-        use_mla = getattr(self.vllm_config.model_config, "use_mla", False)
-        layout = KvTensorLayout.from_vllm_config(shape, use_mla)
-
         # Extract parameters.
-        # Standard attention: [2 (K/V), num_blocks, ...] or [num_blocks, 2, ...]
-        #   — block dim is whichever of shape[0]/shape[1] is larger.
-        # MLA: [num_blocks, page_size, head_size] — block dim is always axis 0.
-        num_device_blocks = shape[0] if use_mla else max(shape[0], shape[1])
+        # Prefer vLLM config's GPU block count; fall back to tensor-derived only
+        # when config is unavailable (older bring-up edge cases).
+        use_mla = getattr(self.vllm_config.model_config, "use_mla", False)
+        config_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks
+        if config_gpu_blocks is None or config_gpu_blocks <= 0:
+            num_device_blocks = int(shape[0] if use_mla else max(shape[0], shape[1]))
+            print(
+                "Warning: cache_config.num_gpu_blocks unavailable; "
+                f"falling back to tensor-derived num_device_blocks={num_device_blocks}"
+            )
+        else:
+            num_device_blocks = int(config_gpu_blocks)
+
+        # Derive explicit layout semantics from vLLM model config + tensor shape.
+        layout = KvTensorLayout.from_vllm_config(
+            self.vllm_config, shape, num_device_blocks, use_mla
+        )
+
         page_size = self.vllm_config.cache_config.block_size
         dtype_width_bytes = self.kvbm_config.cache_dtype_bytes()
+        if num_device_blocks <= 0:
+            raise ValueError(f"Invalid num_device_blocks={num_device_blocks}")
+        if page_size <= 0:
+            raise ValueError(f"Invalid page_size={page_size}")
+        if dtype_width_bytes <= 0:
+            raise ValueError(f"Invalid dtype_width_bytes={dtype_width_bytes}")
 
-        config_gpu_blocks = self.vllm_config.cache_config.num_gpu_blocks
-        if num_device_blocks != config_gpu_blocks:
-            print(
-                f"Warning: num_device_blocks from tensor ({num_device_blocks}) "
-                f"!= config.num_gpu_blocks ({config_gpu_blocks}). "
-                f"Using tensor-derived value."
+        if shape[0] < num_device_blocks and shape[1] < num_device_blocks:
+            raise ValueError(
+                "Cannot locate num_device_blocks in KV tensor shape; "
+                f"shape[:2]={tuple(shape[:2])}, num_gpu_blocks={num_device_blocks}"
+            )
+
+        # Strong startup contract:
+        # bytes_per_block from layout math must equal bytes_per_block implied by the
+        # concrete tensor storage. This catches subtle TP/layout drift early.
+        layer_total_bytes_from_shape = int(math.prod(shape)) * dtype_width_bytes
+        if layer_total_bytes_from_shape % num_device_blocks != 0:
+            raise ValueError(
+                "KV tensor total bytes is not divisible by num_device_blocks: "
+                f"shape={tuple(shape)}, dtype_width_bytes={dtype_width_bytes}, "
+                f"layer_total_bytes={layer_total_bytes_from_shape}, "
+                f"num_device_blocks={num_device_blocks}"
+            )
+        bytes_per_block_from_shape = layer_total_bytes_from_shape // num_device_blocks
+        bytes_per_block_from_layout = (
+            int(layout.outer_dim)
+            * page_size
+            * int(layout.inner_dim)
+            * dtype_width_bytes
+        )
+        if bytes_per_block_from_shape != bytes_per_block_from_layout:
+            raise ValueError(
+                "KV bytes_per_block mismatch between tensor shape and derived layout: "
+                f"shape={tuple(shape)}, "
+                f"bytes_per_block_from_shape={bytes_per_block_from_shape}, "
+                f"bytes_per_block_from_layout={bytes_per_block_from_layout}, "
+                f"outer_dim={layout.outer_dim}, inner_dim={layout.inner_dim}, "
+                f"page_size={page_size}, dtype_width_bytes={dtype_width_bytes}, "
+                f"num_device_blocks={num_device_blocks}"
             )
 
         # Phase 2A: Register KV caches with NIXL via Rust binding
@@ -295,15 +495,15 @@ class SchedulerConnectorWorker:
         # FullyContiguousLayout requires the physical byte layout to be
         # `[num_blocks, num_layers, K/V, page_size, num_kv_heads, head_size]`
         # (the last two collapse into inner_dim). Backends order their
-        # per-layer logical shape differently — FlashAttention NHD returns
+        # per-layer logical shape differently — FA NHD returns
         # `(2, num_blocks, block_size, h, d)` (K/V first) while FlashInfer
         # and Triton NHD return `(num_blocks, 2, block_size, h, d)` (blocks
         # first). After vLLM prepends a num_layers axis, the *logical*
         # position of num_blocks/K/V therefore differs by backend, but the
-        # *physical* layout we need is the same. Probe the per-layer shape
-        # with distinct markers to discover which logical axis each
-        # dimension occupies, then assert the stride_order permutation
-        # lands every axis where FullyContiguousLayout expects it.
+        # *physical* layout we need is the same. Use the shared probe to
+        # discover per-layer axis positions, shift by +1 for the prepended
+        # num_layers axis, then assert the stride-order permutation lands
+        # every axis where FullyContiguousLayout expects it.
         try:
             stride_order = attn_backend.get_kv_cache_stride_order(
                 include_num_layers_dimension=True
@@ -315,38 +515,15 @@ class SchedulerConnectorWorker:
                 f"(include_num_layers_dimension=True); got {type(e).__name__}: {e}"
             ) from e
 
-        # Markers: each value is unique across the per-layer shape so we
-        # can identify every axis via list.index(). The "2" marker is the
-        # K/V outer dim itself — every other marker is non-2 to avoid
-        # collisions. `block_size` must be a multiple of 16 (FA, FlashInfer,
-        # Triton all enforce this in their get_kv_cache_shape probe), so we
-        # use 1024 / 32 / 7 / 64 to stay valid across backends.
-        BLOCK_MARKER, BSIZE_MARKER, KVHEADS_MARKER, HEAD_MARKER = 1024, 32, 7, 64
-        per_layer_shape = tuple(
-            attn_backend.get_kv_cache_shape(
-                num_blocks=BLOCK_MARKER,
-                block_size=BSIZE_MARKER,
-                num_kv_heads=KVHEADS_MARKER,
-                head_size=HEAD_MARKER,
-            )
-        )
+        axes = probe_per_layer_axes(attn_backend)
 
-        def _logical_axis(marker: int) -> int:
-            # +1 because vLLM prepends num_layers at logical position 0.
-            try:
-                return per_layer_shape.index(marker) + 1
-            except ValueError as e:
-                raise RuntimeError(
-                    f"KVBM cross-layer registration cannot locate marker "
-                    f"{marker} in {attn_backend.__name__} per-layer shape "
-                    f"{per_layer_shape}"
-                ) from e
-
-        num_blocks_log = _logical_axis(BLOCK_MARKER)
-        kv_log = _logical_axis(2)  # the literal K/V outer dim
-        block_size_log = _logical_axis(BSIZE_MARKER)
-        heads_log = _logical_axis(KVHEADS_MARKER)
-        head_size_log = _logical_axis(HEAD_MARKER)
+        # vLLM prepends num_layers at logical position 0, so every per-layer
+        # axis position bumps by 1 in the cross-layer logical order.
+        num_blocks_log = axes.blocks + 1
+        kv_log = axes.kv + 1
+        block_size_log = axes.page_size + 1
+        heads_log = axes.heads + 1
+        head_size_log = axes.head_size + 1
 
         def _physical_axis(logical: int) -> int:
             return stride_order.index(logical)
@@ -368,7 +545,7 @@ class SchedulerConnectorWorker:
                 f"KVBM cross-layer registration requires physical byte order "
                 f"[num_blocks, num_layers, K/V, page_size, heads, head_size]; "
                 f"{attn_backend.__name__} stride_order={stride_order} over "
-                f"per-layer shape {per_layer_shape} fails: {failed}. "
+                f"per-layer axes {axes} fails: {failed}. "
                 f"Use a NHD-compatible backend (FLASH_ATTN, FLASHINFER, "
                 f"TRITON_ATTN) or disable cross-layer support."
             )
