@@ -122,7 +122,7 @@ RUN apt-get update && \
 
 # Upgrade NIXL meta package and all device variants to match our built version.
 # The nixl meta package imports device-specific packages, so all must be at the same version.
-# 
+#
 # For CUDA, Upstream vLLM v0.19.1 currently ships NIXL 0.9.0, whose wheels omit
 # libnixl_capi.so. Upgrade both CUDA wheel variants so nixl_sys stubs and the
 # runtime-selected NIXL path see the same C API capable package.
