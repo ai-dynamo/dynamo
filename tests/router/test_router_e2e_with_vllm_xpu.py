@@ -50,7 +50,7 @@ pytestmark = [
 ]
 
 BLOCK_SIZE = get_default_vllm_block_size()
-_GPU_MEM_UTIL = get_gpu_memory_utilization(num_workers=2, single_gpu=False)
+_GPU_MEM_UTIL = get_gpu_memory_utilization()
 _MAX_MODEL_LEN = 768
 
 VLLM_ARGS: Dict[str, Any] = {

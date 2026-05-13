@@ -7,7 +7,9 @@ import json
 import logging
 import os
 import random
-from typing import TYPE_CHECKING, Any, Optional
+import threading
+import time as _time
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import aiohttp
 import nats
@@ -55,6 +57,66 @@ def min_initial_workers_env(min_initial_workers: int):
             os.environ.pop(MIN_INITIAL_WORKERS_ENV, None)
         else:
             os.environ[MIN_INITIAL_WORKERS_ENV] = previous
+
+
+def _create_kv_router_with_timeout(
+    router_factory: Callable[[], KvRouter],
+    num_workers: int,
+    engine_workers,
+    timeout: int = 120,
+) -> KvRouter:
+    """Create KvRouter in a daemon thread with worker liveness polling.
+
+    KvRouter() is a blocking Rust FFI call that waits for min_initial_workers
+    to register.  If a worker crashes (e.g. port conflict, OOM) the call
+    blocks forever because pytest signal-based timeout cannot interrupt
+    Rust FFI.  This helper runs the call in a daemon thread and polls
+    worker liveness every 2 seconds, raising immediately if a worker dies.
+    """
+    kv_router = None
+    kv_router_error = None
+
+    def _create():
+        nonlocal kv_router, kv_router_error
+        try:
+            kv_router = router_factory()
+        except Exception as exc:
+            kv_router_error = exc
+
+    _prev_min_workers = os.environ.get(MIN_INITIAL_WORKERS_ENV)
+    os.environ[MIN_INITIAL_WORKERS_ENV] = str(num_workers)
+    try:
+        router_thread = threading.Thread(target=_create, daemon=True)
+        router_thread.start()
+
+        _router_start = _time.monotonic()
+
+        while router_thread.is_alive():
+            router_thread.join(timeout=2)
+            elapsed = _time.monotonic() - _router_start
+            if elapsed > timeout:
+                raise RuntimeError(
+                    f"KvRouter initialization timed out after {elapsed:.0f}s "
+                    f"waiting for {num_workers} workers to register."
+                )
+            if hasattr(engine_workers, "worker_processes"):
+                for idx, wp in enumerate(engine_workers.worker_processes):
+                    if wp.proc and wp.proc.poll() is not None:
+                        raise RuntimeError(
+                            f"Worker {idx} exited with code {wp.proc.returncode} "
+                            f"while waiting for KvRouter to find "
+                            f"{num_workers} workers."
+                        )
+    finally:
+        if _prev_min_workers is None:
+            os.environ.pop(MIN_INITIAL_WORKERS_ENV, None)
+        else:
+            os.environ[MIN_INITIAL_WORKERS_ENV] = _prev_min_workers
+
+    if kv_router_error is not None:
+        raise kv_router_error
+
+    return kv_router
 
 
 ########################################################
@@ -700,60 +762,15 @@ def _test_python_router_bindings(
     # Create KvRouterConfig with default settings
     kv_router_config = KvRouterConfig()
 
-    # Run KvRouter in a thread with worker liveness polling (same pattern
-    # as _test_router_decisions) to avoid infinite FFI block if a worker dies.
-    import threading
-
-    kv_router = None
-    kv_router_error = None
-
-    def _create_router():
-        nonlocal kv_router, kv_router_error
-        try:
-            kv_router = KvRouter(
-                endpoint=endpoint,
-                block_size=block_size,
-                kv_router_config=kv_router_config,
-            )
-        except Exception as exc:
-            kv_router_error = exc
-
-    # Set the env var in the main thread so it is always restored,
-    # even if the daemon thread is abandoned on timeout.
-    _prev_min_workers = os.environ.get(MIN_INITIAL_WORKERS_ENV)
-    os.environ[MIN_INITIAL_WORKERS_ENV] = str(num_workers)
-    try:
-        router_thread = threading.Thread(target=_create_router, daemon=True)
-        router_thread.start()
-
-        import time as _time
-
-        _router_start = _time.monotonic()
-        _ROUTER_INIT_TIMEOUT = 120  # seconds
-
-        while router_thread.is_alive():
-            router_thread.join(timeout=2)
-            elapsed = _time.monotonic() - _router_start
-            if elapsed > _ROUTER_INIT_TIMEOUT:
-                raise RuntimeError(
-                    f"KvRouter initialization timed out after {elapsed:.0f}s "
-                    f"waiting for {num_workers} workers to register."
-                )
-            if hasattr(engine_workers, "worker_processes"):
-                for idx, wp in enumerate(engine_workers.worker_processes):
-                    if wp.proc and wp.proc.poll() is not None:
-                        raise RuntimeError(
-                            f"Worker {idx} exited with code {wp.proc.returncode} "
-                            f"while waiting for KvRouter to find {num_workers} workers."
-                        )
-    finally:
-        if _prev_min_workers is None:
-            os.environ.pop(MIN_INITIAL_WORKERS_ENV, None)
-        else:
-            os.environ[MIN_INITIAL_WORKERS_ENV] = _prev_min_workers
-
-    if kv_router_error is not None:
-        raise kv_router_error
+    kv_router = _create_kv_router_with_timeout(
+        router_factory=lambda: KvRouter(
+            endpoint=endpoint,
+            block_size=block_size,
+            kv_router_config=kv_router_config,
+        ),
+        num_workers=num_workers,
+        engine_workers=engine_workers,
+    )
 
     logger.info("Created KvRouter Python object")
 
@@ -1611,12 +1628,15 @@ def _test_router_indexers_sync(
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
 
-        with min_initial_workers_env(num_workers):
-            kv_router1 = KvRouter(
+        kv_router1 = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
                 endpoint=endpoint1,
                 block_size=block_size,
                 kv_router_config=kv_router_config,
-            )
+            ),
+            num_workers=num_workers,
+            engine_workers=engine_workers,
+        )
 
         # Wait for workers to be ready
         await wait_for_workers_ready(endpoint1, kv_router1, num_workers, model_name)
@@ -1704,12 +1724,15 @@ def _test_router_indexers_sync(
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
 
-        with min_initial_workers_env(num_workers):
-            kv_router2 = KvRouter(
+        kv_router2 = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
                 endpoint=endpoint2,
                 block_size=block_size,
                 kv_router_config=kv_router_config,
-            )
+            ),
+            num_workers=num_workers,
+            engine_workers=engine_workers,
+        )
 
         # Launch Indexer B alongside Router 2. Workers are passed via --workers
         # so ZMQ sockets connect before recovery, avoiding the slow-joiner problem.
@@ -2220,8 +2243,8 @@ def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
                 f"{prefill_workers.namespace}.prefill.generate"
             )
 
-            with min_initial_workers_env(prefill_workers.num_workers):
-                observer_router = KvRouter(
+            observer_router = _create_kv_router_with_timeout(
+                router_factory=lambda: KvRouter(
                     endpoint=prefill_endpoint,
                     block_size=block_size,
                     kv_router_config=KvRouterConfig(
@@ -2232,7 +2255,10 @@ def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
                         router_track_prefill_tokens=True,
                         router_prefill_load_model="none",
                     ),
-                )
+                ),
+                num_workers=prefill_workers.num_workers,
+                engine_workers=prefill_workers,
+            )
 
             client = await prefill_endpoint.client()
             worker_ids: list[int] = []
@@ -2385,69 +2411,16 @@ def _test_router_decisions(
             else None
         )
 
-        # KvRouter() is a blocking Rust FFI call that waits for
-        # min_initial_workers to register.  If a worker crashes during engine
-        # init (e.g. ZMQ port conflict, GPU OOM) the call blocks forever
-        # because pytest signal-based timeout cannot interrupt Rust FFI.
-        #
-        # Run KvRouter() in a daemon thread; the main thread polls worker
-        # liveness every 2 seconds and raises immediately if a worker dies.
-        import threading
-
-        kv_router = None
-        kv_router_error = None
-
-        def _create_router():
-            nonlocal kv_router, kv_router_error
-            try:
-                kv_router = KvRouter(
-                    endpoint=endpoint,
-                    block_size=block_size,
-                    kv_router_config=kv_router_config,
-                    aic_perf_config=aic_perf_config,
-                )
-            except Exception as exc:
-                kv_router_error = exc
-
-        # Set the env var in the main thread so it is always restored,
-        # even if the daemon thread is abandoned on timeout.
-        _prev_min_workers = os.environ.get(MIN_INITIAL_WORKERS_ENV)
-        os.environ[MIN_INITIAL_WORKERS_ENV] = str(expected_num_instances)
-        try:
-            router_thread = threading.Thread(target=_create_router, daemon=True)
-            router_thread.start()
-
-            import time as _time
-
-            _router_start = _time.monotonic()
-            _ROUTER_INIT_TIMEOUT = 120  # seconds
-
-            while router_thread.is_alive():
-                router_thread.join(timeout=2)
-                elapsed = _time.monotonic() - _router_start
-                if elapsed > _ROUTER_INIT_TIMEOUT:
-                    raise RuntimeError(
-                        f"KvRouter initialization timed out after {elapsed:.0f}s "
-                        f"waiting for {expected_num_instances} workers to register. "
-                        f"A worker may have crashed during startup (e.g. port "
-                        f"conflict, GPU OOM) without fully exiting."
-                    )
-                if hasattr(engine_workers, "worker_processes"):
-                    for idx, wp in enumerate(engine_workers.worker_processes):
-                        if wp.proc and wp.proc.poll() is not None:
-                            raise RuntimeError(
-                                f"Worker {idx} exited with code {wp.proc.returncode} "
-                                f"while waiting for KvRouter to find "
-                                f"{expected_num_instances} workers."
-                            )
-        finally:
-            if _prev_min_workers is None:
-                os.environ.pop(MIN_INITIAL_WORKERS_ENV, None)
-            else:
-                os.environ[MIN_INITIAL_WORKERS_ENV] = _prev_min_workers
-
-        if kv_router_error is not None:
-            raise kv_router_error
+        kv_router = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
+                endpoint=endpoint,
+                block_size=block_size,
+                kv_router_config=kv_router_config,
+                aic_perf_config=aic_perf_config,
+            ),
+            num_workers=expected_num_instances,
+            engine_workers=engine_workers,
+        )
 
         # Wait for workers to be ready and get their instance IDs
         worker_ids = await wait_for_workers_ready(
