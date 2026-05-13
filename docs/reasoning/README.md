@@ -15,8 +15,8 @@ Dynamo's own registry or in the upstream engine (vLLM, SGLang).
 
 | Path | When to use | Page |
 |------|-------------|------|
-| **Dynamo** | Dynamo ships a Rust parser for the model's reasoning format. Lowest latency, KV-routable, the default path. | [Reasoning Parsing (Dynamo)](dynamo.md) |
-| **Engine Fallback** | Dynamo does not have a parser, but the upstream engine (vLLM or SGLang) does. Tokenization stays on the frontend, parsing delegates to the engine's Python preprocessor. | [Reasoning Parsing (Engine Fallback)](engine-fallback.md) |
+| **Dynamo** | Dynamo ships a Rust parser for the model's reasoning format. Lowest latency, the default path. | [Reasoning Parsing (Dynamo)](dynamo.md) |
+| **Engine Fallback** | Use the framework's implementation (vLLM or SGLang) for pre/post processing, including tool call and reasoning parsing - ensure consistency with framework behavior. | [Reasoning Parsing (Engine Fallback)](engine-fallback.md) |
 
 Start with the Dynamo path. Fall back to the engine path only when Dynamo's
 registry does not list a parser for your model.
