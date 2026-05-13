@@ -529,8 +529,7 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         // backends) instead of allocating a one-element slice + Vec.
         let block_id = inner.inactive.find_match(seq_hash, touch)?.1;
         self.metrics.dec_inactive_pool_size();
-        let (handle, reset_on_release) =
-            take_inactive_handle(&mut inner.slots[block_id], block_id);
+        let (handle, reset_on_release) = take_inactive_handle(&mut inner.slots[block_id], block_id);
         // Resurrection: preserve any per-block override the previous
         // holder stored when releasing into the inactive index.
         let inner_arc = ImmutableBlockInner::new_primary_resurrected(

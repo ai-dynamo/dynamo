@@ -3152,8 +3152,7 @@ mod reset_on_release_tests {
     /// Store-wide default: every primary release bypasses inactive.
     #[test]
     fn store_wide_default_resets_on_release() {
-        let manager =
-            create_test_manager_with_default_reset_on_release::<TestBlockData>(4, true);
+        let manager = create_test_manager_with_default_reset_on_release::<TestBlockData>(4, true);
         let token = create_test_token_block_from_iota(50_005);
         let hash = token.kvbm_sequence_hash();
 
@@ -3189,8 +3188,7 @@ mod reset_on_release_tests {
     /// "Preserve per-block opt-out across inactive hits".
     #[test]
     fn opt_out_survives_inactive_resurrection() {
-        let manager =
-            create_test_manager_with_default_reset_on_release::<TestBlockData>(4, true);
+        let manager = create_test_manager_with_default_reset_on_release::<TestBlockData>(4, true);
         let token = create_test_token_block_from_iota(50_009);
         let hash = token.kvbm_sequence_hash();
 
@@ -3237,8 +3235,7 @@ mod reset_on_release_tests {
     /// Holder can opt out of the store-wide default for a specific block.
     #[test]
     fn per_block_can_opt_out_of_store_default() {
-        let manager =
-            create_test_manager_with_default_reset_on_release::<TestBlockData>(4, true);
+        let manager = create_test_manager_with_default_reset_on_release::<TestBlockData>(4, true);
         let token = create_test_token_block_from_iota(50_006);
         let hash = token.kvbm_sequence_hash();
 
@@ -3407,8 +3404,7 @@ mod reset_on_release_tests {
     /// `match_blocks` is idempotent across repeated cache hits.
     #[test]
     fn override_survives_multiple_resurrection_cycles() {
-        let manager =
-            create_test_manager_with_default_reset_on_release::<TestBlockData>(4, true);
+        let manager = create_test_manager_with_default_reset_on_release::<TestBlockData>(4, true);
         let token = create_test_token_block_from_iota(50_010);
         let hash = token.kvbm_sequence_hash();
 
@@ -3467,8 +3463,7 @@ mod reset_on_release_tests {
     /// decoupled from the setter (e.g. wrong Arc, wrong field).
     #[test]
     fn set_evict_on_reset_on_resurrected_inner_takes_effect() {
-        let manager =
-            create_test_manager_with_default_reset_on_release::<TestBlockData>(4, true);
+        let manager = create_test_manager_with_default_reset_on_release::<TestBlockData>(4, true);
         let token = create_test_token_block_from_iota(50_011);
         let hash = token.kvbm_sequence_hash();
 
@@ -3569,8 +3564,7 @@ mod reset_on_release_tests {
     #[test]
     fn override_discarded_on_eviction_back_to_mutable() {
         // block_count=1 so the second allocate must evict from inactive.
-        let manager =
-            create_test_manager_with_default_reset_on_release::<TestBlockData>(1, true);
+        let manager = create_test_manager_with_default_reset_on_release::<TestBlockData>(1, true);
         let store = manager.store_for_test().clone();
 
         // First registration: opt OUT of the store default → Inactive(false).
@@ -3763,6 +3757,9 @@ mod reset_on_release_tests {
         let s = m.snapshot();
         assert_eq!(s.inflight_immutable, 0, "drop decremented immutable");
         assert_eq!(s.inactive_pool_size, 0, "inactive gauge unchanged");
-        assert_eq!(s.reset_pool_size, 4, "reset gauge incremented, not inactive");
+        assert_eq!(
+            s.reset_pool_size, 4,
+            "reset gauge incremented, not inactive"
+        );
     }
 }

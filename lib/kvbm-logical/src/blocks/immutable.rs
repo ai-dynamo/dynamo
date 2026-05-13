@@ -232,9 +232,7 @@ impl<T: BlockMetadata + Sync> ImmutableBlock<T> {
     /// This is unavoidable — the dropping `Inner` is on another thread
     /// mid-`Drop` and its atomic is unreachable.
     pub fn set_evict_on_reset(&self, value: bool) {
-        self.inner
-            .reset_on_release
-            .store(value, Ordering::Relaxed);
+        self.inner.reset_on_release.store(value, Ordering::Relaxed);
     }
 
     /// Type-erased lifecycle pin for cross-policy use.
