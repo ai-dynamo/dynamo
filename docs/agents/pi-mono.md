@@ -5,9 +5,18 @@ title: Use Pi-Mono with Dynamo
 subtitle: Drive a real coding agent through Dynamo with agent context and tool tracing
 ---
 
-[Pi-Mono](https://github.com/mariozechner/pi-mono) is an open-source coding-agent framework. The [`pi-dynamo-provider`](https://github.com/ai-dynamo/pi-dynamo-provider) extension plugs Dynamo in as Pi's model provider so every LLM call and tool span lands in a Dynamo agent trace — no harness patches required.
+[Pi-Mono](https://github.com/mariozechner/pi-mono) is an open-source coding-agent harness whose clean plugin architecture has made it a popular substrate for patterns like subagents and planner/implementer loops. The [`pi-dynamo-provider`](https://github.com/ai-dynamo/pi-dynamo-provider) extension uses that plugin surface to register Dynamo as a Pi model provider — it is **not** a proxy or interceptor. It runs in-process, adds Dynamo's [`agent_context`](agent-tracing.md) and [`agent_hints`](agent-hints.md) to each request, and emits Pi's tool lifecycle events to Dynamo over ZMQ. No harness patches, no sidecar.
 
-This is the recommended way to exercise [Agent Tracing](agent-tracing.md) and [Agent Hints](agent-hints.md) end-to-end.
+This is the recommended way to exercise agent tracing and agent hints end-to-end.
+
+## Why run Pi through Dynamo
+
+You can already point Pi at any OpenAI-compatible endpoint (Ollama, vLLM, a hosted API). Routing through Dynamo gives you two things you don't get from a plain hosting layer:
+
+- **Harness-aware observability.** Pi's session and trajectory IDs flow into Dynamo's `request_end` traces, and Pi's tool spans land on the same timeline. One Perfetto view shows LLM requests, prefill/decode stages, and tool calls together.
+- **Harness-aware orchestration.** Once Dynamo knows which trajectory a request belongs to, it can act on agent hints (priority, expected output length, speculative prefill) for smarter scheduling and KV-aware routing. That same trajectory awareness is what lets backends like [SGLang](../backends/sglang/agents.md) apply priority-based radix eviction and session-scoped KV isolation.
+
+The integration works against any Dynamo backend — vLLM, SGLang, or TRT-LLM — without backend-specific glue.
 
 ## What the extension does
 
@@ -59,7 +68,7 @@ The repo ships a launcher that builds Dynamo, starts an OpenAI-compatible fronte
 ./scripts/launch-agg-agent.sh
 ```
 
-By default this serves `zai-org/GLM-4.7-Flash` on one GPU. When it's ready it prints the exact Pi environment variables to paste into another shell.
+By default this serves `zai-org/GLM-4.7-Flash` on one GPU. When it's ready it prints the exact Pi environment variables to paste into another shell. The launcher is bundled for convenience — the provider works equally well against any Dynamo backend (vLLM, SGLang, TRT-LLM) started by your own deployment, as long as the agent-trace env vars below are set.
 
 <Note>
 Equivalent manual launch: set `DYN_AGENT_TRACE_SINKS=jsonl`, `DYN_AGENT_TRACE_OUTPUT_PATH=<path>`, and `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT=tcp://127.0.0.1:20390` before starting `dynamo.frontend` and your worker. See [Agent Tracing → Enable output](agent-tracing.md#enable-output) for the full variable reference.
