@@ -34,11 +34,11 @@ container.
 ## Examples
 
 ```bash
-# vLLM chat processor (supports KV Routing)
+# vLLM chat processor
 python -m dynamo.vllm ...
 python -m dynamo.frontend --dyn-chat-processor vllm --tool-call-parser hermes
 
-# SGLang chat processor (supports KV Routing)
+# SGLang chat processor
 python -m dynamo.sglang ...
 python -m dynamo.frontend --dyn-chat-processor sglang --tool-call-parser kimi_k2
 ```
