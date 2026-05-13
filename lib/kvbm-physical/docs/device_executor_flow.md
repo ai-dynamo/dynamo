@@ -81,10 +81,10 @@ engine-class agnostic, so whole-block `batch_copy` and kernel
 D2D maps to the H2D pool (`is_d2h = false`); the actual copy direction
 is determined by pointer addresses, not the pool label.
 
-On SYCL the pool is backed by round-robin `sycl::queue` slots inside a
-single `sycl::context` so USM pointers remain valid across queues —
-see `SyclContextCache` in `src/device/sycl/mod.rs`. `KVBM_SYCL_STREAM_POOL_SIZE`
-controls the width.
+On SYCL the pool is backed by round-robin `sycl::queue` slots. Every
+queue is built on the shared multi-device `SyclContext`
+(see `shared_sycl_context` in `src/device/sycl/mod.rs`). Pool width is
+`TransferContext::num_streams` (default 4).
 
 ### Sync semantics
 

@@ -4,7 +4,7 @@
 //! Integration tests for SYCL XPU tensor permute kernel roundtrips.
 //!
 //! Mirrors kernel_roundtrip.rs (CUDA) using the oneAPI-rs safe SYCL API:
-//! - Memory: SyclQueue::alloc_device<T> (typed USM buffers)
+//! - Memory: SyclContext::alloc_device<T> (typed USM slices)
 //! - Transfer: SyclQueue::memcpy_sync (auto-detect direction)
 //! - Kernel dispatch: sycl_universal_from_block / sycl_block_from_universal
 //!   via FFI with queue.raw_queue_ptr()
@@ -163,15 +163,18 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: BlockLayout) {
         ref_universals.push(universal);
     }
 
-    // --- Allocate device memory via SYCL USM (typed SyclBuffer<T>) ---
+    // --- Allocate device memory via SYCL USM (typed SyclSlice<T>) ---
+    //
+    // The returned `SyclSlice` holds an `Arc<SyclContext>`
+    // so it outlives the specific queue.
 
     // Upload block chunks to device
-    use oneapi_rs::sycl::SyclBuffer;
-    let mut block_device_bufs: Vec<SyclBuffer<T>> = Vec::with_capacity(nb * chunk_count);
+    use oneapi_rs::sycl::SyclSlice;
+    let mut block_device_bufs: Vec<SyclSlice<T>> = Vec::with_capacity(nb * chunk_count);
 
     for block_idx in 0..nb {
         for chunk_idx in 0..chunk_count {
-            let mut buf = unsafe { queue.alloc_device::<T>(inner) }
+            let mut buf = queue.context().alloc_device::<T>(queue.device(), inner)
                 .expect("device alloc failed");
 
             // H2D: copy host chunk data to device
@@ -185,9 +188,9 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: BlockLayout) {
     }
 
     // Allocate universal output buffers on device
-    let mut universal_device_bufs: Vec<SyclBuffer<T>> = Vec::with_capacity(nb);
+    let mut universal_device_bufs: Vec<SyclSlice<T>> = Vec::with_capacity(nb);
     for _ in 0..nb {
-        let buf = unsafe { queue.alloc_device::<T>(universal_volume) }
+        let buf = queue.context().alloc_device::<T>(queue.device(), universal_volume)
             .expect("device alloc failed");
         universal_device_bufs.push(buf);
     }
@@ -203,12 +206,12 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: BlockLayout) {
         .map(|buf| buf.as_mut_ptr() as u64)
         .collect();
 
-    let mut block_ptrs_dev = unsafe { queue.alloc_device::<u64>(block_ptr_values.len()) }
+    let mut block_ptrs_dev = queue.context().alloc_device::<u64>(queue.device(), block_ptr_values.len())
         .expect("device alloc failed");
     queue.memcpy_sync(block_ptr_values.as_slice(), &mut block_ptrs_dev)
         .expect("block ptrs H2D failed");
 
-    let mut universal_ptrs_dev = unsafe { queue.alloc_device::<u64>(universal_ptr_values.len()) }
+    let mut universal_ptrs_dev = queue.context().alloc_device::<u64>(queue.device(), universal_ptr_values.len())
         .expect("device alloc failed");
     queue.memcpy_sync(universal_ptr_values.as_slice(), &mut universal_ptrs_dev)
         .expect("universal ptrs H2D failed");
@@ -350,14 +353,14 @@ fn sycl_vectorized_copy_roundtrip() {
 
     // Generate deterministic test data
     let mut src_host_data: Vec<Vec<u8>> = Vec::new();
-    let mut src_bufs: Vec<oneapi_rs::sycl::SyclBuffer<u8>> = Vec::new();
-    let mut dst_bufs: Vec<oneapi_rs::sycl::SyclBuffer<u8>> = Vec::new();
+    let mut src_bufs: Vec<oneapi_rs::sycl::SyclSlice<u8>> = Vec::new();
+    let mut dst_bufs: Vec<oneapi_rs::sycl::SyclSlice<u8>> = Vec::new();
 
     for i in 0..num_pairs as usize {
         let pattern: Vec<u8> = (0..copy_size).map(|b| ((i * 37 + b * 7) & 0xFF) as u8).collect();
-        let mut src = unsafe { queue.alloc_device::<u8>(copy_size) }.expect("alloc src");
+        let mut src = queue.context().alloc_device::<u8>(queue.device(), copy_size).expect("alloc src");
         queue.memcpy_sync(pattern.as_slice(), &mut src).expect("H2D src");
-        let dst = unsafe { queue.alloc_device::<u8>(copy_size) }.expect("alloc dst");
+        let dst = queue.context().alloc_device::<u8>(queue.device(), copy_size).expect("alloc dst");
 
         src_host_data.push(pattern);
         src_bufs.push(src);
@@ -368,11 +371,11 @@ fn sycl_vectorized_copy_roundtrip() {
     let src_ptrs: Vec<u64> = src_bufs.iter().map(|b| b.as_mut_ptr() as u64).collect();
     let dst_ptrs: Vec<u64> = dst_bufs.iter().map(|b| b.as_mut_ptr() as u64).collect();
 
-    let mut src_ptrs_dev = unsafe { queue.alloc_device::<u64>(num_pairs as usize) }
+    let mut src_ptrs_dev = queue.context().alloc_device::<u64>(queue.device(), num_pairs as usize)
         .expect("alloc src_ptrs");
     queue.memcpy_sync(src_ptrs.as_slice(), &mut src_ptrs_dev).expect("H2D src_ptrs");
 
-    let mut dst_ptrs_dev = unsafe { queue.alloc_device::<u64>(num_pairs as usize) }
+    let mut dst_ptrs_dev = queue.context().alloc_device::<u64>(queue.device(), num_pairs as usize)
         .expect("alloc dst_ptrs");
     queue.memcpy_sync(dst_ptrs.as_slice(), &mut dst_ptrs_dev).expect("H2D dst_ptrs");
 

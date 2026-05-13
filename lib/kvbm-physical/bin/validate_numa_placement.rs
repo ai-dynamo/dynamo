@@ -137,19 +137,21 @@ fn enumerate_cuda() -> Result<Vec<DeviceEntry>, String> {
 
 #[cfg(feature = "xpu-sycl")]
 fn enumerate_sycl() -> Result<Vec<DeviceEntry>, String> {
-    use oneapi_rs::safe::SyclDevice;
-
-    let count = SyclDevice::count().map_err(|e| format!("SyclDevice::count: {e}"))?;
-    if count == 0 {
-        return Err("No SYCL/XPU devices found".to_string());
+    // discrete Level Zero GPUs
+    let devices = kvbm_physical::device::sycl::discrete_gpus()
+        .map_err(|e| format!("discrete_gpus: {e}"))?;
+    if devices.is_empty() {
+        return Err("No discrete Level Zero GPUs found".to_string());
     }
-    Ok((0..count as u32)
-        .map(|id| {
-            let pci_bdf = SyclDevice::by_ordinal(id as usize)
-                .ok()
-                .and_then(|d| d.info().ok())
-                .and_then(|info| info.pci_address);
-            DeviceEntry { id, pci_bdf }
+    Ok(devices
+        .iter()
+        .enumerate()
+        .map(|(id, dev)| {
+            let pci_bdf = dev.info().ok().and_then(|info| info.pci_address);
+            DeviceEntry {
+                id: id as u32,
+                pci_bdf,
+            }
         })
         .collect())
 }
@@ -392,7 +394,11 @@ fn main() {
     println!("========================");
     println!("Backend:          {} ({})", backend.name(), backend_arg);
     println!("Compiled feats:   {}", compiled_features_summary());
-    println!("Devices:          {ids:?}");
+    let device_scope = match backend {
+        DeviceBackend::Sycl => "discrete Level Zero GPUs only",
+        DeviceBackend::Cuda => "all CUDA-visible GPUs",
+    };
+    println!("Devices:          {ids:?}  [{device_scope}]");
     println!("Alloc size:       {size_mib} MiB ({alloc_size} bytes)");
     println!("NUMA enabled:     {}", dynamo_memory::is_numa_enabled());
     println!();

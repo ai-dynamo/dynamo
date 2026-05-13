@@ -83,42 +83,44 @@ impl DeviceAllocator for TestCudaAllocator {
 #[cfg(feature = "testing-xpu-sycl")]
 #[derive(Debug)]
 struct TestSyclAllocator {
-    queue: std::sync::Arc<oneapi_rs::safe::SyclQueue>,
+    context: std::sync::Arc<oneapi_rs::safe::SyclContext>,
+    device: std::sync::Arc<oneapi_rs::safe::SyclDevice>,
     device_id: u32,
 }
 
 #[cfg(feature = "testing-xpu-sycl")]
 impl TestSyclAllocator {
     fn new(device_id: u32) -> anyhow::Result<Self> {
-        let queue = oneapi_rs::safe::SyclQueue::new_for_device_ordinal(device_id as usize)?;
-        Ok(Self { queue, device_id })
+        let device = oneapi_rs::safe::SyclDevice::by_ordinal(device_id as usize)?;
+        let context = oneapi_rs::safe::SyclContext::new(&device)?;
+        Ok(Self { context, device, device_id })
     }
 }
 
 #[cfg(feature = "testing-xpu-sycl")]
 impl DeviceAllocator for TestSyclAllocator {
     fn allocate_device(&self, size: usize) -> Result<u64> {
-        self.queue
-            .malloc_device(size)
+        self.context
+            .malloc_device(&self.device, size)
             .map(|ptr| ptr as u64)
             .map_err(|e| StorageError::AllocationFailed(e.to_string()))
     }
 
     fn free_device(&self, ptr: u64) -> Result<()> {
-        self.queue
+        self.context
             .free_raw(ptr as *mut std::ffi::c_void)
             .map_err(|e| StorageError::OperationFailed(e.to_string()))
     }
 
     fn allocate_pinned(&self, size: usize) -> Result<u64> {
-        self.queue
+        self.context
             .malloc_host(size)
             .map(|ptr| ptr as u64)
             .map_err(|e| StorageError::AllocationFailed(e.to_string()))
     }
 
     fn free_pinned(&self, ptr: u64) -> Result<()> {
-        self.queue
+        self.context
             .free_raw(ptr as *mut std::ffi::c_void)
             .map_err(|e| StorageError::OperationFailed(e.to_string()))
     }

@@ -36,7 +36,7 @@
 //! is achieved by the caller via `SyclQueue` operations.
 
 use anyhow::{Result, anyhow};
-use oneapi_rs::safe::SyclQueue;
+use oneapi_rs::safe::{SyclContext, SyclDevice};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
@@ -124,19 +124,27 @@ impl PoolInner {
 
 /// Builder for creating a SYCL device memory pool with configurable parameters.
 ///
+/// The pool binds to a `(SyclContext, SyclDevice)` pair. Allocation and free
+/// go through the context-scoped USM entries (`SyclContext::malloc_device`
+/// / `SyclContext::free_raw`).
+///
 /// # Example
 /// ```ignore
-/// use oneapi_rs::safe::SyclQueue;
+/// use std::sync::Arc;
+/// use oneapi_rs::safe::{SyclContext, SyclDevice};
 ///
-/// let queue = SyclQueue::new_for_device_ordinal(0).unwrap();
-/// let pool = SyclMemPoolBuilder::new(queue, 64 * 1024 * 1024) // 64 MiB reserve
-///     .release_threshold(32 * 1024 * 1024) // 32 MiB release threshold
+/// let device = SyclDevice::by_ordinal(0).unwrap();
+/// let context = SyclContext::new(&device).unwrap();
+/// let pool = SyclMemPoolBuilder::new(context, device, 64 * 1024 * 1024)
+///     .release_threshold(32 * 1024 * 1024)
 ///     .build()
 ///     .unwrap();
 /// ```
 pub struct SyclMemPoolBuilder {
-    /// SYCL queue (owns device + context + queue handles).
-    queue: Arc<SyclQueue>,
+    /// SYCL context the pool allocates through.
+    context: Arc<SyclContext>,
+    /// SYCL device the pool targets. Must be one of `context.devices()`.
+    device: Arc<SyclDevice>,
     /// Bytes to pre-allocate to warm the pool.
     reserve_size: usize,
     /// Optional threshold above which memory is returned to the system on free.
@@ -144,14 +152,20 @@ pub struct SyclMemPoolBuilder {
 }
 
 impl SyclMemPoolBuilder {
-    /// Create a new builder with the required reserve size.
+    /// Create a new builder.
     ///
     /// # Arguments
-    /// * `queue` - SYCL queue (wraps device + context + queue)
-    /// * `reserve_size` - Number of bytes to pre-allocate to warm the pool
-    pub fn new(queue: Arc<SyclQueue>, reserve_size: usize) -> Self {
+    /// * `context` - SYCL context to allocate through (may span multiple devices).
+    /// * `device`  - SYCL device within `context` this pool targets.
+    /// * `reserve_size` - Number of bytes to pre-allocate to warm the pool.
+    pub fn new(
+        context: Arc<SyclContext>,
+        device: Arc<SyclDevice>,
+        reserve_size: usize,
+    ) -> Self {
         Self {
-            queue,
+            context,
+            device,
             reserve_size,
             release_threshold: None,
         }
@@ -173,7 +187,8 @@ impl SyclMemPoolBuilder {
     /// 2. Pre-allocate and cache memory to warm the pool
     pub fn build(self) -> Result<SyclMemPool> {
         let pool = SyclMemPool {
-            queue: self.queue,
+            context: self.context,
+            device: self.device,
             inner: Mutex::new(PoolInner::new()),
             release_threshold: self.release_threshold.unwrap_or(u64::MAX),
         };
@@ -210,8 +225,10 @@ impl SyclMemPoolBuilder {
 ///
 /// Use [`SyclMemPoolBuilder`] for configurable pool creation with pre-allocation.
 pub struct SyclMemPool {
-    /// SYCL queue this pool allocates through.
-    queue: Arc<SyclQueue>,
+    /// SYCL context this pool allocates through.
+    context: Arc<SyclContext>,
+    /// SYCL device this pool targets (one of `context.devices()`).
+    device: Arc<SyclDevice>,
     /// Mutex protecting the free-list.
     inner: Mutex<PoolInner>,
     /// Cached bytes above this threshold trigger actual `sycl::free` calls.
@@ -230,10 +247,15 @@ impl SyclMemPool {
     /// Create a builder for a new SYCL memory pool.
     ///
     /// # Arguments
-    /// * `queue` - SYCL queue (wraps device + context + queue)
-    /// * `reserve_size` - Number of bytes to pre-allocate to warm the pool
-    pub fn builder(queue: Arc<SyclQueue>, reserve_size: usize) -> SyclMemPoolBuilder {
-        SyclMemPoolBuilder::new(queue, reserve_size)
+    /// * `context` - SYCL context to allocate through.
+    /// * `device`  - SYCL device within `context` this pool targets.
+    /// * `reserve_size` - Number of bytes to pre-allocate to warm the pool.
+    pub fn builder(
+        context: Arc<SyclContext>,
+        device: Arc<SyclDevice>,
+        reserve_size: usize,
+    ) -> SyclMemPoolBuilder {
+        SyclMemPoolBuilder::new(context, device, reserve_size)
     }
 
     /// Allocate memory from the pool.
@@ -337,9 +359,14 @@ impl SyclMemPool {
         Ok(())
     }
 
-    /// Get the SYCL queue this pool allocates through.
-    pub fn queue(&self) -> &Arc<SyclQueue> {
-        &self.queue
+    /// Get the SYCL context this pool allocates through.
+    pub fn context(&self) -> &Arc<SyclContext> {
+        &self.context
+    }
+
+    /// Get the SYCL device this pool targets.
+    pub fn device(&self) -> &Arc<SyclDevice> {
+        &self.device
     }
 
     /// Current number of bytes cached in the free-list.
@@ -349,17 +376,18 @@ impl SyclMemPool {
 
     // ── Private helpers ──────────────────────────────────────────────────
 
-    /// Raw allocation via `sycl::malloc_device` (oneAPI-rs safe API).
+    /// Raw allocation via `sycl::malloc_device(bytes, device, context)`.
     fn raw_alloc(&self, size: usize) -> Result<u64> {
-        let ptr = self.queue
-            .malloc_device(size)
+        let ptr = self
+            .context
+            .malloc_device(&self.device, size)
             .map_err(|e| anyhow!("malloc_device failed: {}", e))?;
         Ok(ptr as u64)
     }
 
-    /// Raw free via `sycl::free` (oneAPI-rs safe API).
+    /// Raw free via `sycl::free(ptr, context)`.
     fn raw_free(&self, ptr: u64) -> Result<()> {
-        self.queue
+        self.context
             .free_raw(ptr as *mut c_void)
             .map_err(|e| anyhow!("free_raw failed: {}", e))?;
         Ok(())
@@ -377,7 +405,7 @@ impl Drop for SyclMemPool {
         // Drain every block from the free-list and return to the runtime.
         let all_blocks = inner.drain_to(0);
         for block in all_blocks {
-            if let Err(e) = self.queue.free_raw(block.ptr as *mut c_void) {
+            if let Err(e) = self.context.free_raw(block.ptr as *mut c_void) {
                 tracing::warn!("free_raw failed during SyclMemPool drop: {e}");
             }
         }
@@ -388,17 +416,31 @@ impl Drop for SyclMemPool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_pool_creation_with_builder() {
-        let queue = match SyclQueue::new_for_device_ordinal(0) {
-            Ok(q) => q,
+    /// Resolve (context, device) for device 0, or return None if no SYCL
+    /// device is visible. Tests skip gracefully in CI without a GPU.
+    fn test_context_device() -> Option<(Arc<SyclContext>, Arc<SyclDevice>)> {
+        let device = match SyclDevice::by_ordinal(0) {
+            Ok(d) => d,
             Err(e) => {
                 eprintln!("Skipping test - no SYCL device: {e}");
-                return;
+                return None;
             }
         };
+        let context = match SyclContext::new(&device) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Skipping test - SYCL context creation failed: {e}");
+                return None;
+            }
+        };
+        Some((context, device))
+    }
 
-        let pool = SyclMemPool::builder(queue, 1024 * 1024) // 1 MiB reserve
+    #[test]
+    fn test_pool_creation_with_builder() {
+        let Some((context, device)) = test_context_device() else { return; };
+
+        let pool = SyclMemPool::builder(context, device, 1024 * 1024) // 1 MiB reserve
             .release_threshold(64 * 1024 * 1024) // 64 MiB threshold
             .build()
             .expect("pool creation should succeed");
@@ -409,15 +451,11 @@ mod tests {
 
     #[test]
     fn test_pool_alloc_free_reuse() {
-        let queue = match SyclQueue::new_for_device_ordinal(0) {
-            Ok(q) => q,
-            Err(e) => {
-                eprintln!("Skipping test - no SYCL device: {e}");
-                return;
-            }
-        };
+        let Some((context, device)) = test_context_device() else { return; };
 
-        let pool = SyclMemPool::builder(queue, 0).build().expect("pool build");
+        let pool = SyclMemPool::builder(context, device, 0)
+            .build()
+            .expect("pool build");
 
         // First allocation — cache miss, goes to SYCL runtime.
         let ptr1 = pool.alloc(4096).expect("alloc 4096");
@@ -439,16 +477,10 @@ mod tests {
 
     #[test]
     fn test_pool_release_threshold() {
-        let queue = match SyclQueue::new_for_device_ordinal(0) {
-            Ok(q) => q,
-            Err(e) => {
-                eprintln!("Skipping test - no SYCL device: {e}");
-                return;
-            }
-        };
+        let Some((context, device)) = test_context_device() else { return; };
 
         // Threshold of 8 KiB.
-        let pool = SyclMemPool::builder(queue, 0)
+        let pool = SyclMemPool::builder(context, device, 0)
             .release_threshold(8192)
             .build()
             .expect("pool build");
@@ -469,29 +501,21 @@ mod tests {
 
     #[test]
     fn test_pool_creation_no_threshold() {
-        let queue = match SyclQueue::new_for_device_ordinal(0) {
-            Ok(q) => q,
-            Err(e) => {
-                eprintln!("Skipping test - no SYCL device: {e}");
-                return;
-            }
-        };
+        let Some((context, device)) = test_context_device() else { return; };
 
-        let pool = SyclMemPool::builder(queue, 0).build().expect("pool build");
+        let pool = SyclMemPool::builder(context, device, 0)
+            .build()
+            .expect("pool build");
         drop(pool);
     }
 
     #[test]
     fn test_pool_best_fit_selection() {
-        let queue = match SyclQueue::new_for_device_ordinal(0) {
-            Ok(q) => q,
-            Err(e) => {
-                eprintln!("Skipping test - no SYCL device: {e}");
-                return;
-            }
-        };
+        let Some((context, device)) = test_context_device() else { return; };
 
-        let pool = SyclMemPool::builder(queue, 0).build().expect("pool build");
+        let pool = SyclMemPool::builder(context, device, 0)
+            .build()
+            .expect("pool build");
 
         // Allocate 4K and 8K blocks.
         let ptr_4k = pool.alloc(4096).expect("alloc 4K");
@@ -514,30 +538,22 @@ mod tests {
 
     #[test]
     fn test_pool_alloc_zero_size_error() {
-        let queue = match SyclQueue::new_for_device_ordinal(0) {
-            Ok(q) => q,
-            Err(e) => {
-                eprintln!("Skipping test - no SYCL device: {e}");
-                return;
-            }
-        };
+        let Some((context, device)) = test_context_device() else { return; };
 
-        let pool = SyclMemPool::builder(queue, 0).build().expect("pool build");
+        let pool = SyclMemPool::builder(context, device, 0)
+            .build()
+            .expect("pool build");
         let result = pool.alloc(0);
         assert!(result.is_err(), "alloc(0) should return an error");
     }
 
     #[test]
     fn test_pool_multiple_alloc_free_cycles() {
-        let queue = match SyclQueue::new_for_device_ordinal(0) {
-            Ok(q) => q,
-            Err(e) => {
-                eprintln!("Skipping test - no SYCL device: {e}");
-                return;
-            }
-        };
+        let Some((context, device)) = test_context_device() else { return; };
 
-        let pool = SyclMemPool::builder(queue, 0).build().expect("pool build");
+        let pool = SyclMemPool::builder(context, device, 0)
+            .build()
+            .expect("pool build");
 
         // Run 100 alloc/free cycles with same size — should always reuse.
         let mut last_ptr = 0u64;
@@ -556,16 +572,12 @@ mod tests {
     fn test_pool_concurrent_access() {
         use std::sync::Arc;
 
-        let queue = match SyclQueue::new_for_device_ordinal(0) {
-            Ok(q) => q,
-            Err(e) => {
-                eprintln!("Skipping test - no SYCL device: {e}");
-                return;
-            }
-        };
+        let Some((context, device)) = test_context_device() else { return; };
 
         let pool = Arc::new(
-            SyclMemPool::builder(queue, 0).build().expect("pool build"),
+            SyclMemPool::builder(context, device, 0)
+                .build()
+                .expect("pool build"),
         );
 
         let mut handles = Vec::new();
@@ -587,15 +599,11 @@ mod tests {
 
     #[test]
     fn test_pool_free_null_ptr_noop() {
-        let queue = match SyclQueue::new_for_device_ordinal(0) {
-            Ok(q) => q,
-            Err(e) => {
-                eprintln!("Skipping test - no SYCL device: {e}");
-                return;
-            }
-        };
+        let Some((context, device)) = test_context_device() else { return; };
 
-        let pool = SyclMemPool::builder(queue, 0).build().expect("pool build");
+        let pool = SyclMemPool::builder(context, device, 0)
+            .build()
+            .expect("pool build");
 
         // free(0, _) is a no-op, not an error.
         let result = pool.free(0, 0);
@@ -609,15 +617,11 @@ mod tests {
 
     #[test]
     fn test_pool_free_ignores_size_hint() {
-        let queue = match SyclQueue::new_for_device_ordinal(0) {
-            Ok(q) => q,
-            Err(e) => {
-                eprintln!("Skipping test - no SYCL device: {e}");
-                return;
-            }
-        };
+        let Some((context, device)) = test_context_device() else { return; };
 
-        let pool = SyclMemPool::builder(queue, 0).build().expect("pool build");
+        let pool = SyclMemPool::builder(context, device, 0)
+            .build()
+            .expect("pool build");
 
         // A tracked ptr must be recycled using its real size, regardless of the
         // caller-supplied hint. This guards the size-accounting fix.

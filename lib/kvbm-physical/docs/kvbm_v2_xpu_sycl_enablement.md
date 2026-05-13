@@ -505,8 +505,9 @@ classDiagram
 
     class SyclDeviceContext {
         <<xpu backend>>
-        -cache: SyclContextCache
-        +create_stream() round-robin
+        -device: Arc<SyclDevice>
+        -shared_context: Arc<SyclContext>
+        +create_stream() fresh SyclQueue each call
         +allocate_device() tracked
         +allocate_pinned() NUMA-aware
         +create_memory_pool() SyclMemPoolWrapper
@@ -665,7 +666,8 @@ classDiagram
     }
 
     class SyclMemPool {
-        -queue: Arc~SyclQueue~
+        -context: Arc~SyclContext~
+        -device: Arc~SyclDevice~
         -inner: Mutex~PoolInner~
         -release_threshold: u64
         +alloc(size) Result~u64~
@@ -692,7 +694,7 @@ classDiagram
 
     class SyclPinnedAllocator {
         <<kvbm-physical>>
-        -queue: SyclQueue
+        -context: Arc<SyclContext>
         +alloc_pinned() sycl::malloc_host
     }
 
@@ -805,10 +807,11 @@ pool; neither CUDA nor SYCL binds queues to distinct engine classes today,
 so splitting copy vs. compute into separate pools gave no concurrency
 benefit. The two-pool layout matches upstream `ai-dynamo/dynamo` CUDA.
 
-On SYCL the `SyclContextCache` holds a bounded pool of in-order
-`sycl::queue`s, all built on the same `sycl::context` as the alloc queue so
-USM pointers are valid across the pool (SYCL spec requires this). Pool size
-is controlled by `KVBM_SYCL_STREAM_POOL_SIZE` (default 4).
+On SYCL, `SyclDeviceContext::create_stream()` returns a fresh in-order
+`sycl::queue` on each call — the stream pool lives entirely in
+`TransferContext` (matching the CUDA shape). Every queue kvbm-physical
+hands out is bound to the shared multi-device `SyclContext`. Pool width is
+`TransferContext::num_streams` (default 4).
 
 ### Events
 
@@ -879,8 +882,9 @@ pub trait PinnedAllocator: Send + Sync + 'static {
 
 `CudaPinnedAllocator` (in `device/cuda/mod.rs`) binds the CUDA context to the
 pinned worker thread before calling `cuMemHostAlloc`. `SyclPinnedAllocator`
-(in `device/sycl/mod.rs`) calls `queue.malloc_host(size)` — no context
-binding is required. After the backend allocation returns, the worker writes
+(in `device/sycl/mod.rs`) calls `context.malloc_host(size)` — allocation is
+context-scoped, so no queue or thread binding is needed. After the backend
+allocation returns, the worker writes
 one byte per page to force first-touch on the correct node.
 
 ### Collectives

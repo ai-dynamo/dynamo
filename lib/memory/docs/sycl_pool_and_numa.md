@@ -140,10 +140,9 @@ Two implementations live in `kvbm-physical`:
 
 - `CudaPinnedAllocator` — binds the CUDA context to the pinned worker
   thread, then calls `cuMemHostAlloc(DEVICEMAP)`.
-- `SyclPinnedAllocator` — just calls `queue.malloc_host(size)`. No
-  context binding is required (SYCL USM host alloc is bound to the
-  context the queue was created with, which is already the correct
-  one).
+- `SyclPinnedAllocator` — holds an `Arc<SyclContext>` and calls
+  `context.malloc_host(size)`. SYCL USM host allocation is context-scoped,
+  so the allocator doesn't need a queue at all.
 
 ### `NumaWorkerPool` topology
 

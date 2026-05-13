@@ -7,92 +7,154 @@
 //! `sycl::queue` (in-order) is the single ordered execution context per stream
 //! — matching CUDA stream semantics exactly.
 //!
-//! All device operations route through `oneapi_rs::safe` (RAII wrappers).
-//! No `oneapi_rs::sys` calls remain after the P1–P6 oneapi-rs patches.
+//! # Process-wide shared SyclContext
+//!
+//! A single multi-device [`SyclContext`] spans every visible **discrete
+//! Level Zero GPU** in the process. Every `SyclDeviceContext` binds its
+//! queues to this shared context.
+//!
 
 use crate::device::traits::*;
 use anyhow::Result;
-use oneapi_rs::safe::{SyclDevice, SyclEvent, SyclQueue};
+use oneapi_rs::safe::{SyclContext, SyclDevice, SyclDeviceType, SyclEvent, SyclQueue};
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-// =====================================================================
-// Context cache (one per device_id, shared across streams)
-// =====================================================================
+/// Backend string reported by SYCL for Level Zero devices.
+const SYCL_BACKEND_LEVEL_ZERO: &str = "level_zero";
 
-struct SyclContextCache {
-    device_id: u32,
-    /// A "context-level" queue used for allocation/free (never for stream work).
-    /// SYCL ties USM allocation to a device+context; we use this queue's context.
-    alloc_queue: Arc<SyclQueue>,
-    /// Bounded pool of SYCL queues for stream use. All queues share the same
-    /// SYCL context as `alloc_queue` so USM pointers are valid across them.
-    /// Pool size is controlled by `KVBM_SYCL_STREAM_POOL_SIZE` (default 4).
-    stream_pool: Vec<Arc<SyclQueue>>,
-    /// Round-robin counter for stream pool assignment.
-    next_stream: AtomicUsize,
+/// Decide whether a `SyclDevice` is a discrete Level Zero GPU eligible
+/// for inclusion in the shared multi-device context.
+///
+/// The filter requires:
+/// - `backend == level_zero` 
+/// - `device_type == GPU` 
+/// - `is_integrated == false`
+///
+pub fn is_discrete_level_zero_gpu(device: &SyclDevice) -> bool {
+    let Ok(info) = device.info() else { return false };
+    info.backend == SYCL_BACKEND_LEVEL_ZERO
+        && info.device_type == SyclDeviceType::Gpu
+        && !info.is_integrated
 }
 
-unsafe impl Send for SyclContextCache {}
-unsafe impl Sync for SyclContextCache {}
-
-impl std::fmt::Debug for SyclContextCache {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SyclContextCache")
-            .field("device_id", &self.device_id)
-            .finish()
-    }
+/// Returns the process-wide list of discrete Level Zero GPUs, in the
+/// stable 0-based order used by `SyclDeviceContext::new(device_id)`.
+///
+pub fn discrete_gpus() -> Result<&'static [Arc<SyclDevice>]> {
+    discrete_gpu_devices()
 }
 
-fn get_or_create_sycl_context(device_id: u32) -> Result<Arc<SyclContextCache>> {
-    static CONTEXT_CACHE: OnceLock<Mutex<HashMap<u32, Arc<SyclContextCache>>>> =
-        OnceLock::new();
-
-    let mut cache = CONTEXT_CACHE
-        .get_or_init(|| Mutex::new(HashMap::new()))
+/// Per-process list of discrete Level Zero GPUs in stable 0-based
+/// order. Built lazily on first call from the SYCL enumeration,
+/// filtered to the discrete-L0-GPU subset. `kvbm-physical`'s
+/// `device_id` indexes into this list.
+fn discrete_gpu_devices() -> Result<&'static [Arc<SyclDevice>]> {
+    // `Mutex<Option<_>>` serialises SYCL enumeration across threads so
+    // the Intel L0 driver sees only one concurrent enumeration. 
+    static DEVICES: OnceLock<Mutex<Option<&'static [Arc<SyclDevice>]>>> = OnceLock::new();
+    let slot = DEVICES.get_or_init(|| Mutex::new(None));
+    let mut guard = slot
         .lock()
-        .unwrap();
-
-    if let Some(cached) = cache.get(&device_id) {
-        return Ok(Arc::clone(cached));
+        .map_err(|e| anyhow::anyhow!("discrete GPU device list mutex poisoned: {}", e))?;
+    if let Some(slice) = *guard {
+        return Ok(slice);
     }
 
-    let alloc_queue = SyclQueue::new_for_device_ordinal(device_id as usize)
-        .map_err(|e| anyhow::anyhow!("Failed to create SYCL queue for device {}: {}", device_id, e))?;
+    let device_count = SyclDevice::count()
+        .map_err(|e| anyhow::anyhow!("SyclDevice::count failed: {}", e))?;
+    let mut devs: Vec<Arc<SyclDevice>> = Vec::new();
+    let mut skipped: Vec<(usize, String, String, bool)> = Vec::new();
+    for i in 0..device_count {
+        let Ok(dev) = SyclDevice::by_ordinal(i) else { continue };
+        if is_discrete_level_zero_gpu(&dev) {
+            devs.push(dev);
+        } else if let Ok(info) = dev.info() {
+            skipped.push((i, info.backend, info.name, info.is_integrated));
+        }
+    }
 
-    // Build stream pool on the SAME SYCL context as alloc_queue.
-    // This ensures USM pointers allocated via alloc_queue are valid on every
-    // stream queue (SYCL spec: USM allocations are bound to a context).
-    let pool_size: usize = std::env::var("KVBM_SYCL_STREAM_POOL_SIZE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4)
-        .max(1);
-
-    let sycl_context = alloc_queue.context();
-    let stream_pool: Vec<Arc<SyclQueue>> = (0..pool_size)
-        .map(|_| {
-            SyclQueue::new(sycl_context)
-                .map_err(|e| anyhow::anyhow!("Failed to create SYCL stream queue: {}", e))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    if devs.is_empty() {
+        return Err(anyhow::anyhow!(
+            "no discrete Level Zero GPUs visible (SYCL enumerated {} device(s))",
+            device_count,
+        ));
+    }
 
     tracing::info!(
-        "Created SYCL context cache for device {} (stream pool size: {})",
-        device_id, pool_size,
+        "Discovered {} discrete Level Zero GPU(s); skipped {} non-discrete-L0-GPU \
+         enumeration(s): {:?}",
+        devs.len(),
+        skipped.len(),
+        skipped,
     );
 
-    let entry = Arc::new(SyclContextCache {
-        device_id,
-        alloc_queue,
-        stream_pool,
-        next_stream: AtomicUsize::new(0),
-    });
+    // Leak the Vec into a 'static slice; keeps the `Arc<SyclDevice>`
+    // handles alive for the process lifetime, which matches SYCL's
+    // expectation that device handles outlive any context referencing
+    // them.
+    let slice: &'static [Arc<SyclDevice>] = Box::leak(devs.into_boxed_slice());
+    *guard = Some(slice);
+    Ok(slice)
+}
 
-    cache.insert(device_id, Arc::clone(&entry));
-    Ok(entry)
+/// Resolve a `SyclDevice` for the given kvbm-physical `device_id`.
+///
+/// `device_id` is a 0-based ordinal over the discrete Level Zero GPU
+/// subset.
+fn sycl_device(device_id: u32) -> Result<Arc<SyclDevice>> {
+    let devices = discrete_gpu_devices()?;
+    devices
+        .get(device_id as usize)
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "discrete GPU device {} not found (only {} discrete GPU(s) visible)",
+                device_id,
+                devices.len(),
+            )
+        })
+}
+
+/// Returns the process-wide multi-device `SyclContext` spanning every
+/// discrete Level Zero GPU.
+///
+/// Built lazily on first call via `SyclContext::new_multi`. USM
+/// pointers allocated through this context are addressable from every
+/// queue bound to any of its devices (up to the limits imposed by
+/// `zeDeviceCanAccessPeer` for direct cross-device memcpy).
+fn shared_sycl_context() -> Result<Arc<SyclContext>> {
+    // The Mutex serialises context construction across threads so the
+    // Intel L0 driver sees only one `SyclContext::new_multi` call at a
+    // time; parallel construction can deadlock or waste work. `Option`
+    // inside the mutex holds the constructed context — once populated,
+    // further callers clone cheaply.
+    static SHARED_CTX: OnceLock<Mutex<Option<Arc<SyclContext>>>> = OnceLock::new();
+    let slot = SHARED_CTX.get_or_init(|| Mutex::new(None));
+    let mut guard = slot
+        .lock()
+        .map_err(|e| anyhow::anyhow!("shared SyclContext mutex poisoned: {}", e))?;
+    if let Some(ctx) = guard.as_ref() {
+        return Ok(Arc::clone(ctx));
+    }
+
+    let devices = discrete_gpu_devices()?;
+    let ctx = SyclContext::new_multi(devices).map_err(|e| {
+        anyhow::anyhow!(
+            "SyclContext::new_multi failed for {} discrete GPU(s): {}. \
+             All discrete GPUs must share an L0 platform.",
+            devices.len(),
+            e,
+        )
+    })?;
+    tracing::info!(
+        "Initialised shared multi-device SyclContext spanning {} discrete GPU(s)",
+        devices.len(),
+    );
+
+    *guard = Some(Arc::clone(&ctx));
+    Ok(ctx)
 }
 
 // =====================================================================
@@ -125,13 +187,19 @@ fn untrack_alloc(map: &OnceLock<Mutex<HashMap<u64, u64>>>, ptr_u64: u64) -> bool
 #[derive(Debug)]
 pub struct SyclDeviceContext {
     device_id: u32,
-    cache: Arc<SyclContextCache>,
+    device: Arc<SyclDevice>,
+    /// Process-wide multi-device SYCL context shared across every
+    /// discrete Level Zero GPU. See module docs for filtering rationale.
+    shared_context: Arc<SyclContext>,
 }
 
 impl SyclDeviceContext {
     pub fn new(device_id: u32) -> Result<Self> {
-        let cache = get_or_create_sycl_context(device_id)?;
-        Ok(Self { device_id, cache })
+        Ok(Self {
+            device_id,
+            device: sycl_device(device_id)?,
+            shared_context: shared_sycl_context()?,
+        })
     }
 }
 
@@ -141,20 +209,26 @@ impl DeviceContextOps for SyclDeviceContext {
     }
 
     fn create_stream(&self) -> Result<Box<dyn DeviceStreamOps>> {
-        // Return a queue from the bounded pool (round-robin). All pool queues
-        // share the same SYCL context as alloc_queue, so USM pointers are valid.
-        let pool = &self.cache.stream_pool;
-        let idx = self.cache.next_stream.fetch_add(1, Ordering::Relaxed) % pool.len();
+        // Matches the CUDA implementation's `create_stream` semantics:
+        // every caller gets their own queue.
+        let queue = SyclQueue::new_on_device(&self.shared_context, &self.device)
+            .map_err(|e| anyhow::anyhow!(
+                "SYCL stream creation failed for device {}: {}",
+                self.device_id, e
+            ))?;
         Ok(Box::new(SyclStreamWrapper {
-            queue: Arc::clone(&pool[idx]),
+            queue,
             device_id: self.device_id,
         }))
     }
 
     fn allocate_device(&self, size: usize) -> Result<u64> {
-        let ptr = self.cache.alloc_queue
-            .malloc_device(size)
-            .map_err(|e| anyhow::anyhow!("SYCL device allocation failed ({} bytes): {}", size, e))?;
+        let ptr = self
+            .shared_context
+            .malloc_device(&self.device, size)
+            .map_err(|e| anyhow::anyhow!(
+                "SYCL device allocation failed ({} bytes): {}", size, e
+            ))?;
         let addr = ptr as u64;
         track_alloc(&DEVICE_ALLOCS, addr);
         Ok(addr)
@@ -162,7 +236,7 @@ impl DeviceContextOps for SyclDeviceContext {
 
     fn free_device(&self, ptr: u64) -> Result<()> {
         if untrack_alloc(&DEVICE_ALLOCS, ptr) {
-            self.cache.alloc_queue
+            self.shared_context
                 .free_raw(ptr as *mut c_void)
                 .map_err(|e| anyhow::anyhow!("SYCL free_device failed: {}", e))?;
         } else {
@@ -182,7 +256,7 @@ impl DeviceContextOps for SyclDeviceContext {
             if dynamo_memory::numa::is_numa_enabled() {
                 if let Some(pci) = self.pci_bdf_address() {
                     let allocator = Arc::new(SyclPinnedAllocator {
-                        queue: Arc::clone(&self.cache.alloc_queue),
+                        context: Arc::clone(&self.shared_context),
                     });
                     match dynamo_memory::numa::worker_pool::NumaWorkerPool::global()
                         .allocate_pinned_for_gpu(size, &pci, allocator)
@@ -205,10 +279,13 @@ impl DeviceContextOps for SyclDeviceContext {
             }
         }
 
-        // Fallback: non-NUMA SYCL host allocation
-        let ptr = self.cache.alloc_queue
+        // Fallback: non-NUMA SYCL host allocation.
+        let ptr = self
+            .shared_context
             .malloc_host(size)
-            .map_err(|e| anyhow::anyhow!("SYCL host allocation failed ({} bytes): {}", size, e))?;
+            .map_err(|e| anyhow::anyhow!(
+                "SYCL host allocation failed ({} bytes): {}", size, e
+            ))?;
         let addr = ptr as u64;
         track_alloc(&HOST_ALLOCS, addr);
         Ok(addr)
@@ -216,7 +293,7 @@ impl DeviceContextOps for SyclDeviceContext {
 
     fn free_pinned(&self, ptr: u64) -> Result<()> {
         if untrack_alloc(&HOST_ALLOCS, ptr) {
-            self.cache.alloc_queue
+            self.shared_context
                 .free_raw(ptr as *mut c_void)
                 .map_err(|e| anyhow::anyhow!("SYCL free_pinned failed: {}", e))?;
         } else {
@@ -235,7 +312,8 @@ impl DeviceContextOps for SyclDeviceContext {
         release_threshold: Option<u64>,
     ) -> Result<Box<dyn DeviceMemPoolOps>> {
         let mut builder = dynamo_memory::SyclMemPool::builder(
-            Arc::clone(&self.cache.alloc_queue),
+            Arc::clone(&self.shared_context),
+            Arc::clone(&self.device),
             reserve_size,
         );
         if let Some(threshold) = release_threshold {
@@ -255,31 +333,29 @@ impl DeviceContextOps for SyclDeviceContext {
     }
 
     fn pci_bdf_address(&self) -> Option<String> {
-        SyclDevice::by_ordinal(self.device_id as usize)
-            .ok()
-            .and_then(|dev: Arc<SyclDevice>| dev.info().ok())
-            .and_then(|info| info.pci_address)
+        self.device.info().ok().and_then(|info| info.pci_address)
     }
 }
 
 /// SYCL-specific [`PinnedAllocator`] for NUMA-aware host memory.
 ///
-/// Wraps a `SyclQueue` to call `sycl::malloc_host` on the NUMA-pinned
-/// worker thread. No context binding is needed (unlike CUDA).
+/// Holds an `Arc<SyclContext>` to call `SyclContext::malloc_host` on the
+/// NUMA-pinned worker thread. Pinned USM allocation is context-scoped in
+/// SYCL.
 struct SyclPinnedAllocator {
-    queue: Arc<SyclQueue>,
+    context: Arc<SyclContext>,
 }
 
 impl dynamo_memory::PinnedAllocator for SyclPinnedAllocator {
     fn alloc_pinned(&self, size: usize) -> Result<*mut u8, String> {
-        self.queue
+        self.context
             .malloc_host(size)
             .map(|p| p as *mut u8)
             .map_err(|e| format!("SYCL malloc_host failed: {}", e))
     }
 
     fn free_pinned(&self, ptr: *mut u8) -> Result<(), String> {
-        self.queue
+        self.context
             .free_raw(ptr as *mut c_void)
             .map_err(|e| format!("SYCL free_raw failed: {}", e))
     }

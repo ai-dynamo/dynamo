@@ -413,7 +413,7 @@ unsafe impl Sync for OneCclCollectives {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oneapi_rs::safe::{DevicePtr, SyclBuffer, SyclDevice, SyclQueue};
+    use oneapi_rs::safe::{DevicePtr, SyclSlice, SyclDevice, SyclQueue};
     use std::sync::Arc;
 
     /// Get the number of XPU (SYCL) devices available.
@@ -422,7 +422,7 @@ mod tests {
     }
 
     /// Allocate a device buffer filled with a byte pattern.
-    fn alloc_filled(queue: &Arc<SyclQueue>, size: usize, pattern: u8) -> SyclBuffer<u8> {
+    fn alloc_filled(queue: &Arc<SyclQueue>, size: usize, pattern: u8) -> SyclSlice<u8> {
         let host_data = vec![pattern; size];
         let mut buffer = queue.alloc_zeros::<u8>(size).expect("Failed to allocate buffer");
         queue
@@ -432,12 +432,12 @@ mod tests {
     }
 
     /// Allocate a zeroed device buffer.
-    fn alloc_zeroed(queue: &Arc<SyclQueue>, size: usize) -> SyclBuffer<u8> {
+    fn alloc_zeroed(queue: &Arc<SyclQueue>, size: usize) -> SyclSlice<u8> {
         queue.alloc_zeros::<u8>(size).expect("Failed to allocate zeroed buffer")
     }
 
     /// Read device buffer back to host.
-    fn read_back(queue: &Arc<SyclQueue>, buffer: &SyclBuffer<u8>) -> Vec<u8> {
+    fn read_back(queue: &Arc<SyclQueue>, buffer: &SyclSlice<u8>) -> Vec<u8> {
         queue.clone_dtoh(buffer).expect("Failed to copy from device")
     }
 
@@ -627,7 +627,7 @@ mod tests {
         let queue = SyclQueue::new_for_device_ordinal(0)
             .expect("Failed to create SYCL queue");
 
-        let buffers: Vec<SyclBuffer<u8>> = (0..num_regions)
+        let buffers: Vec<SyclSlice<u8>> = (0..num_regions)
             .map(|region_idx| {
                 if rank == 0 {
                     let pattern = (region_idx + 1) as u8 * 0x11;

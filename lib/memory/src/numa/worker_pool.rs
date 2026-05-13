@@ -652,36 +652,36 @@ mod cuda_tests {
 #[cfg(all(test, feature = "testing-xpu-sycl"))]
 mod sycl_tests {
     use super::*;
-    use oneapi_rs::safe::{SyclDevice, SyclQueue};
+    use oneapi_rs::safe::{SyclContext, SyclDevice};
 
     /// Test SYCL allocator that mirrors the real SyclPinnedAllocator
-    /// in kvbm-physical::device::sycl.
     struct TestSyclAllocator {
-        queue: Arc<SyclQueue>,
+        context: Arc<SyclContext>,
     }
 
     impl PinnedAllocator for TestSyclAllocator {
         fn alloc_pinned(&self, size: usize) -> Result<*mut u8, String> {
-            self.queue
+            self.context
                 .malloc_host(size)
                 .map(|p| p as *mut u8)
                 .map_err(|e| format!("SYCL malloc_host: {}", e))
         }
 
         fn free_pinned(&self, ptr: *mut u8) -> Result<(), String> {
-            self.queue
+            self.context
                 .free_raw(ptr as *mut std::ffi::c_void)
                 .map_err(|e| format!("SYCL free_raw: {}", e))
         }
     }
 
-    fn sycl_queue() -> Option<Arc<SyclQueue>> {
-        SyclQueue::new_for_device_ordinal(0).ok()
+    fn sycl_context() -> Option<Arc<SyclContext>> {
+        let device = SyclDevice::by_ordinal(0).ok()?;
+        SyclContext::new(&device).ok()
     }
 
-    fn test_allocator(queue: &Arc<SyclQueue>) -> Arc<dyn PinnedAllocator> {
+    fn test_allocator(context: &Arc<SyclContext>) -> Arc<dyn PinnedAllocator> {
         Arc::new(TestSyclAllocator {
-            queue: Arc::clone(queue),
+            context: Arc::clone(context),
         })
     }
 
@@ -692,25 +692,25 @@ mod sycl_tests {
 
     #[test]
     fn test_sycl_worker_allocate_pinned() {
-        let queue = match sycl_queue() {
-            Some(q) => q,
+        let context = match sycl_context() {
+            Some(c) => c,
             None => { println!("No SYCL device, skipping"); return; }
         };
         let node = NumaNode(0);
         let worker = NumaWorker::spawn(node).unwrap();
 
-        let send_ptr = worker.allocate(4096, test_allocator(&queue)).unwrap();
+        let send_ptr = worker.allocate(4096, test_allocator(&context)).unwrap();
         let ptr = send_ptr.0;
         assert!(!ptr.is_null());
 
-        // Free via the allocator
-        queue.free_raw(ptr as *mut std::ffi::c_void).unwrap();
+        // Free through the context.
+        context.free_raw(ptr as *mut std::ffi::c_void).unwrap();
     }
 
     #[test]
     fn test_sycl_allocate_pinned_for_gpu() {
-        let queue = match sycl_queue() {
-            Some(q) => q,
+        let context = match sycl_context() {
+            Some(c) => c,
             None => { println!("No SYCL device, skipping"); return; }
         };
         let pci = match test_pci_address() {
@@ -719,11 +719,11 @@ mod sycl_tests {
         };
 
         let pool = NumaWorkerPool::new();
-        match pool.allocate_pinned_for_gpu(8192, &pci, test_allocator(&queue)).unwrap() {
+        match pool.allocate_pinned_for_gpu(8192, &pci, test_allocator(&context)).unwrap() {
             Some(ptr) => {
                 assert!(!ptr.is_null());
                 println!("SYCL NUMA-aware allocation succeeded for PCI {}", pci);
-                queue.free_raw(ptr as *mut std::ffi::c_void).unwrap();
+                context.free_raw(ptr as *mut std::ffi::c_void).unwrap();
             }
             None => {
                 println!(
@@ -736,8 +736,8 @@ mod sycl_tests {
 
     #[test]
     fn test_sycl_worker_reuse() {
-        let queue = match sycl_queue() {
-            Some(q) => q,
+        let context = match sycl_context() {
+            Some(c) => c,
             None => { println!("No SYCL device, skipping"); return; }
         };
         let pci = match test_pci_address() {
@@ -746,16 +746,16 @@ mod sycl_tests {
         };
 
         let pool = NumaWorkerPool::new();
-        let r1 = pool.allocate_pinned_for_gpu(1024, &pci, test_allocator(&queue)).unwrap();
-        let r2 = pool.allocate_pinned_for_gpu(1024, &pci, test_allocator(&queue)).unwrap();
+        let r1 = pool.allocate_pinned_for_gpu(1024, &pci, test_allocator(&context)).unwrap();
+        let r2 = pool.allocate_pinned_for_gpu(1024, &pci, test_allocator(&context)).unwrap();
 
         match (r1, r2) {
             (Some(ptr1), Some(ptr2)) => {
                 assert!(!ptr1.is_null());
                 assert!(!ptr2.is_null());
                 assert_ne!(ptr1, ptr2);
-                queue.free_raw(ptr1 as *mut std::ffi::c_void).unwrap();
-                queue.free_raw(ptr2 as *mut std::ffi::c_void).unwrap();
+                context.free_raw(ptr1 as *mut std::ffi::c_void).unwrap();
+                context.free_raw(ptr2 as *mut std::ffi::c_void).unwrap();
             }
             (None, None) => {
                 println!("NUMA node unknown, both allocations skipped");
@@ -766,8 +766,8 @@ mod sycl_tests {
 
     #[test]
     fn test_sycl_zero_size_allocation() {
-        let queue = match sycl_queue() {
-            Some(q) => q,
+        let context = match sycl_context() {
+            Some(c) => c,
             None => { println!("No SYCL device, skipping"); return; }
         };
         let pci = match test_pci_address() {
@@ -776,7 +776,7 @@ mod sycl_tests {
         };
 
         let pool = NumaWorkerPool::new();
-        let result = pool.allocate_pinned_for_gpu(0, &pci, test_allocator(&queue));
+        let result = pool.allocate_pinned_for_gpu(0, &pci, test_allocator(&context));
         match result {
             Ok(None) => println!("NUMA node unknown, zero-size check not reached"),
             Err(e) => assert!(e.contains("zero")),

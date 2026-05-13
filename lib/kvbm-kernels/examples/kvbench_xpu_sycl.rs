@@ -403,47 +403,55 @@ impl D2DxStaging {
 // ---------------------------------------------------------------------------
 // RAII wrappers for raw USM allocations
 // ---------------------------------------------------------------------------
+//
 
-/// Device memory allocated via `sycl::malloc_device`.
+/// Device memory allocated via `sycl::malloc_device(bytes, device, context)`.
 struct DeviceMem {
     ptr: *mut c_void,
-    queue: Arc<SyclQueue>,
+    /// Kept so `Drop` can call `sycl::free(ptr, context)`.
+    context: Arc<SyclContext>,
 }
 
 impl DeviceMem {
     fn new(queue: &Arc<SyclQueue>, bytes: usize) -> Self {
-        let ptr = queue.malloc_device(bytes).expect("malloc_device failed");
-        Self { ptr, queue: Arc::clone(queue) }
+        let context = Arc::clone(queue.context());
+        let device = queue.device();
+        let ptr = context
+            .malloc_device(device, bytes)
+            .expect("malloc_device failed");
+        Self { ptr, context }
     }
 }
 
 impl Drop for DeviceMem {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
-            let _ = self.queue.free_raw(self.ptr);
+            let _ = self.context.free_raw(self.ptr);
         }
     }
 }
 
-/// Host-pinned (USM host) memory allocated via `sycl::malloc_host`.
+/// Host-pinned (USM host) memory allocated via `sycl::malloc_host(bytes, context)`.
 struct HostMem {
     ptr: *mut c_void,
-    queue: Arc<SyclQueue>,
+    /// Kept so `Drop` can call `sycl::free(ptr, context)`.
+    context: Arc<SyclContext>,
 }
 
 impl HostMem {
     fn new(queue: &Arc<SyclQueue>, bytes: usize) -> Self {
-        let ptr = queue.malloc_host(bytes).expect("malloc_host failed");
+        let context = Arc::clone(queue.context());
+        let ptr = context.malloc_host(bytes).expect("malloc_host failed");
         // Fill with pattern to avoid zero-page tricks.
         unsafe { std::ptr::write_bytes(ptr as *mut u8, 0xAB, bytes) };
-        Self { ptr, queue: Arc::clone(queue) }
+        Self { ptr, context }
     }
 }
 
 impl Drop for HostMem {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
-            let _ = self.queue.free_raw(self.ptr);
+            let _ = self.context.free_raw(self.ptr);
         }
     }
 }
