@@ -343,7 +343,15 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
         def __init__(self, **kwargs):
             calls.append(kwargs)
 
+        def shutdown(self):
+            pass
+
     monkeypatch.setattr(publisher_mod, "KvEventPublisher", FakeKvEventPublisher)
+    monkeypatch.setattr(
+        publisher_mod,
+        "get_zmq_socket",
+        lambda *args, **kwargs: SimpleNamespace(close=lambda linger=0: None),
+    )
     monkeypatch.setattr(publisher_mod, "get_local_ip_auto", lambda: "127.0.0.1")
     monkeypatch.setattr(
         publisher_mod,
@@ -371,7 +379,9 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
         dynamo_args=SimpleNamespace(enable_local_indexer=True),
     )
     publisher = DynamoSglangPublisher(
-        engine=SimpleNamespace(),
+        engine=SimpleNamespace(
+            port_args=SimpleNamespace(metrics_ipc_name="ipc://metrics")
+        ),
         config=config,
         generate_endpoint=SimpleNamespace(),
         component_gauges=SimpleNamespace(),
@@ -381,3 +391,4 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
     publisher.init_kv_event_publish()
 
     assert calls[0]["worker_id"] == 0
+    publisher.cleanup()
