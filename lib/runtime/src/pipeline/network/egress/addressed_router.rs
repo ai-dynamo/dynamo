@@ -270,27 +270,28 @@ where
                 return Err(e.into());
             }
         };
-        // Issue #9466: long-context workloads serialize ~300 KB JSON bodies on
-        // the tokio worker, which blocks every other task on that worker for
-        // ~1.5 ms per request. Punt the body serialization to the blocking
-        // pool. Trade-off: spawn_blocking adds a small wakeup cost (single-
-        // digit µs) on every request including small ones, but keeps tokio
-        // workers free for I/O and shorter critical sections.
-        let data = match tokio::task::spawn_blocking(move || serde_json::to_vec(&request)).await {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => {
+        // Issue #9466: long-context body serialization (~1.5 ms / request for
+        // 300 KB JSON) blocks every other task on the tokio worker. Mark this
+        // span as blocking so the runtime can move other pending work to a
+        // sibling worker. `block_in_place` only signals the scheduler — it
+        // doesn't transfer the task to the blocking pool — so the overhead
+        // for small bodies is one atomic flag set, not the 10-30 µs of
+        // `spawn_blocking`. Multi-thread runtime only; single-thread falls
+        // back to inline.
+        let data = if tokio::runtime::Handle::try_current()
+            .is_ok_and(|h| matches!(h.runtime_flavor(), tokio::runtime::RuntimeFlavor::MultiThread))
+        {
+            tokio::task::block_in_place(|| serde_json::to_vec(&request))
+        } else {
+            serde_json::to_vec(&request)
+        };
+        let data = match data {
+            Ok(v) => v,
+            Err(e) => {
                 if let Some(subject) = &recv_subject {
                     self.resp_transport.cancel_recv_stream(subject).await;
                 }
                 return Err(e.into());
-            }
-            Err(join_err) => {
-                if let Some(subject) = &recv_subject {
-                    self.resp_transport.cancel_recv_stream(subject).await;
-                }
-                return Err(anyhow::anyhow!(
-                    "request body serialization task failed to join: {join_err}"
-                ));
             }
         };
 
