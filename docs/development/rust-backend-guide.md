@@ -282,6 +282,10 @@ impl MyBackend {
             endpoint: args.common.endpoint,
             endpoint_types: args.common.endpoint_types,
             custom_jinja_template: args.common.custom_jinja_template,
+            // Pass `--disaggregation-mode` from `CommonArgs` through to the
+            // Worker — without this line the worker silently registers as
+            // Aggregated regardless of what the operator passed.
+            disaggregation_mode: args.common.disaggregation_mode,
             model_name: args.model,
             served_model_name: args.served_model_name,
             ..Default::default()
@@ -296,6 +300,11 @@ impl MyBackend {
 which is the only mode `Worker` currently supports — the framework
 validates this at startup. Engines needing raw text or tensor inputs
 aren't supported yet.
+
+If your engine branches on the disaggregation role inside `generate`
+(prefill vs decode), keep the same `DisaggregationMode` on your engine
+struct so the runtime registration (`WorkerConfig`) and the per-request
+dispatch stay in lockstep.
 
 ## Step 4: Implement the `LLMEngine` trait
 
