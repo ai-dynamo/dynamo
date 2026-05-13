@@ -28,9 +28,6 @@ To enable this feature, you should set the following flag while launching the ba
 python -m dynamo.<backend> --help
 ```
 
-> [!NOTE]
-> If no tool call parser is provided by the user, Dynamo will try to use default tool call parsing based on &lt;TOOLCALL&gt; and &lt;|python_tag|&gt; tool tags.
-
 > [!TIP]
 > If your model's default chat template doesn't support tool calling, but the model itself does, you can specify a custom chat template per worker
 > with `python -m dynamo.<backend> --custom-jinja-template </path/to/template.jinja>`.
@@ -79,8 +76,8 @@ parser exists for this format.
 ### Launch Dynamo Frontend and Backend
 
 ```bash
-# launch backend worker
-python -m dynamo.vllm --model openai/gpt-oss-20b --dyn-tool-call-parser harmony
+# launch backend worker (or dynamo.vllm)
+python -m dynamo.sglang --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3
 
 # launch frontend worker
 python -m dynamo.frontend
@@ -88,41 +85,68 @@ python -m dynamo.frontend
 
 ### Tool Calling Request Example
 
-```python
-from openai import OpenAI
-import json
-
-client = OpenAI(base_url="http://localhost:8081/v1", api_key="dummy")
-
-def get_weather(location: str, unit: str):
-    return f"Getting the weather for {location} in {unit}..."
-tool_functions = {"get_weather": get_weather}
-
-tools = [{
-    "type": "function",
-    "function": {
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3.5-4B",
+    "messages": [
+      {"role": "user", "content": "What is the weather in San Francisco and New York?"}
+    ],
+    "tools": [{
+      "type": "function",
+      "function": {
         "name": "get_weather",
-        "description": "Get the current weather in a given location",
+        "description": "Get the current weather for a location.",
         "parameters": {
-            "type": "object",
-            "properties": {
-                "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
-                "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
-            },
-            "required": ["location", "unit"]
+          "type": "object",
+          "properties": {"location": {"type": "string"}},
+          "required": ["location"]
         }
-    }
-}]
+      }
+    }],
+    "tool_choice": "auto"
+  }'
+```
 
-response = client.chat.completions.create(
-    model="openai/gpt-oss-20b",
-    messages=[{"role": "user", "content": "What's the weather like in San Francisco in Celsius?"}],
-    tools=tools,
-    tool_choice="auto",
-    max_tokens=10000
-)
-tool_call = response.choices[0].message.tool_calls[0].function
-print(f"Function called: {tool_call.name}")
-print(f"Arguments: {tool_call.arguments}")
-print(f"Result: {tool_functions[tool_call.name](**json.loads(tool_call.arguments))}")
+Dynamo parses the tool calls out of the model output and surfaces them as
+OpenAI-compatible `tool_calls` entries on the response:
+
+```json
+{
+  "id": "chatcmpl-b415caad-9be0-4d9e-ac6d-9d23bfe57703",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "reasoning_content": "The user is asking about the weather in two cities: San Francisco and New York. I need to call the get_weather function for each city. I'll make two separate function calls to get the weather information for both locations.\n",
+        "tool_calls": [
+          {
+            "id": "call-56223a95-3d14-4433-a94e-011f106c0e40",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\":\"San Francisco\"}"
+            }
+          },
+          {
+            "id": "call-d5b5772b-6b0c-4120-ad01-623278a937fe",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"location\":\"New York\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls",
+      "logprobs": null
+    }
+  ],
+  "created": 1778653281,
+  "model": "Qwen/Qwen3.5-4B",
+  ...
+}
 ```
