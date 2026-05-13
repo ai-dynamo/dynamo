@@ -52,7 +52,6 @@ FIXTURES_ROOT = Path(__file__).parent / "fixtures"
 # Y` after vLLM renamed Y) is a real bug and must surface as a test ERROR,
 # not a green skip — so we use `pytest.importorskip` inline rather than a
 # blanket `try: import X except ImportError`.
-IMPL_NAMES: tuple[str, ...] = ("dynamo", "vllm", "sglang")
 _PACKAGE: dict[str, str] = {
     "dynamo": "dynamo._core",
     "vllm": "vllm",
@@ -95,36 +94,15 @@ def _load_fixtures() -> list[tuple[str, str, dict[str, Any]]]:
 FIXTURES = _load_fixtures()
 
 
-def _marks_for(impl: str) -> list:
-    """Per-param marks. Only the impl marker (`vllm`/`sglang`) — used by CI
-    shards to filter via `-m vllm` / `-m sglang`. `dynamo` gets no marker so
-    it runs in every shard (it's the reference we compare against)."""
-    if impl in ("vllm", "sglang"):
-        return [getattr(pytest.mark, impl)]
-    return []
-
-
-@pytest.mark.parametrize(
-    "family,case_id,fixture,impl_name",
-    [
-        pytest.param(
-            f,
-            c,
-            fx,
-            impl,
-            marks=_marks_for(impl),
-            id=f"{f}/{c}#{impl}",
-        )
-        for (f, c, fx) in FIXTURES
-        for impl in IMPL_NAMES
-    ],
-)
-def test_parity(
+def _run_parity_case(
     family: str,
     case_id: str,
     fixture: dict[str, Any],
     impl_name: str,
 ) -> None:
+    """Single-case parity assertion shared by all three entry points
+    (the all-impls `test_parity` plus the impl-specific
+    `test_parity_vllm` / `test_parity_sglang`)."""
     # Skip ONLY when the optional package itself is missing — wrapper-internal
     # ImportError (e.g. a stale upstream API ref after a vLLM/SGLang rename)
     # propagates as a real test ERROR rather than a silent green skip.
@@ -161,3 +139,48 @@ def test_parity(
         f"expected: {expected_canonical}\n"
         f"got:      {got_canonical}\n"
     )
+
+
+# Dynamo-only entry. No engine marker → runs in the default (dynamo-runtime)
+# CI lane. vLLM and SGLang have their own dedicated test functions below.
+@pytest.mark.parametrize(
+    "family,case_id,fixture",
+    [pytest.param(f, c, fx, id=f"{f}/{c}") for (f, c, fx) in FIXTURES],
+)
+def test_parity(
+    family: str,
+    case_id: str,
+    fixture: dict[str, Any],
+) -> None:
+    _run_parity_case(family, case_id, fixture, "dynamo")
+
+
+# vLLM-only entry: function-level `vllm` marker lets the vllm-runtime CI
+# lane select this with `pytest -m vllm`. Each parametrized case targets
+# the same fixture set but only the vllm path; dynamo/sglang are not
+# exercised here.
+@pytest.mark.vllm
+@pytest.mark.parametrize(
+    "family,case_id,fixture",
+    [pytest.param(f, c, fx, id=f"{f}/{c}") for (f, c, fx) in FIXTURES],
+)
+def test_parity_vllm(
+    family: str,
+    case_id: str,
+    fixture: dict[str, Any],
+) -> None:
+    _run_parity_case(family, case_id, fixture, "vllm")
+
+
+# SGLang-only entry (sibling of test_parity_vllm; same shape).
+@pytest.mark.sglang
+@pytest.mark.parametrize(
+    "family,case_id,fixture",
+    [pytest.param(f, c, fx, id=f"{f}/{c}") for (f, c, fx) in FIXTURES],
+)
+def test_parity_sglang(
+    family: str,
+    case_id: str,
+    fixture: dict[str, Any],
+) -> None:
+    _run_parity_case(family, case_id, fixture, "sglang")
