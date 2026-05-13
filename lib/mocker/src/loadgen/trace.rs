@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
+use dynamo_data_gen::MooncakeRow;
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::protocols::{
     BlockHashOptions, ExternalSequenceBlockHash, WorkerId, XXH3_SEED, compute_block_hash_for_seq,
@@ -24,26 +25,6 @@ use super::types::{
     SessionPartitionSpec, SessionTrace, SyntheticTraceSpec, Trace, TurnTrace,
 };
 use crate::common::protocols::DirectRequest;
-
-#[derive(Debug, Deserialize)]
-struct RawMooncakeRecord {
-    #[serde(default)]
-    session_id: Option<String>,
-    #[serde(default)]
-    timestamp: Option<f64>,
-    #[serde(default)]
-    created_time: Option<f64>,
-    #[serde(default, alias = "input_tokens")]
-    input_length: Option<usize>,
-    #[serde(default, alias = "output_tokens")]
-    output_length: Option<usize>,
-    #[serde(default)]
-    hash_ids: Option<Vec<u64>>,
-    #[serde(default)]
-    delay: Option<f64>,
-    #[serde(default)]
-    delay_ms: Option<f64>,
-}
 
 #[derive(Debug, Deserialize)]
 struct RawAppliedComputeAgenticRecord {
@@ -158,7 +139,7 @@ impl Trace {
                 continue;
             }
 
-            let raw: RawMooncakeRecord = serde_json::from_str(&line).with_context(|| {
+            let raw: MooncakeRow = serde_json::from_str(&line).with_context(|| {
                 format!(
                     "failed to parse line {} from {} as JSON",
                     line_idx + 1,
@@ -189,8 +170,8 @@ impl Trace {
             let output_length = raw
                 .output_length
                 .ok_or_else(|| anyhow!("trace line {} is missing output_length", line_idx + 1))?;
-            let timestamp_ms = raw.timestamp.or(raw.created_time);
-            let explicit_delay_ms = raw.delay.or(raw.delay_ms);
+            let timestamp_ms = raw.timestamp;
+            let explicit_delay_ms = raw.delay;
 
             let session_index = *session_indices
                 .entry(session_id.clone())

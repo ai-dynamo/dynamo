@@ -2350,6 +2350,7 @@ dependencies = [
  "chrono",
  "clap 4.6.1",
  "crossbeam-channel",
+ "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-mocker",
  "dynamo-tokens",
@@ -2387,6 +2388,19 @@ name = "dynamo-config"
 version = "1.2.0"
 dependencies = [
  "anyhow",
+]
+
+[[package]]
+name = "dynamo-data-gen"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "dynamo-tokens",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -2554,6 +2568,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
  "futures",
