@@ -17,8 +17,15 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: '[TOOL_CALLS]not a json array[/TOOL_CALLS]'
+      dynamo:
+        calls: []
+        normal_text: '[TOOL_CALLS]not a json array[/TOOL_CALLS]'
+      vllm:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        diverges: true
+        reason: "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)"
     # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
     # vllm produces:
     #   calls: []
@@ -30,8 +37,15 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"][/TOOL_CALLS]'
+      dynamo:
+        calls: []
+        normal_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"][/TOOL_CALLS]'
+      vllm:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        diverges: true
+        reason: "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)"
     # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
     # vllm produces:
     #   calls: []
@@ -43,8 +57,13 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        diverges: true
+        reason: "vLLM mistral_tool_parser raises KeyError when 'name' key is missing"
+        expected_error_pattern: "KeyError"
     # TODO(research): vllm diverges — EXPECTS_ERROR(KeyError): vLLM mistral_tool_parser raises KeyError when 'name' key is missing
     # vllm produces:
     #   error: KeyError: 'name'
@@ -55,8 +74,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        diverges: true
+        reason: "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)"

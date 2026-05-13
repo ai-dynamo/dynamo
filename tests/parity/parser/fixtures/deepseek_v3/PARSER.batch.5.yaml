@@ -21,12 +21,19 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: |-
-        <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-        ```json
-        {"location": "NYC"}
-        ```
+      dynamo:
+        calls: []
+        normal_text: |-
+          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+          ```json
+          {"location": "NYC"}
+          ```
+      vllm:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
     # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
     # vllm produces:
     #   calls: []
@@ -42,12 +49,13 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: |-
-        <｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-        ```json
-        {"location": "NYC"}
-        ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      dynamo:
+        calls: []
+        normal_text: |-
+          <｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+          ```json
+          {"location": "NYC"}
+          ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
   PARSER.batch.5.c:
     description: Truncation mid-arguments JSON inside fenced block
     ref: dynamo
@@ -58,11 +66,18 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: |-
-        <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
-        ```json
-        {"loc
+      dynamo:
+        calls: []
+        normal_text: |-
+          <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+          ```json
+          {"loc
+      vllm:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        diverges: true
+        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"
     # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
     # vllm produces:
     #   calls: []

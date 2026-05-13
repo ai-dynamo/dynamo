@@ -21,13 +21,17 @@ cases:
           first_class:
             type: boolean
     expected:
-      calls:
-      - name: book_flight
-        arguments:
-          destination: Paris
-          passengers: 2
-          first_class: true
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: book_flight
+          arguments:
+            destination: Paris
+            passengers: 2
+            first_class: true
+        normal_text: ''
+      sglang:
+        diverges: true
+        reason: "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits"
   PARSER.batch.7.b:
     description: Unicode + escaped chars
     ref: dynamo
@@ -40,11 +44,15 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: Tōkyō "central"
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Tōkyō "central"
+        normal_text: ''
+      sglang:
+        diverges: true
+        reason: "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)"
   PARSER.batch.7.c:
     description: Schema mismatch — string value where schema declares integer
     ref: dynamo
@@ -57,11 +65,15 @@ cases:
           celsius:
             type: integer
     expected:
-      calls:
-      - name: set_temperature
-        arguments:
-          celsius: '20'
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: set_temperature
+          arguments:
+            celsius: '20'
+        normal_text: ''
+      sglang:
+        diverges: true
+        reason: "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)"
   PARSER.batch.7.d:
     description: Nested object + array
     ref: dynamo
@@ -76,13 +88,17 @@ cases:
           config:
             type: object
     expected:
-      calls:
-      - name: process_data
-        arguments:
-          items:
-          - 1
-          - 2
-          - 3
-          config:
-            nested: true
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: process_data
+          arguments:
+            items:
+            - 1
+            - 2
+            - 3
+            config:
+              nested: true
+        normal_text: ''
+      sglang:
+        diverges: true
+        reason: "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)"

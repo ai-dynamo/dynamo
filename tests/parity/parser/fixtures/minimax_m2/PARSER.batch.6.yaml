@@ -19,10 +19,11 @@ cases:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
   PARSER.batch.6.b:
     description: Invoke with extra newline
     ref: dynamo
@@ -35,7 +36,8 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''

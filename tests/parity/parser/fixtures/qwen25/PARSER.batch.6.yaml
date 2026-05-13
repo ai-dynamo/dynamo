@@ -15,10 +15,14 @@ cases:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      sglang:
+        diverges: true
+        reason: "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits"
   PARSER.batch.6.b:
     description: Whitespace inside arguments {}
     ref: dynamo
@@ -26,10 +30,14 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      sglang:
+        diverges: true
+        reason: "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits"
   PARSER.batch.6.c:
     description: No arguments key
     ref: dynamo
@@ -37,5 +45,6 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '<tool_call>{"name": "get_time"}</tool_call>'
+      dynamo:
+        calls: []
+        normal_text: '<tool_call>{"name": "get_time"}</tool_call>'

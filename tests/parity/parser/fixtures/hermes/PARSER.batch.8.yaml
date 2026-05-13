@@ -17,11 +17,15 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: I will check the weather.
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check the weather.
+      vllm:
+        diverges: true
+        reason: "drops trailing normal_text after tool-call wrapper end"
     # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
     # vllm produces:
     #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
@@ -34,11 +38,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
   PARSER.batch.8.c:
     description: Narration both before and after (sandwich)
     ref: dynamo
@@ -47,11 +52,15 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: I will check the weather.
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check the weather.
+      vllm:
+        diverges: true
+        reason: "drops trailing normal_text after tool-call wrapper end"
     # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
     # vllm produces:
     #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
@@ -64,14 +73,18 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: I will check the weather.
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: I will check the weather.
+      vllm:
+        diverges: true
+        reason: "drops trailing normal_text after tool-call wrapper end"
     # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
     # vllm produces:
     #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}, {'name': 'get_weather', 'arguments': {'location': 'LA'}}]

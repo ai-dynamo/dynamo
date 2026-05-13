@@ -25,9 +25,13 @@ cases:
           timezone:
             type: string
     expected:
-      calls: []
-      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-        to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|>
+      dynamo:
+        calls: []
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
+          to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|>
+      sglang:
+        diverges: true
+        reason: "Dynamo drops back-to-back commentary blocks; SGLang extracts them"
   PARSER.batch.2.c:
     description: With surrounding narration
     ref: dynamo
@@ -37,9 +41,13 @@ cases:
     - *id001
     - *id002
     expected:
-      calls: []
-      normal_text: I need both. <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-        to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|> Done.
+      dynamo:
+        calls: []
+        normal_text: I need both. <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
+          to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|> Done.
+      sglang:
+        diverges: true
+        reason: "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)"
   PARSER.batch.2.d:
     description: Same-name twice
     ref: dynamo
@@ -49,6 +57,10 @@ cases:
     - *id001
     - *id001
     expected:
-      calls: []
-      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-        to=functions.get_weather <|constrain|>json<|message|>{"location":"LA"}<|call|>
+      dynamo:
+        calls: []
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
+          to=functions.get_weather <|constrain|>json<|message|>{"location":"LA"}<|call|>
+      sglang:
+        diverges: true
+        reason: "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)"

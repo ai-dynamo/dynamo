@@ -27,13 +27,17 @@ cases:
           first_class:
             type: boolean
     expected:
-      calls:
-      - name: book_flight
-        arguments:
-          destination: Paris
-          first_class: true
-          passengers: 2
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: book_flight
+          arguments:
+            destination: Paris
+            first_class: true
+            passengers: 2
+        normal_text: ''
+      vllm:
+        diverges: true
+        reason: "vLLM emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types"
     # TODO(research): vllm diverges — vLLM emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types
     # vllm produces:
     #   calls: [{'name': 'book_flight', 'arguments': {'destination': 'Paris', 'passengers': '2', 'first_class': 'true'}}]
@@ -55,8 +59,9 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: Tōkyō central
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Tōkyō central
+        normal_text: ''

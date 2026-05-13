@@ -16,27 +16,33 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        diverges: true
+        reason: "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits"
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: Hello, how can I help you today?
+      dynamo:
+        calls: []
+        normal_text: Hello, how can I help you today?
   PARSER.batch.9:
     description: Empty input
     model_text: ''
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
+      dynamo:
+        calls: []
+        normal_text: ''
   PARSER.batch.10:
     description: Duplicate calls (same name twice)
     model_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_weather", "arguments":
@@ -44,11 +50,15 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      sglang:
+        diverges: true
+        reason: "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits"

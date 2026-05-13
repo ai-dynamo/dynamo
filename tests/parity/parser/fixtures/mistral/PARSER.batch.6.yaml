@@ -15,10 +15,14 @@ cases:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      sglang:
+        diverges: true
+        reason: "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits"
   PARSER.batch.6.b:
     description: Whitespace inside arguments {}
     ref: dynamo
@@ -26,10 +30,14 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      sglang:
+        diverges: true
+        reason: "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits"
   PARSER.batch.6.c:
     description: No arguments key
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_mistral_tool_parser.py#L514
@@ -37,8 +45,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        diverges: true
+        reason: "vLLM accepts call with missing arguments key as having empty args; Dynamo returns calls=[]"
     # TODO(research): vllm diverges — vLLM accepts call with missing arguments key as having empty args; Dynamo returns calls=[]
     # vllm produces:
     #   calls: [{'name': 'get_time', 'arguments': {}}]

@@ -17,8 +17,9 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <TOOLCALL>not a json array</TOOLCALL>
+      dynamo:
+        calls: []
+        normal_text: <TOOLCALL>not a json array</TOOLCALL>
   PARSER.batch.4.b:
     description: Unterminated JSON string in args
     ref: dynamo
@@ -26,11 +27,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
   PARSER.batch.4.c:
     description: Missing name key in JSON
     ref: dynamo
@@ -38,8 +40,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
+      dynamo:
+        calls: []
+        normal_text: ''
   PARSER.batch.4.d:
     description: Mismatched JSON brackets
     ref: dynamo
@@ -47,8 +50,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''

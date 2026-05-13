@@ -17,8 +17,9 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: '[get_weather(location="NYC")'
+      dynamo:
+        calls: []
+        normal_text: '[get_weather(location="NYC")'
   PARSER.batch.5.b:
     description: Closing `]` without matching `[` open
     ref: dynamo
@@ -26,8 +27,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: get_weather(location="NYC")]
+      dynamo:
+        calls: []
+        normal_text: get_weather(location="NYC")]
   PARSER.batch.5.c:
     description: Truncation mid-argument value
     ref: dynamo
@@ -35,5 +37,6 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '[get_weather(location="N'
+      dynamo:
+        calls: []
+        normal_text: '[get_weather(location="N'

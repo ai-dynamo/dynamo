@@ -17,8 +17,15 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
+      dynamo:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
+      vllm:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        diverges: true
+        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"
     # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
     # vllm produces:
     #   calls: []
@@ -30,8 +37,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      dynamo:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      vllm:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
     # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
     # vllm produces:
     #   calls: [{'name': 'get_weather', 'arguments': '{"location":"NYC'}]
@@ -43,8 +54,15 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜><｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      dynamo:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜><｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      vllm:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        diverges: true
+        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"
     # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
     # vllm produces:
     #   calls: [{'name': '', 'arguments': {'location': 'NYC'}}]
@@ -56,8 +74,15 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁calls▁end｜>
+      dynamo:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁calls▁end｜>
+      vllm:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        diverges: true
+        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"
     # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
     # vllm produces:
     #   calls: []

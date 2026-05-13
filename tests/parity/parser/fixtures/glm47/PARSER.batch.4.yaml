@@ -17,8 +17,15 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <tool_call><arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
+      dynamo:
+        calls: []
+        normal_text: <tool_call><arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
+      vllm:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        diverges: true
+        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"
     # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
     # vllm produces:
     #   calls: [{'name': '<arg_key>location</arg_key><arg_value>NYC</arg_value>', 'arguments': {}}]
@@ -30,7 +37,8 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments: {}
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments: {}
+        normal_text: ''

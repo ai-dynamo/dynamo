@@ -15,10 +15,11 @@ cases:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
   PARSER.batch.6.b:
     description: Whitespace inside parens
     ref: dynamo
@@ -26,5 +27,6 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '[get_time( )]'
+      dynamo:
+        calls: []
+        normal_text: '[get_time( )]'

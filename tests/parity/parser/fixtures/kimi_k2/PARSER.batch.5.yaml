@@ -17,11 +17,12 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
   PARSER.batch.5.b:
     description: Closing section_end without matching section_begin
     ref: dynamo
@@ -29,8 +30,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
+      dynamo:
+        calls: []
+        normal_text: <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"NYC"}<|tool_call_end|><|tool_calls_section_end|>
   PARSER.batch.5.c:
     description: Truncation mid-arguments (incomplete JSON body)
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_kimi_k2_tool_parser.py#L413
@@ -38,5 +40,6 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
+      dynamo:
+        calls: []
+        normal_text: ''

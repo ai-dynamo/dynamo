@@ -17,11 +17,12 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
   PARSER.batch.5.b:
     description: Closing </tool_call> without matching <tool_call> open
     ref: dynamo
@@ -29,8 +30,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
+      dynamo:
+        calls: []
+        normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
   PARSER.batch.5.c:
     description: Truncation mid-arguments JSON
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_hermes_tool_parser.py#L356
@@ -38,5 +40,6 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'
+      dynamo:
+        calls: []
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'

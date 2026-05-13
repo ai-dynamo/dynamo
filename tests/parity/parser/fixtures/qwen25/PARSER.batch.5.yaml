@@ -17,11 +17,15 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
   PARSER.batch.5.b:
     description: Closing </tool_call> without matching <tool_call> open
     ref: dynamo
@@ -29,8 +33,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
+      dynamo:
+        calls: []
+        normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
   PARSER.batch.5.c:
     description: Truncation mid-arguments JSON
     ref: dynamo
@@ -38,5 +43,6 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'
+      dynamo:
+        calls: []
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'

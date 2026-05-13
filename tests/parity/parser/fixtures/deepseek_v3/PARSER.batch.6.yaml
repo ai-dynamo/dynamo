@@ -19,10 +19,11 @@ cases:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
   PARSER.batch.6.b:
     description: Whitespace inside empty { } (newlines)
     ref: dynamo
@@ -35,10 +36,14 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm:
+        diverges: true
+        reason: "vLLM rejects whitespace inside empty {} when wrapped in fenced ```json``` block"
     # TODO(research): vllm diverges — vLLM rejects whitespace inside empty {} when wrapped in fenced ```json``` block
     # vllm produces:
     #   calls: []
@@ -50,8 +55,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      dynamo:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      vllm:
+        diverges: true
+        reason: "both return calls=[]; vLLM nullifies normal_text on this recovery path, Dynamo preserves the raw input as normal_text"
     # TODO(research): vllm diverges — both return calls=[]; vLLM nullifies normal_text on this recovery path, Dynamo preserves the raw input as normal_text
     # vllm produces:
     #   calls: []

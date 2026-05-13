@@ -17,8 +17,12 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
+      dynamo:
+        calls: []
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
+      sglang:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
   PARSER.batch.5.b:
     description: Bare <|call|> without preceding channel envelope
     ref: dynamo
@@ -26,8 +30,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|call|>
+      dynamo:
+        calls: []
+        normal_text: <|call|>
   PARSER.batch.5.c:
     description: Truncation mid-message JSON
     ref: dynamo
@@ -35,5 +40,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"loc
+      dynamo:
+        calls: []
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"loc
+      sglang:
+        diverges: true
+        reason: "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)"

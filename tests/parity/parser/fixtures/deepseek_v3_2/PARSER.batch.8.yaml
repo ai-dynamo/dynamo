@@ -22,11 +22,15 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: 'I will check the weather. '
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: 'I will check the weather. '
+      sglang:
+        diverges: true
+        reason: "drops trailing normal_text after tool-call wrapper end"
   PARSER.batch.8.b:
     description: Narration after tool call only
     ref: dynamo
@@ -39,11 +43,18 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ' Let me know if you need more.'
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ' Let me know if you need more.'
+      vllm:
+        diverges: true
+        reason: "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string"
+      sglang:
+        diverges: true
+        reason: "drops trailing normal_text after tool-call wrapper end"
     # TODO(research): vllm diverges — TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string
     # vllm produces:
     #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
@@ -60,11 +71,18 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: I will check the weather.  Let me know if you need more.
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check the weather.  Let me know if you need more.
+      vllm:
+        diverges: true
+        reason: "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string"
+      sglang:
+        diverges: true
+        reason: "drops trailing normal_text after tool-call wrapper end"
     # TODO(research): vllm diverges — TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string
     # vllm produces:
     #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
@@ -85,14 +103,21 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: 'I will check the weather.  Then check LA weather. '
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: 'I will check the weather.  Then check LA weather. '
+      vllm:
+        diverges: true
+        reason: "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string"
+      sglang:
+        diverges: true
+        reason: "drops trailing normal_text after tool-call wrapper end"
     # TODO(research): vllm diverges — TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string
     # vllm produces:
     #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}, {'name': 'get_weather', 'arguments': {'location': 'LA'}}]

@@ -17,11 +17,18 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: Dallas
-      normal_text: I'll check the weather.
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Dallas
+        normal_text: I'll check the weather.
+      vllm:
+        diverges: true
+        reason: "preserves trailing space; Dynamo trims it"
+      sglang:
+        diverges: true
+        reason: "TODO(research): SGLang diverges on this case; investigate vs Dynamo's expected"
     # TODO(research): vllm diverges — preserves trailing space; Dynamo trims it
     # vllm produces:
     #   calls: [{'name': 'get_weather', 'arguments': {'location': 'Dallas'}}]
@@ -34,11 +41,18 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: Dallas
-      normal_text: Let me know if you need more.
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Dallas
+        normal_text: Let me know if you need more.
+      vllm:
+        diverges: true
+        reason: "drops trailing normal_text after tool-call wrapper end"
+      sglang:
+        diverges: true
+        reason: "TODO(research): SGLang diverges on this case; investigate vs Dynamo's expected"
     # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
     # vllm produces:
     #   calls: [{'name': 'get_weather', 'arguments': {'location': 'Dallas'}}]
@@ -51,11 +65,18 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: Dallas
-      normal_text: I'll check the weather.  Let me know if you need more.
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Dallas
+        normal_text: I'll check the weather.  Let me know if you need more.
+      vllm:
+        diverges: true
+        reason: "drops trailing normal_text after tool-call wrapper end"
+      sglang:
+        diverges: true
+        reason: "TODO(research): SGLang diverges on this case; investigate vs Dynamo's expected"
     # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
     # vllm produces:
     #   calls: [{'name': 'get_weather', 'arguments': {'location': 'Dallas'}}]
@@ -68,14 +89,21 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: Dallas
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: First check Dallas.  Then check NYC.
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Dallas
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: First check Dallas.  Then check NYC.
+      vllm:
+        diverges: true
+        reason: "drops trailing normal_text after tool-call wrapper end"
+      sglang:
+        diverges: true
+        reason: "TODO(research): SGLang diverges on this case; investigate vs Dynamo's expected"
     # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
     # vllm produces:
     #   calls: [{'name': 'get_weather', 'arguments': {'location': 'Dallas'}}, {'name': 'get_weather', 'arguments': {'location': 'NYC'}}]

@@ -17,8 +17,9 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: ''
+      dynamo:
+        calls: []
+        normal_text: ''
   PARSER.batch.4.b:
     description: Missing close brace
     ref: dynamo
@@ -26,8 +27,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
+      dynamo:
+        calls: []
+        normal_text: ''
   PARSER.batch.4.c:
     description: Missing name key
     ref: dynamo
@@ -35,8 +37,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
     # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
     # vllm produces:
     #   calls: []
@@ -48,8 +54,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
     # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
     # vllm produces:
     #   calls: []

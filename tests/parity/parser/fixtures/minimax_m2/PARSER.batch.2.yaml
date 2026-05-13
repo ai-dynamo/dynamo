@@ -32,14 +32,15 @@ cases:
           timezone:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
   PARSER.batch.2.b:
     description: Two back-to-back tool_call wrappers
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_minimax_m2_tool_parser.py#L207
@@ -58,14 +59,18 @@ cases:
     - *id001
     - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      sglang:
+        diverges: true
+        reason: "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)"
   PARSER.batch.2.c:
     description: Parallel with surrounding narration
     ref: dynamo
@@ -82,14 +87,18 @@ cases:
     - *id001
     - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: 'Both: '
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both: '
+      sglang:
+        diverges: true
+        reason: "trims trailing space from preceding normal_text"
   PARSER.batch.2.d:
     description: Same-name twice
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_minimax_m2_tool_parser.py#L331
@@ -106,11 +115,12 @@ cases:
     - *id001
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''

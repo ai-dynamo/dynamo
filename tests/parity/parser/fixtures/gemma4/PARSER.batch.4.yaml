@@ -17,8 +17,9 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <|tool_call>nonsense<tool_call|>
+      dynamo:
+        calls: []
+        normal_text: <|tool_call>nonsense<tool_call|>
   PARSER.batch.4.b:
     description: Missing close brace in body
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L572
@@ -26,8 +27,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|><tool_call|>
+      dynamo:
+        calls: []
+        normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|><tool_call|>
   PARSER.batch.4.c:
     description: No call:name prefix
     ref: dynamo
@@ -35,8 +37,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|tool_call>{location:<|"|>NYC<|"|>}<tool_call|>
+      dynamo:
+        calls: []
+        normal_text: <|tool_call>{location:<|"|>NYC<|"|>}<tool_call|>
   PARSER.batch.4.d:
     description: Mismatched sentinels
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L252
@@ -44,5 +47,6 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
+      dynamo:
+        calls: []
+        normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}

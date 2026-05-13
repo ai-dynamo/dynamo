@@ -36,14 +36,15 @@ cases:
           timezone:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
   PARSER.batch.2.b:
     description: Two back-to-back function_calls wrappers
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_deepseekv32_tool_parser.py#L327
@@ -62,15 +63,22 @@ cases:
     - *id001
     - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      # `|2+` below = "\n" (see file header)
-      normal_text: |2+
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        # `|2+` below = "\n" (see file header)
+        normal_text: |2+
+      vllm:
+        diverges: true
+        reason: "vLLM deepseek_v3_2 does not restart parsing on a second back-to-back fence pair"
+      sglang:
+        diverges: true
+        reason: "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)"
 
     # TODO(research): vllm diverges — vLLM deepseek_v3_2 does not restart parsing on a second back-to-back fence pair
     # vllm produces:
@@ -92,14 +100,21 @@ cases:
     - *id001
     - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: 'Both:  Done.'
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both:  Done.'
+      vllm:
+        diverges: true
+        reason: "drops trailing normal_text after tool-call wrapper end"
+      sglang:
+        diverges: true
+        reason: "trims trailing space from preceding normal_text"
     # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
     # vllm produces:
     #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}, {'name': 'get_time', 'arguments': {'timezone': 'EST'}}]
@@ -120,11 +135,12 @@ cases:
     - *id001
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''

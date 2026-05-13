@@ -15,10 +15,11 @@ cases:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
   PARSER.batch.6.b:
     description: Whitespace inside arguments {}
     ref: dynamo
@@ -26,10 +27,11 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
   PARSER.batch.6.c:
     description: No arguments key
     ref: dynamo
@@ -37,8 +39,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        diverges: true
+        reason: "both return calls=[]; vLLM preserves raw input as normal_text on this recovery path, Dynamo emits empty"
     # TODO(research): vllm diverges — both return calls=[]; vLLM preserves raw input as normal_text on this recovery path, Dynamo emits empty
     # vllm produces:
     #   calls: []

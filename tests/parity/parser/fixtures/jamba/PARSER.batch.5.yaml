@@ -17,11 +17,15 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
     # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
     # vllm produces:
     #   calls: []
@@ -33,8 +37,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls>'
+      dynamo:
+        calls: []
+        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls>'
   PARSER.batch.5.c:
     description: Truncation mid-arguments JSON
     ref: dynamo
@@ -42,5 +47,6 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"loc'
+      dynamo:
+        calls: []
+        normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"loc'

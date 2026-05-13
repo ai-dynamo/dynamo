@@ -2584,7 +2584,19 @@ async def main(overwrite_if_exists: bool = False) -> None:
                 merged_case["ref"] = entry.get("ref", "dynamo")
             merged_case["model_text"] = entry["text"]
             merged_case["tools"] = entry["tools"]
-            merged_case["expected"] = expected
+            # Variant D schema: `expected` is keyed by impl. Dynamo is the
+            # oracle and always present; peers (vllm/sglang) are added by
+            # hand when they diverge. Regen only writes the dynamo block —
+            # existing peer overrides on disk are preserved via the merge
+            # path below (step 2) when re-running with `--overwrite`.
+            preserved_peers = {}
+            if case_id in existing:
+                old_expected = existing[case_id].get("expected", {})
+                if isinstance(old_expected, dict):
+                    for peer in ("vllm", "sglang"):
+                        if peer in old_expected:
+                            preserved_peers[peer] = old_expected[peer]
+            merged_case["expected"] = {"dynamo": expected, **preserved_peers}
             merged[case_id] = merged_case
             n_written += 1
 

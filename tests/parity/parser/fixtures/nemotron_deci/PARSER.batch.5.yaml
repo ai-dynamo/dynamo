@@ -17,11 +17,12 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
   PARSER.batch.5.b:
     description: Closing </TOOLCALL> without matching <TOOLCALL> open
     ref: dynamo
@@ -29,8 +30,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL>'
+      dynamo:
+        calls: []
+        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL>'
   PARSER.batch.5.c:
     description: Truncation mid-arguments JSON
     ref: dynamo
@@ -38,5 +40,6 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"loc'
+      dynamo:
+        calls: []
+        normal_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"loc'

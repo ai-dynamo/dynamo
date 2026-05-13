@@ -24,14 +24,15 @@ cases:
           timezone:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
   PARSER.batch.2.c:
     description: Parallel calls with surrounding narration
     ref: dynamo
@@ -41,14 +42,18 @@ cases:
     - *id001
     - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: 'Checking:  Done.'
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Checking:  Done.'
+      vllm:
+        diverges: true
+        reason: "drops trailing normal_text after tool-call wrapper end"
     # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
     # vllm produces:
     #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}, {'name': 'get_time', 'arguments': {'timezone': 'EST'}}]
@@ -61,11 +66,12 @@ cases:
     - *id001
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''

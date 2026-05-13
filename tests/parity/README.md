@@ -104,7 +104,7 @@ Both servers receive identical chat-completion requests with `structured_outputs
 | **CI markers** | (TBD) | `unit, pre_merge, gpu_0` | `e2e, pre_merge, gpu_1` |
 
 All three methods (when implemented) share the same fixtures,
-`ParseResult` shape, and `KNOWN_DIVERGENCES` registry pattern.
+`ParseResult` shape, and per-case `expected.<impl>` divergence blocks in YAML.
 They're stacked diagnostics:
 
 - M2 says: *"the parser class disagrees"*
@@ -130,7 +130,7 @@ PR description.
 Cell values show divergence from Dynamo (the oracle):
 
 - `✓` — both vLLM and SGLang match Dynamo's expected output.
-- `V` — vLLM diverges (xfailed via `KNOWN_DIVERGENCES`).
+- `V` — vLLM diverges (xfailed via `expected.vllm.diverges: true` in the case's YAML).
 - `S` — SGLang diverges.
 - `VS` — both diverge.
 - `n/a` — **not applicable**: no peer parser registered for that
@@ -226,14 +226,14 @@ to run (otherwise they skip cleanly).
 container with `docker ps --format '{{.Names}}' | grep vsc-dynamo2 | head -1`.
 
 **Baseline:** on `main` post-#9338, expect ~378 passed / ~299 skipped
-/ ~64 xfailed in ~5 s. The **xfailed count is the size of `KNOWN_DIVERGENCES`**
+/ ~64 xfailed in ~5 s. The **xfailed count is the number of `diverges: true` entries**
 — perfect parity is when that count is zero (all three impls produce
 byte-identical output on every fixture).
 
 ## Resolving divergences (8 steps)
 
 Each non-`✓` cell in the matrix above is an entry in
-`KNOWN_DIVERGENCES` (`tests/parity/parser/test_parity_parser.py`).
+the per-case `expected.<impl>` block in the family's YAML fixture.
 Goal: drive that count to zero. Walk these steps for one cell at a
 time. Worked example: `kimi_k2 / PARSER.batch.8.b → V` (vLLM drops
 trailing text after the wrapper).
@@ -263,7 +263,7 @@ PARSER.batch.8.b:
   expected:
     calls: [...]
     normal_text: <Dynamo's output>
-  # TODO(research): vllm diverges — <reason from KNOWN_DIVERGENCES>
+  # TODO(research): vllm diverges — <reason from expected.vllm.reason in the YAML>
   # vllm produces:
   #   calls: [...]
   #   normal_text: <vLLM's actual output>
@@ -330,15 +330,20 @@ as stale:
 ```text
 FAILED ...test_parity[kimi_k2/PARSER.batch.8.b#vllm]
        XPASS-strict: known divergence (vllm,kimi_k2,PARSER.batch.8.b)
-       now matches expected — remove from KNOWN_DIVERGENCES.
+       now matches dynamo — remove the `expected.vllm` block from the fixture.
 ```
 
 ### 8. Remove the entry + add spec_ref + refresh comments + commit
 
-Delete the line from `KNOWN_DIVERGENCES`:
+Delete the `expected.vllm` (or `expected.sglang`) block from the case's YAML fixture:
 
 ```python
-("vllm", "kimi_k2", "PARSER.batch.8.b"): "...",   # ← delete
+expected:
+  dynamo:
+    calls: [...]
+  vllm:                # ← delete this block
+    diverges: true
+    reason: "..."
 ```
 
 Add a `spec_ref:` field to the case's INPUTS entry in
@@ -465,7 +470,7 @@ sub-cases) does NOT carry `ref` — those entries predate the convention.
 #### Embedded divergence comments
 
 Each per-sub-case fixture for which there's a registered cross-impl
-divergence (`KNOWN_DIVERGENCES` in `test_parity_parser.py`) carries a
+divergence (`expected.<impl>` block in the family's YAML fixture) carries a
 YAML comment block right after the case's `expected:` data showing what
 the diverging impl actually produces, marked `TODO(research)`:
 
@@ -494,7 +499,7 @@ PYTHONPATH=lib/bindings/python/src python3 -m tests.parity.parser.embed_divergen
 Case keys are the full IDs from
 [`lib/parsers/PARSER_CASES.md`](../../lib/parsers/PARSER_CASES.md)
 (`PARSER.batch.1` … `PARSER.batch.10`, plus sub-cases like
-`PARSER.batch.8.a`). They match the `KNOWN_DIVERGENCES` keys and pytest
+`PARSER.batch.8.a`). They match the pytest
 parametrize IDs directly, so a single `grep PARSER.batch.8.a` finds the
 case across docs, fixtures, and Rust source comments.
 
@@ -572,7 +577,7 @@ qwen3_coder/batch.4 expected.calls[0].arguments = {"location": "NYC"}
 
 Both are valid per-family Dynamo contracts. Cross-impl divergences
 (vLLM and SGLang doing something *different* from Dynamo on the
-same case) are tracked in each test's `KNOWN_DIVERGENCES` registry
+same case) are tracked in each case's `expected.<impl>` block in the YAML fixture
 as `xfail` entries with a one-sentence reason.
 
 **3. `tools`** — sometimes minor parameter-name differences
@@ -697,5 +702,5 @@ real value-add is the cross-impl half (vLLM and SGLang).
    `_FAMILY_TO_VLLM_KEY` (`vllm.py`) and
    `_FAMILY_TO_SGLANG_DETECTOR` (`sglang.py`).
 6. Run pytest. Any cross-impl divergences surface as failures —
-   classify each, add a one-sentence reason to `KNOWN_DIVERGENCES`,
+   classify each, add a one-sentence reason to the case's `expected.<impl>` block in the YAML fixture,
    and the test goes to xfail.

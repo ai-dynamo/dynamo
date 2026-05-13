@@ -17,9 +17,13 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>not json at
-        all<|call|>
+      dynamo:
+        calls: []
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>not json at
+          all<|call|>
+      sglang:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
   PARSER.batch.4.b:
     description: Unterminated JSON in message body
     ref: dynamo
@@ -27,8 +31,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>
+      dynamo:
+        calls: []
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>
+      sglang:
+        diverges: true
+        reason: "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)"
   PARSER.batch.4.c:
     description: No to=functions.X recipient
     ref: dynamo
@@ -36,5 +44,6 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
+      dynamo:
+        calls: []
+        normal_text: ''

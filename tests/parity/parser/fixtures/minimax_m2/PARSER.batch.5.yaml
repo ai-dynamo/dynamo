@@ -21,11 +21,18 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
     # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
     # vllm produces:
     #   calls: []
@@ -41,12 +48,13 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: |-
-        <invoke name="get_weather">
-        <parameter name="location">NYC</parameter>
-        </invoke>
-        </minimax:tool_call>
+      dynamo:
+        calls: []
+        normal_text: |-
+          <invoke name="get_weather">
+          <parameter name="location">NYC</parameter>
+          </invoke>
+          </minimax:tool_call>
   PARSER.batch.5.c:
     description: Truncation mid-parameter value
     ref: dynamo
@@ -57,11 +65,18 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NY
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NY
+        normal_text: ''
+      vllm:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        diverges: true
+        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"
     # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
     # vllm produces:
     #   calls: []

@@ -17,8 +17,9 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <tool_call>not even json</tool_call>
+      dynamo:
+        calls: []
+        normal_text: <tool_call>not even json</tool_call>
   PARSER.batch.4.b:
     description: Missing close brace in JSON body
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_hermes_tool_parser.py#L376
@@ -26,11 +27,18 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        diverges: true
+        reason: "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)"
     # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
     # vllm produces:
     #   calls: []
@@ -42,8 +50,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '<tool_call>{"arguments": {"location": "NYC"}}</tool_call>'
+      dynamo:
+        calls: []
+        normal_text: '<tool_call>{"arguments": {"location": "NYC"}}</tool_call>'
+      sglang:
+        diverges: true
+        reason: "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)"
   PARSER.batch.4.d:
     description: Missing </tool_call> close
     ref: dynamo
@@ -51,8 +63,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''

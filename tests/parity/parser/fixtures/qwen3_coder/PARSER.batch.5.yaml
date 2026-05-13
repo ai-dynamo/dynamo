@@ -23,11 +23,12 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
   PARSER.batch.5.b:
     description: Closing </tool_call> without matching <tool_call> open
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_qwen3coder_tool_parser.py#L943
@@ -41,14 +42,18 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: |-
-        <function=get_weather>
-        <parameter=location>
-        NYC
-        </parameter>
-        </function>
-        </tool_call>
+      dynamo:
+        calls: []
+        normal_text: |-
+          <function=get_weather>
+          <parameter=location>
+          NYC
+          </parameter>
+          </function>
+          </tool_call>
+      vllm:
+        diverges: true
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
     # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
     # vllm produces:
     #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
@@ -64,8 +69,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NY
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NY
+        normal_text: ''
