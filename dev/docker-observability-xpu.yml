@@ -6,13 +6,13 @@
 #
 # Usage (XPU environment):
 #   # 1. Start the XPU exporter on the host (requires xpu-smi installed):
-#   python3 deploy/observability/xpu_smi_exporter.py --port 9966 &
+#   python3 dev/observability/xpu_smi_exporter.py --port 9966 &
 #
 #   # 2. Start base services:
-#   docker compose -f deploy/docker-compose.yml up -d
+#   docker compose -f dev/docker-compose.yml up -d
 #
 #   # 3. Start observability with XPU overlay:
-#   docker compose -f deploy/docker-observability.yml -f deploy/docker-observability-xpu.yml up -d
+#   docker compose -f dev/docker-observability.yml -f dev/docker-observability-xpu.yml up -d
 
 services:
   # Override Prometheus to use XPU-specific config and alert rules

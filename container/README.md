@@ -432,7 +432,7 @@ container/run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME
 # From this point forward, commands run inside the container started in step 2.
 
 # 3. Sanity check (optional but recommended)
-deploy/sanity_check.py
+dev/sanity_check.py
 
 # 4. Run inference (requires both frontend and backend)
 # Start frontend
@@ -475,7 +475,7 @@ cargo build --locked --features dynamo-llm/block-manager --workspace
 cd lib/bindings/python && maturin develop --uv && cd -
 
 # 5. Sanity check (optional but recommended)
-deploy/sanity_check.py --runtime-check-only
+dev/sanity_check.py --runtime-check-only
 
 # 6. Run tests
 python -m pytest tests/

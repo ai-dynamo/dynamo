@@ -32,7 +32,7 @@ The disaggregated approach optimizes for both low-latency (maximizing tokens per
 Ensure that the `etcd` and `nats` services are running with the following command:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up
+docker compose -f dev/docker-compose.yml up
 ```
 
 ## Instructions

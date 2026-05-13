@@ -40,7 +40,7 @@ examples:
   - '.devcontainer/**'
   - 'deploy/discovery/**'
   - 'deploy/inference-gateway/**'
-  - 'deploy/observability/**'
+  - 'dev/observability/**'
   - 'deploy/pre-deployment/**'
 
 ignore:

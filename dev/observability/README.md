@@ -21,10 +21,10 @@ This exporter samples at 200 ms (PCIe internally at 10/s), groups subprocesses i
 The Prometheus instance that scrapes this exporter is gated behind the `resource-monitor` Docker Compose profile, so the main observability stack comes up without it. To enable it, pass `--profile resource-monitor`:
 
 ```bash
-docker compose --profile resource-monitor -f deploy/docker-observability.yml up -d
+docker compose --profile resource-monitor -f dev/docker-observability.yml up -d
 ```
 
-A plain `docker compose -f deploy/docker-observability.yml up -d` will skip the `dynamo-resource-monitor` service entirely.
+A plain `docker compose -f dev/docker-observability.yml up -d` will skip the `dynamo-resource-monitor` service entirely.
 
 **Run the exporter on the host machine** (not inside a container):
 
