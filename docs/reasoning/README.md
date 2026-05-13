@@ -8,8 +8,7 @@ subtitle: Separate reasoning content from assistant output for chain-of-thought 
 Some models emit reasoning or thinking content separately from their final
 response. Dynamo can split that output into `reasoning_content` and normal
 assistant content by configuring a reasoning parser. As with tool calling,
-there are two ways to do this depending on whether the parser lives in
-Dynamo's own registry or in the upstream engine (vLLM, SGLang).
+there are two ways to do this to ensure wide coverage and day0 model support.
 
 ## Choose a parsing path
 
