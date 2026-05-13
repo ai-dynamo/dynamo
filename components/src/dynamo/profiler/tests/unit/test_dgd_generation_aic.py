@@ -505,6 +505,8 @@ class TestEnableVllmXpuRuntime:
         enable_vllm_xpu_runtime(cfg)
 
         for name in ("VllmPrefillWorker", "VllmDecodeWorker"):
-            args = cfg["spec"]["services"][name]["extraPodSpec"]["mainContainer"]["args"]
+            args = cfg["spec"]["services"][name]["extraPodSpec"]["mainContainer"][
+                "args"
+            ]
             kv_cfg = args[args.index("--kv-transfer-config") + 1]
             assert '"kv_buffer_device":"xpu"' in kv_cfg
