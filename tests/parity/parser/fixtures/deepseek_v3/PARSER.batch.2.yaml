@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3
+mode: batch
+cases:
+  PARSER.batch.2.a:
+    description: Parallel calls in single fence pair
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L185
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+      ```json
+      {"location": "NYC"}
+      ```<｜tool▁call▁end｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time
+      ```json
+      {"timezone": "EST"}
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    - &id002
+      name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_time
+        arguments:
+          timezone: EST
+      normal_text: ''
+  PARSER.batch.2.b:
+    description: Two back-to-back fence pairs
+    ref: dynamo
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+      ```json
+      {"location": "NYC"}
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜><｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time
+      ```json
+      {"timezone": "EST"}
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - *id001
+    - *id002
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_time
+        arguments:
+          timezone: EST
+      normal_text: ''
+  PARSER.batch.2.c:
+    description: With surrounding narration
+    ref: dynamo
+    model_text: |-
+      Both: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+      ```json
+      {"location": "NYC"}
+      ```<｜tool▁call▁end｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time
+      ```json
+      {"timezone": "EST"}
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜> Done.
+    tools:
+    - *id001
+    - *id002
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_time
+        arguments:
+          timezone: EST
+      normal_text: 'Both: '
+  PARSER.batch.2.d:
+    description: Same-name twice
+    ref: dynamo
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+      ```json
+      {"location": "NYC"}
+      ```<｜tool▁call▁end｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
+      ```json
+      {"location": "LA"}
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - *id001
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_weather
+        arguments:
+          location: LA
+      normal_text: ''

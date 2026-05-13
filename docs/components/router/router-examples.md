@@ -105,13 +105,13 @@ if __name__ == "__main__":
 
 ## K8s Examples
 
-For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployment section](README.md#kubernetes-deployment) in the Quick Start guide.
+For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployment section](router-guide.md#kubernetes-deployment) in the Router Guide.
 
 ### Complete K8s Examples
 
-- [TRT-LLM aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/agg_router.yaml)
-- [vLLM aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/agg_router.yaml)
-- [SGLang aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/agg_router.yaml)
+- [TRT-LLM aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/agg_router.yaml)
+- [vLLM aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_router.yaml)
+- [SGLang aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg_router.yaml)
 - [Kubernetes deployment guide](../../kubernetes/README.md)
 
 **For A/B Testing and Advanced K8s Setup:**

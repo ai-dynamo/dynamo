@@ -144,7 +144,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(4.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", *, overlap_score_credit=1.0, prefill_load_scale=1.0))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(4.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, prefill_load_scale=1.0))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -169,6 +169,7 @@ impl KvRouterConfig {
         serve_indexer: bool,
         shared_cache_multiplier: f64,
         shared_cache_type: &str,
+        router_predicted_ttl_secs: Option<f64>,
         mut overlap_score_credit: f64,
         mut prefill_load_scale: f64,
     ) -> PyResult<Self> {
@@ -207,6 +208,7 @@ impl KvRouterConfig {
             serve_indexer,
             shared_cache_multiplier,
             shared_cache_type: shared_cache_type.parse().map_err(PyValueError::new_err)?,
+            router_predicted_ttl_secs,
         };
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })

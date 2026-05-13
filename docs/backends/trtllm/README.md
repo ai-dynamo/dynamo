@@ -33,6 +33,22 @@ Dynamo TensorRT-LLM integrates [TensorRT-LLM](https://github.com/NVIDIA/TensorRT
 | **DP Rank Routing**| ✅           |                                                                 |
 | **GB200 Support**  | ✅           |                                                                 |
 
+## Prerequisites
+
+- **`yq`** for in-place YAML edits. Install with `wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq && chmod +x /usr/local/bin/yq` or `pip install yq` (the latter is a different tool with the same name but similar syntax). If neither is available, a `sed` fallback is shown inline where `yq` is used.
+
+## Container / driver matrix
+
+| Container tag | Backend version | CUDA | Min NVIDIA driver |
+|---|---|---|---|
+| `tensorrtllm-runtime:1.0.2` | TRT-LLM `v1.3.0rc5.post1` | `v13.1` | `580+` |
+| `vllm-runtime:1.0.2` | vLLM `v0.16.0` | `v12.9` | `575+` |
+| `vllm-runtime:1.0.2-cuda13` | vLLM `v0.16.0` | `v13.0` | `580+` |
+| `sglang-runtime:1.0.2` | SGLang `v0.5.9` | `v12.9` | `575+` |
+| `sglang-runtime:1.0.2-cuda13` | SGLang `v0.5.9` | `v13.0` | `580+` |
+
+Source of truth: [`docs/reference/support-matrix.md`](../../reference/support-matrix.md#cuda-and-driver-requirements) and [`docs/reference/release-artifacts.md`](../../reference/release-artifacts.md). If those differ from the values above, the source-of-truth files win.
+
 ## Quick Start
 
 **Step 1 (host terminal):** Start infrastructure services:
@@ -44,7 +60,7 @@ docker compose -f deploy/docker-compose.yml up -d
 **Step 2 (host terminal):** Pull and run the prebuilt container:
 
 ```bash
-DYNAMO_VERSION=1.0.0
+DYNAMO_VERSION=1.0.2
 docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:$DYNAMO_VERSION
 docker run --gpus all -it --network host --ipc host \
   nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:$DYNAMO_VERSION
@@ -76,9 +92,18 @@ curl localhost:8000/v1/chat/completions \
   }'
 ```
 
-### Kubernetes Deployment
+## Deploy
 
-You can deploy TensorRT-LLM with Dynamo on Kubernetes using a `DynamoGraphDeployment`. For more details, see the [TensorRT-LLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md).
+Deploy TensorRT-LLM with Dynamo on Kubernetes using a `DynamoGraphDeployment`. Before `kubectl apply`, substitute the container image tag in the deployment YAML. The `sed` fallback is shown inline for environments without `yq`:
+
+```bash
+# yq
+yq -i '(.spec.services[].extraPodSpec.mainContainer.image) |= sub(":1\.0\.2", ":<your-tag>")' deploy.yaml
+# sed fallback
+sed -i.bak 's|:1\.0\.2|:<your-tag>|g' deploy.yaml
+```
+
+For full Kubernetes deployment instructions, see the [TensorRT-LLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md).
 
 ## Next Steps
 

@@ -278,6 +278,34 @@ class GlobalPlannerConnector(PlannerConnector):
             )
         return self._local_k8s_connector
 
+    def get_actual_worker_counts(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> tuple[int, int, bool]:
+        """Read ready replica counts and rollout stability from the pool's own DGD.
+
+        GlobalPlanner orchestrates scaling, but the pool Planner pod has direct
+        access to its own DGD status. Mirror KubernetesConnector by delegating
+        to the pool-local connector so ``_scaling_in_progress`` observes real
+        rollouts instead of always seeing ``is_stable=True``.
+
+        Returns ``(0, 0, True)`` when no local KubernetesConnector is available
+        (e.g. running out-of-cluster), matching the existing capability-discovery
+        fallback path so out-of-cluster callers aren't blocked.
+        """
+        local = self._get_local_k8s_connector()
+        if local is None:
+            logger.debug(
+                "GlobalPlannerConnector: no local KubernetesConnector; "
+                "reporting (0, 0, stable=True) for out-of-cluster usage."
+            )
+            return 0, 0, True
+        return local.get_actual_worker_counts(
+            prefill_component_name=prefill_component_name,
+            decode_component_name=decode_component_name,
+        )
+
     def get_worker_info(
         self,
         sub_component_type: SubComponentType,
