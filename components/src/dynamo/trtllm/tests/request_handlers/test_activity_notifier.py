@@ -45,9 +45,7 @@ def _make_trtllm_stub() -> None:
     # raise ValueError when pytest-marker-report collects the full suite.
     trtllm.__spec__ = importlib.machinery.ModuleSpec("tensorrt_llm", None)
     trtllm.llmapi = types.ModuleType("tensorrt_llm.llmapi")
-    trtllm.llmapi.__spec__ = importlib.machinery.ModuleSpec(
-        "tensorrt_llm.llmapi", None
-    )
+    trtllm.llmapi.__spec__ = importlib.machinery.ModuleSpec("tensorrt_llm.llmapi", None)
     trtllm.llmapi.DisaggregatedParams = MagicMock
     trtllm.llmapi.RequestOutput = MagicMock
     sys.modules.setdefault("tensorrt_llm", trtllm)
