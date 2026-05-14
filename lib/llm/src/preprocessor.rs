@@ -464,7 +464,21 @@ impl OpenAIPreprocessor {
             .with_label_values(&[STAGE_PREPROCESS])
             .observe(preprocess_start.elapsed().as_secs_f64());
 
-        Ok((builder.build()?, annotations, prompt_injected_reasoning))
+        let mut preprocessed = builder.build()?;
+
+        // rl-sdk-2 TITO parity (Step A5): when the client omits `max_tokens`
+        // we default to (context_length - prompt_len), mirroring prime-rl's
+        // vLLM `serving_tokens.py` behavior. Done after token_ids is known
+        // and clamps to 0 (saturating_sub) for the pathological case where
+        // the prompt alone fills the context window (validate_token_count
+        // rejects that earlier, but we belt-and-suspenders here too).
+        if preprocessed.stop_conditions.max_tokens.is_none() && self.context_length > 0 {
+            let prompt_len = preprocessed.token_ids.len() as u32;
+            preprocessed.stop_conditions.max_tokens =
+                Some(self.context_length.saturating_sub(prompt_len));
+        }
+
+        Ok((preprocessed, annotations, prompt_injected_reasoning))
     }
 
     pub fn builder<
@@ -559,16 +573,10 @@ impl OpenAIPreprocessor {
             if nvext.extra_fields.is_some() || nvext.cache_salt.is_some() {
                 let mut nvext_passthrough = serde_json::Map::new();
                 if let Some(ref fields) = nvext.extra_fields {
-                    nvext_passthrough.insert(
-                        "extra_fields".to_string(),
-                        serde_json::json!(fields),
-                    );
+                    nvext_passthrough.insert("extra_fields".to_string(), serde_json::json!(fields));
                 }
                 if let Some(ref salt) = nvext.cache_salt {
-                    nvext_passthrough.insert(
-                        "cache_salt".to_string(),
-                        serde_json::json!(salt),
-                    );
+                    nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
                 }
                 builder.extra_args(Some(
                     serde_json::json!({ "nvext": serde_json::Value::Object(nvext_passthrough) }),
