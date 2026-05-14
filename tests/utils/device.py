@@ -23,13 +23,6 @@ def detect_target_device() -> str:
     return "cuda"
 
 
-def get_device_visibility_env_var() -> str:
-    """Return the runtime-specific device visibility env var."""
-    if detect_target_device() == "xpu":
-        return "ZE_AFFINITY_MASK"
-    return "CUDA_VISIBLE_DEVICES"
-
-
 def get_default_vllm_block_size() -> int:
     """Return a runtime-compatible default vLLM block size for tests."""
     return 64 if detect_target_device() == "xpu" else 16
@@ -49,23 +42,3 @@ def build_nixl_kv_transfer_config() -> dict[str, Any]:
 def build_nixl_kv_transfer_config_json() -> str:
     """JSON-encode the runtime-compatible NIXL kv-transfer config."""
     return json.dumps(build_nixl_kv_transfer_config())
-
-
-def get_gpu_memory_utilization() -> float:
-    """Get device-aware GPU memory utilization ratio for vLLM tests.
-
-    Returns:
-        GPU memory utilization ratio (0.0-1.0)
-
-    Notes:
-        - CUDA (e.g., L40S 48GB): 0.45 per worker is safe in current CI coverage
-        - XPU (e.g., Intel 23GB): 0.4 is used for both shared-GPU and general cases
-    """
-    device = detect_target_device()
-
-    if device == "xpu":
-        # XPU general case (single worker or multi-GPU)
-        return 0.4
-
-    # CUDA (default): more generous utilization
-    return 0.45

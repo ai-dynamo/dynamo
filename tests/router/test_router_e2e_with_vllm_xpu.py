@@ -29,11 +29,7 @@ from tests.router.e2e_harness import (
 )
 from tests.router.helper import generate_random_suffix
 from tests.utils.constants import DefaultPort
-from tests.utils.device import (
-    get_default_vllm_block_size,
-    get_device_visibility_env_var,
-    get_gpu_memory_utilization,
-)
+from tests.utils.device import get_default_vllm_block_size
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 
@@ -50,8 +46,11 @@ pytestmark = [
 ]
 
 BLOCK_SIZE = get_default_vllm_block_size()
-_GPU_MEM_UTIL = get_gpu_memory_utilization()
 _MAX_MODEL_LEN = 768
+_GPU_MEM_UTIL = 0.4
+
+# Device visibility: ZE_AFFINITY_MASK for XPU.
+_DEVICE_VISIBILITY_ENV_VAR = "ZE_AFFINITY_MASK"
 
 VLLM_ARGS: Dict[str, Any] = {
     "block_size": BLOCK_SIZE,
@@ -121,7 +120,7 @@ class XPUVLLMProcess(ManagedEngineProcessMixin):
         self.model_name = model
         self.block_size = vllm_args.get("block_size", BLOCK_SIZE)
 
-        visibility_env_var = get_device_visibility_env_var()
+        visibility_env_var = _DEVICE_VISIBILITY_ENV_VAR
         inherited_visibility = os.environ.get(visibility_env_var)
 
         for worker_idx in range(num_workers):
