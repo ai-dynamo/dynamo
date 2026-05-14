@@ -23,7 +23,9 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -38,73 +40,107 @@ type ExcludedNamespacesInterface interface {
 
 // DetectGroveAvailability checks if Grove is available by checking if the Grove API group is registered
 func DetectGroveAvailability(ctx context.Context, mgr ctrl.Manager) bool {
-	return detectAPIGroupAvailability(ctx, mgr, "grove.io")
+	return detectAPIGroupAvailability(ctx, mgr, "grove.io", nil)
 }
 
 // DetectLWSAvailability checks if LWS is available by checking if the LWS API group is registered
 func DetectLWSAvailability(ctx context.Context, mgr ctrl.Manager) bool {
-	return detectAPIGroupAvailability(ctx, mgr, "leaderworkerset.x-k8s.io")
+	return detectAPIGroupAvailability(ctx, mgr, "leaderworkerset.x-k8s.io", nil)
 }
 
 // DetectVolcanoAvailability checks if Volcano is available by checking if the Volcano API group is registered
 func DetectVolcanoAvailability(ctx context.Context, mgr ctrl.Manager) bool {
-	return detectAPIGroupAvailability(ctx, mgr, "scheduling.volcano.sh")
+	return detectAPIGroupAvailability(ctx, mgr, "scheduling.volcano.sh", nil)
 }
 
 // DetectKaiSchedulerAvailability checks if Kai-scheduler is available by checking if the scheduling.run.ai API group is registered
 func DetectKaiSchedulerAvailability(ctx context.Context, mgr ctrl.Manager) bool {
-	return detectAPIGroupAvailability(ctx, mgr, "scheduling.run.ai")
+	return detectAPIGroupAvailability(ctx, mgr, "scheduling.run.ai", nil)
 }
 
 // DetectInferencePoolAvailability checks if the Gateway API Inference Extension is available
 // by checking if the inference.networking.k8s.io API group is registered
 func DetectInferencePoolAvailability(ctx context.Context, mgr ctrl.Manager) bool {
-	return detectAPIGroupAvailability(ctx, mgr, "inference.networking.k8s.io")
+	return detectAPIGroupAvailability(ctx, mgr, "inference.networking.k8s.io", nil)
 }
 
-// DetectDRAAvailability checks if Dynamic Resource Allocation is available
-// by checking if the resource.k8s.io API group is registered (Kubernetes 1.32+)
+// DetectDRAAvailability checks if the DRA API version used by this operator is available.
 func DetectDRAAvailability(ctx context.Context, mgr ctrl.Manager) bool {
-	return detectAPIGroupAvailability(ctx, mgr, "resource.k8s.io")
+	version := resourcev1.SchemeGroupVersion.Version
+	return detectAPIGroupAvailability(ctx, mgr, resourcev1.SchemeGroupVersion.Group, &version)
 }
 
 // DetectIstioAvailability checks if Istio is available by checking if the
 // networking.istio.io API group is registered. Used to guard DestinationRule
 // reconciliation so the operator doesn't error on clusters without Istio CRDs.
 func DetectIstioAvailability(ctx context.Context, mgr ctrl.Manager) bool {
-	return detectAPIGroupAvailability(ctx, mgr, "networking.istio.io")
+	return detectAPIGroupAvailability(ctx, mgr, "networking.istio.io", nil)
 }
 
-// detectAPIGroupAvailability checks if a specific API group is registered in the cluster
-func detectAPIGroupAvailability(ctx context.Context, mgr ctrl.Manager, groupName string) bool {
+// detectAPIGroupAvailability checks if a specific API group, and optionally a
+// specific version, is registered in the cluster.
+func detectAPIGroupAvailability(ctx context.Context, mgr ctrl.Manager, groupName string, version *string) bool {
 	logger := log.FromContext(ctx)
+	logValues := []any{"group", groupName}
+	versionValue := ""
+	if version != nil {
+		versionValue = *version
+		logValues = append(logValues, "version", versionValue)
+	}
 
 	cfg := mgr.GetConfig()
 	if cfg == nil {
-		logger.Info("detection failed, no discovery client available", "group", groupName)
+		logger.Info("detection failed, no discovery client available", logValues...)
 		return false
 	}
 
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
-		logger.Error(err, "detection failed, could not create discovery client", "group", groupName)
+		logger.Error(err, "detection failed, could not create discovery client", logValues...)
 		return false
 	}
 
 	apiGroups, err := discoveryClient.ServerGroups()
 	if err != nil {
-		logger.Error(err, "detection failed, could not list server groups", "group", groupName)
+		logger.Error(err, "detection failed, could not list server groups", logValues...)
 		return false
 	}
 
-	for _, group := range apiGroups.Groups {
-		if group.Name == groupName {
-			logger.Info("API group is available", "group", groupName)
-			return true
+	if apiGroupServesVersion(apiGroups, groupName, versionValue) {
+		if version == nil {
+			logger.Info("API group is available", logValues...)
+		} else {
+			logger.Info("API group version is available", logValues...)
 		}
+		return true
 	}
 
-	logger.Info("API group not available", "group", groupName)
+	if version == nil {
+		logger.Info("API group not available", logValues...)
+	} else {
+		logger.Info("API group version not available", logValues...)
+	}
+	return false
+}
+
+func apiGroupServesVersion(apiGroups *metav1.APIGroupList, groupName, version string) bool {
+	if apiGroups == nil {
+		return false
+	}
+	for _, group := range apiGroups.Groups {
+		if group.Name != groupName {
+			continue
+		}
+		if version == "" {
+			return true
+		}
+		for _, served := range group.Versions {
+			if served.Version == version {
+				return true
+			}
+		}
+		return false
+	}
 	return false
 }
 

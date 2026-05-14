@@ -148,6 +148,33 @@ func TestIsDeploymentReady(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "not ready (old replicas remain after update)",
+			args: args{
+				deployment: &appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Generation: 2,
+					},
+					Spec: appsv1.DeploymentSpec{
+						Replicas: &[]int32{2}[0],
+					},
+					Status: appsv1.DeploymentStatus{
+						ObservedGeneration: 2,
+						UpdatedReplicas:    2,
+						ReadyReplicas:      2,
+						AvailableReplicas:  2,
+						Replicas:           3,
+						Conditions: []appsv1.DeploymentCondition{
+							{
+								Type:   appsv1.DeploymentAvailable,
+								Status: corev1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			want: false,
+		},
+		{
 			name: "ready",
 			args: args{
 				deployment: &appsv1.Deployment{

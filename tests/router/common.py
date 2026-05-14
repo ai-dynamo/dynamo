@@ -57,6 +57,32 @@ def min_initial_workers_env(min_initial_workers: int):
             os.environ[MIN_INITIAL_WORKERS_ENV] = previous
 
 
+async def _assert_overlap_scores(
+    kv_router,
+    token_ids: list[int],
+    block_size: int,
+    expected_device_blocks: dict[tuple[int, int], int],
+    label: str,
+):
+    scores = await kv_router.get_overlap_scores(token_ids, include_shared=False)
+
+    assert scores["block_size"] == block_size
+    assert scores["num_blocks"] == len(token_ids) // block_size
+    assert scores["shared_cache"]["enabled"] is False
+
+    rows = {(row["worker_id"], row["dp_rank"]): row for row in scores["workers"]}
+
+    for key, expected in expected_device_blocks.items():
+        assert key in rows, f"{label}: missing overlap row for {key}"
+        row = rows[key]
+        assert (
+            row["device_blocks"] == expected
+        ), f"{label}: expected {key} device_blocks={expected}, got {row}"
+        assert row["host_pinned_extension_blocks"] == 0
+        assert row["disk_extension_blocks"] == 0
+        assert row["shared_beyond_device_blocks"] is None
+
+
 ########################################################
 # Test templates
 ########################################################
@@ -601,6 +627,12 @@ def _test_remote_indexer_decisions(
             (consumer_router, A + C + D + F, None, None, 2.0),
             (consumer_router, A + C + E + G, None, None, 2.0),
         ]
+        dp_a = dp_rank_a if dp_rank_a is not None else 0
+        dp_b = dp_rank_b if dp_rank_b is not None else 0
+        expected_overlap_by_request = {
+            4: {(worker_a_id, dp_a): 3, (worker_b_id, dp_b): 2},
+            5: {(worker_a_id, dp_a): 2, (worker_b_id, dp_b): 3},
+        }
 
         responses: list[dict[str, Optional[int]]] = []
         for i, (
@@ -624,6 +656,14 @@ def _test_remote_indexer_decisions(
                     else ""
                 ),
             )
+            if i in expected_overlap_by_request:
+                await _assert_overlap_scores(
+                    kv_router,
+                    token_ids,
+                    block_size,
+                    expected_overlap_by_request[i],
+                    f"request {i}",
+                )
             result = await send_request_via_python_kv_router(
                 kv_python_router=kv_router,
                 model_name=model_name,
@@ -2412,6 +2452,12 @@ def _test_router_decisions(
                 2.0,
             ),  # req5: router picks (worker b should win)
         ]
+        dp_a = dp_rank_a if dp_rank_a is not None else 0
+        dp_b = dp_rank_b if dp_rank_b is not None else 0
+        expected_overlap_by_request = {
+            4: {(worker_a_id, dp_a): 3, (worker_b_id, dp_b): 2},
+            5: {(worker_a_id, dp_a): 2, (worker_b_id, dp_b): 3},
+        }
 
         response_worker_ids: list[dict[str, Optional[int]]] = []
 
@@ -2424,6 +2470,16 @@ def _test_router_decisions(
                 if dp_override is not None:
                     log_msg += f", dp_rank={dp_override}"
             logger.info(log_msg)
+
+            request_idx = i + 1
+            if request_idx in expected_overlap_by_request:
+                await _assert_overlap_scores(
+                    kv_router,
+                    token_ids,
+                    block_size,
+                    expected_overlap_by_request[request_idx],
+                    f"request {request_idx}",
+                )
 
             result = await send_request_via_python_kv_router(
                 kv_python_router=kv_router,

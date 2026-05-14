@@ -1192,6 +1192,48 @@ impl KvRouter {
         })
     }
 
+    #[pyo3(signature = (token_ids, router_config_override=None, block_mm_infos=None, lora_name=None, include_shared=true))]
+    fn get_overlap_scores<'p>(
+        &self,
+        py: Python<'p>,
+        token_ids: Vec<u32>,
+        router_config_override: Option<PyObject>,
+        block_mm_infos: Option<PyObject>,
+        lora_name: Option<String>,
+        include_shared: bool,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let router_config_override = if let Some(obj) = router_config_override {
+            let override_config: RouterConfigOverride =
+                depythonize(obj.bind(py)).map_err(to_pyerr)?;
+            Some(override_config)
+        } else {
+            None
+        };
+        let block_mm_infos = block_mm_infos
+            .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
+            .transpose()?;
+        let chooser = self.inner.chooser.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let scores = chooser
+                .get_overlap_scores(
+                    &token_ids,
+                    router_config_override.as_ref(),
+                    block_mm_infos.as_deref(),
+                    lora_name.as_deref(),
+                    include_shared,
+                )
+                .await
+                .map_err(to_pyerr)?;
+
+            Python::with_gil(|py| {
+                pythonize(py, &scores)
+                    .map(|obj| obj.unbind())
+                    .map_err(to_pyerr)
+            })
+        })
+    }
+
     /// Dump all events from the KV router's indexer as a JSON string
     fn dump_events<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let chooser = self.inner.chooser.clone();
