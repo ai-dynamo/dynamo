@@ -115,6 +115,7 @@ class NativePlannerBase:
         self.config = config
         self.runtime = runtime
         self.namespace = config.namespace
+        self.runtime_namespace = config.namespace
         self.model_name: Optional[str] = None
 
         # Connector
@@ -259,6 +260,7 @@ class NativePlannerBase:
             require_decode=self.require_decode,
         )
         await self.connector.wait_for_deployment_ready(include_planner=False)
+        await self._refresh_runtime_namespace()
 
         # Resolve WorkerInfo once from the connector.  For K8s this populates
         # runtime_config fields from MDC CRDs; for Virtual it returns backend
@@ -313,6 +315,42 @@ class NativePlannerBase:
             self.decode_worker_info.model_name or self.prefill_worker_info.model_name
         )
 
+    def _resolve_runtime_namespace(self) -> str:
+        if hasattr(self.connector, "get_worker_runtime_namespace"):
+            try:
+                return self.connector.get_worker_runtime_namespace(  # type: ignore[attr-defined]
+                    self.namespace
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to resolve worker runtime namespace from connector: {e}; "
+                    f"using base namespace {self.namespace}"
+                )
+        return self.namespace
+
+    async def _refresh_runtime_namespace(self) -> None:
+        """Refresh worker runtime namespace and rebind runtime handles if needed."""
+        runtime_namespace = self._resolve_runtime_namespace()
+        if runtime_namespace == self.runtime_namespace:
+            return
+
+        old_namespace = self.runtime_namespace
+        self.runtime_namespace = runtime_namespace
+        self._prefill_client = None
+        self._decode_client = None
+        self._prefill_fpm_sub = None
+        self._decode_fpm_sub = None
+        logger.info(
+            f"Worker runtime namespace changed: {old_namespace} -> {runtime_namespace}"
+        )
+
+        if self.runtime is None or self.model_name is None:
+            return
+        if self.require_prefill:
+            await self._init_fpm_subscriber("prefill")
+        if self.require_decode:
+            await self._init_fpm_subscriber("decode")
+
     async def _init_fpm_subscriber(self, component: str) -> None:
         from dynamo.llm import FpmEventSubscriber
 
@@ -329,12 +367,13 @@ class NativePlannerBase:
 
         assert self.runtime is not None
         endpoint = self.runtime.endpoint(
-            f"{self.namespace}.{worker_info.component_name}.{worker_info.endpoint}"
+            f"{self.runtime_namespace}.{worker_info.component_name}.{worker_info.endpoint}"
         )
         sub = FpmEventSubscriber(endpoint)
         sub.start_tracking()
         logger.info(
-            f"FPM tracker started for {worker_info.component_name}.{worker_info.endpoint}"
+            f"FPM tracker started for "
+            f"{self.runtime_namespace}.{worker_info.component_name}.{worker_info.endpoint}"
         )
 
         if component == "prefill":
@@ -434,7 +473,7 @@ class NativePlannerBase:
     async def _get_or_create_client(self, component_name: str, endpoint_name: str):
         assert self.runtime is not None
         client = await self.runtime.endpoint(
-            f"{self.namespace}.{component_name}.{endpoint_name}"
+            f"{self.runtime_namespace}.{component_name}.{endpoint_name}"
         ).client()
         await asyncio.sleep(0.1)
         return client
@@ -832,6 +871,7 @@ class NativePlannerBase:
                     await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
                     continue
 
+                await self._refresh_runtime_namespace()
                 self._refresh_worker_info_from_connector()
 
                 tick_input = await self._gather_tick_input(next_tick)
