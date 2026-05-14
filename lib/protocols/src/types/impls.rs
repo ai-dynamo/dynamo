@@ -99,7 +99,26 @@ impl From<async_openai::types::chat::ChatCompletionRequestToolMessage>
     for ChatCompletionRequestMessage
 {
     fn from(value: async_openai::types::chat::ChatCompletionRequestToolMessage) -> Self {
-        Self::Tool(value)
+        Self::Tool(super::ChatCompletionRequestToolMessage {
+            content: match value.content {
+                async_openai::types::chat::ChatCompletionRequestToolMessageContent::Text(s) => {
+                    super::ChatCompletionRequestToolMessageContent::Text(s)
+                }
+                async_openai::types::chat::ChatCompletionRequestToolMessageContent::Array(parts) => {
+                    super::ChatCompletionRequestToolMessageContent::Array(
+                        parts
+                            .into_iter()
+                            .map(|p| match p {
+                                async_openai::types::chat::ChatCompletionRequestToolMessageContentPart::Text(t) => {
+                                    super::ChatCompletionRequestToolMessageContentPart::Text(t)
+                                }
+                            })
+                            .collect(),
+                    )
+                }
+            },
+            tool_call_id: value.tool_call_id,
+        })
     }
 }
 
