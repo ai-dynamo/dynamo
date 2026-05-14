@@ -334,61 +334,57 @@ PYTHONPATH=lib/bindings/python/src python3 -m pytest \
 
 Impl tag is `#vllm` or `#sglang`.
 
-### 4. Decide who's right
+### 4. Pick an alignment target
 
-**Goals, in priority order.** Higher goals trump lower ones when they conflict.
+Parity isn't about declaring a winner. It's about picking what
+Dynamo should align *to* for this (family, case) so the fix has a
+clear oracle. Apply the priorities below in order: the first matching
+rule wins, and the chosen target is recorded in
+`reason:` (or `spec_ref:`) so future readers see the trail.
 
-0. **Spec, if one exists.** If the parser family has a published
-   upstream spec (chat template, tokenizer config, model-card section,
-   vendor docs), align to the spec regardless of what either engine
-   does. Add `spec_ref:` to the fixture (see step 8). This is rare —
-   most families don't have a written spec; skip to goal 1 in that case.
-1. **No tag/marker leakage.** Tool-calling tags like `<｜tool_call｜>`,
-   `<tool_call>`, `[TOOL_CALLS]`, etc. must never reach `message.content`
-   rendered to a user. If one engine leaks and the other doesn't, prefer
-   the non-leaking behavior.
-2. **Parity with both engines.** Dynamo should match vLLM *and* SGLang
-   for each (family, case). When they disagree, this conflicts with
-   goal 1 — pick the engine that better satisfies goal 1.
+**Alignment-target priority (highest wins):**
 
-**Decision rubric (apply in order):**
+0. **Upstream spec, if one exists.** Chat template, tokenizer
+   config, model-card section, vendor docs. Spec is the unambiguous
+   oracle; if both vendors disagree with it, both are upstream bugs
+   to file. Record `spec_ref:` in the fixture (step 8). Rare —
+   most families have no written spec; skip to 1.
+1. **The non-leaking vendor.** Tool-calling tags like `<｜tool_call｜>`,
+   `<tool_call>`, `[TOOL_CALLS]`, etc. must never reach the
+   `message.content` shown to an end user. If one vendor leaks and
+   the other doesn't, align to the non-leaking one.
+2. **The impacted customer's vendor.** If a prod deployment is broken
+   because of a divergence, align to that customer's vendor *now* to
+   unblock. Record incident + vendor chosen in
+   `reason:` (e.g.
+   `"aligned to SGLang per Acme prod report 2026-05-12; vLLM variant leaks <|tool_call|> tag into content"`).
+   Don't re-litigate in the same PR — ship the unblock and follow
+   up separately.
+3. **Vendor consensus.** When vLLM and SGLang agree, that shared
+   shape is the target. When they disagree and none of the above
+   applies, pick the one that better satisfies priority 1 (no leak)
+   and record why in `reason:`.
 
-- **Spec exists** → follow it; record `spec_ref:` in the fixture; both
-  engines disagreeing with the spec are upstream bugs to file.
-- **Customer complains in production** → align to that customer's engine
-  *now* to unblock. Add a `reason:` string referencing the incident and
-  the engine you aligned to (e.g.
-  `"aligned to SGLang per Acme prod report 2026-05-12; vLLM variant leaks <|tool_call|> tag into content"`).
-  Don't litigate the "right" choice in the same PR — ship the unblock
-  and follow up.
-- **Dynamo wrong, impl right** → fix Dynamo (step 5).
-- **Dynamo right, impl wrong intentionally** → leave the entry, file
-  an upstream bug at `vllm-project/vllm` or `sgl-project/sglang`, link
-  it from the divergence reason.
-- **vLLM and SGLang disagree** → align to whichever satisfies goal 1
-  (no leak). Add a `reason:` string explaining why (e.g.
-  `"aligned to vLLM: SGLang leaves trailing <tool_call> in normal_text"`).
-- **Both wrong / spec-ambiguous** → discuss before touching code.
-- **A customer is blocked on a specific divergence** → align Dynamo to
-  *that customer's* engine (vLLM or SGLang) and ship the unblock. Don't
-  litigate "who's correct per spec" while a customer is waiting. Always
-  add a `reason:` to the chosen peer block (or a case-level note for
-  Dynamo-side rationale) explaining why we picked that engine — future
-  readers should see "aligned to vLLM on 2026-MM-DD per <customer/ticket>"
-  rather than guess.
-- **Two customers want different behavior on the same case** → add a
-  runtime parameter or environment variable so operators can toggle which
-  engine's behavior Dynamo emulates per-deployment. This is the sad
-  reality of supporting multiple engines while keeping everyone happy. If
-  the param doesn't exist yet, file a follow-up issue and link it from
-  the divergence reason.
+**Once the target is picked, the action depends on where Dynamo stands:**
 
-> **Sad reality:** sometimes the goals are unreconcilable across
-> customers — one prod deployment wants vLLM-style output, another
-> wants SGLang-style. We may eventually need a parser-side param or
-> env (e.g. `DYN_PARSER_<family>_MODE=vllm|sglang`) to flip behavior
-> per deployment. Track these cases in the divergence `reason:` so
-> the switch can be added later from a known set.
+- **Spec is the target, a vendor diverges** → file an upstream bug
+  at `vllm-project/vllm` or `sgl-project/sglang`, link from `reason:`.
+- **A vendor is the target, Dynamo diverges** → fix Dynamo (step 5).
+- **A vendor is the target, Dynamo already matches, the *other*
+  vendor diverges intentionally** → leave the divergence entry,
+  file an upstream bug at the disagreeing vendor.
+- **Two customers need different behavior on the same case** → file a
+  follow-up for a parser-side runtime parameter or environment variable,
+  then link that follow-up from `reason:`.
+- **Genuinely ambiguous** (no spec, both vendors leak, no incident)
+  → discuss before touching code.
+
+> **Sad reality:** sometimes the priority chain is unreconcilable
+> across customers — one prod deployment needs vLLM-style output,
+> another needs SGLang-style. We may eventually need a parser-side
+> param or env (e.g. `DYN_PARSER_<family>_MODE=vllm|sglang`) to flip
+> behavior per deployment. Track these cases in `reason:` so the
+> switch can be added later from a known set.
 
 ### 5. Fix the parser
 
