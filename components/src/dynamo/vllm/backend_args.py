@@ -102,6 +102,27 @@ class DynamoVllmArgGroup(ArgGroup):
             default=False,
             help="Enable multimodal processing. If not set, none of the multimodal components can be used.",
         )
+        # Mirror SGLang's `--enable-rl` (sglang/backend_args.py:109) so both
+        # backends accept the same CLI / env var. The RL request-plane routes
+        # (pause_generation, update_weights_*, etc.) are unconditionally
+        # registered on the vLLM backend today, so this flag is currently a
+        # no-op gate that exists for parity + future opt-in gating. The
+        # canonical env var is `DYN_ENABLE_RL` (not `DYN_VLLM_ENABLE_RL`)
+        # because RL endpoints live on the frontend side too and they share
+        # this env var (see lib/llm/src/http/service/service_v2.rs).
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-rl",
+            env_var="DYN_ENABLE_RL",
+            default=False,
+            help=(
+                "Enable RL training support. Mirrors --enable-rl on the SGLang "
+                "backend. RL admin routes (/v1/rl/engine pause_generation, "
+                "update_weights_from_disk, resume_generation, etc.) are "
+                "registered unconditionally today; this flag is reserved as the "
+                "future on/off gate."
+            ),
+        )
         add_argument(
             g,
             flag_name="--mm-prompt-template",
@@ -254,6 +275,10 @@ class DynamoVllmConfig(ConfigBase):
     multimodal_worker: bool
     multimodal_decode_worker: bool
     enable_multimodal: bool
+    # RL parity with SGLang. Reserved as the future on/off gate for RL routes;
+    # vLLM registers the routes unconditionally today, so this flag is a no-op
+    # signal that the worker is running in an RL deployment.
+    enable_rl: bool = False
     mm_prompt_template: str
     frontend_decoding: bool
     embedding_transfer_mode: Union[
