@@ -190,17 +190,12 @@ class SglangLLMEngine(LLMEngine):
         )
 
     def _kv_routing_enabled(self) -> bool:
-        # Operator opts in by setting `--kv-events-config` — same gate
-        # as the legacy `DynamoSglangPublisher.init_kv_event_publish`.
-        # Every node (not just the leader) publishes its local DP ranks'
-        # events, and decode workers participate — both match legacy.
+        # Matches legacy `DynamoSglangPublisher.init_kv_event_publish` —
+        # every node publishes its local ranks; no decode gate.
         return bool(getattr(self.server_args, "kv_events_config", None))
 
     def _is_metrics_leader(self) -> bool:
-        # SGLang's scheduler-metrics PULL socket is bound only on the
-        # leader node; non-leader nodes can't emit per-DP-rank metrics
-        # even when KV routing is on. Matches legacy `DynamoSglangPublisher`
-        # which only initialises the ZMQ socket on `node_rank == 0`.
+        # Scheduler-metrics PULL socket binds on the leader only.
         return (getattr(self.server_args, "node_rank", 0) or 0) == 0
 
     def _start_metrics_task(self) -> None:

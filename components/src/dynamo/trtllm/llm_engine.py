@@ -122,8 +122,7 @@ class TrtllmLLMEngine(LLMEngine):
         # Drives context_only / generation_only branching in generate().
         self.disaggregation_mode = disaggregation_mode
         # Gates the metrics-poll thread and the kv_event/metrics source
-        # publishers. Decode workers in disaggregated mode don't host the
-        # KV indexer so they opt out too (handled in `_kv_routing_enabled`).
+        # publishers. See `_kv_routing_enabled`.
         self.publish_events_and_metrics = publish_events_and_metrics
         self._engine: TensorRTLLMEngine | None = None
         self._default_sampling_params = SamplingParams(detokenize=False)
@@ -292,11 +291,8 @@ class TrtllmLLMEngine(LLMEngine):
     # the asyncio event loop.
 
     def _kv_routing_enabled(self) -> bool:
-        # `--publish-events-and-metrics` is the operator's switch for both
-        # KV-event and load-metric publishing. Matches the legacy
-        # `workers/llm_worker.py` flow: events and metrics share a single
-        # gate, and decode workers DO publish (the legacy path only
-        # turns off `enable_local_indexer` for decode, not the publisher).
+        # Matches the legacy `workers/llm_worker.py` gate. Decode workers
+        # publish too — legacy only flips `enable_local_indexer` off.
         return self.publish_events_and_metrics
 
     async def kv_event_sources(self) -> list[KvEventSource]:
@@ -389,16 +385,6 @@ class TrtllmLLMEngine(LLMEngine):
                             "tracebacks (last error: %s)",
                             e,
                         )
-
-    def _scheduling_params_for(
-        self, dp_rank: int | None
-    ) -> Optional[SchedulingParams]:
-        rank = validate_global_dp_rank(
-            dp_rank, 0, self._attention_dp_size, "TRT-LLM"
-        )
-        if rank is None:
-            return None
-        return SchedulingParams(attention_dp_rank=rank, attention_dp_relax=False)
 
     def _dispatch_kv_event(self, event: dict[str, Any]) -> None:
         """Forward stored / removed events to the right publisher. Other
@@ -522,7 +508,14 @@ class TrtllmLLMEngine(LLMEngine):
 
         # Honour the router's DP rank decision; without it TRT-LLM picks
         # its own rank and KV events land on the wrong publisher.
-        scheduling_params = self._scheduling_params_for(forced_dp_rank(request))
+        rank = validate_global_dp_rank(
+            forced_dp_rank(request), 0, self._attention_dp_size, "TRT-LLM"
+        )
+        scheduling_params = (
+            SchedulingParams(attention_dp_rank=rank, attention_dp_relax=False)
+            if rank is not None
+            else None
+        )
 
         # Prefill returns one non-streaming chunk carrying the handoff —
         # matches the legacy disagg wire format.

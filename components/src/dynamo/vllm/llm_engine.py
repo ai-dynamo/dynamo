@@ -276,8 +276,15 @@ class VllmLLMEngine(LLMEngine):
             sampling_params.extra_args["kv_transfer_params"] = kv_params
 
         # Honour the router's DP rank decision; without it vLLM picks
-        # its own rank and KV events land on the wrong publisher.
-        local_dp_rank = self._to_local_dp_rank(forced_dp_rank(request))
+        # its own rank and KV events land on the wrong publisher. vLLM
+        # expects a local rank, so subtract this worker's `dp_start`.
+        local_dp_rank: Optional[int] = None
+        if self._dp_range is not None:
+            dp_start, dp_size = self._dp_range
+            rank = validate_global_dp_rank(
+                forced_dp_rank(request), dp_start, dp_size, "vLLM"
+            )
+            local_dp_rank = None if rank is None else rank - dp_start
 
         gen = self.engine_client.generate(
             prompt, sampling_params, request_id, data_parallel_rank=local_dp_rank
@@ -329,20 +336,8 @@ class VllmLLMEngine(LLMEngine):
                 yield out
                 num_output_tokens_so_far[output_idx] = next_total
 
-    def _to_local_dp_rank(self, dp_rank: int | None) -> int | None:
-        """Map a global DP rank into this worker's local rank, or ``None``
-        if out of range (vLLM then falls back to internal LB)."""
-        if self._dp_range is None:
-            return None
-        dp_start, dp_size = self._dp_range
-        rank = validate_global_dp_rank(dp_rank, dp_start, dp_size, "vLLM")
-        return None if rank is None else rank - dp_start
-
     def _kv_routing_enabled(self) -> bool:
-        # vLLM's KV-event publisher is gated on prefix caching being on, on
-        # the engine actually emitting events, and on whether this worker
-        # role holds long-lived cache. Decode workers in disaggregated mode
-        # don't, so we opt out — matching the legacy publisher behavior.
+        # Matches the legacy `setup_kv_event_publisher` gate.
         if not self.engine_args.enable_prefix_caching:
             return False
         kv_events_config = self.engine_args.kv_events_config
