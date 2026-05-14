@@ -41,6 +41,7 @@ examples:
   - 'deploy/discovery/**'
   - 'deploy/inference-gateway/**'
   - 'dev/observability/**'
+  - 'deploy/observability/**'
   - 'deploy/pre-deployment/**'
 
 ignore:
@@ -50,6 +51,7 @@ ignore:
   - '.clang-format'
   - 'dynamo.code-workspace'
   - 'deploy/*'
+  - 'dev/*'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
   - '.github/pull_request_template.md'
