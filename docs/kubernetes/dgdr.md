@@ -77,6 +77,55 @@ spec:
 
 For the complete CRD spec, see the [API Reference](api-reference.md).
 
+### Generated DGD Overrides
+
+Use `spec.overrides.dgd` when the generated `DynamoGraphDeployment` needs a
+field that DGDR does not expose directly. The value is a partial
+`nvidia.com/v1alpha1` DGD object that is merged into the profiler-generated
+deployment after Dynamo selects a configuration.
+
+For example, to inject an environment variable into every generated service:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-sglang
+spec:
+  model: Qwen/Qwen3-30B-A3B
+  backend: sglang
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1
+      kind: DynamoGraphDeployment
+      spec:
+        envs:
+          - name: TRITON_PTXAS_PATH
+            value: /usr/local/cuda/bin/ptxas
+```
+
+Use `spec.envs` for variables that should apply to all generated services. To
+target a single service, override that service's `envs` entry instead:
+
+```yaml
+spec:
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1
+      kind: DynamoGraphDeployment
+      spec:
+        services:
+          decode:  # replace with the generated service name
+            envs:
+              - name: CUSTOM_WORKER_ENV
+                value: "enabled"
+```
+
+> [!NOTE]
+> `overrides.profilingJob` only customizes the profiling Job. Use
+> `overrides.dgd` for settings that must appear on the deployed worker pods.
+
 ### SKU Format
 
 When providing hardware configuration manually, use lowercase underscore format:

@@ -78,7 +78,11 @@ impl LineageBackend {
     fn insert_inner(&mut self, seq_hash: SequenceHash, block_id: BlockId) {
         let lineage_hash = seq_hash;
         let position = lineage_hash.position();
-        let fragment = lineage_hash.current_hash_fragment();
+        // Key this node by the same fragment width its children will store as their
+        // `parent_hash_fragment`, so child→parent lookups match exactly. PLH carries
+        // the full u64 current sequence hash; we truncate here to the child mode's
+        // parent-fragment width (54/46/38 bits depending on `position + 1`).
+        let fragment = lineage_hash.parent_fragment_for_child_position(position + 1);
         let full_hash = lineage_hash.as_u128();
         let parent_fragment = if position > 0 {
             Some(lineage_hash.parent_hash_fragment())
@@ -187,7 +191,7 @@ impl LineageBackend {
         lineage_hash: &PositionalLineageHash,
     ) -> Option<(SequenceHash, BlockId)> {
         let position = lineage_hash.position();
-        let fragment = lineage_hash.current_hash_fragment();
+        let fragment = lineage_hash.parent_fragment_for_child_position(position + 1);
 
         let node_data = self
             .nodes
@@ -359,7 +363,8 @@ impl InactiveIndex for LineageBackend {
 
     fn has(&self, seq_hash: SequenceHash) -> bool {
         let position = seq_hash.position();
-        let fragment = seq_hash.current_hash_fragment();
+        let fragment = seq_hash.parent_fragment_for_child_position(position + 1);
+
         self.nodes
             .get(&position)
             .and_then(|level| level.get(&fragment))
@@ -377,7 +382,7 @@ impl InactiveIndex for LineageBackend {
         // Match on the full `SequenceHash` AND the block id — `(position,
         // current_hash_fragment)` alone can collide across distinct PLHs.
         let position = seq_hash.position();
-        let fragment = seq_hash.current_hash_fragment();
+        let fragment = seq_hash.parent_fragment_for_child_position(position + 1);
         let stored_id = self
             .nodes
             .get(&position)
@@ -650,8 +655,8 @@ mod tests {
         let impostor: SequenceHash = SequenceHash::new(0xAA, Some(0x22), 5);
         assert_eq!(stored.position(), impostor.position());
         assert_eq!(
-            stored.current_hash_fragment(),
-            impostor.current_hash_fragment()
+            stored.parent_fragment_for_child_position(stored.position() + 1),
+            impostor.parent_fragment_for_child_position(impostor.position() + 1)
         );
         assert_ne!(stored.as_u128(), impostor.as_u128());
 

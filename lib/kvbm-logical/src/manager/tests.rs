@@ -28,7 +28,7 @@ fn create_test_token_block_8_from_iota(start: u32) -> dynamo_tokens::TokenBlock 
 
 /// Helper function to create a basic manager for testing
 fn create_test_manager(block_count: usize) -> BlockManager<TestBlockData> {
-    testing::create_test_manager::<TestBlockData>(block_count)
+    testing::create_test_manager(block_count)
 }
 
 // ============================================================================
@@ -2769,7 +2769,7 @@ mod audit_counter_tests {
             reported_len: 2, // lie: claims 2, allocate() returns 0
         };
         let store: Arc<BlockStore<TestBlockData>> =
-            BlockStore::new(4, 4, Box::new(backend), metrics.clone());
+            BlockStore::new(4, 4, Box::new(backend), metrics.clone(), false);
 
         // free.len() is 4 (all reset). Asking for 5 forces from_inactive=1
         // which trips into the allocate path → backend lies → rollback.
@@ -2930,7 +2930,7 @@ mod audit_counter_tests {
         // backend.allocate(3) returns 2 → rollback fires and reinserts
         // those 2 partial pairs into the inactive index.
         let store: Arc<BlockStore<TestBlockData>> =
-            BlockStore::new(4, 4, Box::new(backend), metrics.clone());
+            BlockStore::new(4, 4, Box::new(backend), metrics.clone(), false);
 
         let result = store.allocate_atomic(7);
         assert!(result.is_none(), "rollback returns None");
@@ -2945,5 +2945,832 @@ mod audit_counter_tests {
         // The partial pairs were reinserted into the index — exercises
         // the `for (h, id) in evicted_pairs { inner.inactive.insert ... }`
         // loop body in the rollback path.
+    }
+}
+
+// ============================================================================
+// RESET-ON-RELEASE TESTS
+// ============================================================================
+//
+// `ImmutableBlock::set_evict_on_reset(true)` and the store-wide
+// `with_default_reset_on_release(true)` cause the last drop of a primary
+// to bypass the inactive pool and return the slot straight to the
+// reset/free list (matching `release_duplicate`).
+
+mod reset_on_release_tests {
+    use super::*;
+    use crate::testing::create_test_manager_with_default_reset_on_release;
+
+    /// Per-block opt-in: a flagged block goes straight to reset on its
+    /// last drop. The inactive pool stays empty and the seq_hash is no
+    /// longer registered or matchable.
+    #[test]
+    fn per_block_flag_bypasses_inactive_pool() {
+        let manager = create_test_manager(4);
+        let m = manager.metrics();
+        let token = create_test_token_block_from_iota(50_000);
+        let hash = token.kvbm_sequence_hash();
+
+        let mutables = manager.allocate_blocks(1).unwrap();
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token)
+            .unwrap();
+        let immutable = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+
+        immutable.set_evict_on_reset(true);
+
+        let store = manager.store_for_test();
+        assert_eq!(store.inactive_len(), 0);
+        assert_eq!(store.reset_len(), 3);
+
+        drop(immutable);
+
+        assert_eq!(store.inactive_len(), 0, "inactive pool stays empty");
+        assert_eq!(store.reset_len(), 4, "slot returned to free list");
+        assert!(
+            !store.has_inactive(hash),
+            "hash not present in inactive index"
+        );
+        assert!(
+            !manager.block_registry().is_registered(hash),
+            "registry handle marked absent"
+        );
+        assert!(
+            manager.match_blocks(&[hash]).is_empty(),
+            "block cannot be matched after reset"
+        );
+
+        let snap = m.snapshot();
+        assert_eq!(snap.inflight_immutable, 0);
+        assert_eq!(snap.inactive_pool_size, 0);
+        assert_eq!(snap.reset_pool_size, 4);
+    }
+
+    /// Flag does not prevent in-flight sharing. While clones exist, the
+    /// block is matchable. Only the *last* drop honors the flag.
+    #[test]
+    fn flag_does_not_prevent_inflight_sharing() {
+        let manager = create_test_manager(4);
+        let token = create_test_token_block_from_iota(50_001);
+        let hash = token.kvbm_sequence_hash();
+
+        let mutables = manager.allocate_blocks(1).unwrap();
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token)
+            .unwrap();
+        let a = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        let b = a.clone();
+        a.set_evict_on_reset(true);
+
+        // Drop only `a`. `b` is still alive; slot stays Primary.
+        drop(a);
+        let store = manager.store_for_test();
+        assert_eq!(store.inactive_len(), 0);
+        assert_eq!(store.reset_len(), 3);
+
+        // Lookup must still succeed — flag has no effect while clones live.
+        let matched = manager.match_blocks(&[hash]);
+        assert_eq!(matched.len(), 1);
+        drop(matched);
+        drop(b);
+
+        // Now the last clone is gone — flag fires, slot resets.
+        assert_eq!(store.inactive_len(), 0);
+        assert_eq!(store.reset_len(), 4);
+        assert!(!manager.block_registry().is_registered(hash));
+    }
+
+    /// The flag is shared across clones via the Arc-backed AtomicBool.
+    /// Last setter wins.
+    #[test]
+    fn last_writer_wins_across_clones() {
+        let manager = create_test_manager(4);
+        let token = create_test_token_block_from_iota(50_002);
+        let hash = token.kvbm_sequence_hash();
+
+        let mutables = manager.allocate_blocks(1).unwrap();
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token)
+            .unwrap();
+        let a = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        let b = a.clone();
+
+        a.set_evict_on_reset(true);
+        b.set_evict_on_reset(false); // overrides — clones share one atomic
+
+        drop(a);
+        drop(b);
+
+        let store = manager.store_for_test();
+        // Last writer was `false`, so the block went to the inactive
+        // pool, not the reset pool.
+        assert_eq!(store.inactive_len(), 1);
+        assert_eq!(store.reset_len(), 3);
+        assert!(store.has_inactive(hash));
+    }
+
+    /// Resetting one block's slot does NOT poison a future registration
+    /// of the same `BlockId`. The next holder starts with the store's
+    /// default (`false` here).
+    #[test]
+    fn no_poisoning_across_registrations() {
+        let manager = create_test_manager(1);
+        let store = manager.store_for_test();
+
+        // First registration: flag = true, reset on drop.
+        let token1 = create_test_token_block_from_iota(50_003);
+        let hash1 = token1.kvbm_sequence_hash();
+        {
+            let mutables = manager.allocate_blocks(1).unwrap();
+            let complete = mutables
+                .into_iter()
+                .next()
+                .unwrap()
+                .complete(&token1)
+                .unwrap();
+            let imm = manager
+                .register_blocks(vec![complete])
+                .into_iter()
+                .next()
+                .unwrap();
+            imm.set_evict_on_reset(true);
+            drop(imm);
+        }
+        assert_eq!(store.reset_len(), 1, "first registration reset");
+        assert!(!manager.block_registry().is_registered(hash1));
+
+        // Second registration: same BlockId (only one available),
+        // different hash. Must NOT inherit the previous flag.
+        let token2 = create_test_token_block_from_iota(50_004);
+        let hash2 = token2.kvbm_sequence_hash();
+        let mutables = manager.allocate_blocks(1).unwrap();
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token2)
+            .unwrap();
+        let imm = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        drop(imm);
+
+        // If poisoning happened, this would reset; with the default
+        // (false), the block should land in the inactive pool.
+        assert_eq!(
+            store.inactive_len(),
+            1,
+            "second block went to inactive, flag NOT inherited"
+        );
+        assert_eq!(store.reset_len(), 0);
+        assert!(store.has_inactive(hash2));
+    }
+
+    /// Store-wide default: every primary release bypasses inactive.
+    #[test]
+    fn store_wide_default_resets_on_release() {
+        let manager = create_test_manager_with_default_reset_on_release::<TestBlockData>(4, true);
+        let token = create_test_token_block_from_iota(50_005);
+        let hash = token.kvbm_sequence_hash();
+
+        let mutables = manager.allocate_blocks(1).unwrap();
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token)
+            .unwrap();
+        let imm = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        // No explicit set_evict_on_reset call — relying on the store default.
+        drop(imm);
+
+        let store = manager.store_for_test();
+        assert_eq!(store.inactive_len(), 0);
+        assert_eq!(store.reset_len(), 4);
+        assert!(!manager.block_registry().is_registered(hash));
+    }
+
+    /// Sticky override: with store default = true, a holder opts out
+    /// via `set_evict_on_reset(false)`. After Drop the block lands in
+    /// the inactive pool (correct). A later `match_blocks` resurrects
+    /// it; the resurrected `ImmutableBlock` inherits the *stored*
+    /// override, NOT the store default. Dropping the resurrected clone
+    /// must keep the block in the inactive pool, not reset it.
+    ///
+    /// Regression test for the Codex review finding:
+    /// "Preserve per-block opt-out across inactive hits".
+    #[test]
+    fn opt_out_survives_inactive_resurrection() {
+        let manager = create_test_manager_with_default_reset_on_release::<TestBlockData>(4, true);
+        let token = create_test_token_block_from_iota(50_009);
+        let hash = token.kvbm_sequence_hash();
+
+        let mutables = manager.allocate_blocks(1).unwrap();
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token)
+            .unwrap();
+        let imm = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        imm.set_evict_on_reset(false); // opt out of store-wide default
+        drop(imm);
+
+        let store = manager.store_for_test();
+        assert_eq!(store.inactive_len(), 1, "opt-out kept block in inactive");
+        assert_eq!(store.reset_len(), 3);
+
+        // Resurrect via the inactive cache.
+        let resurrected = manager.match_blocks(&[hash]);
+        assert_eq!(resurrected.len(), 1);
+        assert_eq!(store.inactive_len(), 0, "resurrection drained inactive");
+
+        // Drop the resurrected clone. The override stored in
+        // SlotState::Inactive must have travelled into the new Inner —
+        // so this drop also keeps the block in the inactive pool
+        // instead of resetting per the store default.
+        drop(resurrected);
+
+        assert_eq!(
+            store.inactive_len(),
+            1,
+            "override survived resurrection — block stayed in inactive"
+        );
+        assert_eq!(store.reset_len(), 3);
+        assert!(store.has_inactive(hash));
+        assert!(manager.block_registry().is_registered(hash));
+    }
+
+    /// Holder can opt out of the store-wide default for a specific block.
+    #[test]
+    fn per_block_can_opt_out_of_store_default() {
+        let manager = create_test_manager_with_default_reset_on_release::<TestBlockData>(4, true);
+        let token = create_test_token_block_from_iota(50_006);
+        let hash = token.kvbm_sequence_hash();
+
+        let mutables = manager.allocate_blocks(1).unwrap();
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token)
+            .unwrap();
+        let imm = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        imm.set_evict_on_reset(false); // overrides store default
+        drop(imm);
+
+        let store = manager.store_for_test();
+        assert_eq!(store.inactive_len(), 1, "kept in inactive despite default");
+        assert_eq!(store.reset_len(), 3);
+        assert!(store.has_inactive(hash));
+    }
+
+    /// Eager-resurrection path (concurrent lookup observes Arc strong=0
+    /// before Drop's `release_primary` fires) preserves the per-block
+    /// override. The override lives in the store-owned per-slot atomic
+    /// (not on the dropping Inner), so the eager `Primary → Inactive`
+    /// transition rides over the race window without losing the flag.
+    /// The resurrected block reads the same atomic on its own drop.
+    ///
+    /// Mirrors `eager_primary_to_inactive_is_deterministic_with_pause_hook`
+    /// in `race_regression_tests`. Regression test for the review finding
+    /// at https://github.com/ai-dynamo/dynamo/pull/9504#discussion_r3238515930.
+    #[test]
+    fn eager_resurrection_preserves_flag() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let manager = Arc::new(create_test_manager(4));
+        let token = create_test_token_block_from_iota(50_007);
+        let hash = token.kvbm_sequence_hash();
+
+        let mutables = manager.allocate_blocks(1).unwrap();
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token)
+            .unwrap();
+        let immutable = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        immutable.set_evict_on_reset(true);
+
+        let store = manager.store_for_test().clone();
+
+        let gate = store.pause_release_primary();
+        let arrivals_before = store.release_primary_arrivals();
+        let drop_t = thread::spawn(move || drop(immutable));
+
+        while store.release_primary_arrivals() == arrivals_before {
+            std::thread::yield_now();
+        }
+
+        // Concurrent lookup drives the eager `Primary → Inactive`
+        // transition. The dropping Inner had flag=true; the eager path
+        // leaves the per-slot atomic untouched, so the override rides
+        // over the race window.
+        let matched = manager.match_blocks(&[hash]);
+        assert_eq!(matched.len(), 1, "eager resurrection must succeed");
+
+        let snap_mid = manager.metrics().snapshot();
+        assert_eq!(
+            snap_mid.eager_primary_to_inactive_total, 1,
+            "eager transition fired"
+        );
+
+        drop(gate);
+        drop_t.join().unwrap();
+
+        // The parked drop saw a slot that no longer matched its self_ptr
+        // and no-opped — its destination decision was preempted by the
+        // eager path.
+        let snap_after = manager.metrics().snapshot();
+        assert_eq!(snap_after.release_primary_noop_total, 1);
+
+        // The resurrected Inner reads the per-slot atomic on its own
+        // drop. Because the original holder had set the override to
+        // `true`, this drop must bypass the inactive pool and reset the
+        // slot — proving the override survived the race window.
+        drop(matched);
+
+        let store = manager.store_for_test();
+        assert_eq!(
+            store.inactive_len(),
+            0,
+            "override preserved — block bypasses inactive on drop",
+        );
+        assert_eq!(store.reset_len(), 4);
+        assert!(
+            !manager.block_registry().is_registered(hash),
+            "registry handle marked absent",
+        );
+    }
+
+    /// Duplicate blocks always reset on drop regardless of the flag —
+    /// this is the pre-existing `release_duplicate` behavior and the
+    /// shared helper. The store-wide default does not change it.
+    #[test]
+    fn duplicate_release_still_resets_with_default_false() {
+        // Use Allow policy so duplicates are created.
+        let registry = crate::registry::BlockRegistry::builder()
+            .frequency_tracker(
+                crate::manager::FrequencyTrackingCapacity::default().create_tracker(),
+            )
+            .build();
+        let manager = BlockManager::<TestBlockData>::builder()
+            .block_count(4)
+            .block_size(4)
+            .registry(registry)
+            .with_lru_backend()
+            .duplication_policy(BlockDuplicationPolicy::Allow)
+            .build()
+            .expect("Should build manager");
+
+        let token = create_test_token_block_from_iota(50_008);
+        let _hash = token.kvbm_sequence_hash();
+
+        // Primary
+        let m1 = manager.allocate_blocks(1).unwrap();
+        let c1 = m1.into_iter().next().unwrap().complete(&token).unwrap();
+        let primary = manager
+            .register_blocks(vec![c1])
+            .into_iter()
+            .next()
+            .unwrap();
+
+        // Duplicate (same hash on a different BlockId)
+        let m2 = manager.allocate_blocks(1).unwrap();
+        let c2 = m2.into_iter().next().unwrap().complete(&token).unwrap();
+        let dup = manager
+            .register_blocks(vec![c2])
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(dup.block_id(), 1);
+        assert_ne!(primary.block_id(), dup.block_id());
+
+        let store = manager.store_for_test();
+        let reset_before = store.reset_len();
+        let inactive_before = store.inactive_len();
+
+        // Drop duplicate first — always resets, never enters inactive.
+        drop(dup);
+        assert_eq!(
+            store.reset_len(),
+            reset_before + 1,
+            "duplicate drop returned to reset pool"
+        );
+        assert_eq!(
+            store.inactive_len(),
+            inactive_before,
+            "duplicate never enters inactive"
+        );
+
+        // Primary drop (flag = false default) → goes to inactive normally.
+        drop(primary);
+        assert_eq!(store.inactive_len(), inactive_before + 1);
+    }
+
+    /// Override survives two full `Inactive → Primary → Inactive`
+    /// hops. Extends `opt_out_survives_inactive_resurrection` (one hop)
+    /// to guarantee the carry path in `acquire_for_hash` /
+    /// `match_blocks` is idempotent across repeated cache hits.
+    #[test]
+    fn override_survives_multiple_resurrection_cycles() {
+        let manager = create_test_manager_with_default_reset_on_release::<TestBlockData>(4, true);
+        let token = create_test_token_block_from_iota(50_010);
+        let hash = token.kvbm_sequence_hash();
+
+        let mutables = manager.allocate_blocks(1).unwrap();
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token)
+            .unwrap();
+        let imm = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        imm.set_evict_on_reset(false); // opt out of store-wide default
+        drop(imm);
+
+        let store = manager.store_for_test();
+        assert_eq!(store.inactive_len(), 1, "first drop landed in inactive");
+        assert_eq!(store.reset_len(), 3);
+
+        // First resurrection
+        let r1 = manager.match_blocks(&[hash]);
+        assert_eq!(r1.len(), 1);
+        assert_eq!(store.inactive_len(), 0);
+        drop(r1);
+        assert_eq!(
+            store.inactive_len(),
+            1,
+            "override survived first resurrection"
+        );
+        assert_eq!(store.reset_len(), 3);
+
+        // Second resurrection — same path, must still honor the override.
+        let r2 = manager.match_blocks(&[hash]);
+        assert_eq!(r2.len(), 1);
+        assert_eq!(store.inactive_len(), 0);
+        drop(r2);
+        assert_eq!(
+            store.inactive_len(),
+            1,
+            "override survived second resurrection"
+        );
+        assert_eq!(store.reset_len(), 3);
+        assert!(store.has_inactive(hash));
+        assert!(manager.block_registry().is_registered(hash));
+    }
+
+    /// Calling `set_evict_on_reset` on a resurrected `ImmutableBlock`
+    /// must take effect — the resurrected Inner's atomic is the
+    /// authoritative one. Resurrect with an inherited `false`, then
+    /// flip to `true` and drop: slot must reset, not stay in inactive.
+    ///
+    /// Guards against a regression where `new_primary_resurrected` is
+    /// decoupled from the setter (e.g. wrong Arc, wrong field).
+    #[test]
+    fn set_evict_on_reset_on_resurrected_inner_takes_effect() {
+        let manager = create_test_manager_with_default_reset_on_release::<TestBlockData>(4, true);
+        let token = create_test_token_block_from_iota(50_011);
+        let hash = token.kvbm_sequence_hash();
+
+        let mutables = manager.allocate_blocks(1).unwrap();
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token)
+            .unwrap();
+        let imm = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        imm.set_evict_on_reset(false);
+        drop(imm);
+
+        let store = manager.store_for_test();
+        assert_eq!(store.inactive_len(), 1);
+
+        // Resurrect: inherited override is `false`.
+        let resurrected = manager.match_blocks(&[hash]);
+        assert_eq!(resurrected.len(), 1);
+
+        // Flip on the *resurrected* Inner. If the setter wires through
+        // correctly, the next drop honors `true` and resets.
+        resurrected[0].set_evict_on_reset(true);
+        drop(resurrected);
+
+        assert_eq!(
+            store.inactive_len(),
+            0,
+            "resurrected-Inner setter took effect"
+        );
+        assert_eq!(store.reset_len(), 4, "slot returned to free list");
+        assert!(!manager.block_registry().is_registered(hash));
+    }
+
+    /// Three blocks registered in a single `register_blocks` call must
+    /// honor independent per-block flags. Guards against any future
+    /// refactor that shares state across the registration loop.
+    #[test]
+    fn mixed_flags_in_single_register_blocks_call() {
+        let manager = create_test_manager(4);
+        let t0 = create_test_token_block_from_iota(50_020);
+        let t1 = create_test_token_block_from_iota(50_021);
+        let t2 = create_test_token_block_from_iota(50_022);
+        let h0 = t0.kvbm_sequence_hash();
+        let h1 = t1.kvbm_sequence_hash();
+        let h2 = t2.kvbm_sequence_hash();
+
+        let mutables = manager.allocate_blocks(3).unwrap();
+        let mut iter = mutables.into_iter();
+        let c0 = iter.next().unwrap().complete(&t0).unwrap();
+        let c1 = iter.next().unwrap().complete(&t1).unwrap();
+        let c2 = iter.next().unwrap().complete(&t2).unwrap();
+
+        let immutables = manager.register_blocks(vec![c0, c1, c2]);
+        assert_eq!(immutables.len(), 3);
+        immutables[0].set_evict_on_reset(true);
+        // immutables[1] left at default (false)
+        immutables[2].set_evict_on_reset(true);
+
+        let store = manager.store_for_test();
+        assert_eq!(store.inactive_len(), 0);
+        assert_eq!(store.reset_len(), 1, "1 of 4 slots still free");
+
+        drop(immutables);
+
+        assert_eq!(
+            store.inactive_len(),
+            1,
+            "only the default-flag block kept in inactive"
+        );
+        assert_eq!(
+            store.reset_len(),
+            3,
+            "two flagged blocks reset + one originally free"
+        );
+        assert!(!store.has_inactive(h0), "flagged block 0 not in inactive");
+        assert!(store.has_inactive(h1), "default-flag block 1 in inactive");
+        assert!(!store.has_inactive(h2), "flagged block 2 not in inactive");
+        assert!(!manager.block_registry().is_registered(h0));
+        assert!(manager.block_registry().is_registered(h1));
+        assert!(!manager.block_registry().is_registered(h2));
+    }
+
+    /// The per-block override must be discarded when the slot leaves
+    /// `Inactive` via eviction back to `Mutable`. A subsequent fresh
+    /// registration on the same `BlockId` must read the store default,
+    /// not inherit the previous holder's override.
+    ///
+    /// Documented invariant from `pools/store.rs`: "The flag is
+    /// discarded when the slot leaves `Inactive` via eviction
+    /// (`Inactive → Mutable`); a future fresh registration on the same
+    /// `BlockId` reads the store default again."
+    #[test]
+    fn override_discarded_on_eviction_back_to_mutable() {
+        // block_count=1 so the second allocate must evict from inactive.
+        let manager = create_test_manager_with_default_reset_on_release::<TestBlockData>(1, true);
+        let store = manager.store_for_test().clone();
+
+        // First registration: opt OUT of the store default → Inactive(false).
+        let token1 = create_test_token_block_from_iota(50_030);
+        let hash1 = token1.kvbm_sequence_hash();
+        {
+            let mutables = manager.allocate_blocks(1).unwrap();
+            let complete = mutables
+                .into_iter()
+                .next()
+                .unwrap()
+                .complete(&token1)
+                .unwrap();
+            let imm = manager
+                .register_blocks(vec![complete])
+                .into_iter()
+                .next()
+                .unwrap();
+            imm.set_evict_on_reset(false);
+            drop(imm);
+        }
+        assert_eq!(store.inactive_len(), 1, "first drop kept in inactive");
+        assert_eq!(store.reset_len(), 0);
+
+        // Force eviction: only slot is in inactive, allocate must evict.
+        let mutables = manager.allocate_blocks(1).unwrap();
+        assert_eq!(store.inactive_len(), 0, "inactive evicted to mutable");
+        assert!(!manager.block_registry().is_registered(hash1));
+
+        // Re-register on the same BlockId with a fresh hash. The fresh
+        // Inner is constructed via `new_primary` (not resurrected) and
+        // must read the store default (true) — NOT inherit the discarded
+        // `false` override.
+        let token2 = create_test_token_block_from_iota(50_031);
+        let hash2 = token2.kvbm_sequence_hash();
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token2)
+            .unwrap();
+        let imm = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        // No explicit `set_evict_on_reset` — fresh Inner must read the
+        // store default (true) from `BlockStore::default_reset_on_release`.
+        drop(imm);
+
+        assert_eq!(
+            store.reset_len(),
+            1,
+            "fresh Inner used store default — slot reset, not inactive"
+        );
+        assert_eq!(store.inactive_len(), 0);
+        assert!(!store.has_inactive(hash2));
+        assert!(!manager.block_registry().is_registered(hash2));
+    }
+
+    /// Calling `set_evict_on_reset(true)` on a *duplicate* must not
+    /// affect its drop (always resets via `release_duplicate`) and must
+    /// not affect the *primary*'s atomic — they live on separate Inners.
+    /// Guards against a refactor that unifies primary/duplicate Inner
+    /// state and silently makes the duplicate's flag observable on the
+    /// primary.
+    #[test]
+    fn duplicate_set_evict_on_reset_is_noop() {
+        let registry = crate::registry::BlockRegistry::builder()
+            .frequency_tracker(
+                crate::manager::FrequencyTrackingCapacity::default().create_tracker(),
+            )
+            .build();
+        let manager = BlockManager::<TestBlockData>::builder()
+            .block_count(4)
+            .block_size(4)
+            .registry(registry)
+            .with_lru_backend()
+            .duplication_policy(BlockDuplicationPolicy::Allow)
+            .build()
+            .expect("Should build manager");
+
+        let token = create_test_token_block_from_iota(50_040);
+        let hash = token.kvbm_sequence_hash();
+
+        // Primary
+        let m1 = manager.allocate_blocks(1).unwrap();
+        let c1 = m1.into_iter().next().unwrap().complete(&token).unwrap();
+        let primary = manager
+            .register_blocks(vec![c1])
+            .into_iter()
+            .next()
+            .unwrap();
+
+        // Duplicate
+        let m2 = manager.allocate_blocks(1).unwrap();
+        let c2 = m2.into_iter().next().unwrap().complete(&token).unwrap();
+        let dup = manager
+            .register_blocks(vec![c2])
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_ne!(primary.block_id(), dup.block_id());
+
+        // Flag on the duplicate — must be a no-op at drop.
+        dup.set_evict_on_reset(true);
+
+        let store = manager.store_for_test();
+        let reset_before = store.reset_len();
+        let inactive_before = store.inactive_len();
+
+        drop(dup);
+        assert_eq!(
+            store.reset_len(),
+            reset_before + 1,
+            "duplicate drop resets regardless of flag"
+        );
+        assert_eq!(
+            store.inactive_len(),
+            inactive_before,
+            "duplicate drop never enters inactive"
+        );
+
+        // Primary must be entirely unaffected by the duplicate's flag:
+        // still matchable, its own atomic still at default (false), so
+        // dropping it lands in inactive.
+        let matched = manager.match_blocks(&[hash]);
+        assert_eq!(matched.len(), 1, "primary still matchable after dup drop");
+        assert_eq!(matched[0].block_id(), primary.block_id());
+        drop(matched);
+        drop(primary);
+
+        assert_eq!(
+            store.inactive_len(),
+            inactive_before + 1,
+            "primary drop honors its own flag (default false → inactive), \
+             unaffected by duplicate's flag"
+        );
+    }
+
+    /// Pool gauges (`inflight_immutable`, `inactive_pool_size`,
+    /// `reset_pool_size`) must stay coherent across the full lifecycle
+    /// when the reset-on-release flag fires. Regression-protects the
+    /// metric plumbing in `release_primary`.
+    #[test]
+    fn metric_gauges_stay_coherent_under_reset_flag() {
+        let manager = create_test_manager(4);
+        let m = manager.metrics();
+        let token = create_test_token_block_from_iota(50_050);
+
+        // Baseline: 4 free slots, nothing in flight.
+        let s = m.snapshot();
+        assert_eq!(s.inflight_immutable, 0);
+        assert_eq!(s.inactive_pool_size, 0);
+        assert_eq!(s.reset_pool_size, 4);
+
+        // Allocate 1 mutable → reset pool decrements; no immutable yet.
+        let mutables = manager.allocate_blocks(1).unwrap();
+        let s = m.snapshot();
+        assert_eq!(s.inflight_immutable, 0, "no immutable until register");
+        assert_eq!(s.inactive_pool_size, 0);
+        assert_eq!(s.reset_pool_size, 3);
+
+        // Complete + register → 1 in flight.
+        let complete = mutables
+            .into_iter()
+            .next()
+            .unwrap()
+            .complete(&token)
+            .unwrap();
+        let imm = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        let s = m.snapshot();
+        assert_eq!(s.inflight_immutable, 1);
+        assert_eq!(s.inactive_pool_size, 0);
+        assert_eq!(s.reset_pool_size, 3);
+
+        // Flip the flag — pure state change, no gauge movement.
+        imm.set_evict_on_reset(true);
+        let s = m.snapshot();
+        assert_eq!(s.inflight_immutable, 1);
+        assert_eq!(s.inactive_pool_size, 0);
+        assert_eq!(s.reset_pool_size, 3);
+
+        // Drop with flag=true → bypasses inactive, slot returns to reset.
+        drop(imm);
+        let s = m.snapshot();
+        assert_eq!(s.inflight_immutable, 0, "drop decremented immutable");
+        assert_eq!(s.inactive_pool_size, 0, "inactive gauge unchanged");
+        assert_eq!(
+            s.reset_pool_size, 4,
+            "reset gauge incremented, not inactive"
+        );
     }
 }
