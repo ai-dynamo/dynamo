@@ -651,6 +651,7 @@ impl OpenAIPreprocessor {
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<String>,
     ) -> Result<Vec<MmImageEntry>> {
+        let mut converted_tool_parts: Vec<ChatCompletionRequestUserMessageContentPart>;
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
