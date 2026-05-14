@@ -629,9 +629,7 @@ class SglangLLMEngine(LLMEngine):
 
             sgl_registry = CollectorRegistry()
             multiprocess.MultiProcessCollector(sgl_registry)
-            register_engine_registry(
-                metrics, sgl_registry, prefix_filters=["sglang:"]
-            )
+            register_engine_registry(metrics, sgl_registry, prefix_filters=["sglang:"])
 
     def _build_sampling_params(self, request: GenerateRequest) -> dict:
         if not self._use_sglang_tokenizer:

@@ -308,8 +308,9 @@ class TrtllmLLMEngine(LLMEngine):
         self._component_gauges.set_model_load_time(time.monotonic() - t0)
 
         if self.publish_events_and_metrics:
-            from dynamo.trtllm.metrics import AdditionalMetricsCollector
             from tensorrt_llm.metrics import MetricsCollector
+
+            from dynamo.trtllm.metrics import AdditionalMetricsCollector
 
             self._additional_metrics = AdditionalMetricsCollector(
                 labels={
@@ -328,9 +329,7 @@ class TrtllmLLMEngine(LLMEngine):
             )
             self._log_request_metrics = getattr(
                 self._trtllm_metrics_collector, "log_request_metrics_dict", None
-            ) or getattr(
-                self._trtllm_metrics_collector, "log_metrics_dict", None
-            )
+            ) or getattr(self._trtllm_metrics_collector, "log_metrics_dict", None)
 
         self._attention_dp_size = self._engine.get_attention_dp_size()
         if self._kv_routing_enabled():
@@ -559,7 +558,13 @@ class TrtllmLLMEngine(LLMEngine):
             if isinstance(guided, dict) and (
                 any(
                     guided.get(k) is not None
-                    for k in ("json", "regex", "grammar", "json_object", "structural_tag")
+                    for k in (
+                        "json",
+                        "regex",
+                        "grammar",
+                        "json_object",
+                        "structural_tag",
+                    )
                 )
                 or bool(guided.get("choice"))
             ):
@@ -682,8 +687,17 @@ class TrtllmLLMEngine(LLMEngine):
                         ):
                             try:
                                 perf = getattr(res, "request_perf_metrics", None)
-                                tm = getattr(perf, "timing_metrics", None) if perf else None
-                                if tm is not None and self._additional_metrics.record_kv_transfer_perf(tm):
+                                tm = (
+                                    getattr(perf, "timing_metrics", None)
+                                    if perf
+                                    else None
+                                )
+                                if (
+                                    tm is not None
+                                    and self._additional_metrics.record_kv_transfer_perf(
+                                        tm
+                                    )
+                                ):
                                     self._additional_metrics.record_kv_transfer_success()
                             except (AttributeError, TypeError) as e:
                                 logger.debug("KV-transfer perf recording failed: %s", e)
@@ -699,9 +713,7 @@ class TrtllmLLMEngine(LLMEngine):
                             try:
                                 self._log_request_metrics(res.metrics_dict)
                             except (AttributeError, TypeError) as e:
-                                logger.debug(
-                                    "TRT-LLM log_metrics_dict failed: %s", e
-                                )
+                                logger.debug("TRT-LLM log_metrics_dict failed: %s", e)
 
                     yield out
                     output_tokens_per_choice[output_idx] = next_total

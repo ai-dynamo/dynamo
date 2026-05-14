@@ -190,7 +190,9 @@ def make_component_metrics(
             "empty-string labels mask auto-injected values"
         )
 
-    from prometheus_client import CollectorRegistry  # lazy; see register_global_registry
+    from prometheus_client import (
+        CollectorRegistry,  # lazy; see register_global_registry
+    )
 
     registry = CollectorRegistry()
     gauges = LLMBackendMetrics(

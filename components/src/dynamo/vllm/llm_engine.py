@@ -138,9 +138,7 @@ class _UnifiedStatLoggerFactory:
     assigned in ``start()`` before ``AsyncLLM.from_vllm_config`` runs,
     so loggers always see populated references."""
 
-    def __init__(
-        self, cache: _DpRankMetricsCache, gauges: LLMBackendMetrics
-    ) -> None:
+    def __init__(self, cache: _DpRankMetricsCache, gauges: LLMBackendMetrics) -> None:
         self.cache = cache
         self.gauges = gauges
 
