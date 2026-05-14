@@ -1297,7 +1297,7 @@ class KvRouterConfig:
         router_snapshot_threshold: Optional[int] = 1000000,
         router_reset_states: bool = False,
         router_ttl_secs: float = 120.0,
-        router_queue_threshold: Optional[float] = 4.0,
+        router_queue_threshold: Optional[float] = 16.0,
         router_event_threads: int = 4,
         router_queue_policy: str = "fcfs",
         use_remote_indexer: bool = False,
@@ -1338,7 +1338,7 @@ class KvRouterConfig:
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
             router_reset_states: Reset router state on startup (default: False)
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
-            router_queue_threshold: Queue threshold fraction for prefill token capacity (default: 4.0).
+            router_queue_threshold: Queue threshold fraction for prefill token capacity (default: 16.0).
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
