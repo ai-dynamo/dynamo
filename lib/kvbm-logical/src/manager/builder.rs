@@ -108,6 +108,13 @@ pub struct BlockManagerConfigBuilder<T: BlockMetadata> {
     /// Optional metrics aggregator for prometheus export
     aggregator: Option<MetricsAggregator>,
 
+    /// Default value of the per-block `reset_on_release` flag. When
+    /// `Some(true)`, every `ImmutableBlock` constructed by this manager
+    /// starts with the flag set, so its last drop bypasses the inactive
+    /// pool and resets the slot directly. Individual blocks can still
+    /// override via [`ImmutableBlock::set_evict_on_reset`].
+    default_reset_on_release: Option<bool>,
+
     /// Phantom data for type parameter
     _phantom: std::marker::PhantomData<T>,
 }
@@ -121,6 +128,7 @@ impl<T: BlockMetadata> Default for BlockManagerConfigBuilder<T> {
             inactive_backend: None,
             duplication_policy: None,
             aggregator: None,
+            default_reset_on_release: None,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -258,6 +266,22 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         self
     }
 
+    /// Set the default value of the per-block `reset_on_release` flag.
+    ///
+    /// When `true`, every `ImmutableBlock` constructed by this manager
+    /// starts with the flag set. On its last drop, the slot bypasses
+    /// the inactive pool and is reset back to the free list directly
+    /// (matching `release_duplicate` semantics for primary releases).
+    ///
+    /// Individual blocks can still override via
+    /// [`crate::blocks::ImmutableBlock::set_evict_on_reset`].
+    ///
+    /// Default: `false`.
+    pub fn with_default_reset_on_release(mut self, value: bool) -> Self {
+        self.default_reset_on_release = Some(value);
+        self
+    }
+
     /// Validate the configuration.
     fn validate(&self) -> Result<(), String> {
         let registry = self.registry.as_ref().ok_or("registry is required")?;
@@ -379,7 +403,13 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         };
 
         // Construct unified store
-        let store = BlockStore::new(block_count, block_size, backend, metrics.clone());
+        let store = BlockStore::new(
+            block_count,
+            block_size,
+            backend,
+            metrics.clone(),
+            self.default_reset_on_release.unwrap_or(false),
+        );
 
         // Register with aggregator if provided
         if let Some(ref aggregator) = self.aggregator {

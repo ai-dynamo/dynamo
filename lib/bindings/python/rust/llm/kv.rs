@@ -1113,20 +1113,23 @@ impl KvRouter {
                 .await
                 .map_err(to_pyerr)?;
 
-            if update_indexer && !chooser.kv_router_config().use_kv_events {
-                let mut tokens_with_hashes =
-                    TokensWithHashes::new(token_ids.clone(), chooser.block_size())
-                        .with_is_eagle(chooser.is_eagle());
-                if let Some(infos) = block_mm_infos.as_ref() {
-                    tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.clone());
+            if update_indexer {
+                let cfg = chooser.kv_router_config();
+                if !cfg.use_kv_events || cfg.predict_on_route_enabled() {
+                    let mut tokens_with_hashes =
+                        TokensWithHashes::new(token_ids.clone(), chooser.block_size())
+                            .with_is_eagle(chooser.is_eagle());
+                    if let Some(infos) = block_mm_infos.as_ref() {
+                        tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.clone());
+                    }
+                    if let Some(lora_name) = lora_name.as_ref() {
+                        tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name.clone());
+                    }
+                    chooser
+                        .record_routing_decision(tokens_with_hashes, best_worker)
+                        .await
+                        .map_err(to_pyerr)?;
                 }
-                if let Some(lora_name) = lora_name.as_ref() {
-                    tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name.clone());
-                }
-                chooser
-                    .record_routing_decision(tokens_with_hashes, best_worker)
-                    .await
-                    .map_err(to_pyerr)?;
             }
 
             Ok((best_worker.worker_id, best_worker.dp_rank, overlap_blocks))
@@ -1188,6 +1191,48 @@ impl KvRouter {
             // Use pythonize to convert Vec<PotentialLoad> to Python list of dicts
             Python::with_gil(|py| {
                 pythonize(py, &loads)
+                    .map(|obj| obj.unbind())
+                    .map_err(to_pyerr)
+            })
+        })
+    }
+
+    #[pyo3(signature = (token_ids, router_config_override=None, block_mm_infos=None, lora_name=None, include_shared=true))]
+    fn get_overlap_scores<'p>(
+        &self,
+        py: Python<'p>,
+        token_ids: Vec<u32>,
+        router_config_override: Option<PyObject>,
+        block_mm_infos: Option<PyObject>,
+        lora_name: Option<String>,
+        include_shared: bool,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let router_config_override = if let Some(obj) = router_config_override {
+            let override_config: RouterConfigOverride =
+                depythonize(obj.bind(py)).map_err(to_pyerr)?;
+            Some(override_config)
+        } else {
+            None
+        };
+        let block_mm_infos = block_mm_infos
+            .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
+            .transpose()?;
+        let chooser = self.inner.chooser.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let scores = chooser
+                .get_overlap_scores(
+                    &token_ids,
+                    router_config_override.as_ref(),
+                    block_mm_infos.as_deref(),
+                    lora_name.as_deref(),
+                    include_shared,
+                )
+                .await
+                .map_err(to_pyerr)?;
+
+            Python::with_gil(|py| {
+                pythonize(py, &scores)
                     .map(|obj| obj.unbind())
                     .map_err(to_pyerr)
             })
