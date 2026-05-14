@@ -30,19 +30,17 @@ This table is not an exhaustive list of all AWS instance types that support EFA.
 
 **Cluster setup:**
 
-- At least **2 GPU nodes if you intend to use EFA as the KV transport** — EFA hardware has no intra-host loopback path, so prefill and decode must run on different nodes for EFA to be in the data path (see [Pod Anti-Affinity](#step-5-pod-anti-affinity-required) below).
-- **GPU-Direct RDMA enabled on the host** — either kernel ≥ 5.12 (DMA-BUF path; default on current AWS EKS AMIs, typically 6.14+) **or** an older kernel with the `nvidia-peermem` / AWS `efa_nv_peermem` module loaded (legacy peer-memory path; installable via the AWS `efa-libs` DaemonSet).
+- **GPU-Direct RDMA enabled on the host** — either kernel ≥ 5.12 (DMA-BUF path; default on current AWS EKS AMIs, typically 6.14+) **or** an older kernel with the `nvidia-peermem` / AWS `efa_nv_peermem` module loaded (legacy peer-memory path; see [Step 2](#step-2-verify-host-kernel-modules) for how to install it).
 - **EFA-enabled security group** — VPC security groups must allow all traffic between EFA-attached ENIs. The standard recommendation is a self-referencing security group rule that allows all protocols within the group. See [AWS EFA security group setup](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-start.html#efa-start-security).
 - **EKS node groups created with EFA support** — when using `eksctl`, set `efaEnabled: true` on the GPU node group. This attaches the appropriate number of EFA ENIs per instance type.
 
 ## Overview
 
-EFA setup involves four pieces. The first two are host/cluster setup; the last two are image and workload configuration:
+EFA setup involves three pieces:
 
-1. **AWS EFA device plugin** — Exposes EFA NICs as the Kubernetes resource `vpc.amazonaws.com/efa`
-2. `**efa_nv_peermem` kernel module** — Required only on older kernels (< 5.12); modern kernels use DMA-BUF and don't need it
-3. **Container image** with libfabric + aws-ofi-nccl + Dynamo
-4. **Workload spec** that requests EFA resources, runs privileged, and forces prefill/decode onto separate nodes
+1. **AWS EFA Kubernetes device plugin** — exposes EFA NICs as the `vpc.amazonaws.com/efa` extended resource (host-level setup, [Step 1](#step-1-install-the-aws-efa-kubernetes-device-plugin)). On modern kernels (≥ 5.12) the DMA-BUF path is used and `efa_nv_peermem` is not required; older kernels need it loaded ([Step 2](#step-2-verify-host-kernel-modules)).
+2. **Container image** with libfabric + aws-ofi-nccl + Dynamo ([Step 3](#step-3-build-a-dynamo-efa-image)).
+3. **Workload spec** that selects the LIBFABRIC NIXL backend, requests EFA resources, and runs privileged ([Step 4](#step-4-configure-nixl-backend), [Step 5](#step-5-pod-resource-requests)).
 
 ## Step 1: Install the AWS EFA Kubernetes Device Plugin
 
@@ -97,11 +95,11 @@ cat /sys/module/efa/version
 # Expected: 3.0.0g or newer
 ```
 
-If you are on an older kernel (< 5.12), you need `efa_nv_peermem` loaded — the AWS [efa-libs DaemonSet](https://github.com/aws/eks-distro) or equivalent can install it.
+If you are on an older kernel (< 5.12) and the host doesn't already have `efa_nv_peermem` loaded, the simplest path is to switch to an AMI that includes EFA host-level components — the EKS-optimized AL2023 NVIDIA AMI and all Bottlerocket AMIs include them. Otherwise, run [`aws-efa-installer`](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-start.html#efa-start-enable) on the host (via a privileged DaemonSet or baked into a custom AMI). See [AWS — Manage EFA devices on Amazon EKS](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html) for the full picture.
 
 ## Step 3: Build a Dynamo EFA Image
 
-Dynamo's image build is two steps: `container/render.py` writes a Dockerfile for the chosen framework + target, then `docker build` consumes it. Passing `--make-efa` to `render.py` appends the AWS EFA installer stage from `[container/templates/aws.Dockerfile](../../../../container/templates/aws.Dockerfile)`, which defines a stage named `aws` on top of `runtime`. **You must pass `--target aws` to `docker build`** — without it, `docker build` stops at the `runtime` stage and you get an image without EFA. See `[container/README.md](../../../../container/README.md)` for the full build workflow.
+Dynamo's image build is two steps: `container/render.py` writes a Dockerfile for the chosen framework + target, then `docker build` consumes it. Passing `--make-efa` to `render.py` appends the AWS EFA installer stage from [`container/templates/aws.Dockerfile`](../../../../container/templates/aws.Dockerfile), which defines a stage named `aws` on top of `runtime`. **You must pass `--target aws` to `docker build`** — without it, `docker build` stops at the `runtime` stage and you get an image without EFA. See [`container/README.md`](../../../../container/README.md) for the full build workflow.
 
 ```bash
 # vLLM EFA image (amd64)
@@ -131,11 +129,11 @@ docker build --target aws -t dynamo:latest-trtllm-runtime-efa \
 `--output-short-filename` writes to `container/rendered.Dockerfile`; omit it to get the long auto-generated filename (e.g., `vllm-runtime-cuda12.9-amd64-rendered.Dockerfile`) — useful when keeping several rendered Dockerfiles side by side.
 
 > [!IMPORTANT]
-> See [Known Issues](#known-issues) below for two cases where the default-built image does **not** produce a working EFA deployment out of the box. Both have customer-impacting symptoms that look like a working setup but silently fall back to TCP or fail at startup.
+> See [Known Issues](#known-issues) below for one case where the default-built image does **not** produce a working EFA deployment out of the box (GB200 / arm64 64K-page kernels). The symptom looks like a working setup but fails at startup during NIXL memory registration.
 
 ## Step 4: Configure NIXL Backend
 
-NIXL is the high-level KV transfer API and supports multiple backends. **For EFA, the LIBFABRIC backend must be selected** — the default UCX backend on AWS lacks the EFA SDK's UCX plugin on modern kernels and falls back to TCP at ~10 Gbps without warning.
+NIXL is the high-level KV transfer API and supports multiple backends. **For EFA, the LIBFABRIC backend must be selected.** UCX is NIXL's default backend, and while it has CUDA-IPC / RDMA transports available in the image, in standard pod-to-pod EFA configurations it lands on a slow transport (effectively TCP-speed at ~1–3 GB/s) instead of EFA's line rate. Empirically, LIBFABRIC is the only backend that reaches full EFA bandwidth on AWS.
 
 Each framework selects the backend differently:
 
@@ -158,15 +156,12 @@ In addition to backend selection, set these on every worker pod:
 env:
   - { name: FI_PROVIDER,                value: efa }
   - { name: FI_EFA_USE_DEVICE_RDMA,     value: "1" }
-  - { name: FI_EFA_ENABLE_SHM_TRANSFER, value: "0" }   # REQUIRED — see anti-affinity note below
+  - { name: FI_EFA_ENABLE_SHM_TRANSFER, value: "0" }
   - { name: FI_EFA_ENABLE_SHM,          value: "0" }
   # Place Amazon EFA libs first in LD_LIBRARY_PATH
   - name: LD_LIBRARY_PATH
     value: "/opt/amazon/efa/lib:/opt/amazon/efa/lib64:/opt/aws-ofi-nccl/lib:${LD_LIBRARY_PATH}"
 ```
-
-> [!IMPORTANT]
-> `FI_EFA_ENABLE_SHM_TRANSFER=0` is **mandatory**. With it set to `1`, the EFA provider's shared-memory path silently corrupts GPU buffer registrations because it treats GPU VRAM pointers as plain CPU pointers and calls `memcpy()`. The transfer appears to succeed but KV data at the decode worker is garbage. The cost of `=0` is that intra-node EFA stops working — hence the anti-affinity requirement below.
 
 ### Recommended EFA performance tuning
 
@@ -211,15 +206,15 @@ volumes:
 
 ## Known Issues
 
-One issue currently affect default-built Dynamo EFA images.
+One issue currently affects default-built Dynamo EFA images.
 
 ### Issue 1: libfabric on GB200 fails `fi_mr_reg` on CUDA VRAM
 
-**Known affected platforms:** GB200 .
+**Known affected platforms:** GB200.
 
 **Symptom:** Worker pod fails at startup with `fi_mr_reg` returning EFAULT during NIXL initialization. NIXL VRAM registration fails; depending on the framework, the worker either crashes or silently falls back to TCP.
 
-**Root cause:** The libfabric version bundled with EFA installer, the ones install aws/libfabric version lower than 2.5.x, lacks a CUDA branch in the dmabuf-eligibility check in `prov/efa/src/efa_mr.c`. On x86_64 hosts the legacy `ibv_reg_mr` path handles CUDA pointers natively, so the bug doesn't surface. On arm64 64K-page kernels (GB200), the legacy path returns EFAULT for CUDA VRAM. Tracked in [ofiwg/libfabric#12019](https://github.com/ofiwg/libfabric/issues/12019).
+**Root cause:** The libfabric version (versions lower than 2.5.x) bundled with the EFA installer (up to currently latest 1.48.0) lacks a CUDA branch in the dmabuf-eligibility check in `prov/efa/src/efa_mr.c`. On x86_64 hosts the legacy `ibv_reg_mr` path handles CUDA pointers natively, so the bug doesn't surface. On arm64 64K-page kernels (GB200), the legacy path returns EFAULT for CUDA VRAM. Tracked in [ofiwg/libfabric#12019](https://github.com/ofiwg/libfabric/issues/12019).
 
 **Upstream status:** The bug is resolved in `ofiwg/libfabric` main and v2.5.x via a more comprehensive rewrite of `efa_mr_reg_ibv_mr()`. AWS's `aws/libfabric` fork has not picked up the upstream rewrite; the latest EFA installer (1.48.0) still ships `v2.4.0amzn3.0` with the older code path.
 
@@ -227,7 +222,7 @@ One issue currently affect default-built Dynamo EFA images.
 
 1. **Apply the one-line patch to the bundled libfabric.** During image build, replace the `aws.Dockerfile` install step with a custom build:
   ```dockerfile
-   RUN git clone --depth 1 --branch v2.4.0amzn1.0 https://github.com/aws/libfabric.git /tmp/libfabric && \
+   RUN git clone --depth 1 --branch v2.4.0amzn3.0 https://github.com/aws/libfabric.git /tmp/libfabric && \
        cd /tmp/libfabric && \
        sed -i 's/efa_mr_is_neuron(efa_mr) || efa_mr_is_rocr(efa_mr)/efa_mr_is_neuron(efa_mr) || efa_mr_is_rocr(efa_mr) || efa_mr_is_cuda(efa_mr)/' prov/efa/src/efa_mr.c && \
        ./autogen.sh && \
@@ -274,11 +269,24 @@ kubectl exec <pod> -- bash -c 'grep "7d7749bc4" /proc/$(pgrep -f "dynamo|vllm|sg
 
 **4. NIXL transfers are happening, none failing** (via Prometheus metrics endpoint):
 
+NIXL telemetry is off by default. To enable it, set on each worker:
+
+```yaml
+env:
+  - { name: NIXL_TELEMETRY_ENABLE,            value: "y" }
+  - { name: NIXL_TELEMETRY_EXPORTER,          value: prometheus }
+  - { name: NIXL_TELEMETRY_PROMETHEUS_PORT,   value: "19090" }   # NIXL's own port — distinct from framework metrics
+```
+
+Then query:
+
 ```bash
-kubectl exec <pod> -- curl -s localhost:9090/metrics | grep -E "vllm:nixl_bytes_transferred|vllm:nixl_num_failed_transfers"
+kubectl exec <pod> -- curl -s localhost:19090/metrics | grep -E "nixl_bytes_transferred|nixl_num_failed_transfers"
 # Expected: nixl_bytes_transferred_count > 0 and increasing
 #           nixl_num_failed_transfers_total stays 0
 ```
+
+The same metrics with the `vllm:` prefix are also published to vLLM's own metrics endpoint (typically `DYN_SYSTEM_PORT`, e.g. `8081`) when vLLM is the frontend.
 
 **5. Decode side confirms KV receipt**:
 
@@ -298,8 +306,7 @@ kubectl logs <decode-pod> | grep "External prefix cache hit rate"
 | TTFT ~100 s, throughput ~MB/s                          | Silent TCP fallback — NIXL backend selection not applied             | Verify Step 4 backend env var; check NIXL startup log                         |
 | TTFT ~10 s, throughput 1–5 GB/s                        | UCX host-staged (no GPU-Direct on kernel ≥ 6.8)                      | Switch to LIBFABRIC backend                                                   |
 | Pod fails at startup with `fi_mr_reg` EFAULT on GB200  | Issue 1 (libfabric CUDA dmabuf bug)                                  | Apply patch or use ofiwg/libfabric v2.5.1                                     |
-| Pod fails at startup with `fi_mr_reg` EFAULT on x86_64 | `privileged: true` missing OR `efa_nv_peermem` missing on old kernel | Verify Step 6 security context                                                |
-| Same-node `EAGAIN` from `fi_read`                      | Prefill and decode on same node                                      | Verify anti-affinity is enforced (Step 5)                                     |
+| Pod fails at startup with `fi_mr_reg` EFAULT on x86_64 | `privileged: true` missing OR `efa_nv_peermem` missing on old kernel | Verify Step 5 security context                                                |
 | Bandwidth halves after image rebuild                   | libfabric / aws-ofi-nccl ABI mismatch                                | Rebuild aws-ofi-nccl from source against the libfabric used in the same image |
 | `rdma_write_bytes` shows 0                             | **Not a failure** — EFA SRD uses SEND, not WRITE                     | Use Prometheus `nixl_bytes_transferred` instead                               |
 
@@ -308,8 +315,9 @@ kubectl logs <decode-pod> | grep "External prefix cache hit rate"
 
 - [Disaggregated Communication Guide](../../disagg-communication-guide.md) — transport-layer fundamentals
 - [RDMA / InfiniBand on AKS](../aks/rdma-infiniband.md) — Azure equivalent
-- `[container/templates/aws.Dockerfile](../../../../container/templates/aws.Dockerfile)` — EFA installer template
-- [AWS EFA documentation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html)
-- [AWS EFA Kubernetes Device Plugin](https://github.com/aws-samples/aws-efa-eks)
+- [`container/templates/aws.Dockerfile`](../../../../container/templates/aws.Dockerfile) — EFA installer template
+- [AWS — Manage EFA devices on Amazon EKS](https://docs.aws.amazon.com/eks/latest/userguide/device-management-efa.html) — official EKS-side guide (DRA driver + device plugin)
+- [AWS EFA documentation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) — EC2-side EFA overview
+- [`aws/eks-charts` — `aws-efa-k8s-device-plugin`](https://github.com/aws/eks-charts/tree/master/stable/aws-efa-k8s-device-plugin) — Helm chart source
 - [ofiwg/libfabric#12019](https://github.com/ofiwg/libfabric/issues/12019) — CUDA dmabuf registration on EFA
 
