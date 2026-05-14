@@ -294,7 +294,18 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     }
 
     fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
-        self.inner.stop.as_ref().and_then(|stop| stop.token_ids())
+        // PR #8119 path: integer IDs in the standard OpenAI `stop` array.
+        if let Some(ids) = self.inner.stop.as_ref().and_then(|stop| stop.token_ids()) {
+            return Some(ids);
+        }
+        // RL-client compat path: `extra_body.stop_token_ids` (whitelisted via
+        // `PASSTHROUGH_EXTRA_FIELDS`). Verifiers' `OpenAIChatCompletionsTokenClient`
+        // and prime-rl's orchestrator both put `stop_token_ids` here when
+        // controlling generation by token ID. The whitelist accepts it at
+        // validation; this reader plumbs it into `common::StopConditions`.
+        self.unsupported_fields
+            .get("stop_token_ids")
+            .and_then(|v| serde_json::from_value::<Vec<crate::types::TokenIdType>>(v.clone()).ok())
     }
 
     /// Returns a reference to the optional `NvExt` extension, if available.

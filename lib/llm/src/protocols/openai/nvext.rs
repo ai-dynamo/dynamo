@@ -328,6 +328,21 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     pub max_thinking_tokens: Option<u32>,
 
+    /// KV prefix-cache isolation hint from RL orchestrators.
+    ///
+    /// Prime-RL's orchestrator tags every rollout request with a `cache_salt`
+    /// derived from the current checkpoint step (e.g. `"step_7"`). When the
+    /// salt changes across requests, the inference engine treats their prompt
+    /// prefixes as distinct cache keys even if the token sequences are
+    /// byte-identical — ensuring KV cache hits from the pre-weight-update
+    /// policy do not leak into post-update generations.
+    ///
+    /// Dynamo passes this through to the backend as a sampling-params hint.
+    /// Backends that do not support cache salting may ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub cache_salt: Option<String>,
+
     /// Extra fields to be included in the response's nvext
     /// This is a list of field names that should be populated in the response
     /// Supported fields include "worker_id", "timing", "routed_experts", "engine_data",
@@ -507,6 +522,7 @@ mod tests {
         assert_eq!(nv_ext.backend_instance_id, None);
         assert_eq!(nv_ext.token_data, None);
         assert_eq!(nv_ext.max_thinking_tokens, None);
+        assert_eq!(nv_ext.cache_salt, None);
         assert_eq!(nv_ext.extra_fields, None);
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);

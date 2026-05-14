@@ -97,16 +97,45 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 // Shared Fields
 //
 
-/// Validates that no unsupported fields are present in the request
+/// Fields that RL clients (prime-rl, verifiers) may send as `extra_body`
+/// hints which Dynamo does not implement as first-class request fields
+/// but should not reject with a 400. They are accepted at the validator
+/// layer; downstream consumers (provider trait, preprocessor, backend)
+/// MAY choose to read them for their own purposes.
+///
+/// Canonical locations going forward:
+///   - `cache_salt`     → `nvext.cache_salt` (this allowlist entry is for
+///                        backward compat with clients that still send it
+///                        under `extra_body.cache_salt`).
+///   - `stop_token_ids` → `nvext.stop_token_ids` (planned). For now the
+///                        provider trait reads from this allowlist via
+///                        `unsupported_fields["stop_token_ids"]` and
+///                        plumbs into `common::StopConditions.stop_token_ids`.
+///   - `bad_words_token_ids`, `allowed_token_ids`, `truncate_prompt_tokens`
+///                        → vLLM `SamplingParams` parity passthroughs.
+pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
+    "cache_salt",
+    "stop_token_ids",
+    "bad_words_token_ids",
+    "allowed_token_ids",
+    "truncate_prompt_tokens",
+];
+
+/// Validates that no unsupported fields are present in the request.
+///
+/// Fields in `PASSTHROUGH_EXTRA_FIELDS` are silently accepted (they may
+/// be read elsewhere — e.g. by `get_stop_token_ids()` on the provider
+/// trait — but their absence from this validator does not cause a 400).
 pub fn validate_no_unsupported_fields(
     unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), anyhow::Error> {
-    if !unsupported_fields.is_empty() {
-        let fields: Vec<_> = unsupported_fields
-            .keys()
-            .map(|s| format!("`{}`", s))
-            .collect();
-        anyhow::bail!("Unsupported parameter(s): {}", fields.join(", "));
+    let unknown: Vec<_> = unsupported_fields
+        .keys()
+        .filter(|k| !PASSTHROUGH_EXTRA_FIELDS.contains(&k.as_str()))
+        .map(|s| format!("`{}`", s))
+        .collect();
+    if !unknown.is_empty() {
+        anyhow::bail!("Unsupported parameter(s): {}", unknown.join(", "));
     }
     Ok(())
 }

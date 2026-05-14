@@ -546,6 +546,34 @@ impl OpenAIPreprocessor {
                 session_control: nvext.session_control.clone(),
             };
             builder.routing(Some(routing));
+
+            // Forward `nvext.extra_fields` (and `nvext.cache_salt`) to the
+            // backend handler via `extra_args["nvext"]` so it can decide
+            // what to emit on the response (`engine_data`, `stop_reason`,
+            // etc.). Mirrors PR #8119's SGLang `_nvext_extra_field_requested`
+            // helper — both backends now read `request["nvext"]["extra_fields"]`
+            // identically. The actual extra_args insertion happens at the
+            // end of build_preprocessed_request (after the multimodal block
+            // also computes extra_args), so both can coexist on a single
+            // PreprocessedRequest.
+            if nvext.extra_fields.is_some() || nvext.cache_salt.is_some() {
+                let mut nvext_passthrough = serde_json::Map::new();
+                if let Some(ref fields) = nvext.extra_fields {
+                    nvext_passthrough.insert(
+                        "extra_fields".to_string(),
+                        serde_json::json!(fields),
+                    );
+                }
+                if let Some(ref salt) = nvext.cache_salt {
+                    nvext_passthrough.insert(
+                        "cache_salt".to_string(),
+                        serde_json::json!(salt),
+                    );
+                }
+                builder.extra_args(Some(
+                    serde_json::json!({ "nvext": serde_json::Value::Object(nvext_passthrough) }),
+                ));
+            }
         } else if lora_name.is_some() {
             // Ensure routing hints exist when we have LoRA,
             // even when nvext is absent.
