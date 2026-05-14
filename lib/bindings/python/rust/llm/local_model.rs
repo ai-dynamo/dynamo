@@ -4,6 +4,47 @@
 use super::*;
 use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
+use llm_rs::protocols::Taints as RsTaints;
+
+#[pyclass]
+#[derive(Clone, Debug, Default)]
+pub struct Taints {
+    pub(crate) inner: RsTaints,
+}
+
+#[pymethods]
+impl Taints {
+    #[new]
+    #[pyo3(signature = (required=None, preferred=None))]
+    fn new(required: Option<Vec<String>>, preferred: Option<Vec<String>>) -> Self {
+        Self {
+            inner: RsTaints {
+                required: required.unwrap_or_default(),
+                preferred: preferred.unwrap_or_default(),
+            },
+        }
+    }
+
+    #[getter]
+    fn required(&self) -> Vec<String> {
+        self.inner.required.clone()
+    }
+
+    #[setter]
+    fn set_required(&mut self, required: Vec<String>) {
+        self.inner.required = required;
+    }
+
+    #[getter]
+    fn preferred(&self) -> Vec<String> {
+        self.inner.preferred.clone()
+    }
+
+    #[setter]
+    fn set_preferred(&mut self, preferred: Vec<String>) {
+        self.inner.preferred = preferred;
+    }
+}
 
 #[pyclass]
 #[derive(Clone, Debug, Default)]
@@ -71,6 +112,11 @@ impl ModelRuntimeConfig {
     #[setter]
     fn set_enable_eagle(&mut self, enable_eagle: bool) {
         self.inner.enable_eagle = enable_eagle;
+    }
+
+    #[setter]
+    fn set_taints(&mut self, taints: &Taints) {
+        self.inner.taints = taints.inner.clone();
     }
 
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
@@ -181,5 +227,12 @@ impl ModelRuntimeConfig {
     #[getter]
     fn enable_eagle(&self) -> bool {
         self.inner.enable_eagle
+    }
+
+    #[getter]
+    fn taints(&self) -> Taints {
+        Taints {
+            inner: self.inner.taints.clone(),
+        }
     }
 }

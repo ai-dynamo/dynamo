@@ -15,7 +15,7 @@ use dynamo_kv_router::{
     protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
-        RouterRequest, RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
+        RouterRequest, RouterResponse, Taints, TokensWithHashes, WorkerId, WorkerWithDpRank,
         compute_block_hash_for_seq,
     },
     scheduling::TierOverlapBlocks,
@@ -473,6 +473,7 @@ where
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        taints: Taints,
     ) -> anyhow::Result<BestMatchDetails> {
         let start = Instant::now();
 
@@ -577,6 +578,7 @@ where
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
+                taints,
                 shared_cache_hits,
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
@@ -640,6 +642,7 @@ where
         priority_jump: f64,
         expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        taints: Taints,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         let result = self
             .find_best_match_details(
@@ -653,6 +656,7 @@ where
                 expected_output_tokens,
                 None,
                 allowed_worker_ids,
+                taints,
             )
             .await?;
         Ok((result.worker, result.cache_hit.rounded_overlap_blocks()))
@@ -897,6 +901,7 @@ where
                         0.0,
                         None,
                         None,
+                        Taints::default(),
                     )
                     .await?;
 
@@ -1124,6 +1129,7 @@ mod tests {
                 0.0,
                 None,
                 None,
+                Taints::default(),
             )
             .await
             .unwrap();
@@ -1157,6 +1163,7 @@ mod tests {
                 0.0,
                 None,
                 None,
+                Taints::default(),
             )
             .await
             .unwrap();

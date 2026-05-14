@@ -302,6 +302,7 @@ impl KvPushRouter {
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
         let allowed_worker_ids = routing.and_then(|r| r.allowed_worker_ids.clone());
+        let taints = routing.and_then(|r| r.taints.clone()).unwrap_or_default();
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
         let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
@@ -318,6 +319,7 @@ impl KvPushRouter {
                     expected_output_tokens,
                     None,
                     allowed_worker_ids,
+                    taints,
                 )
                 .await?;
             let best_worker = selection.worker;
@@ -374,6 +376,7 @@ impl KvPushRouter {
                     expected_output_tokens,
                     Some(pinned_worker),
                     allowed_worker_ids,
+                    taints,
                 )
                 .await?;
             let best_worker = selection.worker;

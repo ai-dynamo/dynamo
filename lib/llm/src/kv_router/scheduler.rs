@@ -20,7 +20,7 @@ use anyhow::Result;
 use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::{KvRouterConfig, RouterConfigOverride},
-    protocols::{WorkerId, WorkerWithDpRank},
+    protocols::{Taints, WorkerId, WorkerWithDpRank},
 };
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -141,6 +141,7 @@ where
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        taints: Taints,
         shared_cache_hits: Option<SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let response = self
@@ -159,6 +160,7 @@ where
                 expected_output_tokens,
                 pinned_worker,
                 allowed_worker_ids,
+                taints,
                 shared_cache_hits,
             )
             .await;

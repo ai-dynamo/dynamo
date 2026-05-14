@@ -3,6 +3,7 @@
 
 use axum::http::HeaderMap;
 use derive_builder::Builder;
+use dynamo_kv_router::protocols::Taints;
 use dynamo_protocols::types::StopReason;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -384,6 +385,11 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_control: Option<SessionControl>,
+
+    /// Request taints used to constrain or prefer tainted workers.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taints: Option<Taints>,
 }
 
 /// Hints from the agent/caller about request characteristics.
@@ -514,6 +520,7 @@ mod tests {
         assert_eq!(nv_ext.agent_context, None);
         assert_eq!(nv_ext.request_timestamp_ms, None);
         assert_eq!(nv_ext.session_control, None);
+        assert_eq!(nv_ext.taints, None);
     }
 
     // Test valid builder configurations

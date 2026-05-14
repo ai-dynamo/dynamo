@@ -215,6 +215,16 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             return Err(KvSchedulerError::NoEndpoints);
         }
 
+        if pinned_worker.is_none()
+            && !request.taints.is_empty()
+            && workers
+                .iter()
+                .filter(|(worker_id, _)| request.is_worker_allowed(**worker_id))
+                .all(|(_, config)| !config.taints().is_compatible_with(&request.taints))
+        {
+            return Err(KvSchedulerError::NoEndpoints);
+        }
+
         let request_blocks = request.request_blocks(block_size);
 
         let weights = LogitWeights {
@@ -237,6 +247,12 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         if let Some(worker) = pinned_worker {
             pinned_worker_config(workers, worker)?;
+            if workers
+                .get(&worker.worker_id)
+                .is_some_and(|config| !config.taints().is_compatible_with(&request.taints))
+            {
+                return Err(KvSchedulerError::NoEndpoints);
+            }
 
             let logit = self.worker_logit(request, worker, block_size, weights, "Pinned formula");
             let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
@@ -272,6 +288,9 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         let worker_iter = workers
             .iter()
             .filter(move |(worker_id, _)| request.is_worker_allowed(**worker_id))
+            .filter(move |(_, config)| {
+                request.taints.is_empty() || config.taints().is_compatible_with(&request.taints)
+            })
             .flat_map(|(worker_id, config)| {
                 let data_parallel_size = config.data_parallel_size();
                 let data_parallel_start_rank = config.data_parallel_start_rank();

@@ -10,8 +10,8 @@ use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::{
-    BlockHashOptions, OverlapScores, PrefillLoadHint, RouterEvent, WorkerConfigLike, WorkerId,
-    WorkerWithDpRank, compute_block_hash_for_seq,
+    BlockHashOptions, OverlapScores, PrefillLoadHint, RouterEvent, Taints, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::{
@@ -173,6 +173,7 @@ impl PendingRequest {
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
             allowed_worker_ids: None,
+            taints: Taints::default(),
             shared_cache_hits: None,
             resp_tx: None,
         }
