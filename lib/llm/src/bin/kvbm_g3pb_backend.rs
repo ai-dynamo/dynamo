@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
@@ -62,10 +61,7 @@ struct Args {
     num_layers: usize,
     outer_dim: usize,
     dtype_width_bytes: usize,
-    foyer_dirs: Vec<PathBuf>,
     g2_bytes: usize,
-    foyer_memory_bytes: usize,
-    foyer_disk_bytes: usize,
 }
 
 impl Default for Args {
@@ -78,10 +74,7 @@ impl Default for Args {
             num_layers: 1,
             outer_dim: 1,
             dtype_width_bytes: 2,
-            foyer_dirs: vec![PathBuf::from(G3pbStorageConfig::DEFAULT_FOYER_DIR)],
             g2_bytes: G3pbStorageConfig::DEFAULT_G2_CAPACITY_BYTES,
-            foyer_memory_bytes: G3pbStorageConfig::DEFAULT_FOYER_MEMORY_CAPACITY_BYTES,
-            foyer_disk_bytes: G3pbStorageConfig::DEFAULT_FOYER_DISK_CAPACITY_BYTES,
         }
     }
 }
@@ -135,29 +128,8 @@ impl Args {
                         .context("missing value for --dtype-width-bytes")?
                         .parse()?
                 }
-                "--foyer-dir" => {
-                    if args.foyer_dirs.len() == 1
-                        && args.foyer_dirs[0] == PathBuf::from(G3pbStorageConfig::DEFAULT_FOYER_DIR)
-                    {
-                        args.foyer_dirs.clear();
-                    }
-                    args.foyer_dirs
-                        .push(it.next().context("missing value for --foyer-dir")?.into())
-                }
                 "--g2-bytes" => {
                     args.g2_bytes = it.next().context("missing value for --g2-bytes")?.parse()?
-                }
-                "--foyer-memory-bytes" => {
-                    args.foyer_memory_bytes = it
-                        .next()
-                        .context("missing value for --foyer-memory-bytes")?
-                        .parse()?
-                }
-                "--foyer-disk-bytes" => {
-                    args.foyer_disk_bytes = it
-                        .next()
-                        .context("missing value for --foyer-disk-bytes")?
-                        .parse()?
                 }
                 "--help" | "-h" => {
                     println!(
@@ -169,10 +141,7 @@ impl Args {
   --num-layers <n>                KVBM num layers (default 1)
   --outer-dim <n>                 KVBM outer dim (default 1)
   --dtype-width-bytes <bytes>     KVBM dtype width bytes (default 2)
-  --foyer-dir <path>              foyer storage directory; repeat for multiple locations
-  --g2-bytes <bytes>              pinned G2 staging capacity
-  --foyer-memory-bytes <bytes>    foyer in-memory capacity
-  --foyer-disk-bytes <bytes>      foyer disk capacity (split across dirs)"
+  --g2-bytes <bytes>              remote host-memory G2 capacity"
                     );
                     std::process::exit(0);
                 }
@@ -540,10 +509,8 @@ struct G3pbEndpointHandler {
 
 impl G3pbBackendService {
     async fn new(args: &Args, instance_id: u64) -> Result<Self> {
-        let mut config = G3pbStorageConfig::new(args.foyer_dirs.clone(), args.device_id);
+        let mut config = G3pbStorageConfig::new(args.device_id);
         config.g2_capacity_bytes = args.g2_bytes;
-        config.foyer_memory_capacity_bytes = args.foyer_memory_bytes;
-        config.foyer_disk_capacity_bytes = args.foyer_disk_bytes;
         let storage = Arc::new(G3pbCacheStorage::new(config).await?);
         let agent = Arc::new(G3pbStorageAgent::new_with_storage(instance_id, storage));
         let runtime = Arc::new(G3pbPeerRuntime::new(args, instance_id).await?);

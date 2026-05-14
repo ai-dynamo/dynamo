@@ -12,14 +12,9 @@ use dynamo_runtime::{
     pipeline::{RouterMode, SingleIn, network::egress::push_router::PushRouter},
     protocols::annotated::Annotated,
 };
-use foyer::{
-    BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder,
-    HybridCachePolicy, PsyncIoEngineConfig,
-};
 use futures::{StreamExt, future::join_all};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -340,41 +335,16 @@ impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct G3pbStorageConfig {
     pub g2_capacity_bytes: usize,
-    pub foyer_memory_capacity_bytes: usize,
-    pub foyer_disk_capacity_bytes: usize,
-    pub foyer_dirs: Vec<PathBuf>,
     pub device_id: usize,
-    pub g2_high_watermark_pct: usize, // Evict when G2 is this full
-    pub g2_low_watermark_pct: usize,  // Evict until G2 is this full
-    pub promotion_threshold: u64,     // Access count to promote to G2
-    pub demotion_threshold: u64,      // Access count to demote to G3
 }
 
 impl G3pbStorageConfig {
     pub const DEFAULT_G2_CAPACITY_BYTES: usize = 2 * 1024 * 1024 * 1024;
-    pub const DEFAULT_FOYER_MEMORY_CAPACITY_BYTES: usize = 2 * 1024 * 1024 * 1024;
-    pub const DEFAULT_FOYER_DISK_CAPACITY_BYTES: usize = 4 * 1024 * 1024 * 1024;
-    pub const DEFAULT_FOYER_DIR: &str = "/tmp/dynamo-g3pb-foyer";
-    pub const DEFAULT_G2_HIGH_WATERMARK_PCT: usize = 90; // 90%
-    pub const DEFAULT_G2_LOW_WATERMARK_PCT: usize = 70; // 70%
-    pub const DEFAULT_PROMOTION_THRESHOLD: u64 = 10;
-    pub const DEFAULT_DEMOTION_THRESHOLD: u64 = 5;
 
-    pub fn new(foyer_dirs: Vec<PathBuf>, device_id: usize) -> Self {
+    pub fn new(device_id: usize) -> Self {
         Self {
             g2_capacity_bytes: Self::DEFAULT_G2_CAPACITY_BYTES,
-            foyer_memory_capacity_bytes: Self::DEFAULT_FOYER_MEMORY_CAPACITY_BYTES,
-            foyer_disk_capacity_bytes: Self::DEFAULT_FOYER_DISK_CAPACITY_BYTES,
-            foyer_dirs: if foyer_dirs.is_empty() {
-                vec![PathBuf::from(Self::DEFAULT_FOYER_DIR)]
-            } else {
-                foyer_dirs
-            },
             device_id,
-            g2_high_watermark_pct: Self::DEFAULT_G2_HIGH_WATERMARK_PCT,
-            g2_low_watermark_pct: Self::DEFAULT_G2_LOW_WATERMARK_PCT,
-            promotion_threshold: Self::DEFAULT_PROMOTION_THRESHOLD,
-            demotion_threshold: Self::DEFAULT_DEMOTION_THRESHOLD,
         }
     }
 }
@@ -482,12 +452,10 @@ impl ShardedMetadata {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum G3pbCacheLocation {
     G2 { offset: usize },
-    Foyer,
 }
 
 pub struct G3pbCacheStorage {
     g2_storage: Arc<crate::block_manager::storage::PinnedStorage>,
-    foyer_shards: Vec<HybridCache<SequenceHash, Vec<u8>>>,
     metadata: ShardedMetadata,
     tick_counter: AtomicU64,
     _g2_allocator: Arc<crate::block_manager::storage::PinnedAllocator>,
@@ -503,32 +471,10 @@ impl G3pbCacheStorage {
         let g2_allocator = Arc::new(PinnedAllocator::new(config.device_id)?);
         let g2_storage = Arc::new(g2_allocator.allocate(config.g2_capacity_bytes)?);
 
-        let num_foyer_shards = config.foyer_dirs.len().max(1);
-        let foyer_memory_per_shard = (config.foyer_memory_capacity_bytes / num_foyer_shards).max(1);
-        let foyer_disk_per_shard = (config.foyer_disk_capacity_bytes / num_foyer_shards).max(1);
-        let mut foyer_shards = Vec::with_capacity(num_foyer_shards);
-        for (idx, dir) in config.foyer_dirs.iter().enumerate() {
-            std::fs::create_dir_all(dir)?;
-            let device = FsDeviceBuilder::new(dir)
-                .with_capacity(foyer_disk_per_shard)
-                .build()?;
-            let cache: HybridCache<SequenceHash, Vec<u8>> = HybridCacheBuilder::new()
-                .with_name(format!("g3pb-foyer-{idx}"))
-                .with_policy(HybridCachePolicy::WriteOnEviction)
-                .memory(foyer_memory_per_shard)
-                .storage()
-                .with_io_engine_config(PsyncIoEngineConfig::new())
-                .with_engine_config(BlockEngineConfig::new(device))
-                .build()
-                .await?;
-            foyer_shards.push(cache);
-        }
-
         let metadata = ShardedMetadata::new(DEFAULT_METADATA_SHARDS);
 
         Ok(Self {
             g2_storage,
-            foyer_shards,
             metadata,
             tick_counter: AtomicU64::new(0),
             _g2_allocator: g2_allocator,
@@ -541,36 +487,6 @@ impl G3pbCacheStorage {
     fn next_tick(&self) -> u64 {
         self.tick_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    }
-
-    fn foyer_shard_index(&self, sequence_hash: SequenceHash) -> usize {
-        (sequence_hash as usize) % self.foyer_shards.len()
-    }
-
-    async fn foyer_insert(&self, sequence_hash: SequenceHash, payload: Vec<u8>) -> Result<()> {
-        self.foyer_shards[self.foyer_shard_index(sequence_hash)].insert(sequence_hash, payload);
-        Ok(())
-    }
-
-    async fn foyer_get(&self, sequence_hash: SequenceHash) -> Result<Option<Vec<u8>>> {
-        Ok(self.foyer_shards[self.foyer_shard_index(sequence_hash)]
-            .get(&sequence_hash)
-            .await?
-            .map(|entry| entry.value().clone()))
-    }
-
-    fn foyer_remove(&self, sequence_hash: SequenceHash) {
-        self.foyer_shards[self.foyer_shard_index(sequence_hash)].remove(&sequence_hash);
-    }
-
-    async fn prune_if_missing_from_foyer(&self, sequence_hash: SequenceHash) -> Result<bool> {
-        match self.foyer_get(sequence_hash).await? {
-            Some(_) => Ok(true),
-            None => {
-                let _ = self.metadata.remove(sequence_hash)?;
-                Ok(false)
-            }
-        }
     }
 
     async fn allocate_in_g2(
@@ -597,7 +513,8 @@ impl G3pbCacheStorage {
             let new_allocated = current_allocated + size as u64;
 
             if new_allocated > self.config.g2_capacity_bytes as u64 {
-                self.evict_to_g2(size).await?;
+                self.g2_allocated.fetch_sub(size as u64, Ordering::Relaxed);
+                self.evict_for_space(size).await?;
                 continue;
             }
 
@@ -632,144 +549,10 @@ impl G3pbCacheStorage {
 
     async fn get_stored_location(&self, sequence_hash: SequenceHash) -> Option<G3pbCacheLocation> {
         let meta = self.metadata.get(sequence_hash).ok()??;
-        if !meta.payload_ready {
-            return None;
-        }
-        match meta.location {
-            G3pbCacheLocation::G2 { offset } => {
-                Some(self.read_from_g2(offset, meta.size_bytes).await)
-                    .map(|_| G3pbCacheLocation::G2 { offset })
-            }
-            G3pbCacheLocation::Foyer => match self.prune_if_missing_from_foyer(sequence_hash).await
-            {
-                Ok(true) => Some(G3pbCacheLocation::Foyer),
-                Ok(false) | Err(_) => None,
-            },
-        }
+        meta.payload_ready.then_some(meta.location)
     }
 
-    async fn promote_to_g2(&self, sequence_hash: SequenceHash) -> Result<()> {
-        let size = {
-            let Some(meta) = self.metadata.get(sequence_hash)? else {
-                return Ok(());
-            };
-
-            if matches!(meta.location, G3pbCacheLocation::Foyer) && meta.payload_ready {
-                meta.size_bytes
-            } else {
-                return Ok(());
-            }
-        };
-
-        let payload = self.foyer_get(sequence_hash).await?;
-
-        if let Some(payload) = payload {
-            if let Ok((g2_offset, _)) = self.allocate_in_g2(size).await {
-                self.write_to_g2(g2_offset, &payload).await;
-                self.metadata.update(sequence_hash, |meta| {
-                    meta.location = G3pbCacheLocation::G2 { offset: g2_offset };
-                    meta.acquired_tick = self.next_tick();
-                })?;
-            }
-        } else {
-            let _ = self.metadata.remove(sequence_hash)?;
-        }
-
-        Ok(())
-    }
-
-    async fn demote_to_g3(&self, sequence_hash: SequenceHash) -> Result<()> {
-        let (offset, size_bytes) = {
-            let Some(meta) = self.metadata.get(sequence_hash)? else {
-                return Ok(());
-            };
-
-            match meta.location {
-                G3pbCacheLocation::G2 { offset } => (offset, meta.size_bytes),
-                G3pbCacheLocation::Foyer => return Ok(()),
-            }
-        };
-        let _ = size_bytes;
-        self.metadata.update(sequence_hash, |meta| {
-            if matches!(
-                meta.location,
-                G3pbCacheLocation::G2 {
-                    offset: current_offset
-                } if current_offset == offset
-            ) {
-                meta.location = G3pbCacheLocation::Foyer;
-                meta.returned_tick = self.next_tick();
-            }
-        })?;
-        self.free_in_g2(offset, size_bytes).await;
-
-        Ok(())
-    }
-
-    async fn evict_if_needed(&self) -> Result<()> {
-        let (to_demote, to_evict) = {
-            let metadata = self.metadata.snapshot()?;
-
-            let g2_size: usize = metadata
-                .iter()
-                .map(|(_, meta)| meta)
-                .filter(|m| matches!(m.location, G3pbCacheLocation::G2 { .. }))
-                .map(|m| m.size_bytes)
-                .sum();
-
-            let g2_capacity = self.config.g2_capacity_bytes;
-            let high_watermark = g2_capacity * self.config.g2_high_watermark_pct / 100;
-            if g2_size <= high_watermark {
-                return Ok(());
-            }
-
-            let low_watermark = g2_capacity * self.config.g2_low_watermark_pct / 100;
-            let target_size = low_watermark;
-
-            let mut g2_blocks: Vec<_> = metadata
-                .into_iter()
-                .filter(|(_, meta)| matches!(meta.location, G3pbCacheLocation::G2 { .. }))
-                .collect();
-            g2_blocks.sort_by_key(|(_, meta)| (meta.returned_tick, meta.priority));
-
-            let mut to_demote = Vec::new();
-            let mut to_evict = Vec::new();
-            let mut evicted_size = 0;
-
-            for (hash, meta) in g2_blocks {
-                if evicted_size >= g2_size - target_size {
-                    break;
-                }
-
-                if let G3pbCacheLocation::G2 { offset } = meta.location {
-                    evicted_size += meta.size_bytes;
-                    if meta.access_count >= self.config.demotion_threshold {
-                        to_demote.push(hash);
-                    } else {
-                        to_evict.push((hash, offset, meta.size_bytes));
-                    }
-                }
-            }
-
-            (to_demote, to_evict)
-        };
-
-        for sequence_hash in to_demote {
-            let _ = self.demote_to_g3(sequence_hash).await;
-        }
-
-        for (hash, offset, size) in to_evict {
-            self.metadata.update(hash, |meta| {
-                meta.location = G3pbCacheLocation::Foyer;
-                meta.returned_tick = self.next_tick();
-            })?;
-            self.free_in_g2(offset, size).await;
-        }
-
-        Ok(())
-    }
-
-    async fn evict_to_g2(&self, required_size: usize) -> Result<()> {
+    async fn evict_for_space(&self, required_size: usize) -> Result<()> {
         let (to_evict, freed_size) = {
             let mut g2_blocks: Vec<_> = self
                 .metadata
@@ -787,26 +570,22 @@ impl G3pbCacheStorage {
                     break;
                 }
 
-                if let G3pbCacheLocation::G2 { offset } = meta.location {
-                    freed_size += meta.size_bytes;
-                    to_evict.push((hash, offset, meta.size_bytes));
-                }
+                let G3pbCacheLocation::G2 { offset } = meta.location;
+                freed_size += meta.size_bytes;
+                to_evict.push((hash, offset, meta.size_bytes));
             }
 
             (to_evict, freed_size)
         };
 
         for (hash, offset, size) in to_evict {
-            self.metadata.update(hash, |meta| {
-                meta.location = G3pbCacheLocation::Foyer;
-                meta.returned_tick = self.next_tick();
-            })?;
+            let _ = self.metadata.remove(hash)?;
             self.free_in_g2(offset, size).await;
         }
 
         if freed_size < required_size {
             return Err(anyhow::anyhow!(
-                "Failed to evict enough space: needed {}, freed {}",
+                "failed to evict enough G2 space: needed {}, freed {}",
                 required_size,
                 freed_size
             ));
@@ -827,7 +606,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
             let location = if let Some(existing) = existing_location {
                 existing
             } else {
-                G3pbCacheLocation::Foyer
+                continue;
             };
 
             self.metadata
@@ -884,19 +663,11 @@ impl G3pbPeerStorage for G3pbCacheStorage {
                 .filter(|m| m.payload_ready)
                 .map(|m| (m.location, m.size_bytes));
 
-            self.foyer_insert(block.meta.sequence_hash, block.payload.clone())
-                .await
-                .map_err(|_| G3pbError::NotFound {
-                    instance_id: 0,
-                    sequence_hashes: vec![block.meta.sequence_hash],
-                })?;
-
             if let Some((location, _)) = existing_location {
                 match location {
                     G3pbCacheLocation::G2 { offset } => {
                         self.write_to_g2(offset, &block.payload).await;
                     }
-                    G3pbCacheLocation::Foyer => {}
                 }
 
                 self.metadata
@@ -907,13 +678,11 @@ impl G3pbPeerStorage for G3pbCacheStorage {
                     })
                     .expect("metadata lock poisoned");
             } else {
-                let location = match self.allocate_in_g2(block.payload.len()).await {
-                    Ok((offset, _)) => {
-                        self.write_to_g2(offset, &block.payload).await;
-                        G3pbCacheLocation::G2 { offset }
-                    }
-                    Err(_) => G3pbCacheLocation::Foyer,
-                };
+                let (offset, _) = self.allocate_in_g2(block.payload.len()).await.map_err(|_| {
+                    G3pbError::UnknownPeer { instance_id: 0 }
+                })?;
+                self.write_to_g2(offset, &block.payload).await;
+                let location = G3pbCacheLocation::G2 { offset };
 
                 self.metadata
                     .insert(
@@ -933,8 +702,6 @@ impl G3pbPeerStorage for G3pbCacheStorage {
             }
         }
 
-        let _ = self.evict_if_needed().await;
-
         Ok(())
     }
 
@@ -945,10 +712,8 @@ impl G3pbPeerStorage for G3pbCacheStorage {
                 .remove(*sequence_hash)
                 .expect("metadata lock poisoned")
             {
-                if let G3pbCacheLocation::G2 { offset } = metadata.location {
-                    self.free_in_g2(offset, metadata.size_bytes).await;
-                }
-                self.foyer_remove(*sequence_hash);
+                let G3pbCacheLocation::G2 { offset } = metadata.location;
+                self.free_in_g2(offset, metadata.size_bytes).await;
             }
         }
 
@@ -961,7 +726,6 @@ impl G3pbPeerStorage for G3pbCacheStorage {
         sequence_hashes: &[SequenceHash],
     ) -> Vec<G3pbQueryHit> {
         let mut hits = Vec::new();
-        let mut foyer_candidates = Vec::new();
 
         // Group by shard to minimize lock acquisitions
         let mut hashes_by_shard: std::collections::HashMap<usize, Vec<SequenceHash>> =
@@ -984,36 +748,12 @@ impl G3pbPeerStorage for G3pbCacheStorage {
                 if let Some(meta) = guard.get(sequence_hash)
                     && meta.payload_ready
                 {
-                    match meta.location {
-                        G3pbCacheLocation::G2 { .. } => hits.push(G3pbQueryHit {
-                            instance_id,
-                            sequence_hash: *sequence_hash,
-                            size_bytes: meta.size_bytes,
-                            checksum: None,
-                        }),
-                        G3pbCacheLocation::Foyer => {
-                            foyer_candidates.push((*sequence_hash, meta.size_bytes));
-                        }
-                    }
-                }
-            }
-        }
-
-        for (sequence_hash, size_bytes) in foyer_candidates {
-            match self.prune_if_missing_from_foyer(sequence_hash).await {
-                Ok(true) => hits.push(G3pbQueryHit {
+                    hits.push(G3pbQueryHit {
                     instance_id,
-                    sequence_hash,
-                    size_bytes,
+                    sequence_hash: *sequence_hash,
+                    size_bytes: meta.size_bytes,
                     checksum: None,
-                }),
-                Ok(false) => {}
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        sequence_hash,
-                        "failed to validate foyer-backed G3PB query candidate"
-                    );
+                });
                 }
             }
         }
@@ -1029,7 +769,6 @@ impl G3pbPeerStorage for G3pbCacheStorage {
         let tick = self.next_tick();
         let mut missing = Vec::new();
         let mut blocks = Vec::with_capacity(sequence_hashes.len());
-        let mut to_promote = Vec::new();
 
         // Group sequence hashes by shard to minimize lock acquisitions
         let mut hashes_by_shard: std::collections::HashMap<usize, Vec<SequenceHash>> =
@@ -1056,22 +795,10 @@ impl G3pbPeerStorage for G3pbCacheStorage {
                         meta.access_count += 1;
                         meta.last_access_tick = tick;
                         meta.acquired_tick = tick;
-
-                        // Collect blocks to promote
-                        if meta.access_count >= self.config.promotion_threshold
-                            && matches!(meta.location, G3pbCacheLocation::Foyer)
-                        {
-                            to_promote.push(*sequence_hash);
-                        }
                     }
                     None => missing.push(*sequence_hash),
                 }
             }
-        }
-
-        // Process promotions
-        for sequence_hash in to_promote {
-            let _ = self.promote_to_g2(sequence_hash).await;
         }
 
         // Second pass: collect block locations
@@ -1100,22 +827,6 @@ impl G3pbPeerStorage for G3pbCacheStorage {
         for (sequence_hash, location, size) in block_locations {
             let payload = match location {
                 G3pbCacheLocation::G2 { offset } => self.read_from_g2(offset, size).await,
-                G3pbCacheLocation::Foyer => {
-                    match self
-                        .foyer_get(sequence_hash)
-                        .await
-                        .map_err(|_| G3pbError::NotFound {
-                            instance_id,
-                            sequence_hashes: vec![sequence_hash],
-                        })? {
-                        Some(p) => p,
-                        None => {
-                            let _ = self.metadata.remove(sequence_hash);
-                            missing.push(sequence_hash);
-                            continue;
-                        }
-                    }
-                }
             };
 
             blocks.push(G3pbTransferBlock {
@@ -2373,11 +2084,8 @@ mod tests {
 
     #[tokio::test]
     async fn g3pb_cache_storage_supports_basic_operations() -> Result<()> {
-        let temp_dir = tempfile::tempdir()?;
-        let mut config = G3pbStorageConfig::new(vec![temp_dir.path().to_path_buf()], 0);
+        let mut config = G3pbStorageConfig::new(0);
         config.g2_capacity_bytes = 4 * 1024;
-        config.foyer_memory_capacity_bytes = 4 * 1024;
-        config.foyer_disk_capacity_bytes = 64 * 1024;
 
         let storage = Arc::new(G3pbCacheStorage::new(config).await?);
         let agent = G3pbStorageAgent::new_with_storage(77, storage.clone());
@@ -2425,46 +2133,6 @@ mod tests {
                 sequence_hashes,
             }) if sequence_hashes == vec![1001]
         ));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn g3pb_cache_storage_prunes_stale_foyer_metadata() -> Result<()> {
-        let temp_dir = tempfile::tempdir()?;
-        let mut config = G3pbStorageConfig::new(vec![temp_dir.path().to_path_buf()], 0);
-        config.g2_capacity_bytes = 4;
-        config.foyer_memory_capacity_bytes = 4 * 1024;
-        config.foyer_disk_capacity_bytes = 64 * 1024;
-
-        let storage = Arc::new(G3pbCacheStorage::new(config).await?);
-        let agent = G3pbStorageAgent::new_with_storage(77, storage.clone());
-        let sequence_hash = 4242;
-
-        agent
-            .offer_and_put_payload_blocks(vec![G3pbTransferBlock {
-                meta: G3pbPutBlock {
-                    sequence_hash,
-                    size_bytes: 8,
-                    checksum: None,
-                },
-                payload: vec![1, 2, 3, 4, 5, 6, 7, 8],
-            }])
-            .await?;
-
-        assert!(storage.metadata.contains_key(sequence_hash)?);
-        storage.foyer_remove(sequence_hash);
-
-        assert!(agent.query_blocks(&[sequence_hash]).await.is_empty());
-        assert!(!storage.metadata.contains_key(sequence_hash)?);
-        assert!(
-            agent
-                .fetch_blocks(&[sequence_hash])
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("not found")
-        );
 
         Ok(())
     }
