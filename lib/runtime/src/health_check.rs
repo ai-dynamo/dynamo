@@ -91,19 +91,22 @@ impl HealthCheckManager {
             .get_endpoint_health_check_notifier(&endpoint_subject)
             .expect("Notifier should exist for registered endpoint");
 
-        // Get the optional activity notifier (fires on engine activity
-        // even when no client stream is active — the disagg prefill fix).
-        let activity_notifier = self
-            .drt
-            .system_health()
-            .lock()
-            .get_endpoint_activity_check_notifier(&endpoint_subject);
-
         let task = tokio::spawn(async move {
             let endpoint_subject = endpoint_subject_clone;
             info!("Health check task started for: {}", endpoint_subject);
 
             loop {
+                // Re-fetch the activity notifier each iteration so that a late
+                // register_activity_notifier() call (after this task started)
+                // is visible.  The cost is one Arc clone per iteration of the
+                // health-check loop, which fires at most once per canary_wait
+                // interval (~seconds).
+                let activity_notifier = manager
+                    .drt
+                    .system_health()
+                    .lock()
+                    .get_endpoint_activity_check_notifier(&endpoint_subject);
+
                 // Wait for either timeout or activity notification from either source.
                 tokio::select! {
                     _ = tokio::time::sleep(canary_wait) => {
