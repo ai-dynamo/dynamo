@@ -4640,7 +4640,6 @@ name = "kvbm-consolidator"
 version = "1.2.0"
 dependencies = [
  "anyhow",
- "bytes",
  "dynamo-kv-hashing",
  "dynamo-kv-router",
  "dynamo-tokens",
@@ -4654,7 +4653,6 @@ dependencies = [
  "rstest 0.26.1",
  "serde",
  "tempfile",
- "thiserror 2.0.18",
  "tmq",
  "tokio",
  "tokio-stream",
@@ -4662,7 +4660,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-test",
- "xxhash-rust",
 ]
 
 [[package]]
