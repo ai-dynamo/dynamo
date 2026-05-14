@@ -25,7 +25,7 @@ from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
 from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 from dynamo._core import Context
-from dynamo.common.backend.dp_rank import validate_global_dp_rank
+from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
     EngineConfig,
     GenerateChunk,
@@ -257,8 +257,8 @@ class SglangLLMEngine(LLMEngine):
 
         # Honour the router's DP rank decision; without it SGLang picks
         # its own rank and KV events land on the wrong publisher.
-        forced_dp_rank = validate_global_dp_rank(
-            (request.get("routing") or {}).get("dp_rank"),
+        sgl_dp_rank = validate_global_dp_rank(
+            forced_dp_rank(request),
             self._dp_start,
             self._dp_size,
             "SGLang",
@@ -269,7 +269,7 @@ class SglangLLMEngine(LLMEngine):
             sampling_params=sampling_params,
             stream=True,
             rid=context.trace_id,
-            data_parallel_rank=forced_dp_rank,
+            data_parallel_rank=sgl_dp_rank,
             **bootstrap_kwargs,
         )
 

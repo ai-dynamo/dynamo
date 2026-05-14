@@ -13,9 +13,18 @@ logic doesn't drift across backends.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
+
+from dynamo.common.backend.engine import GenerateRequest
 
 logger = logging.getLogger(__name__)
+
+
+def forced_dp_rank(request: GenerateRequest) -> Optional[int]:
+    """Return the router-supplied global ``dp_rank`` from a request's
+    ``routing`` hints, or ``None`` when the router didn't set one."""
+    routing: dict[str, Any] = request.get("routing") or {}  # type: ignore[assignment]
+    return routing.get("dp_rank")
 
 
 def validate_global_dp_rank(

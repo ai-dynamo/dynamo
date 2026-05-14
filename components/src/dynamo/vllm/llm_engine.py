@@ -25,7 +25,7 @@ from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo._core import Context
 from dynamo.common.backend.disagg import require_prefill_result
-from dynamo.common.backend.dp_rank import validate_global_dp_rank
+from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
     EngineConfig,
     GenerateChunk,
@@ -277,9 +277,7 @@ class VllmLLMEngine(LLMEngine):
 
         # Honour the router's DP rank decision; without it vLLM picks
         # its own rank and KV events land on the wrong publisher.
-        local_dp_rank = self._to_local_dp_rank(
-            (request.get("routing") or {}).get("dp_rank")
-        )
+        local_dp_rank = self._to_local_dp_rank(forced_dp_rank(request))
 
         gen = self.engine_client.generate(
             prompt, sampling_params, request_id, data_parallel_rank=local_dp_rank

@@ -33,7 +33,7 @@ from torch.cuda import device_count
 
 from dynamo._core import Context
 from dynamo.common.backend.disagg import require_prefill_result
-from dynamo.common.backend.dp_rank import validate_global_dp_rank
+from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
     EngineConfig,
     GenerateChunk,
@@ -522,9 +522,7 @@ class TrtllmLLMEngine(LLMEngine):
 
         # Honour the router's DP rank decision; without it TRT-LLM picks
         # its own rank and KV events land on the wrong publisher.
-        scheduling_params = self._scheduling_params_for(
-            (request.get("routing") or {}).get("dp_rank")
-        )
+        scheduling_params = self._scheduling_params_for(forced_dp_rank(request))
 
         # Prefill returns one non-streaming chunk carrying the handoff —
         # matches the legacy disagg wire format.
