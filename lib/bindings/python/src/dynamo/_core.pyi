@@ -514,7 +514,7 @@ class ModelRuntimeConfig:
     data_parallel_size: int
     enable_local_indexer: bool
     enable_eagle: bool
-    taints: List[str]
+    taints: Set[str]
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
     bootstrap_host: str | None
@@ -547,13 +547,13 @@ class ModelRuntimeConfig:
         ...
 
 class RoutingConstraints:
-    required_taints: List[str]
-    preferred_taints: List[str]
+    required_taints: Set[str]
+    preferred_taints: Set[str]
 
     def __init__(
         self,
-        required_taints: Optional[List[str]] = None,
-        preferred_taints: Optional[List[str]] = None,
+        required_taints: Optional[Set[str]] = None,
+        preferred_taints: Optional[Set[str]] = None,
     ) -> None: ...
 
 class OverlapScores:

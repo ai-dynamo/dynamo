@@ -1033,7 +1033,7 @@ impl KvRouter {
             let routing = llm_rs::protocols::common::preprocessor::RoutingHints {
                 backend_instance_id: worker_id,
                 dp_rank,
-                routing_constraints: routing_constraints.map(|t| t.inner),
+                routing_constraints: routing_constraints.map(Into::into),
                 ..Default::default()
             };
             request_builder.routing(Some(routing));
@@ -1108,7 +1108,7 @@ impl KvRouter {
                     0.0,
                     None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
-                    routing_constraints.map(|t| t.inner).unwrap_or_default(),
+                    routing_constraints.map(Into::into).unwrap_or_default(),
                 )
                 .await
                 .map_err(to_pyerr)?;

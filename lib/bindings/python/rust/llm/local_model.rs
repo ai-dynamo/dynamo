@@ -11,46 +11,27 @@ use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeCon
 #[pyclass]
 #[derive(Clone, Debug, Default)]
 pub struct RoutingConstraints {
-    pub(crate) inner: RsRoutingConstraints,
+    #[pyo3(get, set)]
+    pub required_taints: HashSet<String>,
+    #[pyo3(get, set)]
+    pub preferred_taints: HashSet<String>,
 }
 
-#[pymethods]
-impl RoutingConstraints {
-    #[new]
-    #[pyo3(signature = (required_taints=None, preferred_taints=None))]
-    fn new(required_taints: Option<Vec<String>>, preferred_taints: Option<Vec<String>>) -> Self {
+impl From<RoutingConstraints> for RsRoutingConstraints {
+    fn from(value: RoutingConstraints) -> Self {
         Self {
-            inner: RsRoutingConstraints {
-                required_taints: required_taints
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect::<HashSet<_>>(),
-                preferred_taints: preferred_taints
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect::<HashSet<_>>(),
-            },
+            required_taints: value.required_taints,
+            preferred_taints: value.preferred_taints,
         }
     }
+}
 
-    #[getter]
-    fn required_taints(&self) -> Vec<String> {
-        self.inner.required_taints.iter().cloned().collect()
-    }
-
-    #[setter]
-    fn set_required_taints(&mut self, required_taints: Vec<String>) {
-        self.inner.required_taints = required_taints.into_iter().collect::<HashSet<_>>();
-    }
-
-    #[getter]
-    fn preferred_taints(&self) -> Vec<String> {
-        self.inner.preferred_taints.iter().cloned().collect()
-    }
-
-    #[setter]
-    fn set_preferred_taints(&mut self, preferred_taints: Vec<String>) {
-        self.inner.preferred_taints = preferred_taints.into_iter().collect::<HashSet<_>>();
+impl From<RsRoutingConstraints> for RoutingConstraints {
+    fn from(value: RsRoutingConstraints) -> Self {
+        Self {
+            required_taints: value.required_taints,
+            preferred_taints: value.preferred_taints,
+        }
     }
 }
 
@@ -123,8 +104,8 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
-    fn set_taints(&mut self, taints: Vec<String>) {
-        self.inner.taints = taints.into_iter().collect::<HashSet<_>>();
+    fn set_taints(&mut self, taints: HashSet<String>) {
+        self.inner.taints = taints;
     }
 
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
@@ -238,7 +219,7 @@ impl ModelRuntimeConfig {
     }
 
     #[getter]
-    fn taints(&self) -> Vec<String> {
-        self.inner.taints.iter().cloned().collect()
+    fn taints(&self) -> HashSet<String> {
+        self.inner.taints.clone()
     }
 }
