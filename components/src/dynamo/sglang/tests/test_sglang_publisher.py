@@ -6,18 +6,18 @@ from types import SimpleNamespace
 
 import pytest
 
+import dynamo.sglang._disagg as disagg_mod
 import dynamo.sglang.publisher as publisher_mod
-import dynamo.sglang.worker_group as worker_group_mod
+from dynamo.sglang._disagg import (
+    SGLANG_WORKER_GROUP_ID_KEY,
+    get_sglang_worker_group_id,
+)
 from dynamo.sglang.publisher import (
     DynamoSglangPublisher,
     _resolve_multinode_leader_worker_id,
     get_local_dp_rank_range,
     handle_non_leader_node,
     set_forward_pass_metrics_worker_id,
-)
-from dynamo.sglang.worker_group import (
-    SGLANG_WORKER_GROUP_ID_KEY,
-    get_sglang_worker_group_id,
 )
 
 pytestmark = [
@@ -88,7 +88,7 @@ class FakeNetworkAddress:
 
 
 def test_sglang_worker_group_id_matches_across_node_ranks(monkeypatch):
-    monkeypatch.setattr(worker_group_mod, "NetworkAddress", FakeNetworkAddress)
+    monkeypatch.setattr(disagg_mod, "_network_address_cls", lambda: FakeNetworkAddress)
     node0_args = SimpleNamespace(nnodes=2, node_rank=0, dist_init_addr="10.0.0.1:2345")
     node1_args = SimpleNamespace(nnodes=2, node_rank=1, dist_init_addr="10.0.0.1:2345")
 
@@ -98,7 +98,7 @@ def test_sglang_worker_group_id_matches_across_node_ranks(monkeypatch):
 
 
 def test_sglang_worker_group_id_differs_by_dist_init_addr(monkeypatch):
-    monkeypatch.setattr(worker_group_mod, "NetworkAddress", FakeNetworkAddress)
+    monkeypatch.setattr(disagg_mod, "_network_address_cls", lambda: FakeNetworkAddress)
     group_a = get_sglang_worker_group_id(
         SimpleNamespace(nnodes=2, dist_init_addr="10.0.0.1:2345")
     )
@@ -121,7 +121,9 @@ def test_sglang_worker_group_id_returns_none_when_unparseable(monkeypatch):
         def parse(value: str):
             raise ValueError(f"bad address: {value}")
 
-    monkeypatch.setattr(worker_group_mod, "NetworkAddress", BrokenNetworkAddress)
+    monkeypatch.setattr(
+        disagg_mod, "_network_address_cls", lambda: BrokenNetworkAddress
+    )
     server_args = SimpleNamespace(nnodes=2, dist_init_addr="not an address")
 
     assert get_sglang_worker_group_id(server_args) is None

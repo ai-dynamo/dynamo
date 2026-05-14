@@ -95,7 +95,7 @@ async def test_start_populates_registration_metadata(started_engine):
 
 async def test_runtime_data_includes_worker_group(monkeypatch):
     from dynamo.sglang import llm_engine as llm_engine_mod
-    from dynamo.sglang.worker_group import SGLANG_WORKER_GROUP_ID_KEY
+    from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY
 
     monkeypatch.setattr(
         llm_engine_mod,

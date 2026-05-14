@@ -32,12 +32,13 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import ModelInput
 from dynamo.sglang._compat import get_scheduler_info
-from dynamo.sglang._disagg import compute_bootstrap_address, warmup_prefill_engine
-from dynamo.sglang.args import parse_args
-from dynamo.sglang.worker_group import (
+from dynamo.sglang._disagg import (
     SGLANG_WORKER_GROUP_ID_KEY,
+    compute_bootstrap_address,
     get_sglang_worker_group_id,
+    warmup_prefill_engine,
 )
+from dynamo.sglang.args import parse_args
 
 logger = logging.getLogger(__name__)
 
