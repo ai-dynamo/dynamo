@@ -406,12 +406,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::protocols::{SharedCacheHits, WorkerConfigLike};
 
     #[derive(Clone, Default)]
     struct TaintedWorkerConfig {
-        taints: Vec<String>,
+        taints: HashSet<String>,
     }
 
     impl WorkerConfigLike for TaintedWorkerConfig {
@@ -431,7 +433,7 @@ mod tests {
             None
         }
 
-        fn taints(&self) -> &[String] {
+        fn taints(&self) -> &HashSet<String> {
             &self.taints
         }
     }
@@ -605,7 +607,7 @@ mod tests {
         let workers = HashMap::from([(
             10,
             TaintedWorkerConfig {
-                taints: vec!["mdc-a".to_string()],
+                taints: HashSet::from(["mdc-a".to_string()]),
             },
         )]);
         let request = SchedulingRequest {
@@ -626,8 +628,8 @@ mod tests {
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints {
-                required_taints: vec!["mdc-b".to_string()],
-                preferred_taints: Vec::new(),
+                required_taints: HashSet::from(["mdc-b".to_string()]),
+                preferred_taints: HashSet::new(),
             },
             shared_cache_hits: None,
             resp_tx: None,
@@ -644,13 +646,13 @@ mod tests {
             (
                 10,
                 TaintedWorkerConfig {
-                    taints: vec!["mdc-a".to_string()],
+                    taints: HashSet::from(["mdc-a".to_string()]),
                 },
             ),
             (
                 20,
                 TaintedWorkerConfig {
-                    taints: vec!["mdc-b".to_string()],
+                    taints: HashSet::from(["mdc-b".to_string()]),
                 },
             ),
         ]);
@@ -672,8 +674,8 @@ mod tests {
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints {
-                required_taints: vec!["mdc-b".to_string()],
-                preferred_taints: Vec::new(),
+                required_taints: HashSet::from(["mdc-b".to_string()]),
+                preferred_taints: HashSet::new(),
             },
             shared_cache_hits: None,
             resp_tx: None,
@@ -690,13 +692,13 @@ mod tests {
         let name_b = "mdc-b".to_string();
         let name_c = "mdc-c".to_string();
         let taint_a = TaintedWorkerConfig {
-            taints: vec![name_a.clone()],
+            taints: HashSet::from([name_a.clone()]),
         };
         let taint_b = TaintedWorkerConfig {
-            taints: vec![name_b.clone()],
+            taints: HashSet::from([name_b.clone()]),
         };
         let taint_c = TaintedWorkerConfig {
-            taints: vec![name_c.clone()],
+            taints: HashSet::from([name_c.clone()]),
         };
         let workers = HashMap::from([
             (10, taint_a.clone()),
@@ -734,8 +736,8 @@ mod tests {
                 pinned_worker: None,
                 allowed_worker_ids: None,
                 routing_constraints: crate::protocols::RoutingConstraints {
-                    required_taints: vec![required_taint.clone()],
-                    preferred_taints: Vec::new(),
+                    required_taints: HashSet::from([required_taint.clone()]),
+                    preferred_taints: HashSet::new(),
                 },
                 shared_cache_hits: None,
                 resp_tx: None,

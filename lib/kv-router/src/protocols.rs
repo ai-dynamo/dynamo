@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::ops::Range;
 use std::sync::LazyLock;
@@ -165,17 +166,17 @@ pub trait WorkerConfigLike {
     fn data_parallel_size(&self) -> u32;
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
-    fn taints(&self) -> &[String] {
+    fn taints(&self) -> &HashSet<String> {
         &EMPTY_WORKER_TAINTS
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct RoutingConstraints {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_taints: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub preferred_taints: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub required_taints: HashSet<String>,
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub preferred_taints: HashSet<String>,
 }
 
 impl RoutingConstraints {
@@ -183,16 +184,14 @@ impl RoutingConstraints {
         self.required_taints.is_empty() && self.preferred_taints.is_empty()
     }
 
-    pub fn is_compatible_with_worker_taints(&self, worker_taints: &[String]) -> bool {
-        self.required_taints.iter().all(|taint| {
-            worker_taints
-                .iter()
-                .any(|worker_taint| worker_taint == taint)
-        })
+    pub fn is_compatible_with_worker_taints(&self, worker_taints: &HashSet<String>) -> bool {
+        self.required_taints
+            .iter()
+            .all(|taint| worker_taints.contains(taint))
     }
 }
 
-static EMPTY_WORKER_TAINTS: LazyLock<Vec<String>> = LazyLock::new(Vec::new);
+static EMPTY_WORKER_TAINTS: LazyLock<HashSet<String>> = LazyLock::new(HashSet::new);
 
 /// Transport abstraction for publishing batched router-visible KV cache events.
 pub trait RouterEventSink: Send + Sync {

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -64,8 +64,8 @@ pub struct ModelRuntimeConfig {
     #[serde(default = "default_eagle")]
     pub enable_eagle: bool,
 
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub taints: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub taints: HashSet<String>,
 }
 
 const fn default_data_parallel_start_rank() -> u32 {
@@ -104,7 +104,7 @@ impl Default for ModelRuntimeConfig {
             tensor_model_config: None,
             disaggregated_endpoint: None,
             enable_eagle: false,
-            taints: Vec::new(),
+            taints: HashSet::new(),
         }
     }
 }
@@ -126,7 +126,7 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
         self.total_kv_blocks
     }
 
-    fn taints(&self) -> &[String] {
+    fn taints(&self) -> &HashSet<String> {
         &self.taints
     }
 }

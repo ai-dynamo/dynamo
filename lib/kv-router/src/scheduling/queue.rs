@@ -1102,7 +1102,7 @@ mod tests {
             0_u64,
             SimpleWorkerConfig {
                 max_num_batched_tokens: Some(256),
-                taints: vec!["mdc-a".to_string()],
+                taints: HashSet::from(["mdc-a".to_string()]),
                 ..Default::default()
             },
         );
@@ -1110,8 +1110,8 @@ mod tests {
 
         let (mut req, rx) = make_request("tainted", 256);
         req.routing_constraints = crate::protocols::RoutingConstraints {
-            required_taints: vec!["mdc-b".to_string()],
-            preferred_taints: Vec::new(),
+            required_taints: HashSet::from(["mdc-b".to_string()]),
+            preferred_taints: HashSet::new(),
         };
 
         queue.enqueue(req).await;

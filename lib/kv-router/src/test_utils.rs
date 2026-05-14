@@ -370,7 +370,7 @@ pub struct SimpleWorkerConfig {
     pub data_parallel_size: u32,
     pub max_num_batched_tokens: Option<u64>,
     pub total_kv_blocks: Option<u64>,
-    pub taints: Vec<String>,
+    pub taints: HashSet<String>,
 }
 
 impl Default for SimpleWorkerConfig {
@@ -380,7 +380,7 @@ impl Default for SimpleWorkerConfig {
             data_parallel_size: 1,
             max_num_batched_tokens: None,
             total_kv_blocks: None,
-            taints: Vec::new(),
+            taints: HashSet::new(),
         }
     }
 }
@@ -402,7 +402,8 @@ impl WorkerConfigLike for SimpleWorkerConfig {
         self.total_kv_blocks
     }
 
-    fn taints(&self) -> &[String] {
+    fn taints(&self) -> &HashSet<String> {
         &self.taints
     }
 }
+use std::collections::HashSet;

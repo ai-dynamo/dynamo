@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
+
 use super::*;
 use dynamo_kv_router::protocols::RoutingConstraints as RsRoutingConstraints;
 use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
@@ -19,30 +21,36 @@ impl RoutingConstraints {
     fn new(required_taints: Option<Vec<String>>, preferred_taints: Option<Vec<String>>) -> Self {
         Self {
             inner: RsRoutingConstraints {
-                required_taints: required_taints.unwrap_or_default(),
-                preferred_taints: preferred_taints.unwrap_or_default(),
+                required_taints: required_taints
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect::<HashSet<_>>(),
+                preferred_taints: preferred_taints
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect::<HashSet<_>>(),
             },
         }
     }
 
     #[getter]
     fn required_taints(&self) -> Vec<String> {
-        self.inner.required_taints.clone()
+        self.inner.required_taints.iter().cloned().collect()
     }
 
     #[setter]
     fn set_required_taints(&mut self, required_taints: Vec<String>) {
-        self.inner.required_taints = required_taints;
+        self.inner.required_taints = required_taints.into_iter().collect::<HashSet<_>>();
     }
 
     #[getter]
     fn preferred_taints(&self) -> Vec<String> {
-        self.inner.preferred_taints.clone()
+        self.inner.preferred_taints.iter().cloned().collect()
     }
 
     #[setter]
     fn set_preferred_taints(&mut self, preferred_taints: Vec<String>) {
-        self.inner.preferred_taints = preferred_taints;
+        self.inner.preferred_taints = preferred_taints.into_iter().collect::<HashSet<_>>();
     }
 }
 
@@ -116,7 +124,7 @@ impl ModelRuntimeConfig {
 
     #[setter]
     fn set_taints(&mut self, taints: Vec<String>) {
-        self.inner.taints = taints;
+        self.inner.taints = taints.into_iter().collect::<HashSet<_>>();
     }
 
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
@@ -231,6 +239,6 @@ impl ModelRuntimeConfig {
 
     #[getter]
     fn taints(&self) -> Vec<String> {
-        self.inner.taints.clone()
+        self.inner.taints.iter().cloned().collect()
     }
 }
