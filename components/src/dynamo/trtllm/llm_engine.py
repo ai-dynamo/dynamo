@@ -292,14 +292,11 @@ class TrtllmLLMEngine(LLMEngine):
 
     def _kv_routing_enabled(self) -> bool:
         # `--publish-events-and-metrics` is the operator's switch for both
-        # KV-event and load-metric publishing. Decode workers in
-        # disaggregated mode don't host the KV indexer, so opt them out
-        # too — matches the legacy `setup_kv_event_publisher` behaviour.
-        if not self.publish_events_and_metrics:
-            return False
-        if self.disaggregation_mode == DisaggregationMode.DECODE:
-            return False
-        return True
+        # KV-event and load-metric publishing. Matches the legacy
+        # `workers/llm_worker.py` flow: events and metrics share a single
+        # gate, and decode workers DO publish (the legacy path only
+        # turns off `enable_local_indexer` for decode, not the publisher).
+        return self.publish_events_and_metrics
 
     async def kv_event_sources(self) -> list[KvEventSource]:
         if not self._kv_routing_enabled():

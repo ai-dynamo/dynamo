@@ -189,22 +189,22 @@ class SglangLLMEngine(LLMEngine):
         )
 
     def _kv_routing_enabled(self) -> bool:
-        # Operator opts in by setting `--kv-events-config` (the same
-        # signal `kv_event_sources` already keys on). Multi-node SGLang
-        # only emits events / metrics on the leader, and decode workers
-        # in disaggregated mode don't host the indexer — same shape as
-        # the vLLM and TRT-LLM helpers.
-        if not getattr(self.server_args, "kv_events_config", None):
-            return False
-        if (getattr(self.server_args, "node_rank", 0) or 0) != 0:
-            return False
-        if self.serving_mode == DisaggregationMode.DECODE:
-            return False
-        return True
+        # Operator opts in by setting `--kv-events-config` — same gate
+        # as the legacy `DynamoSglangPublisher.init_kv_event_publish`.
+        # Every node (not just the leader) publishes its local DP ranks'
+        # events, and decode workers participate — both match legacy.
+        return bool(getattr(self.server_args, "kv_events_config", None))
+
+    def _is_metrics_leader(self) -> bool:
+        # SGLang's scheduler-metrics PULL socket is bound only on the
+        # leader node; non-leader nodes can't emit per-DP-rank metrics
+        # even when KV routing is on. Matches legacy `DynamoSglangPublisher`
+        # which only initialises the ZMQ socket on `node_rank == 0`.
+        return (getattr(self.server_args, "node_rank", 0) or 0) == 0
 
     def _start_metrics_task(self) -> None:
         assert self.engine is not None, "Engine not initialized"
-        if not self._kv_routing_enabled():
+        if not (self._kv_routing_enabled() and self._is_metrics_leader()):
             return
         self._metrics_zmq_ctx = zmq.asyncio.Context()
         self._metrics_zmq_sock = get_zmq_socket(
@@ -579,7 +579,7 @@ class SglangLLMEngine(LLMEngine):
         return sources
 
     async def metrics_sources(self) -> list[SnapshotSource]:
-        if not self._kv_routing_enabled():
+        if not (self._kv_routing_enabled() and self._is_metrics_leader()):
             return []
 
         def snapshot_for(r: int) -> Callable[[], Optional[Metrics]]:
