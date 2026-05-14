@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 family: llama3_json
+model_label: Llama 3 (JSON fmt)
 mode: batch
 cases:
   PARSER.batch.1:
@@ -16,27 +17,39 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo: &d_1
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *d_1
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: Hello, how can I help you today?
+      dynamo: &d_3
+        calls: []
+        normal_text: Hello, how can I help you today?
+      vllm: *d_3
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'
   PARSER.batch.9:
     description: Empty input
     model_text: ''
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
+      dynamo: &d_9
+        calls: []
+        normal_text: ''
+      vllm: *d_9
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'
   PARSER.batch.10:
     description: Duplicate calls (same name twice)
     model_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}};{"name": "get_weather", "arguments":
@@ -44,5 +57,18 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            location: LA
+          name: get_weather
+        normal_text: ''
+        reason: "vLLM llama3_json does not parse semicolon-separated calls the same way Dynamo does"
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'

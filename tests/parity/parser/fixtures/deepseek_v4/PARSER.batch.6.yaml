@@ -19,10 +19,14 @@ cases:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &d_6_a
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *d_6_a
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.6.b:
     description: Invoke with extra newline
     ref: dynamo
@@ -35,7 +39,11 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &d_6_b
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *d_6_b
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'

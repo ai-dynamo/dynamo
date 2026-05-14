@@ -36,14 +36,17 @@ cases:
           timezone:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
+      dynamo: &d_2_a
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm: *d_2_a
+      sglang: *d_2_a
   PARSER.batch.2.b:
     description: Two back-to-back function_calls wrappers
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_deepseekv32_tool_parser.py#L327
@@ -62,20 +65,27 @@ cases:
     - *id001
     - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      # `|2+` below = "\n" (see file header)
-      normal_text: |2+
+      dynamo: &d_2_b
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        # `|2+` below = "\n" (see file header). The blank line that follows
+        # is REQUIRED — without it the block scalar parses as "" (empty)
+        # rather than "\n", causing a false negative in canonical-diff.
+        normal_text: |2+
 
-    # TODO(research): vllm diverges — vLLM deepseek_v3_2 does not restart parsing on a second back-to-back fence pair
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}, {'name': 'get_time', 'arguments': {'timezone': 'EST'}}]
-    #   normal_text: None
+      vllm: *d_2_b
+      sglang:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: ''
+
   PARSER.batch.2.c:
     description: With surrounding narration
     ref: dynamo
@@ -92,18 +102,35 @@ cases:
     - *id001
     - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: 'Both:  Done.'
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}, {'name': 'get_time', 'arguments': {'timezone': 'EST'}}]
-    #   normal_text: 'Both: '
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both:  Done.'
+      vllm:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            timezone: EST
+          name: get_time
+        normal_text: 'Both: '
+        reason: "drops trailing normal_text after tool-call wrapper end"
+      sglang:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            timezone: EST
+          name: get_time
+        normal_text: 'Both:'
+        reason: "trims trailing space from preceding normal_text"
   PARSER.batch.2.d:
     description: Same-name twice
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_deepseekv32_tool_parser.py#L370
@@ -120,11 +147,14 @@ cases:
     - *id001
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: ''
+      dynamo: &d_2_d
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *d_2_d
+      sglang: *d_2_d
