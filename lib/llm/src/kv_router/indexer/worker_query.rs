@@ -361,6 +361,10 @@ impl WorkerQueryClient {
         let key = (worker_id, dp_rank);
         match self.query_targets.insert(key, endpoint.target.clone()) {
             Some(previous) if previous != endpoint.target => {
+                // Discovery can briefly show a replacement route instance for the same
+                // logical worker during restart overlap. We keep existing cursor state
+                // here because SGLang multinode ranks are expected to restart together;
+                // if that invariant changes, this should reset the rank and restore.
                 tracing::warn!(
                     "WorkerQueryClient: query endpoint for worker {worker_id} dp_rank {dp_rank} \
                      changed from {:?} to {:?}",
@@ -771,10 +775,6 @@ impl WorkerQueryClient {
             .unwrap_or_else(|| anyhow::anyhow!("No response after {RECOVERY_MAX_RETRIES} retries")))
     }
 }
-
-// ============================================================================
-// Worker-side endpoint registration (unchanged)
-// ============================================================================
 
 /// Worker-side endpoint registration for Router -> LocalKvIndexer query service
 pub(crate) async fn start_worker_kv_query_endpoint(
