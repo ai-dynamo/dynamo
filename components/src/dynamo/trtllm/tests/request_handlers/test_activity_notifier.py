@@ -26,7 +26,6 @@ import pytest
 
 pytestmark = [
     pytest.mark.unit,
-    pytest.mark.trtllm,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -54,8 +53,19 @@ def _make_trtllm_stub() -> None:
     """
     import importlib.abc
     import importlib.machinery
+    import importlib.util
 
     PREFIX = "tensorrt_llm"
+
+    # If the real tensorrt_llm is already installed, don't shadow it — this
+    # file might be collected by a trtllm-runtime job where other tests depend
+    # on the real package.  Our stubs are only needed in images where the SDK
+    # is absent (e.g. dynamo-runtime).
+    try:
+        if importlib.util.find_spec(PREFIX) is not None:
+            return
+    except (ModuleNotFoundError, ValueError):
+        pass
 
     class _AutoMockModule(types.ModuleType):
         """Module stub that returns MagicMock for any attribute that isn't set."""
