@@ -488,7 +488,7 @@ pip install -e ".[dev]"
 ```
 
 The sample engine has a unit-test
-[suite](../../components/src/dynamo/common/backend/tests/test_engine.py)
+[suite](../../components/src/dynamo/common/backend/tests/test_sample_engine.py)
 that you can copy as a starting point. The shape of a useful test:
 
 ```python
