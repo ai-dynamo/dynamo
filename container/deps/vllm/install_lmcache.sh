@@ -52,7 +52,8 @@ import pathlib
 import subprocess
 
 site = pathlib.Path("/usr/local/lib")
-matches = sorted(site.glob("python*/dist-packages/lmcache/c_ops*.so"))
+matches = sorted(site.glob("python*/site-packages/lmcache/c_ops*.so"))
+matches += sorted(site.glob("python*/dist-packages/lmcache/c_ops*.so"))
 assert matches, "lmcache c_ops shared object not found after source rebuild"
 ldd = subprocess.check_output(["ldd", str(matches[-1])], text=True)
 assert "libcudart.so.13" in ldd, ldd
