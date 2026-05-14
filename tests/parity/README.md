@@ -336,10 +336,31 @@ Impl tag is `#vllm` or `#sglang`.
 
 ### 4. Decide who's right
 
+**Two goals; they sometimes conflict.**
+
+1. **No tag/marker leakage.** Tool-calling tags like `<｜tool_call｜>`,
+   `<tool_call>`, `[TOOL_CALLS]`, etc. must never reach `message.content`
+   rendered to a user. If one engine leaks and the other doesn't, prefer
+   the non-leaking behavior.
+2. **Parity with both engines.** Dynamo should match vLLM *and* SGLang
+   for each (family, case). When they disagree, this conflicts with
+   goal 1 — pick the engine that better satisfies goal 1.
+
+**Decision rubric (apply in order):**
+
+- **Customer complains in production** → align to that customer's engine
+  *now* to unblock. Add a `reason:` string referencing the incident and
+  the engine you aligned to (e.g.
+  `"aligned to SGLang per Acme prod report 2026-05-12; vLLM variant leaks <|tool_call|> tag into content"`).
+  Don't litigate the "right" choice in the same PR — ship the unblock
+  and follow up.
 - **Dynamo wrong, impl right** → fix Dynamo (step 5).
 - **Dynamo right, impl wrong intentionally** → leave the entry, file
   an upstream bug at `vllm-project/vllm` or `sgl-project/sglang`, link
   it from the divergence reason.
+- **vLLM and SGLang disagree** → align to whichever satisfies goal 1
+  (no leak). Add a `reason:` string explaining why (e.g.
+  `"aligned to vLLM: SGLang leaves trailing <tool_call> in normal_text"`).
 - **Both wrong / spec-ambiguous** → discuss before touching code.
 - **A customer is blocked on a specific divergence** → align Dynamo to
   *that customer's* engine (vLLM or SGLang) and ship the unblock. Don't
@@ -354,6 +375,13 @@ Impl tag is `#vllm` or `#sglang`.
   reality of supporting multiple engines while keeping everyone happy. If
   the param doesn't exist yet, file a follow-up issue and link it from
   the divergence reason.
+
+> **Sad reality:** sometimes the goals are unreconcilable across
+> customers — one prod deployment wants vLLM-style output, another
+> wants SGLang-style. We may eventually need a parser-side param or
+> env (e.g. `DYN_PARSER_<family>_MODE=vllm|sglang`) to flip behavior
+> per deployment. Track these cases in the divergence `reason:` so
+> the switch can be added later from a known set.
 
 ### 5. Fix the parser
 
