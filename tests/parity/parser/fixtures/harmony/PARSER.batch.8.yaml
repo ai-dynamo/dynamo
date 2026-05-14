@@ -26,11 +26,10 @@ cases:
         unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
       sglang:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
         normal_text: I will check the weather.
-        reason: "SGLang's GptOssDetector bot_token requires '<|start|>assistant<|channel|>commentary' envelope; Dynamo accepts the bare '<|channel|>commentary' variant"
   PARSER.batch.8.b:
     description: Narration after tool call only
     ref: dynamo
@@ -47,11 +46,10 @@ cases:
         unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
       sglang:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
         normal_text: Let me know if you need more.
-        reason: "SGLang's GptOssDetector bot_token requires '<|start|>assistant<|channel|>commentary' envelope; Dynamo accepts the bare '<|channel|>commentary' variant"
   PARSER.batch.8.c:
     description: Narration both before and after (sandwich)
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_openai_tool_parser.py#L220
@@ -68,11 +66,10 @@ cases:
         unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
       sglang:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
         normal_text: I will check the weather.   Let me know if you need more.
-        reason: "SGLang's GptOssDetector bot_token requires '<|start|>assistant<|channel|>commentary' envelope; Dynamo accepts the bare '<|channel|>commentary' variant"
   PARSER.batch.8.d:
     description: Narration between multiple tool calls
     ref: dynamo
@@ -91,11 +88,10 @@ cases:
         unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
       sglang:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_weather
+          arguments:
             location: LA
-          name: get_weather
         normal_text: I will check the weather.   Then check LA weather.
-        reason: "SGLang's GptOssDetector bot_token requires '<|start|>assistant<|channel|>commentary' envelope; Dynamo accepts the bare '<|channel|>commentary' variant"

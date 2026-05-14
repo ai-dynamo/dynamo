@@ -9,46 +9,46 @@ cases:
     ref: dynamo
     model_text: '<tool_call>{"name": "get_time", "arguments": {}}</tool_call>'
     tools:
-    - &id001
+    - &id002
       name: get_time
       parameters:
         type: object
         properties: {}
     expected:
-      dynamo: &d_6_a
+      dynamo: &id001
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
-      vllm: *d_6_a
-      sglang: *d_6_a
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.6.b:
     description: Whitespace inside arguments {}
     ref: dynamo
     model_text: '<tool_call>{"name": "get_time", "arguments": { }}</tool_call>'
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_6_b
+      dynamo: &id003
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
-      vllm: *d_6_b
-      sglang: *d_6_b
+      vllm: *id003
+      sglang: *id003
   PARSER.batch.6.c:
     description: No arguments key
     ref: dynamo
     model_text: '<tool_call>{"name": "get_time"}</tool_call>'
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_6_c
+      dynamo: &id004
         calls: []
         normal_text: '<tool_call>{"name": "get_time"}</tool_call>'
-      vllm: *d_6_c
+      vllm: *id004
       sglang:
         calls:
-        - arguments: {}
-          name: get_time
+        - name: get_time
+          arguments: {}
         normal_text: ''

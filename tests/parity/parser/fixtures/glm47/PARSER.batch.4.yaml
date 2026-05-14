@@ -22,14 +22,12 @@ cases:
         normal_text: <tool_call><arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
       vllm:
         calls:
-        - arguments: {}
-          name: <arg_key>location</arg_key><arg_value>NYC</arg_value>
+        - name: <arg_key>location</arg_key><arg_value>NYC</arg_value>
+          arguments: {}
         normal_text: ''
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
       sglang:
         calls: []
         normal_text: ''
-        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"
   PARSER.batch.4.d:
     description: Missing </arg_value> end tag
     ref: dynamo
@@ -37,10 +35,10 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_4_d
+      dynamo: &id002
         calls:
         - name: get_weather
           arguments: {}
         normal_text: ''
-      vllm: *d_4_d
-      sglang: *d_4_d
+      vllm: *id002
+      sglang: *id002

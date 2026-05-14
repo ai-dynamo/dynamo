@@ -38,9 +38,8 @@ cases:
         unavailable: vLLM has no parser for family='qwen25'
       sglang:
         calls: []
-        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "get_time",
-          "arguments": {"timezone": "EST"}}</tool_call>'
-        reason: "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits"
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name":
+          "get_time", "arguments": {"timezone": "EST"}}</tool_call>'
   PARSER.batch.2.c:
     description: With surrounding narration
     ref: dynamo
@@ -63,8 +62,8 @@ cases:
         unavailable: vLLM has no parser for family='qwen25'
       sglang:
         calls: []
-        normal_text: 'Both: <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "get_time",
-          "arguments": {"timezone": "EST"}}</tool_call> Done.'
+        normal_text: 'Both: <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name":
+          "get_time", "arguments": {"timezone": "EST"}}</tool_call> Done.'
   PARSER.batch.2.d:
     description: Same-name twice
     ref: dynamo
@@ -87,5 +86,5 @@ cases:
         unavailable: vLLM has no parser for family='qwen25'
       sglang:
         calls: []
-        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "get_weather",
-          "arguments": {"location": "LA"}}</tool_call>'
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name":
+          "get_weather", "arguments": {"location": "LA"}}</tool_call>'

@@ -13,19 +13,19 @@ cases:
       {}
       ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
     tools:
-    - &id001
+    - &id002
       name: get_time
       parameters:
         type: object
         properties: {}
     expected:
-      dynamo: &d_6_a
+      dynamo: &id001
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
-      vllm: *d_6_a
-      sglang: *d_6_a
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.6.b:
     description: Whitespace inside empty { } (newlines)
     ref: dynamo
@@ -36,9 +36,9 @@ cases:
       }
       ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_6_b
+      dynamo: &id003
         calls:
         - name: get_time
           arguments: {}
@@ -46,20 +46,18 @@ cases:
       vllm:
         calls: []
         normal_text: ''
-        reason: "vLLM rejects whitespace inside empty {} when wrapped in fenced ```json``` block"
-      sglang: *d_6_b
+      sglang: *id003
   PARSER.batch.6.c:
     description: No fenced JSON block (function name only)
     ref: dynamo
     model_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time<｜tool▁call▁end｜><｜tool▁calls▁end｜>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_6_c
+      dynamo: &id004
         calls: []
         normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time<｜tool▁call▁end｜><｜tool▁calls▁end｜>
       vllm:
         calls: []
         normal_text: ''
-        reason: "both return calls=[]; vLLM nullifies normal_text on this recovery path, Dynamo preserves the raw input as normal_text"
-      sglang: *d_6_c
+      sglang: *id004

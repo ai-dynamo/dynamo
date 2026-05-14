@@ -9,7 +9,7 @@ cases:
     ref: dynamo
     model_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -17,74 +17,76 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_5_a
+      dynamo: &id001
         calls: []
         normal_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>
-      vllm: *d_5_a
-      sglang: *d_5_a
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.5.b:
     description: Closing </tool_call> without matching <tool_call> open
     ref: dynamo
     model_text: get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_5_b
+      dynamo: &id003
         calls: []
         normal_text: get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>
-      vllm: *d_5_b
-      sglang: *d_5_b
+      vllm: *id003
+      sglang: *id003
   PARSER.batch.5.c:
     description: Truncation mid-arg_value
     ref: dynamo
     model_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>N
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_5_c
+      dynamo: &id004
         calls: []
         normal_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>N
-      vllm: *d_5_c
-      sglang: *d_5_c
+      vllm: *id004
+      sglang: *id004
   PARSER.batch.5.d:
     description: Multi-call, last call missing only </tool_call> end marker (body complete)
     ref: dynamo
-    model_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>Boston</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>New York</arg_value>
+    model_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>Boston</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>New
+      York</arg_value>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_5_d
+      dynamo: &id005
         calls:
         - name: get_weather
           arguments:
             location: Boston
-        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New York</arg_value>
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New
+          York</arg_value>
       vllm:
         calls:
         - name: get_weather
           arguments:
             location: Boston
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
-        reason: vLLM preserves leading narration but drops the incomplete tool_call block
-      sglang: *d_5_d
+      sglang: *id005
   PARSER.batch.5.e:
     description: Multi-call, last call truncated mid-arg-value
     ref: dynamo
-    model_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>Boston</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>New York
+    model_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>Boston</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>New
+      York
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_5_e
+      dynamo: &id006
         calls:
         - name: get_weather
           arguments:
             location: Boston
-        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New York
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New
+          York
       vllm:
         calls:
         - name: get_weather
           arguments:
             location: Boston
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
-        reason: vLLM preserves leading narration but drops the incomplete tool_call block
-      sglang: *d_5_e
+      sglang: *id006

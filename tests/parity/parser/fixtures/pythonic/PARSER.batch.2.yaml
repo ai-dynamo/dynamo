@@ -9,14 +9,14 @@ cases:
     ref: dynamo
     model_text: '[get_weather(location="NYC"), get_time(timezone="EST")]'
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
         properties:
           location:
             type: string
-    - &id002
+    - &id003
       name: get_time
       parameters:
         type: object
@@ -24,7 +24,7 @@ cases:
           timezone:
             type: string
     expected:
-      dynamo: &d_2_a
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
@@ -33,15 +33,15 @@ cases:
           arguments:
             timezone: EST
         normal_text: ''
-      vllm: *d_2_a
-      sglang: *d_2_a
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.2.c:
     description: With surrounding narration
     ref: dynamo
     model_text: 'Both: [get_weather(location="NYC"), get_time(timezone="EST")] Done.'
     tools:
-    - *id001
     - *id002
+    - *id003
     expected:
       dynamo:
         calls:
@@ -55,25 +55,24 @@ cases:
       vllm:
         calls: []
         normal_text: 'Both: [get_weather(location="NYC"), get_time(timezone="EST")] Done.'
-        reason: "vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the calls"
       sglang:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_time
+          arguments:
             timezone: EST
-          name: get_time
         normal_text: 'Both:  Done.'
   PARSER.batch.2.d:
     description: Same-name twice
     ref: dynamo
     model_text: '[get_weather(location="NYC"), get_weather(location="LA")]'
     tools:
-    - *id001
-    - *id001
+    - *id002
+    - *id002
     expected:
-      dynamo: &d_2_d
+      dynamo: &id004
         calls:
         - name: get_weather
           arguments:
@@ -82,5 +81,5 @@ cases:
           arguments:
             location: LA
         normal_text: ''
-      vllm: *d_2_d
-      sglang: *d_2_d
+      vllm: *id004
+      sglang: *id004

@@ -13,19 +13,19 @@ cases:
       </invoke>
       </minimax:tool_call>
     tools:
-    - &id001
+    - &id002
       name: get_time
       parameters:
         type: object
         properties: {}
     expected:
-      dynamo: &d_6_a
+      dynamo: &id001
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
-      vllm: *d_6_a
-      sglang: *d_6_a
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.6.b:
     description: Invoke with extra newline
     ref: dynamo
@@ -36,12 +36,12 @@ cases:
       </invoke>
       </minimax:tool_call>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_6_b
+      dynamo: &id003
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
-      vllm: *d_6_b
-      sglang: *d_6_b
+      vllm: *id003
+      sglang: *id003

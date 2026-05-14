@@ -9,7 +9,7 @@ cases:
     ref: dynamo
     model_text: <tool_call>not even json</tool_call>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -17,17 +17,17 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_4_a
+      dynamo: &id001
         calls: []
         normal_text: <tool_call>not even json</tool_call>
-      vllm: *d_4_a
-      sglang: *d_4_a
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.4.b:
     description: Missing close brace in JSON body
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_hermes_tool_parser.py#L376
     model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"</tool_call>'
     tools:
-    - *id001
+    - *id002
     expected:
       dynamo:
         calls:
@@ -38,7 +38,6 @@ cases:
       vllm:
         calls: []
         normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"</tool_call>'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
       sglang:
         calls: []
         normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"</tool_call>'
@@ -47,12 +46,12 @@ cases:
     ref: dynamo
     model_text: '<tool_call>{"arguments": {"location": "NYC"}}</tool_call>'
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_4_c
+      dynamo: &id003
         calls: []
         normal_text: '<tool_call>{"arguments": {"location": "NYC"}}</tool_call>'
-      vllm: *d_4_c
+      vllm: *id003
       sglang:
         calls: []
         normal_text: ''
@@ -61,13 +60,13 @@ cases:
     ref: dynamo
     model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_4_d
+      dynamo: &id004
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm: *d_4_d
-      sglang: *d_4_d
+      vllm: *id004
+      sglang: *id004

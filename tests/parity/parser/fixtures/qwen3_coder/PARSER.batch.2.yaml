@@ -23,14 +23,14 @@ cases:
       </function>
       </tool_call>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
         properties:
           location:
             type: string
-    - &id002
+    - &id003
       name: get_time
       parameters:
         type: object
@@ -38,7 +38,7 @@ cases:
           timezone:
             type: string
     expected:
-      dynamo: &d_2_a
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
@@ -47,8 +47,8 @@ cases:
           arguments:
             timezone: EST
         normal_text: ''
-      vllm: *d_2_a
-      sglang: *d_2_a
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.2.c:
     description: Parallel calls with surrounding narration
     ref: dynamo
@@ -68,10 +68,10 @@ cases:
       </function>
       </tool_call> Results above.
     tools:
-    - *id001
     - *id002
+    - *id003
     expected:
-      dynamo: &d_2_c
+      dynamo: &id004
         calls:
         - name: get_weather
           arguments:
@@ -80,8 +80,8 @@ cases:
           arguments:
             timezone: EST
         normal_text: 'Both queries: '
-      vllm: *d_2_c
-      sglang: *d_2_c
+      vllm: *id004
+      sglang: *id004
   PARSER.batch.2.d:
     description: Same-name twice (id distinctness)
     ref: dynamo
@@ -101,10 +101,10 @@ cases:
       </function>
       </tool_call>
     tools:
-    - *id001
-    - *id001
+    - *id002
+    - *id002
     expected:
-      dynamo: &d_2_d
+      dynamo: &id005
         calls:
         - name: get_weather
           arguments:
@@ -113,5 +113,5 @@ cases:
           arguments:
             location: LA
         normal_text: ''
-      vllm: *d_2_d
-      sglang: *d_2_d
+      vllm: *id005
+      sglang: *id005

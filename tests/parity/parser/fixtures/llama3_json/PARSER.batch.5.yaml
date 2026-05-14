@@ -23,7 +23,7 @@ cases:
       vllm:
         calls: []
         normal_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+        reason: impl-defined recovery contract (see PARSER_CASES.md)
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
   PARSER.batch.5.c:
@@ -39,6 +39,38 @@ cases:
       vllm:
         calls: []
         normal_text: '<|python_tag|>{"name": "get_weather", "arguments": {"loc'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+        reason: impl-defined recovery contract (see PARSER_CASES.md)
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<|python_tag|>{"name":
+      "get_weather", "arguments": {"location": "Boston"}};{"name": "get_weather", "arguments": {"location": "New York"}'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'
+      vllm: &id002
+        error: 'AttributeError: ''_StubTokenizer'' object has no attribute ''encode'''
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<|python_tag|>{"name":
+      "get_weather", "arguments": {"location": "Boston"}};{"name": "get_weather", "arguments": {"location": "New York'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'
+      vllm: *id002

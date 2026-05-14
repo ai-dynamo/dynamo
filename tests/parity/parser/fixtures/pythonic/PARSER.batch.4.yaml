@@ -9,7 +9,7 @@ cases:
     ref: dynamo
     model_text: '[not a valid python call]'
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -17,32 +17,32 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_4_a
+      dynamo: &id001
         calls: []
         normal_text: '[not a valid python call]'
-      vllm: *d_4_a
-      sglang: *d_4_a
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.4.b:
     description: Missing closing bracket
     ref: dynamo
     model_text: '[get_weather(location="NYC"'
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_4_b
+      dynamo: &id003
         calls: []
         normal_text: '[get_weather(location="NYC"'
-      vllm: *d_4_b
-      sglang: *d_4_b
+      vllm: *id003
+      sglang: *id003
   PARSER.batch.4.d:
     description: Mismatched paren / bracket
     ref: dynamo
     model_text: '[get_weather(location="NYC"]'
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_4_d
+      dynamo: &id004
         calls: []
         normal_text: '[get_weather(location="NYC"]'
-      vllm: *d_4_d
-      sglang: *d_4_d
+      vllm: *id004
+      sglang: *id004

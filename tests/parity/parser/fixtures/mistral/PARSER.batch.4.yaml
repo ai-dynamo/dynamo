@@ -23,7 +23,6 @@ cases:
       vllm:
         calls: []
         normal_text: not a json array[/TOOL_CALLS]
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
       sglang:
         calls: []
         normal_text: ''
@@ -40,7 +39,6 @@ cases:
       vllm:
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"][/TOOL_CALLS]'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
       sglang:
         calls: []
         normal_text: ''
@@ -51,13 +49,13 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_4_c
+      dynamo: &id002
         calls: []
         normal_text: ''
       vllm:
         error: 'KeyError: ''name'''
-        reason: "vLLM mistral_tool_parser raises KeyError when 'name' key is missing"
-      sglang: *d_4_c
+        reason: vLLM mistral_tool_parser raises KeyError when 'name' key is missing
+      sglang: *id002
   PARSER.batch.4.d:
     description: Missing [/TOOL_CALLS] close
     ref: dynamo
@@ -65,13 +63,13 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_4_d
+      dynamo: &id003
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm: *d_4_d
+      vllm: *id003
       sglang:
         calls: []
         normal_text: ''

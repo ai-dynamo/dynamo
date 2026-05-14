@@ -10,14 +10,14 @@ cases:
     model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "get_time",
       "arguments": {"timezone": "EST"}}</tool_call>'
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
         properties:
           location:
             type: string
-    - &id002
+    - &id003
       name: get_time
       parameters:
         type: object
@@ -25,7 +25,7 @@ cases:
           timezone:
             type: string
     expected:
-      dynamo: &d_2_a
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
@@ -34,18 +34,18 @@ cases:
           arguments:
             timezone: EST
         normal_text: ''
-      vllm: *d_2_a
-      sglang: *d_2_a
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.2.c:
     description: With surrounding narration
     ref: dynamo
     model_text: 'Both: <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name":
       "get_time", "arguments": {"timezone": "EST"}}</tool_call> Done.'
     tools:
-    - *id001
     - *id002
+    - *id003
     expected:
-      dynamo: &d_2_c
+      dynamo: &id004
         calls:
         - name: get_weather
           arguments:
@@ -56,25 +56,24 @@ cases:
         normal_text: 'Both:'
       vllm:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_time
+          arguments:
             timezone: EST
-          name: get_time
         normal_text: 'Both: '
-        reason: "drops trailing normal_text after tool-call wrapper end"
-      sglang: *d_2_c
+      sglang: *id004
   PARSER.batch.2.d:
     description: Same-name twice
     ref: dynamo
     model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "get_weather",
       "arguments": {"location": "LA"}}</tool_call>'
     tools:
-    - *id001
-    - *id001
+    - *id002
+    - *id002
     expected:
-      dynamo: &d_2_d
+      dynamo: &id005
         calls:
         - name: get_weather
           arguments:
@@ -83,5 +82,5 @@ cases:
           arguments:
             location: LA
         normal_text: ''
-      vllm: *d_2_d
-      sglang: *d_2_d
+      vllm: *id005
+      sglang: *id005

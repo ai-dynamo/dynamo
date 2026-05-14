@@ -27,7 +27,7 @@ cases:
           first_class:
             type: boolean
     expected:
-      dynamo: &d_7_a
+      dynamo: &id001
         calls:
         - name: book_flight
           arguments:
@@ -35,7 +35,7 @@ cases:
             passengers: 2
             first_class: true
         normal_text: ''
-      vllm: *d_7_a
+      vllm: *id001
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.7.b:
@@ -55,13 +55,13 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_7_b
+      dynamo: &id002
         calls:
         - name: get_weather
           arguments:
             location: Tōkyō central
         normal_text: ''
-      vllm: *d_7_b
+      vllm: *id002
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   # PARSER.batch.7.c (schema mismatch on JSON value) n/a: DSML encodes typing explicitly via the string="true|false" parameter attribute, not via JSON. There's no JSON-typing/coercion path to mismatch with.

@@ -80,3 +80,47 @@ cases:
         reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: |-
+      I'll start by fetching the weather for both Boston and New York at the same time!
+      <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">Boston</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">New York</｜DSML｜parameter>
+      </｜DSML｜invoke>
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+      vllm: &vllm_deepseek_v4_missing
+        error: 'KeyError: deepseek_v4 parser not registered in this vLLM build'
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: |-
+      I'll start by fetching the weather for both Boston and New York at the same time!
+      <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">Boston</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">New York
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: |
+          I'll start by fetching the weather for both Boston and New York at the same time!
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
+      vllm: *vllm_deepseek_v4_missing

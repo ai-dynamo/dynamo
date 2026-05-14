@@ -33,7 +33,7 @@ cases:
           first_class:
             type: boolean
     expected:
-      dynamo: &d_7_a
+      dynamo: &id001
         calls:
         - name: book_flight
           arguments:
@@ -41,16 +41,15 @@ cases:
             first_class: true
             passengers: 2
         normal_text: ''
-      vllm: *d_7_a
+      vllm: *id001
       sglang:
         calls:
-        - arguments:
+        - name: book_flight
+          arguments:
             destination: Paris
-            first_class: 'true'
             passengers: '2'
-          name: book_flight
+            first_class: 'true'
         normal_text: ''
-        reason: "SGLang's qwen3_coder parser does not coerce parameter values via the tool schema, so booleans / integers surface as raw strings; vLLM and Dynamo coerce."
   PARSER.batch.7.b:
     description: Unicode in parameter value
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L302
@@ -70,11 +69,11 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_7_b
+      dynamo: &id002
         calls:
         - name: get_weather
           arguments:
             location: Tōkyō central
         normal_text: ''
-      vllm: *d_7_b
-      sglang: *d_7_b
+      vllm: *id002
+      sglang: *id002

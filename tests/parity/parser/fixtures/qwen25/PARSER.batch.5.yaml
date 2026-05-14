@@ -28,7 +28,6 @@ cases:
       sglang:
         calls: []
         normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
   PARSER.batch.5.b:
     description: Closing </tool_call> without matching <tool_call> open
     ref: dynamo
@@ -36,12 +35,12 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_5_b
+      dynamo: &id002
         calls: []
         normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang: *d_5_b
+      sglang: *id002
   PARSER.batch.5.c:
     description: Truncation mid-arguments JSON
     ref: dynamo
@@ -49,9 +48,51 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_5_c
+      dynamo: &id003
         calls: []
         normal_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang: *d_5_c
+      sglang: *id003
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_call>{"name": "get_weather",
+      "arguments": {"location": "Boston"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location": "New York"}}'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang:
+        calls: []
+        normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_call>{"name":
+          "get_weather", "arguments": {"location": "Boston"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location":
+          "New York"}}'
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_call>{"name": "get_weather",
+      "arguments": {"location": "Boston"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location": "New York'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang:
+        calls: []
+        normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_call>{"name":
+          "get_weather", "arguments": {"location": "Boston"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location":
+          "New York'

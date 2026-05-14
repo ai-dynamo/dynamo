@@ -25,7 +25,6 @@ cases:
       sglang:
         calls: []
         normal_text: '<tool_call>{"name": "get_time", "arguments": {}}</tool_call>'
-        reason: "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits"
   PARSER.batch.6.b:
     description: Whitespace inside arguments {}
     ref: dynamo
@@ -43,7 +42,6 @@ cases:
       sglang:
         calls: []
         normal_text: '<tool_call>{"name": "get_time", "arguments": { }}</tool_call>'
-        reason: "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits"
   PARSER.batch.6.c:
     description: No arguments key
     ref: dynamo
@@ -51,9 +49,9 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_6_c
+      dynamo: &id002
         calls: []
         normal_text: '<tool_call>{"name": "get_time"}</tool_call>'
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang: *d_6_c
+      sglang: *id002

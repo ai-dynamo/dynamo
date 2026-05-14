@@ -23,11 +23,9 @@ cases:
       vllm:
         calls: []
         normal_text: ''
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
       sglang:
         calls: []
         normal_text: ''
-        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"
   PARSER.batch.4.b:
     description: Unterminated JSON string in args
     ref: dynamo
@@ -35,16 +33,15 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_4_b
+      dynamo: &id002
         calls: []
         normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC<｜tool▁call▁end｜><｜tool▁calls▁end｜>
       vllm:
         calls:
-        - arguments: '{"location":"NYC'
-          name: get_weather
+        - name: get_weather
+          arguments: '{"location":"NYC'
         normal_text: ''
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
-      sglang: *d_4_b
+      sglang: *id002
   PARSER.batch.4.c:
     description: Missing function name (no token before tool_sep)
     ref: dynamo
@@ -57,15 +54,13 @@ cases:
         normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜><｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
       vllm:
         calls:
-        - arguments:
+        - name: ''
+          arguments:
             location: NYC
-          name: ''
         normal_text: ''
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
       sglang:
         calls: []
         normal_text: ''
-        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"
   PARSER.batch.4.d:
     description: Mismatched fences (calls_end without call_end)
     ref: dynamo
@@ -79,8 +74,6 @@ cases:
       vllm:
         calls: []
         normal_text: ''
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
       sglang:
         calls: []
         normal_text: ''
-        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"
