@@ -485,8 +485,24 @@ class Context:
 
         Returns:
             ``{"traceparent": "00-<trace_id>-<span_id>-01"}`` when this request
-            carries trace context, ``None`` otherwise. Forward the value
-            unchanged to the inference engine's ``trace_headers`` kwarg.
+            carries trace context, ``None`` otherwise. Also emits ``tracestate``,
+            ``x-request-id``, ``request-id`` when upstream propagated them.
+            Forward unchanged to the inference engine's ``trace_headers`` kwarg.
+        """
+        ...
+
+    def record_attribute(self, key: str, value: Any) -> None:
+        """
+        Record an attribute on the worker's ``engine.generate`` span. Engines
+        call this via ``dynamo.common.backend.telemetry.record(...)``. Unknown
+        field names are silently dropped — pre-declare attrs on the span.
+        """
+        ...
+
+    def record_event(self, name: str, attrs: Optional[dict[str, Any]] = None) -> None:
+        """
+        Emit an event on the worker's ``engine.generate`` span. Engines call
+        this via ``dynamo.common.backend.telemetry.event(...)``.
         """
         ...
 

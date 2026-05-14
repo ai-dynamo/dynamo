@@ -7,7 +7,7 @@ use dynamo_runtime::logging::DistributedTraceContext;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::context::Controller;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::watch;
@@ -24,6 +24,11 @@ pub struct Context {
     /// prefill requests.
     first_token: Option<watch::Sender<bool>>,
     metadata: Arc<Mutex<BTreeMap<String, String>>>,
+    /// `engine.generate` span captured before crossing the spawn_blocking
+    /// boundary, so PyO3 `record_attribute` / `record_event` can target it
+    /// from Python code (where `Span::current()` is the worker thread root,
+    /// not the auto-span). `None` for Python-instantiated test contexts.
+    span: Option<tracing::Span>,
 }
 
 #[derive(Clone)]
@@ -139,7 +144,16 @@ impl Context {
             trace_context,
             first_token,
             metadata: Arc::new(Mutex::new(metadata)),
+            span: Some(tracing::Span::current()),
         }
+    }
+
+    /// Override the span the telemetry methods record onto. Used by
+    /// `PyLLMEngine::generate` to plumb the `engine.generate` auto-span
+    /// across the spawn_blocking boundary.
+    pub fn with_span(mut self, span: tracing::Span) -> Self {
+        self.span = Some(span);
+        self
     }
 
     // Get trace context for Rust-side usage
@@ -173,6 +187,7 @@ impl Context {
             trace_context: None,
             first_token: None,
             metadata: Arc::new(Mutex::new(metadata.unwrap_or_default())),
+            span: None,
         }
     }
 
@@ -253,21 +268,94 @@ impl Context {
             .and_then(|ctx| ctx.parent_id.clone())
     }
 
+    /// Record an attribute on the `engine.generate` span. Silently no-op when
+    /// no span was plumbed in (Python-instantiated test contexts). Used by
+    /// `dynamo.common.backend.telemetry.record(...)`.
+    fn record_attribute(&self, key: &str, value: Bound<'_, PyAny>) -> PyResult<()> {
+        let Some(span) = &self.span else {
+            return Ok(());
+        };
+        // Span::record only accepts declared empty fields. Engines should
+        // record canonical attrs (e.g. via `telemetry.record(input_tokens=N)`)
+        // — unknown field names are silently dropped by tracing, matching
+        // the `tracing::Span::record` semantics.
+        if let Ok(b) = value.downcast::<PyBool>() {
+            span.record(key, b.is_true());
+        } else if let Ok(i) = value.downcast::<PyInt>() {
+            span.record(key, i.extract::<i64>()?);
+        } else if let Ok(f) = value.downcast::<PyFloat>() {
+            span.record(key, f.extract::<f64>()?);
+        } else if let Ok(s) = value.downcast::<PyString>() {
+            span.record(key, s.to_str()?);
+        } else {
+            // Fallback: render via Python `repr()` so callers see something
+            // useful in trace UIs even for engine-specific objects.
+            let repr = value.repr()?.extract::<String>()?;
+            span.record(key, repr.as_str());
+        }
+        Ok(())
+    }
+
+    /// Emit a structured event on the `engine.generate` span. `attrs` is an
+    /// optional dict of field name → Python value, rendered via `repr()` for
+    /// non-primitive types. Used by `dynamo.common.backend.telemetry.event`.
+    #[pyo3(signature = (name, attrs=None))]
+    fn record_event(&self, name: &str, attrs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        let Some(span) = &self.span else {
+            return Ok(());
+        };
+        // Build a comma-separated rendering of the attrs map. We can't emit
+        // dynamic fields via the `event!` macro (compile-time names only), so
+        // pack into a single `attrs` field. Operators read `event_name` + `attrs`.
+        let attrs_str = match attrs {
+            Some(d) if !d.is_empty() => {
+                let mut parts: Vec<String> = Vec::with_capacity(d.len());
+                for (k, v) in d.iter() {
+                    let k_str = k.extract::<String>()?;
+                    let v_repr = v.repr()?.extract::<String>()?;
+                    parts.push(format!("{k_str}={v_repr}"));
+                }
+                parts.join(", ")
+            }
+            _ => String::new(),
+        };
+        let _enter = span.enter();
+        tracing::event!(
+            target: "request_span",
+            tracing::Level::INFO,
+            event_name = name,
+            attrs = %attrs_str,
+        );
+        Ok(())
+    }
+
     /// Build W3C trace headers for propagating to downstream inference engines.
     /// Returns `None` when no upstream trace context is present, in which case
     /// callers should forward the value as-is — inference engines treat `None`
     /// as "no upstream trace."
+    ///
+    /// Always emits `traceparent`. Also emits `tracestate`, `x-request-id`,
+    /// and `request-id` when the upstream propagated them. Trace-flags are
+    /// hard-coded to `01` (sampled) until we plumb the live span's flags.
     fn trace_headers(&self) -> Option<HashMap<String, String>> {
         let tc = self.trace_context.as_ref()?;
         if tc.trace_id.is_empty() || tc.span_id.is_empty() {
             return None;
         }
-        // TODO: propagate trace-flags from the current span instead of hard-coding `01`.
         let mut headers = HashMap::new();
         headers.insert(
             "traceparent".to_string(),
             format!("00-{}-{}-01", tc.trace_id, tc.span_id),
         );
+        if let Some(ts) = &tc.tracestate {
+            headers.insert("tracestate".to_string(), ts.clone());
+        }
+        if let Some(id) = &tc.x_request_id {
+            headers.insert("x-request-id".to_string(), id.clone());
+        }
+        if let Some(id) = &tc.request_id {
+            headers.insert("request-id".to_string(), id.clone());
+        }
         Some(headers)
     }
 }

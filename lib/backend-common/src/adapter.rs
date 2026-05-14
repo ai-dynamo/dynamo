@@ -8,6 +8,7 @@
 //! avoid orphaning the prefill peer's NIXL KV transfer.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
@@ -21,9 +22,25 @@ use dynamo_runtime::protocols::maybe_error::MaybeError;
 use futures::StreamExt;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::disagg::DisaggregationMode;
 use crate::engine::{GenerateContext, LLMEngine};
+
+/// OTLP-export gate. When the runtime isn't exporting traces (the operator
+/// hasn't set `OTEL_EXPORT_ENABLED=1`), the per-chunk ttft capture and
+/// terminal attribute writes are dead work — the span has nowhere to go but
+/// the local `tracing` event stream, which doesn't read these fields. The
+/// span itself still gets created so log events stay correlated with the
+/// request_id.
+///
+/// Read uncached (~tens of ns per request) so tests that flip the env var
+/// see consistent behavior regardless of ordering.
+fn is_otlp_export_enabled() -> bool {
+    std::env::var("OTEL_EXPORT_ENABLED")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
 
 /// Cancels its token on Drop so the monitor task exits cleanly when the
 /// response stream is gone.
@@ -59,6 +76,62 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
 
+        // Per-request worker-side span. Nests under `handle_payload` (set up
+        // by the runtime's NATS ingress) so the trace tree has a contiguous
+        // worker layer. Attributes get filled in across the stream lifecycle:
+        // - `model`, `input_tokens`, `disagg_role` on entry,
+        // - `prefill_trace_id` / `prefill_span_id` on decode (when the prefill
+        //   peer embedded its trace identity in disaggregated_params),
+        // - `ttft_ms` on first non-empty chunk,
+        // - `output_tokens`, `finish_reason`, `cancelled` on terminal.
+        let span = tracing::info_span!(
+            target: "request_span",
+            "engine.generate",
+            model = %request.model,
+            input_tokens = request.token_ids.len(),
+            disagg_role = self.mode.as_str(),
+            prefill_trace_id = tracing::field::Empty,
+            prefill_span_id = tracing::field::Empty,
+            ttft_ms = tracing::field::Empty,
+            output_tokens = tracing::field::Empty,
+            finish_reason = tracing::field::Empty,
+            cancelled = tracing::field::Empty,
+            error_kind = tracing::field::Empty,
+        );
+
+        // Decode-side: record the prefill peer's trace identity if it embedded
+        // one in disaggregated_params (see prefill-side injection below).
+        // Operators can follow the trail manually; a proper OTel Link
+        // requires the opentelemetry crate (deferred follow-up).
+        if self.mode.is_decode()
+            && let Some(prefill) = request.prefill_result.as_ref()
+            && let Some(meta) = prefill.disaggregated_params.get("dynamo_trace")
+        {
+            if let Some(tid) = meta.get("trace_id").and_then(|v| v.as_str()) {
+                span.record("prefill_trace_id", tid);
+            }
+            if let Some(sid) = meta.get("span_id").and_then(|v| v.as_str()) {
+                span.record("prefill_span_id", sid);
+            }
+        }
+
+        // Prefill-side: capture this worker's trace identity for embedding
+        // into the terminal chunk's disaggregated_params. `in_scope` reads
+        // from our `engine.generate` span (the DistributedTraceIdLayer has
+        // populated it in JSONL mode); yields None in non-JSONL deployments.
+        let prefill_trace_meta: Option<serde_json::Value> = if self.mode.is_prefill() {
+            span.in_scope(|| {
+                dynamo_runtime::logging::get_distributed_tracing_context().map(|tc| {
+                    serde_json::json!({
+                        "trace_id": tc.trace_id,
+                        "span_id": tc.span_id,
+                    })
+                })
+            })
+        } else {
+            None
+        };
+
         // Decode workers defer engine.abort() until first-token to protect
         // in-flight NIXL transfers. The Sender goes to the engine (via
         // GenerateContext + the stream wrapper's auto-fire); the Receiver
@@ -72,11 +145,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let gen_ctx =
             GenerateContext::with_metadata(ctx.clone(), ft_tx.clone(), handle.metadata().clone());
+        // `.instrument()` the setup call so a setup-time error lands on the
+        // same span as the streaming body.
         let chunks = self
             .engine
             .generate(request, gen_ctx)
+            .instrument(span.clone())
             .await
-            .map_err(Error::from)?;
+            .map_err(|e| {
+                span.record("error_kind", "setup_failed");
+                Error::from(e)
+            })?;
+        let request_start = Instant::now();
 
         let drop_token = CancellationToken::new();
         let monitor_token = drop_token.clone();
@@ -127,28 +207,68 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let chunks = crate::validate::wrap(chunks);
 
         let stream_ctx = ctx.clone();
+        let stream_span = span.clone();
+        let record_attrs = is_otlp_export_enabled();
+        let is_prefill_mode = self.mode.is_prefill();
         let mapped = async_stream::stream! {
             let _guard = guard;
             let mut inner = chunks;
             let mut chunk_count: usize = 0;
+            let mut output_token_count: usize = 0;
             let mut signalled = false;
             while let Some(item) = inner.next().await {
                 chunk_count += 1;
                 match item {
-                    Ok(chunk) => {
+                    Ok(mut chunk) => {
                         // First non-empty chunk releases the deferred abort.
                         // Token-less chunks (SGLang's bootstrap handshake) don't count.
-                        if !signalled
-                            && !chunk.token_ids.is_empty()
-                            && let Some(tx) = &ft_tx
-                        {
-                            // Receiver is held by the monitor task; send only
-                            // fails if it panicked, in which case the abort is
-                            // already moot.
-                            let _ = tx.send(true);
+                        if !signalled && !chunk.token_ids.is_empty() {
+                            if record_attrs {
+                                // ttft = time from setup completion to first token.
+                                // Recorded once; subsequent non-empty chunks don't update.
+                                let ttft_ms = request_start.elapsed().as_secs_f64() * 1000.0;
+                                stream_span.record("ttft_ms", format!("{:.2}", ttft_ms).as_str());
+                            }
+                            if let Some(tx) = &ft_tx {
+                                // Receiver is held by the monitor task; send only
+                                // fails if it panicked, in which case the abort is
+                                // already moot.
+                                let _ = tx.send(true);
+                            }
                             signalled = true;
                         }
+                        if record_attrs {
+                            output_token_count += chunk.token_ids.len();
+                        }
                         let is_terminal = chunk.finish_reason.is_some();
+                        if record_attrs && is_terminal {
+                            stream_span.record("output_tokens", output_token_count);
+                            if let Some(reason) = chunk.finish_reason.as_ref() {
+                                stream_span.record("finish_reason", format!("{:?}", reason).as_str());
+                            }
+                            stream_span.record("cancelled", stream_ctx.is_stopped());
+                        }
+                        // Prefill-side: embed our trace identity into the
+                        // terminal chunk's disaggregated_params so the decode
+                        // peer can link back. Only mutate if the engine packed
+                        // a JSON object (or nothing); preserve non-object
+                        // shapes as-is.
+                        if is_prefill_mode
+                            && is_terminal
+                            && let Some(meta) = &prefill_trace_meta
+                        {
+                            match chunk.disaggregated_params.as_mut() {
+                                Some(serde_json::Value::Object(map)) => {
+                                    map.insert("dynamo_trace".to_string(), meta.clone());
+                                }
+                                None => {
+                                    chunk.disaggregated_params = Some(serde_json::json!({
+                                        "dynamo_trace": meta,
+                                    }));
+                                }
+                                _ => {}
+                            }
+                        }
                         yield Annotated::from_data(chunk);
                         if is_terminal {
                             break;
@@ -160,6 +280,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             error = %dynamo_err,
                             "engine stream yielded typed error",
                         );
+                        if record_attrs {
+                            stream_span.record("error_kind", format!("{:?}", dynamo_err.error_type()).as_str());
+                            stream_span.record("output_tokens", output_token_count);
+                            stream_span.record("cancelled", stream_ctx.is_stopped());
+                        }
                         yield Annotated::from_err(dynamo_err);
                         break;
                     }
@@ -172,6 +297,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 "stream complete"
             );
         };
+        // `stream_span.record(...)` from the closure mutates the same span
+        // we just dropped — `Span` is a cheap handle, clones share storage.
 
         Ok(ResponseStream::new(Box::pin(mapped), ctx))
     }
@@ -668,6 +795,171 @@ mod tests {
             abort_calls.load(Ordering::SeqCst),
             0,
             "stream drop before first-token must not fire engine.abort"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Auto-span observation. Uses a custom tracing layer that records field
+    // values on `engine.generate` spans into a shared map, then asserts on
+    // the values the adapter recorded across the stream lifecycle.
+    // -------------------------------------------------------------------
+
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use tracing::field::{Field, Visit};
+    use tracing::span;
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::{Context as TraceCtx, SubscriberExt};
+    use tracing_subscriber::registry::LookupSpan;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    #[derive(Default, Clone)]
+    struct CapturedFields(Arc<Mutex<HashMap<String, String>>>);
+
+    struct FieldRecorder<'a>(&'a mut HashMap<String, String>);
+
+    impl<'a> Visit for FieldRecorder<'a> {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    struct CaptureLayer {
+        out: CapturedFields,
+    }
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    {
+        fn on_new_span(&self, attrs: &span::Attributes<'_>, _id: &span::Id, _ctx: TraceCtx<'_, S>) {
+            if attrs.metadata().name() != "engine.generate" {
+                return;
+            }
+            let mut out = self.out.0.lock().unwrap();
+            attrs.record(&mut FieldRecorder(&mut out));
+        }
+
+        fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: TraceCtx<'_, S>) {
+            if !ctx.span(id).is_some_and(|s| s.name() == "engine.generate") {
+                return;
+            }
+            let mut out = self.out.0.lock().unwrap();
+            values.record(&mut FieldRecorder(&mut out));
+        }
+    }
+
+    /// Force-enable OTLP export for the recording fast-path and install a
+    /// fresh subscriber that captures every `engine.generate` field write
+    /// into a shared map. Returns the map handle plus a dispatch guard whose
+    /// drop restores the prior subscriber.
+    fn install_capture() -> (CapturedFields, tracing::dispatcher::DefaultGuard) {
+        // SAFETY: tests in this module run inside a single tokio runtime;
+        // OTEL_EXPORT_ENABLED is read once and cached behind a OnceLock.
+        unsafe {
+            std::env::set_var("OTEL_EXPORT_ENABLED", "1");
+        }
+        let captured = CapturedFields::default();
+        let layer = CaptureLayer {
+            out: captured.clone(),
+        };
+        let guard = tracing_subscriber::registry().with(layer).set_default();
+        (captured, guard)
+    }
+
+    #[tokio::test]
+    async fn auto_span_records_initial_attrs() {
+        let (captured, _guard) = install_capture();
+        let (engine, _abort) = MockEngine::new(vec![]);
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+        let input = Context::new(make_request(vec![1, 2, 3, 4, 5]));
+        let _stream = adapter.generate(input).await.unwrap();
+
+        let fields = captured.0.lock().unwrap().clone();
+        assert_eq!(fields.get("model").map(String::as_str), Some("mock"));
+        assert_eq!(fields.get("input_tokens").map(String::as_str), Some("5"));
+        assert_eq!(fields.get("disagg_role").map(String::as_str), Some("agg"));
+    }
+
+    #[tokio::test]
+    async fn auto_span_records_terminal_attrs_on_clean_stream() {
+        let (captured, _guard) = install_capture();
+        let (engine, _abort) = MockEngine::new(vec![
+            chunk::token(11),
+            chunk::token(22),
+            LLMEngineOutput::length()
+                .with_tokens(vec![33])
+                .with_usage(usage(3, 3)),
+        ]);
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+        let input = Context::new(make_request(vec![1, 2, 3]));
+        let stream = adapter.generate(input).await.unwrap();
+        let _: Vec<_> = stream.collect().await;
+
+        let fields = captured.0.lock().unwrap().clone();
+        // 3 chunks, 1 token each → 3 total. Sum-not-count is the contract.
+        assert_eq!(fields.get("output_tokens").map(String::as_str), Some("3"));
+        assert!(
+            fields
+                .get("finish_reason")
+                .is_some_and(|v| v.contains("Length")),
+            "got: {:?}",
+            fields.get("finish_reason")
+        );
+        assert_eq!(fields.get("cancelled").map(String::as_str), Some("false"));
+        assert!(
+            fields.contains_key("ttft_ms"),
+            "ttft_ms missing; got fields: {fields:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_span_marks_cancelled_when_stream_stopped() {
+        let (captured, _guard) = install_capture();
+        let adapter = EngineAdapter::new(
+            Arc::new(TerminalOnCancelEngine),
+            DisaggregationMode::Aggregated,
+        );
+        let input: Context<PreprocessedRequest> = Context::new(make_request(vec![1, 2, 3]));
+        let ctrl = input.context();
+        let mut stream = adapter.generate(input).await.unwrap();
+        let _ = stream.next().await;
+        ctrl.stop_generating();
+        let _: Vec<_> = stream.collect().await;
+
+        let fields = captured.0.lock().unwrap().clone();
+        assert_eq!(fields.get("cancelled").map(String::as_str), Some("true"));
+    }
+
+    #[tokio::test]
+    async fn auto_span_records_error_kind_on_typed_error() {
+        let (captured, _guard) = install_capture();
+        let adapter = EngineAdapter::new(
+            Arc::new(TypedMidStreamErrEngine),
+            DisaggregationMode::Aggregated,
+        );
+        let input = Context::new(make_request(vec![1]));
+        let stream = adapter.generate(input).await.unwrap();
+        let _: Vec<_> = stream.collect().await;
+
+        let fields = captured.0.lock().unwrap().clone();
+        let err_kind = fields.get("error_kind").cloned().unwrap_or_default();
+        assert!(
+            err_kind.contains("InvalidArgument"),
+            "expected error_kind to contain InvalidArgument, got: {err_kind:?}"
         );
     }
 }

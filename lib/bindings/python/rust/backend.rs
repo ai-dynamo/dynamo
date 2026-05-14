@@ -593,6 +593,10 @@ impl LLMEngine for PyLLMEngine {
 
         let first_token = ctx.first_token_sender().cloned();
         let inner_ctx = ctx.inner_arc();
+        // Capture the `engine.generate` auto-span before crossing the
+        // spawn_blocking boundary — `tracing::Span::current()` inside the
+        // blocking closure is the worker-thread root, not the auto-span.
+        let engine_span = tracing::Span::current();
 
         // Pythonize the request, call generate(request, context=ctx), and
         // turn the resulting Python async generator into a Rust stream.
@@ -606,7 +610,8 @@ impl LLMEngine for PyLLMEngine {
                         trace_context,
                         first_token,
                         ctx.metadata().clone(),
-                    ),
+                    )
+                    .with_span(engine_span),
                 )?;
 
                 let kwargs = PyDict::new(py);
