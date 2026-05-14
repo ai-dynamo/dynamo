@@ -14,9 +14,11 @@
 //
 // PEP 703 (free-threaded CPython) note: the callback pair is held in a magic-
 // statics singleton, so reads from my_malloc/my_free are data-race-free without
-// explicit synchronization. The first call to init_module wins; subsequent calls
-// are silent no-ops on the stored callbacks. The Python wrapper
-// _ensure_callbacks_initialized already enforces one-shot init in practice.
+// explicit synchronization. The C++ contract is "first call to callbacks() wins";
+// in practice that is init_module, because the Python wrapper
+// _ensure_callbacks_initialized invokes init_module synchronously before any
+// allocation path can reach my_malloc / my_free. Subsequent calls to callbacks()
+// with new arguments are silent no-ops on the stored pointers.
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
@@ -114,8 +116,9 @@ py_init_module(PyObject* self, PyObject* args)
     return nullptr;
   }
 
-  // First call wins; subsequent calls are silent no-ops by design (matches the
-  // single-init contract enforced by _ensure_callbacks_initialized).
+  // First call to callbacks() wins; subsequent calls do not rebind the stored
+  // pointers. In practice this is invoked exactly once by the Python wrapper
+  // _ensure_callbacks_initialized.
   callbacks(malloc_cb, free_cb);
 
   Py_RETURN_NONE;
