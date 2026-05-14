@@ -34,7 +34,14 @@ def get_gms_lock_mode(extra_config: dict):
 def get_gms_ro_connect_timeout_ms(extra_config: dict) -> int | None:
     """Weight RO reconnect timeout in ms. None waits indefinitely."""
     raw = extra_config.get("gms_ro_connect_timeout_ms")
-    return None if raw is None else int(raw)
+    if raw is None:
+        return None
+    timeout_ms = int(raw)
+    if timeout_ms < 0:
+        raise ValueError(
+            f"gms_ro_connect_timeout_ms must be non-negative, got {timeout_ms}"
+        )
+    return timeout_ms
 
 
 def strip_gms_model_loader_config(load_config, load_format: str):
