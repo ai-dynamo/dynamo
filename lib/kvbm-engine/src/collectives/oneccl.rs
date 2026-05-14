@@ -237,7 +237,7 @@ impl OneCclCollectives {
     /// oneCCL warns that `ccl::event::wait()` on a collective submitted
     /// inside group API is not supported — per-op events in a group are
     /// not meaningful completion signals (the runtime may fuse/reorder
-    /// them). The spec-correct host-side wait for a group is a wait on
+    /// them). The host-side wait for a group is a wait on
     /// the underlying `sycl::queue`, exposed via `ccl_rs_stream_wait`.
     fn broadcast_regions(&self, regions: &[(usize, usize)], root: c_int) -> Result<()> {
         if regions.is_empty() {
@@ -251,13 +251,14 @@ impl OneCclCollectives {
             .map_err(|e| anyhow::anyhow!("ccl_rs_group_start failed: {}", e))?;
 
         let mut last_event: *mut sys::ccl_rs_event_t = ptr::null_mut();
+        let mut broadcast_err: Option<anyhow::Error> = None;
 
         for (ptr, size) in regions {
             let mut event: *mut sys::ccl_rs_event_t = ptr::null_mut();
 
             // SAFETY: We're calling oneCCL with valid pointers.
             // Using CCL_RS_DATATYPE_UINT8 for byte-level transfer (like ncclChar).
-            check_ccl_result(unsafe {
+            let res = check_ccl_result(unsafe {
                 sys::ccl_rs_broadcast(
                     *ptr as *mut c_void,
                     *size,
@@ -267,30 +268,40 @@ impl OneCclCollectives {
                     stream,
                     &mut event,
                 )
-            })
-            .map_err(|e| anyhow::anyhow!("ccl_rs_broadcast failed: {}", e))?;
+            });
+
+            if let Err(e) = res {
+                broadcast_err = Some(anyhow::anyhow!("ccl_rs_broadcast failed: {}", e));
+                break;
+            }
 
             // Destroy any previous event; we don't wait on per-op events
-            // (see function docs). Always destroy the last one too (below).
+            // Always destroy the last one too.
             if !last_event.is_null() {
                 unsafe { sys::ccl_rs_event_destroy(last_event) };
             }
             last_event = event;
         }
 
-        // End group — submits all queued ops.
-        check_ccl_result(unsafe { sys::ccl_rs_group_end() })
-            .map_err(|e| anyhow::anyhow!("ccl_rs_group_end failed: {}", e))?;
+        // Always close the group — leaving it open corrupts oneCCL runtime state.
+        let group_end_res = check_ccl_result(unsafe { sys::ccl_rs_group_end() });
 
         // Destroy the retained per-op event without waiting on it: per-op
-        // events in a group are not valid sync points per oneCCL spec.
+        // events in a group are not valid sync points.
         if !last_event.is_null() {
             unsafe { sys::ccl_rs_event_destroy(last_event) };
         }
 
+        // Propagate broadcast error first (root cause), then group_end error.
+        if let Some(e) = broadcast_err {
+            return Err(e);
+        }
+        group_end_res
+            .map_err(|e| anyhow::anyhow!("ccl_rs_group_end failed: {}", e))?;
+
         // Block until all submitted work has completed on-device. This
         // delegates to `sycl::queue::wait()` on the queue wrapped by the
-        // CCL stream — the only spec-valid way to await a group.
+        // CCL stream.
         check_ccl_result(unsafe { sys::ccl_rs_stream_wait(stream) })
             .map_err(|e| anyhow::anyhow!("ccl_rs_stream_wait failed: {}", e))?;
 

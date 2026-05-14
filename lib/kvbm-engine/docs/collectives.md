@@ -203,7 +203,7 @@ returned `TransferCompleteNotification` before using the blocks.
 | Event | NCCL | oneCCL |
 |---|---|---|
 | Per-rank init failure before broadcast | `ncclResult_t` returned from `ncclCommInitRankConfig` | `ccl_rs_result_t` returned from `ccl_rs_comm_create` |
-| Mid-broadcast failure | group aborts; communicator is unusable | broadcast returns error; `ccl_rs_group_end` still called so the submission queue is drained |
+| Mid-broadcast failure | group aborts; communicator is unusable | `ccl_rs_broadcast` error breaks the loop; `ccl_rs_group_end` is **always** called (even on error) so the oneCCL runtime is left in a clean state. The broadcast error is propagated after cleanup. |
 | Communicator destruction (owned) | `ncclCommDestroy` on `Drop` | `ccl_rs_comm_destroy` on `Drop` |
 | Communicator destruction (borrowed) | host runtime (PyTorch) owns it | host runtime owns it |
 | Stream destruction (owned) | same ownership rule | `ccl_rs_stream_destroy` on `Drop` only for `CclStream::Owned` |
