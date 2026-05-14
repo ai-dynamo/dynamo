@@ -1304,6 +1304,7 @@ class KvRouterConfig:
         serve_indexer: bool = False,
         shared_cache_multiplier: float = 0.0,
         shared_cache_type: str = "none",
+        router_predicted_ttl_secs: Optional[float] = None,
         *,
         overlap_score_credit: float = 1.0,
         prefill_load_scale: float = 1.0,
@@ -1352,6 +1353,10 @@ class KvRouterConfig:
             serve_indexer: Serve this router's local indexer from the worker component (default: False).
             shared_cache_multiplier: Credit multiplier for shared cache hits beyond the device prefix (default: 0.0).
             shared_cache_type: External shared KV cache type, "none" or "hicache" (default: "none").
+            router_predicted_ttl_secs: Enables predict-on-route when set. This TTL
+                applies to entries in the local side indexer and requires
+                use_kv_events=True. Set to None to disable. Independent of
+                router_ttl_secs, which covers pure approximate mode.
         """
         ...
 
@@ -2105,6 +2110,33 @@ class KvRouter:
         Note:
             Each (worker_id, dp_rank) pair is returned as a separate entry.
             If you need aggregated loads per worker_id, sum the values manually.
+        """
+        ...
+
+    async def get_overlap_scores(
+        self,
+        token_ids: List[int],
+        router_config_override: Optional[JsonLike] = None,
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+        lora_name: Optional[str] = None,
+        include_shared: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Get per-worker KV overlap by storage tier.
+
+        Args:
+            token_ids: List of token IDs to evaluate.
+            router_config_override: Optional router configuration override for
+                                   score-credit fields.
+            block_mm_infos: Optional block-level multimodal metadata aligned to
+                           request blocks.
+            lora_name: Optional LoRA adapter name for adapter-aware matching.
+            include_shared: Whether to query the configured shared cache.
+
+        Returns:
+            A dictionary containing block_size, num_blocks, shared_cache, and
+            workers. Each worker row is keyed by worker_id and dp_rank and
+            reports device, host-pinned, disk, and shared-cache overlap blocks.
         """
         ...
 

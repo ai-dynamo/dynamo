@@ -43,6 +43,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "serve_indexer",
     "shared_cache_multiplier",
     "shared_cache_type",
+    "router_predicted_ttl_secs",
 )
 
 _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
@@ -60,6 +61,7 @@ _LOAD_AWARE_KWARG_OVERRIDES = {
     "serve_indexer": False,
     "shared_cache_multiplier": 0.0,
     "shared_cache_type": "none",
+    "router_predicted_ttl_secs": None,
 }
 
 
@@ -120,6 +122,7 @@ class KvRouterConfigBase(ConfigBase):
     serve_indexer: bool = False
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
+    router_predicted_ttl_secs: Optional[float] = None
     load_aware: bool = False
 
     def apply_load_aware_preset(self) -> None:
@@ -408,4 +411,16 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=str,
             choices=["none", "hicache"],
+        )
+        add_argument(
+            g,
+            flag_name="--router-predicted-ttl-secs",
+            env_var="DYN_ROUTER_PREDICTED_TTL_SECS",
+            default=None,
+            help=(
+                "KV Router: Enable predict-on-route with this TTL in seconds for entries "
+                "in the local side indexer. Requires KV events; omit to disable. "
+                "Independent of --router-ttl-secs, which covers pure approximate mode."
+            ),
+            arg_type=float,
         )

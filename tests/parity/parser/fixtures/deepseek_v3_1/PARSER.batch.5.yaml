@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3_1
+mode: batch
+cases:
+  PARSER.batch.5.a:
+    description: Missing tool_calls_end (truncation)
+    ref: dynamo
+    model_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜>
+      vllm:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+  PARSER.batch.5.b:
+    description: Closing tool_calls_end without matching tool_calls_begin
+    ref: dynamo
+    model_text: <｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - *id001
+    expected:
+      dynamo: &d_5_b
+        calls: []
+        normal_text: <｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      vllm: *d_5_b
+      sglang: *d_5_b
+  PARSER.batch.5.c:
+    description: Truncation mid-arguments JSON
+    ref: dynamo
+    model_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"loc
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"loc
+      vllm:
+        calls: []
+        normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"

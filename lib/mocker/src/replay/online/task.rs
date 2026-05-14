@@ -108,7 +108,9 @@ pub(super) async fn run_request_task(
     }
 
     ctx.stats.record_dispatch(worker_idx);
+    tracing::info!(%uuid, worker_idx, "replay_diag: request dispatched, awaiting completion");
     state.wait_for_completion().await;
+    tracing::info!(%uuid, "replay_diag: request completed");
     ctx.stats.record_completion();
     ctx.requests.remove(&uuid);
     if let Some(workload) = ctx.workload.as_ref() {

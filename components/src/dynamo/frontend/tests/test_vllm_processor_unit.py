@@ -174,12 +174,10 @@ class TestReasoningParserMetadata:
         assert parser_kwargs == {"chat_template_kwargs": {"reasoning_effort": "high"}}
 
     def test_kv_router_copies_reasoning_metadata_to_extra_args(self):
-        from dynamo.frontend.vllm_processor import (
-            _copy_reasoning_metadata_to_extra_args,
-        )
+        from dynamo.frontend.vllm_processor import _inject_routing_metadata
 
         kv_kwargs = {"extra_args": {"mm_hashes": [123]}}
-        _copy_reasoning_metadata_to_extra_args(
+        _inject_routing_metadata(
             {
                 "reasoning_ended": False,
                 "reasoning_parser_kwargs": {
@@ -196,3 +194,185 @@ class TestReasoningParserMetadata:
                 "chat_template_kwargs": {"reasoning_effort": "high"}
             },
         }
+
+
+async def _async_iter(items):
+    for item in items:
+        yield item
+
+
+class _FakeRoutedItem:
+    """Mimics a real routed-engine item with is_error/comments/data methods."""
+
+    def __init__(self, data, is_error=False, comments=None):
+        self._data = data
+        self._is_error = is_error
+        self._comments = comments or []
+
+    def is_error(self):
+        return self._is_error
+
+    def comments(self):
+        return self._comments
+
+    def data(self):
+        return self._data
+
+
+class _FakeRoutedEngine:
+    def __init__(self, items=None):
+        if items is None:
+            items = [_FakeRoutedItem({"token_ids": [101], "index": 0})]
+        else:
+            items = [
+                item if isinstance(item, _FakeRoutedItem) else _FakeRoutedItem(item)
+                for item in items
+            ]
+        self.items = items
+        self.requests = []
+        self.kwargs = []
+
+    async def generate(self, preprocessed, **kwargs):
+        self.requests.append(preprocessed)
+        self.kwargs.append(kwargs)
+        return _async_iter(self.items)
+
+
+class _FakeOutputProcessor:
+    def __init__(self):
+        self.request_states = {}
+        self.added_requests = []
+        self.aborted_requests = []
+
+    def add_request(self, preproc, *args, **kwargs):
+        self.added_requests.append((preproc, args, kwargs))
+        self.request_states[preproc.request_id] = object()
+
+    def process_outputs(self, outputs):
+        return SimpleNamespace(
+            reqs_to_abort=[],
+            request_outputs=[SimpleNamespace(outputs=[SimpleNamespace(index=0)])],
+        )
+
+    def abort_requests(self, request_ids, internal=False):
+        self.aborted_requests.append((request_ids, internal))
+        for request_id in request_ids:
+            self.request_states.pop(request_id, None)
+
+
+class _FakePostProcessor:
+    def process_output(self, output):
+        return {
+            "index": output.index,
+            "delta": {"content": "x"},
+            "finish_reason": None,
+        }
+
+
+@pytest.fixture
+def vllm_processor_module(monkeypatch):
+    import dynamo.frontend.vllm_processor as module
+
+    class FakeEngineCoreOutput:
+        __struct_fields__ = ()
+
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    monkeypatch.setattr(module, "EngineCoreOutput", FakeEngineCoreOutput)
+    monkeypatch.setattr(module._nvtx, "start_range", lambda *args, **kwargs: object())
+    monkeypatch.setattr(module._nvtx, "end_range", lambda rng: None)
+    return module
+
+
+def _make_processor(module, routed_engine):
+    processor = module.VllmProcessor.__new__(module.VllmProcessor)
+    processor.routed_engine = routed_engine
+    processor.output_processor = _FakeOutputProcessor()
+    return processor
+
+
+def _base_preproc():
+    return {
+        "model": MODEL,
+        "token_ids": [1, 2, 3],
+        "stop_conditions": {"max_tokens": 4},
+        "sampling_options": {"temperature": 0.0},
+        "output_options": {},
+        "eos_token_ids": [],
+        "annotations": [],
+        "routing": None,
+    }
+
+
+async def _run_generate(processor, preproc, *, mm_routing_info=None, context=None):
+    vllm_preproc = SimpleNamespace(
+        sampling_params=SimpleNamespace(n=1),
+        request_id="vllm-request",
+        external_req_id=None,
+    )
+    post_processors = {0: _FakePostProcessor()}
+
+    return [
+        item
+        async for item in processor._generate_and_stream(
+            "request-id",
+            {"model": MODEL},
+            preproc,
+            preproc["token_ids"],
+            vllm_preproc,
+            post_processors,
+            mm_routing_info=mm_routing_info,
+            context=context,
+        )
+    ]
+
+
+class TestRoutedEnginePath:
+    @pytest.mark.asyncio
+    async def test_routed_engine_gets_extra_args_metadata(self, vllm_processor_module):
+        routed_engine = _FakeRoutedEngine()
+        processor = _make_processor(vllm_processor_module, routed_engine)
+        preproc = _base_preproc()
+        preproc["extra_args"] = {"mm_hashes": [123]}
+        preproc["reasoning_ended"] = False
+        preproc["reasoning_parser_kwargs"] = {
+            "chat_template_kwargs": {"reasoning_effort": "high"}
+        }
+        preproc["mm_processor_kwargs"] = {"use_audio_in_video": True}
+
+        await _run_generate(processor, preproc)
+
+        assert routed_engine.requests[0]["extra_args"] == {
+            "mm_hashes": [123],
+            "reasoning_ended": False,
+            "reasoning_parser_kwargs": {
+                "chat_template_kwargs": {"reasoning_effort": "high"}
+            },
+            "mm_processor_kwargs": {"use_audio_in_video": True},
+        }
+
+    @pytest.mark.asyncio
+    async def test_routed_stream_produces_openai_chunks(self, vllm_processor_module):
+        routed_engine = _FakeRoutedEngine(
+            [{"token_ids": [101], "index": 0, "finish_reason": None}]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+
+        chunks = await _run_generate(processor, _base_preproc())
+
+        assert chunks == [
+            {
+                "id": "request-id",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "x"},
+                        "finish_reason": None,
+                    }
+                ],
+                "created": chunks[0]["created"],
+                "model": MODEL,
+                "object": "chat.completion.chunk",
+            }
+        ]
