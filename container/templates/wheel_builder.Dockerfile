@@ -116,10 +116,25 @@ RUN apt-get update -y \
 {% if device == "cuda" %}
 # Install system dependencies
 # Cache dnf downloads; sharing=locked avoids dnf/rpm races with concurrent builds.
+#
+# The AlmaLinux 8 PowerTools mirrorlist pool occasionally serves inconsistent
+# repomd.xml across mirrors (some mirrors lag behind upstream rotations),
+# which makes dnf chase hash-named repodata files that have already been
+# evicted. Point powertools directly at the master server to bypass the pool.
 RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
-    dnf install -y almalinux-release-synergy && \
-    dnf config-manager --set-enabled powertools && \
-    dnf install -y \
+    rm -rf /var/cache/dnf/* && \
+    dnf --refresh install -y almalinux-release-synergy && \
+    printf '%s\n' \
+        '[powertools]' \
+        'name=AlmaLinux 8 - PowerTools (forced baseurl)' \
+        'baseurl=https://repo.almalinux.org/almalinux/8/PowerTools/x86_64/os/' \
+        'enabled=1' \
+        'gpgcheck=1' \
+        'gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-AlmaLinux' \
+        > /etc/yum.repos.d/almalinux-powertools.repo && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf/* && \
+    dnf --refresh install -y \
         # Autotools (required for UCX, libfabric ./autogen.sh and ./configure)
         autoconf \
         automake \

@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# KvThompsonRouter Default Configuration
+# =======================================
+#
+# Two-term scoring model:
+#   score(w) = lambda_ranking × ranking(w) + lambda_stickiness × stickiness(w)
+#
+# Bundled with dynamo.thompson_router. Override at runtime by setting
+# THOMPSON_CONFIG_PATH=/path/to/custom/config.yaml
+#
+# The router reads this at startup and exposes hot-reload via POST /config.
+
+infrastructure:
+  block_size: 16
+  router_type: kv_thompson
+  min_workers: 1
+
+kv_thompson:
+
+  # --- Two-term scoring weights ---
+  lambda_ranking: 1.0
+  lambda_stickiness: 1.0
+
+  # --- Ranking term: best worker for THIS request ---
+  w_cache: 0.55
+  w_queue: 0.15
+  w_osl_load: 2.0
+  w_sensitivity: 0.10
+
+  # --- Stickiness term: future value of prefix on this worker ---
+  alpha_reuse: 0.25
+  sticky_bonus: 0.3
+  stickiness_overlap_cap: 0.5
+
+  # --- Bandit residual (disabled by default) ---
+  epsilon: 0.05
+  beta_decay: 0.995
+
+  # --- Baseline tracking ---
+  latency_ema_alpha: 0.2

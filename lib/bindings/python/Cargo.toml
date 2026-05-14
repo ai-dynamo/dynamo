@@ -42,10 +42,10 @@ dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { path = "../../parsers" }
 dynamo-backend-common = { path = "../../backend-common" }
 
+dashmap = { version = "6.1" }
 anyhow = { version = "1" }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
-dashmap = { version = "6.1" }
 futures = { version = "0.3" }
 rmp = { version = "0.8" }
 once_cell = { version = "1.20.3" }
