@@ -8,6 +8,17 @@ subtitle: Create custom Python workers and engines for Dynamo
 
 # Writing Python Workers in Dynamo
 
+> **Lower-level Python worker path.** This guide documents the
+> `@dynamo_worker()` + `register_model()` + `endpoint.serve_endpoint()`
+> entry point. For new engines, prefer Dynamo's
+> [unified Python backend](python-backend-guide.md) (or
+> [unified Rust backend](rust-backend-guide.md)) — those put the
+> framework in charge of lifecycle, signal handling, cancellation
+> monitoring, and registration. Stay on this path for workloads that
+> depend on multimodal, LoRA, logprobs, guided decoding, metrics,
+> OTEL tracing, or engine routes — features the unified backend does
+> not yet cover.
+
 This guide explains how to create your own Python worker in Dynamo.
 
 The [dynamo](https://pypi.org/project/ai-dynamo/) Python library allows you to build your own engine and attach it to Dynamo.

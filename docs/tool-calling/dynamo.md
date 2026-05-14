@@ -47,24 +47,24 @@ parser exists for this format.
 | Parser Name | Models | Upstream name | Notes |
 |---|---|---|---|
 | `kimi_k2` | Kimi K2 Instruct/Thinking, Kimi K2.5 | | Pair with `--dyn-reasoning-parser kimi` or `kimi_k25` |
-| `qwen3_coder` | Qwen3.5, Qwen3-Coder | | XML `<tool_call><function=...>` |
+| `minimax_m2` | MiniMax M2 / M2.1 | vLLM: `minimax` | XML `<minimax:tool_call>` |
 | `deepseek_v4` | DeepSeek V4 Pro / Flash | vLLM: `deepseek_v4`; SGLang: `deepseekv4` | DSML tags (`<｜DSML｜tool_calls>...`). Aliases: `deepseek-v4`, `deepseekv4` |
 | `deepseek_v3` | DeepSeek V3, DeepSeek R1-0528+ | SGLang: `deepseekv3` | Special Unicode markers |
 | `deepseek_v3_1` | DeepSeek V3.1 | Dynamo-only | JSON separators |
 | `deepseek_v3_2` | DeepSeek V3.2+ | Dynamo-only | DSML tags (`<｜DSML｜function_calls>...`) |
-| `default` | *(fallback)* | Dynamo-only | Empty JSON config (no start/end tokens). Prefer a model-specific parser for production use. |
-| `gemma4` | Google Gemma 4 (thinking models) | vLLM: `gemma4` | Custom non-JSON grammar with `<\|"\|>` string delimiters and `<\|tool_call>...<tool_call\|>` markers. Aliases: `gemma-4`. Pair with `--dyn-reasoning-parser gemma4` and `--custom-jinja-template examples/chat_templates/gemma4_tool.jinja` |
+| `qwen3_coder` | Qwen3.5, Qwen3-Coder | | XML `<tool_call><function=...>` |
 | `glm47` | GLM-4.5, GLM-4.7 | Dynamo-only | XML `<arg_key>/<arg_value>` |
-| `harmony` | gpt-oss-20b / -120b | Dynamo-only | Harmony channel format |
-| `hermes` | Qwen2.5-\*, QwQ-32B, Qwen3-Instruct, Qwen3-Think, NousHermes-2/3 | vLLM: `qwen2_5`; SGLang: `qwen25` (for Qwen models) | `<tool_call>` JSON |
-| `jamba` | Jamba 1.5 / 1.6 / 1.7 | Dynamo-only | `<tool_calls>` JSON |
-| `llama3_json` | Llama 3 / 3.1 / 3.2 / 3.3 Instruct | | `<\|python_tag\|>` tool syntax |
-| `minimax_m2` | MiniMax M2 / M2.1 | vLLM: `minimax` | XML `<minimax:tool_call>` |
-| `mistral` | Mistral / Mixtral / Mistral-Nemo, Magistral | | `[TOOL_CALLS]...[/TOOL_CALLS]` |
 | `nemotron_deci` | Nemotron-Super / -Ultra / -Deci, Llama-Nemotron-Ultra / -Super | Dynamo-only | `<TOOLCALL>` JSON |
 | `nemotron_nano` | Nemotron-Nano | Dynamo-only | Alias for `qwen3_coder` |
+| `gemma4` | Google Gemma 4 (thinking models) | vLLM: `gemma4` | Custom non-JSON grammar with `<\|"\|>` string delimiters and `<\|tool_call>...<tool_call\|>` markers. Aliases: `gemma-4`. Pair with `--dyn-reasoning-parser gemma4` and `--custom-jinja-template examples/chat_templates/gemma4_tool.jinja` |
+| `harmony` | gpt-oss-20b / -120b | Dynamo-only | Harmony channel format |
+| `hermes` | Qwen2.5-\*, QwQ-32B, Qwen3-Instruct, Qwen3-Think, NousHermes-2/3 | vLLM: `qwen2_5`; SGLang: `qwen25` (for Qwen models) | `<tool_call>` JSON |
 | `phi4` | Phi-4, Phi-4-mini, Phi-4-mini-reasoning | vLLM: `phi4_mini_json` | `functools[...]` JSON |
 | `pythonic` | Llama 4 (Scout / Maverick) | | Python-list tool syntax |
+| `llama3_json` | Llama 3 / 3.1 / 3.2 / 3.3 Instruct | | `<\|python_tag\|>` tool syntax |
+| `mistral` | Mistral / Mixtral / Mistral-Nemo, Magistral | | `[TOOL_CALLS]...[/TOOL_CALLS]` |
+| `jamba` | Jamba 1.5 / 1.6 / 1.7 | Dynamo-only | `<tool_calls>` JSON |
+| `default` | *(fallback)* | Dynamo-only | Empty JSON config (no start/end tokens). Prefer a model-specific parser for production use. |
 
 > [!TIP]
 > For Kimi K2.5 thinking models, pair `--dyn-tool-call-parser kimi_k2` with

@@ -27,17 +27,17 @@ cases:
           first_class:
             type: boolean
     expected:
-      calls:
-      - name: book_flight
-        arguments:
-          destination: Paris
-          passengers: 2
-          first_class: true
-      normal_text: ''
-    # TODO(research): vllm diverges — vLLM emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types
-    # vllm produces:
-    #   calls: [{'name': 'book_flight', 'arguments': {'destination': 'Paris', 'passengers': '2', 'first_class': 'true'}}]
-    #   normal_text: None
+      dynamo: &d_7_a
+        calls:
+        - name: book_flight
+          arguments:
+            destination: Paris
+            passengers: 2
+            first_class: true
+        normal_text: ''
+      vllm: *d_7_a
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.7.b:
     description: Unicode in parameter
     ref: dynamo
@@ -55,8 +55,12 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: Tōkyō central
-      normal_text: ''
+      dynamo: &d_7_b
+        calls:
+        - name: get_weather
+          arguments:
+            location: Tōkyō central
+        normal_text: ''
+      vllm: *d_7_b
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'

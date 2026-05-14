@@ -34,15 +34,7 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
 from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_features
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
-from dynamo.llm import (
-    KvRouter,
-    ModelCardInstanceId,
-    PythonAsyncEngine,
-    RouterConfig,
-    RouterMode,
-    fetch_model,
-)
-from dynamo.runtime import Client, DistributedRuntime
+from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine, fetch_model
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .utils import (
@@ -104,25 +96,27 @@ def _build_reasoning_parser_metadata(
     return reasoning_parser.is_reasoning_end(prompt_token_ids), parser_kwargs
 
 
-def _copy_reasoning_metadata_to_extra_args(
-    dynamo_preproc: dict[str, Any], kv_kwargs: dict[str, Any]
+def _inject_routing_metadata(
+    dynamo_preproc: dict[str, Any],
+    target: dict[str, Any],
+    mm_routing_info: dict[str, Any] | None = None,
 ) -> None:
-    reasoning_extra_args: dict[str, Any] = {}
-    if "reasoning_ended" in dynamo_preproc:
-        reasoning_extra_args["reasoning_ended"] = dynamo_preproc["reasoning_ended"]
-    if "reasoning_parser_kwargs" in dynamo_preproc:
-        reasoning_extra_args["reasoning_parser_kwargs"] = dynamo_preproc[
-            "reasoning_parser_kwargs"
-        ]
+    extra_updates: dict[str, Any] = {}
+    for key in ("reasoning_ended", "reasoning_parser_kwargs"):
+        if key in dynamo_preproc:
+            extra_updates[key] = dynamo_preproc[key]
+    if dynamo_preproc.get("mm_processor_kwargs") is not None:
+        extra_updates["mm_processor_kwargs"] = dynamo_preproc["mm_processor_kwargs"]
 
-    if not reasoning_extra_args:
-        return
+    if extra_updates:
+        extra_args = target.get("extra_args")
+        if not isinstance(extra_args, dict):
+            extra_args = {}
+            target["extra_args"] = extra_args
+        extra_args.update(extra_updates)
 
-    extra_args = kv_kwargs.get("extra_args")
-    if not isinstance(extra_args, dict):
-        extra_args = {}
-        kv_kwargs["extra_args"] = extra_args
-    extra_args.update(reasoning_extra_args)
+    if mm_routing_info is not None:
+        target["mm_routing_info"] = mm_routing_info
 
 
 class VllmProcessor:
@@ -130,17 +124,16 @@ class VllmProcessor:
         self,
         tokenizer: TokenizerLike,
         input_processor: InputProcessor,
-        router: Any,  # Client or KvRouter
         output_processor: OutputProcessor,
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
+        routed_engine: RoutedEngine,
         block_size: int = 16,
         enable_auto_tool_choice: bool = False,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
-        self.router = router
-        self.is_kv_router = isinstance(router, KvRouter)
+        self.routed_engine = routed_engine
         self.output_processor = output_processor
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
@@ -194,7 +187,7 @@ class VllmProcessor:
         nixl_transferred = False
 
         rng_routing = _nvtx.start_range("mm_frontend:build_routing_info", color="cyan")
-        if self.is_kv_router and vllm_preproc.mm_features:
+        if vllm_preproc.mm_features:
             mm_routing_info = build_mm_routing_info_from_features(
                 vllm_preproc.mm_features,
                 prompt_token_ids=list(vllm_preproc.prompt_token_ids),
@@ -281,7 +274,7 @@ class VllmProcessor:
                     )
                     cleanup_items = []
 
-        elif self.is_kv_router:
+        else:
             logger.debug("[mm-routing] No mm_features — text-only request")
         _nvtx.end_range(rng_routing)
 
@@ -291,18 +284,18 @@ class VllmProcessor:
     # it has a lot of fields.
     # request: dynamo.NVCreateChatCompletionRequest
     async def generator(
-        self, request: dict[str, Any]
+        self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         Run a single request through the engine. Does pre and post processing on this machine, delegates
         model inference to a backend using the router.
         """
         with _nvtx.annotate("mm_frontend:generator", color="blue"):
-            async for item in self._generator_inner(request):
+            async for item in self._generator_inner(request, context=context):
                 yield item
 
     async def _generator_inner(
-        self, request: dict[str, Any]
+        self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
 
@@ -513,6 +506,7 @@ class VllmProcessor:
                 vllm_preproc,
                 post_processors,
                 mm_routing_info=mm_routing_info,
+                context=context,
             ):
                 yield item
         finally:
@@ -528,6 +522,7 @@ class VllmProcessor:
         vllm_preproc: EngineCoreRequest,
         post_processors: dict[int, StreamingPostProcessor],
         mm_routing_info: dict[str, Any] | None = None,
+        context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         sp = vllm_preproc.sampling_params
         output_request_ids: dict[int, str]
@@ -577,66 +572,37 @@ class VllmProcessor:
                 registered_request_ids.append(child_request_id)
 
         try:
-            rng_route = _nvtx.start_range("mm_frontend:kv_router_generate", color="red")
-            if self.is_kv_router:
-                kv_kwargs: dict[str, Any] = {
-                    "token_ids": tokens,
-                    "model": dynamo_preproc["model"],
-                    "stop_conditions": dynamo_preproc["stop_conditions"],
-                    "sampling_options": dynamo_preproc["sampling_options"],
-                    "output_options": dynamo_preproc["output_options"],
-                    "multi_modal_data": dynamo_preproc.get("multi_modal_data"),
-                }
-                if dynamo_preproc.get("extra_args"):
-                    kv_kwargs["extra_args"] = dynamo_preproc["extra_args"]
-                    ea = dynamo_preproc["extra_args"]
-                    logger.debug(
-                        "[mm-routing] extra_args keys=%s, has_nixl=%s, "
-                        "n_hashes=%d, n_placeholders=%d",
-                        list(ea.keys()),
-                        "mm_kwargs_nixl" in ea,
-                        len(ea.get("mm_hashes", [])),
-                        len(ea.get("mm_placeholders", [])),
-                    )
-                _copy_reasoning_metadata_to_extra_args(dynamo_preproc, kv_kwargs)
-                # Forward mm_processor_kwargs (e.g. use_audio_in_video) to backend.
-                mm_proc_kwargs = dynamo_preproc.get("mm_processor_kwargs")
-                if mm_proc_kwargs is not None:
-                    if "extra_args" not in kv_kwargs or kv_kwargs["extra_args"] is None:
-                        kv_kwargs["extra_args"] = {}
-                    kv_kwargs["extra_args"]["mm_processor_kwargs"] = mm_proc_kwargs
-                if mm_routing_info is not None:
-                    kv_kwargs["mm_routing_info"] = mm_routing_info
-                    logger.debug(
-                        "[mm-routing] KvRouter.generate() called with "
-                        "mm_routing_info (%d routing tokens, %d blocks)",
-                        len(mm_routing_info.get("routing_token_ids", [])),
-                        len(mm_routing_info.get("block_mm_infos", [])),
-                    )
-                else:
-                    logger.debug(
-                        "[mm-routing] KvRouter.generate() called without "
-                        "mm_routing_info (text-only)"
-                    )
-                dynamo_stream = await self.router.generate(**kv_kwargs)
-            else:
-                dynamo_stream = await self.router.generate(
-                    dynamo_preproc, annotated=False
+            _inject_routing_metadata(dynamo_preproc, dynamo_preproc, mm_routing_info)
+            with _nvtx.annotate("mm_frontend:routed_engine_generate", color="red"):
+                dynamo_stream = await self.routed_engine.generate(
+                    dynamo_preproc, context=context
                 )
-            _nvtx.end_range(rng_route)
 
             rng_stream = _nvtx.start_range(
                 "mm_frontend:stream_response", color="purple"
             )
             async for dynamo_response in dynamo_stream:
-                if self.is_kv_router:
-                    engine_response = dynamo_response
-                elif hasattr(dynamo_response, "data"):
-                    engine_response = dynamo_response.data()
-                else:
-                    engine_response = dynamo_response
+                if dynamo_response.is_error():
+                    comments = dynamo_response.comments() or []
+                    message = "; ".join(comments) or "unknown routed_engine error"
+                    logger.error(
+                        "routed_engine error for request %s: %s",
+                        request_id,
+                        message,
+                    )
+                    yield make_internal_error(request_id, message)
+                    break
+                engine_response = dynamo_response.data()
 
-                if engine_response is None or "token_ids" not in engine_response:
+                if engine_response is None:
+                    if dynamo_response.is_error():
+                        yield handle_engine_error(engine_response, request_id, logger)
+                        break
+                    # No data or error fields, means we may have a comment or other kind of event.
+                    # I'm not sure what those are used for, so TODO. Skip for now.
+                    continue
+
+                if "token_ids" not in engine_response:
                     yield handle_engine_error(engine_response, request_id, logger)
                     break
 
@@ -729,13 +695,9 @@ class VllmProcessor:
 class EngineFactory:
     def __init__(
         self,
-        runtime: DistributedRuntime,
-        router_config: RouterConfig,
         config: FrontendConfig,
         flags: Namespace,
     ):
-        self.runtime = runtime
-        self.router_config = router_config
         self.config = config
         self.flags = flags
         self.stream_interval = 20
@@ -754,6 +716,7 @@ class EngineFactory:
         self,
         instance_id: ModelCardInstanceId,
         mdc: ModelDeploymentCard,
+        routed_engine: RoutedEngine,
     ) -> PythonAsyncEngine:
         """
         Called by Rust when a model is discovered.
@@ -858,31 +821,15 @@ class EngineFactory:
         else:
             reasoning_parser_class = None
 
-        namespace_name, component_name, endpoint_name = instance_id.triple()
-        generate_endpoint = self.runtime.endpoint(
-            f"{namespace_name}.{component_name}.{endpoint_name}"
-        )
-        router: Client | KvRouter
-        if self.router_config.router_mode == RouterMode.KV:
-            router = KvRouter(
-                endpoint=generate_endpoint,
-                block_size=self.config.kv_cache_block_size or 16,
-                kv_router_config=self.router_config.kv_router_config,
-            )
-        else:
-            router = await generate_endpoint.client(
-                router_mode=self.router_config.router_mode
-            )
-
         block_size = self.config.kv_cache_block_size or 16
 
         gen = VllmProcessor(
             tokenizer,
             input_processor,
-            router,
             output_processor,
             tool_parser_class,
             reasoning_parser_class,
+            routed_engine,
             block_size=block_size,
             enable_auto_tool_choice=enable_auto_tool_choice,
         )

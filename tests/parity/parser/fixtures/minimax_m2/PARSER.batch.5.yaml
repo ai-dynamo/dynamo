@@ -21,15 +21,32 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<minimax:tool_call>\n<invoke name="get_weather">\n<parameter name="location">NYC</parameter>\n</invoke>'
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<minimax:tool_call>
+
+          <invoke name="get_weather">
+
+          <parameter name="location">NYC</parameter>
+
+          </invoke>'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        calls: []
+        normal_text: '<minimax:tool_call>
+
+          <invoke name="get_weather">
+
+          <parameter name="location">NYC</parameter>
+
+          </invoke>'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
   PARSER.batch.5.b:
     description: Closing </minimax:tool_call> without matching open
     ref: dynamo
@@ -41,12 +58,15 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: |-
-        <invoke name="get_weather">
-        <parameter name="location">NYC</parameter>
-        </invoke>
-        </minimax:tool_call>
+      dynamo: &d_5_b
+        calls: []
+        normal_text: |-
+          <invoke name="get_weather">
+          <parameter name="location">NYC</parameter>
+          </invoke>
+          </minimax:tool_call>
+      vllm: *d_5_b
+      sglang: *d_5_b
   PARSER.batch.5.c:
     description: Truncation mid-parameter value
     ref: dynamo
@@ -57,12 +77,25 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NY
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<minimax:tool_call>\n<invoke name="get_weather">\n<parameter name="location">NY'
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NY
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<minimax:tool_call>
+
+          <invoke name="get_weather">
+
+          <parameter name="location">NY'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        calls: []
+        normal_text: '<minimax:tool_call>
+
+          <invoke name="get_weather">
+
+          <parameter name="location">NY'
+        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"

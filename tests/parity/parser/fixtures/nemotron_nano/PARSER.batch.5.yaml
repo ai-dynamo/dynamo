@@ -23,11 +23,16 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'
   PARSER.batch.5.b:
     description: Closing </tool_call> without matching <tool_call> open
     ref: dynamo
@@ -41,14 +46,19 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: |-
-        <function=get_weather>
-        <parameter=location>
-        NYC
-        </parameter>
-        </function>
-        </tool_call>
+      dynamo:
+        calls: []
+        normal_text: |-
+          <function=get_weather>
+          <parameter=location>
+          NYC
+          </parameter>
+          </function>
+          </tool_call>
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'
   PARSER.batch.5.c:
     description: Truncation mid-parameter value
     ref: dynamo
@@ -60,8 +70,13 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NY
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NY
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'

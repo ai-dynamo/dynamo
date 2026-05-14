@@ -170,6 +170,9 @@ pub mod frontend_service {
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
 
+    /// Total number of LLM requests accepted by the frontend handler
+    pub const REQUESTS_STARTED_TOTAL: &str = "requests_started_total";
+
     /// Number of requests waiting in HTTP queue before receiving the first response (gauge)
     pub const QUEUED_REQUESTS: &str = "queued_requests";
 
