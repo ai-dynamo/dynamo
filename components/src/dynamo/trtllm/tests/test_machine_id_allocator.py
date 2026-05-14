@@ -1,13 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for DisaggMachineIdAllocator."""
 
 from __future__ import annotations
 
 import tempfile
-import threading
+
 import pytest
-from pathlib import Path
 
 from dynamo.trtllm.machine_id_allocator import DisaggMachineIdAllocator
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.trtllm,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
 
 
 class TestDisaggMachineIdAllocator:

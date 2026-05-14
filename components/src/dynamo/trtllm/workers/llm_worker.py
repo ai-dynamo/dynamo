@@ -58,8 +58,8 @@ from dynamo.trtllm.args import Config
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.engine import Backend, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
-from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.machine_id_allocator import DisaggMachineIdAllocator
+from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import DYNAMO_COMPONENT_REGISTRY, get_publisher
 from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
@@ -70,18 +70,28 @@ from dynamo.trtllm.utils.trtllm_utils import deep_update
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
-_pools: dict[int, DisaggMachineIdAllocator] = {}
+# Shared pool directory for all TRT-LLM workers in this process.
+# All connections must allocate from the same pool so that slot numbers are
+# unique across workers — a per-connection pool directory would let every
+# connection receive slot 1 from its own empty pool.
+_DEFAULT_POOL_DIR = "/var/run/dynamo/disagg_machine_id"
+_pools: dict[str, DisaggMachineIdAllocator] = {}
 _pool_lock = threading.Lock()
 
 
-def _get_disagg_machine_id(endpoint) -> int:
+def _get_disagg_machine_id(endpoint, pool_dir: str = _DEFAULT_POOL_DIR) -> int:
+    """Return a unique disagg_machine_id for *endpoint*.
+
+    All callers within a process share a single :class:`DisaggMachineIdAllocator`
+    backed by *pool_dir*.  The allocator is cached by pool directory so that
+    the same on-disk pool is reused across connections, guaranteeing that no
+    two live workers receive the same slot.
+    """
     cid = int(endpoint.connection_id())
     with _pool_lock:
-        if cid not in _pools:
-            _pools[cid] = DisaggMachineIdAllocator(
-                f"/var/run/dynamo/disagg_machine_id/{cid}"
-            )
-    return _pools[cid].allocate(cid)
+        if pool_dir not in _pools:
+            _pools[pool_dir] = DisaggMachineIdAllocator(pool_dir)
+    return _pools[pool_dir].allocate(cid)
 
 
 def build_kv_connector_config(config: Config):
