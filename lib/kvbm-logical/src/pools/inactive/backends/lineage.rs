@@ -1,10 +1,42 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Lineage-aware inactive index — stores blocks in a parent/child graph
-//! keyed by `(position, fragment)` and evicts only from leaves.
+//! Lineage-aware inactive index — a slab-backed parent/child graph that
+//! evicts only from leaves, oldest-first.
+//!
+//! # Structure
+//!
+//! Every node (real block or out-of-order ghost placeholder) lives in a
+//! single pre-sized `Vec<LineageSlot>` arena addressed by `u32` index, so
+//! insert / remove / find do **no heap allocation in steady state** — they
+//! pop and recycle slots through a free list. The graph edges are slab
+//! indices, not hash keys:
+//!
+//! - `parent` / `first_child` / `next_sibling` — an intrusive parent→child
+//!   tree. A single-child chain (the common KV-prefix shape) is just
+//!   `first_child`; branches extend the `next_sibling` chain.
+//! - `lru_prev` / `lru_next` — an intrusive FIFO list threaded through the
+//!   *Real leaf* nodes only. Its head is the oldest evictable block. This
+//!   replaces the previous `BTreeMap` leaf queue **and** the per-node
+//!   `last_used` tick counter — list position *is* insertion-recency.
+//!
+//! A single `index: HashMap<(position, fragment), u32>` resolves the
+//! `(position, current_hash_fragment)` pair to a slot — needed because
+//! lineage navigation is by *fragment* (a child's hash only carries its
+//! parent's fragment, never the parent's full hash). It is identity-mixed
+//! (see `PairHasher`) and pre-sized, so it does not rehash on the hot path.
+//!
+//! # Eviction-order note
+//!
+//! When a node *re-becomes a leaf* (its last child is removed) it is
+//! appended at the **tail** of the leaf FIFO — treated as freshly
+//! evictable — rather than re-entering at its original insertion position.
+//! This differs from the previous `BTreeMap`-by-original-tick behavior; it
+//! is the trade that makes the leaf queue O(1) and allocation-free, and is
+//! arguably more correct (the node *was* just touched by losing a child).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashMap;
+use std::hash::{BuildHasher, Hasher};
 
 use dynamo_tokens::PositionalLineageHash;
 
@@ -12,51 +44,105 @@ use crate::BlockId;
 use crate::blocks::SequenceHash;
 use crate::pools::store::InactiveIndex;
 
-/// The data stored in a lineage node — either a real block or a ghost
-/// placeholder created for out-of-order insertions.
-enum LineageNodeData {
+// ---------------------------------------------------------------------------
+// `(position, fragment)` index hasher
+// ---------------------------------------------------------------------------
+
+/// Hand-rolled mixer for the `(u64, u64)` index key. `current_hash_fragment`
+/// is already a well-mixed hash fragment and `position` is a small int;
+/// SipHash over the pair would be wasted work on the lookup hot path. A
+/// `(u64, u64)` derives `Hash` as two `write_u64` calls, so an FxHash-style
+/// rotate-xor-multiply accumulator over those two words is sufficient and
+/// cheap. `write` (the byte-slice path) is never exercised by `(u64, u64)`.
+#[derive(Default)]
+struct PairHasher(u64);
+
+impl Hasher for PairHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write_u64(&mut self, v: u64) {
+        // FxHash-style: rotate to spread bits across words, xor in the new
+        // word, multiply by an odd constant to avalanche.
+        const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(K);
+    }
+    fn write(&mut self, _: &[u8]) {
+        unreachable!("(position, fragment) keys hash via write_u64, not the byte-slice path");
+    }
+}
+
+#[derive(Default, Clone)]
+struct PairBuildHasher;
+
+impl BuildHasher for PairBuildHasher {
+    type Hasher = PairHasher;
+    fn build_hasher(&self) -> PairHasher {
+        PairHasher::default()
+    }
+}
+
+type IndexMap = HashMap<(u64, u64), u32, PairBuildHasher>;
+
+// ---------------------------------------------------------------------------
+// Slab
+// ---------------------------------------------------------------------------
+
+/// Payload of a slab slot.
+enum SlotData {
+    /// A real inactive block.
     Real {
         block_id: BlockId,
         seq_hash: SequenceHash,
-        last_used: u64,
     },
+    /// Out-of-order placeholder: a parent referenced by a child that was
+    /// inserted before it. Always has at least one child while it exists.
     Ghost,
+    /// Slot is on the free list; `next_sibling` is the free-list link.
+    Free,
 }
 
-struct LineageNode {
-    data: LineageNodeData,
-    parent_fragment: Option<u64>,
-    children: HashSet<u64>,
+/// One arena slot. Graph edges and the leaf-FIFO links are `u32` slab
+/// indices. `position` / `fragment` are stored on every slot (real *and*
+/// ghost) because a ghost has no `seq_hash` yet still needs its index key
+/// to remove itself during pruning.
+struct LineageSlot {
+    data: SlotData,
+    position: u64,
+    fragment: u64,
+    /// Parent node's slot index (real or ghost). `None` for a root
+    /// (`position == 0`) or a not-yet-linked node.
+    parent: Option<u32>,
+    /// Head of this node's intrusive child list.
+    first_child: Option<u32>,
+    /// Next sibling in the parent's child list. Reused as the free-list
+    /// link while the slot is `Free`.
+    next_sibling: Option<u32>,
+    /// Intrusive leaf-FIFO links — meaningful only while this slot is a
+    /// `Real` leaf (no children).
+    lru_prev: Option<u32>,
+    lru_next: Option<u32>,
 }
 
-impl LineageNode {
-    fn new(block_id: BlockId, lineage_hash: PositionalLineageHash, tick: u64) -> Self {
-        let parent_fragment = if lineage_hash.position() > 0 {
-            Some(lineage_hash.parent_hash_fragment())
-        } else {
-            None
-        };
-        Self {
-            data: LineageNodeData::Real {
-                block_id,
-                seq_hash: lineage_hash,
-                last_used: tick,
-            },
-            parent_fragment,
-            children: HashSet::new(),
-        }
-    }
-
+impl LineageSlot {
     fn is_leaf(&self) -> bool {
-        self.children.is_empty()
+        self.first_child.is_none()
     }
 }
 
 pub(crate) struct LineageBackend {
-    nodes: HashMap<u64, HashMap<u64, LineageNode>>,
-    leaf_queue: BTreeMap<(u64, u64, u64), ()>,
+    slots: Vec<LineageSlot>,
+    /// Free-list head; links through `LineageSlot::next_sibling`.
+    free_head: Option<u32>,
+    /// `(position, fragment)` → slot index, for parent resolution on
+    /// insert and target resolution on remove.
+    index: IndexMap,
+    /// Intrusive FIFO over `Real` leaf nodes — `leaf_head` is the oldest
+    /// (next to evict), `leaf_tail` the newest.
+    leaf_head: Option<u32>,
+    leaf_tail: Option<u32>,
+    /// Number of `Real` nodes (ghosts excluded).
     count: usize,
-    current_tick: u64,
 }
 
 impl Default for LineageBackend {
@@ -66,246 +152,299 @@ impl Default for LineageBackend {
 }
 
 impl LineageBackend {
+    /// Create with no pre-sized capacity (slab and index grow on demand).
+    /// Production builds go through [`with_capacity`](Self::with_capacity).
     pub(crate) fn new() -> Self {
+        Self::with_capacity(0)
+    }
+
+    /// Create pre-sized for `capacity` real blocks. The inactive pool is
+    /// bounded by the store's `total_blocks`, so sizing the slab and index
+    /// to that bound means the steady-state hot path never reallocates.
+    /// (Out-of-order ghosts can briefly push past `capacity`; that grows
+    /// the slab once, amortized — not a steady-state cost.)
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
-            nodes: HashMap::new(),
-            leaf_queue: BTreeMap::new(),
+            slots: Vec::with_capacity(capacity),
+            free_head: None,
+            index: HashMap::with_capacity_and_hasher(capacity, PairBuildHasher),
+            leaf_head: None,
+            leaf_tail: None,
             count: 0,
-            current_tick: 0,
         }
     }
 
+    // ---- slab alloc / free ----
+
+    /// Place `slot` into a recycled or freshly-pushed arena cell.
+    fn alloc_slot(&mut self, slot: LineageSlot) -> u32 {
+        match self.free_head {
+            Some(idx) => {
+                self.free_head = self.slots[idx as usize].next_sibling;
+                self.slots[idx as usize] = slot;
+                idx
+            }
+            None => {
+                let idx = self.slots.len();
+                debug_assert!(
+                    idx <= u32::MAX as usize,
+                    "lineage slab exceeded u32 index space"
+                );
+                self.slots.push(slot);
+                idx as u32
+            }
+        }
+    }
+
+    /// Return a slot to the free list. Other fields are left stale — the
+    /// next `alloc_slot` overwrites the cell wholesale.
+    fn free_slot(&mut self, idx: u32) {
+        self.slots[idx as usize].data = SlotData::Free;
+        self.slots[idx as usize].next_sibling = self.free_head;
+        self.free_head = Some(idx);
+    }
+
+    // ---- intrusive leaf FIFO ----
+
+    /// Append a `Real` leaf to the tail (newest) of the leaf FIFO.
+    fn leaf_push_back(&mut self, idx: u32) {
+        self.slots[idx as usize].lru_prev = self.leaf_tail;
+        self.slots[idx as usize].lru_next = None;
+        match self.leaf_tail {
+            Some(t) => self.slots[t as usize].lru_next = Some(idx),
+            None => self.leaf_head = Some(idx),
+        }
+        self.leaf_tail = Some(idx);
+    }
+
+    /// Unlink a node from the leaf FIFO. No-op semantics rely on the caller
+    /// only invoking this for a slot actually in the list.
+    fn leaf_unlink(&mut self, idx: u32) {
+        let prev = self.slots[idx as usize].lru_prev;
+        let next = self.slots[idx as usize].lru_next;
+        match prev {
+            Some(p) => self.slots[p as usize].lru_next = next,
+            None => self.leaf_head = next,
+        }
+        match next {
+            Some(n) => self.slots[n as usize].lru_prev = prev,
+            None => self.leaf_tail = prev,
+        }
+        self.slots[idx as usize].lru_prev = None;
+        self.slots[idx as usize].lru_next = None;
+    }
+
+    // ---- child list ----
+
+    /// Remove `child` from `parent`'s intrusive child list. O(siblings) —
+    /// KV-prefix branch factors are small.
+    fn detach_child(&mut self, parent: u32, child: u32) {
+        let head = self.slots[parent as usize].first_child;
+        if head == Some(child) {
+            self.slots[parent as usize].first_child = self.slots[child as usize].next_sibling;
+            return;
+        }
+        let mut cur = head;
+        while let Some(c) = cur {
+            let next = self.slots[c as usize].next_sibling;
+            if next == Some(child) {
+                self.slots[c as usize].next_sibling = self.slots[child as usize].next_sibling;
+                return;
+            }
+            cur = next;
+        }
+        debug_assert!(
+            false,
+            "detach_child: {child} not found under parent {parent}"
+        );
+    }
+
+    // ---- core mutation ----
+
     fn insert_inner(&mut self, seq_hash: SequenceHash, block_id: BlockId) {
-        let lineage_hash = seq_hash;
-        let position = lineage_hash.position();
-        let fragment = lineage_hash.current_hash_fragment();
-        let full_hash = lineage_hash.as_u128();
+        let position = seq_hash.position();
+        let fragment = seq_hash.current_hash_fragment();
         let parent_fragment = if position > 0 {
-            Some(lineage_hash.parent_hash_fragment())
+            Some(seq_hash.parent_hash_fragment())
         } else {
             None
         };
 
-        let increment_count: bool;
-        let tick = self.current_tick;
-        self.current_tick += 1;
-
-        let level = self.nodes.entry(position).or_default();
-        match level.entry(fragment) {
-            std::collections::hash_map::Entry::Vacant(e) => {
-                increment_count = true;
-                let node = LineageNode::new(block_id, lineage_hash, tick);
-                e.insert(node);
-            }
-            std::collections::hash_map::Entry::Occupied(mut e) => {
-                let node = e.get_mut();
-                match &node.data {
-                    LineageNodeData::Ghost => {
-                        increment_count = true;
-                        node.data = LineageNodeData::Real {
-                            block_id,
-                            seq_hash: lineage_hash,
-                            last_used: tick,
-                        };
-                        node.parent_fragment = parent_fragment;
+        // 1. Find-or-create this node. An existing entry must be a Ghost
+        //    (a real-vs-real hit is a duplicate or a collision bug).
+        let node_idx = match self.index.get(&(position, fragment)) {
+            Some(&idx) => {
+                match self.slots[idx as usize].data {
+                    SlotData::Ghost => {
+                        self.slots[idx as usize].data = SlotData::Real { block_id, seq_hash };
+                        self.count += 1;
                     }
-                    LineageNodeData::Real {
-                        seq_hash: existing_hash,
-                        ..
+                    SlotData::Real {
+                        seq_hash: existing, ..
                     } => {
-                        let existing_full = existing_hash.as_u128();
-                        if existing_full == full_hash {
+                        if existing.as_u128() == seq_hash.as_u128() {
                             panic!(
-                                "Duplicate insertion detected! position={}, fragment={:#x}, hash={:#032x}.",
-                                position, fragment, full_hash
+                                "Duplicate insertion detected! position={}, fragment={:#x}, \
+                                 hash={:#032x}.",
+                                position,
+                                fragment,
+                                seq_hash.as_u128()
                             );
                         } else {
                             panic!(
                                 "Hash collision detected! position={}, fragment={:#x}, \
                                  existing_hash={:#032x}, new_hash={:#032x}.",
-                                position, fragment, existing_full, full_hash
+                                position,
+                                fragment,
+                                existing.as_u128(),
+                                seq_hash.as_u128()
                             );
                         }
                     }
+                    SlotData::Free => unreachable!("index points at a freed slot"),
                 }
+                idx
             }
-        }
-
-        if increment_count {
-            self.count += 1;
-        }
-
-        if let Some(p_frag) = parent_fragment {
-            let p_pos = position - 1;
-            let parent_level = self.nodes.entry(p_pos).or_default();
-            let parent_node = parent_level.entry(p_frag).or_insert_with(|| LineageNode {
-                data: LineageNodeData::Ghost,
-                parent_fragment: None,
-                children: HashSet::new(),
-            });
-
-            let was_parent_leaf = parent_node.is_leaf();
-            parent_node.children.insert(fragment);
-
-            if was_parent_leaf && let LineageNodeData::Real { last_used, .. } = parent_node.data {
-                self.leaf_queue.remove(&(last_used, p_pos, p_frag));
+            None => {
+                let idx = self.alloc_slot(LineageSlot {
+                    data: SlotData::Real { block_id, seq_hash },
+                    position,
+                    fragment,
+                    parent: None,
+                    first_child: None,
+                    next_sibling: None,
+                    lru_prev: None,
+                    lru_next: None,
+                });
+                self.index.insert((position, fragment), idx);
+                self.count += 1;
+                idx
             }
-        }
+        };
 
-        let node = self.nodes.get(&position).unwrap().get(&fragment).unwrap();
-        if node.is_leaf()
-            && let LineageNodeData::Real { last_used, .. } = node.data
+        // 2. Link to parent (creating a ghost parent if it does not exist
+        //    yet). A fresh node and a just-promoted ghost both have
+        //    `parent == None` here, so this links exactly once.
+        if let Some(p_frag) = parent_fragment
+            && self.slots[node_idx as usize].parent.is_none()
         {
-            self.leaf_queue.insert((last_used, position, fragment), ());
-        }
-    }
-
-    fn allocate_inner(&mut self, count: usize) -> Vec<(SequenceHash, BlockId)> {
-        let mut allocated = Vec::with_capacity(count);
-        while allocated.len() < count {
-            if let Some((&(tick, pos, frag), _)) = self.leaf_queue.iter().next() {
-                let key = (tick, pos, frag);
-                self.leaf_queue.remove(&key);
-                if let Some(b) = self.remove_block(pos, frag) {
-                    allocated.push(b);
+            let p_pos = position - 1;
+            let parent_idx = match self.index.get(&(p_pos, p_frag)) {
+                Some(&pidx) => pidx,
+                None => {
+                    let pidx = self.alloc_slot(LineageSlot {
+                        data: SlotData::Ghost,
+                        position: p_pos,
+                        fragment: p_frag,
+                        parent: None,
+                        first_child: None,
+                        next_sibling: None,
+                        lru_prev: None,
+                        lru_next: None,
+                    });
+                    self.index.insert((p_pos, p_frag), pidx);
+                    pidx
                 }
-            } else {
-                break;
+            };
+
+            let parent_was_leaf = self.slots[parent_idx as usize].is_leaf();
+            // Prepend node_idx into parent's child list.
+            self.slots[node_idx as usize].parent = Some(parent_idx);
+            self.slots[node_idx as usize].next_sibling =
+                self.slots[parent_idx as usize].first_child;
+            self.slots[parent_idx as usize].first_child = Some(node_idx);
+
+            // A Real parent that was a leaf is now an interior node.
+            if parent_was_leaf
+                && matches!(self.slots[parent_idx as usize].data, SlotData::Real { .. })
+            {
+                self.leaf_unlink(parent_idx);
             }
         }
-        allocated
+
+        // 3. If this node is a Real leaf, it is the newest evictable block.
+        //    (A promoted ghost already has children — not a leaf.)
+        if self.slots[node_idx as usize].is_leaf() {
+            self.leaf_push_back(node_idx);
+        }
     }
 
-    /// Remove a specific block by its lineage hash (cache-hit path).
-    /// Verifies the stored full `SequenceHash` matches before removing: the
-    /// `(position, current_hash_fragment)` key is not unique — distinct
-    /// `PositionalLineageHash`es can share that pair (e.g. same current hash
-    /// and position but different parent), so a key-only match would let a
-    /// lookup for one PLH delete the block belonging to another.
+    /// Look up a node by its full `SequenceHash` and, if it is the real
+    /// block stored under that `(position, fragment)` key, remove it.
+    ///
+    /// The full-hash verification matters: `(position, current_hash_fragment)`
+    /// is not unique — distinct `PositionalLineageHash`es can share that pair
+    /// (same current hash + position, different parent), so a key-only match
+    /// would let a lookup for one PLH delete another's block.
     fn remove_by_hash(
         &mut self,
         lineage_hash: &PositionalLineageHash,
     ) -> Option<(SequenceHash, BlockId)> {
         let position = lineage_hash.position();
         let fragment = lineage_hash.current_hash_fragment();
-
-        let node_data = self
-            .nodes
-            .get(&position)
-            .and_then(|level| level.get(&fragment))
-            .and_then(|node| match &node.data {
-                LineageNodeData::Real {
-                    last_used,
-                    seq_hash,
-                    ..
-                } if seq_hash == lineage_hash => Some(*last_used),
-                _ => None,
-            });
-
-        if let Some(tick) = node_data {
-            self.leaf_queue.remove(&(tick, position, fragment));
-            self.remove_block(position, fragment)
-        } else {
-            None
+        let idx = *self.index.get(&(position, fragment))?;
+        match self.slots[idx as usize].data {
+            SlotData::Real { seq_hash, .. } if seq_hash == *lineage_hash => {
+                Some(self.remove_node_at(idx))
+            }
+            _ => None,
         }
     }
 
-    /// Remove the real block at `(position, fragment)`, leaving a ghost in
-    /// place if needed. Iteratively prunes orphan ghosts upward.
-    fn remove_block(&mut self, position: u64, fragment: u64) -> Option<(SequenceHash, BlockId)> {
-        let payload = {
-            let level = self.nodes.get_mut(&position)?;
-            let node = level.get_mut(&fragment)?;
-            match &mut node.data {
-                LineageNodeData::Real { .. } => {
-                    let prior = std::mem::replace(&mut node.data, LineageNodeData::Ghost);
-                    if let LineageNodeData::Real {
-                        block_id, seq_hash, ..
-                    } = prior
-                    {
-                        Some((seq_hash, block_id))
-                    } else {
-                        unreachable!()
-                    }
-                }
-                LineageNodeData::Ghost => None,
-            }
+    /// Turn the `Real` node at `idx` into a `Ghost`, then iteratively prune
+    /// any now-childless ghost up the parent chain. Returns the evicted
+    /// `(seq_hash, block_id)`.
+    fn remove_node_at(&mut self, idx: u32) -> (SequenceHash, BlockId) {
+        let was_leaf = self.slots[idx as usize].is_leaf();
+        let payload = match std::mem::replace(&mut self.slots[idx as usize].data, SlotData::Ghost) {
+            SlotData::Real { seq_hash, block_id } => (seq_hash, block_id),
+            _ => unreachable!("remove_node_at called on a non-Real slot"),
         };
-
-        if payload.is_some() {
-            self.count -= 1;
+        self.count -= 1;
+        if was_leaf {
+            // It was a Real leaf, hence in the leaf FIFO.
+            self.leaf_unlink(idx);
         }
 
-        let mut current_pos = position;
-        let mut current_frag = fragment;
-
+        // Prune: a childless Ghost is removed from the graph entirely; if
+        // that orphans its parent, recurse. A node that still has children
+        // simply stays as a Ghost.
+        let mut cur = idx;
         loop {
-            let mut should_remove_node = false;
-            let mut parent_info = None;
-
-            if let Some(level) = self.nodes.get(&current_pos)
-                && let Some(node) = level.get(&current_frag)
-            {
-                let is_ghost = matches!(node.data, LineageNodeData::Ghost);
-                if node.children.is_empty() && is_ghost {
-                    should_remove_node = true;
-                    parent_info = node
-                        .parent_fragment
-                        .map(|pf| (current_pos.saturating_sub(1), pf));
-                }
-            }
-
-            if should_remove_node {
-                if let Some(level) = self.nodes.get_mut(&current_pos) {
-                    level.remove(&current_frag);
-                    if level.is_empty() {
-                        self.nodes.remove(&current_pos);
-                    }
-                }
-
-                if let Some((p_pos, p_frag)) = parent_info {
-                    let mut parent_became_leaf = false;
-                    let mut parent_has_block = false;
-                    let mut parent_tick = 0;
-
-                    if let Some(level) = self.nodes.get_mut(&p_pos)
-                        && let Some(parent) = level.get_mut(&p_frag)
-                    {
-                        parent.children.remove(&current_frag);
-                        if parent.children.is_empty() {
-                            parent_became_leaf = true;
-                            match &parent.data {
-                                LineageNodeData::Real { last_used, .. } => {
-                                    parent_has_block = true;
-                                    parent_tick = *last_used;
-                                }
-                                LineageNodeData::Ghost => {
-                                    parent_has_block = false;
-                                }
-                            }
-                        }
-                    }
-
-                    if parent_became_leaf {
-                        if parent_has_block {
-                            self.leaf_queue.insert((parent_tick, p_pos, p_frag), ());
-                            break;
-                        } else {
-                            current_pos = p_pos;
-                            current_frag = p_frag;
-                            continue;
-                        }
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            } else {
+            if self.slots[cur as usize].first_child.is_some() {
                 break;
             }
-        }
+            let parent = self.slots[cur as usize].parent;
+            let key = (
+                self.slots[cur as usize].position,
+                self.slots[cur as usize].fragment,
+            );
+            if let Some(p) = parent {
+                self.detach_child(p, cur);
+            }
+            self.index.remove(&key);
+            self.free_slot(cur);
 
+            match parent {
+                None => break,
+                Some(p) => {
+                    if self.slots[p as usize].first_child.is_some() {
+                        break; // parent still has other children
+                    }
+                    match self.slots[p as usize].data {
+                        SlotData::Real { .. } => {
+                            // Parent is a Real leaf again — newest evictable.
+                            self.leaf_push_back(p);
+                            break;
+                        }
+                        SlotData::Ghost => {
+                            cur = p; // childless ghost — prune it too
+                        }
+                        SlotData::Free => unreachable!("parent slot is free"),
+                    }
+                }
+            }
+        }
         payload
     }
 }
@@ -346,7 +485,16 @@ impl InactiveIndex for LineageBackend {
     }
 
     fn allocate(&mut self, count: usize) -> Vec<(SequenceHash, BlockId)> {
-        self.allocate_inner(count)
+        let mut allocated = Vec::with_capacity(count);
+        while allocated.len() < count {
+            // Oldest evictable leaf. `remove_node_at` unlinks it from the
+            // FIFO and may expose its parent as the next leaf.
+            match self.leaf_head {
+                Some(idx) => allocated.push(self.remove_node_at(idx)),
+                None => break,
+            }
+        }
+        allocated
     }
 
     fn insert(&mut self, seq_hash: SequenceHash, block_id: BlockId) {
@@ -360,39 +508,34 @@ impl InactiveIndex for LineageBackend {
     fn has(&self, seq_hash: SequenceHash) -> bool {
         let position = seq_hash.position();
         let fragment = seq_hash.current_hash_fragment();
-        self.nodes
-            .get(&position)
-            .and_then(|level| level.get(&fragment))
-            .is_some_and(|node| match &node.data {
-                LineageNodeData::Real {
+        self.index.get(&(position, fragment)).is_some_and(|&idx| {
+            match self.slots[idx as usize].data {
+                SlotData::Real {
                     seq_hash: stored, ..
-                } => *stored == seq_hash,
-                LineageNodeData::Ghost => false,
-            })
+                } => stored == seq_hash,
+                _ => false,
+            }
+        })
     }
 
     fn take(&mut self, seq_hash: SequenceHash, block_id: BlockId) -> bool {
-        // Non-mutating lookup first; only remove on an exact id match so a
-        // miss leaves `current_tick`, `last_used`, and `leaf_queue` untouched.
         // Match on the full `SequenceHash` AND the block id — `(position,
         // current_hash_fragment)` alone can collide across distinct PLHs.
         let position = seq_hash.position();
         let fragment = seq_hash.current_hash_fragment();
-        let stored_id = self
-            .nodes
-            .get(&position)
-            .and_then(|level| level.get(&fragment))
-            .and_then(|node| match &node.data {
-                LineageNodeData::Real {
-                    block_id: id,
+        let hit = self.index.get(&(position, fragment)).is_some_and(|&idx| {
+            match self.slots[idx as usize].data {
+                SlotData::Real {
                     seq_hash: stored,
-                    ..
-                } if *stored == seq_hash => Some(*id),
-                _ => None,
-            });
-        match stored_id {
-            Some(id) if id == block_id => self.remove_by_hash(&seq_hash).is_some(),
-            _ => false,
+                    block_id: stored_id,
+                } => stored == seq_hash && stored_id == block_id,
+                _ => false,
+            }
+        });
+        if hit {
+            self.remove_by_hash(&seq_hash).is_some()
+        } else {
+            false
         }
     }
 }
@@ -401,6 +544,24 @@ impl InactiveIndex for LineageBackend {
 mod tests {
     use super::*;
     use crate::testing::BlockSequenceBuilder;
+
+    impl LineageBackend {
+        /// Test-only: length of the intrusive leaf FIFO.
+        fn get_queue_len(&self) -> usize {
+            let mut n = 0;
+            let mut cur = self.leaf_head;
+            while let Some(idx) = cur {
+                n += 1;
+                cur = self.slots[idx as usize].lru_next;
+            }
+            n
+        }
+
+        /// Test-only: no live slots remain (all real + ghost nodes gone).
+        fn is_graph_empty(&self) -> bool {
+            self.index.is_empty()
+        }
+    }
 
     /// Build a chain of lineage hashes and return `(block_id, seq_hash)` pairs.
     fn create_chain(count: usize, offset: u32) -> Vec<(BlockId, SequenceHash)> {
@@ -423,12 +584,6 @@ mod tests {
             .unwrap()
     }
 
-    impl LineageBackend {
-        pub fn get_queue_len(&self) -> usize {
-            self.leaf_queue.len()
-        }
-    }
-
     #[test]
     fn test_leaf_insertion() {
         let mut backend = LineageBackend::new();
@@ -443,6 +598,7 @@ mod tests {
         assert_eq!(allocated.len(), 1);
         assert_eq!(allocated[0].1, 0);
         assert_eq!(backend.len(), 0);
+        assert!(backend.is_graph_empty());
     }
 
     #[test]
@@ -521,6 +677,11 @@ mod tests {
         assert_eq!(backend.get_queue_len(), 2);
     }
 
+    /// Two interleaved 2-chains. Eviction order reflects the intrusive-FIFO
+    /// semantics: when a node re-becomes a leaf it appends at the *tail*, so
+    /// the two chains' roots are not evicted back-to-back with their own
+    /// leaves — they round-robin. (The previous BTreeMap-by-original-tick
+    /// backend evicted `B, A, Y, X`; see the module doc for the rationale.)
     #[test]
     fn test_interleaved_chains() {
         let mut backend = LineageBackend::new();
@@ -533,25 +694,26 @@ mod tests {
         let (x_id, x_h) = chain2.remove(0);
         let (y_id, y_h) = chain2.remove(0);
 
-        backend.insert(a_h, a_id);
-        backend.insert(b_h, b_id);
-        backend.insert(x_h, x_id);
-        backend.insert(y_h, y_id);
+        backend.insert(a_h, a_id); // chain1 root  (block_id 0)
+        backend.insert(b_h, b_id); // chain1 leaf  (block_id 1)
+        backend.insert(x_h, x_id); // chain2 root  (block_id 0)
+        backend.insert(y_h, y_id); // chain2 leaf  (block_id 1)
 
         assert_eq!(backend.len(), 4);
         assert_eq!(backend.get_queue_len(), 2);
+        // Leaf FIFO: [B, Y].
 
         let alloc1 = backend.allocate(1);
-        assert_eq!(alloc1[0].1, 1); // B from chain1
+        assert_eq!(alloc1[0].1, b_id); // B; A re-leafs → tail. FIFO: [Y, A]
 
         let alloc2 = backend.allocate(1);
-        assert_eq!(alloc2[0].1, 0); // A from chain1
+        assert_eq!(alloc2[0].1, y_id); // Y; X re-leafs → tail. FIFO: [A, X]
 
         let alloc3 = backend.allocate(1);
-        assert_eq!(alloc3[0].1, 1); // Y from chain2
+        assert_eq!(alloc3[0].1, a_id); // A. FIFO: [X]
 
         let alloc4 = backend.allocate(1);
-        assert_eq!(alloc4[0].1, 0); // X from chain2
+        assert_eq!(alloc4[0].1, x_id); // X
     }
 
     #[test]
@@ -566,6 +728,7 @@ mod tests {
         assert!(removed.is_some());
         assert_eq!(removed.unwrap().1, 0);
         assert_eq!(backend.len(), 0);
+        assert!(backend.is_graph_empty());
     }
 
     #[test]
@@ -599,7 +762,7 @@ mod tests {
         backend.remove_by_hash(&leaf_h);
 
         assert_eq!(backend.len(), 0);
-        assert!(backend.nodes.is_empty());
+        assert!(backend.is_graph_empty());
     }
 
     #[test]
@@ -637,15 +800,11 @@ mod tests {
 
     /// Regression: lookups must compare the full `SequenceHash`, not just
     /// `(position, current_hash_fragment)`. Two `PositionalLineageHash`es that
-    /// share that key pair but have different parents (or different full
-    /// hashes generally) must not collide on lookup — otherwise `find_matches`
-    /// / `scan_matches` / `take` / `has` would return or remove the wrong
-    /// block. We construct two such hashes by hand and verify each lookup
-    /// path rejects the impostor.
+    /// share that key pair but have different parents must not collide —
+    /// otherwise `find_matches` / `scan_matches` / `take` / `has` would
+    /// return or remove the wrong block.
     #[test]
     fn lookup_rejects_same_position_fragment_but_different_full_hash() {
-        // Same current hash + position, different parent → identical
-        // (position, current_hash_fragment) key, distinct full hashes.
         let stored: SequenceHash = SequenceHash::new(0xAA, Some(0x11), 5);
         let impostor: SequenceHash = SequenceHash::new(0xAA, Some(0x22), 5);
         assert_eq!(stored.position(), impostor.position());
@@ -658,50 +817,112 @@ mod tests {
         let mut backend = LineageBackend::new();
         backend.insert(stored, 42);
 
-        // Sanity: the stored hash hits.
         assert!(backend.has(stored));
-
-        // The impostor must NOT hit the read path.
         assert!(
             !backend.has(impostor),
             "has() returned a false-positive for impostor PLH"
         );
 
-        // The impostor must NOT remove the stored block via any mutating path.
         assert!(
             backend.remove_by_hash(&impostor).is_none(),
             "remove_by_hash matched impostor PLH and deleted stored block"
         );
-        assert_eq!(
-            backend.len(),
-            1,
-            "stored block must remain after impostor remove_by_hash"
-        );
+        assert_eq!(backend.len(), 1);
 
         let scan_hits = backend.scan_matches(&[impostor], false);
-        assert!(
-            scan_hits.is_empty(),
-            "scan_matches matched impostor PLH and removed stored block"
-        );
+        assert!(scan_hits.is_empty());
         assert_eq!(backend.len(), 1);
 
         let find_hits = backend.find_matches(&[impostor], false);
-        assert!(
-            find_hits.is_empty(),
-            "find_matches matched impostor PLH and removed stored block"
-        );
+        assert!(find_hits.is_empty());
         assert_eq!(backend.len(), 1);
 
-        // The impostor must NOT consume the stored block via take.
-        assert!(
-            !backend.take(impostor, 42),
-            "take() matched impostor PLH and removed stored block"
-        );
+        assert!(!backend.take(impostor, 42));
         assert_eq!(backend.len(), 1);
 
-        // The genuine hash still resolves and removes correctly.
         let removed = backend.remove_by_hash(&stored);
         assert_eq!(removed, Some((stored, 42)));
         assert_eq!(backend.len(), 0);
+        assert!(backend.is_graph_empty());
+    }
+
+    /// Slab cells are recycled through the free list rather than reallocated.
+    #[test]
+    fn slab_recycles_freed_slots() {
+        let mut backend = LineageBackend::with_capacity(8);
+
+        // Fill, drain, refill — the slab length must not grow past the
+        // high-water mark because freed slots are reused.
+        for (id, h) in create_chain(8, 0) {
+            backend.insert(h, id);
+        }
+        let high_water = backend.slots.len();
+        assert_eq!(high_water, 8, "no ghosts for an in-order chain");
+
+        backend.allocate(8);
+        assert_eq!(backend.len(), 0);
+        assert!(backend.is_graph_empty());
+
+        for (id, h) in create_chain(8, 9000) {
+            backend.insert(h, id);
+        }
+        assert_eq!(
+            backend.slots.len(),
+            high_water,
+            "freed slots must be recycled, not reallocated"
+        );
+    }
+
+    /// Re-becoming a leaf appends at the FIFO tail (documented eviction-order
+    /// change vs. the previous BTreeMap-by-original-tick behavior).
+    #[test]
+    fn re_leafed_node_goes_to_fifo_tail() {
+        // Two independent 2-chains: A0->A1 and B0->B1.
+        let mut backend = LineageBackend::new();
+        let chain_a = create_chain(2, 0);
+        let chain_b = create_chain(2, 7000);
+        let (a0_id, a0_h) = chain_a[0];
+        let (a1_id, a1_h) = chain_a[1];
+        let (b0_id, b0_h) = chain_b[0];
+        let (b1_id, b1_h) = chain_b[1];
+
+        backend.insert(a0_h, a0_id);
+        backend.insert(a1_h, a1_id);
+        backend.insert(b0_h, b0_id);
+        backend.insert(b1_h, b1_id);
+        // Leaf FIFO: [A1, B1].
+
+        // Remove A1 by hash → A0 re-becomes a leaf and goes to the TAIL.
+        // FIFO is now [B1, A0], not [A0, B1].
+        assert!(backend.remove_by_hash(&a1_h).is_some());
+
+        let order: Vec<BlockId> = backend.allocate(2).into_iter().map(|(_, id)| id).collect();
+        assert_eq!(order, vec![b1_id, a0_id], "re-leafed A0 evicts after B1");
+    }
+
+    #[test]
+    fn pair_hasher_distinguishes_keys() {
+        use std::collections::HashSet;
+        let keys = [
+            (0u64, 0u64),
+            (0, 1),
+            (1, 0),
+            (1, 1),
+            (5, 0xdead_beef),
+            (5, 0xbeef_dead),
+        ];
+        let digests: HashSet<u64> = keys
+            .iter()
+            .map(|&k| {
+                let mut h = PairBuildHasher.build_hasher();
+                std::hash::Hash::hash(&k, &mut h);
+                h.finish()
+            })
+            .collect();
+        assert_eq!(
+            digests.len(),
+            keys.len(),
+            "distinct pairs → distinct digests"
+        );
     }
 }

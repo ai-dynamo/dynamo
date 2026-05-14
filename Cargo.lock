@@ -4676,6 +4676,7 @@ dependencies = [
  "async-stream",
  "bincode 2.0.1",
  "bytes",
+ "criterion 0.5.1",
  "derive_builder",
  "dynamo-tokens",
  "futures",

@@ -394,11 +394,11 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
             }
             Some(InactiveBackendConfig::Lineage) => {
                 tracing::info!("Using Lineage inactive backend");
-                Box::new(LineageBackend::default())
+                Box::new(LineageBackend::with_capacity(block_count))
             }
             None => {
                 tracing::info!("Using default inactive backend: Lineage");
-                Box::new(LineageBackend::default())
+                Box::new(LineageBackend::with_capacity(block_count))
             }
         };
 
