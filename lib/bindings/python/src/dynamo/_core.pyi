@@ -2113,6 +2113,33 @@ class KvRouter:
         """
         ...
 
+    async def get_overlap_scores(
+        self,
+        token_ids: List[int],
+        router_config_override: Optional[JsonLike] = None,
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
+        lora_name: Optional[str] = None,
+        include_shared: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Get per-worker KV overlap by storage tier.
+
+        Args:
+            token_ids: List of token IDs to evaluate.
+            router_config_override: Optional router configuration override for
+                                   score-credit fields.
+            block_mm_infos: Optional block-level multimodal metadata aligned to
+                           request blocks.
+            lora_name: Optional LoRA adapter name for adapter-aware matching.
+            include_shared: Whether to query the configured shared cache.
+
+        Returns:
+            A dictionary containing block_size, num_blocks, shared_cache, and
+            workers. Each worker row is keyed by worker_id and dp_rank and
+            reports device, host-pinned, disk, and shared-cache overlap blocks.
+        """
+        ...
+
     async def dump_events(self) -> str:
         """
         Dump all events from the KV router's indexer.
