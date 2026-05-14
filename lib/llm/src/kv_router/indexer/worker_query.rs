@@ -8,11 +8,13 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use dashmap::DashMap;
-use dynamo_runtime::component::Component;
-use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery};
+use dynamo_runtime::component::{Component, Instance};
+use dynamo_runtime::discovery::{
+    DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, EndpointInstanceId,
+};
 use dynamo_runtime::pipeline::{
-    AsyncEngine, AsyncEngineContextProvider, ManyOut, PushRouter, ResponseStream, RouterMode,
-    SingleIn, network::Ingress,
+    AddressedPushRouter, AddressedRequest, AsyncEngine, AsyncEngineContextProvider, ManyOut,
+    ResponseStream, SingleIn, network::Ingress,
 };
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 use dynamo_runtime::stream;
@@ -42,16 +44,84 @@ const QUERY_ENDPOINT_PREFIX: &str = "worker_kv_indexer_query_dp";
 type RecoveryKey = (WorkerId, DpRank);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct WorkerQueryTarget {
-    route_worker_id: WorkerId,
-    endpoint_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct DiscoveredQueryEndpoint {
     worker_id: WorkerId,
     dp_rank: DpRank,
-    target: WorkerQueryTarget,
+    target: Instance,
+}
+
+#[derive(Debug, Default)]
+struct WorkerQueryEndpointDirectory {
+    targets: DashMap<RecoveryKey, Instance>,
+}
+
+impl WorkerQueryEndpointDirectory {
+    fn parse_endpoint_name(
+        endpoint_name: &str,
+        route_worker_id: WorkerId,
+    ) -> Option<(WorkerId, DpRank)> {
+        let suffix = endpoint_name.strip_prefix(QUERY_ENDPOINT_PREFIX)?;
+        let (dp_rank, worker_id) = match suffix.split_once("_worker") {
+            Some((dp_rank, worker_id)) => (dp_rank.parse().ok()?, worker_id.parse().ok()?),
+            None => (suffix.parse().ok()?, route_worker_id),
+        };
+        Some((worker_id, dp_rank))
+    }
+
+    fn parse_added(instance: DiscoveryInstance) -> Option<DiscoveredQueryEndpoint> {
+        let DiscoveryInstance::Endpoint(inst) = instance else {
+            return None;
+        };
+        let (worker_id, dp_rank) = Self::parse_endpoint_name(&inst.endpoint, inst.instance_id)?;
+        Some(DiscoveredQueryEndpoint {
+            worker_id,
+            dp_rank,
+            target: inst,
+        })
+    }
+
+    fn parse_removed(id: DiscoveryInstanceId) -> Option<(WorkerId, DpRank, EndpointInstanceId)> {
+        let DiscoveryInstanceId::Endpoint(eid) = id else {
+            return None;
+        };
+        let (worker_id, dp_rank) = Self::parse_endpoint_name(&eid.endpoint, eid.instance_id)?;
+        Some((worker_id, dp_rank, eid))
+    }
+
+    fn insert(&self, endpoint: &DiscoveredQueryEndpoint) -> Option<Instance> {
+        self.targets.insert(
+            (endpoint.worker_id, endpoint.dp_rank),
+            endpoint.target.clone(),
+        )
+    }
+
+    fn target_for(&self, worker_id: WorkerId, dp_rank: DpRank) -> Option<Instance> {
+        self.targets
+            .get(&(worker_id, dp_rank))
+            .map(|target| target.value().clone())
+    }
+
+    #[cfg(test)]
+    fn remove_dp(&self, worker_id: WorkerId, dp_rank: DpRank) {
+        self.targets.remove(&(worker_id, dp_rank));
+    }
+
+    fn remove_if_matches(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        endpoint_id: EndpointInstanceId,
+    ) -> bool {
+        let key = (worker_id, dp_rank);
+        let should_remove = self
+            .targets
+            .get(&key)
+            .is_some_and(|target| target.value().endpoint_instance_id() == endpoint_id);
+        if should_remove {
+            self.targets.remove(&key);
+        }
+        should_remove
+    }
 }
 
 #[derive(Debug, Default)]
@@ -92,44 +162,21 @@ trait WorkerQueryTransport: Send + Sync {
         &self,
         worker_id: WorkerId,
         dp_rank: DpRank,
-        target: WorkerQueryTarget,
+        target: Instance,
         start_event_id: Option<u64>,
         end_event_id: Option<u64>,
     ) -> Result<WorkerKvQueryResponse>;
 }
 
 struct RuntimeWorkerQueryTransport {
-    component: Component,
-    routers: DashMap<String, Arc<PushRouter<WorkerKvQueryRequest, WorkerKvQueryResponse>>>,
+    addressed: Arc<AddressedPushRouter>,
 }
 
 impl RuntimeWorkerQueryTransport {
-    fn new(component: Component) -> Self {
-        Self {
-            component,
-            routers: DashMap::new(),
-        }
-    }
-
-    async fn get_router_for_endpoint(
-        &self,
-        endpoint_name: &str,
-    ) -> Result<Arc<PushRouter<WorkerKvQueryRequest, WorkerKvQueryResponse>>> {
-        if let Some(router) = self.routers.get(endpoint_name) {
-            return Ok(router.clone());
-        }
-
-        let endpoint = self.component.endpoint(endpoint_name);
-        let client = endpoint.client().await?;
-        let router = Arc::new(
-            PushRouter::from_client_no_fault_detection(client, RouterMode::RoundRobin).await?,
-        );
-
-        Ok(self
-            .routers
-            .entry(endpoint_name.to_string())
-            .or_insert(router)
-            .clone())
+    async fn new(component: &Component) -> Result<Self> {
+        Ok(Self {
+            addressed: AddressedPushRouter::from_runtime_provider(component).await?,
+        })
     }
 }
 
@@ -139,25 +186,29 @@ impl WorkerQueryTransport for RuntimeWorkerQueryTransport {
         &self,
         worker_id: WorkerId,
         dp_rank: DpRank,
-        target: WorkerQueryTarget,
+        target: Instance,
         start_event_id: Option<u64>,
         end_event_id: Option<u64>,
     ) -> Result<WorkerKvQueryResponse> {
-        let router = self.get_router_for_endpoint(&target.endpoint_name).await?;
-
         let request = WorkerKvQueryRequest {
             worker_id,
+            dp_rank,
             start_event_id,
             end_event_id,
         };
-        let mut stream = router
-            .direct(SingleIn::new(request), target.route_worker_id)
+        let instance = target;
+        let instance_id = instance.instance_id;
+        let endpoint_name = instance.endpoint.clone();
+        let addressed_request =
+            SingleIn::new(request).map(|req| AddressedRequest::for_instance(req, instance));
+        let mut stream: ManyOut<WorkerKvQueryResponse> = self
+            .addressed
+            .generate(addressed_request)
             .await
             .with_context(|| {
                 format!(
                     "Failed to send worker KV query to worker {worker_id} dp_rank {dp_rank} \
-                     via endpoint {} instance {}",
-                    target.endpoint_name, target.route_worker_id
+                     via endpoint {endpoint_name} instance {instance_id}"
                 )
             })?;
 
@@ -179,7 +230,9 @@ impl WorkerQueryTransport for RuntimeWorkerQueryTransport {
 /// Discovers query endpoints via `ComponentEndpoints` discovery, filtering for
 /// the `worker_kv_indexer_query_dp{N}` name pattern. Coordinates restore and
 /// gap recovery at the worker level while still querying each `(worker_id,
-/// dp_rank)` endpoint independently.
+/// dp_rank)` endpoint independently. Recovery sends strict direct requests to
+/// the discovered endpoint instance; it does not use serving-router load
+/// balancing, busy handling, or fallback worker selection.
 ///
 /// Also handles worker lifecycle (add/remove) by tracking known endpoints and
 /// sending removal events to the router indexer when all dp_ranks for a worker
@@ -190,7 +243,7 @@ pub struct WorkerQueryClient {
     /// Indexer for applying recovered events and worker removals.
     indexer: Indexer,
     worker_states: DashMap<WorkerId, Arc<Mutex<WorkerState>>>,
-    query_targets: DashMap<RecoveryKey, WorkerQueryTarget>,
+    query_endpoints: WorkerQueryEndpointDirectory,
     recovery_semaphore: Arc<Semaphore>,
 }
 
@@ -205,7 +258,7 @@ impl WorkerQueryClient {
             transport,
             indexer,
             worker_states: DashMap::new(),
-            query_targets: DashMap::new(),
+            query_endpoints: WorkerQueryEndpointDirectory::default(),
             recovery_semaphore: Arc::new(Semaphore::new(RECOVERY_CONCURRENCY_LIMIT)),
         })
     }
@@ -216,7 +269,7 @@ impl WorkerQueryClient {
     /// recovers each `(worker_id, dp_rank)` as it appears, and sends worker removal
     /// events when all dp_ranks for a worker disappear.
     pub async fn spawn(component: Component, indexer: Indexer) -> Result<Arc<Self>> {
-        let transport = Arc::new(RuntimeWorkerQueryTransport::new(component.clone()));
+        let transport = Arc::new(RuntimeWorkerQueryTransport::new(&component).await?);
         let client = Self::new(component.clone(), indexer, transport);
 
         let client_bg = client.clone();
@@ -261,68 +314,24 @@ impl WorkerQueryClient {
 
             match event {
                 DiscoveryEvent::Added(instance) => {
-                    let Some(endpoint) = Self::parse_query_endpoint(&instance) else {
+                    let Some(endpoint) = WorkerQueryEndpointDirectory::parse_added(instance) else {
                         continue;
                     };
                     self.handle_discovered_query_endpoint(endpoint).await;
                 }
                 DiscoveryEvent::Removed(id) => {
-                    let Some(endpoint) = Self::parse_instance_id(&id) else {
+                    let Some((worker_id, dp_rank, endpoint_id)) =
+                        WorkerQueryEndpointDirectory::parse_removed(id)
+                    else {
                         continue;
                     };
-                    self.handle_removed_query_endpoint(endpoint).await;
+                    self.handle_removed_query_endpoint(worker_id, dp_rank, endpoint_id)
+                        .await;
                 }
             }
         }
 
         Ok(())
-    }
-
-    fn parse_query_endpoint_name(
-        endpoint_name: &str,
-        route_worker_id: WorkerId,
-    ) -> Option<(WorkerId, DpRank)> {
-        let suffix = endpoint_name.strip_prefix(QUERY_ENDPOINT_PREFIX)?;
-        let (dp_rank, worker_id) = match suffix.split_once("_worker") {
-            Some((dp_rank, worker_id)) => (dp_rank.parse().ok()?, worker_id.parse().ok()?),
-            None => (suffix.parse().ok()?, route_worker_id),
-        };
-        Some((worker_id, dp_rank))
-    }
-
-    /// Parse a query endpoint from a discovery instance.
-    fn parse_query_endpoint(instance: &DiscoveryInstance) -> Option<DiscoveredQueryEndpoint> {
-        let DiscoveryInstance::Endpoint(inst) = instance else {
-            return None;
-        };
-        let (worker_id, dp_rank) =
-            Self::parse_query_endpoint_name(&inst.endpoint, inst.instance_id)?;
-        Some(DiscoveredQueryEndpoint {
-            worker_id,
-            dp_rank,
-            target: WorkerQueryTarget {
-                route_worker_id: inst.instance_id,
-                endpoint_name: inst.endpoint.clone(),
-            },
-        })
-    }
-
-    /// Parse a query endpoint from a discovery instance ID (for removals).
-    fn parse_instance_id(
-        id: &dynamo_runtime::discovery::DiscoveryInstanceId,
-    ) -> Option<DiscoveredQueryEndpoint> {
-        let dynamo_runtime::discovery::DiscoveryInstanceId::Endpoint(eid) = id else {
-            return None;
-        };
-        let (worker_id, dp_rank) = Self::parse_query_endpoint_name(&eid.endpoint, eid.instance_id)?;
-        Some(DiscoveredQueryEndpoint {
-            worker_id,
-            dp_rank,
-            target: WorkerQueryTarget {
-                route_worker_id: eid.instance_id,
-                endpoint_name: eid.endpoint.clone(),
-            },
-        })
     }
 
     fn get_or_create_worker_state(&self, worker_id: WorkerId) -> Arc<Mutex<WorkerState>> {
@@ -332,14 +341,25 @@ impl WorkerQueryClient {
             .clone()
     }
 
-    fn query_target_for(&self, worker_id: WorkerId, dp_rank: DpRank) -> WorkerQueryTarget {
-        self.query_targets
-            .get(&(worker_id, dp_rank))
-            .map(|target| target.value().clone())
-            .unwrap_or_else(|| WorkerQueryTarget {
-                route_worker_id: worker_id,
-                endpoint_name: worker_kv_indexer_query_endpoint(dp_rank),
-            })
+    fn query_target_for(&self, worker_id: WorkerId, dp_rank: DpRank) -> Option<Instance> {
+        if let Some(target) = self.query_endpoints.target_for(worker_id, dp_rank) {
+            return Some(target);
+        }
+
+        #[cfg(test)]
+        {
+            return Some(Instance {
+                namespace: self.component.namespace().name().to_string(),
+                component: self.component.name().to_string(),
+                endpoint: worker_kv_indexer_query_endpoint(dp_rank),
+                instance_id: worker_id,
+                transport: dynamo_runtime::component::TransportType::Nats(String::new()),
+                device_type: None,
+            });
+        }
+
+        #[cfg(not(test))]
+        None
     }
 
     #[cfg(test)]
@@ -347,9 +367,13 @@ impl WorkerQueryClient {
         let endpoint = DiscoveredQueryEndpoint {
             worker_id,
             dp_rank,
-            target: WorkerQueryTarget {
-                route_worker_id: worker_id,
-                endpoint_name: worker_kv_indexer_query_endpoint(dp_rank),
+            target: Instance {
+                namespace: self.component.namespace().name().to_string(),
+                component: self.component.name().to_string(),
+                endpoint: worker_kv_indexer_query_endpoint(dp_rank),
+                instance_id: worker_id,
+                transport: dynamo_runtime::component::TransportType::Nats(String::new()),
+                device_type: None,
             },
         };
         self.handle_discovered_query_endpoint(endpoint).await;
@@ -358,8 +382,7 @@ impl WorkerQueryClient {
     async fn handle_discovered_query_endpoint(self: &Arc<Self>, endpoint: DiscoveredQueryEndpoint) {
         let worker_id = endpoint.worker_id;
         let dp_rank = endpoint.dp_rank;
-        let key = (worker_id, dp_rank);
-        match self.query_targets.insert(key, endpoint.target.clone()) {
+        match self.query_endpoints.insert(&endpoint) {
             Some(previous) if previous != endpoint.target => {
                 // Discovery can briefly show a replacement route instance for the same
                 // logical worker during restart overlap. We keep existing cursor state
@@ -397,23 +420,24 @@ impl WorkerQueryClient {
 
     #[cfg(test)]
     async fn handle_removed_worker_dp(&self, worker_id: WorkerId, dp_rank: DpRank) {
-        self.query_targets.remove(&(worker_id, dp_rank));
+        self.query_endpoints.remove_dp(worker_id, dp_rank);
         self.remove_worker_dp_state(worker_id, dp_rank).await;
     }
 
-    async fn handle_removed_query_endpoint(&self, endpoint: DiscoveredQueryEndpoint) {
-        let key = (endpoint.worker_id, endpoint.dp_rank);
-        let should_remove = self
-            .query_targets
-            .get(&key)
-            .is_some_and(|target| target.value() == &endpoint.target);
-        if !should_remove {
+    async fn handle_removed_query_endpoint(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        endpoint_id: EndpointInstanceId,
+    ) {
+        if !self
+            .query_endpoints
+            .remove_if_matches(worker_id, dp_rank, endpoint_id)
+        {
             return;
         }
 
-        self.query_targets.remove(&key);
-        self.remove_worker_dp_state(endpoint.worker_id, endpoint.dp_rank)
-            .await;
+        self.remove_worker_dp_state(worker_id, dp_rank).await;
     }
 
     async fn remove_worker_dp_state(&self, worker_id: WorkerId, dp_rank: DpRank) {
@@ -721,6 +745,28 @@ impl WorkerQueryClient {
         }
     }
 
+    async fn resolve_query_target_for_recovery(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        attempt: u32,
+    ) -> Option<Instance> {
+        if let Some(target) = self.query_target_for(worker_id, dp_rank) {
+            return Some(target);
+        }
+
+        if attempt < RECOVERY_MAX_RETRIES - 1 {
+            let backoff_ms = RECOVERY_INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
+            tracing::warn!(
+                "Worker {worker_id} dp_rank {dp_rank} query owner missing on attempt {attempt}, \
+                 retrying after {backoff_ms}ms"
+            );
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+        }
+
+        None
+    }
+
     /// Query a worker's local KV indexer with exponential backoff retry.
     async fn fetch_recovery_response(
         &self,
@@ -737,16 +783,19 @@ impl WorkerQueryClient {
         let mut last_error = None;
 
         for attempt in 0..RECOVERY_MAX_RETRIES {
-            let target = self.query_target_for(worker_id, dp_rank);
+            let Some(target) = self
+                .resolve_query_target_for_recovery(worker_id, dp_rank, attempt)
+                .await
+            else {
+                last_error = Some(anyhow::anyhow!(
+                    "No query owner discovered for worker {worker_id} dp_rank {dp_rank}"
+                ));
+                continue;
+            };
+
             match self
                 .transport
-                .query_worker(
-                    worker_id,
-                    dp_rank,
-                    target.clone(),
-                    start_event_id,
-                    end_event_id,
-                )
+                .query_worker(worker_id, dp_rank, target, start_event_id, end_event_id)
                 .await
             {
                 Ok(resp) => {
@@ -785,6 +834,7 @@ pub(crate) async fn start_worker_kv_query_endpoint(
 ) {
     let engine = Arc::new(WorkerKvQueryEngine {
         worker_id,
+        dp_rank,
         local_indexer,
         processing_semaphore: Semaphore::new(1),
     });
@@ -826,6 +876,7 @@ pub(crate) async fn start_worker_kv_query_endpoint(
 
 struct WorkerKvQueryEngine {
     worker_id: u64,
+    dp_rank: DpRank,
     local_indexer: Arc<LocalKvIndexer>,
     /// Semaphore limiting concurrent recovery request processing to 1.
     /// Prevents multiple routers from overwhelming the worker with heavy tree dump operations.
@@ -852,6 +903,18 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
             let error_message = format!(
                 "WorkerKvQueryEngine::generate worker_id mismatch: request.worker_id={} this.worker_id={}",
                 request.worker_id, self.worker_id
+            );
+            let response = WorkerKvQueryResponse::Error(error_message);
+            return Ok(ResponseStream::new(
+                Box::pin(stream::iter(vec![response])),
+                ctx.context(),
+            ));
+        }
+
+        if request.dp_rank != self.dp_rank {
+            let error_message = format!(
+                "WorkerKvQueryEngine::generate dp_rank mismatch: request.dp_rank={} this.dp_rank={}",
+                request.dp_rank, self.dp_rank
             );
             let response = WorkerKvQueryResponse::Error(error_message);
             return Ok(ResponseStream::new(
@@ -970,7 +1033,7 @@ mod tests {
         actions: DashMap<RecoveryKey, Arc<StdMutex<VecDeque<MockQueryAction>>>>,
         #[allow(clippy::type_complexity)]
         calls: Arc<StdMutex<Vec<(RecoveryKey, Option<u64>, Option<u64>)>>>,
-        targets: Arc<StdMutex<Vec<(RecoveryKey, WorkerQueryTarget)>>>,
+        targets: Arc<StdMutex<Vec<(RecoveryKey, Instance)>>>,
     }
 
     impl MockWorkerQueryTransport {
@@ -991,7 +1054,7 @@ mod tests {
             self.calls.lock().unwrap().clone()
         }
 
-        fn targets(&self) -> Vec<(RecoveryKey, WorkerQueryTarget)> {
+        fn targets(&self) -> Vec<(RecoveryKey, Instance)> {
             self.targets.lock().unwrap().clone()
         }
     }
@@ -1002,7 +1065,7 @@ mod tests {
             &self,
             worker_id: WorkerId,
             dp_rank: DpRank,
-            target: WorkerQueryTarget,
+            target: Instance,
             start_event_id: Option<u64>,
             end_event_id: Option<u64>,
         ) -> Result<WorkerKvQueryResponse> {
@@ -1077,15 +1140,19 @@ mod tests {
         (client, transport, kv_indexer)
     }
 
-    fn make_endpoint_instance(endpoint: String, instance_id: WorkerId) -> DiscoveryInstance {
-        DiscoveryInstance::Endpoint(Instance {
+    fn make_instance(endpoint: String, instance_id: WorkerId) -> Instance {
+        Instance {
             namespace: "test-ns".to_string(),
             component: "test-component".to_string(),
             endpoint,
             instance_id,
             transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
             device_type: None,
-        })
+        }
+    }
+
+    fn make_endpoint_instance(endpoint: String, instance_id: WorkerId) -> DiscoveryInstance {
+        DiscoveryInstance::Endpoint(make_instance(endpoint, instance_id))
     }
 
     fn make_endpoint_instance_id(endpoint: String, instance_id: WorkerId) -> DiscoveryInstanceId {
@@ -1192,7 +1259,7 @@ mod tests {
         let endpoint_name = worker_kv_indexer_query_endpoint(4);
         let instance = make_endpoint_instance(endpoint_name.clone(), 11);
 
-        let parsed = WorkerQueryClient::parse_query_endpoint(&instance)
+        let parsed = WorkerQueryEndpointDirectory::parse_added(instance)
             .expect("legacy query endpoint should parse");
 
         assert_eq!(
@@ -1200,10 +1267,7 @@ mod tests {
             DiscoveredQueryEndpoint {
                 worker_id: 11,
                 dp_rank: 4,
-                target: WorkerQueryTarget {
-                    route_worker_id: 11,
-                    endpoint_name,
-                },
+                target: make_instance(endpoint_name, 11),
             }
         );
     }
@@ -1214,21 +1278,20 @@ mod tests {
         let instance = make_endpoint_instance(endpoint_name.clone(), 11);
         let instance_id = make_endpoint_instance_id(endpoint_name.clone(), 11);
 
-        let parsed = WorkerQueryClient::parse_query_endpoint(&instance)
+        let parsed = WorkerQueryEndpointDirectory::parse_added(instance)
             .expect("worker-scoped query endpoint should parse");
-        let parsed_id = WorkerQueryClient::parse_instance_id(&instance_id)
+        let parsed_id = WorkerQueryEndpointDirectory::parse_removed(instance_id)
             .expect("worker-scoped query endpoint id should parse");
 
         let expected = DiscoveredQueryEndpoint {
             worker_id: 100,
             dp_rank: 4,
-            target: WorkerQueryTarget {
-                route_worker_id: 11,
-                endpoint_name,
-            },
+            target: make_instance(endpoint_name, 11),
         };
         assert_eq!(parsed, expected.clone());
-        assert_eq!(parsed_id, expected);
+        assert_eq!(parsed_id.0, expected.worker_id);
+        assert_eq!(parsed_id.1, expected.dp_rank);
+        assert_eq!(parsed_id.2, expected.target.endpoint_instance_id());
     }
 
     #[tokio::test]
@@ -1238,10 +1301,7 @@ mod tests {
         let endpoint = DiscoveredQueryEndpoint {
             worker_id: 100,
             dp_rank: 4,
-            target: WorkerQueryTarget {
-                route_worker_id: 11,
-                endpoint_name: endpoint_name.clone(),
-            },
+            target: make_instance(endpoint_name.clone(), 11),
         };
 
         transport.push_action(
@@ -1261,13 +1321,7 @@ mod tests {
         wait_for(|| transport.call_count() == 1).await;
         assert_eq!(
             transport.targets(),
-            vec![(
-                (100, 4),
-                WorkerQueryTarget {
-                    route_worker_id: 11,
-                    endpoint_name,
-                }
-            )]
+            vec![((100, 4), make_instance(endpoint_name, 11))]
         );
         kv_indexer.flush().await;
     }
@@ -1294,12 +1348,14 @@ mod tests {
 
         let engine = WorkerKvQueryEngine {
             worker_id,
+            dp_rank: 0,
             local_indexer,
             processing_semaphore: Semaphore::new(1),
         };
 
         let request = WorkerKvQueryRequest {
             worker_id,
+            dp_rank: 0,
             start_event_id: Some(1),
             end_event_id: Some(1),
         };
