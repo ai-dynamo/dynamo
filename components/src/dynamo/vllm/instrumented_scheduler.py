@@ -489,7 +489,8 @@ class InstrumentedScheduler(AsyncScheduler):
         """Synthetic decode benchmark requests register as new requests."""
         return (
             getattr(self, "_bench_active", False)
-            and getattr(self, "_bench_phase", _BenchPhase.IDLE) == _BenchPhase.DECODE_SWEEP
+            and getattr(self, "_bench_phase", _BenchPhase.IDLE)
+            == _BenchPhase.DECODE_SWEEP
             and req_id in getattr(self, "_bench_active_req_ids", set())
         )
 
