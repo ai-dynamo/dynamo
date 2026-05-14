@@ -154,7 +154,6 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
     Some(format!("[{}]", items.join(",")))
 }
 
-
 /// Attempt to repair JSON truncated by max_tokens / EOS. Walks the input
 /// tracking string state and brace/bracket nesting; on EOF closes any
 /// open string and pops outstanding closers. Returns `Some(repaired)` only
