@@ -909,13 +909,59 @@ class ManagedDeployment:
         except Exception as e:
             self._logger.debug(f"Failed to snapshot restart baseline: {e}")
 
-    async def _check_post_ready_restarts(self) -> List[str]:
+    async def _fetch_previous_container_log(
+        self,
+        pod_name: str,
+        container: str,
+        tail_lines: int = 100,
+    ) -> Optional[str]:
+        """Fetch the previous (pre-restart) instance log for a container.
+
+        Returns the tail of the log as a single string, or None if no previous
+        instance exists or the API call fails. This is the artifact that
+        normally lives in ``<pod>.<container>.previous.log`` on disk; we
+        surface it inline so failed CI runs are self-diagnosing without
+        needing an artifact download.
+        """
+        try:
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            log = await self._core_api.read_namespaced_pod_log(
+                name=pod_name,
+                namespace=self.namespace,
+                container=container,
+                previous=True,
+                tail_lines=tail_lines,
+            )
+            return log if isinstance(log, str) else str(log)
+        except exceptions.ApiException as e:
+            # 400 "previous terminated container … not found" is the common
+            # case when restart_count > 0 but the previous instance log was
+            # rotated. 404 means the pod is gone (cleanup race).
+            self._logger.debug(
+                f"No previous log for {pod_name}/{container} "
+                f"(status={e.status}, reason={e.reason})"
+            )
+            return None
+        except Exception as e:
+            self._logger.debug(
+                f"Failed to fetch previous log for {pod_name}/{container}: {e}"
+            )
+            return None
+
+    async def _check_post_ready_restarts(
+        self, prev_log_tail_lines: int = 80
+    ) -> List[str]:
         """Return a list of human-readable warnings for any container whose
         restart count increased since the Ready baseline was captured.
 
         This is the signal that distinguishes "test sent a bad request and the
         sidecar crashed" from "the sidecar refused to handle the request":
         the former increments restart_count, the latter does not.
+
+        For every restarted container we also embed the tail of the
+        pre-restart log (``previous=True``) so the cause -- e.g. a vLLM
+        Python traceback that exits with code 1 -- is visible in the test
+        output itself without having to download the CI pod-logs artifact.
         """
         if not self._ready_restart_baseline:
             return []
@@ -951,6 +997,25 @@ class ManagedDeployment:
                             warning += f" lastReason={last_reason}"
                         if last_exit is not None:
                             warning += f" lastExitCode={last_exit}"
+
+                        # Inline the tail of the previous-instance log so the
+                        # actual cause of the crash is in the test output.
+                        prev_log = await self._fetch_previous_container_log(
+                            pod_name, cs.name, tail_lines=prev_log_tail_lines
+                        )
+                        if prev_log:
+                            warning += (
+                                f"\n      --- last {prev_log_tail_lines} lines of "
+                                f"previous {cs.name} log ({pod_name}) ---\n"
+                            )
+                            for line in prev_log.splitlines():
+                                warning += f"      {line}\n"
+                            warning += f"      --- end of previous {cs.name} log ---"
+                        else:
+                            warning += (
+                                f"\n      (previous log unavailable for "
+                                f"{cs.name} on {pod_name})"
+                            )
                         warnings.append(warning)
             return warnings
         except Exception as e:
