@@ -380,12 +380,24 @@ class CachedTokensChatPayload(ChatPayload):
         expected_log: Optional[List[str]] = None,
         timeout: int = 60,
         min_cached_tokens: int = 1,
+        require_lightseek_init: bool = False,
+        min_routing_total_blocks: int = 0,
     ):
+        # MM-aware routing checks: piggyback on engine_process.validate_expected_logs.
+        log_patterns: List[str] = list(expected_log or [])
+        if require_lightseek_init:
+            log_patterns.append(r"MM-aware KV routing enabled \(lightseek\)")
+        if min_routing_total_blocks > 0:
+            # Threshold assumed to be a power of 10 (10, 100, ...).
+            min_digits = len(str(min_routing_total_blocks))
+            log_patterns.append(
+                rf"\[ROUTING\].*with\s+\d+/[1-9]\d{{{min_digits - 1},}}\s+blocks overlap"
+            )
         super().__init__(
             body=body,
             repeat_count=repeat_count,
             expected_response=expected_response or [],
-            expected_log=expected_log or [],
+            expected_log=log_patterns,
             timeout=timeout,
         )
         self.min_cached_tokens = min_cached_tokens
