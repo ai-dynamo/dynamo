@@ -128,6 +128,21 @@ def _make_dynamo_llm_stub() -> None:
         sys.modules.setdefault(name, mod)
 
 
+def _make_blake3_stub() -> None:
+    """Stub blake3 (C extension used by dynamo.trtllm.multimodal.hasher)."""
+    import importlib.machinery
+    import importlib.util
+
+    if importlib.util.find_spec("blake3") is not None:
+        return
+
+    mod = types.ModuleType("blake3")
+    mod.__spec__ = importlib.machinery.ModuleSpec("blake3", None)
+    # `from blake3 import blake3` — the imported name is a callable hasher class.
+    mod.blake3 = MagicMock
+    sys.modules.setdefault("blake3", mod)
+
+
 def _make_dynamo_runtime_stub() -> None:
     """Stub dynamo.runtime (also PyO3-backed) so import chains don't fail."""
     import importlib.machinery
@@ -144,6 +159,7 @@ def _make_dynamo_runtime_stub() -> None:
 
 
 _make_trtllm_stub()
+_make_blake3_stub()
 _make_dynamo_core_stub()
 _make_dynamo_llm_stub()
 _make_dynamo_runtime_stub()
