@@ -436,7 +436,18 @@ async def init_llm_worker(
         default_sampling_params.detokenize = False
 
     connector = None
-    if config.disaggregation_mode != DisaggregationMode.AGGREGATED:
+    needs_nixl = config.disaggregation_mode != DisaggregationMode.AGGREGATED or (
+        config.modality == Modality.MULTIMODAL
+        and (
+            config.frontend_decoding
+            or config.disaggregation_mode == DisaggregationMode.ENCODE
+            or (
+                config.disaggregation_mode == DisaggregationMode.PREFILL
+                and bool(config.encode_endpoint)
+            )
+        )
+    )
+    if needs_nixl:
         try:
             logging.info("Initializing NIXL Connect.")
             connector = nixl_connect.Connector()
