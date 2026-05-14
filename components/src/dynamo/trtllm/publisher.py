@@ -828,6 +828,15 @@ class Publisher:
             # request handling under load).
             self.processing_initial_created_events = False
             parent_hash = _to_signed_i64(data["parent_hash"])
+            # Track each block's actual chain parent for the metadata cache.
+            # The event-level `parent_hash` is the FIRST block's parent and
+            # stays unchanged for the per-tier dispatch below; `chain_parent`
+            # walks forward block-by-block so each block's metadata records
+            # the right parent for a later tier-transition `updated` event.
+            # Without this, every block past the first in a multi-block event
+            # gets cached with parent_hash=event_parent, which breaks the
+            # router's lower-tier chain walk on eviction.
+            chain_parent = parent_hash
             # Group blocks by cache_level (0 = primary GPU, 1 = secondary
             # host pool) so we can emit one BlockStored event per tier with
             # the correct storage_tier tag for the router's tiered indexer.
@@ -895,10 +904,14 @@ class Publisher:
                 self._block_metadata[block_hash] = {
                     "token_ids": token_id_list,
                     "num_block_tokens": token_num_in_block,
-                    "parent_hash": parent_hash,
+                    "parent_hash": chain_parent,
                     "block_mm_info": mm_info,
                     "cache_level": cache_level,
                 }
+                # Advance the chain so the next block in this event records
+                # the right parent in its metadata (this block becomes that
+                # block's parent in the prefix tree).
+                chain_parent = block_hash
 
             lora_name = data.get("lora_name")
 
@@ -1041,6 +1054,11 @@ class Publisher:
         """
         if not block_hashes:
             return
+        import logging as _lg
+        _lg.getLogger(__name__).warning(
+            'PROBE dispatch_stored: tier=%s parent=%s hashes=%s ntok=%s',
+            storage_tier, parent_hash, block_hashes, num_block_tokens,
+        )
         if self.zmq_kv_event_publisher:
             if storage_tier != "device":
                 logging.warning(
@@ -1084,6 +1102,11 @@ class Publisher:
     ) -> None:
         if not block_hashes:
             return
+        import logging as _lg
+        _lg.getLogger(__name__).warning(
+            'PROBE dispatch_removed: tier=%s hashes=%s',
+            storage_tier, block_hashes,
+        )
         if self.zmq_kv_event_publisher:
             if storage_tier != "device":
                 logging.warning(
