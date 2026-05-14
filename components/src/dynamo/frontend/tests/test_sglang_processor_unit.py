@@ -16,6 +16,7 @@ import sys
 import types
 
 import pytest
+from _routed_engine_fakes import FakeRoutedEngine
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
@@ -1645,8 +1646,6 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
     def test_stop_reason_emits_in_nvext_when_requested(self, tokenizer):
         """Frontend emits backend stop_reason under nvext when requested."""
-
-        from _routed_engine_fakes import FakeRoutedEngine
 
         async def collect():
             processor = SglangProcessor(
