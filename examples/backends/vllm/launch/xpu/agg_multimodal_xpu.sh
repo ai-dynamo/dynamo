@@ -71,6 +71,9 @@ case "$MODEL_NAME" in
         MODEL_EXTRA_ARGS="--tensor-parallel-size=8" ;;
 esac
 
+# Non-profiled XPU fallback: cap at 0.75 to leave headroom for the Level Zero
+# driver/runtime, whose allocations vLLM's accounting doesn't track. The profiler
+# path supplies its own --gpu-memory-utilization 0.01 via $GPU_MEM_ARGS.
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 # Start vLLM worker with vision model
@@ -81,9 +84,6 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
-    # Non-profiled XPU fallback: cap at 0.75 to leave headroom for the Level Zero
-    # driver/runtime, whose allocations vLLM's accounting doesn't track. The profiler
-    # path supplies its own --gpu-memory-utilization 0.01 via $GPU_MEM_ARGS.
     --block-size "${BLOCK_SIZE:-64}" \
     ${GPU_MEM_ARGS:---gpu-memory-utilization 0.75} $MODEL_EXTRA_ARGS "${EXTRA_ARGS[@]}" &
 
