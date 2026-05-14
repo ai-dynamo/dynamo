@@ -653,8 +653,20 @@ async def register_vllm_model(
 
     # Get data_parallel_size from vllm_config (defaults to 1)
     dp_range = get_dp_range_for_worker(vllm_config)
-    runtime_config.data_parallel_start_rank = dp_range[0]
-    runtime_config.data_parallel_size = dp_range[1]
+    if config.use_internal_dp_lb:
+        # Present this worker as a single endpoint to dynamo and let vLLM's
+        # internal DPLB pick the rank per request. Actual vLLM DP topology
+        # is unchanged.
+        logger.info(
+            "use-internal-dp-lb: reporting data_parallel_size=1 to dynamo "
+            "(vLLM-internal DP=%d will pick per-request)",
+            dp_range[1],
+        )
+        runtime_config.data_parallel_start_rank = 0
+        runtime_config.data_parallel_size = 1
+    else:
+        runtime_config.data_parallel_start_rank = dp_range[0]
+        runtime_config.data_parallel_size = dp_range[1]
 
     # Configure media decoder for frontend image decoding when enabled
     # This enables frontend to decode images and transfer via NIXL RDMA

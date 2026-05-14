@@ -637,6 +637,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
+        # When --use-internal-dp-lb is set, the worker reports dp_size=1 to
+        # dynamo and ignores any incoming dp_rank hint so vLLM's internal
+        # DPLB picks the rank per request. See `_to_local_dp_rank`.
+        self._use_internal_dp_lb: bool = bool(
+            getattr(config, "use_internal_dp_lb", False)
+        )
         self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
         self._quiesce_lock = asyncio.Lock()
         self._mm_kwargs_receiver: MmKwargsNixlReceiver | None = None
@@ -1059,6 +1065,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     def _to_local_dp_rank(self, dp_rank: int | None) -> int | None:
         """Convert global DP rank to local DP rank based on engine config."""
+        if self._use_internal_dp_lb:
+            # Drop any router-provided dp_rank so vLLM's AsyncLLM uses its
+            # internal DPLBAsyncMPClient to pick the rank for this request.
+            return None
         if dp_rank is None:
             return None
         if dp_rank < self.dp_range[0] or dp_rank >= self.dp_range[0] + self.dp_range[1]:

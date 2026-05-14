@@ -140,6 +140,23 @@ class DynamoVllmArgGroup(ArgGroup):
             "See vLLM multi-node data parallel documentation for more details.",
         )
 
+        # Hide vLLM's DP ranks from dynamo's router and let vLLM's internal
+        # DPLB pick the rank for each incoming request.
+        add_negatable_bool_argument(
+            g,
+            flag_name="--use-internal-dp-lb",
+            env_var="DYN_VLLM_USE_INTERNAL_DP_LB",
+            default=False,
+            help=(
+                "Use vLLM's internal DPLBAsyncMPClient to pick the DP rank per "
+                "request, instead of letting dynamo's router pick a specific DP "
+                "rank. The worker reports data_parallel_size=1 to dynamo discovery "
+                "regardless of vLLM's actual DP size, and the handler drops any "
+                "dp_rank hint on incoming requests."
+            ),
+            dest="use_internal_dp_lb",
+        )
+
         # ModelExpress P2P
         add_argument(
             g,
@@ -262,6 +279,10 @@ class DynamoVllmConfig(ConfigBase):
 
     # Headless mode for multi-node TP/PP
     headless: bool = False
+
+    # Report dp_size=1 to dynamo and let vLLM's internal DPLB pick the
+    # per-request DP rank. See the `--use-internal-dp-lb` CLI help for details.
+    use_internal_dp_lb: bool = False
 
     # ModelExpress P2P
     model_express_url: Optional[str] = None
