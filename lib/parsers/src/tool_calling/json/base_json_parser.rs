@@ -112,8 +112,8 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
                 //   {"name":"q","arguments":{}} Let me know if you need more
                 // from_str would Err on the trailing text; StreamDeserializer
                 // reads one value and stops.
-                let mut stream = serde_json::Deserializer::from_str(remaining)
-                    .into_iter::<Box<RawValue>>();
+                let mut stream =
+                    serde_json::Deserializer::from_str(remaining).into_iter::<Box<RawValue>>();
                 match stream.next() {
                     Some(Ok(rv)) => {
                         let raw = rv.get();
