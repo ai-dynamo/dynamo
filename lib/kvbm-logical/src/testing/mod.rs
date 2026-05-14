@@ -49,7 +49,7 @@ pub struct MetadataC;
 
 /// Standard salt value for test token blocks.
 /// Standardizes mixed salt values (42 in pools/manager, 1337 in registry).
-pub const TEST_SALT: u64 = 42;
+pub const TEST_SALT: dynamo_tokens::SaltHash = 42;
 
 // ============================================================================
 // Re-exports from submodules

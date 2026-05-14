@@ -16,11 +16,14 @@
 //!   tree. A single-child chain (the common KV-prefix shape) is just
 //!   `first_child`; branches extend the `next_sibling` chain.
 //!
-//! A single `index: HashMap<(position, fragment), u32>` resolves the
-//! `(position, current_hash_fragment)` pair to a slot — needed because
-//! lineage navigation is by *fragment* (a child's hash only carries its
-//! parent's fragment, never the parent's full hash). It is identity-mixed
-//! (see `PairHasher`) and pre-sized, so it does not rehash on the hot path.
+//! A single `index: HashMap<(position, fragment), u32>` resolves a
+//! `(position, fragment)` pair to a slot — needed because lineage
+//! navigation is by *fragment* (a child's hash only carries its parent's
+//! fragment, never the parent's full hash). A node is keyed by
+//! `parent_fragment_for_child_position(position + 1)` — the fragment width
+//! its children compute as `parent_hash_fragment` — so child→parent
+//! lookups match exactly. The map is identity-mixed (see `PairHasher`) and
+//! pre-sized, so it does not rehash on the hot path.
 //!
 //! # Leaf eviction ordering
 //!
@@ -48,8 +51,8 @@ use crate::pools::store::InactiveIndex;
 // `(position, fragment)` index hasher
 // ---------------------------------------------------------------------------
 
-/// Hand-rolled mixer for the `(u64, u64)` index key. `current_hash_fragment`
-/// is already a well-mixed hash fragment and `position` is a small int;
+/// Hand-rolled mixer for the `(u64, u64)` index key. The fragment word is
+/// already a well-mixed hash fragment and `position` is a small int;
 /// SipHash over the pair would be wasted work on the lookup hot path. A
 /// `(u64, u64)` derives `Hash` as two `write_u64` calls, so an FxHash-style
 /// rotate-xor-multiply accumulator over those two words is sufficient and
@@ -237,7 +240,13 @@ impl LineageBackend {
 
     fn insert_inner(&mut self, seq_hash: SequenceHash, block_id: BlockId) {
         let position = seq_hash.position();
-        let fragment = seq_hash.current_hash_fragment();
+        // Key this node by the same fragment width its children will store
+        // as their `parent_hash_fragment`, so child→parent lookups match
+        // exactly. PLH fragment widths vary by mode (54/46/38 bits); a node
+        // at `position` must be keyed at the width a child at `position + 1`
+        // uses for its parent fragment — not this node's own
+        // `current_hash_fragment` width.
+        let fragment = seq_hash.parent_fragment_for_child_position(position + 1);
         let parent_fragment = if position > 0 {
             Some(seq_hash.parent_hash_fragment())
         } else {
@@ -344,16 +353,16 @@ impl LineageBackend {
     /// Look up a node by its full `SequenceHash` and, if it is the real
     /// block stored under that `(position, fragment)` key, remove it.
     ///
-    /// The full-hash verification matters: `(position, current_hash_fragment)`
-    /// is not unique — distinct `PositionalLineageHash`es can share that pair
-    /// (same current hash + position, different parent), so a key-only match
+    /// The full-hash verification matters: the `(position, fragment)` key
+    /// is not unique — distinct `PositionalLineageHash`es can share it
+    /// (same fragment + position, different parent), so a key-only match
     /// would let a lookup for one PLH delete another's block.
     fn remove_by_hash(
         &mut self,
         lineage_hash: &PositionalLineageHash,
     ) -> Option<(SequenceHash, BlockId)> {
         let position = lineage_hash.position();
-        let fragment = lineage_hash.current_hash_fragment();
+        let fragment = lineage_hash.parent_fragment_for_child_position(position + 1);
         let idx = *self.index.get(&(position, fragment))?;
         match self.slots[idx as usize].data {
             SlotData::Real { seq_hash, .. } if seq_hash == *lineage_hash => {
@@ -478,7 +487,7 @@ impl InactiveIndex for LineageBackend {
 
     fn has(&self, seq_hash: SequenceHash) -> bool {
         let position = seq_hash.position();
-        let fragment = seq_hash.current_hash_fragment();
+        let fragment = seq_hash.parent_fragment_for_child_position(position + 1);
         self.index.get(&(position, fragment)).is_some_and(|&idx| {
             match self.slots[idx as usize].data {
                 SlotData::Real {
@@ -490,10 +499,10 @@ impl InactiveIndex for LineageBackend {
     }
 
     fn take(&mut self, seq_hash: SequenceHash, block_id: BlockId) -> bool {
-        // Match on the full `SequenceHash` AND the block id — `(position,
-        // current_hash_fragment)` alone can collide across distinct PLHs.
+        // Match on the full `SequenceHash` AND the block id — the
+        // `(position, fragment)` key alone can collide across distinct PLHs.
         let position = seq_hash.position();
-        let fragment = seq_hash.current_hash_fragment();
+        let fragment = seq_hash.parent_fragment_for_child_position(position + 1);
         let hit = self.index.get(&(position, fragment)).is_some_and(|&idx| {
             match self.slots[idx as usize].data {
                 SlotData::Real {
@@ -763,9 +772,9 @@ mod tests {
     }
 
     /// Regression: lookups must compare the full `SequenceHash`, not just
-    /// `(position, current_hash_fragment)`. Two `PositionalLineageHash`es that
-    /// share that key pair but have different parents must not collide —
-    /// otherwise `find_matches` / `scan_matches` / `take` / `has` would
+    /// the `(position, fragment)` index key. Two `PositionalLineageHash`es
+    /// that share that key pair but have different parents must not collide
+    /// — otherwise `find_matches` / `scan_matches` / `take` / `has` would
     /// return or remove the wrong block.
     #[test]
     fn lookup_rejects_same_position_fragment_but_different_full_hash() {
@@ -773,8 +782,8 @@ mod tests {
         let impostor: SequenceHash = SequenceHash::new(0xAA, Some(0x22), 5);
         assert_eq!(stored.position(), impostor.position());
         assert_eq!(
-            stored.current_hash_fragment(),
-            impostor.current_hash_fragment()
+            stored.parent_fragment_for_child_position(stored.position() + 1),
+            impostor.parent_fragment_for_child_position(impostor.position() + 1)
         );
         assert_ne!(stored.as_u128(), impostor.as_u128());
 
