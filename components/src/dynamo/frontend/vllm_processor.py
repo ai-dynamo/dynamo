@@ -430,6 +430,7 @@ class VllmProcessor:
                 "stop_token_ids": sp.stop_token_ids,
                 "min_tokens": sp.min_tokens,
                 "ignore_eos": sp.ignore_eos,
+                "max_thinking_tokens": sp.thinking_token_budget,
             },
             "sampling_options": {
                 "n": sp.n,
