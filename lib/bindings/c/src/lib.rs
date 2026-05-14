@@ -450,6 +450,7 @@ impl RouterHandles {
     ///
     /// When `allowed_worker_ids` is Some, only workers in that set are considered.
     /// Returns worker_id on success.
+    #[expect(clippy::too_many_arguments)]
     async fn query_prefill_worker(
         &self,
         tokens: &[u32],
@@ -458,6 +459,7 @@ impl RouterHandles {
         lora_name: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        taints: Taints,
     ) -> Result<(u64, Option<u32>), QueryRouterResult> {
         if let Some(ref ids) = allowed_worker_ids {
             self.prefill_router.register_workers(ids);
@@ -471,7 +473,7 @@ impl RouterHandles {
                 lora_name,
                 priority_jump,
                 allowed_worker_ids,
-                Taints::default(),
+                taints,
             )
             .await
             .map_err(|e| {
@@ -501,6 +503,7 @@ impl RouterHandles {
         is_disaggregated: bool,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        taints: Taints,
     ) -> Result<(WorkerWithDpRank, u32), QueryRouterResult> {
         if let Some(ref ids) = allowed_worker_ids {
             self.decode_router.register_workers(ids);
@@ -530,7 +533,7 @@ impl RouterHandles {
                 priority_jump,
                 None,
                 allowed_worker_ids,
-                Taints::default(),
+                taints,
             )
             .await
             .map_err(|e| {
@@ -1126,7 +1129,7 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
 /// Parse a JSON request string, apply the chat template, tokenize, and lift
 /// the router-relevant `priority_jump` out of `nvext.agent_hints.priority`.
 ///
-/// Returns `(token_ids, priority_jump)` on success, or a `QueryRouterResult`
+/// Returns `(token_ids, priority_jump, taints)` on success, or a `QueryRouterResult`
 /// error code. `priority_jump` is `0.0` when no hint is present. This mirrors
 /// the standalone Dynamo preprocessor lift in `lib/llm/src/preprocessor.rs`
 /// so the GAIE/EPP path produces the same queue ordering as a non-EPP
@@ -1134,7 +1137,7 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
 unsafe fn preprocess_request(
     handles: &RouterHandles,
     request_json: *const c_char,
-) -> Result<(Vec<u32>, f64), QueryRouterResult> {
+) -> Result<(Vec<u32>, f64, Taints), QueryRouterResult> {
     let preprocessor = match &handles.preprocessor {
         Some(p) => p,
         None => {
@@ -1158,6 +1161,11 @@ unsafe fn preprocess_request(
         };
 
     let priority_jump = extract_priority_jump(&request);
+    let taints = request
+        .nvext
+        .as_ref()
+        .and_then(|nvext| nvext.taints.clone())
+        .unwrap_or_default();
 
     let formatted_prompt = match preprocessor.apply_template(&request) {
         Ok(Some(prompt)) => prompt,
@@ -1184,7 +1192,7 @@ unsafe fn preprocess_request(
         "[EPP-TOKENIZE] Tokenized prompt in C bindings (this is the ONLY tokenization)"
     );
 
-    Ok((token_ids, priority_jump))
+    Ok((token_ids, priority_jump, taints))
 }
 
 /// Parse pods JSON into an optional set of allowed worker IDs.
@@ -1270,7 +1278,8 @@ pub unsafe extern "C" fn route_prefill_request(
 
     let handles = unsafe { &*handle };
 
-    let (tokens, priority_jump) = match unsafe { preprocess_request(handles, request_json) } {
+    let (tokens, priority_jump, taints) = match unsafe { preprocess_request(handles, request_json) }
+    {
         Ok(t) => t,
         Err(code) => return code,
     };
@@ -1286,6 +1295,7 @@ pub unsafe extern "C" fn route_prefill_request(
                 None,
                 priority_jump,
                 allowed_worker_ids,
+                taints,
             )
             .await?;
 
@@ -1348,7 +1358,8 @@ pub unsafe extern "C" fn route_decode_request(
 
     let handles = unsafe { &*handle };
 
-    let (tokens, priority_jump) = match unsafe { preprocess_request(handles, request_json) } {
+    let (tokens, priority_jump, taints) = match unsafe { preprocess_request(handles, request_json) }
+    {
         Ok(t) => t,
         Err(code) => return code,
     };
@@ -1357,7 +1368,13 @@ pub unsafe extern "C" fn route_decode_request(
 
     let result = handles.runtime.secondary().block_on(async {
         let (decode_worker, _overlap_blocks) = handles
-            .query_decode_worker(&tokens, is_disaggregated, priority_jump, allowed_worker_ids)
+            .query_decode_worker(
+                &tokens,
+                is_disaggregated,
+                priority_jump,
+                allowed_worker_ids,
+                taints,
+            )
             .await?;
 
         tracing::info!(

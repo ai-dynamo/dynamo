@@ -407,7 +407,34 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::SharedCacheHits;
+    use crate::protocols::{SharedCacheHits, WorkerConfigLike};
+
+    #[derive(Clone, Default)]
+    struct TaintedWorkerConfig {
+        taints: Vec<String>,
+    }
+
+    impl WorkerConfigLike for TaintedWorkerConfig {
+        fn data_parallel_start_rank(&self) -> u32 {
+            0
+        }
+
+        fn data_parallel_size(&self) -> u32 {
+            1
+        }
+
+        fn max_num_batched_tokens(&self) -> Option<u64> {
+            None
+        }
+
+        fn total_kv_blocks(&self) -> Option<u64> {
+            None
+        }
+
+        fn taints(&self) -> &[String] {
+            &self.taints
+        }
+    }
 
     #[test]
     fn test_softmax_sample_single_key() {
@@ -570,6 +597,156 @@ mod tests {
             selected_count > 1,
             "zero-temperature tie-breaking should not always select the same worker"
         );
+    }
+
+    #[test]
+    fn test_required_taints_return_no_endpoints_when_no_worker_matches() {
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let workers = HashMap::from([(
+            10,
+            TaintedWorkerConfig {
+                taints: vec!["mdc-a".to_string()],
+            },
+        )]);
+        let request = SchedulingRequest {
+            maybe_request_id: Some("test".into()),
+            token_seq: None,
+            isl_tokens: 16,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::default(),
+            effective_cached_tokens: HashMap::default(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            update_states: false,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            taints: crate::protocols::Taints {
+                required: vec!["mdc-b".to_string()],
+                preferred: Vec::new(),
+            },
+            shared_cache_hits: None,
+            resp_tx: None,
+        };
+
+        let result = selector.select_worker(&workers, &request, 16);
+        assert!(matches!(result, Err(KvSchedulerError::NoEndpoints)));
+    }
+
+    #[test]
+    fn test_required_taints_filter_out_incompatible_workers() {
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let workers = HashMap::from([
+            (
+                10,
+                TaintedWorkerConfig {
+                    taints: vec!["mdc-a".to_string()],
+                },
+            ),
+            (
+                20,
+                TaintedWorkerConfig {
+                    taints: vec!["mdc-b".to_string()],
+                },
+            ),
+        ]);
+        let request = SchedulingRequest {
+            maybe_request_id: Some("test".into()),
+            token_seq: None,
+            isl_tokens: 16,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::default(),
+            effective_cached_tokens: HashMap::default(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            update_states: false,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            taints: crate::protocols::Taints {
+                required: vec!["mdc-b".to_string()],
+                preferred: Vec::new(),
+            },
+            shared_cache_hits: None,
+            resp_tx: None,
+        };
+
+        let result = selector.select_worker(&workers, &request, 16).unwrap();
+        assert_eq!(result.worker.worker_id, 20);
+    }
+
+    #[test]
+    fn test_required_taints_switch_matching_worker_sets_by_label() {
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let name_a = "mdc-a".to_string();
+        let name_b = "mdc-b".to_string();
+        let name_c = "mdc-c".to_string();
+        let taint_a = TaintedWorkerConfig {
+            taints: vec![name_a.clone()],
+        };
+        let taint_b = TaintedWorkerConfig {
+            taints: vec![name_b.clone()],
+        };
+        let taint_c = TaintedWorkerConfig {
+            taints: vec![name_c.clone()],
+        };
+        let workers = HashMap::from([
+            (10, taint_a.clone()),
+            (11, taint_a),
+            (20, taint_b.clone()),
+            (21, taint_b),
+            (30, taint_c.clone()),
+            (31, taint_c),
+        ]);
+
+        for (required_taint, expected_worker_id, noisy_worker_id) in [
+            (name_a, 10_u64, 11_u64),
+            (name_b, 20_u64, 21_u64),
+            (name_c, 30_u64, 31_u64),
+        ] {
+            let mut decode_blocks = FxHashMap::default();
+            decode_blocks.insert(WorkerWithDpRank::from_worker_id(expected_worker_id), 0);
+            decode_blocks.insert(WorkerWithDpRank::from_worker_id(noisy_worker_id), 400_000);
+
+            let request = SchedulingRequest {
+                maybe_request_id: Some("test".into()),
+                token_seq: None,
+                isl_tokens: 16,
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: HashMap::default(),
+                effective_cached_tokens: HashMap::default(),
+                decode_blocks,
+                prefill_tokens: FxHashMap::default(),
+                track_prefill_tokens: true,
+                router_config_override: None,
+                update_states: false,
+                lora_name: None,
+                priority_jump: 0.0,
+                expected_output_tokens: None,
+                pinned_worker: None,
+                allowed_worker_ids: None,
+                taints: crate::protocols::Taints {
+                    required: vec![required_taint.clone()],
+                    preferred: Vec::new(),
+                },
+                shared_cache_hits: None,
+                resp_tx: None,
+            };
+
+            let result = selector.select_worker(&workers, &request, 16).unwrap();
+            assert_eq!(
+                result.worker.worker_id, expected_worker_id,
+                "required taint {required_taint} should route only within its compatible worker set"
+            );
+        }
     }
 
     /// Test the scoring formula with shared cache hits.
