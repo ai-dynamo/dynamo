@@ -141,7 +141,7 @@ jobs:
     needs: image
     runs-on: prod-tester-amd-v2
     container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:5ce55e4f7cbdb5f6719237e9f4976f3b699a2571-dynamo-runtime-cuda12-test
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ inputs.cuda_version != '' && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || startsWith(inputs.cuda_version, '13.') && '13' || inputs.cuda_version) || '' }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
