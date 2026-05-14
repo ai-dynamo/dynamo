@@ -21,7 +21,6 @@
 //! resurrecting an evicted block from the store's inactive pool through
 //! the registry (slow path).
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
 use crate::ManagerId;
@@ -32,6 +31,12 @@ use crate::pools::{BlockStore, store::upgrade_or_resurrect};
 /// Internal owner of a registered slot. Every clone of an
 /// [`ImmutableBlock`] shares an `Arc<ImmutableBlockInner<T>>`. When the
 /// last `Arc` is dropped the slot transitions per `is_primary`.
+///
+/// The per-block "reset on release" override is *not* stored here —
+/// it lives in `BlockStore::reset_on_release[block_id]` and is read by
+/// `release_primary` under the store mutex. This keeps the override
+/// visible to the lookup-driven eager `Primary → Inactive` path even
+/// when this Inner is mid-drop.
 pub(crate) struct ImmutableBlockInner<T: BlockMetadata> {
     store: Arc<BlockStore<T>>,
     block_id: BlockId,
@@ -42,15 +47,6 @@ pub(crate) struct ImmutableBlockInner<T: BlockMetadata> {
     /// the primary cannot transition to `Inactive` (and thus be evicted)
     /// while any duplicate is alive.
     _primary_keepalive: Option<Arc<ImmutableBlockInner<T>>>,
-    /// When `true` *and* this is the last clone of a primary inner, the
-    /// slot bypasses the inactive pool and goes straight back to the
-    /// reset/free list (matches `release_duplicate` semantics). Mutated
-    /// via [`ImmutableBlock::set_evict_on_reset`] with `Relaxed`
-    /// ordering: only this Inner's `Drop` reads it, and `Drop` cannot
-    /// race with any `set_evict_on_reset` because the latter requires a
-    /// live `ImmutableBlock` clone (Arc strong ≥ 1) while `Drop` fires
-    /// at strong = 0. Initialized from `BlockStore::default_reset_on_release`.
-    reset_on_release: AtomicBool,
 }
 
 impl<T: BlockMetadata + Sync> ImmutableBlockInner<T> {
@@ -60,7 +56,6 @@ impl<T: BlockMetadata + Sync> ImmutableBlockInner<T> {
         seq_hash: SequenceHash,
         handle: BlockRegistrationHandle,
     ) -> Arc<Self> {
-        let reset_on_release = AtomicBool::new(store.default_reset_on_release());
         Arc::new(Self {
             store,
             block_id,
@@ -68,30 +63,6 @@ impl<T: BlockMetadata + Sync> ImmutableBlockInner<T> {
             handle,
             is_primary: true,
             _primary_keepalive: None,
-            reset_on_release,
-        })
-    }
-
-    /// Resurrection constructor: the slot is being promoted
-    /// `Inactive → Primary`. The `reset_on_release` flag is the value
-    /// captured into `SlotState::Inactive` from the previous holder's
-    /// last drop — *not* the store default. This makes a per-block
-    /// `set_evict_on_reset` override sticky across the cache-hit cycle.
-    pub(crate) fn new_primary_resurrected(
-        store: Arc<BlockStore<T>>,
-        block_id: BlockId,
-        seq_hash: SequenceHash,
-        handle: BlockRegistrationHandle,
-        reset_on_release: bool,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            store,
-            block_id,
-            seq_hash,
-            handle,
-            is_primary: true,
-            _primary_keepalive: None,
-            reset_on_release: AtomicBool::new(reset_on_release),
         })
     }
 
@@ -102,10 +73,6 @@ impl<T: BlockMetadata + Sync> ImmutableBlockInner<T> {
         handle: BlockRegistrationHandle,
         primary: Arc<ImmutableBlockInner<T>>,
     ) -> Arc<Self> {
-        // Duplicates always reset on drop regardless of this flag (see
-        // `release_duplicate`), but initialize from the store default for
-        // symmetry so any reader sees a consistent value.
-        let reset_on_release = AtomicBool::new(store.default_reset_on_release());
         Arc::new(Self {
             store,
             block_id,
@@ -113,7 +80,6 @@ impl<T: BlockMetadata + Sync> ImmutableBlockInner<T> {
             handle,
             is_primary: false,
             _primary_keepalive: Some(primary),
-            reset_on_release,
         })
     }
 
@@ -142,13 +108,12 @@ impl<T: BlockMetadata> Drop for ImmutableBlockInner<T> {
         // self_ptr identifies *this* Inner so the store can verify slot
         // identity before transitioning. If a concurrent
         // `acquire_for_hash` already eagerly completed the transition,
-        // the store call is a no-op.
+        // the store call is a no-op. The destination decision (Inactive
+        // vs Reset) is taken inside `release_primary` from the
+        // store-owned per-slot atomic.
         let self_ptr = self as *const ImmutableBlockInner<T> as *const ();
         if self.is_primary {
-            // `&mut self` excludes concurrent access; plain field read.
-            let reset_on_release = *self.reset_on_release.get_mut();
-            self.store
-                .release_primary(self.block_id, self_ptr, reset_on_release);
+            self.store.release_primary(self.block_id, self_ptr);
         } else {
             self.store.release_duplicate(self.block_id, self_ptr);
         }
@@ -212,27 +177,26 @@ impl<T: BlockMetadata + Sync> ImmutableBlock<T> {
     ///
     /// The override is sticky across cache-hit resurrections: if the
     /// block lands in the inactive pool and is later matched, the
-    /// resurrected `ImmutableBlock` inherits this value rather than
-    /// reading the store default. The override is discarded only when
-    /// the slot truly leaves the inactive pool (eviction back to
-    /// `Mutable`) or when the slot is reset.
+    /// resurrected `ImmutableBlock` inherits this value. The override
+    /// is reset to the store-wide default only when the slot truly
+    /// leaves the inactive pool (eviction back to `Mutable`).
     ///
-    /// Best-effort, lock-free: stored with `Ordering::Relaxed`. While
-    /// other clones exist, this block can still be matched by sequence
-    /// hash and acquired by other consumers — only the *last* drop
-    /// honors the flag. The flag is shared across clones via the
-    /// underlying `Arc`, so concurrent setters race with
-    /// last-writer-wins semantics.
+    /// Briefly acquires the store mutex to publish the write. Not a hot
+    /// path — typically called at most once per block. Concurrent
+    /// setters race with last-writer-wins semantics under the mutex.
     ///
-    /// There is one narrow race where the override is lost: if a
+    /// Race-window guarantee: the override is preserved even when a
     /// concurrent `match_blocks` drives the eager `Primary → Inactive`
     /// transition (because this `Inner`'s `Arc` strong-count went to 0
-    /// before `release_primary` ran), the new `Inactive` slot is
-    /// initialised from the store default instead of this override.
-    /// This is unavoidable — the dropping `Inner` is on another thread
-    /// mid-`Drop` and its atomic is unreachable.
+    /// before `release_primary` ran). The eager path leaves the
+    /// per-slot value untouched, and every reader of that value also
+    /// goes through the same store mutex — so visibility comes from
+    /// release-acquire on the mutex, not from any assumption about
+    /// `Arc::drop` / `Weak::upgrade` ordering.
     pub fn set_evict_on_reset(&self, value: bool) {
-        self.inner.reset_on_release.store(value, Ordering::Relaxed);
+        self.inner
+            .store
+            .store_reset_on_release(self.inner.block_id, value);
     }
 
     /// Type-erased lifecycle pin for cross-policy use.

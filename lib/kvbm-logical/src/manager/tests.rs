@@ -3261,13 +3261,17 @@ mod reset_on_release_tests {
     }
 
     /// Eager-resurrection path (concurrent lookup observes Arc strong=0
-    /// before Drop's `release_primary` fires) ignores the flag. The
-    /// resurrected block is a fresh Inner with the store default.
+    /// before Drop's `release_primary` fires) preserves the per-block
+    /// override. The override lives in the store-owned per-slot atomic
+    /// (not on the dropping Inner), so the eager `Primary → Inactive`
+    /// transition rides over the race window without losing the flag.
+    /// The resurrected block reads the same atomic on its own drop.
     ///
     /// Mirrors `eager_primary_to_inactive_is_deterministic_with_pause_hook`
-    /// in `race_regression_tests`.
+    /// in `race_regression_tests`. Regression test for the review finding
+    /// at https://github.com/ai-dynamo/dynamo/pull/9504#discussion_r3238515930.
     #[test]
-    fn eager_resurrection_ignores_flag() {
+    fn eager_resurrection_preserves_flag() {
         use std::sync::Arc;
         use std::thread;
 
@@ -3299,9 +3303,10 @@ mod reset_on_release_tests {
             std::thread::yield_now();
         }
 
-        // Concurrent lookup drives the eager transition. Even though the
-        // dropping Inner had flag=true, the eager path takes the Inactive
-        // branch (someone wants the block right now).
+        // Concurrent lookup drives the eager `Primary → Inactive`
+        // transition. The dropping Inner had flag=true; the eager path
+        // leaves the per-slot atomic untouched, so the override rides
+        // over the race window.
         let matched = manager.match_blocks(&[hash]);
         assert_eq!(matched.len(), 1, "eager resurrection must succeed");
 
@@ -3315,22 +3320,28 @@ mod reset_on_release_tests {
         drop_t.join().unwrap();
 
         // The parked drop saw a slot that no longer matched its self_ptr
-        // and no-opped — its flag had no effect.
+        // and no-opped — its destination decision was preempted by the
+        // eager path.
         let snap_after = manager.metrics().snapshot();
         assert_eq!(snap_after.release_primary_noop_total, 1);
 
-        // The new Inner (held by `matched`) inherited the *store
-        // default* (false), not the previous holder's `true`. Drop it
-        // and assert it lands in the inactive pool, not reset.
+        // The resurrected Inner reads the per-slot atomic on its own
+        // drop. Because the original holder had set the override to
+        // `true`, this drop must bypass the inactive pool and reset the
+        // slot — proving the override survived the race window.
         drop(matched);
 
         let store = manager.store_for_test();
         assert_eq!(
             store.inactive_len(),
-            1,
-            "resurrected block uses store default (false), goes to inactive"
+            0,
+            "override preserved — block bypasses inactive on drop",
         );
-        assert_eq!(store.reset_len(), 3);
+        assert_eq!(store.reset_len(), 4);
+        assert!(
+            !manager.block_registry().is_registered(hash),
+            "registry handle marked absent",
+        );
     }
 
     /// Duplicate blocks always reset on drop regardless of the flag —
