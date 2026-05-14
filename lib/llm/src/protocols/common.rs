@@ -343,6 +343,12 @@ pub struct SamplingOptions {
 
     /// Guided Decoding Options
     pub guided_decoding: Option<GuidedDecodingOptions>,
+
+    /// rl-sdk-2 TITO parity: when `Some(false)`, the engine should skip text
+    /// decoding of generated token IDs. Mirrors vLLM `SamplingParams.detokenize`.
+    /// Backends MAY ignore this hint; the only downside is wasted detok work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detokenize: Option<bool>,
 }
 
 /// Guided Decoding Options

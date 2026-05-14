@@ -264,6 +264,14 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
     fn get_skip_special_tokens(&self) -> Option<bool> {
         self.common.skip_special_tokens
     }
+
+    fn get_prompt_logprobs_count(&self) -> Option<u32> {
+        self.common.prompt_logprobs
+    }
+
+    fn get_detokenize(&self) -> Option<bool> {
+        self.common.detokenize
+    }
 }
 
 /// Implements `OpenAIStopConditionsProvider` for `NvCreateChatCompletionRequest`,
@@ -337,7 +345,11 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
     }
 
     fn get_prompt_logprobs(&self) -> Option<u32> {
-        None
+        // rl-sdk-2 TITO parity: clients (e.g. prime-rl teacher-logprobs path)
+        // request prompt logprobs by setting top-level `prompt_logprobs: N` on
+        // the chat-completions request body. Surfaced via CommonExt and then
+        // copied into common::OutputOptions.prompt_logprobs for the engine.
+        self.common.prompt_logprobs
     }
 
     fn get_skip_special_tokens(&self) -> Option<bool> {
@@ -521,14 +533,21 @@ mod tests {
             serde_json::from_value(scalar_token_id_stop);
         assert!(result.is_err());
 
-        let unsupported_stop_token_ids = json!({
+        // rl-sdk-2: `stop_token_ids` is in PASSTHROUGH_EXTRA_FIELDS (the
+        // RL-client compat allowlist). Validation must now ACCEPT it (the
+        // provider trait reads it from `unsupported_fields["stop_token_ids"]`
+        // and plumbs it into `common::StopConditions.stop_token_ids`).
+        let whitelisted_stop_token_ids = json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "Hello"}],
             "stop_token_ids": [576]
         });
         let request: NvCreateChatCompletionRequest =
-            serde_json::from_value(unsupported_stop_token_ids)
+            serde_json::from_value(whitelisted_stop_token_ids)
                 .expect("Failed to deserialize request");
-        assert!(ValidateRequest::validate(&request).is_err());
+        assert!(
+            ValidateRequest::validate(&request).is_ok(),
+            "stop_token_ids must be accepted via PASSTHROUGH_EXTRA_FIELDS"
+        );
     }
 }

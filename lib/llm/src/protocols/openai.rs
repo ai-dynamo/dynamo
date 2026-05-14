@@ -160,6 +160,10 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             }
         };
 
+        // rl-sdk-2 TITO parity: surface `detokenize` from CommonExt so the
+        // engine adapter can disable text decoding when the client asked for it.
+        let detokenize = self.common_ext().and_then(|c| c.detokenize);
+
         Ok(common::SamplingOptions {
             n,
             best_of,
@@ -175,6 +179,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             length_penalty: None,
             guided_decoding,
             include_stop_str_in_output,
+            detokenize,
         })
     }
 }

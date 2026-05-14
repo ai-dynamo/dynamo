@@ -81,6 +81,30 @@ pub struct CommonExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub skip_special_tokens: Option<bool>,
+
+    /// Number of log probabilities to return per prompt token (rl-sdk-2 TITO parity).
+    ///
+    /// When set, the engine emits the top-`prompt_logprobs` per-position
+    /// logprobs over the prompt sequence. Mirrors vLLM's `prompt_logprobs`
+    /// `SamplingParams` field. Surfaced on the response via
+    /// `nvext.prompt_logprobs` when the client also opts in with
+    /// `nvext.extra_fields = ["prompt_logprobs"]`. Required by prime-rl's
+    /// teacher-logprobs path (`orchestrator/utils.py:compute_teacher_logprobs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub prompt_logprobs: Option<u32>,
+
+    /// Skip text decoding when false (rl-sdk-2 TITO parity).
+    ///
+    /// When `Some(false)`, the engine should not run the detokenizer over
+    /// the generated token IDs. `choices[0].message.content` will be `None`
+    /// (or empty) and clients are expected to read `nvext.completion_token_ids`
+    /// instead. Mirrors vLLM's `SamplingParams.detokenize=False`. Defaults
+    /// to `None` (engine default = true). Backends that do not honor this
+    /// hint MAY ignore it; the only downside is unnecessary detok work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub detokenize: Option<bool>,
 }
 
 impl CommonExt {
@@ -111,6 +135,12 @@ pub trait CommonExtProvider {
 
     /// Output Options
     fn get_skip_special_tokens(&self) -> Option<bool>;
+
+    /// rl-sdk-2 TITO parity: top-`k` prompt logprobs request (verifier path).
+    fn get_prompt_logprobs_count(&self) -> Option<u32>;
+
+    /// rl-sdk-2 TITO parity: skip text decode when `Some(false)`.
+    fn get_detokenize(&self) -> Option<bool>;
 }
 
 #[cfg(test)]
@@ -206,6 +236,8 @@ mod tests {
             guided_decoding_backend: None,
             guided_whitespace_pattern: None,
             skip_special_tokens: None,
+            prompt_logprobs: None,
+            detokenize: None,
         };
         assert!(common_ext.validate().is_ok());
     }

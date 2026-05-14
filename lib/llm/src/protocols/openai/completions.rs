@@ -236,6 +236,14 @@ impl CommonExtProvider for NvCreateCompletionRequest {
     fn get_skip_special_tokens(&self) -> Option<bool> {
         self.common.skip_special_tokens
     }
+
+    fn get_prompt_logprobs_count(&self) -> Option<u32> {
+        self.common.prompt_logprobs
+    }
+
+    fn get_detokenize(&self) -> Option<bool> {
+        self.common.detokenize
+    }
 }
 
 impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
@@ -733,13 +741,18 @@ mod tests {
         assert_eq!(request.get_stop(), Some(vec!["token_id:576".to_string()]));
         assert_eq!(request.get_stop_token_ids(), None);
 
-        let unsupported_stop_token_ids = json!({
+        // rl-sdk-2: `stop_token_ids` is in PASSTHROUGH_EXTRA_FIELDS — must now
+        // validate OK (it's accepted as a passthrough hint, not a 400).
+        let whitelisted_stop_token_ids = json!({
             "model": "test-model",
             "prompt": [1, 2, 3],
             "stop_token_ids": [576]
         });
-        let request: NvCreateCompletionRequest = serde_json::from_value(unsupported_stop_token_ids)
+        let request: NvCreateCompletionRequest = serde_json::from_value(whitelisted_stop_token_ids)
             .expect("Failed to deserialize request");
-        assert!(ValidateRequest::validate(&request).is_err());
+        assert!(
+            ValidateRequest::validate(&request).is_ok(),
+            "stop_token_ids must be accepted via PASSTHROUGH_EXTRA_FIELDS"
+        );
     }
 }
