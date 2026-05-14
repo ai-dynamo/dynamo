@@ -50,6 +50,7 @@ cases:
     - *id001
     expected:
       dynamo: &id002
+        reason: "Dynamo's qwen25 (hermes alias) parser leaves <tool_call> tag in normal_text on minimal/no-body case"
         calls: []
         normal_text: '<tool_call>{"name": "get_time"}</tool_call>'
       vllm:

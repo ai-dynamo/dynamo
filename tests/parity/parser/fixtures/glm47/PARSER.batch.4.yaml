@@ -18,6 +18,7 @@ cases:
             type: string
     expected:
       dynamo:
+        reason: "Dynamo's glm47 parser leaves <tool_call> tag, <arg_key>/<arg_value> in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: ''
       vllm:

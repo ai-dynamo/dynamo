@@ -26,6 +26,7 @@ cases:
             type: string
     expected:
       dynamo:
+        reason: "Dynamo's harmony parser leaks the entire envelope into normal_text; SGLang extracts both calls"
         calls: []
         normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
           to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|>
@@ -50,6 +51,7 @@ cases:
     - *id002
     expected:
       dynamo:
+        reason: "Dynamo's harmony parser leaks the envelope (with surrounding narration) into normal_text; SGLang extracts both calls and preserves the narration"
         calls: []
         normal_text: I need both. <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
           to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|> Done.
@@ -74,6 +76,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: "Dynamo's harmony parser leaks the envelope into normal_text instead of extracting both same-name calls; SGLang extracts both"
         calls: []
         normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
           to=functions.get_weather <|constrain|>json<|message|>{"location":"LA"}<|call|>

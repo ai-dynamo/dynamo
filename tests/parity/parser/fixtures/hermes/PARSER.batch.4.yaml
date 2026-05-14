@@ -18,6 +18,7 @@ cases:
             type: string
     expected:
       dynamo: &id001
+        reason: "Dynamo's hermes parser leaves <tool_call> tag in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: <tool_call>not even json</tool_call>
       vllm: *id001
@@ -49,6 +50,7 @@ cases:
     - *id002
     expected:
       dynamo: &id003
+        reason: "Dynamo's hermes parser leaves <tool_call> tag in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: '<tool_call>{"arguments": {"location": "NYC"}}</tool_call>'
       vllm: *id003

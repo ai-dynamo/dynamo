@@ -18,6 +18,7 @@ cases:
             type: string
     expected:
       dynamo:
+        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
       vllm:
@@ -38,6 +39,7 @@ cases:
     - *id001
     expected:
       dynamo: &id002
+        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: |-
           <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather
@@ -62,6 +64,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: "Dynamo's deepseek_v3 parser leaves <｜tool▁call…｜> deepseek_v3 token, <｜tool▁sep｜> in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: |-
           <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>

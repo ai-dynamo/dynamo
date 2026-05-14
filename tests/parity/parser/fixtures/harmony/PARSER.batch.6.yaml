@@ -50,6 +50,7 @@ cases:
     - *id001
     expected:
       dynamo: &id002
+        reason: "Dynamo's harmony parser leaves <|channel|> harmony token, <|constrain|> harmony token in normal_text on minimal/no-body case"
         calls: []
         normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json
       vllm:

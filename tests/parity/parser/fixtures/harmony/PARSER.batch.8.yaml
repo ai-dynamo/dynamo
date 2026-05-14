@@ -19,6 +19,7 @@ cases:
             type: string
     expected:
       dynamo:
+        reason: "Dynamo leaks the full envelope (narration + analysis + commentary) into normal_text instead of extracting the tool call and preserving the narration"
         calls: []
         normal_text: I will check the weather. <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary
           to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|>
@@ -39,6 +40,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: "Dynamo leaks the full envelope (analysis + commentary + trailing narration) into normal_text instead of extracting the tool call and keeping the trailing prose"
         calls: []
         normal_text: <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary
           to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|> Let me know if you need more.
@@ -59,6 +61,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: "Dynamo leaks the sandwich (leading + envelope + trailing) into normal_text instead of extracting the tool call and stitching the surrounding prose"
         calls: []
         normal_text: I will check the weather. <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary
           to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|> Let me know if you need more.
@@ -80,6 +83,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: "Dynamo leaks multi-call sequence with interspersed narration into normal_text instead of extracting both calls and preserving the inter-call prose"
         calls: []
         normal_text: I will check the weather. <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary
           to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|> Then check LA weather. <|channel|>commentary

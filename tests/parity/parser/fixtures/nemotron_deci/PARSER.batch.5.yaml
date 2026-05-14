@@ -35,6 +35,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: "Dynamo's nemotron_deci parser leaves <TOOLCALL> envelope in normal_text on missing/orphan end marker (impl-defined recovery)"
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL>'
       vllm:
@@ -49,6 +50,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: "Dynamo's nemotron_deci parser leaves <TOOLCALL> envelope in normal_text on missing/orphan end marker (impl-defined recovery)"
         calls: []
         normal_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"loc'
       vllm:

@@ -18,6 +18,7 @@ cases:
             type: string
     expected:
       dynamo:
+        reason: "Dynamo echoes the entire <|start|>…<|message|>{args} envelope into normal_text on missing <|call|> end marker; SGLang returns cleanly-empty"
         calls: []
         normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
       vllm:
@@ -33,6 +34,7 @@ cases:
     - *id001
     expected:
       dynamo: &id002
+        reason: "Dynamo's harmony parser leaves <|call|> harmony token in normal_text on missing/orphan end marker (impl-defined recovery)"
         calls: []
         normal_text: <|call|>
       vllm:
@@ -46,6 +48,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: "Dynamo's harmony parser leaves <|channel|> harmony token, <|message|> harmony token, <|constrain|> harmony token (+1 more) in normal_text on missing/orphan end marker (impl-defined recovery)"
         calls: []
         normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"loc
       vllm:

@@ -18,6 +18,7 @@ cases:
             type: string
     expected:
       dynamo: &id001
+        reason: "Dynamo's jamba parser leaves <tool_calls> envelope in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: <tool_calls>not a json array</tool_calls>
       vllm: *id001
@@ -31,6 +32,7 @@ cases:
     - *id002
     expected:
       dynamo: &id003
+        reason: "Dynamo's jamba parser leaves <tool_calls> envelope in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"]</tool_calls>'
       vllm: *id003

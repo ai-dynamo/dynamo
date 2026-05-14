@@ -44,6 +44,7 @@ cases:
     - *id002
     expected:
       dynamo: &id004
+        reason: "Dynamo's hermes parser leaves <tool_call> tag in normal_text on minimal/no-body case"
         calls: []
         normal_text: '<tool_call>{"name": "get_time"}</tool_call>'
       vllm: *id004

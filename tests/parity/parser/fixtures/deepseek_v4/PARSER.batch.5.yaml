@@ -46,6 +46,7 @@ cases:
     - *id001
     expected:
       dynamo: &d_5_b
+        reason: "Dynamo's DSML parser leaves <｜DSML｜…> envelope in normal_text on missing/orphan end marker (impl-defined recovery)"
         calls: []
         normal_text: |-
           <｜DSML｜invoke name="get_weather">

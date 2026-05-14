@@ -60,6 +60,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: "Dynamo leaks back-to-back same-name commentary blocks into normal_text instead of extracting both duplicate calls"
         calls: []
         normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
           to=functions.get_weather <|constrain|>json<|message|>{"location":"LA"}<|call|>
