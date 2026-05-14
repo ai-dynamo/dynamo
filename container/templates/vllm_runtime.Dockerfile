@@ -35,7 +35,7 @@ ENV PATH=/usr/local/bin/etcd:${PATH}
 # installation rather than under /opt/nvidia/nvda_nixl. Resolve the packaged
 # CUDA-matched `.nixl_cu*` directory once at build time and expose it via a
 # stable path so the same runtime template works for both CUDA 12 and CUDA 13.
-ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/site-packages
 {% if device == "cuda" %}
 ENV NIXL_PREFIX=/opt/dynamo/nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}
