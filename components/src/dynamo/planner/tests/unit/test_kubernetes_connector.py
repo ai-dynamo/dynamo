@@ -124,6 +124,37 @@ def test_get_worker_runtime_namespace_legacy_hash(kubernetes_connector, mock_kub
     assert namespace == "base-ns"
 
 
+def test_get_worker_runtime_namespace_with_v2_hash(kubernetes_connector, mock_kube_api):
+    mock_kube_api.get_graph_deployment.return_value = {
+        "metadata": {
+            "annotations": {
+                "nvidia.com/current-worker-hash-v2": "v2abc",
+            }
+        }
+    }
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns-v2abc"
+
+
+def test_get_worker_runtime_namespace_with_legacy_v1_and_v2_hash(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = {
+        "metadata": {
+            "annotations": {
+                "nvidia.com/current-worker-hash": "legacy",
+                "nvidia.com/current-worker-hash-v2": "v2abc",
+            }
+        }
+    }
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns-v2abc"
+
+
 def test_get_service_name_from_sub_component_type(kubernetes_connector):
     deployment = {
         "metadata": {"name": "test-graph"},

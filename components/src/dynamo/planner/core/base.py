@@ -21,6 +21,8 @@ import time
 from typing import TYPE_CHECKING, Optional, Union
 
 import aiohttp.web
+from kubernetes.client import ApiException
+from kubernetes.config.config_exception import ConfigException
 from prometheus_client import start_http_server
 
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
@@ -42,6 +44,7 @@ from dynamo.planner.core.types import (
     WorkerCapabilities,
     WorkerCounts,
 )
+from dynamo.planner.errors import PlannerError
 from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
@@ -74,9 +77,9 @@ def _engine_caps(
         return None
     return EngineCapabilities(
         num_gpu=num_gpu,
-        max_num_batched_tokens=worker_info.max_num_batched_tokens
-        if worker_info
-        else None,
+        max_num_batched_tokens=(
+            worker_info.max_num_batched_tokens if worker_info else None
+        ),
         max_num_seqs=worker_info.max_num_seqs if worker_info else None,
         context_length=worker_info.context_length if worker_info else None,
         max_kv_tokens=worker_info.max_kv_tokens if worker_info else None,
@@ -317,20 +320,21 @@ class NativePlannerBase:
 
     def _resolve_runtime_namespace(self) -> str:
         if hasattr(self.connector, "get_worker_runtime_namespace"):
-            try:
-                return self.connector.get_worker_runtime_namespace(  # type: ignore[attr-defined]
-                    self.namespace
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to resolve worker runtime namespace from connector: {e}; "
-                    f"using base namespace {self.namespace}"
-                )
+            return self.connector.get_worker_runtime_namespace(  # type: ignore[attr-defined]
+                self.namespace
+            )
         return self.namespace
 
     async def _refresh_runtime_namespace(self) -> None:
         """Refresh worker runtime namespace and rebind runtime handles if needed."""
-        runtime_namespace = self._resolve_runtime_namespace()
+        try:
+            runtime_namespace = self._resolve_runtime_namespace()
+        except (ApiException, ConfigException, PlannerError) as e:
+            logger.warning(
+                f"Failed to resolve worker runtime namespace from connector: {e}; "
+                f"keeping current runtime namespace {self.runtime_namespace}"
+            )
+            return
         if runtime_namespace == self.runtime_namespace:
             return
 
@@ -338,6 +342,10 @@ class NativePlannerBase:
         self.runtime_namespace = runtime_namespace
         self._prefill_client = None
         self._decode_client = None
+        if self._prefill_fpm_sub is not None:
+            self._prefill_fpm_sub.shutdown()
+        if self._decode_fpm_sub is not None:
+            self._decode_fpm_sub.shutdown()
         self._prefill_fpm_sub = None
         self._decode_fpm_sub = None
         logger.info(
