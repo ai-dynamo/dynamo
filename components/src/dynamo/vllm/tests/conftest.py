@@ -15,6 +15,26 @@ import pytest
 # Cached result of attempting to import the omni handler module.
 # `None` = not yet attempted, `True` = succeeded, `False` = raised.
 _omni_importable: bool | None = None
+_multimodal_utils_importable: bool | None = None
+
+
+def _can_import_multimodal_utils() -> bool:
+    """Try to import dynamo.vllm.multimodal_utils once and cache the result.
+
+    The multimodal_utils sub-package transitively imports vllm internals
+    (e.g. chat_message_utils → vllm) that are not available in the
+    dynamo-runtime image.  ``find_spec("vllm")`` returns non-None even
+    when vllm is partially installed, so the spec check is insufficient —
+    only a real import attempt reveals the failure.
+    """
+    global _multimodal_utils_importable
+    if _multimodal_utils_importable is None:
+        try:
+            importlib.import_module("dynamo.vllm.multimodal_utils")
+            _multimodal_utils_importable = True
+        except Exception:
+            _multimodal_utils_importable = False
+    return _multimodal_utils_importable
 
 
 def _can_import_omni() -> bool:
@@ -51,6 +71,11 @@ def pytest_ignore_collect(collection_path, config):
     # doesn't catch this, so skip collection up-front if the canonical
     # omni module isn't importable.
     parts = collection_path.parts
+    # multimodal_utils tests import dynamo.vllm.multimodal_utils which
+    # transitively imports vllm internals not present in dynamo-runtime.
+    if "multimodal_utils" in parts and filename.startswith("test_"):
+        if not _can_import_multimodal_utils():
+            return True
     if "omni" in parts and filename.startswith("test_"):
         if not _can_import_omni():
             return True
