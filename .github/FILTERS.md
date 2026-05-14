@@ -8,11 +8,11 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 
 | Filter | Triggers |
 |--------|----------|
-| `core` | Main test suite (vLLM, SGLang, TRT-LLM containers) |
+| `core` | Main test suite (vLLM, SGLang, TRT-LLM, FastVideo containers) |
 | `operator` | Kubernetes operator tests |
 | `snapshot` | Snapshot Agent tests |
 | `deploy` | Deploy-specific tests |
-| `vllm` / `sglang` / `trtllm` | Backend-specific tests |
+| `vllm` / `sglang` / `trtllm` / `fastvideo` | Backend-specific tests |
 | `benchmarks` | Dynamo runtime pipeline (runs `tests/benchmarks/**` pytest suite) |
 | `sample` | Sample-backend unified test (piggybacks on vllm image) |
 | `docs` | Nothing (classification only) |

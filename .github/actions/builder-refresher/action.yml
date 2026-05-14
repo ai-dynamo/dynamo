@@ -19,14 +19,14 @@ inputs:
     description: 'Name of the buildx builder to check'
     required: true
   flavor:
-    description: 'Buildkit flavor used to route workers on re-init (vllm, sglang, trtllm, general)'
+    description: 'Buildkit flavor used to route workers on re-init (vllm, sglang, trtllm, fastvideo, general)'
     required: true
   arch:
     description: 'Docker platform string used on re-init (e.g. linux/amd64, linux/arm64, linux/amd64,linux/arm64)'
     required: false
     default: 'linux/amd64'
   cuda_version:
-    description: 'CUDA version used on re-init (e.g. 12.9, 13.0). Leave empty for general flavor.'
+    description: 'CUDA version used on re-init (e.g. 12.9, 13.0, 13.1). Leave empty for general flavor.'
     required: false
     default: ''
 

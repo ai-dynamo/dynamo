@@ -69,6 +69,12 @@ sglang = [
     "cupy-cuda12x>=13.0.0",
 ]
 
+fastvideo = [
+    "uvloop",
+    "fastvideo @ git+https://github.com/hao-ai-lab/FastVideo.git@17f07bc313d77adaf1d60aa344d92f8145e54cfb",
+    "flash-attn-4==4.0.0b9",
+]
+
 mocker = [
     "aiconfigurator>=0.7.0",
 ]
@@ -77,6 +83,7 @@ mocker = [
 vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"
 sglang_tests = "dynamo.sglang.tests.conftest"
+fastvideo_tests = "dynamo.fastvideo.tests.conftest"
 
 [dependency-groups]
 docs = [
@@ -150,7 +157,7 @@ known_first_party = ["dynamo", "deploy"]
 # failure. To mitigate 1) one can install 3rd party lib so that isort is aware of it,
 # 2) hardcode 3rd party lib here, 3) add "# isort: skip_file" to problematic files
 # as the last resort.
-known_third_party = ["vllm", "tensorrt_llm", "sglang", "tokenspeed", "aiconfigurator"]
+known_third_party = ["vllm", "tensorrt_llm", "sglang", "fastvideo", "tokenspeed", "aiconfigurator"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -274,6 +281,7 @@ markers = [
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
+    "fastvideo: marks tests as requiring fastvideo",
     "lmcache: marks tests as requiring lmcache",
     "multimodal: marks tests as multimodal (image/video) tests",
     "slow: marks tests as known to be slow",
@@ -288,7 +296,7 @@ markers = [
     "k8s: marks tests as requiring Kubernetes",
     "fault_tolerance: marks tests as fault tolerance tests",
     "deploy: marks tests as deployment tests",
-    "framework_only: marks standard framework deployment tests (vllm, sglang, trtllm)",
+    "framework_only: marks standard framework deployment tests (vllm, sglang, trtllm, fastvideo)",
     "framework_with_gaie: marks tests for GAIE (Gateway API Inference Extension) deployment",
     "unified: marks unified-backend e2e tests (LLMEngine ABC + Worker, DEP #8251)",
     # Built-in markers
@@ -366,6 +374,11 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["tensorrt_llm", "tensorrt_llm.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["fastvideo", "fastvideo.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 

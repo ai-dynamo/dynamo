@@ -1222,15 +1222,16 @@ func PCSNameForAlphaDGDServices(dgdName string, services map[string]*v1alpha1.Dy
 	return PCSNameForDGD(dgdName, components)
 }
 
-// Define BackendFramework enum for sglang, vllm, trtllm
+// Define BackendFramework enum for sglang, vllm, trtllm, fastvideo
 
 type BackendFramework string
 
 const (
-	BackendFrameworkSGLang BackendFramework = "sglang"
-	BackendFrameworkVLLM   BackendFramework = "vllm"
-	BackendFrameworkTRTLLM BackendFramework = "trtllm"
-	BackendFrameworkNoop   BackendFramework = "noop"
+	BackendFrameworkSGLang    BackendFramework = "sglang"
+	BackendFrameworkVLLM      BackendFramework = "vllm"
+	BackendFrameworkTRTLLM    BackendFramework = "trtllm"
+	BackendFrameworkFastVideo BackendFramework = "fastvideo"
+	BackendFrameworkNoop      BackendFramework = "noop"
 )
 
 // ParseBackendFramework converts a string to BackendFramework type.
@@ -1238,10 +1239,10 @@ const (
 func ParseBackendFramework(framework string) (BackendFramework, error) {
 	bf := BackendFramework(framework)
 	switch bf {
-	case BackendFrameworkVLLM, BackendFrameworkSGLang, BackendFrameworkTRTLLM, BackendFrameworkNoop:
+	case BackendFrameworkVLLM, BackendFrameworkSGLang, BackendFrameworkTRTLLM, BackendFrameworkFastVideo, BackendFrameworkNoop:
 		return bf, nil
 	default:
-		return "", fmt.Errorf("unsupported backend framework: %s (valid values: vllm, sglang, trtllm)", framework)
+		return "", fmt.Errorf("unsupported backend framework: %s (valid values: vllm, sglang, trtllm, fastvideo)", framework)
 	}
 }
 
@@ -1281,7 +1282,7 @@ func BackendFactory(backendFramework BackendFramework, operatorConfig *configv1a
 		return &TRTLLMBackend{
 			MpiRunSecretName: operatorConfig.MPI.SSHSecretName,
 		}
-	case BackendFrameworkNoop:
+	case BackendFrameworkFastVideo, BackendFrameworkNoop:
 		return &NoopBackend{}
 	default:
 		return nil
@@ -2297,9 +2298,10 @@ func detectBackendFrameworkFromArgs(command []string, args []string) (BackendFra
 
 	// Pattern to match python -m dynamo.{backend}.something
 	patterns := map[BackendFramework]*regexp.Regexp{
-		BackendFrameworkVLLM:   regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.vllm[^|&;]*`),
-		BackendFrameworkSGLang: regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.sglang[^|&;]*`),
-		BackendFrameworkTRTLLM: regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.trtllm[^|&;]*`),
+		BackendFrameworkVLLM:      regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.vllm[^|&;]*`),
+		BackendFrameworkSGLang:    regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.sglang[^|&;]*`),
+		BackendFrameworkTRTLLM:    regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.trtllm[^|&;]*`),
+		BackendFrameworkFastVideo: regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.fastvideo[^|&;]*`),
 	}
 
 	var detected []BackendFramework

@@ -12,6 +12,10 @@ inputs:
     description: 'Test suite name for test metrics'
     required: false
     default: 'unknown'
+  framework:
+    description: 'Test framework label used in metrics env and artifact names (e.g. vllm, sglang, trtllm, fastvideo)'
+    required: false
+    default: 'unknown'
   test_type:
     description: 'Test type (unit, e2e, integration)'
     required: false
@@ -170,7 +174,12 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
-        docker run ${GPU_FLAGS} --rm -w /workspace \
+        DOCKER_CAP_FLAGS=()
+        if [[ "${{ inputs.framework }}" == "fastvideo" || "${{ inputs.pytest_marks }}" == *"fastvideo"* ]]; then
+          DOCKER_CAP_FLAGS+=(--cap-add SYS_PTRACE)
+        fi
+
+        docker run ${GPU_FLAGS} "${DOCKER_CAP_FLAGS[@]}" --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --shm-size=200m \
           --ulimit nofile=65536:65536 \
@@ -294,7 +303,13 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
+        DOCKER_CAP_FLAGS=()
+        if [[ "${{ inputs.framework }}" == "fastvideo" || "${{ inputs.pytest_marks }}" == *"fastvideo"* ]]; then
+          DOCKER_CAP_FLAGS+=(--cap-add SYS_PTRACE)
+        fi
+
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} \
+          "${DOCKER_CAP_FLAGS[@]}" \
           "${DOCKER_EXTRA_FLAGS[@]}" \
           --rm -w /workspace \
           --network host \

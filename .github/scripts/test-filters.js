@@ -11,7 +11,7 @@
  *   npm test -- --coverage      # Run both
  *
  * This validates that tj-actions/changed-files will correctly:
- * - Match backend-specific files to their respective filters (vllm, sglang, trtllm)
+ * - Match backend-specific files to their respective filters (vllm, sglang, trtllm, fastvideo)
  * - Exclude doc files (*.md, *.rst, *.txt) from core via negation patterns
  * - Match CI/infrastructure changes to core
  * - (with --coverage) Ensure all files in repo are covered by at least one filter
@@ -71,13 +71,23 @@ const testCases = [
   },
   {
     file: 'examples/backends/trtllm/example.py',
-    expect: { core: false, vllm: false, sglang: false, trtllm: true },
+    expect: { core: false, vllm: false, sglang: false, trtllm: true, fastvideo: false },
     desc: 'trtllm script triggers only trtllm'
   },
   {
+    file: 'examples/backends/fastvideo/launch/run_local.sh',
+    expect: { core: false, vllm: false, sglang: false, trtllm: false, fastvideo: true },
+    desc: 'fastvideo script triggers only fastvideo'
+  },
+  {
     file: 'components/src/dynamo/vllm/worker.py',
-    expect: { core: false, vllm: true },
+    expect: { core: false, vllm: true, fastvideo: false },
     desc: 'vllm component triggers only vllm'
+  },
+  {
+    file: 'components/src/dynamo/fastvideo/backend.py',
+    expect: { core: false, fastvideo: true },
+    desc: 'fastvideo component triggers only fastvideo'
   },
 
   // Doc files should be excluded from core (negation patterns)

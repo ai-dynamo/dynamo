@@ -16,9 +16,9 @@ description: 'Route buildkit workers and bootstrap buildx builder for dynamo bui
 #
 # Flavor routing:
 #   BuildKit pods are assigned to flavors based on pod index modulo 3:
-#   - Pool 0 (mod 0): vllm-cuda12, trtllm-cuda12
-#   - Pool 1 (mod 1): vllm-cuda13, trtllm-cuda13, sglang-cuda13
-#   - Pool 2 (mod 2): sglang-cuda12, general (any/no CUDA)
+#   - Group 0: vllm-cuda13, sglang-cuda13, fastvideo-cuda13
+#   - Group 1: vllm-cuda12, sglang-cuda12
+#   - Group 2: trtllm-cuda13, general (any/no CUDA)
 #
 # Usage examples:
 #   # Initialize for both architectures with general flavor:
@@ -41,7 +41,7 @@ inputs:
     description: 'Name for the buildx builder'
     required: true
   flavor:
-    description: 'Buildkit flavor (vllm, trtllm, sglang, general)'
+    description: 'Buildkit flavor (vllm, trtllm, sglang, fastvideo, general)'
     required: false
     default: 'general'
   arch:
@@ -49,7 +49,7 @@ inputs:
     required: false
     default: 'linux/amd64'
   cuda_version:
-    description: 'CUDA version (12.9, 13.0). Optional for general flavor.'
+    description: 'CUDA version (12.9, 13.0, 13.1). Optional for general flavor.'
     required: false
     default: ''
   fresh_builder:

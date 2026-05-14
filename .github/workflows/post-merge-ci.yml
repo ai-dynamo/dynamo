@@ -13,7 +13,7 @@ on:
       framework:
         description: 'Framework to validate'
         type: choice
-        options: [all, vllm, sglang, trtllm]
+        options: [all, vllm, sglang, trtllm, fastvideo]
         default: all
 
 permissions:
@@ -32,13 +32,14 @@ jobs:
       run_vllm:   ${{ steps.flags.outputs.run_vllm }}
       run_sglang: ${{ steps.flags.outputs.run_sglang }}
       run_trtllm: ${{ steps.flags.outputs.run_trtllm }}
+      run_fastvideo: ${{ steps.flags.outputs.run_fastvideo }}
     steps:
       - id: flags
         shell: bash
         env:
           FW: ${{ github.event.inputs.framework || 'all' }}
         run: |
-          for f in vllm sglang trtllm; do
+          for f in vllm sglang trtllm fastvideo; do
             if [[ "$FW" == "all" || "$FW" == "$f" ]]; then
               echo "run_$f=true" >> "$GITHUB_OUTPUT"
             else
@@ -59,8 +60,8 @@ jobs:
       # (e.g. fault_tolerance/deploy/*) that fail in this container-only
       # context. Matches the coverage of the old container-validation-dynamo
       # workflow.
-      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm or fastvideo) and (gpu_0)'
+      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm or fastvideo) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'
     secrets: inherit
 
@@ -277,6 +278,41 @@ jobs:
         ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
     secrets: inherit
 
+  fastvideo-build:
+    name: fastvideo-runtime # This name overlaps with other fastvideo jobs to group them in the UI
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_fastvideo == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: fastvideo
+      target: runtime
+      cuda_version: '["13.1"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 120
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-fastvideo-runtime' || '' }}
+        ${{ github.ref_name == 'main' && format('main-fastvideo-runtime-{0}', github.sha) || '' }}
+    secrets: inherit
+
+  fastvideo-dev-build:
+    name: fastvideo-dev
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_fastvideo == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: fastvideo
+      target: dev
+      cuda_version: '["13.1"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      push_image: true
+      build_timeout_minutes: 60
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-fastvideo-dev' || '' }}
+        ${{ github.ref_name == 'main' && format('main-fastvideo-dev-{0}', github.sha) || '' }}
+    secrets: inherit
+
   planner-build:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     if: github.event_name != 'workflow_dispatch'
@@ -460,6 +496,23 @@ jobs:
       run_gpu_tests: false
     secrets: inherit
 
+  fastvideo-test:
+    name: fastvideo-runtime # This name overlaps with other fastvideo jobs to group them in the UI
+    needs: [fastvideo-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: fastvideo
+      test_type: Test
+      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      target_tag_plain: ${{ needs.fastvideo-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      run_cpu_only_tests: true
+      cpu_only_test_markers: '(pre_merge or post_merge) and fastvideo and gpu_0'
+      gpu_test_markers: '(pre_merge or post_merge) and fastvideo and gpu_1'
+      gpu_test_timeout_minutes: 120
+    secrets: inherit
+
   planner-test:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [planner-build]
@@ -515,6 +568,18 @@ jobs:
       framework: trtllm
       target: runtime
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64", "arm64"]'
+    secrets: inherit
+
+  fastvideo-compliance:
+    name: fastvideo-runtime # This name overlaps with other fastvideo jobs to group them in the UI
+    needs: [fastvideo-build]
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: fastvideo
+      target: runtime
+      target_tag_plain: ${{ needs.fastvideo-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]'
     secrets: inherit
@@ -616,6 +681,30 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
+  fastvideo-copy-to-acr:
+    name: fastvideo-runtime # This name overlaps with other fastvideo jobs to group them in the UI
+    needs: [fastvideo-build]
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.fastvideo-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      copy_timeout_minutes: 20
+    secrets: inherit
+
+  fastvideo-dev-copy-to-acr:
+    name: fastvideo-dev # This name overlaps with other fastvideo jobs to group them in the UI
+    needs: [fastvideo-dev-build]
+    if: |
+      always() &&
+      needs.fastvideo-dev-build.result == 'success'
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.fastvideo-dev-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 20
+    secrets: inherit
+
   frontend-copy-to-acr:
     name: frontend # This name overlaps with other frontend jobs to group them in the UI
     needs: [frontend-build]
@@ -688,9 +777,21 @@ jobs:
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
 
+  deploy-test-fastvideo:
+    needs: [deploy-operator, fastvideo-copy-to-acr]
+    uses: ./.github/workflows/shared-deploy-test.yml
+    with:
+      framework: fastvideo
+      profiles: '["agg"]'
+      image_suffix: fastvideo-runtime-cuda13
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
   deploy-cleanup:
     if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-fastvideo, deploy-test-gaie]
     runs-on: prod-default-small-v2
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -768,7 +869,7 @@ jobs:
 
   deploy-status-check:
     runs-on: ubuntu-latest
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-fastvideo, deploy-test-gaie]
     if: always()
     steps:
       - name: "Check all deploy test jobs"
@@ -783,7 +884,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, frontend-build, planner-build]
+    needs: [vllm-build, sglang-build, trtllm-build, fastvideo-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, fastvideo-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, frontend-build, planner-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

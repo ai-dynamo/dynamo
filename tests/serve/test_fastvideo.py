@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import copy
+import dataclasses
+import importlib.util
+import os
+import sys
+from dataclasses import dataclass
+
+import pytest
+
+from tests.serve.common import (
+    WORKSPACE_DIR,
+    params_with_model_mark,
+    run_serve_deployment,
+)
+from tests.utils.engine_process import EngineConfig
+from tests.utils.payload_builder import video_generation_payload_default
+
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("fastvideo") is None,
+    reason="fastvideo is not installed",
+)
+
+
+@dataclass
+class FastVideoConfig(EngineConfig):
+    """Configuration for FastVideo serve smoke tests."""
+
+
+fastvideo_local_dir = os.path.join(WORKSPACE_DIR, "examples/backends/fastvideo/launch")
+fastvideo_ci_worker_args = (
+    "--dit-layerwise-offload "
+    "--vae-cpu-offload "
+    "--text-encoder-cpu-offload "
+    "--image-encoder-cpu-offload "
+    "--attention-backend VIDEO_SPARSE_ATTN"
+)
+
+fastvideo_configs = {
+    "aggregated": FastVideoConfig(
+        name="aggregated",
+        directory=fastvideo_local_dir,
+        command=["bash", os.path.join(fastvideo_local_dir, "run_local.sh")],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.fastvideo,
+            pytest.mark.pre_merge,
+            pytest.mark.slow,
+            pytest.mark.timeout(1800),
+        ],
+        model="FastVideo/FastWan2.1-T2V-1.3B-Diffusers",
+        timeout=1800,
+        env={
+            "WORKER_EXTRA_ARGS": fastvideo_ci_worker_args,
+            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        },
+        request_payloads=[video_generation_payload_default()],
+    ),
+}
+
+
+@pytest.fixture(params=params_with_model_mark(fastvideo_configs))
+def fastvideo_config_test(request):
+    """Fixture that provides FastVideo serve test configurations."""
+    return copy.deepcopy(fastvideo_configs[request.param])
+
+
+@pytest.mark.fastvideo
+@pytest.mark.e2e
+def test_fastvideo_deployment(
+    fastvideo_config_test,
+    request,
+    tmp_path,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    set_ucx_tls_no_mm,
+    predownload_models,
+):
+    """Smoke test the built-in FastVideo backend behind the shared frontend."""
+    runtime_dir = (
+        tmp_path / f"dynamo-fastvideo-serve-{dynamo_dynamic_ports.frontend_port}"
+    )
+    config = dataclasses.replace(
+        fastvideo_config_test,
+        frontend_port=dynamo_dynamic_ports.frontend_port,
+        env={
+            **fastvideo_config_test.env,
+            "MODEL": fastvideo_config_test.model,
+            "PYTHON_BIN": sys.executable,
+            "HTTP_PORT": str(dynamo_dynamic_ports.frontend_port),
+            "DISCOVERY_DIR": str(runtime_dir / "discovery"),
+            "LOG_DIR": str(runtime_dir / "logs"),
+        },
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)

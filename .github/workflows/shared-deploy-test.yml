@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       framework:
-        description: 'Framework to test (vllm, sglang, trtllm)'
+        description: 'Framework to test (vllm, sglang, trtllm, fastvideo)'
         type: string
         required: true
       profiles:

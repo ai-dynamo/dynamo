@@ -16,7 +16,7 @@ inputs:
     required: false
     default: 'linux/amd64'
   framework:
-    description: 'Framework name for base image resolution (vllm, sglang, trtllm, dynamo)'
+    description: 'Framework name for base image resolution (vllm, sglang, trtllm, fastvideo, dynamo)'
     required: false
     default: ''
   target:

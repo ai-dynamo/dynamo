@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       framework:
-        description: 'Framework name (vllm, sglang, trtllm)'
+        description: 'Framework name (vllm, sglang, trtllm, fastvideo)'
         required: true
         type: string
       target:
@@ -171,7 +171,7 @@ jobs:
         id: calculate-builder-flavor
         shell: bash
         run: |
-          if [[ ${{ inputs.framework }} != @(vllm|sglang|trtllm) ]]; then
+          if [[ ${{ inputs.framework }} != @(vllm|sglang|trtllm|fastvideo) ]]; then
             echo "builder_flavor=general" >> $GITHUB_OUTPUT
           else
             echo "builder_flavor=${{ inputs.framework }}" >> $GITHUB_OUTPUT

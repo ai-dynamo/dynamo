@@ -160,6 +160,7 @@ def wait_for_model_availability(
     max_attempts: int = 15,
     attempt_timeouts: list[float] | None = None,
     headers: dict[str, str] | None = None,
+    request_payload: dict[str, Any] | None = None,
 ) -> bool:
     """
     Wait for model to be available by sending test requests.
@@ -175,6 +176,8 @@ def wait_for_model_availability(
         logger: Logger instance for output
         max_attempts: Maximum number of attempts to check availability (default: 15)
         attempt_timeouts: List of timeout values for each attempt (default: decreasing from 60s)
+        request_payload: Optional framework-specific readiness payload. If not
+            provided, a chat completion probe is used.
 
     Returns:
         True if model is available and responding, False otherwise
@@ -187,12 +190,18 @@ def wait_for_model_availability(
 
     for attempt in range(max_attempts):
         try:
-            test_payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": "test"}],
-                "max_tokens": 1,
-                "stream": False,
-            }
+            if request_payload is None:
+                test_payload = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": "test"}],
+                    "max_tokens": 1,
+                    "stream": False,
+                }
+            else:
+                test_payload = deepcopy(request_payload)
+
+            if "model" not in test_payload:
+                test_payload["model"] = model
 
             timeout_val = attempt_timeouts[min(attempt, len(attempt_timeouts) - 1)]
             logger.debug(

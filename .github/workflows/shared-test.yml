@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       test_suite_name:
-        description: 'Test suite name (vllm, sglang, trtllm)'
+        description: 'Test suite name (vllm, sglang, trtllm, fastvideo)'
         required: true
         type: string
       test_type:
@@ -113,6 +113,7 @@ jobs:
     runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v2' }}
     container:
       image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ matrix.cuda_version != '' && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || startsWith(matrix.cuda_version, '13.') && '13' || matrix.cuda_version) || '' }}-test
+      options: ${{ inputs.test_suite_name == 'fastvideo' && '--cap-add SYS_PTRACE' || '' }}
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and

@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Worker count is controlled by COMPOSE_PROFILES (1-8).
+# COMPOSE_PROFILES=4 starts backend-0..backend-3 on GPUs 0..3.
+# Set FASTVIDEO_IMAGE to override the default released FastVideo runtime image.
+
+x-backend-base: &backend-base
+  image: ${FASTVIDEO_IMAGE:-nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:nightly-cuda13}
+  restart: on-failure
+  command: >
+    python -m dynamo.fastvideo
+      --model ${MODEL:-FastVideo/FastWan2.1-T2V-1.3B-Diffusers}
+      --attention-backend ${FASTVIDEO_ATTENTION_BACKEND:-VIDEO_SPARSE_ATTN}
+  environment:
+    - DYN_DISCOVERY_BACKEND=etcd
+    - ETCD_ENDPOINTS=http://etcd:2379
+    - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  cap_add:
+    - SYS_PTRACE
+  shm_size: 8g
+  ulimits:
+    memlock: -1
+    stack: 67108864
+  depends_on:
+    - etcd
+    - frontend
+
+services:
+  etcd:
+    image: bitnamilegacy/etcd:3.6.1
+    restart: on-failure
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+
+  frontend:
+    image: ${FASTVIDEO_IMAGE:-nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:nightly-cuda13}
+    restart: on-failure
+    command: >
+      python -m dynamo.frontend
+        --http-port 8000
+        --discovery-backend etcd
+    environment:
+      - ETCD_ENDPOINTS=http://etcd:2379
+    depends_on:
+      - etcd
+    ports:
+      - "8000:8000"
+
+  backend-0:
+    <<: *backend-base
+    profiles: ["1", "2", "3", "4", "5", "6", "7", "8"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, device_ids: ["0"], capabilities: [gpu] }
+
+  backend-1:
+    <<: *backend-base
+    profiles: ["2", "3", "4", "5", "6", "7", "8"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, device_ids: ["1"], capabilities: [gpu] }
+
+  backend-2:
+    <<: *backend-base
+    profiles: ["3", "4", "5", "6", "7", "8"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, device_ids: ["2"], capabilities: [gpu] }
+
+  backend-3:
+    <<: *backend-base
+    profiles: ["4", "5", "6", "7", "8"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, device_ids: ["3"], capabilities: [gpu] }
+
+  backend-4:
+    <<: *backend-base
+    profiles: ["5", "6", "7", "8"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, device_ids: ["4"], capabilities: [gpu] }
+
+  backend-5:
+    <<: *backend-base
+    profiles: ["6", "7", "8"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, device_ids: ["5"], capabilities: [gpu] }
+
+  backend-6:
+    <<: *backend-base
+    profiles: ["7", "8"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, device_ids: ["6"], capabilities: [gpu] }
+
+  backend-7:
+    <<: *backend-base
+    profiles: ["8"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - { driver: nvidia, device_ids: ["7"], capabilities: [gpu] }

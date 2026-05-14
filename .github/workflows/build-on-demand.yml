@@ -18,6 +18,10 @@ on:
         description: 'Build and push trtllm image, tagged with branch name'
         type: boolean
         default: false
+      build_fastvideo:
+        description: 'Build and push fastvideo image, tagged with branch name'
+        type: boolean
+        default: false
       build_operator:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
@@ -91,6 +95,20 @@ jobs:
       build_timeout_minutes: 60
     secrets: inherit
 
+  fastvideo-build:
+    name: fastvideo-runtime # This name overlaps with other fastvideo jobs to group them in the UI
+    needs: [init]
+    if: inputs.build_fastvideo
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: fastvideo
+      target: runtime
+      cuda_version: '["13.1"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.init.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
   vllm-copy-to-acr:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-build]
@@ -119,6 +137,17 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 10
+    secrets: inherit
+
+  fastvideo-copy-to-acr:
+    name: fastvideo-runtime # This name overlaps with other fastvideo jobs to group them in the UI
+    needs: [fastvideo-build]
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.fastvideo-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
@@ -194,7 +223,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-build, sglang-build, trtllm-build, fastvideo-build, operator]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

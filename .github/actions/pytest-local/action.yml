@@ -13,7 +13,7 @@ inputs:
     required: false
     default: 'unknown'
   framework:
-    description: 'Test framework label used in metrics env and artifact names (e.g. vllm, sglang, trtllm)'
+    description: 'Test framework label used in metrics env and artifact names (e.g. vllm, sglang, trtllm, fastvideo)'
     required: false
     default: 'unknown'
   test_type:

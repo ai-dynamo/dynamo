@@ -30,7 +30,7 @@ inputs:
     default: ''
 
   framework:
-    description: 'Framework name (vllm, sglang, trtllm)'
+    description: 'Framework name (vllm, sglang, trtllm, fastvideo)'
     required: false
     default: ''
   profile:

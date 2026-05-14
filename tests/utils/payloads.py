@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import base64
+import binascii
 import json
 import logging
 import math
@@ -1416,25 +1417,39 @@ class VideoGenerationPayload(BasePayload):
             f"Video generation not completed. Status: {result.get('status')}, "
             f"Error: {result.get('error', 'none')}"
         )
-        assert (
-            "data" in result
-        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
-        assert len(result["data"]) > 0, "Empty data in video response"
-        entry = result["data"][0]
-        if "url" in entry:
-            assert entry["url"], "Video response url is empty"
+        data = result.get("data")
+        assert isinstance(data, list) and data, "Empty data in video response"
+        entry = data[0]
+
+        b64_json = entry.get("b64_json")
+        if b64_json is not None:
+            return b64_json
+
+        url = entry.get("url")
+        if url is not None:
+            assert isinstance(url, str) and url, "Video response url is empty"
             return entry["url"]
-        assert entry.get("b64_json"), "Video response b64_json is empty"
-        return "b64_video_returned"
+
+        raise AssertionError("Video response must include b64_json or url")
 
     def validate(self, response: Any, content: str) -> None:
-        assert content, "Video response content is empty"
-        if self.expected_response and not any(
-            expected.lower() in content.lower() for expected in self.expected_response
-        ):
-            raise AssertionError(
-                f"Expected at least one of {self.expected_response} in {content!r}"
-            )
+        super().validate(response, content)
+
+        result = response.json()
+        entry = result["data"][0]
+        b64_json = entry.get("b64_json")
+        if b64_json is not None:
+            try:
+                decoded = base64.b64decode(b64_json, validate=True)
+            except (ValueError, binascii.Error) as exc:
+                raise AssertionError(
+                    "Video response b64_json is not valid base64"
+                ) from exc
+            assert decoded, "Video response b64_json decodes to empty content"
+            return
+
+        url = entry.get("url")
+        assert isinstance(url, str) and url, "Video response must include a non-empty url"
 
 
 @dataclass
