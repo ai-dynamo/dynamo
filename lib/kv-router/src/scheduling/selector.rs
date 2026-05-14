@@ -280,25 +280,29 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             });
 
         let (best_worker, best_logit) = if temperature == 0.0 {
-            let mut min_workers = Vec::new();
-            let mut min_score = f64::INFINITY;
+            let mut best_worker = None;
+            let mut best_logit = f64::INFINITY;
+            let mut tie_count = 0usize;
+            let mut rng = rand::rng();
             for worker in worker_iter {
                 let score = get_score(worker);
-                if score < min_score {
-                    min_workers.clear();
-                    min_workers.push(worker);
-                    min_score = score;
-                } else if score == min_score {
-                    min_workers.push(worker);
+                if score < best_logit {
+                    best_worker = Some(worker);
+                    best_logit = score;
+                    tie_count = 1;
+                    continue;
+                }
+
+                if score == best_logit {
+                    tie_count += 1;
+                    // Reservoir sampling keeps tied minima uniform without collecting workers.
+                    if rng.random_range(0..tie_count) == 0 {
+                        best_worker = Some(worker);
+                    }
                 }
             }
 
-            if min_workers.len() > 1 {
-                let idx = rand::rng().random_range(0..min_workers.len());
-                (min_workers[idx], min_score)
-            } else {
-                (min_workers[0], min_score)
-            }
+            (best_worker.expect("worker_iter non-empty"), best_logit)
         } else {
             let mut worker_logits = FxHashMap::default();
             for worker in worker_iter {
@@ -485,6 +489,59 @@ mod tests {
 
         let result = softmax_sample_with_sample(&logits, temperature, sample);
         assert_eq!(result, entries[target_idx]);
+    }
+
+    #[test]
+    fn test_default_selector_randomizes_zero_temperature_ties() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let config = KvRouterConfig {
+            router_temperature: 0.0,
+            ..Default::default()
+        };
+        let selector = DefaultWorkerSelector::new(Some(config), "test");
+        let workers = HashMap::from([
+            (10, SimpleWorkerConfig::default()),
+            (20, SimpleWorkerConfig::default()),
+            (30, SimpleWorkerConfig::default()),
+        ]);
+        let request = SchedulingRequest {
+            maybe_request_id: Some("test".into()),
+            token_seq: None,
+            isl_tokens: 16,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::default(),
+            effective_cached_tokens: HashMap::default(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            update_states: false,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            shared_cache_hits: None,
+            resp_tx: None,
+        };
+        let mut selected = [false; 3];
+
+        for _ in 0..120 {
+            let result = selector.select_worker(&workers, &request, 16).unwrap();
+            match result.worker.worker_id {
+                10 => selected[0] = true,
+                20 => selected[1] = true,
+                30 => selected[2] = true,
+                worker_id => panic!("unexpected worker id: {worker_id}"),
+            }
+        }
+
+        let selected_count = selected.into_iter().filter(|seen| *seen).count();
+        assert!(
+            selected_count > 1,
+            "zero-temperature tie-breaking should not always select the same worker"
+        );
     }
 
     /// Test the scoring formula with shared cache hits.

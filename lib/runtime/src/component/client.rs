@@ -12,6 +12,7 @@ use anyhow::Result;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use futures::StreamExt;
+use rand::Rng;
 
 use crate::component::{Endpoint, Instance};
 use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
@@ -34,7 +35,30 @@ impl RoutingOccupancyState {
 
     pub(crate) async fn select_exact_min_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
         let _guard = self.exact_selection_lock.lock().await;
-        let id = *instance_ids.iter().min_by_key(|&&id| self.load(id))?;
+
+        let mut min_load = u64::MAX;
+        let mut selected = None;
+        let mut tie_count = 0usize;
+        let mut rng = rand::rng();
+        for &id in instance_ids {
+            let load = self.load(id);
+            if load < min_load {
+                min_load = load;
+                selected = Some(id);
+                tie_count = 1;
+                continue;
+            }
+
+            if load == min_load {
+                tie_count += 1;
+                // Reservoir sampling keeps tied minima uniform without allocating in this locked hot path.
+                if rng.random_range(0..tie_count) == 0 {
+                    selected = Some(id);
+                }
+            }
+        }
+
+        let id = selected?;
         self.increment(id);
         Some(id)
     }
@@ -551,6 +575,31 @@ mod tests {
         assert_eq!(state.load(100), 30);
         assert_eq!(state.load(200), 30);
         assert_eq!(state.load(300), 30);
+    }
+
+    #[tokio::test]
+    async fn test_select_exact_min_and_increment_randomizes_ties() {
+        let mut selected = [false; 3];
+
+        for _ in 0..120 {
+            let state = RoutingOccupancyState::default();
+            let picked = state
+                .select_exact_min_and_increment(&[10, 20, 30])
+                .await
+                .unwrap();
+            match picked {
+                10 => selected[0] = true,
+                20 => selected[1] = true,
+                30 => selected[2] = true,
+                _ => panic!("unexpected worker id: {picked}"),
+            }
+        }
+
+        let selected_count = selected.into_iter().filter(|seen| *seen).count();
+        assert!(
+            selected_count > 1,
+            "tie-breaking should not always select the first minimum-load worker"
+        );
     }
 
     #[tokio::test]
