@@ -55,7 +55,16 @@ cases:
           arguments:
             timezone: EST
         normal_text: 'Both:'
-      vllm: *d_2c
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+        reason: "vLLM llama3_json drops leading normal_text before the python_tag token"
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
   PARSER.batch.2.d:
