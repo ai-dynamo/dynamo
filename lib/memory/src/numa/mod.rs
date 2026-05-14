@@ -30,6 +30,7 @@ pub mod topology;
 pub mod worker_pool;
 
 use cudarc::driver::{CudaContext, result::device as cuda_device, sys as cuda_sys};
+use kvbm_common::DeviceBackend;
 use nix::libc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -49,25 +50,6 @@ pub(crate) fn cuda_context(device_id: u32) -> crate::Result<Arc<CudaContext>> {
     Ok(ctx)
 }
 use std::{fs, mem, process::Command};
-
-/// Device backend selector for NUMA CPU-set subdivision.
-///
-/// Lightweight enum local to `dynamo-memory` so this crate does not depend on
-/// `kvbm-physical`. Callers that already have a `kvbm_physical::device::DeviceBackend`
-/// can convert trivially:
-/// ```ignore
-/// let kind = match backend {
-///     DeviceBackend::Cuda => DeviceBackendKind::Cuda,
-///     DeviceBackend::Sycl => DeviceBackendKind::Sycl,
-/// };
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DeviceBackendKind {
-    /// NVIDIA CUDA backend.
-    Cuda,
-    /// Intel XPU via SYCL backend.
-    Sycl,
-}
 
 /// Cache for GPU PCI address → NUMA node lookups.
 /// The mapping never changes at runtime, so we cache results (including negative
@@ -649,7 +631,7 @@ fn subdivide_cpu_set_for_device(
 // ---------------------------------------------------------------------------
 
 /// Cache: (backend, pci_address) → CPU set.
-static BACKEND_CPU_SETS: OnceLock<Mutex<HashMap<(DeviceBackendKind, String), Option<Vec<usize>>>>> =
+static BACKEND_CPU_SETS: OnceLock<Mutex<HashMap<(DeviceBackend, String), Option<Vec<usize>>>>> =
     OnceLock::new();
 
 /// Get a deterministic CPU subset for a device, subdivided among ALL GPUs
@@ -681,7 +663,7 @@ static BACKEND_CPU_SETS: OnceLock<Mutex<HashMap<(DeviceBackendKind, String), Opt
 /// sysfs scan sees all 4 → correctly subdivides into 2 CPU slices per node.
 ///
 /// Returns `None` if the NUMA node cannot be determined.
-pub fn get_device_cpu_set(backend: DeviceBackendKind, pci_address: &str) -> Option<Vec<usize>> {
+pub fn get_device_cpu_set(backend: DeviceBackend, pci_address: &str) -> Option<Vec<usize>> {
     let cache = BACKEND_CPU_SETS.get_or_init(|| Mutex::new(HashMap::new()));
     let key = (backend, pci_address.to_string());
 
@@ -699,7 +681,7 @@ pub fn get_device_cpu_set(backend: DeviceBackendKind, pci_address: &str) -> Opti
 
 /// Compute the CPU set for a single device by enumerating its backend's GPUs.
 fn compute_cpu_set_for_device(
-    backend: DeviceBackendKind,
+    backend: DeviceBackend,
     pci_address: &str,
 ) -> Option<Vec<usize>> {
     let topology = match topology::get_numa_topology() {
@@ -711,8 +693,8 @@ fn compute_cpu_set_for_device(
     };
 
     let all_gpus = match backend {
-        DeviceBackendKind::Cuda => CudaGpuEnumerator.enumerate_all_gpus(),
-        DeviceBackendKind::Sycl => {
+        DeviceBackend::Cuda => CudaGpuEnumerator.enumerate_all_gpus(),
+        DeviceBackend::Sycl => {
             #[cfg(feature = "xpu-sycl")]
             {
                 SyclGpuEnumerator.enumerate_all_gpus()

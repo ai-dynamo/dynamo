@@ -305,7 +305,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Parse backend (DeviceBackend::from_str handles cuda, ze, sycl, xpu, intel, etc.)
-    let device_backend: DeviceBackend = cli.backend.parse()?;
+    let device_backend: DeviceBackend = cli.backend.parse().map_err(anyhow::Error::msg)?;
 
     // Parse enums from CLI strings
     let directions: Vec<Direction> = cli

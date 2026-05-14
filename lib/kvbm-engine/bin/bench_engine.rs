@@ -52,7 +52,7 @@ use kvbm_engine::{
 use kvbm_logical::blocks::BlockRegistry;
 use kvbm_logical::manager::BlockManager;
 use dynamo_memory::DeviceAllocator;
-use kvbm_physical::device::{DeviceBackend, DeviceContext};
+use kvbm_physical::device::{DeviceBackend, DeviceBackendExt, DeviceContext};
 use kvbm_physical::layout::{LayoutConfig, PhysicalLayout};
 use kvbm_physical::transfer::{NixlAgent, TransferManager, TransferOptions};
 
@@ -368,14 +368,8 @@ fn spawn_worker_thread(
                     .and_then(|ctx| ctx.pci_bdf_address());
 
                 if let Some(ref bdf) = pci_bdf {
-                    // Map kvbm-physical backend to dynamo-memory's lightweight enum
-                    let backend_kind = match backend {
-                        DeviceBackend::Cuda => dynamo_memory::numa::DeviceBackendKind::Cuda,
-                        DeviceBackend::Sycl => dynamo_memory::numa::DeviceBackendKind::Sycl,
-                    };
-
                     // Try CPU-set subdivision (works for all backends now)
-                    if let Some(cpus) = dynamo_memory::numa::get_device_cpu_set(backend_kind, bdf) {
+                    if let Some(cpus) = dynamo_memory::numa::get_device_cpu_set(backend, bdf) {
                         let numa_node = dynamo_memory::numa::get_numa_node_for_pci_address(bdf);
                         let numa_str = match numa_node {
                             Some(n) => format!("NUMA node {n}"),

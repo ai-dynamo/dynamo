@@ -28,6 +28,7 @@ xpu-sycl = ["dep:oneapi-rs"]
 [dependencies]
 anyhow = { workspace = true }
 cudarc = { workspace = true }
+kvbm-common = { workspace = true }
 oneapi-rs = { workspace = true, optional = true }
 nixl-sys = { version = "=0.10.1" }
 serde = { workspace = true}

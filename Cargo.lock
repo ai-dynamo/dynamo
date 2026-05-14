@@ -2578,6 +2578,7 @@ version = "1.2.0"
 dependencies = [
  "anyhow",
  "cudarc",
+ "kvbm-common",
  "libc",
  "libloading 0.8.9",
  "nix 0.30.1",

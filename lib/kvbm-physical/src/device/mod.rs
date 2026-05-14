@@ -7,7 +7,6 @@
 //! (CUDA, SYCL/XPU) using the Static Enum + Trait Objects pattern.
 
 pub mod traits;
-pub mod detection;
 
 #[cfg(feature = "cuda")]
 pub mod cuda;
@@ -15,30 +14,37 @@ pub mod cuda;
 pub mod sycl;
 
 use anyhow::{Result, bail};
-use serde::{Deserialize, Serialize};
-use std::str::FromStr;
 
 pub use traits::{DeviceContextOps, DeviceStreamOps, DeviceEventOps, DeviceMemPoolOps};
 
-/// Device backend type selector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum DeviceBackend {
-    Cuda,
-    /// SYCL backend — pure SYCL implementation (Intel XPU via SYCL).
-    Sycl,
+// `DeviceBackend` lives in `kvbm-common` so both the storage layer (`dynamo-memory`)
+// and device layer can reference the same enum. Runtime probes (feature-gated
+// `is_available` etc.) live on the `DeviceBackendExt` extension trait below because
+// they must call into the cuda / xpu-sycl submodules.
+pub use kvbm_common::DeviceBackend;
+
+/// Extension trait adding runtime probes to [`DeviceBackend`].
+///
+/// Bring into scope with `use kvbm_physical::device::DeviceBackendExt;`
+/// at call sites that need `.is_available()` / `::detect_backend()` /
+/// `::list_available()`.
+pub trait DeviceBackendExt: Sized {
+    /// Return true if this backend is compiled in AND a device is
+    /// physically present.
+    fn is_available(&self) -> bool;
+
+    /// Auto-detect the best available device backend.
+    ///
+    /// Priority order: CUDA then SYCL (XPU).
+    fn detect_backend() -> Result<Self>;
+
+    /// List every backend that is both compiled in and physically
+    /// present on the current system.
+    fn list_available() -> Vec<Self>;
 }
 
-impl DeviceBackend {
-    /// Get human-readable name.
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Cuda => "CUDA",
-            Self::Sycl => "SYCL (XPU)",
-        }
-    }
-
-    /// Check if backend is available on current system.
-    pub fn is_available(&self) -> bool {
+impl DeviceBackendExt for DeviceBackend {
+    fn is_available(&self) -> bool {
         match self {
             Self::Cuda => {
                 #[cfg(feature = "cuda")]
@@ -54,17 +60,36 @@ impl DeviceBackend {
             }
         }
     }
-}
 
-impl FromStr for DeviceBackend {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s.to_lowercase().as_str() {
-            "cuda" | "gpu" | "nvidia" => Ok(Self::Cuda),
-            "sycl" | "xpu" | "intel" => Ok(Self::Sycl),
-            _ => bail!("Unknown device backend: {}", s),
+    fn detect_backend() -> Result<Self> {
+        #[cfg(feature = "cuda")]
+        {
+            if Self::Cuda.is_available() {
+                tracing::info!("Auto-detected CUDA backend");
+                return Ok(Self::Cuda);
+            }
         }
+        #[cfg(feature = "xpu-sycl")]
+        {
+            if Self::Sycl.is_available() {
+                tracing::info!("Auto-detected SYCL (XPU) backend");
+                return Ok(Self::Sycl);
+            }
+        }
+        bail!("No supported device backend available on this system")
+    }
+
+    fn list_available() -> Vec<Self> {
+        let mut backends = Vec::new();
+        #[cfg(feature = "cuda")]
+        if Self::Cuda.is_available() {
+            backends.push(Self::Cuda);
+        }
+        #[cfg(feature = "xpu-sycl")]
+        if Self::Sycl.is_available() {
+            backends.push(Self::Sycl);
+        }
+        backends
     }
 }
 
@@ -352,5 +377,29 @@ impl std::fmt::Debug for DeviceMemPool {
         f.debug_struct("DeviceMemPool")
             .field("backend", &self.backend)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeviceBackend, DeviceBackendExt};
+
+    #[test]
+    fn test_detect_backend() {
+        match DeviceBackend::detect_backend() {
+            Ok(backend) => {
+                println!("Detected: {:?}", backend);
+                assert!(backend.is_available());
+            }
+            Err(e) => {
+                println!("No backend available: {}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_list_available() {
+        let backends = DeviceBackend::list_available();
+        println!("Available backends: {:?}", backends);
     }
 }
