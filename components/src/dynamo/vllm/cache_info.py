@@ -95,9 +95,11 @@ async def configure_kv_event_block_size(
         if is_mamba_or_hybrid:
             hf_config = getattr(vllm_config.model_config, "hf_config", None)
             architectures = list(getattr(hf_config, "architectures", []) or [])
+            speculative = vllm_config.speculative_config is not None
+            reason = "speculative/hybrid model" if speculative else "Mamba model"
             raise ValueError(
-                f"Failed to fetch KV cache group metadata for hybrid/Mamba model "
-                f"(architectures={architectures}, speculative_config is not None). "
+                f"Failed to fetch KV cache group metadata for {reason} "
+                f"(architectures={architectures}). "
                 f"The get_kv_cache_group_metadata engine utility must be available "
                 f"to determine the correct KV event block size. Original error: {e}"
             ) from e
