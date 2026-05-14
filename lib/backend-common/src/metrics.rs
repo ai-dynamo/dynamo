@@ -6,22 +6,22 @@
 //! `Worker` constructs an `EngineMetrics` from the endpoint's
 //! [`MetricsHierarchy`] and hands it to the engine via
 //! [`LLMEngine::register_prometheus`]. Engines never see the full `Endpoint`
-//! — only the methods needed to create Prometheus instruments or bridge a
-//! foreign registry into the runtime's `/metrics` output.
+//! — only the surface needed to bridge a foreign registry into the runtime's
+//! `/metrics` output via [`EngineMetrics::add_expfmt_callback`].
 //!
-//! Rust engines use the native `create_*` methods; hierarchy auto-labels
-//! (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, `worker_id`)
-//! are injected at metric construction time by the underlying
-//! [`dynamo_runtime::metrics::create_metric`] helper.
-//!
-//! Engines wrapping a foreign `prometheus::Registry` (e.g. one populated by
-//! a third-party library) call [`EngineMetrics::add_expfmt_callback`].
+//! Native Rust `create_*` (with model labels merged in) is intentionally not
+//! exposed here yet — `dynamo_runtime::metrics::create_metric` injects only
+//! hierarchy labels (`dynamo_namespace`, `dynamo_component`,
+//! `dynamo_endpoint`, `worker_id`). When a Rust engine needs to emit
+//! native metrics labelled with `model`/`model_name`, add label-aware
+//! `create_*` wrappers on `EngineMetrics` that merge in `auto_labels`
+//! at construction time.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use dynamo_runtime::metrics::{
-    Metrics, MetricsHierarchy, PrometheusExpositionFormatCallback, prometheus_names::labels,
+    MetricsHierarchy, PrometheusExpositionFormatCallback, prometheus_names::labels,
 };
 
 use crate::engine::EngineConfig;
@@ -73,12 +73,6 @@ impl EngineMetrics {
     /// Precomputed auto-labels for the FFI bridge.
     pub fn auto_labels(&self) -> &Arc<HashMap<String, String>> {
         &self.auto_labels
-    }
-
-    /// Runtime metrics wrapper for `create_*` access (auto-labels baked
-    /// in at construction).
-    pub fn metrics(&self) -> Metrics<&dyn MetricsHierarchy> {
-        Metrics::new(&*self.hierarchy)
     }
 
     /// Register a scrape callback for a foreign Prometheus registry.
@@ -159,24 +153,6 @@ fn compute_auto_labels(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn metrics_create_registers_with_hierarchy() {
-        let m = EngineMetrics::from_hierarchy(TestHierarchy::new());
-        let counter = m
-            .metrics()
-            .create_intcounter("requests_total", "test counter", &[])
-            .expect("create");
-        counter.inc();
-        counter.inc();
-        let text = m
-            .hierarchy()
-            .get_metrics_registry()
-            .prometheus_expfmt_combined()
-            .expect("expfmt");
-        assert!(text.contains("requests_total"));
-        assert!(text.contains(" 2"));
-    }
 
     #[test]
     fn with_engine_config_populates_model_labels() {
