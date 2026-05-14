@@ -594,7 +594,15 @@ class VllmProcessor:
                     break
                 engine_response = dynamo_response.data()
 
-                if engine_response is None or "token_ids" not in engine_response:
+                if engine_response is None:
+                    if dynamo_response.is_error():
+                        yield handle_engine_error(engine_response, request_id, logger)
+                        break
+                    # No data or error fields, means we may have a comment or other kind of event.
+                    # I'm not sure what those are used for, so TODO. Skip for now.
+                    continue
+
+                if "token_ids" not in engine_response:
                     yield handle_engine_error(engine_response, request_id, logger)
                     break
 
