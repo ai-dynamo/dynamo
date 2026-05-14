@@ -47,8 +47,13 @@ pytestmark = [
 
 
 class _FakeContext:
-    """Duck-typed ``dynamo._core.Context``.  TrtllmLLMEngine only calls
-    ``context.id()``."""
+    """Duck-typed ``dynamo._core.Context``. ``TrtllmLLMEngine`` calls
+    ``context.id()`` plus ``trace_id`` / ``span_id`` (via
+    ``build_trace_headers``); both return ``None`` here so the helper
+    short-circuits to a no-op header dict."""
+
+    trace_id: str | None = None
+    span_id: str | None = None
 
     def __init__(self, request_id: str = "unit-test-req") -> None:
         self._id = request_id

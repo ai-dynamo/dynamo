@@ -160,6 +160,36 @@ Standardize on:
   finish reasons.
 - `logger.error` only for unrecoverable failures.
 
+## Trace propagation
+
+Engines must forward W3C trace headers to their underlying inference engine so
+that vLLM / TRT-LLM / SGLang's internal OTel spans (scheduler, forward pass,
+KV transfer) join the Dynamo trace tree. Build the header dict once at the top
+of `generate()` and pass it to every inference-engine call site:
+
+```python
+from dynamo.common.utils.otel_tracing import build_trace_headers
+...
+trace_headers = build_trace_headers(context)
+gen = self.engine_client.generate(prompt, sampling_params, request_id,
+                                  trace_headers=trace_headers)
+```
+
+`build_trace_headers(context)` returns `None` when the request arrived without a
+`traceparent` — pass it through unchanged; inference engines treat `None` as
+"no upstream trace." The kwarg name varies per backend:
+
+| Backend | Method | Kwarg |
+|---|---|---|
+| vLLM | `engine_client.generate` | `trace_headers` |
+| TRT-LLM | `engine.llm.generate_async` | `trace_headers` |
+| SGLang | `engine.async_generate` | `external_trace_header` (gated on `server_args.enable_trace`) |
+
+See the canonical wire-ups in `vllm/llm_engine.py`, `trtllm/llm_engine.py`,
+`sglang/llm_engine.py`. Without this forwarding, the trace_id reaches the
+worker but never reaches the inference engine — the trace tree shows a gap
+where the engine's internal spans should be.
+
 ## Key Files
 
 | File | What it does |
