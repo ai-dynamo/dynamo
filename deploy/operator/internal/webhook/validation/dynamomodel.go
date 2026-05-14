@@ -96,9 +96,10 @@ func (v *DynamoModelValidator) validateSourceURI(uri string) error {
 		return fmt.Errorf("source URI cannot be empty")
 	}
 
-	// Check for supported schemes
-	if !strings.HasPrefix(uri, "s3://") && !strings.HasPrefix(uri, "hf://") && !strings.HasPrefix(uri, "file://") {
-		return fmt.Errorf("source URI must start with 's3://', 'hf://', or 'file://', got: %s", uri)
+	// Check for supported schemes. file:// requires three slashes (file:///path)
+	// to denote a local filesystem path; file://host/path and bare file:// are rejected.
+	if !strings.HasPrefix(uri, "s3://") && !strings.HasPrefix(uri, "hf://") && !strings.HasPrefix(uri, "file:///") {
+		return fmt.Errorf("source URI must start with 's3://', 'hf://', or 'file:///', got: %s", uri)
 	}
 
 	return nil
