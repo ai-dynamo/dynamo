@@ -216,10 +216,21 @@ impl LiveRuntime {
             workload: Some(Arc::clone(&workload)),
         };
 
+        tracing::info!(
+            total_turns,
+            num_workers = self.senders.len(),
+            "replay_diag: workload loop starting"
+        );
+
         loop {
             let now = now_ms(start);
             let ready_turns = workload.driver.lock().unwrap().pop_ready(now, usize::MAX);
             if !ready_turns.is_empty() {
+                tracing::info!(
+                    count = ready_turns.len(),
+                    tasks_active = tasks.len(),
+                    "replay_diag: spawning ready turns"
+                );
                 for ready_turn in ready_turns {
                     let guard = cap_enabled.then(|| {
                         InFlightGuard::new(Arc::clone(&workload), ready_turn.request_uuid)
@@ -245,24 +256,35 @@ impl LiveRuntime {
                 (driver.is_drained(), driver.next_ready_time_ms())
             };
             if is_drained {
+                tracing::info!(
+                    tasks_remaining = tasks.len(),
+                    "replay_diag: workload drained, waiting for tasks"
+                );
                 break;
             }
 
             wait_for_workload_progress(next_ready_ms, start, wake.as_mut()).await;
         }
 
+        let mut completed_tasks = 0usize;
         while let Some(result) = tasks.join_next().await {
+            completed_tasks += 1;
             result.map_err(|e| anyhow!("online replay request task failed: {e}"))??;
         }
+        tracing::info!(completed_tasks, "replay_diag: all tasks joined");
 
         drop(arrival_tx);
+        tracing::info!("replay_diag: shutdown — cancelling workers");
         self.cancel_token.cancel();
         self.schedulers.clear();
 
+        tracing::info!("replay_diag: shutdown — awaiting demux");
         let report = demux_task
             .await
             .map_err(|e| anyhow!("online replay demux task failed: {e}"))?;
+        tracing::info!("replay_diag: shutdown — demux done, shutting down router");
         router.shutdown().await?;
+        tracing::info!("replay_diag: shutdown complete");
         Ok((report, stats.snapshot()))
     }
 }
