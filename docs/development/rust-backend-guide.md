@@ -285,10 +285,15 @@ Every backend's CLI shares a common base (`--namespace`, `--component`,
 `--endpoint`, etc.) provided by `CommonArgs`. Flatten that into your
 engine's `Args` struct and add your engine-specific flags.
 
+`option_env!` here (instead of `env!`) is intentional: `CARGO_BIN_NAME` is
+only defined when the file is built as part of a bin target, but the Step 7
+conformance test compiles `engine.rs` as part of an integration test where
+the variable is absent — `env!` would refuse to compile.
+
 ```rust
 #[derive(clap::Parser, Debug)]
 #[command(
-    name = env!("CARGO_BIN_NAME"),
+    name = option_env!("CARGO_BIN_NAME").unwrap_or("my-backend"),
     about = "My Dynamo Rust backend."
 )]
 struct Args {
@@ -518,14 +523,22 @@ plain loop that polls cancellation between yields:
 ```rust
 Ok(Box::pin(async_stream::stream! {
     for (i, token_id) in tokens_to_emit.iter().enumerate() {
-        tokio::select! {
-            biased;
-            _ = ctx.stopped() => {
+        if delay.is_zero() {
+            if ctx.is_stopped() {
                 yield Ok(LLMEngineOutput::cancelled()
                     .with_usage(usage(prompt_tokens, i as u32)));
                 return;
             }
-            _ = tokio::time::sleep(delay), if !delay.is_zero() => {}
+        } else {
+            tokio::select! {
+                biased;
+                _ = ctx.stopped() => {
+                    yield Ok(LLMEngineOutput::cancelled()
+                        .with_usage(usage(prompt_tokens, i as u32)));
+                    return;
+                }
+                _ = tokio::time::sleep(delay) => {}
+            }
         }
         if i == tokens_to_emit.len() - 1 {
             yield Ok(LLMEngineOutput::stop()
@@ -538,8 +551,14 @@ Ok(Box::pin(async_stream::stream! {
 }))
 ```
 
+The two-branch split is load-bearing: `tokio::select!` with the sleep
+arm disabled by a `if !delay.is_zero()` guard would leave `ctx.stopped()`
+as the only enabled branch and hang forever in tests that drive
+`generate` from a context that never fires `stop_generating` (e.g. the
+conformance kit's `mock_context()`).
+
 No channel-close race to worry about; `biased` is still cheap and
-recommended for consistency.
+recommended for consistency in the non-zero-delay path.
 
 **Cancellation rules**:
 
