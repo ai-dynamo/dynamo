@@ -109,6 +109,9 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
                 match serde_json::from_str::<Box<RawValue>>(remaining) {
                     Ok(rv) => {
                         let raw = rv.get();
+                        if raw.is_empty() {
+                            break; // defensive: zero-advance guard
+                        }
                         items.push(raw.to_string());
                         // Advance past the consumed bytes.  `RawValue` captures
                         // exactly the JSON token bytes (no surrounding whitespace),
