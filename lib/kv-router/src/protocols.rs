@@ -335,6 +335,8 @@ pub enum RouterRequest {
         tokens: Vec<Token>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        #[serde(default, skip_serializing_if = "RoutingConstraints::is_empty")]
+        routing_constraints: RoutingConstraints,
     },
     MarkPrefill,
     MarkFree {
@@ -350,6 +352,7 @@ impl Default for RouterRequest {
         RouterRequest::New {
             tokens: vec![],
             block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
         }
     }
 }

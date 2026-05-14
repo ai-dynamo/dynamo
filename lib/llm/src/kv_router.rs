@@ -1076,6 +1076,7 @@ where
             RouterRequest::New {
                 tokens,
                 block_mm_infos,
+                routing_constraints,
             } => {
                 let (best_worker, overlap_blocks) = self
                     .find_best_match(
@@ -1088,7 +1089,7 @@ where
                         0.0,
                         None,
                         None,
-                        RoutingConstraints::default(),
+                        routing_constraints,
                     )
                     .await?;
 
