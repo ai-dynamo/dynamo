@@ -289,6 +289,93 @@ def _compute_mm_uuids(
     return {"image": uuids}
 
 
+# ---------------------------------------------------------------------------
+# nvext.engine_data helpers (mirror of SGLang PR #8119)
+# ---------------------------------------------------------------------------
+#
+# Clients (e.g. verifiers' OpenAIChatCompletionsTokenClient when targeting
+# Dynamo) opt-in to engine-side metadata by setting
+# `nvext.extra_fields: ["engine_data"]` on the request. When set, the
+# response.nvext.engine_data payload from this backend includes the exact
+# engine-emitted completion_token_ids and per-token logprobs (flat list of
+# float indexed by sampled token) -- removing the need for the client to
+# re-tokenize message.content to recover token IDs (the root cause of the
+# 144x Mismatch-KL gap observed on Dynamo vs native vLLM RL runs).
+#
+# Symmetric with SGLang's `_nvext_extra_field_requested` helper added in
+# `components/src/dynamo/sglang/request_handlers/llm/decode_handler.py`.
+
+
+def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
+    """Return True iff the request opted into the given nvext extra field.
+
+    Mirrors the SGLang backend helper of the same name (PR #8119) so the
+    two backends honor `nvext.extra_fields=[...]` identically.
+
+    Looks in two places (in order):
+      1. `request["nvext"]["extra_fields"]` — raw OpenAI request shape
+         (used by SGLang's handler; also covers any direct test injection).
+      2. `request["extra_args"]["nvext"]["extra_fields"]` — what the Rust
+         preprocessor stashes when building PreprocessedRequest from an
+         OpenAI request (PreprocessedRequest itself has no nvext field).
+    """
+    for source in (
+        request.get("nvext"),
+        (request.get("extra_args") or {}).get("nvext")
+        if isinstance(request.get("extra_args"), dict)
+        else None,
+    ):
+        if not isinstance(source, dict):
+            continue
+        extra_fields = source.get("extra_fields")
+        if isinstance(extra_fields, list) and field in extra_fields:
+            return True
+    return False
+
+
+def _flatten_logprobs(
+    log_probs: Any,
+) -> Optional[list[float]]:
+    """Coerce a per-token logprob sequence into a flat list[float].
+
+    The backend's per-chunk `log_probs` field is one float per emitted
+    token (the logprob the engine sampled). Some upstream paths wrap it
+    in dicts or nested lists; this helper accepts:
+      - list[float]               -> returned as-is
+      - list[list[float]]         -> flattened
+      - list[dict{logprob: ...}]  -> .logprob extracted
+      - None                      -> None
+
+    Any element that isn't coercible to float is dropped silently rather
+    than poisoning the entire payload. The trainer treats missing
+    per-token logprobs as off-policy correction = 0 for that token, so a
+    partial list is preferable to a hard failure.
+    """
+    if log_probs is None:
+        return None
+    if not isinstance(log_probs, list):
+        return None
+    out: list[float] = []
+    for item in log_probs:
+        if isinstance(item, (int, float)):
+            out.append(float(item))
+        elif isinstance(item, list) and item:
+            head = item[0]
+            if isinstance(head, (int, float)):
+                out.append(float(head))
+            elif isinstance(head, dict) and "logprob" in head:
+                try:
+                    out.append(float(head["logprob"]))
+                except (TypeError, ValueError):
+                    continue
+        elif isinstance(item, dict) and "logprob" in item:
+            try:
+                out.append(float(item["logprob"]))
+            except (TypeError, ValueError):
+                continue
+    return out or None
+
+
 # LoRAManager singleton - initialized lazily when DYN_LORA_ENABLED is set
 # None = not yet initialized, False = disabled/failed, LoRAManager = initialized
 _lora_manager = None
@@ -2923,6 +3010,28 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             async with self._abort_monitor(
                 context, request_id, abort_guard=abort_guard
             ):
+                # nvext.engine_data opt-in: if the client requested
+                # `nvext.extra_fields=["engine_data"]`, we accumulate
+                # per-chunk token_ids and logprobs and attach them to the
+                # FINAL chunk (the one carrying `finish_reason`). The Rust
+                # frontend's response builder (delta.rs) gates emission via
+                # `NvExtResponseFieldSelection.engine_data` so this payload
+                # only reaches clients that asked for it.
+                want_engine_data = _nvext_extra_field_requested(
+                    request, "engine_data"
+                )
+                # Prompt token IDs the engine actually saw. Either the
+                # pre-tokenized `nvext.token_data` (TITO) or whatever the
+                # preprocessor produced from messages (MITO). We echo them
+                # back in engine_data so the client doesn't have to re-derive
+                # them from a request it might no longer hold.
+                request_prompt_token_ids = (
+                    list(request.get("token_ids") or [])
+                    if want_engine_data
+                    else None
+                )
+                accumulated_token_ids: list[int] = []
+                accumulated_log_probs: list[float] = []
                 try:
                     async for tok in self.generate_tokens(
                         prompt,
@@ -2942,6 +3051,35 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             tok["completion_usage"][
                                 "prompt_tokens_details"
                             ] = prefill_prompt_tokens_details
+
+                        if want_engine_data:
+                            new_token_ids = tok.get("token_ids")
+                            if isinstance(new_token_ids, list):
+                                accumulated_token_ids.extend(
+                                    int(t) for t in new_token_ids
+                                )
+                            flat_lp = _flatten_logprobs(tok.get("log_probs"))
+                            if flat_lp:
+                                accumulated_log_probs.extend(flat_lp)
+                            if tok.get("finish_reason") is not None:
+                                # Final chunk -- attach the cumulative
+                                # engine_data payload. Schema mirrors PR #8119
+                                # (SGLang) so clients see a single shape.
+                                engine_data: Dict[str, Any] = {
+                                    "completion_token_ids": list(
+                                        accumulated_token_ids
+                                    ),
+                                    "finished": True,
+                                }
+                                if accumulated_log_probs:
+                                    engine_data["completion_logprobs"] = list(
+                                        accumulated_log_probs
+                                    )
+                                if request_prompt_token_ids:
+                                    engine_data["prompt_token_ids"] = list(
+                                        request_prompt_token_ids
+                                    )
+                                tok["engine_data"] = engine_data
                         yield tok
                 except EngineDeadError as e:
                     logger.error(f"vLLM EngineDeadError: {e}")
