@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Lineage-aware inactive index — a slab-backed parent/child graph that
-//! evicts only from leaves, oldest-first.
+//! evicts only from leaves.
 //!
 //! # Structure
 //!
@@ -15,10 +15,6 @@
 //! - `parent` / `first_child` / `next_sibling` — an intrusive parent→child
 //!   tree. A single-child chain (the common KV-prefix shape) is just
 //!   `first_child`; branches extend the `next_sibling` chain.
-//! - `lru_prev` / `lru_next` — an intrusive FIFO list threaded through the
-//!   *Real leaf* nodes only. Its head is the oldest evictable block. This
-//!   replaces the previous `BTreeMap` leaf queue **and** the per-node
-//!   `last_used` tick counter — list position *is* insertion-recency.
 //!
 //! A single `index: HashMap<(position, fragment), u32>` resolves the
 //! `(position, current_hash_fragment)` pair to a slot — needed because
@@ -26,14 +22,18 @@
 //! parent's fragment, never the parent's full hash). It is identity-mixed
 //! (see `PairHasher`) and pre-sized, so it does not rehash on the hot path.
 //!
-//! # Eviction-order note
+//! # Leaf eviction ordering
 //!
-//! When a node *re-becomes a leaf* (its last child is removed) it is
-//! appended at the **tail** of the leaf FIFO — treated as freshly
-//! evictable — rather than re-entering at its original insertion position.
-//! This differs from the previous `BTreeMap`-by-original-tick behavior; it
-//! is the trade that makes the leaf queue O(1) and allocation-free, and is
-//! arguably more correct (the node *was* just touched by losing a child).
+//! *Which* leaf is evicted first is delegated to a pluggable [`LeafPolicy`]
+//! (see [`eviction`]). The default is `Tick` — a `BTreeMap` keyed on a
+//! per-node insertion tick, the historical behavior, where a node that
+//! *re-becomes* a leaf returns to its original position. The `Fifo`
+//! variant is O(1) and allocation-free but appends a re-leafed node at the
+//! tail instead; it is opt-in via `with_lineage_backend_eviction`.
+
+mod eviction;
+
+pub(crate) use eviction::LeafPolicy;
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
@@ -102,10 +102,11 @@ enum SlotData {
     Free,
 }
 
-/// One arena slot. Graph edges and the leaf-FIFO links are `u32` slab
-/// indices. `position` / `fragment` are stored on every slot (real *and*
-/// ghost) because a ghost has no `seq_hash` yet still needs its index key
-/// to remove itself during pruning.
+/// One arena slot. Graph edges are `u32` slab indices. `position` /
+/// `fragment` are stored on every slot (real *and* ghost) because a ghost
+/// has no `seq_hash` yet still needs its index key to remove itself during
+/// pruning. Leaf-eviction ordering state lives in the [`LeafPolicy`], not
+/// here, so the slot stays policy-agnostic.
 struct LineageSlot {
     data: SlotData,
     position: u64,
@@ -118,10 +119,6 @@ struct LineageSlot {
     /// Next sibling in the parent's child list. Reused as the free-list
     /// link while the slot is `Free`.
     next_sibling: Option<u32>,
-    /// Intrusive leaf-FIFO links — meaningful only while this slot is a
-    /// `Real` leaf (no children).
-    lru_prev: Option<u32>,
-    lru_next: Option<u32>,
 }
 
 impl LineageSlot {
@@ -137,10 +134,10 @@ pub(crate) struct LineageBackend {
     /// `(position, fragment)` → slot index, for parent resolution on
     /// insert and target resolution on remove.
     index: IndexMap,
-    /// Intrusive FIFO over `Real` leaf nodes — `leaf_head` is the oldest
-    /// (next to evict), `leaf_tail` the newest.
-    leaf_head: Option<u32>,
-    leaf_tail: Option<u32>,
+    /// Pluggable leaf-eviction ordering. The backend feeds it the
+    /// inserted / leaf-added / leaf-demoted / removed transitions and asks
+    /// it for the next eviction victim.
+    leaves: LeafPolicy,
     /// Number of `Real` nodes (ghosts excluded).
     count: usize,
 }
@@ -152,24 +149,31 @@ impl Default for LineageBackend {
 }
 
 impl LineageBackend {
-    /// Create with no pre-sized capacity (slab and index grow on demand).
-    /// Production builds go through [`with_capacity`](Self::with_capacity).
+    /// Create with no pre-sized capacity and the default (`Tick`) eviction
+    /// policy. Production builds go through [`with_policy`](Self::with_policy).
     pub(crate) fn new() -> Self {
         Self::with_capacity(0)
     }
 
-    /// Create pre-sized for `capacity` real blocks. The inactive pool is
-    /// bounded by the store's `total_blocks`, so sizing the slab and index
-    /// to that bound means the steady-state hot path never reallocates.
-    /// (Out-of-order ghosts can briefly push past `capacity`; that grows
-    /// the slab once, amortized — not a steady-state cost.)
+    /// Create pre-sized for `capacity` real blocks with the default
+    /// (`Tick`) eviction policy.
     pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self::with_policy(capacity, LeafPolicy::tick(capacity))
+    }
+
+    /// Create pre-sized for `capacity` real blocks with an explicit leaf
+    /// eviction policy. The inactive pool is bounded by the store's
+    /// `total_blocks`, so sizing the slab, index, and policy to that bound
+    /// means the steady-state hot path never reallocates. (Out-of-order
+    /// ghosts can briefly push past `capacity`; that grows the slab once,
+    /// amortized — not a steady-state cost. The `Tick` policy's `BTreeMap`
+    /// is the one structure that always churns nodes.)
+    pub(crate) fn with_policy(capacity: usize, leaves: LeafPolicy) -> Self {
         Self {
             slots: Vec::with_capacity(capacity),
             free_head: None,
             index: HashMap::with_capacity_and_hasher(capacity, PairBuildHasher),
-            leaf_head: None,
-            leaf_tail: None,
+            leaves,
             count: 0,
         }
     }
@@ -202,36 +206,6 @@ impl LineageBackend {
         self.slots[idx as usize].data = SlotData::Free;
         self.slots[idx as usize].next_sibling = self.free_head;
         self.free_head = Some(idx);
-    }
-
-    // ---- intrusive leaf FIFO ----
-
-    /// Append a `Real` leaf to the tail (newest) of the leaf FIFO.
-    fn leaf_push_back(&mut self, idx: u32) {
-        self.slots[idx as usize].lru_prev = self.leaf_tail;
-        self.slots[idx as usize].lru_next = None;
-        match self.leaf_tail {
-            Some(t) => self.slots[t as usize].lru_next = Some(idx),
-            None => self.leaf_head = Some(idx),
-        }
-        self.leaf_tail = Some(idx);
-    }
-
-    /// Unlink a node from the leaf FIFO. No-op semantics rely on the caller
-    /// only invoking this for a slot actually in the list.
-    fn leaf_unlink(&mut self, idx: u32) {
-        let prev = self.slots[idx as usize].lru_prev;
-        let next = self.slots[idx as usize].lru_next;
-        match prev {
-            Some(p) => self.slots[p as usize].lru_next = next,
-            None => self.leaf_head = next,
-        }
-        match next {
-            Some(n) => self.slots[n as usize].lru_prev = prev,
-            None => self.leaf_tail = prev,
-        }
-        self.slots[idx as usize].lru_prev = None;
-        self.slots[idx as usize].lru_next = None;
     }
 
     // ---- child list ----
@@ -278,6 +252,7 @@ impl LineageBackend {
                     SlotData::Ghost => {
                         self.slots[idx as usize].data = SlotData::Real { block_id, seq_hash };
                         self.count += 1;
+                        self.leaves.on_node_inserted(idx);
                     }
                     SlotData::Real {
                         seq_hash: existing, ..
@@ -313,11 +288,10 @@ impl LineageBackend {
                     parent: None,
                     first_child: None,
                     next_sibling: None,
-                    lru_prev: None,
-                    lru_next: None,
                 });
                 self.index.insert((position, fragment), idx);
                 self.count += 1;
+                self.leaves.on_node_inserted(idx);
                 idx
             }
         };
@@ -339,8 +313,6 @@ impl LineageBackend {
                         parent: None,
                         first_child: None,
                         next_sibling: None,
-                        lru_prev: None,
-                        lru_next: None,
                     });
                     self.index.insert((p_pos, p_frag), pidx);
                     pidx
@@ -358,14 +330,14 @@ impl LineageBackend {
             if parent_was_leaf
                 && matches!(self.slots[parent_idx as usize].data, SlotData::Real { .. })
             {
-                self.leaf_unlink(parent_idx);
+                self.leaves.on_leaf_demoted(parent_idx);
             }
         }
 
-        // 3. If this node is a Real leaf, it is the newest evictable block.
+        // 3. If this node is a Real leaf, it enters the eviction order.
         //    (A promoted ghost already has children — not a leaf.)
         if self.slots[node_idx as usize].is_leaf() {
-            self.leaf_push_back(node_idx);
+            self.leaves.on_leaf_added(node_idx);
         }
     }
 
@@ -395,16 +367,14 @@ impl LineageBackend {
     /// any now-childless ghost up the parent chain. Returns the evicted
     /// `(seq_hash, block_id)`.
     fn remove_node_at(&mut self, idx: u32) -> (SequenceHash, BlockId) {
-        let was_leaf = self.slots[idx as usize].is_leaf();
         let payload = match std::mem::replace(&mut self.slots[idx as usize].data, SlotData::Ghost) {
             SlotData::Real { seq_hash, block_id } => (seq_hash, block_id),
             _ => unreachable!("remove_node_at called on a non-Real slot"),
         };
         self.count -= 1;
-        if was_leaf {
-            // It was a Real leaf, hence in the leaf FIFO.
-            self.leaf_unlink(idx);
-        }
+        // The node has left the graph: drop it from the eviction order
+        // (no-op if it was an interior node) and clear its policy state.
+        self.leaves.on_node_removed(idx);
 
         // Prune: a childless Ghost is removed from the graph entirely; if
         // that orphans its parent, recurse. A node that still has children
@@ -433,8 +403,9 @@ impl LineageBackend {
                     }
                     match self.slots[p as usize].data {
                         SlotData::Real { .. } => {
-                            // Parent is a Real leaf again — newest evictable.
-                            self.leaf_push_back(p);
+                            // Parent is a Real leaf again — back into the
+                            // eviction order.
+                            self.leaves.on_leaf_added(p);
                             break;
                         }
                         SlotData::Ghost => {
@@ -487,9 +458,9 @@ impl InactiveIndex for LineageBackend {
     fn allocate(&mut self, count: usize) -> Vec<(SequenceHash, BlockId)> {
         let mut allocated = Vec::with_capacity(count);
         while allocated.len() < count {
-            // Oldest evictable leaf. `remove_node_at` unlinks it from the
-            // FIFO and may expose its parent as the next leaf.
-            match self.leaf_head {
+            // Next leaf in policy order. `remove_node_at` drops it from the
+            // policy and may expose its parent as the next victim.
+            match self.leaves.next_victim() {
                 Some(idx) => allocated.push(self.remove_node_at(idx)),
                 None => break,
             }
@@ -546,15 +517,9 @@ mod tests {
     use crate::testing::BlockSequenceBuilder;
 
     impl LineageBackend {
-        /// Test-only: length of the intrusive leaf FIFO.
+        /// Test-only: number of currently-evictable leaves.
         fn get_queue_len(&self) -> usize {
-            let mut n = 0;
-            let mut cur = self.leaf_head;
-            while let Some(idx) = cur {
-                n += 1;
-                cur = self.slots[idx as usize].lru_next;
-            }
-            n
+            self.leaves.len()
         }
 
         /// Test-only: no live slots remain (all real + ghost nodes gone).
@@ -677,14 +642,14 @@ mod tests {
         assert_eq!(backend.get_queue_len(), 2);
     }
 
-    /// Two interleaved 2-chains. Eviction order reflects the intrusive-FIFO
-    /// semantics: when a node re-becomes a leaf it appends at the *tail*, so
-    /// the two chains' roots are not evicted back-to-back with their own
-    /// leaves — they round-robin. (The previous BTreeMap-by-original-tick
-    /// backend evicted `B, A, Y, X`; see the module doc for the rationale.)
+    /// Two interleaved 2-chains under the default `Tick` policy: a node
+    /// that re-becomes a leaf returns to its *original* insertion-order
+    /// position, so each chain's root is evicted right after its own leaf.
+    /// (This is the historical ordering; `Fifo` would round-robin instead —
+    /// see `re_leafed_node_goes_to_fifo_tail`.)
     #[test]
     fn test_interleaved_chains() {
-        let mut backend = LineageBackend::new();
+        let mut backend = LineageBackend::new(); // default: Tick
 
         let mut chain1 = create_chain(2, 0);
         let (a_id, a_h) = chain1.remove(0);
@@ -701,19 +666,18 @@ mod tests {
 
         assert_eq!(backend.len(), 4);
         assert_eq!(backend.get_queue_len(), 2);
-        // Leaf FIFO: [B, Y].
 
         let alloc1 = backend.allocate(1);
-        assert_eq!(alloc1[0].1, b_id); // B; A re-leafs → tail. FIFO: [Y, A]
+        assert_eq!(alloc1[0].1, b_id); // B (tick 1)
 
         let alloc2 = backend.allocate(1);
-        assert_eq!(alloc2[0].1, y_id); // Y; X re-leafs → tail. FIFO: [A, X]
+        assert_eq!(alloc2[0].1, a_id); // A re-leafed, keeps tick 0 → next
 
         let alloc3 = backend.allocate(1);
-        assert_eq!(alloc3[0].1, a_id); // A. FIFO: [X]
+        assert_eq!(alloc3[0].1, y_id); // Y (tick 3)
 
         let alloc4 = backend.allocate(1);
-        assert_eq!(alloc4[0].1, x_id); // X
+        assert_eq!(alloc4[0].1, x_id); // X re-leafed, keeps tick 2
     }
 
     #[test]
@@ -851,8 +815,6 @@ mod tests {
     fn slab_recycles_freed_slots() {
         let mut backend = LineageBackend::with_capacity(8);
 
-        // Fill, drain, refill — the slab length must not grow past the
-        // high-water mark because freed slots are reused.
         for (id, h) in create_chain(8, 0) {
             backend.insert(h, id);
         }
@@ -873,12 +835,11 @@ mod tests {
         );
     }
 
-    /// Re-becoming a leaf appends at the FIFO tail (documented eviction-order
-    /// change vs. the previous BTreeMap-by-original-tick behavior).
+    /// Under the `Fifo` policy a node that re-becomes a leaf is appended at
+    /// the FIFO tail (the documented eviction-order difference vs. `Tick`).
     #[test]
     fn re_leafed_node_goes_to_fifo_tail() {
-        // Two independent 2-chains: A0->A1 and B0->B1.
-        let mut backend = LineageBackend::new();
+        let mut backend = LineageBackend::with_policy(0, LeafPolicy::fifo(0));
         let chain_a = create_chain(2, 0);
         let chain_b = create_chain(2, 7000);
         let (a0_id, a0_h) = chain_a[0];
@@ -892,12 +853,38 @@ mod tests {
         backend.insert(b1_h, b1_id);
         // Leaf FIFO: [A1, B1].
 
-        // Remove A1 by hash → A0 re-becomes a leaf and goes to the TAIL.
+        // Remove A1 → A0 re-becomes a leaf and goes to the TAIL:
         // FIFO is now [B1, A0], not [A0, B1].
         assert!(backend.remove_by_hash(&a1_h).is_some());
+        let _ = a0_id;
+        let _ = b0_id;
 
         let order: Vec<BlockId> = backend.allocate(2).into_iter().map(|(_, id)| id).collect();
         assert_eq!(order, vec![b1_id, a0_id], "re-leafed A0 evicts after B1");
+    }
+
+    /// The same interleaved-chains scenario under `Fifo` round-robins the
+    /// chains instead of keeping each root next to its own leaf.
+    #[test]
+    fn test_interleaved_chains_fifo() {
+        let mut backend = LineageBackend::with_policy(0, LeafPolicy::fifo(0));
+
+        let chain1 = create_chain(2, 0);
+        let chain2 = create_chain(2, 1000);
+        let (a_id, a_h) = chain1[0];
+        let (b_id, b_h) = chain1[1];
+        let (x_id, x_h) = chain2[0];
+        let (y_id, y_h) = chain2[1];
+
+        backend.insert(a_h, a_id);
+        backend.insert(b_h, b_id);
+        backend.insert(x_h, x_id);
+        backend.insert(y_h, y_id);
+        // Leaf FIFO: [B, Y].
+
+        let order: Vec<BlockId> = backend.allocate(4).into_iter().map(|(_, id)| id).collect();
+        // B; A re-leafs→tail; Y; X re-leafs→tail; A; X.
+        assert_eq!(order, vec![b_id, y_id, a_id, x_id]);
     }
 
     #[test]

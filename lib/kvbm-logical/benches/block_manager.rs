@@ -26,7 +26,7 @@ use kvbm_logical::BlockManager;
 use kvbm_logical::KvbmSequenceHashProvider;
 use kvbm_logical::SequenceHash;
 use kvbm_logical::blocks::ImmutableBlock;
-use kvbm_logical::manager::BlockManagerConfigBuilder;
+use kvbm_logical::manager::{BlockManagerConfigBuilder, LineageEviction};
 use kvbm_logical::testing::{TestMeta, create_test_manager_with_backend};
 
 const BLOCK_SIZE: u32 = 4; // `create_test_manager_with_backend` builds 4-token blocks.
@@ -35,11 +35,17 @@ const SIZES: [usize; 3] = [8, 32, 128];
 /// Builder closure type for selecting an inactive backend.
 type BackendConfig = fn(BlockManagerConfigBuilder<TestMeta>) -> BlockManagerConfigBuilder<TestMeta>;
 
-/// All inactive backends, swept by the backend-sensitive groups.
+/// All inactive backends, swept by the backend-sensitive groups. The
+/// lineage backend appears twice — once per leaf-eviction policy.
 const BACKENDS: &[(&str, BackendConfig)] = &[
     ("lru", |b| b.with_lru_backend()),
     ("multi_lru", |b| b.with_multi_lru_backend()),
-    ("lineage", |b| b.with_lineage_backend()),
+    ("lineage_tick", |b| {
+        b.with_lineage_backend_eviction(LineageEviction::Tick)
+    }),
+    ("lineage_fifo", |b| {
+        b.with_lineage_backend_eviction(LineageEviction::Fifo)
+    }),
 ];
 
 /// Build a manager with `n` blocks registered as a single lineage chain,

@@ -14,7 +14,7 @@ mod tests;
 
 pub use builder::{
     BlockManagerBuilderError, BlockManagerConfigBuilder, BlockManagerResetError,
-    FrequencyTrackingCapacity, InactiveBackendConfig,
+    FrequencyTrackingCapacity, InactiveBackendConfig, LineageEviction,
 };
 
 use std::collections::HashMap;
