@@ -100,21 +100,11 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
             ),
-            # `agg_router` exercises agg_multimodal_router.sh: Rust frontend
-            # with the `lightseek-mm` feature, MM-aware KV routing, multi-worker.
-            # Smoke-level on post_merge so regressions to the script's plumbing
-            # (worker boot order, ZMQ KV events, MM-routing build) surface in
-            # CI. The fine-grained routing-correctness assertions live in
-            # tests/mm_router/test_router_rust_mm_router_e2e.py.
-            #
-            # The payload sends two identical MM requests and asserts the
-            # second sees cached_tokens > 0 — proves the warm worker reused
-            # its KV cache, which only happens if the router routed both
-            # requests to the same worker. If routing silently regressed to
-            # text-prefix only, both requests would still succeed but the
-            # second's cached_tokens would be 0 and this case would fail.
+            # Pre_merge gater for the lightseek MM-routing path. Fine-grained
+            # assertions live in tests/mm_router/test_router_rust_mm_router_e2e.py
+            # (post_merge).
             "agg_router": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[pytest.mark.pre_merge],
                 timeout_s=400,
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=1_719_075_000,

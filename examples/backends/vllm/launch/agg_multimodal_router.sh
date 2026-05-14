@@ -131,6 +131,7 @@ COMMON_ENV=(
 
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
+# Phase 1: launch all workers in parallel.
 for i in $(seq 1 "${NUM_WORKERS}"); do
     WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
     KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + (i - 1)))
@@ -150,6 +151,11 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         --max-model-len "${MAX_MODEL_LEN}" \
         --kv-events-config "${KV_EVENTS_CONFIG}" \
         ${GPU_MEM_ARGS} ${VLLM_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
+done
+
+# Phase 2: wait for all workers to be ready.
+for i in $(seq 1 "${NUM_WORKERS}"); do
+    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
     wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i"
 done
 
