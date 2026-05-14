@@ -212,6 +212,7 @@ impl ActiveSequence {
     }
 
     /// Push a token to the sequence
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn push(&mut self, token: u32) -> Option<Vec<MoveBlock>> {
         self.tokens.append(token).expect("Token push failed.");
         self.generated_tokens += 1;
@@ -292,6 +293,7 @@ impl ActiveSequence {
     ///
     /// Calling this function when max_output_tokens has already been reached will cause a panic.
     /// Always check `generated_tokens < max_output_tokens` before calling this method.
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn generate(&mut self) -> Vec<MoveBlock> {
         // Assert that we haven't reached the maximum output tokens
         assert!(

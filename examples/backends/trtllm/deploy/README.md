@@ -2,6 +2,8 @@
 
 This directory contains Kubernetes Custom Resource Definition (CRD) templates for deploying TensorRT-LLM inference graphs using the **DynamoGraphDeployment** resource.
 
+The top-level `deploy/*.yaml` templates use `nvidia.com/v1alpha1` for compatibility with existing tooling. Equivalent `nvidia.com/v1beta1` templates are available under [`v1beta1/`](./v1beta1/).
+
 ## Available Deployment Patterns
 
 ### 1. **Aggregated Deployment** (`agg.yaml`)

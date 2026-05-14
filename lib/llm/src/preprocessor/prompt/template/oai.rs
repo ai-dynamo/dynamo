@@ -235,9 +235,11 @@ fn flatten_mixed_content(parts: &[serde_json::Value], placeholder_tpl: &str) -> 
     out
 }
 
-fn normalize_tool_arguments_in_messages(messages: &mut serde_json::Value) {
-    // Deserialize tool call arguments from JSON strings to objects/arrays before template rendering
-    // avoids double encoding and enables iteration
+fn normalize_tool_calls_arguments_in_messages(messages: &mut serde_json::Value) {
+    // Deserialize `tool_calls[].function.arguments` from JSON strings to
+    // objects/arrays before template rendering — avoids double encoding
+    // and enables iteration. Skipped for templates whose own `is string`
+    // branch wants the raw string verbatim (see render()).
     let Some(msgs) = messages.as_array_mut() else {
         return;
     };
@@ -254,7 +256,19 @@ fn normalize_tool_arguments_in_messages(messages: &mut serde_json::Value) {
                 }
             }
         }
+    }
+}
 
+fn normalize_function_call_arguments_in_messages(messages: &mut serde_json::Value) {
+    // Legacy (deprecated) OpenAI `function_call.arguments` path. Kept separate
+    // from `tool_calls` normalization so the per-template `arguments is string`
+    // opt-out — which only refers to `tool_call.arguments` inside the
+    // tool_calls loop — does not accidentally suppress this path.
+    let Some(msgs) = messages.as_array_mut() else {
+        return;
+    };
+
+    for msg in msgs.iter_mut() {
         if let Some(function_call) = msg.get_mut("function_call").and_then(|v| v.as_object_mut())
             && let Some(args) = function_call.get_mut("arguments")
             && let Some(s) = args.as_str()
@@ -521,7 +535,37 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         ))
         .unwrap();
 
-        normalize_tool_arguments_in_messages(&mut messages_for_template);
+        // Pick the concrete template first so the normalization opt-out can be
+        // template- and field-specific: only the chosen template's
+        // `tool_call.arguments is string` flag should suppress normalization,
+        // and only for the `tool_calls[].function.arguments` field. Legacy
+        // `function_call.arguments` lives outside that branch and is always
+        // normalized.
+        let (template_name, template_handles_tool_calls_args_string) = if has_tools {
+            (
+                "tool_use",
+                self.tool_use_template_handles_tool_calls_arguments_string,
+            )
+        } else {
+            (
+                "default",
+                self.default_template_handles_tool_calls_arguments_string,
+            )
+        };
+
+        // Pre-parse JSON-string `arguments` into objects — but only for templates
+        // that unconditionally `| tojson` them. Templates that branch on
+        // `tool_call.arguments is string` (Qwen3, Hermes) want the raw string
+        // verbatim so the rendered bytes match what the model emitted on the
+        // prior turn. Re-serializing through minijinja's compact `tojson` here
+        // breaks append-only prefix matching across multi-step tool use.
+        if !template_handles_tool_calls_args_string {
+            normalize_tool_calls_arguments_in_messages(&mut messages_for_template);
+        }
+        // Legacy `function_call.arguments` is always normalized — the
+        // `arguments is string` opt-out only covers the modern `tool_calls`
+        // branch.
+        normalize_function_call_arguments_in_messages(&mut messages_for_template);
 
         // Inject reasoning_content as <think> blocks into content — but only if
         // the template doesn't handle it natively. Templates like Nemotron and
@@ -549,11 +593,7 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
             ctx
         };
 
-        let tmpl: minijinja::Template<'_, '_> = if has_tools {
-            self.env.get_template("tool_use")?
-        } else {
-            self.env.get_template("default")?
-        };
+        let tmpl: minijinja::Template<'_, '_> = self.env.get_template(template_name)?;
         Ok(tmpl.render(&ctx)?)
     }
 }
@@ -1271,7 +1311,7 @@ NORMAL MODE
             }]
         })]);
 
-        normalize_tool_arguments_in_messages(&mut messages);
+        normalize_tool_calls_arguments_in_messages(&mut messages);
 
         let mut env = Environment::new();
         env.add_filter("tojson", super::super::tokcfg::tojson);
@@ -1304,7 +1344,7 @@ NORMAL MODE
             }]
         })]);
 
-        normalize_tool_arguments_in_messages(&mut messages);
+        normalize_tool_calls_arguments_in_messages(&mut messages);
 
         let mut env = Environment::new();
         env.add_template("t", tmpl).unwrap();
@@ -1328,7 +1368,7 @@ NORMAL MODE
             }
         })]);
 
-        normalize_tool_arguments_in_messages(&mut messages);
+        normalize_function_call_arguments_in_messages(&mut messages);
 
         assert_eq!(
             messages[0]["function_call"]["arguments"],
@@ -1350,7 +1390,7 @@ NORMAL MODE
             }]
         })]);
 
-        normalize_tool_arguments_in_messages(&mut messages);
+        normalize_tool_calls_arguments_in_messages(&mut messages);
 
         assert_eq!(
             messages[0]["tool_calls"][0]["function"]["arguments"],
@@ -1392,7 +1432,7 @@ NORMAL MODE
         let mut messages =
             serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
-        normalize_tool_arguments_in_messages(&mut messages);
+        normalize_tool_calls_arguments_in_messages(&mut messages);
 
         // Multimodal content preserved as array (mixed types not flattened)
         assert!(messages[0]["content"].is_array());
@@ -1905,6 +1945,243 @@ NORMAL_MODE
             think_count, 1,
             "must have exactly one <think> block (from template), got {} in: {}",
             think_count, rendered
+        );
+    }
+
+    /// Real Qwen3-4B-Thinking-2507 chat template (verbatim from
+    /// `Qwen/Qwen3-4B-Thinking-2507/tokenizer_config.json`). Used to
+    /// regression-test append-only rendering across multi-step tool use.
+    const QWEN3_THINKING_TEMPLATE: &str = r##"{%- if tools %}
+    {{- '<|im_start|>system\n' }}
+    {%- if messages[0].role == 'system' %}
+        {{- messages[0].content + '\n\n' }}
+    {%- endif %}
+    {{- "# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>" }}
+    {%- for tool in tools %}
+        {{- "\n" }}
+        {{- tool | tojson }}
+    {%- endfor %}
+    {{- "\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n" }}
+{%- else %}
+    {%- if messages[0].role == 'system' %}
+        {{- '<|im_start|>system\n' + messages[0].content + '<|im_end|>\n' }}
+    {%- endif %}
+{%- endif %}
+{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}
+{%- for message in messages[::-1] %}
+    {%- set index = (messages|length - 1) - loop.index0 %}
+    {%- if ns.multi_step_tool and message.role == "user" and message.content is string and not(message.content.startswith('<tool_response>') and message.content.endswith('</tool_response>')) %}
+        {%- set ns.multi_step_tool = false %}
+        {%- set ns.last_query_index = index %}
+    {%- endif %}
+{%- endfor %}
+{%- for message in messages %}
+    {%- if message.content is string %}
+        {%- set content = message.content %}
+    {%- else %}
+        {%- set content = '' %}
+    {%- endif %}
+    {%- if (message.role == "user") or (message.role == "system" and not loop.first) %}
+        {{- '<|im_start|>' + message.role + '\n' + content + '<|im_end|>' + '\n' }}
+    {%- elif message.role == "assistant" %}
+        {%- set reasoning_content = '' %}
+        {%- if message.reasoning_content is string %}
+            {%- set reasoning_content = message.reasoning_content %}
+        {%- else %}
+            {%- if '</think>' in content %}
+                {%- set reasoning_content = content.split('</think>')[0].rstrip('\n').split('<think>')[-1].lstrip('\n') %}
+                {%- set content = content.split('</think>')[-1].lstrip('\n') %}
+            {%- endif %}
+        {%- endif %}
+        {%- if loop.index0 > ns.last_query_index %}
+            {%- if loop.last or (not loop.last and reasoning_content) %}
+                {{- '<|im_start|>' + message.role + '\n<think>\n' + reasoning_content.strip('\n') + '\n</think>\n\n' + content.lstrip('\n') }}
+            {%- else %}
+                {{- '<|im_start|>' + message.role + '\n' + content }}
+            {%- endif %}
+        {%- else %}
+            {{- '<|im_start|>' + message.role + '\n' + content }}
+        {%- endif %}
+        {%- if message.tool_calls %}
+            {%- for tool_call in message.tool_calls %}
+                {%- if (loop.first and content) or (not loop.first) %}
+                    {{- '\n' }}
+                {%- endif %}
+                {%- if tool_call.function %}
+                    {%- set tool_call = tool_call.function %}
+                {%- endif %}
+                {{- '<tool_call>\n{"name": "' }}
+                {{- tool_call.name }}
+                {{- '", "arguments": ' }}
+                {%- if tool_call.arguments is string %}
+                    {{- tool_call.arguments }}
+                {%- else %}
+                    {{- tool_call.arguments | tojson }}
+                {%- endif %}
+                {{- '}\n</tool_call>' }}
+            {%- endfor %}
+        {%- endif %}
+        {{- '<|im_end|>\n' }}
+    {%- elif message.role == "tool" %}
+        {%- if loop.first or (messages[loop.index0 - 1].role != "tool") %}
+            {{- '<|im_start|>user' }}
+        {%- endif %}
+        {{- '\n<tool_response>\n' }}
+        {{- content }}
+        {{- '\n</tool_response>' }}
+        {%- if loop.last or (messages[loop.index0 + 1].role != "tool") %}
+            {{- '<|im_end|>\n' }}
+        {%- endif %}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n<think>\n' }}
+{%- endif %}"##;
+
+    fn qwen3_thinking_formatter() -> HfTokenizerConfigJsonFormatter {
+        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": QWEN3_THINKING_TEMPLATE,
+        }))
+        .unwrap();
+        HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap()
+    }
+
+    #[test]
+    fn test_qwen3_thinking_template_flags_detected() {
+        let formatter = qwen3_thinking_formatter();
+        assert!(
+            formatter.template_handles_reasoning,
+            "template references reasoning_content directly"
+        );
+        // The Qwen3-Thinking template is registered as both `default` and
+        // `tool_use` (single-string HF chat template), so both flags must fire.
+        assert!(
+            formatter.default_template_handles_tool_calls_arguments_string,
+            "default template branches on `arguments is string`"
+        );
+        assert!(
+            formatter.tool_use_template_handles_tool_calls_arguments_string,
+            "tool_use template branches on `arguments is string`"
+        );
+    }
+
+    /// Across a multi-step tool-use turn, the rendered prompt for turn N+1
+    /// must be a strict prefix-extension of [turn-N prompt + bytes the model
+    /// emitted on turn N]. Otherwise KV-cache prefix matching falls off a
+    /// cliff every time a tool result comes back.
+    ///
+    /// The Qwen3-Thinking template's `is string` branch (template lines 63-67)
+    /// renders `tool_call.arguments` verbatim from the OpenAI-canonical JSON
+    /// string. Pre-parsing that string into an object forces the `else` branch
+    /// and re-emits with minijinja's compact `tojson`, breaking append-only.
+    #[test]
+    fn test_qwen3_thinking_append_only_across_tool_use_turn() {
+        let formatter = qwen3_thinking_formatter();
+
+        let tools = serde_json::json!([{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather for a location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string"},
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+                    },
+                    "required": ["location"]
+                }
+            }
+        }]);
+
+        // Turn 1: server is asked to produce the first assistant turn.
+        let turn1_request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "qwen3-thinking",
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "What's the weather in San Francisco?"},
+                ],
+                "tools": tools,
+            }))
+            .unwrap();
+        let p1 = formatter.render(&turn1_request).unwrap();
+
+        // Bytes the model emits next. Spacing matches the Qwen3 training
+        // distribution (Python jinja2 / json.dumps defaults: `, ` and `: `).
+        // Empty content + reasoning + a tool call.
+        let model_emitted = "I'll call get_weather for SF.\n\
+            </think>\n\n\
+            <tool_call>\n\
+            {\"name\": \"get_weather\", \"arguments\": {\"location\": \"San Francisco\", \"unit\": \"celsius\"}}\n\
+            </tool_call><|im_end|>\n";
+        let wire_after_t1 = format!("{p1}{model_emitted}");
+
+        // Turn 2: client sends the prior assistant turn back in OpenAI canonical
+        // form (arguments as a JSON STRING with spaces) plus the tool result.
+        let turn2_request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "qwen3-thinking",
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "What's the weather in San Francisco?"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "I'll call get_weather for SF.",
+                        "tool_calls": [{
+                            "id": "call_sf",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": "{\"location\": \"San Francisco\", \"unit\": \"celsius\"}"
+                            }
+                        }]
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_sf",
+                        "content": "{\"temp\": 18, \"conditions\": \"Foggy\"}"
+                    }
+                ],
+                "tools": tools,
+            }))
+            .unwrap();
+        let p2 = formatter.render(&turn2_request).unwrap();
+
+        if !p2.starts_with(&wire_after_t1) {
+            // Find first divergence and report it for easy debugging.
+            let div = wire_after_t1
+                .as_bytes()
+                .iter()
+                .zip(p2.as_bytes())
+                .position(|(a, b)| a != b)
+                .unwrap_or_else(|| wire_after_t1.len().min(p2.len()));
+            let lo = div.saturating_sub(40);
+            panic!(
+                "turn-2 prompt is NOT a prefix-extension of [turn-1 + model bytes]\n  \
+                 diverges at byte {div}\n  \
+                 wire ends: ...{}|{}\n  \
+                 t2 has:    ...{}|{}",
+                String::from_utf8_lossy(&wire_after_t1.as_bytes()[lo..div]),
+                String::from_utf8_lossy(
+                    &wire_after_t1.as_bytes()[div..(div + 60).min(wire_after_t1.len())]
+                ),
+                String::from_utf8_lossy(&p2.as_bytes()[lo..div]),
+                String::from_utf8_lossy(&p2.as_bytes()[div..(div + 60).min(p2.len())]),
+            );
+        }
+
+        // The only new bytes in P2 should be the tool response and the next
+        // generation prompt — nothing in the prior conversation should change.
+        let suffix = &p2[wire_after_t1.len()..];
+        assert!(
+            suffix.contains("<tool_response>"),
+            "appended bytes must include the tool response, got: {suffix}"
+        );
+        assert!(
+            suffix.ends_with("<|im_start|>assistant\n<think>\n"),
+            "appended bytes must end with the next generation prompt, got: {suffix}"
         );
     }
 }
