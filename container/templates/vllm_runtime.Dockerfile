@@ -36,6 +36,7 @@ ENV PATH=/usr/local/bin/etcd:${PATH}
 # CUDA-matched `.nixl_cu*` directory once at build time and expose it via a
 # stable path so the same runtime template works for both CUDA 12 and CUDA 13.
 ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+{% if device == "cuda" %}
 ENV NIXL_PREFIX=/opt/dynamo/nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}
 ENV NIXL_PLUGIN_DIR=${NIXL_LIB_DIR}/plugins
@@ -50,6 +51,30 @@ ${NIXL_PLUGIN_DIR}:\
 ${TORCH_LIB_DIR}:\
 ${CUDA_RUNTIME_LIB_DIR}:\
 ${LD_LIBRARY_PATH:-}
+{% elif device == "xpu" %}
+ENV NIXL_PREFIX=/opt/intel/intel_nixl
+ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
+ENV NIXL_PLUGIN_DIR=${NIXL_LIB_DIR}/plugins
+ENV LD_LIBRARY_PATH=\
+${NIXL_LIB_DIR}:\
+${NIXL_PLUGIN_DIR}:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+${LD_LIBRARY_PATH:-}
+{% else %}
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
+ENV NIXL_PLUGIN_DIR=${NIXL_LIB_DIR}/plugins
+ENV LD_LIBRARY_PATH=\
+${NIXL_LIB_DIR}:\
+${NIXL_PLUGIN_DIR}:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+${LD_LIBRARY_PATH:-}
+ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:${VIRTUAL_ENV}/lib/libiomp5.so"
+{% endif %}
 
 # Install NATS and ETCD
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
@@ -77,17 +102,12 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         "nixl==${NIXL_VERSION}" \
         "nixl-cu12==${NIXL_VERSION}" \
         "nixl-cu13==${NIXL_VERSION}"
-{% endif %}
 
 # Find upstream's CUDA-versioned NIXL and libcudart libs and expose them at
 # stable paths. CUDA 12 and CUDA 13 package the runtime under different
 # site-packages directories, so resolve the actual location once at build time.
 RUN set -eu; \
-{% if device == "cuda" %}
     NIXL_SITE_DIR="$(find "${SITE_PACKAGES}" -maxdepth 1 -type d -name ".nixl_cu${CUDA_MAJOR}.mesonpy.libs" | sort | tail -n 1)"; \
-{% else %}
-    NIXL_SITE_DIR="$(find "${SITE_PACKAGES}" -maxdepth 1 -type d -name '.nixl_cu*.mesonpy.libs' | sort | tail -n 1)"; \
-{% endif %}
     if [ -z "${NIXL_SITE_DIR}" ]; then \
         echo "Could not find CUDA-matched NIXL libs under ${SITE_PACKAGES}" >&2; \
         find "${SITE_PACKAGES}" -maxdepth 1 -type d -name '.nixl_cu*.mesonpy.libs' >&2; \
@@ -97,6 +117,22 @@ RUN set -eu; \
     CUDA_RUNTIME_SITE_LIB="$(find "${SITE_PACKAGES}/nvidia" -maxdepth 3 -type f -name 'libcudart.so.*' | sort | tail -n 1)"; \
     test -n "${CUDA_RUNTIME_SITE_LIB}"; \
     ln -sfn "$(dirname "${CUDA_RUNTIME_SITE_LIB}")" "${CUDA_RUNTIME_LIB_DIR}"
+{% else %}
+# Non-CUDA images keep using Dynamo-built NIXL/UCX while sharing the
+# framework-free runtime path.
+COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
+{% if device == "xpu" %}
+COPY --from=wheel_builder /opt/intel/intel_nixl /opt/intel/intel_nixl
+COPY --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
+{% else %}
+COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
+{% endif %}
+RUN echo "${NIXL_LIB_DIR}" > /etc/ld.so.conf.d/nixl.conf && \
+    echo "${NIXL_PLUGIN_DIR}" >> /etc/ld.so.conf.d/nixl.conf && \
+    echo "/usr/local/ucx/lib" > /etc/ld.so.conf.d/ucx.conf && \
+    echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
+    ldconfig
+{% endif %}
 
 # Copy attribution files and wheels
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
@@ -108,6 +144,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 # missing package must be added explicitly.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install --system --no-deps "msgspec==0.19.0" && \
     uv pip install --system --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install --system --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
@@ -119,6 +156,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
         if [ -n "$GMS_WHEEL" ]; then uv pip install --system --no-deps "$GMS_WHEEL"; fi; \
     fi
 
+{% if device == "cuda" %}
 # vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
 # jq for readable curl output just like the upstream omni image does.
 RUN set -eux; \
@@ -151,6 +189,17 @@ RUN --mount=type=bind,source=./container/deps/vllm/install_lmcache.sh,target=/tm
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     bash /tmp/install_lmcache.sh
+{% endif %}
+{% endif %}
+
+{% if context.vllm.enable_media_ffmpeg == "true" %}
+# Copy ffmpeg libraries from wheel_builder (requires root, runs before USER dynamo)
+RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
+    mkdir -p /usr/local/lib/pkgconfig && \
+    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
+    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
 {% endif %}
 
 USER dynamo
