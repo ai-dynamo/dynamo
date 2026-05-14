@@ -180,6 +180,41 @@ async def test_resolve_multinode_leader_worker_id_uses_worker_group(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_resolve_multinode_leader_worker_id_has_no_default_timeout(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        async def wait_for_instance_by_runtime_data(self, key, value, timeout_s=None):
+            calls.append((key, value, timeout_s))
+            return 1234
+
+    class FakeEndpoint:
+        async def client(self):
+            return FakeClient()
+
+    monkeypatch.setattr(
+        publisher_mod,
+        "get_sglang_worker_group_id",
+        lambda server_args: "dist_init:tcp://10.0.0.1:2345",
+    )
+    server_args = SimpleNamespace(
+        nnodes=2,
+        node_rank=1,
+    )
+
+    worker_id = await _resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
+
+    assert worker_id == 1234
+    assert calls == [
+        (
+            SGLANG_WORKER_GROUP_ID_KEY,
+            "dist_init:tcp://10.0.0.1:2345",
+            None,
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_resolve_multinode_leader_worker_id_ignores_ambiguous_instances():
     class FakeClient:
         async def wait_for_instances(self):

@@ -110,13 +110,13 @@ impl WorkerQueryEndpointDirectory {
         &self,
         worker_id: WorkerId,
         dp_rank: DpRank,
-        endpoint_id: EndpointInstanceId,
+        endpoint_id: &EndpointInstanceId,
     ) -> bool {
         let key = (worker_id, dp_rank);
         let should_remove = self
             .targets
             .get(&key)
-            .is_some_and(|target| target.value().endpoint_instance_id() == endpoint_id);
+            .is_some_and(|target| target.value().endpoint_instance_id() == *endpoint_id);
         if should_remove {
             self.targets.remove(&key);
         }
@@ -166,6 +166,12 @@ trait WorkerQueryTransport: Send + Sync {
         start_event_id: Option<u64>,
         end_event_id: Option<u64>,
     ) -> Result<WorkerKvQueryResponse>;
+
+    async fn cancel_instance_streams(&self, _endpoint_id: &EndpointInstanceId) -> usize {
+        0
+    }
+
+    async fn clear_instance_tombstone(&self, _endpoint_id: &EndpointInstanceId) {}
 }
 
 struct RuntimeWorkerQueryTransport {
@@ -222,6 +228,14 @@ impl WorkerQueryTransport for RuntimeWorkerQueryTransport {
         }
 
         Ok(response)
+    }
+
+    async fn cancel_instance_streams(&self, endpoint_id: &EndpointInstanceId) -> usize {
+        self.addressed.cancel_instance_streams(endpoint_id).await
+    }
+
+    async fn clear_instance_tombstone(&self, endpoint_id: &EndpointInstanceId) {
+        self.addressed.clear_instance_tombstone(endpoint_id).await;
     }
 }
 
@@ -382,25 +396,33 @@ impl WorkerQueryClient {
     async fn handle_discovered_query_endpoint(self: &Arc<Self>, endpoint: DiscoveredQueryEndpoint) {
         let worker_id = endpoint.worker_id;
         let dp_rank = endpoint.dp_rank;
-        match self.query_endpoints.insert(&endpoint) {
-            Some(previous) if previous != endpoint.target => {
-                // Discovery can briefly show a replacement route instance for the same
-                // logical worker during restart overlap. We keep existing cursor state
-                // here because SGLang multinode ranks are expected to restart together;
-                // if that invariant changes, this should reset the rank and restore.
-                tracing::warn!(
-                    "WorkerQueryClient: query endpoint for worker {worker_id} dp_rank {dp_rank} \
-                     changed from {:?} to {:?}",
-                    previous,
-                    endpoint.target
-                );
-            }
-            _ => {}
+        let endpoint_id = endpoint.target.endpoint_instance_id();
+        self.transport.clear_instance_tombstone(&endpoint_id).await;
+
+        let replaced = match self.query_endpoints.insert(&endpoint) {
+            Some(previous) if previous != endpoint.target => Some(previous),
+            _ => None,
+        };
+        if let Some(previous) = replaced.as_ref() {
+            tracing::warn!(
+                "WorkerQueryClient: query endpoint for worker {worker_id} dp_rank {dp_rank} \
+                 changed from {:?} to {:?}; resetting rank state",
+                previous,
+                endpoint.target
+            );
+            self.transport
+                .cancel_instance_streams(&previous.endpoint_instance_id())
+                .await;
         }
 
         let worker_state = self.get_or_create_worker_state(worker_id);
         let spawn = {
             let mut worker_state = worker_state.lock().await;
+            if replaced.is_some() {
+                worker_state.epoch += 1;
+                worker_state.ranks.insert(dp_rank, RankState::default());
+                self.indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
+            }
             let rank_state = worker_state.ranks.entry(dp_rank).or_default();
             if matches!(rank_state.cursor, CursorState::Initial) && !rank_state.recovery_inflight {
                 tracing::info!(
@@ -432,11 +454,12 @@ impl WorkerQueryClient {
     ) {
         if !self
             .query_endpoints
-            .remove_if_matches(worker_id, dp_rank, endpoint_id)
+            .remove_if_matches(worker_id, dp_rank, &endpoint_id)
         {
             return;
         }
 
+        self.transport.cancel_instance_streams(&endpoint_id).await;
         self.remove_worker_dp_state(worker_id, dp_rank).await;
     }
 
@@ -1034,6 +1057,8 @@ mod tests {
         #[allow(clippy::type_complexity)]
         calls: Arc<StdMutex<Vec<(RecoveryKey, Option<u64>, Option<u64>)>>>,
         targets: Arc<StdMutex<Vec<(RecoveryKey, Instance)>>>,
+        cancelled_instances: Arc<StdMutex<Vec<EndpointInstanceId>>>,
+        cleared_tombstones: Arc<StdMutex<Vec<EndpointInstanceId>>>,
     }
 
     impl MockWorkerQueryTransport {
@@ -1056,6 +1081,14 @@ mod tests {
 
         fn targets(&self) -> Vec<(RecoveryKey, Instance)> {
             self.targets.lock().unwrap().clone()
+        }
+
+        fn cancelled_instances(&self) -> Vec<EndpointInstanceId> {
+            self.cancelled_instances.lock().unwrap().clone()
+        }
+
+        fn cleared_tombstones(&self) -> Vec<EndpointInstanceId> {
+            self.cleared_tombstones.lock().unwrap().clone()
         }
     }
 
@@ -1098,6 +1131,21 @@ mod tests {
                 Ok(response) => Ok(response),
                 Err(message) => Err(anyhow::anyhow!(message)),
             }
+        }
+
+        async fn cancel_instance_streams(&self, endpoint_id: &EndpointInstanceId) -> usize {
+            self.cancelled_instances
+                .lock()
+                .unwrap()
+                .push(endpoint_id.clone());
+            0
+        }
+
+        async fn clear_instance_tombstone(&self, endpoint_id: &EndpointInstanceId) {
+            self.cleared_tombstones
+                .lock()
+                .unwrap()
+                .push(endpoint_id.clone());
         }
     }
 
@@ -1323,6 +1371,118 @@ mod tests {
             transport.targets(),
             vec![((100, 4), make_instance(endpoint_name, 11))]
         );
+        kv_indexer.flush().await;
+    }
+
+    #[tokio::test]
+    async fn test_query_endpoint_replacement_resets_rank_and_restores_new_target() {
+        let (client, transport, kv_indexer) = make_test_client("replace-route").await;
+        let key = (100, 4);
+        let first_endpoint_name = worker_kv_indexer_query_endpoint_for_worker(key.0, key.1);
+        let second_endpoint_name = first_endpoint_name.clone();
+        let first_target = make_instance(first_endpoint_name, 11);
+        let second_target = make_instance(second_endpoint_name, 12);
+        let first_id = first_target.endpoint_instance_id();
+        let second_id = second_target.endpoint_instance_id();
+
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: None,
+                release: None,
+                response: Ok(WorkerKvQueryResponse::TreeDump {
+                    events: vec![make_store_event(key.0, key.1, 90)],
+                    last_event_id: 90,
+                }),
+            },
+        );
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: None,
+                release: None,
+                response: Ok(WorkerKvQueryResponse::TreeDump {
+                    events: vec![make_store_event(key.0, key.1, 1)],
+                    last_event_id: 1,
+                }),
+            },
+        );
+
+        client
+            .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                worker_id: key.0,
+                dp_rank: key.1,
+                target: first_target.clone(),
+            })
+            .await;
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(90) && !state.recovery_inflight
+            })
+        })
+        .await;
+
+        client
+            .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                worker_id: key.0,
+                dp_rank: key.1,
+                target: second_target.clone(),
+            })
+            .await;
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(1) && !state.recovery_inflight
+            })
+        })
+        .await;
+
+        assert_eq!(transport.cancelled_instances(), vec![first_id.clone()]);
+        assert_eq!(transport.cleared_tombstones(), vec![first_id, second_id]);
+        assert_eq!(
+            transport.targets(),
+            vec![(key, first_target), (key, second_target)]
+        );
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert_eq!(stored_block_hashes_for(&events, key.0, key.1), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn test_removed_query_endpoint_cancels_inflight_streams() {
+        let (client, transport, kv_indexer) = make_test_client("remove-cancels").await;
+        let key = (100, 4);
+        let endpoint_name = worker_kv_indexer_query_endpoint_for_worker(key.0, key.1);
+        let target = make_instance(endpoint_name, 11);
+        let endpoint_id = target.endpoint_instance_id();
+
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: None,
+                release: None,
+                response: Ok(WorkerKvQueryResponse::TreeDump {
+                    events: vec![],
+                    last_event_id: 0,
+                }),
+            },
+        );
+
+        client
+            .handle_discovered_query_endpoint(DiscoveredQueryEndpoint {
+                worker_id: key.0,
+                dp_rank: key.1,
+                target,
+            })
+            .await;
+        wait_for(|| transport.call_count() == 1).await;
+
+        client
+            .handle_removed_query_endpoint(key.0, key.1, endpoint_id.clone())
+            .await;
+
+        assert_eq!(transport.cancelled_instances(), vec![endpoint_id]);
+        wait_for(|| !rank_state_matches(&client, key, |_| true)).await;
         kv_indexer.flush().await;
     }
 

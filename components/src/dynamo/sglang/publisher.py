@@ -27,8 +27,6 @@ from dynamo.runtime import Endpoint
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import Config
 
-SGLANG_WORKER_GROUP_LOOKUP_TIMEOUT_S = 300.0
-
 
 def get_local_dp_rank_range(server_args) -> range:
     """Return the global DP ranks hosted by this local worker."""
@@ -76,13 +74,12 @@ async def _resolve_multinode_leader_worker_id(
     client = await generate_endpoint.client()
     if worker_group_id is not None:
         timeout_s = getattr(server_args, "dist_timeout", None)
-        if timeout_s is None:
-            timeout_s = SGLANG_WORKER_GROUP_LOOKUP_TIMEOUT_S
+        timeout_s = None if timeout_s is None else float(timeout_s)
         try:
             worker_id = await client.wait_for_instance_by_runtime_data(
                 SGLANG_WORKER_GROUP_ID_KEY,
                 worker_group_id,
-                timeout_s=float(timeout_s),
+                timeout_s=timeout_s,
             )
         except Exception as e:
             raise RuntimeError(
