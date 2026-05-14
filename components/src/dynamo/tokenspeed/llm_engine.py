@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import atexit
 import importlib
 import json
 import logging
+import os
 import re
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -31,9 +33,13 @@ logger = logging.getLogger(__name__)
 class TokenspeedLLMEngine(LLMEngine):
     def __init__(self, server_args: Any):
         self.server_args = server_args
-        self.engine = None
+        self.async_llm = None
+        self.scheduler_info: dict[str, Any] = {}
         self._model_max_len: int | None = None
         self._active_rids_by_context: dict[str, list[str]] = {}
+        self._tokenspeed_process_tree_owned = False
+        self._atexit_cleanup_callback = self._cleanup_tokenspeed_subprocesses
+        self._atexit_cleanup_registered = False
 
     @classmethod
     async def from_args(
@@ -53,14 +59,26 @@ class TokenspeedLLMEngine(LLMEngine):
         del worker_id  # tokenspeed has no cluster-wide ID needs
         # The Dynamo response layer expects per-chunk token deltas.
         self.server_args.stream_output = True
-        self.engine = _tokenspeed_engine_cls()(server_args=self.server_args)
+        self._tokenspeed_process_tree_owned = True
+        try:
+            self.async_llm, self.scheduler_info = _launch_tokenspeed_subprocesses(
+                self.server_args
+            )
+        except Exception:
+            self._cleanup_tokenspeed_subprocesses()
+            raise
+        if self.async_llm is None:
+            self._cleanup_tokenspeed_subprocesses()
+            raise RuntimeError(
+                "TokenSpeed _launch_subprocesses returned no AsyncLLM; "
+                "only rank 0 can serve Dynamo requests"
+            )
+        self._register_atexit_cleanup()
 
-        scheduler_info = getattr(self.engine, "scheduler_info", {}) or {}
+        scheduler_info = self.scheduler_info or {}
         self._model_max_len = _optional_int(
             scheduler_info.get("max_model_len")
-            or getattr(
-                getattr(self.engine, "tokenizer_manager", None), "context_len", None
-            )
+            or getattr(self.async_llm, "context_len", None)
             or getattr(self.server_args, "max_model_len", None)
         )
 
@@ -97,7 +115,7 @@ class TokenspeedLLMEngine(LLMEngine):
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
-        assert self.engine is not None, "Engine not initialized"
+        assert self.async_llm is not None, "Engine not initialized"
 
         _validate_single_choice_sampling(request)
         sampling_params = build_sampling_params(request, self._model_max_len)
@@ -115,7 +133,7 @@ class TokenspeedLLMEngine(LLMEngine):
 
         emitted_completion_tokens = 0
         try:
-            async for out in self.engine.tokenizer_manager.generate_request(obj):
+            async for out in self.async_llm.generate_request(obj):
                 delta_out, emitted_completion_tokens = _completion_delta_output(
                     out, emitted_completion_tokens
                 )
@@ -126,18 +144,36 @@ class TokenspeedLLMEngine(LLMEngine):
 
     async def abort(self, context: Context) -> None:
         request_id = context.id()
-        if self.engine is None or request_id is None:
+        if self.async_llm is None or request_id is None:
             return
 
         rids = self._active_rids_by_context.get(request_id, [request_id])
         for rid in rids:
-            self.engine.tokenizer_manager.abort_request(rid)
+            self.async_llm.abort_request(rid)
             logger.debug("Aborted TokenSpeed request %s", rid)
 
     async def cleanup(self) -> None:
-        if self.engine is not None:
-            self.engine.shutdown()
-            logger.info("TokenSpeed engine shutdown")
+        self._cleanup_tokenspeed_subprocesses()
+        self._unregister_atexit_cleanup()
+
+    def _cleanup_tokenspeed_subprocesses(self) -> None:
+        if not self._tokenspeed_process_tree_owned:
+            return
+        _kill_tokenspeed_process_tree()
+        self.async_llm = None
+        self.scheduler_info = {}
+        self._tokenspeed_process_tree_owned = False
+        logger.info("TokenSpeed engine shutdown")
+
+    def _register_atexit_cleanup(self) -> None:
+        if not self._atexit_cleanup_registered:
+            atexit.register(self._atexit_cleanup_callback)
+            self._atexit_cleanup_registered = True
+
+    def _unregister_atexit_cleanup(self) -> None:
+        if self._atexit_cleanup_registered:
+            atexit.unregister(self._atexit_cleanup_callback)
+            self._atexit_cleanup_registered = False
 
 
 def build_sampling_params(
@@ -337,9 +373,24 @@ def _optional_int(value: Any) -> int | None:
     return int(value)
 
 
-def _tokenspeed_engine_cls() -> Any:
+def _launch_tokenspeed_subprocesses(server_args: Any) -> tuple[Any, dict[str, Any]]:
     module = importlib.import_module("tokenspeed.runtime.entrypoints.engine")
-    return module.Engine
+    port_args = _tokenspeed_port_args_cls().init_new(server_args)
+    async_llm, _, scheduler_info = module._launch_subprocesses(
+        server_args=server_args,
+        port_args=port_args,
+    )
+    return async_llm, scheduler_info or {}
+
+
+def _tokenspeed_port_args_cls() -> Any:
+    module = importlib.import_module("tokenspeed.runtime.utils.server_args")
+    return module.PortArgs
+
+
+def _kill_tokenspeed_process_tree() -> None:
+    module = importlib.import_module("tokenspeed.runtime.utils.process")
+    module.kill_process_tree(os.getpid(), include_parent=False)
 
 
 def _generate_req_input_cls() -> Any:
