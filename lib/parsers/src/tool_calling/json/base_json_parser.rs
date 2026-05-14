@@ -99,18 +99,31 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
         }
         // Only consider segments that start like JSON (objects or arrays)
         if s.starts_with('{') {
-            // Llama 3.x emits parallel calls as semicolon-separated JSON objects:
-            // {"name":"fn1","arguments":{}};{"name":"fn2","arguments":{}}
-            // Split on ';' to isolate each individual call before JSON parsing.
-            for chunk in s.split(';') {
-                let trimmed_chunk = chunk.trim();
-                if trimmed_chunk.is_empty() {
-                    continue;
+            // Try the segment as a single JSON object first. This handles the common
+            // case and preserves argument strings that legitimately contain ';'
+            // (e.g. {"name":"query","arguments":{"sql":"SELECT a; SELECT b"}}).
+            let mut parsed_single = false;
+            if let Some(pos) = s.rfind('}') {
+                let candidate = s[..=pos].trim();
+                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                    items.push(candidate.to_string());
+                    parsed_single = true;
                 }
-                if let Some(pos) = trimmed_chunk.rfind('}') {
-                    let candidate = &trimmed_chunk[..=pos].trim();
-                    if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
-                        items.push(candidate.to_string());
+            }
+            if !parsed_single {
+                // Single-object parse failed. Fall back to semicolon splitting to
+                // handle Llama 3.x parallel calls:
+                // {"name":"fn1","arguments":{}};{"name":"fn2","arguments":{}}
+                for chunk in s.split(';') {
+                    let trimmed_chunk = chunk.trim();
+                    if trimmed_chunk.is_empty() {
+                        continue;
+                    }
+                    if let Some(pos) = trimmed_chunk.rfind('}') {
+                        let candidate = trimmed_chunk[..=pos].trim();
+                        if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                            items.push(candidate.to_string());
+                        }
                     }
                 }
             }
