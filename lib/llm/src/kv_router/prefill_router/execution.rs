@@ -270,6 +270,7 @@ impl PrefillRouter {
     ///
     /// This is the shared worker selection logic used by both `resolve_prefill_worker`
     /// and `query_route`.
+    #[expect(clippy::too_many_arguments)]
     pub async fn query_prefill_worker(
         &self,
         token_ids: &[u32],
