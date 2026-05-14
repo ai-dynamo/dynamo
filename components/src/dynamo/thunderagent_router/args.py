@@ -32,7 +32,7 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
     acting_token_weight: float
     acting_decay_tau_seconds: float
     scheduler_interval_seconds: float
-    scheduling_disabled: bool
+    scheduling_enabled: bool
     model_name: Optional[str] = None
     model_path: Optional[str] = None
 
@@ -48,7 +48,7 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
             acting_token_weight=self.acting_token_weight,
             acting_decay_tau_seconds=self.acting_decay_tau_seconds,
             scheduler_interval_seconds=self.scheduler_interval_seconds,
-            scheduling_disabled=self.scheduling_disabled,
+            scheduling_enabled=self.scheduling_enabled,
         )
 
     def validate(self) -> None:  # type: ignore[override]
@@ -125,11 +125,8 @@ class ThunderAgentArgGroup(ArgGroup):
             flag_name="--resume-hysteresis",
             env_var="DYN_THUNDERAGENT_RESUME_HYSTERESIS",
             default=0.10,
-            help="Working-set fraction below pause_threshold required before "
-            "resuming any paused program. 0.10 = resume only when "
-            "working_set <= (pause_threshold - 0.10) * pool. Larger "
-            "values stabilise high-cadence loads at the cost of holding "
-            "programs paused longer (default: 0.10).",
+            help="Util drop below pause_threshold required before any resume "
+            "(default: 0.10).",
             arg_type=float,
         )
         add_argument(
@@ -137,11 +134,8 @@ class ThunderAgentArgGroup(ArgGroup):
             flag_name="--pause-target",
             env_var="DYN_THUNDERAGENT_PAUSE_TARGET",
             default=0.80,
-            help="Setpoint that pause cycles drive util DOWN to. Trigger "
-            "fires at --pause-threshold (e.g. 0.95) but we keep pausing "
-            "until projected util reaches --pause-target (e.g. 0.80). "
-            "Fixes the 'stall at 0.948' failure where pauses stopped "
-            "firing the moment util slipped under threshold (default: 0.80).",
+            help="Setpoint that pause cycles drain util down to. Must be "
+            "<= --pause-threshold (default: 0.80).",
             arg_type=float,
         )
         add_argument(
@@ -149,10 +143,8 @@ class ThunderAgentArgGroup(ArgGroup):
             flag_name="--acting-token-weight",
             env_var="DYN_THUNDERAGENT_ACTING_TOKEN_WEIGHT",
             default=1.0,
-            help="Flat multiplier on token_total for ACTING programs in the "
-            "PAUSE-side working set. Mirrors upstream TA's tool_coefficient. "
-            "Default 1.0 = conservative on pause; lower admits more programs "
-            "before pause_threshold trips.",
+            help="Multiplier on token_total for ACTING programs in the "
+            "pause-side working set (default: 1.0).",
             arg_type=float,
         )
         add_argument(
@@ -160,13 +152,8 @@ class ThunderAgentArgGroup(ArgGroup):
             flag_name="--acting-decay-tau-seconds",
             env_var="DYN_THUNDERAGENT_ACTING_DECAY_TAU_SECONDS",
             default=1.0,
-            help="Time constant for the exponential decay applied to ACTING "
-            "programs in the RESUME-side working set. Weight is "
-            "2^(-(now - acting_since) / tau). With tau=1.0s, programs idle "
-            "for 10s contribute ~0.001x their tokens; idle 60s contribute "
-            "~0. Mirrors upstream TA's remaining_capacity_with_decay -- the "
-            "decay replaces a hard TTL/GC, so a returning zombie program "
-            "keeps its token_total history (default: 1.0).",
+            help="Tau (s) for ``2^(-idle/tau)`` decay of ACTING tokens on "
+            "the resume side. Idle >= 10*tau contributes ~0 (default: 1.0).",
             arg_type=float,
         )
         add_argument(
@@ -179,10 +166,10 @@ class ThunderAgentArgGroup(ArgGroup):
         )
         add_argument(
             g,
-            flag_name="--scheduling-disabled",
-            env_var="DYN_THUNDERAGENT_SCHEDULING_DISABLED",
-            default=False,
-            help="When set, the router records lifecycle state but does not "
+            flag_name="--scheduling-enabled",
+            env_var="DYN_THUNDERAGENT_SCHEDULING_ENABLED",
+            default=True,
+            help="When False, the router records lifecycle state but does not "
             "pause / resume / soft-demote. Used as the 'TR off' arm to "
             "isolate scheduling value vs program-aware passthrough.",
             arg_type=bool,

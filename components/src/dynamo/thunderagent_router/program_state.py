@@ -19,11 +19,10 @@ from typing import Optional
 
 
 class ProgramStatus(Enum):
-    """What the program is currently doing.
+    """REASONING: request on GPU. ACTING: between turns (tools/wait).
 
-    REASONING: a request is on GPU executing inference.
-    ACTING: between LLM turns -- harness is running tools or waiting for the
-    next user/agent input.
+    ``acting_since`` carries a ``time.monotonic()`` stamp; never compare it
+    against ``time.time()``.
     """
 
     REASONING = "reasoning"
@@ -31,13 +30,7 @@ class ProgramStatus(Enum):
 
 
 class ProgramLifecycle(Enum):
-    """Lifecycle state.
-
-    ACTIVE: program is registered and admissible.
-    PAUSED: program is held in the global waiting queue; the next request will
-    block on ``waiting`` until the scheduler resumes it.
-    TERMINATED: program is released; no further state kept.
-    """
+    """ACTIVE: admissible. PAUSED: blocked on ``waiting``. TERMINATED: cleaned."""
 
     ACTIVE = "active"
     PAUSED = "paused"
@@ -46,30 +39,22 @@ class ProgramLifecycle(Enum):
 
 @dataclass
 class Program:
-    """Per-``program_id`` scheduling state.
-
-    ``program_id`` is the value of ``nvext.agent_context.trajectory_id``;
-    we keep ThunderAgent's "program" terminology internal because the
-    scheduling primitives are paper-aligned.
-    """
+    """Per-``program_id`` scheduling state. ``program_id`` is
+    ``nvext.agent_context.trajectory_id``."""
 
     program_id: str
 
     status: ProgramStatus = ProgramStatus.REASONING
     lifecycle: ProgramLifecycle = ProgramLifecycle.ACTIVE
 
-    # Soft worker affinity. Cleared on hard pause; restored on resume.
     assigned_worker_id: Optional[int] = None
-    origin_worker_id: Optional[int] = None
 
-    # Real token accounting. Updated from response usage at end of each turn.
     token_total: int = 0
-    last_prompt_tokens: int = 0
-    last_completion_tokens: int = 0
 
     step_count: int = 0
     marked_for_pause: bool = False
-    soft_demoted_until: float = 0.0  # epoch seconds; >0 means priority demotion active
+    # monotonic seconds; >0 means priority demotion active
+    soft_demoted_until: float = 0.0
     waiting: Optional[asyncio.Event] = field(default=None, repr=False)
 
     acting_since: float = 0.0
@@ -79,42 +64,21 @@ class Program:
 class ProgramTable:
     """In-memory registry of all known programs.
 
-    Pure data: scheduling decisions live in ``router.py``. Methods here only
-    update the state machine and surface aggregates the router needs.
+    Pure data: scheduling decisions live in ``router.py``.
     """
 
     programs: dict[str, Program] = field(default_factory=dict)
-    # program_id -> presence sentinel; the global paused queue.
-    paused: dict[str, bool] = field(default_factory=dict)
-
-    def get_or_create(self, program_id: str) -> Program:
-        program = self.programs.get(program_id)
-        if program is None:
-            program = Program(program_id=program_id)
-            self.programs[program_id] = program
-        return program
-
-    def release(self, program_id: str) -> Optional[Program]:
-        program = self.programs.pop(program_id, None)
-        if program is None:
-            return None
-        program.lifecycle = ProgramLifecycle.TERMINATED
-        self.paused.pop(program_id, None)
-        if program.waiting is not None:
-            program.waiting.set()
-            program.waiting = None
-        return program
+    # Used as an insertion-ordered set; values are never read.
+    paused: dict[str, None] = field(default_factory=dict)
 
     def begin_request(
         self, program_id: str, estimated_prompt_tokens: int = 0
     ) -> Program:
-        """Transition program -> REASONING; bump step_count.
-
-        ThunderAgent updates its token estimate before admission. Dynamo already
-        has preprocessed token IDs at this point, so use that exact prompt
-        length instead of the upstream chars/token heuristic.
-        """
-        program = self.get_or_create(program_id)
+        """Transition program -> REASONING; bump step_count."""
+        program = self.programs.get(program_id)
+        if program is None:
+            program = Program(program_id=program_id)
+            self.programs[program_id] = program
         program.step_count += 1
         if estimated_prompt_tokens > 0:
             program.token_total = estimated_prompt_tokens
@@ -123,29 +87,13 @@ class ProgramTable:
         return program
 
     def end_request(
-        self,
-        program_id: str,
-        prompt_tokens: int,
-        completion_tokens: int,
+        self, program_id: str, prompt_tokens: int, completion_tokens: int
     ) -> Optional[Program]:
         """Transition program -> ACTING and record real token accounting."""
         program = self.programs.get(program_id)
         if program is None:
             return None
-        program.last_prompt_tokens = prompt_tokens
-        program.last_completion_tokens = completion_tokens
         program.token_total = prompt_tokens + completion_tokens
         program.status = ProgramStatus.ACTING
-        program.acting_since = time.time()
+        program.acting_since = time.monotonic()
         return program
-
-    def counts(self) -> dict[str, int]:
-        reasoning = acting = paused = 0
-        for program in self.programs.values():
-            if program.lifecycle == ProgramLifecycle.PAUSED:
-                paused += 1
-            elif program.status == ProgramStatus.REASONING:
-                reasoning += 1
-            else:
-                acting += 1
-        return {"reasoning": reasoning, "acting": acting, "paused": paused}

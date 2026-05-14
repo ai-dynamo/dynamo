@@ -8,10 +8,9 @@ Usage:
         --endpoint dynamo.vllm.generate \\
         --router-block-size 64
 
-Mirrors the integration shape of ``dynamo.thompson_router`` (PR #8522). The
-service serves ``{namespace}.thunderagent_router.generate`` as a model-handler
-endpoint; the frontend's discovery picks it up the same way it would any other
-worker endpoint and dispatches LLM requests to it.
+The service serves ``{namespace}.thunderagent_router.generate`` as a
+model-handler endpoint; the frontend's discovery picks it up the same way
+it would any other worker endpoint and dispatches LLM requests to it.
 
 Reads ``request["agent_context"]["trajectory_id"]`` to attach lifecycle decisions
 to programs (Dynamo's ``trajectory_id`` is the analogue of ThunderAgent's
@@ -21,9 +20,7 @@ no pause/resume gating -- the v0 contract is "opt-in via nvext.agent_context".
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
 from typing import Any, Optional
 
 import uvloop
@@ -38,20 +35,14 @@ from dynamo.thunderagent_router.args import (
     parse_args,
 )
 from dynamo.thunderagent_router.capacity import FpmCapacityProvider
-from dynamo.thunderagent_router.router import KvThunderAgentRouter
+from dynamo.thunderagent_router.router import ThunderAgentScheduler
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
 def _extract_program_id(request: dict[str, Any]) -> Optional[str]:
-    """Pull the scheduling program_id off ``nvext.agent_context.trajectory_id``.
-
-    The frontend preprocessor parses ``nvext.agent_context`` into a top-level
-    ``agent_context`` field on PreprocessedRequest, which depythonizes into the
-    request dict we receive here. Dynamo's ``trajectory_id`` is the
-    schedulable identifier and maps 1:1 to ThunderAgent's ``program_id``.
-    """
+    """Pull the scheduling program_id off ``nvext.agent_context.trajectory_id``."""
     ctx = request.get("agent_context")
     if not isinstance(ctx, dict):
         return None
@@ -64,7 +55,8 @@ def _extract_program_id(request: dict[str, Any]) -> Optional[str]:
 def _wrap_preprocessed_request(request: dict[str, Any]) -> dict[str, Any]:
     """Build the PreprocessedRequest dict KvRouter.generate_from_request expects.
 
-    Mirrors the wrapping done in ``dynamo.router/__main__.py``.
+    Duplicated from ``dynamo.router/__main__.py`` since neither package exports
+    it. Keep the field list in sync if the upstream wrapper grows new keys.
     """
     routing = request.get("routing")
     dp_rank = request.get("dp_rank")
@@ -91,7 +83,7 @@ def _wrap_preprocessed_request(request: dict[str, Any]) -> dict[str, Any]:
 
 
 class ThunderAgentRouterHandler:
-    """Glue between the Dynamo endpoint runtime and KvThunderAgentRouter."""
+    """Glue between the Dynamo endpoint runtime and ThunderAgentScheduler."""
 
     def __init__(
         self,
@@ -102,7 +94,7 @@ class ThunderAgentRouterHandler:
         self._config = config
         self._kv_router: Optional[KvRouter] = None
         self._capacity: Optional[FpmCapacityProvider] = None
-        self._scheduler: Optional[KvThunderAgentRouter] = None
+        self._scheduler: Optional[ThunderAgentScheduler] = None
 
     async def initialize(self) -> None:
         parts = self._config.endpoint.split(".")
@@ -124,8 +116,7 @@ class ThunderAgentRouterHandler:
         self._capacity = FpmCapacityProvider(worker_endpoint)
         self._capacity.start()
 
-        self._scheduler = KvThunderAgentRouter(
-            kv_router=self._kv_router,
+        self._scheduler = ThunderAgentScheduler(
             capacity=self._capacity,
             config=self._config.to_thunderagent_config(),
         )
@@ -148,32 +139,11 @@ class ThunderAgentRouterHandler:
     async def generate(self, request: dict[str, Any]):
         """Wrap KvRouter.generate_from_request with ThunderAgent admission,
         sticky-worker pinning, and real-token accounting."""
-        if self._kv_router is None or self._scheduler is None:
-            raise RuntimeError("ThunderAgentRouterHandler not initialized")
-
-        if not getattr(self, "_logged_first_req", False):
-            self._logged_first_req = True
-            try:
-                tids = request.get("token_ids")
-                ac = request.get("agent_context")
-                logger.info(
-                    "first request shape: keys=%s token_ids_type=%s "
-                    "token_ids_len=%s agent_context=%s",
-                    sorted(list(request.keys()))
-                    if isinstance(request, dict)
-                    else type(request),
-                    type(tids).__name__ if tids is not None else "missing",
-                    len(tids) if isinstance(tids, list) else "n/a",
-                    ac,
-                )
-            except Exception as exc:
-                logger.warning("first-request diagnostic failed: %s", exc)
-
         program_id = _extract_program_id(request)
 
         # Path A: no program_id -> behave like the standalone router (no
-        # admission, no lifecycle). Keeps backward compatibility for clients
-        # that don't send agent_context.
+        # admission, no lifecycle). Backward compat for clients that don't
+        # send agent_context.
         if program_id is None:
             preprocessed = _wrap_preprocessed_request(request)
             async for chunk in await self._kv_router.generate_from_request(
@@ -188,27 +158,8 @@ class ThunderAgentRouterHandler:
         decision = await self._scheduler.before_request(
             program_id, estimated_prompt_tokens=estimated_prompt_tokens
         )
+        worker_pin = decision.assigned_worker_hint
 
-        # Sticky worker pin: if the program already has an assigned worker
-        # (from a prior turn or BFD resume), pin the request there. Returns
-        # None to let the KV router pick freely.
-        worker_pin = await self._scheduler.select_worker(
-            program_id, token_ids, decision.was_paused
-        )
-        if decision.was_paused or decision.waited_seconds > 0.010:
-            logger.info(
-                "admission decision program=%s waited_seconds=%.3f "
-                "was_paused=%s priority_jump=%.3f worker_pin=%s",
-                program_id,
-                decision.waited_seconds,
-                decision.was_paused,
-                decision.priority_jump,
-                worker_pin,
-            )
-
-        # Fold decision.priority_jump into the request before it reaches the
-        # KV router queue. The frontend may have already populated routing
-        # with client-supplied priority_jump; we add to it.
         preprocessed = _wrap_preprocessed_request(request)
         if decision.priority_jump != 0.0:
             routing = preprocessed.get("routing") or {}
@@ -216,28 +167,24 @@ class ThunderAgentRouterHandler:
             routing["priority_jump"] = float(existing) + decision.priority_jump
             preprocessed["routing"] = routing
 
-        # Apply the sticky worker pin if select_worker resolved one;
-        # otherwise let the KV router pick freely from the indexer.
         if worker_pin is not None:
             routing = preprocessed.get("routing") or {}
             routing["backend_instance_id"] = worker_pin
             preprocessed["routing"] = routing
-            self._scheduler.assign_worker(program_id, worker_pin)
 
         prompt_tokens_seen = 0
         completion_tokens_seen = 0
-        first_chunk_with_worker = True
+        first_chunk = True
         try:
             async for chunk in await self._kv_router.generate_from_request(
                 preprocessed  # type: ignore[arg-type]
             ):
-                if first_chunk_with_worker:
-                    first_chunk_with_worker = False
+                if first_chunk and worker_pin is None:
+                    first_chunk = False
                     selected_worker = _worker_id_from_chunk(chunk)
                     if selected_worker is not None:
                         self._scheduler.assign_worker(program_id, selected_worker)
 
-                # Item 1: real token accounting from the response usage.
                 usage = (
                     chunk.get("completion_usage") if isinstance(chunk, dict) else None
                 )
@@ -257,41 +204,20 @@ class ThunderAgentRouterHandler:
 
                 yield chunk
         finally:
-            # Item 1: capture real prompt_tokens; if no usage was reported,
-            # fall back to len(token_ids) which is still better than chars/5.
+            # Fall back to len(token_ids) if the engine didn't report usage,
+            # which is still better than upstream's chars/5 estimator.
             if prompt_tokens_seen == 0 and isinstance(token_ids, list):
                 prompt_tokens_seen = len(token_ids)
-            if not getattr(self, "_logged_first_after", False):
-                self._logged_first_after = True
-                logger.info(
-                    "first after_request: pid=%s prompt=%d completion=%d "
-                    "token_ids_type=%s token_ids_len=%s",
-                    program_id,
-                    prompt_tokens_seen,
-                    completion_tokens_seen,
-                    type(token_ids).__name__,
-                    len(token_ids) if isinstance(token_ids, list) else "n/a",
-                )
             await self._scheduler.after_request(
                 program_id,
                 prompt_tokens_seen,
                 completion_tokens_seen,
             )
 
-    async def stats(self, _request: Any):
-        """Diagnostic endpoint -- returns scheduler counters as JSON."""
-        if self._scheduler is None:
-            yield {"error": "not initialized"}
-            return
-        yield {
-            "ts": time.time(),
-            "scheduler": self._scheduler.stats(),
-        }
-
 
 def _worker_id_from_chunk(chunk: Any) -> Optional[int]:
-    """Extract worker_id from KvRouter response disaggregated_params (set by
-    ``inject_worker_id_from_tracker`` in the Python bindings)."""
+    """Extract worker_id set by ``inject_worker_id_from_tracker`` in the
+    Python bindings."""
     if not isinstance(chunk, dict):
         return None
     dp = chunk.get("disaggregated_params")
@@ -320,7 +246,6 @@ async def worker(runtime: DistributedRuntime) -> None:
     generate_endpoint = runtime.endpoint(
         f"{config.namespace}.thunderagent_router.generate"
     )
-    stats_endpoint = runtime.endpoint(f"{config.namespace}.thunderagent_router.stats")
 
     if config.model_name:
         model_path = config.model_path or config.model_name
@@ -339,17 +264,10 @@ async def worker(runtime: DistributedRuntime) -> None:
         )
 
     try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                graceful_shutdown=True,
-                metrics_labels=[("service", "thunderagent_router")],
-            ),
-            stats_endpoint.serve_endpoint(
-                handler.stats,
-                graceful_shutdown=True,
-                metrics_labels=[("service", "thunderagent_router")],
-            ),
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=[("service", "thunderagent_router")],
         )
     finally:
         await handler.shutdown()

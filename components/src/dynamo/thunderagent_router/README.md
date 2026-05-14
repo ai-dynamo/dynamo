@@ -99,7 +99,7 @@ explicitly future work, not part of v0.
 | `--acting-token-weight` | `DYN_THUNDERAGENT_ACTING_TOKEN_WEIGHT` | 1.0 | Multiplier on `token_total` for ACTING programs in the **pause-side** working set. |
 | `--acting-decay-tau-seconds` | `DYN_THUNDERAGENT_ACTING_DECAY_TAU_SECONDS` | 1.0 | Tau for exponential decay of ACTING tokens in the **resume-side** working set. |
 | `--scheduler-interval-seconds` | `DYN_THUNDERAGENT_SCHEDULER_INTERVAL_SECONDS` | 5.0 | Scheduler tick period. |
-| `--scheduling-disabled` | `DYN_THUNDERAGENT_SCHEDULING_DISABLED` | false | Record lifecycle state but skip pause/resume/soft-demote. Useful for attribution. |
+| `--scheduling-enabled` | `DYN_THUNDERAGENT_SCHEDULING_ENABLED` | true | When false, record lifecycle state but skip pause/resume/soft-demote. Useful for attribution. |
 | `--model-name` | `DYN_THUNDERAGENT_MODEL_NAME` | – | Frontend-visible model name. Triggers `register_model`. |
 | `--model-path` | `DYN_THUNDERAGENT_MODEL_PATH` | – | Path or HF repo ID for tokenizer + model card. |
 
@@ -146,40 +146,26 @@ within a few turns.
 
 Next, in rough priority:
 
-1. **Blended worker-selection cost function.** Today the
-   `_select_worker_for_new_program_locked` admission path picks the
-   lightest-loaded worker and ignores cache state. Replace it with a
-   single `KvRouter` call configured with `overlap_score_weight ∈ (0, 1)`
-   so worker selection blends load and prefix overlap. Dynamo's KvRouter
-   already supports this; we just need to call the right scoring API
-   with a tuned weight, sweep λ on captured traces, and live-validate
-   the top candidate.
-2. **Frontend in `--router-mode kv`.** The richer per-request timing
-   fields (`prefill_wait_time_ms`, `prefill_time_ms`, `ttft_ms`,
-   `avg_itl_ms`, `kv_hit_rate`, prefill/decode worker IDs) are only
-   populated by `push_router`'s `record_prefill_start/complete` markers.
-   Today's round-robin frontend skips them. Switching modes adds zero
-   schema work and unlocks prefill/decode breakdown for offline replay.
+1. **Blended worker selection.** The admission path picks the
+   lightest-loaded worker and ignores cache state. Configure Dynamo's
+   `KvRouter` with `overlap_score_weight ∈ (0, 1)` so worker selection
+   blends load and prefix overlap. Sweep the weight on captured traces.
+2. **Frontend in `--router-mode kv`.** Richer per-request timing
+   (`prefill_wait_time_ms`, `ttft_ms`, `kv_hit_rate`, prefill/decode
+   worker IDs) is only populated by `push_router`'s markers; the
+   round-robin frontend skips them. Switching modes unlocks
+   prefill/decode breakdown for offline replay.
 3. **Workflow-profile-aware pause selection.** Profile per-session-type
    tool-gap distributions from captured traces (P50/P90 acting seconds).
    At pause time, prefer programs whose predicted idle exceeds the
-   resume cost. This is where the trace work pays off: pick the right
-   program to pause based on what it's likely to do next.
-4. **KV demote / prefetch primitives.** Today pause is logical; the
-   engine evicts on its own schedule. A `demote_kv(program_id, tier)`
-   RPC lets the scheduler deterministically offload paused KV to
-   HiCache CPU/disk, freeing GPU pool predictably. Paired with a
-   `prefetch_kv(prefix, worker)` call on subagent close, the parent
-   resume turn skips re-prefill.
-5. **Rust port of the hot path.** Per-response-chunk `Python::with_gil`
-   + `pythonize` cost is real at 128-concurrency. The Rust scaffold in
-   `lib/llm/src/kv_router/program_controller.rs` is the starting point
-   once the algorithm stabilises.
-6. **Stronger correctness coverage.** Multi-worker resume placement,
-   restart durability of pause state, and the
-   `routing.backend_instance_id` honouring path are smoke-tested today;
-   they need per-request log assertions before this package is
-   promoted out of `experimental`.
+   resume cost.
+4. **Rust port of the hot path.** Per-response-chunk `Python::with_gil`
+   + `pythonize` cost is real at 128-concurrency. Port once the
+   algorithm stabilises.
+5. **Stronger correctness coverage.** Multi-worker resume placement,
+   restart durability of pause state, and `routing.backend_instance_id`
+   honouring are smoke-tested today; they need per-request log
+   assertions before this package leaves `experimental`.
 
 ---
 
@@ -213,7 +199,7 @@ LLM-turn ↔ tool-gap timeline per agent.
 │  - admission gate: before_request → was_paused?             │
 │  - scheduler loop (every scheduler_interval_seconds):       │
 │      _apply_soft_demotes → _pause_until_safe → _greedy_resume│
-│  - select_worker: BFD on resume; passthrough on new req     │
+│  - sticky worker pin from program.assigned_worker_id        │
 │  - after_request: real-token accounting                     │
 └────────────────────┬────────────────────────────────────────┘
                      │  KvRouter.generate
