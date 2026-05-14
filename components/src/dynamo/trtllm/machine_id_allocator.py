@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Disk-backed disagg_machine_id slot allocator for TRT-LLM workers."""
 
 from __future__ import annotations
@@ -5,7 +8,6 @@ from __future__ import annotations
 import os
 import threading
 from pathlib import Path
-from typing import Optional
 
 
 class DisaggMachineIdAllocator:
@@ -51,7 +53,9 @@ class DisaggMachineIdAllocator:
                 if slot not in allocated:
                     # Atomic slot file creation
                     try:
-                        fd = os.open(str(sf), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                        fd = os.open(
+                            str(sf), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644
+                        )
                         os.write(fd, str(slot).encode())
                         os.close(fd)
                     except FileExistsError:
@@ -72,6 +76,7 @@ class DisaggMachineIdAllocator:
     def num_allocated(self) -> int:
         with self._lock:
             return sum(
-                1 for f in self._pool_dir.iterdir()
+                1
+                for f in self._pool_dir.iterdir()
                 if f.suffix == ".slot" and f.name != ".slot"
             )
