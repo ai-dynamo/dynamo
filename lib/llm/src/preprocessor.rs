@@ -225,7 +225,7 @@ fn extract_images_from_tool_parts(
         }
     }
 
-    return user_parts;
+    user_parts
 }
 
 pub struct OpenAIPreprocessor {
