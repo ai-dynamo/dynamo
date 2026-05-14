@@ -71,9 +71,7 @@ class _GMSClientSession:
         #     (engine loading weights, loader committing, etc.) and can be
         #     minutes for large models. We deliberately don't impose a
         #     server-availability ceiling on a workload-shaped wait.
-        self._transport.connect(
-            timeout_ms=30_000 if timeout_ms is None else timeout_ms
-        )
+        self._transport.connect(timeout_ms=30_000 if timeout_ms is None else timeout_ms)
         try:
             response = self._transport.handshake(lock_type, timeout_ms)
         except Exception:
