@@ -14,6 +14,7 @@ import os
 import sys
 from typing import Optional
 
+import yaml
 from prometheus_client import REGISTRY
 from tensorrt_llm.llmapi import (
     CapacitySchedulerPolicy,
@@ -301,12 +302,10 @@ async def init_llm_worker(
         # for later re-application, and (b) detect collisions with _warn_override.
         _parsed_extra = {}
         try:
-            import yaml
-
             _parsed_extra = yaml.safe_load(config.extra_engine_args) or {}
             if not isinstance(_parsed_extra, dict):
                 _parsed_extra = {}
-        except Exception:
+        except yaml.YAMLError:
             pass  # YAML parse errors are handled by update_llm_args_with_extra_options
         if isinstance(_parsed_extra, dict):
             _user_return_perf_metrics = _parsed_extra.get("return_perf_metrics")
@@ -396,12 +395,15 @@ async def init_llm_worker(
 
     logging.info(f"TensorRT-LLM engine args: {arg_map}")
 
-    # Re-apply user-supplied return_perf_metrics after all massaging.
-    # This guards against:
-    # 1. The initial arg_map default (line ~266) applied before YAML was parsed.
-    # 2. Any future unconditional assignment that could silently downgrade an
-    #    explicit True to False (which would break KV cache event publishing).
-    if _user_return_perf_metrics is not None:
+    # Re-apply user-supplied return_perf_metrics from YAML (extra_engine_args)
+    # only when JSON overrides (override_engine_args) did not also set it.
+    # JSON overrides have higher precedence than YAML extra args, so we must
+    # not clobber a JSON-supplied value here.
+    _override_set_perf_metrics = (
+        config.override_engine_args != ""
+        and "return_perf_metrics" in json.loads(config.override_engine_args or "{}")
+    )
+    if _user_return_perf_metrics is not None and not _override_set_perf_metrics:
         arg_map["return_perf_metrics"] = _user_return_perf_metrics
 
     engine_args = arg_map
