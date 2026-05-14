@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from vllm.config import VllmConfig
-from vllm.v1.engine.async_llm import AsyncLLM
+from . import envs
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.v1.engine.async_llm import AsyncLLM
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +20,11 @@ MAIN_ATTENTION_KV_CACHE_KINDS = {
 }
 
 
-def get_configured_kv_event_block_size(vllm_config: VllmConfig) -> int:
+def get_configured_kv_event_block_size(vllm_config: "VllmConfig") -> int:
     """Return the configured KV event block size, falling back to vLLM's cache block size."""
+    if envs.is_set("DYN_VLLM_KV_EVENT_BLOCK_SIZE"):
+        return envs.DYN_VLLM_KV_EVENT_BLOCK_SIZE
+
     additional_config = vllm_config.additional_config or {}
     return additional_config.get(
         DYNAMO_KV_EVENT_BLOCK_SIZE_KEY,
@@ -42,27 +48,44 @@ def select_main_attention_block_size(
 
 
 async def configure_kv_event_block_size(
-    engine: AsyncLLM,
-    vllm_config: VllmConfig,
+    engine: "AsyncLLM",
+    vllm_config: "VllmConfig",
+    *,
+    require_exact_match: bool = False,
 ) -> int:
     """Fetch engine cache-group metadata and cache the KV event block size on vLLM config."""
-    fallback_block_size = vllm_config.cache_config.block_size
-    try:
-        group_metadata = await engine.engine_core.call_utility_async(
-            "get_kv_cache_group_metadata"
-        )
-    except Exception as e:
-        logger.warning(
-            "Failed to fetch KV cache group metadata; falling back to "
-            "vLLM cache_config.block_size: %s",
-            e,
-        )
-        kv_event_block_size = fallback_block_size
+    if envs.is_set("DYN_VLLM_KV_EVENT_BLOCK_SIZE"):
+        kv_event_block_size = envs.DYN_VLLM_KV_EVENT_BLOCK_SIZE
     else:
-        kv_event_block_size = select_main_attention_block_size(
-            group_metadata,
-            fallback_block_size,
-        )
+        additional_config = vllm_config.additional_config or {}
+        if DYNAMO_KV_EVENT_BLOCK_SIZE_KEY in additional_config:
+            kv_event_block_size = additional_config[DYNAMO_KV_EVENT_BLOCK_SIZE_KEY]
+        else:
+            fallback_block_size = vllm_config.cache_config.block_size
+            try:
+                group_metadata = await engine.engine_core.call_utility_async(
+                    "get_kv_cache_group_metadata"
+                )
+            except Exception as e:
+                if require_exact_match:
+                    raise RuntimeError(
+                        "Failed to fetch KV cache group metadata needed to determine "
+                        "the vLLM KV event block size. Set "
+                        "DYN_VLLM_KV_EVENT_BLOCK_SIZE to an explicit value or run "
+                        "with a vLLM build that exposes "
+                        "EngineCoreProc.get_kv_cache_group_metadata()."
+                    ) from e
+                logger.warning(
+                    "Failed to fetch KV cache group metadata; falling back to "
+                    "vLLM cache_config.block_size: %s",
+                    e,
+                )
+                kv_event_block_size = fallback_block_size
+            else:
+                kv_event_block_size = select_main_attention_block_size(
+                    group_metadata,
+                    fallback_block_size,
+                )
 
     if vllm_config.additional_config is None:
         vllm_config.additional_config = {}
