@@ -109,6 +109,7 @@ class TrtllmLLMEngine(LLMEngine):
         max_num_tokens: int | None = None,
         kv_block_size: int = 32,
         disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
+        publish_events_and_metrics: bool = False,
     ):
         self.engine_args = engine_args
         self.model_name = model_name
@@ -119,6 +120,10 @@ class TrtllmLLMEngine(LLMEngine):
         self.kv_block_size = kv_block_size
         # Drives context_only / generation_only branching in generate().
         self.disaggregation_mode = disaggregation_mode
+        # Gates the metrics-poll thread and the kv_event/metrics source
+        # publishers. Decode workers in disaggregated mode don't host the
+        # KV indexer so they opt out too (handled in `_kv_routing_enabled`).
+        self.publish_events_and_metrics = publish_events_and_metrics
         self._engine: TensorRTLLMEngine | None = None
         self._default_sampling_params = SamplingParams(detokenize=False)
         # Per-request GenerationResult handles for `abort()` lookup. TRT-LLM's
@@ -237,6 +242,7 @@ class TrtllmLLMEngine(LLMEngine):
             max_num_tokens=engine_args.get("max_num_tokens", config.max_num_tokens),
             kv_block_size=config.kv_block_size,
             disaggregation_mode=config.disaggregation_mode,
+            publish_events_and_metrics=config.publish_events_and_metrics,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -262,12 +268,13 @@ class TrtllmLLMEngine(LLMEngine):
         await self._engine.initialize()
 
         self._attention_dp_size = self._engine.get_attention_dp_size()
-        self._metrics_thread = threading.Thread(
-            target=self._metrics_poll_loop,
-            daemon=True,
-            name="trtllm-metrics-poll",
-        )
-        self._metrics_thread.start()
+        if self._kv_routing_enabled():
+            self._metrics_thread = threading.Thread(
+                target=self._metrics_poll_loop,
+                daemon=True,
+                name="trtllm-metrics-poll",
+            )
+            self._metrics_thread.start()
 
         return EngineConfig(
             model=self.model_name,
@@ -283,7 +290,20 @@ class TrtllmLLMEngine(LLMEngine):
     # thread, so we drive them from dedicated worker threads rather than
     # the asyncio event loop.
 
+    def _kv_routing_enabled(self) -> bool:
+        # `--publish-events-and-metrics` is the operator's switch for both
+        # KV-event and load-metric publishing. Decode workers in
+        # disaggregated mode don't host the KV indexer, so opt them out
+        # too — matches the legacy `setup_kv_event_publisher` behaviour.
+        if not self.publish_events_and_metrics:
+            return False
+        if self.disaggregation_mode == DisaggregationMode.DECODE:
+            return False
+        return True
+
     async def kv_event_sources(self) -> list[KvEventSource]:
+        if not self._kv_routing_enabled():
+            return []
         return [
             PushSource(
                 on_ready=self._make_on_publisher_ready(rank),
@@ -293,6 +313,9 @@ class TrtllmLLMEngine(LLMEngine):
         ]
 
     async def metrics_sources(self) -> list[SnapshotSource]:
+        if not self._kv_routing_enabled():
+            return []
+
         def snapshot_for(r: int) -> Callable[[], Optional[Metrics]]:
             return lambda: self._latest_metrics.get(r)
 
