@@ -1296,6 +1296,120 @@ async fn cd_prefill_cleanup_is_idempotent() -> Result<()> {
     Ok(())
 }
 
+// ----------------------------------------------------------------------------
+// Reproducer tests for commit 2696546 — observer fires BEFORE session attach.
+//
+// `run_setup` is spawned by `ensure_started` and `factory.attach(...).await`
+// is asynchronous. The G1→G2 register observer can fire `commit_output_blocks`
+// while `state.session` is still `None` (cold-cache R1 on asymmetric topologies
+// where vLLM's forward-pass + offload lift wins the race against velo's
+// attach). Pre-fix, those blocks were dropped on the floor and decode's
+// `decode_commits_closed_short seen=0` watchdog eventually timed out the
+// request. Post-fix, they are buffered in `PrefillBits::pending_output_commits`
+// and drained inside `run_setup` immediately after attach.
+//
+// These tests use `flavor = "current_thread"` to deterministically observe
+// `state.session == None` between `get_num_new_matched_tokens` returning
+// (which only `spawn`s `run_setup`, doesn't poll it) and the first `.await`
+// in the test body. On `current_thread` the spawned task cannot run until
+// the test yields, so the precondition is race-free.
+// ----------------------------------------------------------------------------
+
+#[tokio::test(flavor = "current_thread")]
+async fn cd_prefill_observer_fires_before_attach_buffered_and_drained() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    // INVARIANT: run_setup is queued on the current_thread runtime but has
+    // not been polled yet — no `.await` has happened on this task. So
+    // `state.session` is guaranteed `None`. Fire the observer callback
+    // synchronously into the coordinator.
+    //
+    // Pre-fix this returned Err("session not attached for req-1") and the
+    // blocks were silently dropped; post-fix it buffers them.
+    h.coordinator
+        .commit_output_blocks("req-1", h.output_blocks.clone())?;
+
+    let expected_hashes: Vec<kvbm_logical::SequenceHash> =
+        h.output_blocks.iter().map(|b| b.sequence_hash()).collect();
+
+    // Hand off — yields control to the runtime so the spawned run_setup
+    // can attach and drain the buffer before driving the peer-side
+    // commit/availability streams.
+    let session = drive_setup(&h).await;
+
+    wait_until(|| !session.commit_calls().is_empty()).await;
+
+    let commits = session.commit_calls();
+    assert_eq!(
+        commits.len(),
+        1,
+        "buffered drain must invoke session.commit exactly once"
+    );
+    assert_eq!(
+        commits[0], expected_hashes,
+        "drained commit hashes must match the buffered output blocks"
+    );
+
+    let avails = session.make_available_calls();
+    assert_eq!(avails.len(), 1, "buffered drain must invoke make_available once");
+    assert_eq!(
+        avails[0], expected_hashes,
+        "drained availability hashes must match the buffered output blocks"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cd_prefill_multiple_observer_commits_before_attach_accumulate() -> Result<()> {
+    let h = build_harness(true);
+
+    h.wrapper.create_slot(make_request())?;
+    let _ = h.wrapper.get_num_new_matched_tokens("req-1", 0)?;
+
+    // Split the two output blocks across two pre-attach observer fires.
+    // Asserts the `extend()` accumulation semantics in
+    // `pending_output_commits` — both batches must land at the session
+    // after attach, in order.
+    let batch1: Vec<ImmutableBlock<G2>> = h.output_blocks[..1].to_vec();
+    let batch2: Vec<ImmutableBlock<G2>> = h.output_blocks[1..].to_vec();
+    assert_eq!(batch1.len(), 1);
+    assert_eq!(batch2.len(), 1);
+
+    h.coordinator.commit_output_blocks("req-1", batch1.clone())?;
+    h.coordinator.commit_output_blocks("req-1", batch2.clone())?;
+
+    let expected_hashes: Vec<kvbm_logical::SequenceHash> = batch1
+        .iter()
+        .chain(batch2.iter())
+        .map(|b| b.sequence_hash())
+        .collect();
+
+    let session = drive_setup(&h).await;
+
+    wait_until(|| !session.commit_calls().is_empty()).await;
+
+    let commits = session.commit_calls();
+    assert_eq!(
+        commits.len(),
+        1,
+        "drain must batch both buffered calls into a single session.commit"
+    );
+    assert_eq!(
+        commits[0], expected_hashes,
+        "drained hashes must preserve buffer insertion order"
+    );
+
+    let avails = session.make_available_calls();
+    assert_eq!(avails.len(), 1);
+    assert_eq!(avails[0], expected_hashes);
+
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn _ensure_used(h: &TestHarness) {
     let _ = (

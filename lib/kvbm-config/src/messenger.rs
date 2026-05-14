@@ -4,6 +4,7 @@
 //! Messenger transport and discovery configuration.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,10 @@ use crate::discovery::DiscoveryConfig;
 
 fn default_init_timeout_secs() -> u64 {
     1800
+}
+
+fn default_uds_enabled() -> bool {
+    true
 }
 
 /// Messenger configuration combining backend and discovery settings.
@@ -60,6 +65,7 @@ impl MessengerConfig {
 
         use velo::Velo;
         use velo::transports::tcp::TcpTransportBuilder;
+        use velo::transports::uds::UdsTransportBuilder;
 
         // 1. Build TCP transport
         let bind_addr = self.backend.resolve_bind_addr()?;
@@ -76,8 +82,29 @@ impl MessengerConfig {
             .context("Failed to build TCP transport")?;
         let tcp_transport = Arc::new(tcp_transport);
 
-        // 2. Configure VeloBuilder with transport + optional discovery
-        let mut builder = Velo::builder().add_transport(tcp_transport);
+        // 2. Configure VeloBuilder. Insertion order seeds the default transport
+        //    priority list (see VeloBackend::new in velo); UDS is added first
+        //    so same-host peers prefer it. Host-affinity in velo automatically
+        //    falls back to TCP when a peer's UDS path is not visible on this
+        //    host's filesystem.
+        let mut builder = Velo::builder();
+
+        if self.backend.uds_enabled {
+            let dir = self
+                .backend
+                .uds_dir
+                .clone()
+                .unwrap_or_else(std::env::temp_dir);
+            let socket_path = dir.join(format!("velo-kvbm-{}.sock", uuid::Uuid::new_v4()));
+            let uds_transport = UdsTransportBuilder::new()
+                .socket_path(&socket_path)
+                .build()
+                .context("Failed to build UDS transport")?;
+            tracing::info!("Built UDS transport bound to {}", socket_path.display());
+            builder = builder.add_transport(Arc::new(uds_transport));
+        }
+
+        builder = builder.add_transport(tcp_transport);
 
         if let Some(discovery_config) = &self.discovery {
             match discovery_config {
@@ -116,7 +143,7 @@ impl MessengerConfig {
 }
 
 /// Messenger backend (transport) configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct MessengerBackendConfig {
     /// IP address to bind (mutually exclusive with tcp_interface).
     /// e.g., "0.0.0.0" or "192.168.1.100"
@@ -129,6 +156,32 @@ pub struct MessengerBackendConfig {
     /// TCP port to bind. 0 means OS-assigned (ephemeral port).
     #[serde(default)]
     pub tcp_port: u16,
+
+    /// Enable a side-by-side UDS transport for same-host peer communication.
+    ///
+    /// When `true`, velo prefers UDS over TCP for any peer whose advertised
+    /// socket path is visible on this host's filesystem; cross-host peers
+    /// transparently fall back to TCP via velo's host-affinity logic.
+    #[serde(default = "default_uds_enabled")]
+    pub uds_enabled: bool,
+
+    /// Directory in which to bind the UDS socket. `None` means
+    /// [`std::env::temp_dir`] (typically `/tmp`). The filename is generated
+    /// per worker and is unique per process.
+    #[serde(default)]
+    pub uds_dir: Option<PathBuf>,
+}
+
+impl Default for MessengerBackendConfig {
+    fn default() -> Self {
+        Self {
+            tcp_addr: None,
+            tcp_interface: None,
+            tcp_port: 0,
+            uds_enabled: default_uds_enabled(),
+            uds_dir: None,
+        }
+    }
 }
 
 impl MessengerBackendConfig {
@@ -185,6 +238,26 @@ mod tests {
         assert!(config.tcp_addr.is_none());
         assert!(config.tcp_interface.is_none());
         assert_eq!(config.tcp_port, 0);
+        assert!(config.uds_enabled);
+        assert!(config.uds_dir.is_none());
+    }
+
+    #[test]
+    fn test_uds_disabled_via_serde() {
+        // Omitted field defaults to true; explicit false survives the round-trip.
+        let cfg: MessengerBackendConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.uds_enabled);
+
+        let cfg: MessengerBackendConfig =
+            serde_json::from_str(r#"{"uds_enabled": false}"#).unwrap();
+        assert!(!cfg.uds_enabled);
+
+        let cfg: MessengerBackendConfig =
+            serde_json::from_str(r#"{"uds_dir": "/run/kvbm"}"#).unwrap();
+        assert_eq!(
+            cfg.uds_dir.as_deref(),
+            Some(std::path::Path::new("/run/kvbm"))
+        );
     }
 
     #[test]
@@ -199,8 +272,8 @@ mod tests {
     fn test_resolve_bind_addr_explicit() {
         let config = MessengerBackendConfig {
             tcp_addr: Some("192.168.1.100".to_string()),
-            tcp_interface: None,
             tcp_port: 8080,
+            ..Default::default()
         };
         let addr = config.resolve_bind_addr().unwrap();
         assert_eq!(addr.ip(), IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)));
@@ -212,7 +285,7 @@ mod tests {
         let config = MessengerBackendConfig {
             tcp_addr: Some("0.0.0.0".to_string()),
             tcp_interface: Some("eth0".to_string()),
-            tcp_port: 0,
+            ..Default::default()
         };
         let result = config.resolve_bind_addr();
         assert!(result.is_err());
