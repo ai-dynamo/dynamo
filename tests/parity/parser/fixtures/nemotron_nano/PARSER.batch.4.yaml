@@ -22,7 +22,10 @@ cases:
     expected:
       dynamo:
         calls: []
-        normal_text: ''
+        normal_text: |-
+          <tool_call>
+          random text
+          </tool_call>
       vllm:
         unavailable: vLLM has no parser for family='nemotron_nano'
       sglang:
