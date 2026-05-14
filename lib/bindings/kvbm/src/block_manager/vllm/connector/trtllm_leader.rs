@@ -22,9 +22,9 @@ use dynamo_llm::block_manager::distributed::{
 };
 use dynamo_llm::block_manager::kv_consolidator::EventSource;
 use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
-use dynamo_llm::block_manager::{MutableBlock, Storage, block::locality::LocalityProvider};
 use dynamo_llm::block_manager::offload::max_transfer_batch_size;
 use dynamo_llm::block_manager::storage::DeviceAllocator;
+use dynamo_llm::block_manager::{MutableBlock, Storage, block::locality::LocalityProvider};
 use dynamo_llm::tokens::{SequenceHash, TokenBlock};
 use dynamo_runtime::DistributedRuntime;
 use std::collections::{HashMap, HashSet};
@@ -32,14 +32,30 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
-use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
-struct RemotePrefetchContext {
+struct RemoteOnboardingContext {
     request_client: G2pbRequestPlaneClient,
     peer_resolver: G2pbPeerResolver,
     transfer_context: Arc<TransferContext>,
     imported_instances: Arc<Mutex<HashSet<u64>>>,
+}
+
+struct RemoteOnboardingAdvisor {
+    drt: Option<Arc<DistributedRuntime>>,
+    device_id: usize,
+    slot_manager: Arc<OnceLock<ConnectorSlotManager<String>>>,
+    kvbm_metrics: KvbmMetrics,
+    remote_onboarding: Option<RemoteOnboardingContext>,
+    inflight_remote_onboarding: Arc<Mutex<HashSet<String>>>,
+}
+
+impl std::fmt::Debug for RemoteOnboardingAdvisor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteOnboardingAdvisor")
+            .field("device_id", &self.device_id)
+            .finish()
+    }
 }
 
 fn complete_block<
@@ -89,58 +105,31 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
 
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()>;
 
-    fn advise_async_loading(
-        &mut self,
-        request: KvbmRequest,
-        tokens: Vec<u32>,
-        transfer_budget_ms: u64,
-        min_blocks: u64,
-    ) -> anyhow::Result<()>;
-
     fn slot_manager(&self) -> &ConnectorSlotManager<String>;
 }
 
+#[derive(Debug)]
 pub struct KvConnectorLeader {
     slot_manager: Arc<OnceLock<ConnectorSlotManager<String>>>,
-    drt: Option<Arc<DistributedRuntime>>,
-    rank: usize,
-    device_id: usize,
     block_size: usize,
     inflight_requests: HashSet<String>,
     onboarding_slots: HashSet<String>,
     iteration_counter: u64,
     inflight_request_to_num_external_tokens: HashMap<String, usize>,
-    remote_prefetch: Option<RemotePrefetchContext>,
-    inflight_remote_prefetch: Arc<Mutex<HashSet<String>>>,
-    remote_prefetch_cancellation: Arc<Mutex<HashMap<String, CancellationToken>>>,
     kvbm_metrics: KvbmMetrics,
-}
-
-impl std::fmt::Debug for KvConnectorLeader {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KvConnectorLeader")
-            .field("rank", &self.rank)
-            .field("device_id", &self.device_id)
-            .field("block_size", &self.block_size)
-            .field("iteration_counter", &self.iteration_counter)
-            .finish()
-    }
 }
 
 impl KvConnectorLeader {
     fn new(
-        rank: u64,
-        device_id: u64,
-        drt: Option<Arc<DistributedRuntime>>,
+        worker_id: u64,
         page_size: usize,
         leader_py: PyKvbmLeader,
         consolidator_trtllm_endpoint: Option<String>,
         consolidator_output_endpoint: Option<String>,
     ) -> Self {
         tracing::info!(
-            "KvConnectorLeader initialized with rank: {}, device_id: {}",
-            rank,
-            device_id
+            "KvConnectorLeader initialized with worker_id: {}",
+            worker_id
         );
 
         let leader = leader_py.get_inner().clone();
@@ -158,7 +147,6 @@ impl KvConnectorLeader {
 
         {
             let slot_manager_cell = slot_manager_cell.clone();
-            // Capture consolidator endpoints for the async block
             let consolidator_trtllm_ep = consolidator_trtllm_endpoint.clone();
             let consolidator_output_ep = consolidator_output_endpoint.clone();
 
@@ -178,8 +166,6 @@ impl KvConnectorLeader {
                     .disable_device_pool(false)
                     .kvbm_metrics(kvbm_metrics_clone.clone());
 
-                // Add consolidator config if endpoint is provided
-                // For TRTLLM: engine_endpoint is where TRTLLM publishes, output_endpoint is where consolidator publishes
                 if let Some(trtllm_ep) = consolidator_trtllm_ep.clone() {
                     tracing::info!(
                         "Consolidator config: trtllm_endpoint={}, consolidated_output_endpoint={:?}",
@@ -194,8 +180,7 @@ impl KvConnectorLeader {
                     );
                 }
 
-                let block_manager = match block_manager_builder.build().await
-                {
+                let block_manager = match block_manager_builder.build().await {
                     Ok(bm) => bm,
                     Err(e) => {
                         tracing::error!("Failed to build BlockManager: {}", e);
@@ -203,12 +188,11 @@ impl KvConnectorLeader {
                     }
                 };
 
-                // Create the slot manager now that everything is ready
                 let sm = ConnectorSlotManager::new(
                     block_manager.get_block_manager().clone(),
                     leader.clone(),
                     kvbm_metrics_clone.clone(),
-                    Some(format!("worker-{}", rank)),
+                    Some(format!("worker-{}", worker_id)),
                 );
 
                 let _ = slot_manager_cell.set(sm);
@@ -219,26 +203,44 @@ impl KvConnectorLeader {
 
         Self {
             slot_manager: slot_manager_cell,
-            drt,
-            rank: rank as usize,
-            device_id: device_id as usize,
             block_size: page_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),
             iteration_counter: 0,
             inflight_request_to_num_external_tokens: HashMap::new(),
-            remote_prefetch: None,
-            inflight_remote_prefetch: Arc::new(Mutex::new(HashSet::new())),
-            remote_prefetch_cancellation: Arc::new(Mutex::new(HashMap::new())),
             kvbm_metrics,
         }
     }
+}
 
-    fn remote_prefetch_context(
+impl RemoteOnboardingAdvisor {
+    fn new(
+        drt: Option<Arc<DistributedRuntime>>,
+        device_id: usize,
+        slot_manager: Arc<OnceLock<ConnectorSlotManager<String>>>,
+        kvbm_metrics: KvbmMetrics,
+    ) -> Self {
+        Self {
+            drt,
+            device_id,
+            slot_manager,
+            kvbm_metrics,
+            remote_onboarding: None,
+            inflight_remote_onboarding: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    fn slot_manager(&self) -> anyhow::Result<&ConnectorSlotManager<String>> {
+        self.slot_manager
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("slot_manager not initialized"))
+    }
+
+    fn remote_onboarding_context(
         &mut self,
         timeout_ms: u64,
-    ) -> anyhow::Result<Option<RemotePrefetchContext>> {
-        if let Some(context) = &self.remote_prefetch {
+    ) -> anyhow::Result<Option<RemoteOnboardingContext>> {
+        if let Some(context) = &self.remote_onboarding {
             return Ok(Some(context.clone()));
         }
 
@@ -246,7 +248,9 @@ impl KvConnectorLeader {
             return Ok(None);
         };
 
-        let component = drt.namespace(G2PB_NAMESPACE)?.component(G2PB_COMPONENT_NAME)?;
+        let component = drt
+            .namespace(G2PB_NAMESPACE)?
+            .component(G2PB_COMPONENT_NAME)?;
         let request_client = tokio::task::block_in_place(|| {
             get_current_tokio_handle().block_on(async {
                 tokio::time::timeout(
@@ -275,25 +279,110 @@ impl KvConnectorLeader {
             num_layers: 1,
         };
         let transfer_context = Arc::new(TransferContext::new(
-            self.slot_manager().block_manager().nixl_agent(),
+            self.slot_manager()?.block_manager().nixl_agent(),
             DeviceAllocator::new(self.device_id)?.ctx().new_stream()?,
             tokio::runtime::Handle::current(),
             Some(pool_config),
         )?);
 
-        let context = RemotePrefetchContext {
+        let context = RemoteOnboardingContext {
             request_client,
             peer_resolver,
             transfer_context,
             imported_instances: Arc::new(Mutex::new(HashSet::new())),
         };
-        self.remote_prefetch = Some(context.clone());
+        self.remote_onboarding = Some(context.clone());
         Ok(Some(context))
+    }
+
+    fn advise_async_onboarding(
+        &mut self,
+        request: KvbmRequest,
+        timeout_ms: u64,
+        min_blocks: u64,
+    ) -> anyhow::Result<()> {
+        let Some(context) = self.remote_onboarding_context(timeout_ms)? else {
+            tracing::debug!(
+                request_id = request.request_id,
+                "remote onboarding advice ignored because no distributed runtime is available"
+            );
+            return Ok(());
+        };
+
+        {
+            let mut inflight = self
+                .inflight_remote_onboarding
+                .lock()
+                .map_err(|_| anyhow::anyhow!("remote onboarding set poisoned"))?;
+            if !inflight.insert(request.request_id.clone()) {
+                return Ok(());
+            }
+        }
+
+        let request_id = request.request_id.clone();
+        let salt_hash = request.salt_hash;
+        let shared_slot = self.slot_manager()?.get_slot(&request_id)?;
+        let sequence_blocks = {
+            let slot = shared_slot
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
+            slot.sequence().blocks().to_vec()
+        };
+        let block_manager = self.slot_manager()?.block_manager().clone();
+        let kvbm_metrics = self.kvbm_metrics.clone();
+        let inflight = self.inflight_remote_onboarding.clone();
+        let (done_tx, done_rx) = oneshot::channel();
+
+        tokio::spawn(async move {
+            let result = execute_remote_onboarding(
+                block_manager,
+                sequence_blocks,
+                salt_hash,
+                min_blocks as usize,
+                kvbm_metrics,
+                context,
+            )
+            .await;
+
+            match result {
+                Ok(prefetched_blocks) => {
+                    tracing::debug!(
+                        request_id,
+                        prefetched_blocks,
+                        "completed advisory remote onboarding"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        request_id,
+                        error = %error,
+                        "advisory remote onboarding failed"
+                    );
+                }
+            }
+
+            if let Ok(mut guard) = inflight.lock() {
+                guard.remove(&request_id);
+            }
+
+            let _ = done_tx.send(());
+        });
+
+        tokio::task::block_in_place(|| {
+            get_current_tokio_handle().block_on(async move {
+                let _ = tokio::time::timeout(Duration::from_millis(timeout_ms), done_rx).await;
+            });
+        });
+
+        Ok(())
     }
 }
 
 async fn local_match_prefix_len<L>(
-    block_manager: &dynamo_llm::block_manager::KvBlockManager<L, dynamo_llm::block_manager::BasicMetadata>,
+    block_manager: &dynamo_llm::block_manager::KvBlockManager<
+        L,
+        dynamo_llm::block_manager::BasicMetadata,
+    >,
     sequence_hashes: &[SequenceHash],
 ) -> anyhow::Result<usize>
 where
@@ -306,23 +395,29 @@ where
     }
 
     if let Some(host) = block_manager.host() {
-        matched += host.match_sequence_hashes(&sequence_hashes[matched..]).await?.len();
+        matched += host
+            .match_sequence_hashes(&sequence_hashes[matched..])
+            .await?
+            .len();
     }
 
     if let Some(disk) = block_manager.disk() {
-        matched += disk.match_sequence_hashes(&sequence_hashes[matched..]).await?.len();
+        matched += disk
+            .match_sequence_hashes(&sequence_hashes[matched..])
+            .await?
+            .len();
     }
 
     Ok(matched)
 }
 
-async fn execute_remote_prefetch(
+async fn execute_remote_onboarding(
     block_manager: crate::block_manager::VllmBlockManager,
     sequence_blocks: Vec<TokenBlock>,
     salt_hash: u64,
     min_blocks: usize,
     kvbm_metrics: KvbmMetrics,
-    context: RemotePrefetchContext,
+    context: RemoteOnboardingContext,
 ) -> anyhow::Result<usize> {
     if sequence_blocks.is_empty() {
         return Ok(0);
@@ -373,7 +468,9 @@ async fn execute_remote_prefetch(
 
     if post_gap_hits > 0 {
         kvbm_metrics.g2pb_post_gap_requests.inc();
-        kvbm_metrics.g2pb_post_gap_blocks.inc_by(post_gap_hits as u64);
+        kvbm_metrics
+            .g2pb_post_gap_blocks
+            .inc_by(post_gap_hits as u64);
     }
 
     if contiguous_remote.len() < min_blocks {
@@ -422,9 +519,9 @@ async fn execute_remote_prefetch(
         let mut local_host_blocks = host_pool.allocate_blocks(owner_hashes.len()).await?;
 
         for (block, sequence_hash) in local_host_blocks.iter_mut().zip(owner_hashes.iter()) {
-            let token_block = token_blocks_by_hash
-                .get(sequence_hash)
-                .ok_or_else(|| anyhow::anyhow!("missing token block for sequence hash {sequence_hash}"))?;
+            let token_block = token_blocks_by_hash.get(sequence_hash).ok_or_else(|| {
+                anyhow::anyhow!("missing token block for sequence hash {sequence_hash}")
+            })?;
             complete_block(block, salt_hash, token_block.tokens().as_ref())?;
         }
 
@@ -433,7 +530,7 @@ async fn execute_remote_prefetch(
             &mut local_host_blocks,
             context.transfer_context.clone(),
         )?;
-        notify.await.context("remote prefetch transfer dropped")?;
+        notify.await.context("remote onboarding transfer dropped")?;
 
         let immutable_host_blocks = host_pool.register_blocks(local_host_blocks).await?;
         prefetched += immutable_host_blocks.len();
@@ -467,12 +564,6 @@ impl Leader for KvConnectorLeader {
             .expect("slot_manager not initialized")
     }
 
-    /// Match the tokens in the request with the available block pools.
-    /// Note: the necessary details of the request are captured prior to this call. For trtllm,
-    /// we make a create slot call prior to this call, so a slot is guaranteed to exist.
-    ///
-    /// To align with the connector interface, we must ensure that if no blocks are matched, we return (0, false).
-    /// In our implementation, if we match any block, we return (num_matched_tokens, true).
     #[tracing::instrument(level = "debug", skip(self, request_num_tokens, num_computed_tokens))]
     fn get_num_new_matched_tokens(
         &mut self,
@@ -484,8 +575,6 @@ impl Leader for KvConnectorLeader {
             "request_num_tokens: {request_num_tokens}; num_computed_tokens: {num_computed_tokens}"
         );
 
-        // TRTLLM could match partial blocks if enable_partial_reuse = True,
-        // immediately return 0 to simplify things.
         if !num_computed_tokens.is_multiple_of(self.block_size) {
             return Ok((0, false));
         }
@@ -495,7 +584,6 @@ impl Leader for KvConnectorLeader {
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
 
-        // early exit if we cannot match full block
         if (slot.sequence().total_tokens() - num_computed_tokens) < self.block_size {
             let total_tokens = slot.sequence().total_tokens();
             tracing::debug!(
@@ -504,12 +592,8 @@ impl Leader for KvConnectorLeader {
             return Ok((0, false));
         }
 
-        // find matches for any remaining tokens
-        // this will advance the computed position and hold any newly matched blocks in the slot
         slot.acquire_local_matches(num_computed_tokens)?;
 
-        // return the number of external tokens that are ready for onboarding
-        // we always return true here as we always asynchronously onboard matched blocks
         if let SlotState::OnboardStaged(num_external_tokens) = slot.state() {
             debug_assert!(
                 (num_computed_tokens + num_external_tokens).is_multiple_of(self.block_size)
@@ -519,7 +603,6 @@ impl Leader for KvConnectorLeader {
                 "scheduling onboarding for {} external tokens",
                 num_external_tokens
             );
-            // Add to the map so that onboarding can be triggered in update_state_after_alloc.
             self.inflight_request_to_num_external_tokens
                 .insert(request_id, num_external_tokens);
 
@@ -532,8 +615,6 @@ impl Leader for KvConnectorLeader {
         }
     }
 
-    /// Note: TRTLLM will not provide any scheduler output data for requests that are onboarding. it is entirely
-    /// on the connector's implementation to handle this case.
     #[tracing::instrument(level = "debug", skip_all, fields(request_id))]
     fn update_state_after_alloc(
         &mut self,
@@ -552,9 +633,6 @@ impl Leader for KvConnectorLeader {
         let mut slot = shared_slot
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
-
-        // we have not yet advanced the computed position, but now we can, since we have an indication that we have
-        // necessary gpu blocks into which we will load the external tokens.
 
         slot.append_mutable_device_blocks(&block_ids)?;
 
@@ -588,11 +666,6 @@ impl Leader for KvConnectorLeader {
         &mut self,
         scheduler_output: SchedulerOutput,
     ) -> anyhow::Result<Vec<u8>> {
-        // the iteration counter is used to track the number of times we have built the connector metadata
-        // all connetor operations have the iteration counter at which they were issued.
-        // this allows operations to be lazily enqueued to the transfer engine
-        // the worker side of the connector will track all operations for completion before the request is
-        // allowed to be marked as finished.
         self.iteration_counter += 1;
         let iteration = self.iteration_counter;
 
@@ -604,16 +677,6 @@ impl Leader for KvConnectorLeader {
 
         let onboarding_slots = std::mem::take(&mut self.onboarding_slots);
 
-        // Worker-side - we create a request slot for onboarding, then delete it when onboarding is finished, then
-        // recreate it again when we start the prefill/decode phase.
-        //
-        // This is kind of a nice abstraction as it keeps the events simplier; however, we now create the request-slot
-        // once for onboarding (this loop), then again for prefill/decode (new_requests loop).
-        //
-        // TODO(krish): Consider a more deterministic way to count immediate ops.
-        // Currently we count by filtering pending_ops at runtime. A higher-level approach
-        // (e.g., tracking count when onboard_blocks is called, or deriving from architecture
-        // config) might be more robust against potential timing-related issues.
         for request_id in onboarding_slots.iter() {
             let shared_slot = self.slot_manager().get_slot(request_id)?;
             let mut slot = shared_slot
@@ -623,13 +686,11 @@ impl Leader for KvConnectorLeader {
             let pending_ops_opt = slot.take_pending_operations();
 
             if let Some(pending_ops) = pending_ops_opt {
-                // Count immediate (onboard) operations for this slot
                 let num_immediate = pending_ops
                     .iter()
                     .filter(|op| op.request_type == RequestType::Immediate)
                     .count() as u64;
 
-                // Create slot with expected immediate ops BEFORE adding operations
                 md.create_slot(request_id.clone(), num_immediate);
                 md.add_operations(pending_ops);
             } else {
@@ -637,14 +698,11 @@ impl Leader for KvConnectorLeader {
             }
         }
 
-        // todo: update the code and abstraction to account for this two-phase lifecycle.
         for new_req in &scheduler_output.new_requests {
             let request_id = &new_req.request_id;
 
             let already_created = md.new_slots.iter().any(|s| &s.request_id == request_id);
 
-            // Skip if this slot was already created in the onboarding_slots loop above.
-            // This prevents overwriting the slot with expected_immediate_ops=0 when it should have the correct count.
             if already_created {
                 assert!(
                     inflight_requests.remove(request_id),
@@ -690,13 +748,11 @@ impl Leader for KvConnectorLeader {
             let pending_ops_opt = slot.take_pending_operations();
 
             if let Some(pending_ops) = pending_ops_opt {
-                // Count immediate (onboard) operations for this slot
                 let num_immediate = pending_ops
                     .iter()
                     .filter(|op| op.request_type == RequestType::Immediate)
                     .count() as u64;
 
-                // Create slot with expected immediate ops BEFORE adding operations
                 md.create_slot(new_req.request_id.clone(), num_immediate);
 
                 tracing::debug!(
@@ -714,7 +770,6 @@ impl Leader for KvConnectorLeader {
         for cached_req in &scheduler_output.cached_requests {
             let request_id = &cached_req.request_id;
 
-            // note: evicition might trigger this assert
             assert!(
                 inflight_requests.remove(request_id),
                 "request_id {request_id} not found in inflight_requests: "
@@ -759,37 +814,17 @@ impl Leader for KvConnectorLeader {
         block_ids: Vec<BlockId>,
     ) -> anyhow::Result<bool> {
         tracing::debug!("Request finished: {request_id}; block_ids: {block_ids:?}");
-        // grab the slot
         let shared_slot = self.slot_manager().get_slot(&request_id)?;
 
-        // mark the slot as finished
         let mut slot = shared_slot
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
         slot.mark_as_finished(self.iteration_counter)?;
 
-        // todo: allow the request to resolve when it should exit
-        // the request may have some outstanding operations
-        // we would like to inform it to shutdown, then have it signal to the work that is officially gone,
-        // then we can remove the slot and trigger the worker to clean up as well.
-
-        // remove it from the manager as we will never use it again
         self.slot_manager().remove_slot(&request_id)?;
         self.inflight_request_to_num_external_tokens
             .remove(&request_id);
-        if let Ok(mut inflight) = self.inflight_remote_prefetch.lock() {
-            inflight.remove(&request_id);
-        }
-        if let Ok(mut cancellations) = self.remote_prefetch_cancellation.lock()
-            && let Some(token) = cancellations.remove(&request_id)
-        {
-            token.cancel();
-        }
 
-        // if the slot has finished, we can return false to trtllm, indicating all gpu blocks are free to be reused
-        // otherwise, we return true, which means there are still outstanding operations on gpu blocks which
-        // must be awaited before the gpu blocks can be reused. if we return true, then it is the worker side
-        // of the connector api which will be used to inform trtllm that the request is finished.
         if let SlotState::Finished = slot.state() {
             Ok(false)
         } else {
@@ -802,8 +837,6 @@ impl Leader for KvConnectorLeader {
         self.slot_manager().has_slot(&request_id)
     }
 
-    /// Create a new slot for the given request ID.
-    /// This is used to create a new slot for the request.
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()> {
         self.slot_manager()
             .create_slot(&request.request_id, tokens, request.salt_hash)?;
@@ -812,130 +845,12 @@ impl Leader for KvConnectorLeader {
 
         Ok(())
     }
-
-    fn advise_async_loading(
-        &mut self,
-        request: KvbmRequest,
-        tokens: Vec<u32>,
-        transfer_budget_ms: u64,
-        min_blocks: u64,
-    ) -> anyhow::Result<()> {
-        // This is a best-effort pre-scheduling hint, not a load promise.
-        //
-        // Intended call timing:
-        // - after TRT-LLM has activated request objects for the upcoming iteration
-        // - before the scheduler runs for that iteration
-        //
-        // Intended caller shape:
-        // - inspect active/context requests that are likely to need remote KV soon
-        // - call advise_async_loading(request, tokens, budget, min_blocks)
-        // - allow a bounded grace period for remote-to-local prefetch work
-        // - then run normal scheduling using only local KVBM matches
-        //
-        // This API must not be used to promise remote availability to TRT-LLM.
-        // It starts best-effort leader-side remote prefetch into local KVBM state.
-        if !self.has_slot(request.request_id.clone()) {
-            self.create_slot(request.clone(), tokens.clone())?;
-        }
-
-        let Some(context) = self.remote_prefetch_context(transfer_budget_ms)? else {
-            tracing::debug!(
-                request_id = request.request_id,
-                "remote advice ignored because no distributed runtime is available"
-            );
-            return Ok(());
-        };
-
-        {
-            let mut inflight = self
-                .inflight_remote_prefetch
-                .lock()
-                .map_err(|_| anyhow::anyhow!("remote prefetch set poisoned"))?;
-            if !inflight.insert(request.request_id.clone()) {
-                return Ok(());
-            }
-        }
-        let cancellation = CancellationToken::new();
-        {
-            let mut cancellations = self
-                .remote_prefetch_cancellation
-                .lock()
-                .map_err(|_| anyhow::anyhow!("remote prefetch cancellation map poisoned"))?;
-            cancellations.insert(request.request_id.clone(), cancellation.clone());
-        }
-
-        let request_id = request.request_id.clone();
-        let salt_hash = request.salt_hash;
-        let shared_slot = self.slot_manager().get_slot(&request_id)?;
-        let sequence_blocks = {
-            let slot = shared_slot
-                .lock()
-                .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
-            slot.sequence().blocks().to_vec()
-        };
-        let block_manager = self.slot_manager().block_manager().clone();
-        let kvbm_metrics = self.kvbm_metrics.clone();
-        let inflight = self.inflight_remote_prefetch.clone();
-        let cancellations = self.remote_prefetch_cancellation.clone();
-        let (done_tx, done_rx) = oneshot::channel();
-
-        tokio::spawn(async move {
-            let result = tokio::select! {
-                _ = cancellation.cancelled() => {
-                    tracing::debug!(request_id, "cancelled advisory remote prefetch");
-                    Ok(0usize)
-                }
-                result = execute_remote_prefetch(
-                    block_manager,
-                    sequence_blocks,
-                    salt_hash,
-                    min_blocks as usize,
-                    kvbm_metrics,
-                    context,
-                ) => result,
-            };
-
-            match result {
-                Ok(prefetched_blocks) => {
-                    tracing::debug!(
-                        request_id,
-                        prefetched_blocks,
-                        "completed advisory remote prefetch"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        request_id,
-                        error = %error,
-                        "advisory remote prefetch failed"
-                    );
-                }
-            }
-
-            if let Ok(mut guard) = inflight.lock() {
-                guard.remove(&request_id);
-            }
-            if let Ok(mut guard) = cancellations.lock() {
-                guard.remove(&request_id);
-            }
-
-            let _ = done_tx.send(());
-        });
-
-        tokio::task::block_in_place(|| {
-            get_current_tokio_handle().block_on(async move {
-                let _ = tokio::time::timeout(Duration::from_millis(transfer_budget_ms), done_rx)
-                    .await;
-            });
-        });
-
-        Ok(())
-    }
 }
 
 #[pyclass]
 pub struct PyTrtllmKvConnectorLeader {
     connector_leader: Box<dyn Leader>,
+    onboarding_advisor: RemoteOnboardingAdvisor,
 }
 
 #[pymethods]
@@ -959,16 +874,24 @@ impl PyTrtllmKvConnectorLeader {
             }
         })?;
 
-        let connector_leader: Box<dyn Leader> = Box::new(KvConnectorLeader::new(
+        let connector_leader = KvConnectorLeader::new(
             rank,
-            device_id,
-            drt,
             page_size,
             leader,
             consolidator_trtllm_endpoint,
             consolidator_output_endpoint,
-        ));
-        Ok(Self { connector_leader })
+        );
+        let onboarding_advisor = RemoteOnboardingAdvisor::new(
+            drt,
+            device_id as usize,
+            connector_leader.slot_manager.clone(),
+            connector_leader.kvbm_metrics.clone(),
+        );
+
+        Ok(Self {
+            connector_leader: Box::new(connector_leader),
+            onboarding_advisor,
+        })
     }
 
     fn get_num_new_matched_tokens(
@@ -1023,8 +946,9 @@ impl PyTrtllmKvConnectorLeader {
         transfer_budget_ms: u64,
         min_blocks: u64,
     ) -> PyResult<()> {
-        self.connector_leader
-            .advise_async_loading(request, tokens, transfer_budget_ms, min_blocks)
+        let _ = tokens;
+        self.onboarding_advisor
+            .advise_async_onboarding(request, transfer_budget_ms, min_blocks)
             .map_err(to_pyerr)
     }
 }
@@ -1037,6 +961,7 @@ mod tests {
     use dynamo_llm::block_manager::config::{
         KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig,
     };
+    use dynamo_llm::block_manager::distributed::G2pbChecksum;
     use dynamo_llm::block_manager::storage::{PinnedStorage, cuda::PinnedAllocator};
     use dynamo_llm::tokens::{TokenBlockSequence, Tokens};
     use tokio_util::sync::CancellationToken;
@@ -1051,10 +976,9 @@ mod tests {
             .to_vec()
     }
 
-    async fn build_test_block_manager(
-    ) -> anyhow::Result<
-        dynamo_llm::block_manager::KvBlockManager<locality::Local, BasicMetadata>,
-    > {
+    async fn build_test_block_manager()
+    -> anyhow::Result<dynamo_llm::block_manager::KvBlockManager<locality::Local, BasicMetadata>>
+    {
         let cancel_token = CancellationToken::new();
         let config = KvBlockManagerConfig::builder()
             .runtime(
@@ -1118,7 +1042,7 @@ mod tests {
                     instance_id: 11,
                     sequence_hash: block.sequence_hash(),
                     size_bytes: 1024,
-                    checksum: None,
+                    checksum: 123 as G2pbChecksum,
                 },
             );
         }
@@ -1156,8 +1080,7 @@ mod tests {
         let missing_hash = register_blocks_with_hashes(host_pool, &[vec![41, 42, 43, 44]])
             .await?
             .pop()
-            .expect("missing hash")
-            ;
+            .expect("missing hash");
         let query_hashes = vec![
             present_hashes[0],
             present_hashes[1],

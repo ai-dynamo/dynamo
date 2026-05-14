@@ -3,6 +3,7 @@
 
 import logging
 import os
+from collections.abc import Callable
 from typing import List, Optional
 
 import tensorrt_llm
@@ -24,6 +25,22 @@ logger = logging.getLogger(__name__)
 DistributedRuntime = None
 if is_dyn_runtime_enabled():
     from dynamo.runtime import DistributedRuntime
+
+AsyncLoadingAdvisor = Callable[[str, List[int], Optional[str], Optional[str], int, int], None]
+_async_loading_advisor: Optional[AsyncLoadingAdvisor] = None
+
+
+def register_async_loading_advisor(advisor: Optional[AsyncLoadingAdvisor]) -> None:
+    global _async_loading_advisor
+    _async_loading_advisor = advisor
+
+
+def clear_async_loading_advisor() -> None:
+    register_async_loading_advisor(None)
+
+
+def get_async_loading_advisor() -> Optional[AsyncLoadingAdvisor]:
+    return _async_loading_advisor
 
 
 class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
@@ -109,6 +126,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
             consolidator_trtllm_endpoint=trtllm_ep,
             consolidator_output_endpoint=consolidator_output_ep,
         )
+        register_async_loading_advisor(self.advise_async_loading)
 
     @nvtx_annotate(category="scheduler")
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> bytes:
@@ -134,7 +152,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
                 req.new_tokens,
                 req.new_block_ids,
                 req.computed_position,
-                req.priorities,  # Pass retention priorities for offload filtering
+                req.priorities,
             )
 
         resumed_from_preemption = False
@@ -145,7 +163,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
                 req.new_tokens,
                 req.new_block_ids,
                 req.computed_position,
-                req.priorities,  # Pass retention priorities for offload filtering
+                req.priorities,
             )
 
         output.add_num_scheduled_tokens(
@@ -215,45 +233,59 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
         if bool(request.multimodal_positions):
             raise ValueError("Unsupported request - requires mm extra keys")
 
-        all_token_ids = request.get_tokens(0)
-
-        # extract the critial aspects of the request that effect how the tokens are hashed
-        request = KvbmRequest(
-            request_id=str(request.request_id), lora_name=None, salt_hash=None
+        self._create_slot_from_tokens(
+            request_id=str(request.request_id),
+            token_ids=list(request.get_tokens(0)),
+            lora_name=None,
+            salt_hash=None,
         )
 
-        self._connector.create_slot(request, all_token_ids)
+    def _create_slot_from_tokens(
+        self,
+        request_id: str,
+        token_ids: List[int],
+        lora_name: Optional[str],
+        salt_hash: Optional[str],
+    ) -> None:
+        if self._connector.has_slot(request_id):
+            return None
+
+        request = KvbmRequest(
+            request_id=request_id, lora_name=lora_name, salt_hash=salt_hash
+        )
+        self._connector.create_slot(request, token_ids)
 
     @nvtx_annotate(category="scheduler")
     def advise_async_loading(
-        self, request: LlmRequest, transfer_for_ms: int = 100, min_blocks: int = 10
+        self,
+        request_id: str,
+        token_ids: List[int],
+        lora_name: Optional[str] = None,
+        salt_hash: Optional[str] = None,
+        transfer_for_ms: int = 100,
+        min_blocks: int = 10,
     ) -> None:
         """
-        Start best-effort async remote loading for this request before scheduling.
+        Start best-effort async remote loading before scheduling.
 
-        This should be called after TRT-LLM has activated the request for the upcoming
-        iteration, but before the scheduler makes its placement decision for that
-        iteration.
-
-        Intended usage:
-        - inspect active/context requests that are likely to need remote KV soon
-        - call this method with the full request tokens
-        - allow a bounded grace period for remote-to-local prefetch work
-        - run normal scheduling afterward using only local KVBM matches
-
-        This API is best-effort only. It must not be treated as a promise that remote
-        KV will be available in time for the next iteration.
+        This is the side-band pre-scheduler hook. It does not require a TRT-LLM
+        `LlmRequest`; callers provide request identity plus tokens, with optional
+        LoRA and salt inputs so hashing stays consistent with the eventual slot.
         """
-        self._create_slot(request)
+        self._create_slot_from_tokens(request_id, token_ids, lora_name, salt_hash)
 
-        if bool(request.multimodal_positions):
-            raise ValueError("Unsupported request - requires mm extra keys")
-
-        all_token_ids = request.get_tokens(0)
         request = KvbmRequest(
-            request_id=str(request.request_id), lora_name=None, salt_hash=None
+            request_id=request_id, lora_name=lora_name, salt_hash=salt_hash
+        )
+        self._connector.advise_async_loading(
+            request, token_ids, transfer_for_ms, min_blocks
         )
 
-        self._connector.advise_async_loading(
-            request, all_token_ids, transfer_for_ms, min_blocks
-        )
+    def __del__(self):
+        try:
+            advisor = get_async_loading_advisor()
+            bound = getattr(advisor, "__self__", None)
+            if bound is self:
+                clear_async_loading_advisor()
+        except Exception:
+            pass
