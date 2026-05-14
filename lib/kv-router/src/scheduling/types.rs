@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
 use crate::protocols::{
-    DpRank, SharedCacheHits, Taints, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    DpRank, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use crate::sequences::PrefillTokenDeltas;
 
@@ -64,7 +64,7 @@ pub struct SchedulingRequest {
     // Routing constraints and request-level config.
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
-    pub taints: Taints,
+    pub routing_constraints: RoutingConstraints,
     pub router_config_override: Option<RouterConfigOverride>,
     pub track_prefill_tokens: bool,
     pub priority_jump: f64,

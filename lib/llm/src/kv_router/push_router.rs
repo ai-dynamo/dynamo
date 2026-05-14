@@ -302,7 +302,9 @@ impl KvPushRouter {
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
         let allowed_worker_ids = routing.and_then(|r| r.allowed_worker_ids.clone());
-        let taints = routing.and_then(|r| r.taints.clone()).unwrap_or_default();
+        let routing_constraints = routing
+            .and_then(|r| r.routing_constraints.clone())
+            .unwrap_or_default();
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
         let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
@@ -319,7 +321,7 @@ impl KvPushRouter {
                     expected_output_tokens,
                     None,
                     allowed_worker_ids,
-                    taints,
+                    routing_constraints.clone(),
                 )
                 .await?;
             let best_worker = selection.worker;
@@ -376,7 +378,7 @@ impl KvPushRouter {
                     expected_output_tokens,
                     Some(pinned_worker),
                     allowed_worker_ids,
-                    taints,
+                    routing_constraints.clone(),
                 )
                 .await?;
             let best_worker = selection.worker;
@@ -407,15 +409,17 @@ impl KvPushRouter {
             "Routing to specified worker"
         );
 
-        if !taints.is_empty() {
+        if !routing_constraints.is_empty() {
             let configs = self.chooser.workers_with_configs.borrow();
             match configs.get(&pinned_worker_id) {
-                Some(config) if !taints.is_compatible_with_worker_taints(config.taints()) => {
+                Some(config)
+                    if !routing_constraints.is_compatible_with_worker_taints(config.taints()) =>
+                {
                     tracing::warn!(
                         request_id = %context_id,
                         worker_id = pinned_worker_id,
                         dp_rank = ?resolved_dp_rank,
-                        requested_taints = ?taints.required,
+                        requested_taints = ?routing_constraints.required,
                         worker_taints = ?config.taints(),
                         ?phase,
                         "Pinned worker fallback bypassed incompatible required taints"
@@ -426,7 +430,7 @@ impl KvPushRouter {
                         request_id = %context_id,
                         worker_id = pinned_worker_id,
                         dp_rank = ?resolved_dp_rank,
-                        requested_taints = ?taints.required,
+                        requested_taints = ?routing_constraints.required,
                         ?phase,
                         "Pinned worker fallback could not validate required taints because worker config was unavailable"
                     );

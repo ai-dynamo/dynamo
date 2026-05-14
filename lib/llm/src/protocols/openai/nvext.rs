@@ -3,7 +3,7 @@
 
 use axum::http::HeaderMap;
 use derive_builder::Builder;
-use dynamo_kv_router::protocols::Taints;
+use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_protocols::types::StopReason;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -285,14 +285,14 @@ impl NvExtResponseFieldSelection {
     }
 }
 
-/// OpenAPI-facing schema for request taints.
+/// OpenAPI-facing schema for request routing constraints.
 ///
-/// Runtime serialization still uses `dynamo_kv_router::protocols::Taints`;
+/// Runtime serialization still uses `dynamo_kv_router::protocols::RoutingConstraints`;
 /// this mirror exists so `NvExt` can expose the concrete field shape without
 /// making the kv-router crate depend on utoipa.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
-pub struct TaintsSchema {
-    /// Taints that must be matched for the request to be eligible for a worker.
+pub struct RoutingConstraintsSchema {
+    /// Worker taints that must be matched for the request to be eligible.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required: Vec<String>,
 
@@ -402,11 +402,11 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_control: Option<SessionControl>,
 
-    /// Request taints used to constrain or prefer tainted workers.
+    /// Request routing constraints used to constrain or prefer tainted workers.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(value_type = TaintsSchema)]
-    pub taints: Option<Taints>,
+    #[schema(value_type = RoutingConstraintsSchema)]
+    pub routing_constraints: Option<RoutingConstraints>,
 }
 
 /// Hints from the agent/caller about request characteristics.
@@ -537,7 +537,7 @@ mod tests {
         assert_eq!(nv_ext.agent_context, None);
         assert_eq!(nv_ext.request_timestamp_ms, None);
         assert_eq!(nv_ext.session_control, None);
-        assert_eq!(nv_ext.taints, None);
+        assert_eq!(nv_ext.routing_constraints, None);
     }
 
     // Test valid builder configurations

@@ -545,7 +545,7 @@ impl OpenAIPreprocessor {
                 lora_name,
                 allowed_worker_ids: None,
                 session_control: nvext.session_control.clone(),
-                taints: nvext.taints.clone(),
+                routing_constraints: nvext.routing_constraints.clone(),
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() {

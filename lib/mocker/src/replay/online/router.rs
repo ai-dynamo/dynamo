@@ -12,7 +12,7 @@ use dynamo_kv_router::indexer::{
     KvIndexer, KvIndexerInterface, KvIndexerMetrics, ThreadPoolIndexer,
 };
 use dynamo_kv_router::protocols::{
-    BlockHashOptions, OverlapScores, RouterEvent, StorageTier, Taints, WorkerId,
+    BlockHashOptions, OverlapScores, RouterEvent, RoutingConstraints, StorageTier, WorkerId,
 };
 use dynamo_kv_router::scheduling::TierOverlapBlocks;
 use tokio::sync::mpsc;
@@ -252,7 +252,7 @@ impl KvReplayRouter {
                 ),
                 None,
                 None,
-                Taints::default(),
+                RoutingConstraints::default(),
                 None,
             )
             .await?;

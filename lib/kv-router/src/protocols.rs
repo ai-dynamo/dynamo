@@ -171,14 +171,14 @@ pub trait WorkerConfigLike {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct Taints {
+pub struct RoutingConstraints {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preferred: Vec<String>,
 }
 
-impl Taints {
+impl RoutingConstraints {
     pub fn is_empty(&self) -> bool {
         self.required.is_empty() && self.preferred.is_empty()
     }

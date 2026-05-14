@@ -14,7 +14,9 @@ use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{SchedulingRequest, SchedulingResponse, pinned_worker_config};
-use crate::protocols::{PrefillLoadHint, Taints, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{
+    PrefillLoadHint, RoutingConstraints, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+};
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
@@ -165,7 +167,7 @@ impl<
             threshold,
             request.allowed_worker_ids.as_ref(),
             request.pinned_worker,
-            &request.taints,
+            &request.routing_constraints,
             decay_now,
         ) {
             tracing::debug!("all workers busy, queueing request");
@@ -218,7 +220,7 @@ impl<
                 threshold,
                 front.request.allowed_worker_ids.as_ref(),
                 front.request.pinned_worker,
-                &front.request.taints,
+                &front.request.routing_constraints,
                 decay_now,
             ) {
                 break;
@@ -354,7 +356,7 @@ impl<
         threshold: f64,
         allowed: Option<&HashSet<WorkerId>>,
         pinned_worker: Option<WorkerWithDpRank>,
-        taints: &Taints,
+        routing_constraints: &RoutingConstraints,
         decay_now: Instant,
     ) -> bool {
         let active_tokens = self.slots.active_tokens(decay_now);
@@ -364,7 +366,9 @@ impl<
             let Ok(config) = pinned_worker_config::<C>(&*configs, worker) else {
                 return false;
             };
-            if !taints.is_empty() && !taints.is_compatible_with_worker_taints(config.taints()) {
+            if !routing_constraints.is_empty()
+                && !routing_constraints.is_compatible_with_worker_taints(config.taints())
+            {
                 return false;
             }
 
@@ -382,7 +386,9 @@ impl<
             {
                 continue;
             }
-            if !taints.is_empty() && !taints.is_compatible_with_worker_taints(config.taints()) {
+            if !routing_constraints.is_empty()
+                && !routing_constraints.is_compatible_with_worker_taints(config.taints())
+            {
                 continue;
             }
             let dp_size = config.data_parallel_size();
@@ -644,7 +650,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
-            taints: crate::protocols::Taints::default(),
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
             resp_tx: Some(tx),
         };
@@ -1039,7 +1045,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: Some(allowed),
-            taints: crate::protocols::Taints::default(),
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
             resp_tx: Some(tx),
         };
@@ -1103,7 +1109,7 @@ mod tests {
         cfg_tx.send(configs).unwrap();
 
         let (mut req, rx) = make_request("tainted", 256);
-        req.taints = crate::protocols::Taints {
+        req.routing_constraints = crate::protocols::RoutingConstraints {
             required: vec!["mdc-b".to_string()],
             preferred: Vec::new(),
         };

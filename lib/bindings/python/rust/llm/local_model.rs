@@ -2,23 +2,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use dynamo_kv_router::protocols::Taints as RsTaints;
+use dynamo_kv_router::protocols::RoutingConstraints as RsRoutingConstraints;
 use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
 
 #[pyclass]
 #[derive(Clone, Debug, Default)]
-pub struct Taints {
-    pub(crate) inner: RsTaints,
+pub struct RoutingConstraints {
+    pub(crate) inner: RsRoutingConstraints,
 }
 
 #[pymethods]
-impl Taints {
+impl RoutingConstraints {
     #[new]
     #[pyo3(signature = (required=None, preferred=None))]
     fn new(required: Option<Vec<String>>, preferred: Option<Vec<String>>) -> Self {
         Self {
-            inner: RsTaints {
+            inner: RsRoutingConstraints {
                 required: required.unwrap_or_default(),
                 preferred: preferred.unwrap_or_default(),
             },

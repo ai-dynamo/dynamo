@@ -8,7 +8,7 @@ use futures::StreamExt;
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
-use dynamo_kv_router::protocols::{BlockExtraInfo, Taints, WorkerId};
+use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId};
 use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
 
 use super::{InnerPrefillRouter, PrefillError, PrefillResolveDecision, PrefillRouter};
@@ -58,10 +58,10 @@ impl PrefillRouter {
                 .routing
                 .as_ref()
                 .and_then(|r| r.allowed_worker_ids.clone());
-            let taints = req
+            let routing_constraints = req
                 .routing
                 .as_ref()
-                .and_then(|r| r.taints.clone())
+                .and_then(|r| r.routing_constraints.clone())
                 .unwrap_or_default();
             let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
             match self
@@ -72,7 +72,7 @@ impl PrefillRouter {
                     lora_name,
                     priority_jump,
                     allowed_worker_ids,
-                    taints,
+                    routing_constraints,
                 )
                 .await
             {
@@ -279,7 +279,7 @@ impl PrefillRouter {
         lora_name: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
-        taints: Taints,
+        routing_constraints: RoutingConstraints,
     ) -> Result<(u64, Option<u32>)> {
         let prefill_router = self
             .prefill_router
@@ -300,7 +300,7 @@ impl PrefillRouter {
                         priority_jump,
                         None,
                         allowed_worker_ids,
-                        taints,
+                        routing_constraints,
                     )
                     .await?;
                 Ok((worker.worker_id, Some(worker.dp_rank)))

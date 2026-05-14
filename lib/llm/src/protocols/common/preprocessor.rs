@@ -7,7 +7,7 @@ use std::sync::Arc;
 use derive_builder::Builder;
 use dynamo_kv_router::{
     config::RouterConfigOverride,
-    protocols::{BlockExtraInfo, Taints, WorkerId},
+    protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
 };
 use serde::{Deserialize, Serialize};
 
@@ -68,9 +68,9 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
 
-    /// Request taints used for worker compatibility and soft preference.
+    /// Request routing constraints used for worker compatibility and soft preference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub taints: Option<Taints>,
+    pub routing_constraints: Option<RoutingConstraints>,
 
     /// Session control for subagent KV isolation and sticky routing.
     /// Contains session_id (for affinity) and optional action (open/close).

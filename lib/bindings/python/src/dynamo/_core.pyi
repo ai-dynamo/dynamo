@@ -546,7 +546,7 @@ class ModelRuntimeConfig:
         """Get the tensor model configuration."""
         ...
 
-class Taints:
+class RoutingConstraints:
     required: List[str]
     preferred: List[str]
 
@@ -2009,7 +2009,7 @@ class KvRouter:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         multi_modal_data: Optional[JsonLike] = None,
         mm_routing_info: Optional[JsonLike] = None,
-        taints: Optional[Taints] = None,
+        routing_constraints: Optional[RoutingConstraints] = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate text using the KV-aware router.
@@ -2038,7 +2038,7 @@ class KvRouter:
             mm_routing_info: Optional structured routing-only multimodal payload
                             (e.g., {"routing_token_ids": [...], "block_mm_infos": [...]})
                             used by router selection without changing execution token_ids.
-            taints: Optional request taints used to constrain or prefer tainted workers.
+            routing_constraints: Optional request routing constraints used to constrain or prefer tainted workers.
 
         Returns:
             An async iterator yielding generation responses
@@ -2072,7 +2072,7 @@ class KvRouter:
         update_indexer: bool = False,
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
-        taints: Optional[Taints] = None,
+        routing_constraints: Optional[RoutingConstraints] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.

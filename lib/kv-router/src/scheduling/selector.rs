@@ -216,13 +216,13 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         }
 
         if pinned_worker.is_none()
-            && !request.taints.is_empty()
+            && !request.routing_constraints.is_empty()
             && workers
                 .iter()
                 .filter(|(worker_id, _)| request.is_worker_allowed(**worker_id))
                 .all(|(_, config)| {
                     !request
-                        .taints
+                        .routing_constraints
                         .is_compatible_with_worker_taints(config.taints())
                 })
         {
@@ -253,7 +253,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             pinned_worker_config(workers, worker)?;
             if workers.get(&worker.worker_id).is_some_and(|config| {
                 !request
-                    .taints
+                    .routing_constraints
                     .is_compatible_with_worker_taints(config.taints())
             }) {
                 return Err(KvSchedulerError::NoEndpoints);
@@ -294,9 +294,9 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .iter()
             .filter(move |(worker_id, _)| request.is_worker_allowed(**worker_id))
             .filter(move |(_, config)| {
-                request.taints.is_empty()
+                request.routing_constraints.is_empty()
                     || request
-                        .taints
+                        .routing_constraints
                         .is_compatible_with_worker_taints(config.taints())
             })
             .flat_map(|(worker_id, config)| {
@@ -576,7 +576,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
-            taints: crate::protocols::Taints::default(),
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
             resp_tx: None,
         };
@@ -625,7 +625,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
-            taints: crate::protocols::Taints {
+            routing_constraints: crate::protocols::RoutingConstraints {
                 required: vec!["mdc-b".to_string()],
                 preferred: Vec::new(),
             },
@@ -671,7 +671,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
-            taints: crate::protocols::Taints {
+            routing_constraints: crate::protocols::RoutingConstraints {
                 required: vec!["mdc-b".to_string()],
                 preferred: Vec::new(),
             },
@@ -733,7 +733,7 @@ mod tests {
                 expected_output_tokens: None,
                 pinned_worker: None,
                 allowed_worker_ids: None,
-                taints: crate::protocols::Taints {
+                routing_constraints: crate::protocols::RoutingConstraints {
                     required: vec![required_taint.clone()],
                     preferred: Vec::new(),
                 },
@@ -809,7 +809,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
-            taints: crate::protocols::Taints::default(),
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: Some(shared_hits),
             resp_tx: Some(tx),
         };
@@ -874,7 +874,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
-            taints: crate::protocols::Taints::default(),
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
             resp_tx: Some(tx),
         };
@@ -934,7 +934,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
-            taints: crate::protocols::Taints::default(),
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
             resp_tx: Some(tx),
         };
@@ -984,7 +984,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
-            taints: crate::protocols::Taints::default(),
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
             resp_tx: Some(tx),
         };
