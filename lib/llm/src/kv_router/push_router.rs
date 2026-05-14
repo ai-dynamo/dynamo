@@ -420,16 +420,14 @@ impl KvPushRouter {
                         pinned_worker_id,
                         routing_constraints.required_taints,
                         config.taints()
-                    )
-                    .into());
+                    ));
                 }
                 None => {
                     return Err(anyhow::anyhow!(
                         "Pinned worker {} could not be validated against required taints {:?} because worker config was unavailable",
                         pinned_worker_id,
                         routing_constraints.required_taints
-                    )
-                    .into());
+                    ));
                 }
                 _ => {}
             }
