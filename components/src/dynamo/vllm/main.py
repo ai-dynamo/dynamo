@@ -110,6 +110,23 @@ async def worker() -> None:
     if not config.served_model_name:
         config.served_model_name = config.engine_args.served_model_name = config.model
 
+    # rl-sdk-2 TITO parity: when running as an RL backend, default
+    # ``logprobs_mode`` to ``processed_logprobs`` so per-token logprobs are
+    # reported from the temperature-applied (post-softmax-with-T) distribution.
+    # vLLM defaults to ``raw_logprobs`` (pre-temperature), which produces
+    # systematically different values vs prime-rl's ``inference @`` entrypoint
+    # (which sets ``processed_logprobs`` at ``inference.py:566``) — leading to
+    # a ~17× Mismatch KL gap on T>0 RL workloads even though the engines
+    # otherwise agree byte-for-byte. Honor an explicit ``--logprobs-mode``
+    # override if the caller set one; only inject the RL-friendly default
+    # when the field is still at the vLLM default ``raw_logprobs``.
+    if config.enable_rl and config.engine_args.logprobs_mode == "raw_logprobs":
+        config.engine_args.logprobs_mode = "processed_logprobs"
+        logger.info(
+            "Defaulting logprobs_mode=processed_logprobs (--enable-rl active); "
+            "override with --logprobs-mode=raw_logprobs to restore vLLM's default."
+        )
+
     # Download the model if necessary using modelexpress.
     # We want it on disk before we start vllm to avoid downloading from HuggingFace.
     #
