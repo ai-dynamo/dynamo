@@ -125,6 +125,44 @@ impl VllmDPLBSelector {
             .write()
             .insert(worker, Counts { waiting, running });
     }
+
+    /// Max-merge engine counts with local optimistic bumps.
+    ///
+    /// FPM transit (ZMQ → relay → NATS → decode) takes ~10–30ms, so an
+    /// arriving FPM message reflects engine state from the past. If the
+    /// router has admitted requests since the FPM was generated, local
+    /// `(waiting, running)` exceeds what FPM reports. Overwriting via
+    /// `set_counts` would clobber those in-flight bumps and make the
+    /// worker look empty, steering more requests at it and producing
+    /// TTFT spikes.
+    ///
+    /// Max-merge keeps the higher of (local, fpm) per field. Trade-off:
+    /// counts only decrease via `on_running` / `on_finish`, so any missing
+    /// lifecycle hook drifts counts upward forever. Use this for
+    /// benchmarking the staleness hypothesis; a proper fix needs
+    /// delta-based reconciliation keyed by FPM sequence number.
+    pub fn max_merge_counts(&self, worker: WorkerWithDpRank, waiting: u32, running: u32) {
+        let mut counts = self.counts.write();
+        let entry = counts.entry(worker).or_default();
+        let prev_waiting = entry.waiting;
+        let prev_running = entry.running;
+        entry.waiting = prev_waiting.max(waiting);
+        entry.running = prev_running.max(running);
+        drop(counts);
+
+        if prev_waiting > waiting || prev_running > running {
+            tracing::debug!(
+                worker_type = self.worker_type,
+                worker_id = worker.worker_id,
+                dp_rank = worker.dp_rank,
+                local_waiting = prev_waiting,
+                local_running = prev_running,
+                fpm_waiting = waiting,
+                fpm_running = running,
+                "FPM behind local optimistic counts; keeping local (max-merge)"
+            );
+        }
+    }
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for VllmDPLBSelector {
@@ -222,7 +260,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for VllmDPLBSelector {
     }
 
     fn update_from_fpm(&self, worker: WorkerWithDpRank, waiting: u32, running: u32) {
-        self.set_counts(worker, waiting, running);
+        self.max_merge_counts(worker, waiting, running);
     }
 
     fn wants_fpm(&self) -> bool {
