@@ -135,7 +135,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 env={"SINGLE_GPU": "true"},
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
             ),
             # Frontend-decode variant: same `agg_multimodal_router.sh` as
             # `agg_router`, but `VLLM_EXTRA_ARGS=--frontend-decoding` so
@@ -155,7 +155,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     "SINGLE_GPU": "true",
                     "VLLM_EXTRA_ARGS": "--frontend-decoding",
                 },
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
             ),
             "e_pd": TopologyConfig(
                 marks=[pytest.mark.post_merge],
