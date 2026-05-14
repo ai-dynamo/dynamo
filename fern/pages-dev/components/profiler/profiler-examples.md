@@ -164,7 +164,7 @@ spec:
               effect: NoSchedule
 ```
 
-**Override the generated DynamoGraphDeployment** (e.g., to use a custom worker image):
+**Override the generated DynamoGraphDeployment** (e.g., to inject worker environment variables):
 
 ```yaml
 spec:
@@ -174,9 +174,12 @@ spec:
       apiVersion: nvidia.com/v1alpha1
       kind: DynamoGraphDeployment
       spec:
+        envs:
+          - name: TRITON_PTXAS_PATH
+            value: "/usr/local/cuda/bin/ptxas"
         services:
           VllmWorker:
-            extraEnvs:
+            envs:
               - name: CUSTOM_ENV
                 value: "my-value"
 ```
