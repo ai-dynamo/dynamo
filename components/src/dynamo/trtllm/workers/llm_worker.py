@@ -74,7 +74,24 @@ DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 # All connections must allocate from the same pool so that slot numbers are
 # unique across workers — a per-connection pool directory would let every
 # connection receive slot 1 from its own empty pool.
-_DEFAULT_POOL_DIR = "/var/run/dynamo/disagg_machine_id"
+# Prefer /var/run/dynamo (system-managed, survives reboots) but fall back to
+# a user-writable tmp path when the directory can't be created (e.g. in CI
+# containers that run without root).
+_PREFERRED_POOL_DIR = "/var/run/dynamo/disagg_machine_id"
+_FALLBACK_POOL_DIR = os.path.join(
+    os.environ.get("TMPDIR", "/tmp"), "dynamo", "disagg_machine_id"
+)
+
+
+def _resolve_pool_dir() -> str:
+    try:
+        os.makedirs(_PREFERRED_POOL_DIR, exist_ok=True)
+        return _PREFERRED_POOL_DIR
+    except OSError:
+        return _FALLBACK_POOL_DIR
+
+
+_DEFAULT_POOL_DIR = _resolve_pool_dir()
 _pools: dict[str, DisaggMachineIdAllocator] = {}
 _pool_lock = threading.Lock()
 
