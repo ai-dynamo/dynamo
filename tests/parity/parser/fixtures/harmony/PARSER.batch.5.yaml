@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: harmony
+mode: batch
+cases:
+  PARSER.batch.5.a:
+    description: Missing <|call|> end marker (bare envelope)
+    ref: dynamo
+    model_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls: []
+      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
+  PARSER.batch.5.b:
+    description: Bare <|call|> without preceding channel envelope
+    ref: dynamo
+    model_text: <|call|>
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: <|call|>
+  PARSER.batch.5.c:
+    description: Truncation mid-message JSON
+    ref: dynamo
+    model_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"loc
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"loc

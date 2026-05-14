@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3
+mode: batch
+cases:
+  PARSER.batch.6.a:
+    description: Canonical empty {} in fenced code block
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L260
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time
+      ```json
+      {}
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - &id001
+      name: get_time
+      parameters:
+        type: object
+        properties: {}
+    expected:
+      calls:
+      - name: get_time
+        arguments: {}
+      normal_text: ''
+  PARSER.batch.6.b:
+    description: Whitespace inside empty { } (newlines)
+    ref: dynamo
+    model_text: |-
+      <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time
+      ```json
+      {
+      }
+      ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - *id001
+    expected:
+      calls:
+      - name: get_time
+        arguments: {}
+      normal_text: ''
+    # TODO(research): vllm diverges — vLLM rejects whitespace inside empty {} when wrapped in fenced ```json``` block
+    # vllm produces:
+    #   calls: []
+    #   normal_text: None
+  PARSER.batch.6.c:
+    description: No fenced JSON block (function name only)
+    ref: dynamo
+    model_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    # TODO(research): vllm diverges — both return calls=[]; vLLM nullifies normal_text on this recovery path, Dynamo preserves the raw input as normal_text
+    # vllm produces:
+    #   calls: []
+    #   normal_text: None

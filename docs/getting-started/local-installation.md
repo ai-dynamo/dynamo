@@ -154,7 +154,12 @@ python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
 ```
 
 The warning `Cannot connect to ModelExpress server/transport error. Using direct download.`
-is expected in local deployments and can be safely ignored.
+is expected in this local single-machine setup (no ModelExpress server running) and can
+be safely ignored. In a Kubernetes deployment where `MODEL_EXPRESS_URL` is configured,
+this warning -- or the related `Failed to resolve local model path after server download`
+-- indicates that ModelExpress is configured but is not actually serving cached models;
+see [Model Caching in Kubernetes](../kubernetes/model-caching.md#option-2-modelexpress-p2p-distribution)
+for the correct configuration.
 
 **vLLM**
 

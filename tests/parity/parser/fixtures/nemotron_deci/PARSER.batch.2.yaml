@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: nemotron_deci
+mode: batch
+cases:
+  PARSER.batch.2.a:
+    description: Parallel calls in JSON array
+    ref: dynamo
+    model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_time", "arguments": {"timezone":
+      "EST"}}]</TOOLCALL>'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    - &id002
+      name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_time
+        arguments:
+          timezone: EST
+      normal_text: ''
+  PARSER.batch.2.b:
+    description: Two back-to-back TOOLCALL wrappers
+    ref: dynamo
+    model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL><TOOLCALL>[{"name": "get_time",
+      "arguments": {"timezone": "EST"}}]</TOOLCALL>'
+    tools:
+    - *id001
+    - *id002
+    expected:
+      calls: []
+      normal_text: ''
+    # NOTE: Dynamo's nemotron_deci parser does not restart on back-to-back
+    # <TOOLCALL>...</TOOLCALL> wrappers (handles multi-call within ONE wrapper
+    # — see 2.a — but not multiple wrappers). Known parser limitation; the
+    # fixture pins actual oracle output, not desired behavior. nemotron_deci
+    # has no vLLM/SGLang peer (n/a row in parity matrix) so this is
+    # Dynamo-self-check only.
+  PARSER.batch.2.c:
+    description: With surrounding narration
+    ref: dynamo
+    model_text: 'Both: <TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_time", "arguments":
+      {"timezone": "EST"}}]</TOOLCALL> Done.'
+    tools:
+    - *id001
+    - *id002
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_time
+        arguments:
+          timezone: EST
+      normal_text: 'Both:'
+  PARSER.batch.2.d:
+    description: Same-name twice
+    ref: dynamo
+    model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_weather", "arguments":
+      {"location": "LA"}}]</TOOLCALL>'
+    tools:
+    - *id001
+    - *id001
+    expected:
+      calls:
+      - name: get_weather
+        arguments:
+          location: NYC
+      - name: get_weather
+        arguments:
+          location: LA
+      normal_text: ''

@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  nvidia.com/dynamo-graph-deployment-name: vllm-disagg
+              topologyKey: topology.kubernetes.io/zone
+        containers:
+        - image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
+          name: main
+    replicas: 1
+    type: frontend
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  nvidia.com/dynamo-graph-deployment-name: vllm-disagg
+              topologyKey: topology.kubernetes.io/zone
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  nvidia.com/dynamo-component: VllmPrefillWorker
+              topologyKey: kubernetes.io/hostname
+        containers:
+        - command:
+          - /bin/bash
+          - -c
+          - |
+            exec python3 -m dynamo.vllm \
+             --model Qwen/Qwen3-0.6B \
+             --disaggregation-mode decode \
+             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          workingDir: /workspace/examples/backends/vllm
+        nodeSelector:
+          node.kubernetes.io/instance-type: g6e.2xlarge
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+    replicas: 1
+    type: decode
+  - name: VllmPrefillWorker
+    podTemplate:
+      spec:
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  nvidia.com/dynamo-graph-deployment-name: vllm-disagg
+              topologyKey: topology.kubernetes.io/zone
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  nvidia.com/dynamo-component: VllmDecodeWorker
+              topologyKey: kubernetes.io/hostname
+        containers:
+        - command:
+          - /bin/bash
+          - -c
+          - |-
+            exec python3 -m dynamo.vllm \
+             --model Qwen/Qwen3-0.6B \
+             --disaggregation-mode prefill \
+             --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          workingDir: /workspace/examples/backends/vllm
+        nodeSelector:
+          node.kubernetes.io/instance-type: g6e.2xlarge
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+    replicas: 1
+    type: prefill
