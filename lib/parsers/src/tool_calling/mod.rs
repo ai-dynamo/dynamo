@@ -5,6 +5,7 @@ use serde_json::Value;
 
 pub mod config;
 pub mod dsml;
+pub mod gemma4;
 pub mod harmony;
 pub mod json;
 pub mod parsers;
@@ -27,6 +28,7 @@ pub use config::{
     JsonParserConfig, KimiK2ParserConfig, ParserConfig, ToolCallConfig, XmlParserConfig,
 };
 pub use dsml::try_tool_call_parse_dsml;
+pub use gemma4::try_tool_call_parse_gemma4;
 pub use harmony::parse_tool_calls_harmony_complete;
 pub use json::try_tool_call_parse_json;
 pub use parsers::{
@@ -35,6 +37,9 @@ pub use parsers::{
 };
 pub use pythonic::try_tool_call_parse_pythonic;
 pub use response::{CalledFunction, ToolCallResponse, ToolCallType};
-pub use tools::{try_tool_call_parse_aggregate, try_tool_call_parse_stream};
+pub use tools::{
+    try_tool_call_parse_aggregate, try_tool_call_parse_aggregate_finalize,
+    try_tool_call_parse_stream,
+};
 pub use xml::try_tool_call_parse_kimi_k2;
 pub use xml::try_tool_call_parse_xml;

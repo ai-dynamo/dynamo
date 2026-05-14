@@ -22,13 +22,14 @@ import torch
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import core_schema
 from typing_extensions import NotRequired
+from vllm.inputs import TokensPrompt  # noqa: F401
 
 try:
-    from vllm.inputs import MultiModalUUIDDict, TokensPrompt  # noqa: F401
+    # vllm >= 0.19.0: MultiModalUUIDDict moved to vllm.inputs
+    from vllm.inputs import MultiModalUUIDDict  # noqa: F401
 except ImportError:
-    # For vLLM v0.18.1 or earlier (XPU currently supports vLLM v0.17)
-    # TODO: Remove this fallback once XPU supports vLLM v0.18.1 or later
-    from vllm.inputs.data import TokensPrompt
+    # vllm < 0.19.0: MultiModalUUIDDict lives in vllm.multimodal.inputs
+    from vllm.multimodal.inputs import MultiModalUUIDDict  # noqa: F401
 
 from vllm.logprobs import PromptLogprobs
 from vllm.outputs import CompletionOutput

@@ -31,6 +31,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
+	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -85,6 +86,7 @@ const (
 	tokenH200   = "H200"
 	tokenH100   = "H100"
 	tokenA100   = "A100"
+	tokenA30    = "A30"
 	tokenL40S   = "L40S"
 	tokenL40    = "L40"
 	tokenL4     = "L4"
@@ -129,6 +131,7 @@ var gpuRules = []gpuRule{
 
 	// Ampere
 	{token: tokenA100, sxmSKU: nvidiacomv1beta1.GPUSKUTypeA100SXM, pcieSKU: nvidiacomv1beta1.GPUSKUTypeA100PCIe},
+	{token: tokenA30, singleSKU: nvidiacomv1beta1.GPUSKUTypeA30},
 
 	// Ada
 	{token: tokenL40S, singleSKU: nvidiacomv1beta1.GPUSKUTypeL40S},
@@ -171,7 +174,7 @@ type gpuCacheEntry struct {
 }
 
 // GPUDiscoveryCache caches discovery results keyed by SKU filter.
-// Bounded by the GPUSKUType enum (≤7 values incl. empty for unfiltered).
+// Bounded by the GPUSKUType enum plus empty for unfiltered discovery.
 type GPUDiscoveryCache struct {
 	mu      sync.RWMutex
 	entries map[nvidiacomv1beta1.GPUSKUType]gpuCacheEntry
@@ -179,6 +182,7 @@ type GPUDiscoveryCache struct {
 
 type GPUDiscovery struct {
 	Scraper ScrapeMetricsFunc
+	group   singleflight.Group
 }
 
 func NewGPUDiscovery(scraper ScrapeMetricsFunc) *GPUDiscovery {
@@ -266,12 +270,52 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGM(ctx context.Context, k8sClient clien
 //   - *GPUInfo for the selected node
 //   - error if no GPU data can be retrieved
 func (g *GPUDiscovery) DiscoverGPUsFromDCGMFiltered(ctx context.Context, k8sClient client.Reader, cache *GPUDiscoveryCache, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
+	logger := log.FromContext(ctx)
 	if cache != nil {
 		if cached, ok := cache.Get(filterSKU); ok {
+			logger.V(1).Info("GPU discovery cache hit", "gpuSku", filterSKU)
 			return cached, nil
 		}
 	}
 
+	resultCh := g.group.DoChan(string(filterSKU), func() (any, error) {
+		if cache != nil {
+			if cached, ok := cache.Get(filterSKU); ok {
+				logger.V(1).Info("GPU discovery cache hit after waiting for in-flight request", "gpuSku", filterSKU)
+				return cached, nil
+			}
+		}
+
+		logger.V(1).Info("GPU discovery cache miss; scraping DCGM exporter pods", "gpuSku", filterSKU)
+		info, err := g.discoverGPUsFromDCGMFilteredUncached(ctx, k8sClient, filterSKU)
+		if err != nil {
+			return nil, err
+		}
+		if cache != nil {
+			cache.Set(filterSKU, info, 60*time.Second)
+		}
+		return info, nil
+	})
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		if result.Shared {
+			logger.V(1).Info("GPU discovery shared in-flight result", "gpuSku", filterSKU)
+		}
+		info, ok := result.Val.(*GPUInfo)
+		if !ok || info == nil {
+			return nil, fmt.Errorf("unexpected GPU discovery result type %T", result.Val)
+		}
+		return info, nil
+	}
+}
+
+func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context, k8sClient client.Reader, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
 	// List DCGM exporter pods
 	dcgmPods, err := listDCGMExporterPods(ctx, k8sClient)
 	if err != nil && !strings.Contains(err.Error(), "no DCGM exporter pods found") {
@@ -375,9 +419,6 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGMFiltered(ctx context.Context, k8sClie
 	bestNode.RDMAEnabled = rdmaDetected
 	bestNode.RDMAType = rdmaType
 
-	if cache != nil {
-		cache.Set(filterSKU, bestNode, 60*time.Second)
-	}
 	return bestNode, nil
 }
 func buildDCGMEndpoint(podIP string) string {
@@ -715,15 +756,27 @@ func parseMetrics(ctx context.Context, families map[string]*dto.MetricFamily) (*
 }
 
 // DiscoverGPUs queries Kubernetes nodes to determine GPU configuration.
+// It is a convenience wrapper around DiscoverGPUsFiltered with no SKU filter.
+// See DiscoverGPUsFiltered for full documentation.
+func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error) {
+	return DiscoverGPUsFiltered(ctx, k8sClient, "")
+}
+
+// DiscoverGPUsFiltered queries Kubernetes nodes to determine GPU configuration.
 // It extracts GPU information from NVIDIA GPU Feature Discovery (GFD) labels
 // and returns aggregated GPU info, preferring nodes with higher GPU count,
 // then higher VRAM if counts are equal.
 //
+// When filterSKU is non-empty, only nodes whose inferred SKU matches are
+// considered for selection and counting. When empty, the best node is selected
+// first and then only nodes with the same SKU are counted.
+//
 // This function requires cluster-wide node read permissions and expects nodes
 // to have GFD labels. If no nodes with GPU labels are found, it returns an error.
-func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error) {
+func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Starting GPU discovery from cluster nodes")
+	logger.Info("Starting GPU discovery from cluster nodes", "filterSKU", filterSKU)
+
 	// List all nodes in the cluster
 	nodeList := &corev1.NodeList{}
 	if err := k8sClient.List(ctx, nodeList); err != nil {
@@ -733,48 +786,74 @@ func DiscoverGPUs(ctx context.Context, k8sClient client.Reader) (*GPUInfo, error
 		return nil, fmt.Errorf("no nodes found in cluster")
 	}
 	logger.Info("Found cluster nodes", "count", len(nodeList.Items))
-	// Track the best GPU configuration found
-	var bestGPUInfo *GPUInfo
-	nodesWithGPUs := 0
+
+	// Collect per-node GPU info with inferred SKU.
+	type nodeInfo struct {
+		info *GPUInfo
+		sku  nvidiacomv1beta1.GPUSKUType
+	}
+	allNodes := make([]nodeInfo, 0, len(nodeList.Items))
 	for i := range nodeList.Items {
 		node := &nodeList.Items[i]
 		gpuInfo, err := extractGPUInfoFromNode(node)
 		if err != nil {
-			// Node doesn't have GPU labels or has invalid labels, skip it
 			logger.V(1).Info("Skipping node without valid GPU info",
 				"node", node.Name,
 				"reason", err.Error())
 			continue
 		}
-		nodesWithGPUs++
+		gpuInfo.NodeName = node.Name
+		sku := InferHardwareSystem(gpuInfo.Model)
 		logger.Info("Found GPU node",
 			"node", node.Name,
 			"gpus", gpuInfo.GPUsPerNode,
 			"model", gpuInfo.Model,
-			"vram", gpuInfo.VRAMPerGPU)
-		// Select best configuration: prefer higher GPU count, then higher VRAM
-		if bestGPUInfo == nil ||
-			gpuInfo.GPUsPerNode > bestGPUInfo.GPUsPerNode ||
-			(gpuInfo.GPUsPerNode == bestGPUInfo.GPUsPerNode && gpuInfo.VRAMPerGPU > bestGPUInfo.VRAMPerGPU) {
-			bestGPUInfo = gpuInfo
+			"vram", gpuInfo.VRAMPerGPU,
+			"sku", sku)
+		allNodes = append(allNodes, nodeInfo{info: gpuInfo, sku: sku})
+	}
+
+	// Select best node (only from matching SKU when filtered).
+	var bestNode *GPUInfo
+	var bestSKU nvidiacomv1beta1.GPUSKUType
+	for _, n := range allNodes {
+		if filterSKU != "" && n.sku != filterSKU {
+			continue
+		}
+		if bestNode == nil ||
+			n.info.GPUsPerNode > bestNode.GPUsPerNode ||
+			(n.info.GPUsPerNode == bestNode.GPUsPerNode && n.info.VRAMPerGPU > bestNode.VRAMPerGPU) {
+			bestNode = n.info
+			bestSKU = n.sku
 		}
 	}
-	if bestGPUInfo == nil {
+	if bestNode == nil {
+		if filterSKU != "" {
+			return nil, fmt.Errorf("no nodes with NVIDIA GPU Feature Discovery labels matching SKU %q found (checked %d nodes)",
+				filterSKU, len(nodeList.Items))
+		}
 		return nil, fmt.Errorf("no nodes with NVIDIA GPU Feature Discovery labels found (checked %d nodes). "+
 			"Ensure GPU nodes have labels: %s, %s, %s",
 			len(nodeList.Items), LabelGPUCount, LabelGPUProduct, LabelGPUMemory)
 	}
-	// Infer hardware system from GPU model
-	bestGPUInfo.System = InferHardwareSystem(bestGPUInfo.Model)
-	bestGPUInfo.NodesWithGPUs = nodesWithGPUs
+
+	// Count only nodes with the same SKU as the selected best node.
+	nodesWithGPUs := 0
+	for _, n := range allNodes {
+		if n.sku == bestSKU {
+			nodesWithGPUs++
+		}
+	}
+	bestNode.System = bestSKU
+	bestNode.NodesWithGPUs = nodesWithGPUs
 	logger.Info("GPU discovery completed",
-		"gpusPerNode", bestGPUInfo.GPUsPerNode,
-		"nodesWithGPUs", bestGPUInfo.NodesWithGPUs,
-		"totalGpus", bestGPUInfo.GPUsPerNode*bestGPUInfo.NodesWithGPUs,
-		"model", bestGPUInfo.Model,
-		"vram", bestGPUInfo.VRAMPerGPU,
-		"system", bestGPUInfo.System)
-	return bestGPUInfo, nil
+		"gpusPerNode", bestNode.GPUsPerNode,
+		"nodesWithGPUs", bestNode.NodesWithGPUs,
+		"totalGpus", bestNode.GPUsPerNode*bestNode.NodesWithGPUs,
+		"model", bestNode.Model,
+		"vram", bestNode.VRAMPerGPU,
+		"system", bestNode.System)
+	return bestNode, nil
 }
 
 // extractGPUInfoFromNode extracts GPU information from a single node's labels.
@@ -840,6 +919,9 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	formFactor := detectFormFactor(normalized)
 
 	for _, rule := range gpuRules {
+		if rule.token == tokenA30 && !containsModelToken(gpuProduct, tokenA30) {
+			continue
+		}
 		if strings.Contains(normalized, rule.token) {
 			if rule.singleSKU != "" {
 				return rule.singleSKU
@@ -849,6 +931,12 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 			}
 			if rule.pcieSKU != "" {
 				return rule.pcieSKU
+			}
+			// Token matched but no form factor indicator was present in the string
+			// (e.g. "NVIDIA H200" from DCGM has no SXM/HGX/DGX suffix). If the GPU
+			// has no PCIe variant it must be SXM-only (H200, B200, GB200).
+			if rule.sxmSKU != "" {
+				return rule.sxmSKU
 			}
 		}
 	}
@@ -865,6 +953,28 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 func normalize(input string) string {
 	s := strings.ToUpper(strings.ReplaceAll(input, strDash, strSpace))
 	return strings.ReplaceAll(s, " ", "")
+}
+
+func containsModelToken(input, token string) bool {
+	upper := strings.ToUpper(input)
+	for start := 0; start < len(upper); {
+		idx := strings.Index(upper[start:], token)
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		end := idx + len(token)
+		if (idx == 0 || !isASCIIAlphaNum(upper[idx-1])) &&
+			(end == len(upper) || !isASCIIAlphaNum(upper[end])) {
+			return true
+		}
+		start = idx + 1
+	}
+	return false
+}
+
+func isASCIIAlphaNum(ch byte) bool {
+	return (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
 }
 
 // detectFormFactor determines the GPU form factor (e.g. SXM or PCIe)

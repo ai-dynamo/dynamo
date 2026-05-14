@@ -84,6 +84,8 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	for file in config/crd/bases/*.yaml; do \
 		$(YQ) eval '(.. | select(has("extraPodSpec")) | .extraPodSpec.required) |= (. - ["containers"])' -i --indent 2 $$file || exit 1; \
 	done
+	echo "Removing name from standalone v1beta1 DynamoComponentDeployment required fields"
+	$(YQ) eval '(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.required) |= (. - ["name"])' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
 	echo "Fixing PluginSpec parameters field: json.RawMessage needs x-kubernetes-preserve-unknown-fields instead of type: string"
 	for file in config/crd/bases/*.yaml; do \
 		$(YQ) eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
@@ -146,7 +148,7 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e | grep -v /test | grep -v /api | grep -v /cmd) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e | grep -v /test | grep -v /cmd) -coverprofile cover.out
 
 # Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.
 .PHONY: test-e2e  # Run the e2e tests against a Kind k8s instance that is spun up.

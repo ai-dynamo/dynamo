@@ -44,14 +44,18 @@ pub use self::multi_worker_sequence::{
     SequenceSubscriber,
 };
 pub use self::sequence::{ActiveSequences, RequestId};
+pub use self::sequences::PrefillTokenDeltas;
 pub use concurrent_radix_tree::ConcurrentRadixTree;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use config::{
     KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel, RouterQueuePolicy,
     SharedCacheType,
 };
+#[allow(deprecated)]
 pub use indexer::{
-    BranchShardedIndexer, MaybeError, SharedKvCache, SyncIndexer, ThreadPoolIndexer,
+    AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, BranchShardedIndexer,
+    LowerTierContinuation, LowerTierIndexer, MaybeError, SharedKvCache, SyncIndexer,
+    ThreadPoolIndexer,
 };
 pub use nested_map::PositionalIndexer;
 pub use protocols::{

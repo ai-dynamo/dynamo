@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use dynamo_kv_router::{
-    config::{KvRouterConfig, RouterConfigOverride},
+    config::{
+        KvRouterConfig, RouterConfigOverride, apply_deprecated_overlap_score_weight_override,
+    },
     protocols::*,
 };
 use dynamo_llm::kv_router::publisher::KvEventPublisher;
@@ -478,8 +480,12 @@ impl RouterHandles {
     }
 
     /// Query optimal decode worker for a request.
-    /// For disaggregated mode, set `is_disaggregated` to true to use overlap_score_weight=0
+    /// For disaggregated mode, set `is_disaggregated` to true to use overlap_score_credit=0
     /// (since KV cache is being transferred from prefill, not reused).
+    ///
+    /// `priority_jump` is forwarded to the decode scheduler queue so that
+    /// requests carrying `nvext.agent_hints.priority` jump ahead of normal
+    /// arrivals when the router queue is active.
     ///
     /// When `allowed_worker_ids` is Some, only workers in that set are considered.
     /// This does NOT overwrite the router's internal worker state — it only filters this decision.
@@ -492,17 +498,18 @@ impl RouterHandles {
         &self,
         tokens: &[u32],
         is_disaggregated: bool,
+        priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<(WorkerWithDpRank, u32), QueryRouterResult> {
         if let Some(ref ids) = allowed_worker_ids {
             self.decode_router.register_workers(ids);
         }
 
-        // For decode phase in disaggregated mode, use overlap_score_weight=0
+        // For decode phase in disaggregated mode, use overlap_score_credit=0
         // This matches prefill_router.rs
         let config_override = if is_disaggregated {
             Some(RouterConfigOverride {
-                overlap_score_weight: Some(0.0),
+                overlap_score_credit: Some(0.0),
                 assume_kv_reuse: Some(false),
                 track_prefill_tokens: Some(false),
                 ..Default::default()
@@ -519,8 +526,7 @@ impl RouterHandles {
                 config_override.as_ref(),
                 false,
                 None,
-                0.0,
-                None,
+                priority_jump,
                 None,
                 allowed_worker_ids,
             )
@@ -530,6 +536,25 @@ impl RouterHandles {
                 QueryRouterResult::ErrQueryFailed
             })
     }
+}
+
+/// Extract the router queue `priority_jump` from a chat completion request's
+/// `nvext.agent_hints.priority`.
+///
+/// Negative values from either `priority` or the deprecated
+/// `latency_sensitivity` alias are clamped to `0.0` so a low-priority hint
+/// never pushes a request behind FCFS arrivals. Returns `0.0` when `nvext`
+/// or `agent_hints` is absent.
+fn extract_priority_jump(
+    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+) -> f64 {
+    request
+        .nvext
+        .as_ref()
+        .and_then(|n| n.agent_hints.as_ref())
+        .and_then(|h| h.priority.map(|p| p as f64).or(h.latency_sensitivity))
+        .map(|v| v.max(0.0))
+        .unwrap_or(0.0)
 }
 
 /// Opaque handle for the router pair
@@ -564,8 +589,25 @@ fn kv_router_config_from_env() -> KvRouterConfig {
             })
     }
 
-    if let Some(v) = env_f64("DYN_OVERLAP_SCORE_WEIGHT") {
-        cfg.overlap_score_weight = v;
+    if let Some(v) = env_f64("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT") {
+        cfg.overlap_score_credit = v;
+    }
+    if let Some(v) = env_f64("DYN_ROUTER_PREFILL_LOAD_SCALE") {
+        cfg.prefill_load_scale = v;
+    }
+    for key in [
+        "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
+        "DYN_OVERLAP_SCORE_WEIGHT",
+    ] {
+        if let Some(v) = env_f64(key) {
+            tracing::warn!("{key} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE");
+            apply_deprecated_overlap_score_weight_override(
+                v,
+                &mut cfg.overlap_score_credit,
+                &mut cfg.prefill_load_scale,
+            );
+            break;
+        }
     }
     if let Some(v) = env_f64("DYN_ROUTER_TEMPERATURE") {
         cfg.router_temperature = v;
@@ -588,9 +630,13 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     if let Some(v) = env_f64("DYN_ROUTER_QUEUE_THRESHOLD") {
         cfg.router_queue_threshold = Some(v);
     }
+    if let Some(v) = env_f64("DYN_ROUTER_PREDICTED_TTL_SECS") {
+        cfg.router_predicted_ttl_secs = Some(v);
+    }
 
     tracing::info!(
-        overlap_score_weight = cfg.overlap_score_weight,
+        overlap_score_credit = cfg.overlap_score_credit,
+        prefill_load_scale = cfg.prefill_load_scale,
         router_temperature = cfg.router_temperature,
         use_kv_events = cfg.use_kv_events,
         router_replica_sync = cfg.router_replica_sync,
@@ -598,6 +644,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
         router_track_output_blocks = cfg.router_track_output_blocks,
         router_track_prefill_tokens = cfg.router_track_prefill_tokens,
         router_queue_threshold = ?cfg.router_queue_threshold,
+        router_predicted_ttl_secs = ?cfg.router_predicted_ttl_secs,
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
 
@@ -866,7 +913,7 @@ pub unsafe extern "C" fn add_request(
         tokio::time::timeout(timeout_duration, async {
             let worker = WorkerWithDpRank::new(worker_id, dp_rank);
             let router_config_override = RouterConfigOverride {
-                overlap_score_weight: Some(0.0),
+                overlap_score_credit: Some(0.0),
                 assume_kv_reuse: Some(false),
                 track_prefill_tokens: Some(false),
                 ..Default::default()
@@ -884,12 +931,13 @@ pub unsafe extern "C" fn add_request(
                 }
             };
 
+            let cached_tokens = overlap_blocks as usize * decode_router.block_size() as usize;
             decode_router
                 .add_request(
                     request_id_str.clone(),
                     &tokens,
                     None,
-                    overlap_blocks,
+                    cached_tokens,
                     None,
                     worker,
                     None, // lora_name
@@ -1073,12 +1121,18 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
     }
 }
 
-/// Parse a JSON request string, apply the chat template, and tokenize.
-/// Returns the token IDs on success, or a `QueryRouterResult` error code.
+/// Parse a JSON request string, apply the chat template, tokenize, and lift
+/// the router-relevant `priority_jump` out of `nvext.agent_hints.priority`.
+///
+/// Returns `(token_ids, priority_jump)` on success, or a `QueryRouterResult`
+/// error code. `priority_jump` is `0.0` when no hint is present. This mirrors
+/// the standalone Dynamo preprocessor lift in `lib/llm/src/preprocessor.rs`
+/// so the GAIE/EPP path produces the same queue ordering as a non-EPP
+/// deployment.
 unsafe fn preprocess_request(
     handles: &RouterHandles,
     request_json: *const c_char,
-) -> Result<Vec<u32>, QueryRouterResult> {
+) -> Result<(Vec<u32>, f64), QueryRouterResult> {
     let preprocessor = match &handles.preprocessor {
         Some(p) => p,
         None => {
@@ -1101,6 +1155,8 @@ unsafe fn preprocess_request(
             }
         };
 
+    let priority_jump = extract_priority_jump(&request);
+
     let formatted_prompt = match preprocessor.apply_template(&request) {
         Ok(Some(prompt)) => prompt,
         Ok(None) => String::new(),
@@ -1122,10 +1178,11 @@ unsafe fn preprocess_request(
     tracing::info!(
         token_count = token_ids.len(),
         first_tokens = ?&token_ids[..std::cmp::min(5, token_ids.len())],
+        priority_jump,
         "[EPP-TOKENIZE] Tokenized prompt in C bindings (this is the ONLY tokenization)"
     );
 
-    Ok(token_ids)
+    Ok((token_ids, priority_jump))
 }
 
 /// Parse pods JSON into an optional set of allowed worker IDs.
@@ -1211,7 +1268,7 @@ pub unsafe extern "C" fn route_prefill_request(
 
     let handles = unsafe { &*handle };
 
-    let tokens = match unsafe { preprocess_request(handles, request_json) } {
+    let (tokens, priority_jump) = match unsafe { preprocess_request(handles, request_json) } {
         Ok(t) => t,
         Err(code) => return code,
     };
@@ -1220,7 +1277,14 @@ pub unsafe extern "C" fn route_prefill_request(
 
     let result = handles.runtime.secondary().block_on(async {
         let (prefill_worker_id, prefill_dp_rank) = handles
-            .query_prefill_worker(&tokens, None, false, None, 0.0, allowed_worker_ids)
+            .query_prefill_worker(
+                &tokens,
+                None,
+                false,
+                None,
+                priority_jump,
+                allowed_worker_ids,
+            )
             .await?;
 
         let prefill_dp_rank = prefill_dp_rank.unwrap_or(u32::MAX);
@@ -1229,6 +1293,7 @@ pub unsafe extern "C" fn route_prefill_request(
             prefill_worker_id = prefill_worker_id,
             prefill_dp_rank = prefill_dp_rank,
             token_count = tokens.len(),
+            priority_jump,
             "Routed prefill request"
         );
 
@@ -1252,7 +1317,7 @@ pub unsafe extern "C" fn route_prefill_request(
 /// Route a request to select the best **decode** worker only.
 ///
 /// This is used in both aggregated and disaggregated modes.
-/// - When `is_disaggregated` is true, the decode router uses `overlap_score_weight=0`
+/// - When `is_disaggregated` is true, the decode router uses `overlap_score_credit=0`
 ///   (KV cache is being transferred from prefill, not reused locally).
 /// - When `is_disaggregated` is false, normal KV-aware scoring is used.
 ///
@@ -1281,7 +1346,7 @@ pub unsafe extern "C" fn route_decode_request(
 
     let handles = unsafe { &*handle };
 
-    let tokens = match unsafe { preprocess_request(handles, request_json) } {
+    let (tokens, priority_jump) = match unsafe { preprocess_request(handles, request_json) } {
         Ok(t) => t,
         Err(code) => return code,
     };
@@ -1290,7 +1355,7 @@ pub unsafe extern "C" fn route_decode_request(
 
     let result = handles.runtime.secondary().block_on(async {
         let (decode_worker, _overlap_blocks) = handles
-            .query_decode_worker(&tokens, is_disaggregated, allowed_worker_ids)
+            .query_decode_worker(&tokens, is_disaggregated, priority_jump, allowed_worker_ids)
             .await?;
 
         tracing::info!(
@@ -1298,6 +1363,7 @@ pub unsafe extern "C" fn route_decode_request(
             decode_worker_id = decode_worker.worker_id,
             decode_dp_rank = decode_worker.dp_rank,
             token_count = tokens.len(),
+            priority_jump,
             "Routed decode request"
         );
 
@@ -1498,7 +1564,7 @@ async fn fetch_preprocessor_from_discovery(
     );
 
     // Download config (tokenizer files) if not local
-    card.download_config().await?;
+    card.download_config(None).await?;
 
     // Create preprocessor
     let preprocessor = OpenAIPreprocessor::new(card.clone())?;
@@ -1507,4 +1573,23 @@ async fn fetch_preprocessor_from_discovery(
         card,
         actual_namespace,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn priority_jump_lifted_from_agent_hints_priority() {
+        let req: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                "model": "test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "nvext": {"agent_hints": {"priority": 5}}
+            }"#,
+            )
+            .expect("test request must parse as chat completion");
+        assert_eq!(extract_priority_jump(&req), 5.0);
+    }
 }
