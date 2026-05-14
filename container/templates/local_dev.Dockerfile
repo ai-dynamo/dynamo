@@ -41,6 +41,14 @@ RUN mkdir -p /etc/sudoers.d \
     && (getent group $USERNAME > /dev/null 2>&1 && groupmod -g $USER_GID $USERNAME || groupadd -g $USER_GID $USERNAME) \
     && usermod -u $USER_UID -g $USER_GID -G 0 $USERNAME \
     && chown $USERNAME:$USER_GID /home/$USERNAME \
+    # Ensure user-writable XDG dirs. Upstream base images (e.g. vLLM CPU/XPU) may pre-create
+    # /home/dynamo/.local as root:root, which breaks `python3 -c 'site.getusersitepackages()'`
+    # and other user-site installs after we switch to the non-root user below.
+    # These dirs are small (a few KB), so a shallow chown is acceptable and does NOT
+    # violate the "no recursive chown on large mounts" rule.
+    && mkdir -p /home/$USERNAME/.local/lib /home/$USERNAME/.local/bin /home/$USERNAME/.local/share \
+    && chown -R $USERNAME:$USER_GID /home/$USERNAME/.local \
+    && [ ! -e /home/$USERNAME/.gitconfig ] || chown $USERNAME:$USER_GID /home/$USERNAME/.gitconfig \
     && chsh -s /bin/bash $USERNAME
 
 # Set workspace directory variable
