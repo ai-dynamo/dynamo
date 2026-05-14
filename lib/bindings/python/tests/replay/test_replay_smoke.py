@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import time
-
 import pytest
 
 from dynamo.llm import MockEngineArgs
@@ -288,8 +286,6 @@ def test_run_synthetic_trace_replay_invariant_counts_match(
 
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
 def test_run_synthetic_trace_replay_supports_multiturn_workloads(tmp_path, replay_mode):
-    print(f"[replay_smoke] starting mode={replay_mode} workers=2 router=kv_router")
-    t0 = time.monotonic()
     report = run_synthetic_trace_replay(
         64,
         2,
@@ -302,9 +298,6 @@ def test_run_synthetic_trace_replay_supports_multiturn_workloads(tmp_path, repla
         inter_turn_delay_ms=5.0,
         shared_prefix_ratio=0.5,
         num_prefix_groups=2,
-    )
-    print(
-        f"[replay_smoke] finished mode={replay_mode} elapsed={time.monotonic() - t0:.3f}s"
     )
 
     _assert_basic_report_counts(

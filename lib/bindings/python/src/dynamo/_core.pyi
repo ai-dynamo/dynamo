@@ -2379,6 +2379,8 @@ class backend:
             total_kv_blocks: Optional[int] = None,
             max_num_seqs: Optional[int] = None,
             max_num_batched_tokens: Optional[int] = None,
+            data_parallel_size: Optional[int] = None,
+            data_parallel_start_rank: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
         ) -> None: ...
@@ -2396,6 +2398,10 @@ class backend:
         def max_num_seqs(self) -> Optional[int]: ...
         @property
         def max_num_batched_tokens(self) -> Optional[int]: ...
+        @property
+        def data_parallel_size(self) -> Optional[int]: ...
+        @property
+        def data_parallel_start_rank(self) -> Optional[int]: ...
         @property
         def bootstrap_host(self) -> Optional[str]: ...
         @property
@@ -2424,6 +2430,7 @@ class backend:
             reasoning_parser: Optional[str] = None,
             exclude_tools_when_tool_choice_none: bool = ...,
             enable_local_indexer: bool = ...,
+            enable_kv_routing: bool = ...,
             metrics_labels: List[Tuple[str, str]] = ...,
             runtime: Optional["backend.RuntimeConfig"] = None,
             disaggregation_mode: "backend.DisaggregationMode" = ...,

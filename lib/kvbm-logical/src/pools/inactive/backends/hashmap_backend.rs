@@ -6,24 +6,23 @@
 //! Maps `SequenceHash → BlockId` and delegates eviction order to a pluggable
 //! [`ReusePolicy`] (FIFO is the default).
 
-use std::collections::HashMap;
-
 use crate::BlockId;
 use crate::blocks::SequenceHash;
-use crate::pools::InactiveBlock;
 use crate::pools::store::InactiveIndex;
+use crate::pools::{InactiveBlock, SeqHashMap};
 
 use super::ReusePolicy;
 
 pub(crate) struct HashMapBackend {
-    blocks: HashMap<SequenceHash, BlockId>,
+    /// Identity-hashed: `SequenceHash` is already a content hash.
+    blocks: SeqHashMap<BlockId>,
     reuse_policy: Box<dyn ReusePolicy>,
 }
 
 impl HashMapBackend {
     pub(crate) fn new(reuse_policy: Box<dyn ReusePolicy>) -> Self {
         Self {
-            blocks: HashMap::new(),
+            blocks: SeqHashMap::default(),
             reuse_policy,
         }
     }

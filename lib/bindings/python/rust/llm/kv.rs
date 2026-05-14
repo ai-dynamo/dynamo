@@ -210,6 +210,27 @@ pub(crate) struct KvEventPublisher {
     warning_count: Arc<AtomicU32>,
 }
 
+impl KvEventPublisher {
+    /// Wrap an already-constructed Rust publisher as the Python pyclass.
+    ///
+    /// Used by the unified-backend bridge (`crate::backend`) so the Worker
+    /// can hand a publisher built from a [`PushSource`] back to the Python
+    /// engine without going through the Python-side `__init__` (which
+    /// requires an `Endpoint` and rebuilds the publisher from scratch).
+    pub(crate) fn from_arc(
+        inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
+        dp_rank: DpRank,
+    ) -> Self {
+        let kv_block_size = inner.kv_block_size() as usize;
+        Self {
+            inner,
+            kv_block_size,
+            dp_rank,
+            warning_count: Arc::new(AtomicU32::new(0)),
+        }
+    }
+}
+
 #[pymethods]
 impl KvEventPublisher {
     /// Create a KV event publisher that batches raw engine events before forwarding

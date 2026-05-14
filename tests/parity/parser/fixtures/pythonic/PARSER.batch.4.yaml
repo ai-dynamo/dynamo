@@ -17,8 +17,11 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: '[not a valid python call]'
+      dynamo: &d_4_a
+        calls: []
+        normal_text: '[not a valid python call]'
+      vllm: *d_4_a
+      sglang: *d_4_a
   PARSER.batch.4.b:
     description: Missing closing bracket
     ref: dynamo
@@ -26,8 +29,11 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '[get_weather(location="NYC"'
+      dynamo: &d_4_b
+        calls: []
+        normal_text: '[get_weather(location="NYC"'
+      vllm: *d_4_b
+      sglang: *d_4_b
   PARSER.batch.4.d:
     description: Mismatched paren / bracket
     ref: dynamo
@@ -35,5 +41,8 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '[get_weather(location="NYC"]'
+      dynamo: &d_4_d
+        calls: []
+        normal_text: '[get_weather(location="NYC"]'
+      vllm: *d_4_d
+      sglang: *d_4_d

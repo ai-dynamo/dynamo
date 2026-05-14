@@ -17,8 +17,12 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <tool_call>not even json</tool_call>
+      dynamo: &d_4_a
+        calls: []
+        normal_text: <tool_call>not even json</tool_call>
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang: *d_4_a
   PARSER.batch.4.b:
     description: Missing close brace in JSON body
     ref: dynamo
@@ -26,11 +30,17 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang:
+        calls: []
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"</tool_call>'
   PARSER.batch.4.c:
     description: Missing name key
     ref: dynamo
@@ -38,8 +48,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '<tool_call>{"arguments": {"location": "NYC"}}</tool_call>'
+      dynamo: &d_4_c
+        calls: []
+        normal_text: '<tool_call>{"arguments": {"location": "NYC"}}</tool_call>'
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang: *d_4_c
   PARSER.batch.4.d:
     description: Missing </tool_call> close
     ref: dynamo
@@ -47,8 +61,14 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang:
+        calls: []
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'

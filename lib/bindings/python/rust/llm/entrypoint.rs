@@ -15,10 +15,10 @@ use dynamo_kv_router::config::{
     apply_deprecated_overlap_score_weight_override,
 };
 use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
-use dynamo_llm::entrypoint::ChatEngineFactoryCallback;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
+use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, PrefillRoutedEngine};
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
@@ -559,7 +559,8 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
 
     Arc::new(
         move |instance_id: RsModelCardInstanceId,
-              card: RsModelDeploymentCard|
+              card: RsModelDeploymentCard,
+              routed_engine: PrefillRoutedEngine|
               -> Pin<
             Box<dyn Future<Output = anyhow::Result<OpenAIChatCompletionsStreamingEngine>> + Send>,
         > {
@@ -577,10 +578,15 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
                     let py_card = ModelDeploymentCard { inner: card };
                     let py_card_obj = Py::new(py, py_card)
                         .map_err(|e| anyhow::anyhow!("Failed to create Python MDC: {e}"))?;
+                    let py_routed = Py::new(
+                        py,
+                        crate::llm::routed_engine::RoutedEngine::new(routed_engine),
+                    )
+                    .map_err(|e| anyhow::anyhow!("Failed to create Python RoutedEngine: {e}"))?;
 
                     // Call Python async function to get a coroutine
                     let coroutine = callback
-                        .call1(py, (py_instance_id, py_card_obj))
+                        .call1(py, (py_instance_id, py_card_obj, py_routed))
                         .map_err(|e| anyhow::anyhow!("Failed to call chat_engine_factory: {e}"))?;
 
                     // Use the TaskLocals captured at registration time
