@@ -37,26 +37,28 @@ impl RoutingOccupancyState {
         let _guard = self.exact_selection_lock.lock().await;
 
         let mut min_load = u64::MAX;
-        let mut min_ids = Vec::new();
+        let mut selected = None;
+        let mut tie_count = 0usize;
+        let mut rng = rand::rng();
         for &id in instance_ids {
             let load = self.load(id);
             if load < min_load {
                 min_load = load;
-                min_ids.clear();
-                min_ids.push(id);
+                selected = Some(id);
+                tie_count = 1;
                 continue;
             }
 
             if load == min_load {
-                min_ids.push(id);
+                tie_count += 1;
+                // Reservoir sampling keeps tied minima uniform without allocating in this locked hot path.
+                if rng.random_range(0..tie_count) == 0 {
+                    selected = Some(id);
+                }
             }
         }
 
-        if min_ids.is_empty() {
-            return None;
-        }
-
-        let id = min_ids[rand::rng().random_range(0..min_ids.len())];
+        let id = selected?;
         self.increment(id);
         Some(id)
     }
