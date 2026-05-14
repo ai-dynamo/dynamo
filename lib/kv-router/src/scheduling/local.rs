@@ -17,8 +17,8 @@ use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::protocols::Taints;
+use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{
     ActiveSequencesMultiWorker, PrefillTokenDeltas, SequenceError, SequencePublisher,
     SequenceRequest,
@@ -460,6 +460,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::Taints::default(),
                 None,
             )
             .await
@@ -504,6 +505,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::Taints::default(),
                 None,
             )
             .await
@@ -548,6 +550,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::Taints::default(),
                 None,
             )
             .await
@@ -593,6 +596,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::Taints::default(),
                 None,
             )
             .await
@@ -616,6 +620,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        crate::protocols::Taints::default(),
                         None,
                     )
                     .await
@@ -660,6 +665,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::Taints::default(),
                 None,
             )
             .await
@@ -683,6 +689,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        crate::protocols::Taints::default(),
                         None,
                     )
                     .await
@@ -741,6 +748,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::Taints::default(),
                 None,
             )
             .await
@@ -764,6 +772,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        crate::protocols::Taints::default(),
                         None,
                     )
                     .await
@@ -821,6 +830,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::Taints::default(),
                 None,
             )
             .await
@@ -844,6 +854,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        crate::protocols::Taints::default(),
                         None,
                     )
                     .await
@@ -899,6 +910,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::Taints::default(),
                 None,
             )
             .await
@@ -999,6 +1011,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::Taints::default(),
                 None,
             )
             .await
@@ -1097,6 +1110,7 @@ mod tests {
                 None,
                 None,
                 None,
+                crate::protocols::Taints::default(),
                 None,
             )
             .await

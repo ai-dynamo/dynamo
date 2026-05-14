@@ -251,14 +251,11 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         if let Some(worker) = pinned_worker {
             pinned_worker_config(workers, worker)?;
-            if workers
-                .get(&worker.worker_id)
-                .is_some_and(|config| {
-                    !request
-                        .taints
-                        .is_compatible_with_worker_taints(config.taints())
-                })
-            {
+            if workers.get(&worker.worker_id).is_some_and(|config| {
+                !request
+                    .taints
+                    .is_compatible_with_worker_taints(config.taints())
+            }) {
                 return Err(KvSchedulerError::NoEndpoints);
             }
 
@@ -552,6 +549,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            taints: crate::protocols::Taints::default(),
             shared_cache_hits: None,
             resp_tx: None,
         };
@@ -634,6 +632,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            taints: crate::protocols::Taints::default(),
             shared_cache_hits: Some(shared_hits),
             resp_tx: Some(tx),
         };
@@ -698,6 +697,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            taints: crate::protocols::Taints::default(),
             shared_cache_hits: None,
             resp_tx: Some(tx),
         };
@@ -757,6 +757,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            taints: crate::protocols::Taints::default(),
             shared_cache_hits: None,
             resp_tx: Some(tx),
         };
@@ -806,6 +807,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            taints: crate::protocols::Taints::default(),
             shared_cache_hits: None,
             resp_tx: Some(tx),
         };

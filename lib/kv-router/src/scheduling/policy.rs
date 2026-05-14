@@ -148,6 +148,7 @@ mod tests {
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            taints: crate::protocols::Taints::default(),
             shared_cache_hits: None,
             resp_tx: None,
         }

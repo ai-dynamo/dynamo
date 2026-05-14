@@ -8,7 +8,9 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
-use crate::protocols::{DpRank, SharedCacheHits, Taints, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{
+    DpRank, SharedCacheHits, Taints, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+};
 use crate::sequences::PrefillTokenDeltas;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

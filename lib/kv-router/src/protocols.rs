@@ -3,8 +3,8 @@
 
 use std::future::Future;
 use std::ops::Range;
-use std::time::Duration;
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use dynamo_tokens::{SequenceHash, Token, compute_hash_v2};
 use rustc_hash::FxHashMap;
@@ -200,10 +200,11 @@ impl Taints {
     }
 
     pub fn is_compatible_with_worker_taints(&self, worker_taints: &[String]) -> bool {
-        self
-            .required
-            .iter()
-            .all(|taint| worker_taints.iter().any(|worker_taint| worker_taint == taint))
+        self.required.iter().all(|taint| {
+            worker_taints
+                .iter()
+                .any(|worker_taint| worker_taint == taint)
+        })
     }
 }
 
