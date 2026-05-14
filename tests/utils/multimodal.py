@@ -34,6 +34,7 @@ AUDIO_TEST_URL = (
 _MULTIMODAL_COLOR_PROMPT = (
     "What colors are in the following image? Respond only with the colors."
 )
+IMAGE_COLOR_PROMPT = _MULTIMODAL_COLOR_PROMPT
 
 
 def make_image_payload(
