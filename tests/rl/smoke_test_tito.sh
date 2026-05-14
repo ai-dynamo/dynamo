@@ -73,7 +73,8 @@ FRONTEND_PID=$!
 BGPIDS+=("$FRONTEND_PID")
 echo "[tito] Frontend started (pid=$FRONTEND_PID)"
 
-# Worker — RL endpoint registered unconditionally on rl-sdk-1 (no --enable-rl)
+# Worker — `--enable-rl` mirrors SGLang. Routes are registered unconditionally
+# today, but the flag signals RL deployment and matches the smoke_test.sh CLI.
 HF_HUB_OFFLINE=1 \
   TRANSFORMERS_OFFLINE=1 \
   PYTHONPATH="${PRIME_RL_SRC}${PYTHONPATH:+:$PYTHONPATH}" \
@@ -84,6 +85,7 @@ HF_HUB_OFFLINE=1 \
     --max-model-len 2048 \
     --max-num-seqs 4 \
     --gpu-memory-utilization 0.30 \
+    --enable-rl \
     --worker-extension-cls prime_rl.inference.vllm.worker.filesystem.FileSystemWeightUpdateWorker \
     > "$LOG_DIR/worker.log" 2>&1 &
 WORKER_PID=$!
@@ -120,6 +122,13 @@ ids = tok.apply_chat_template(
     [{"role": "user", "content": "$PROMPT_TEXT"}],
     add_generation_prompt=True, tokenize=True,
 )
+# transformers >=4.45 may return a BatchEncoding for tokenize=True;
+# unwrap to a flat list[int] regardless of return shape.
+if hasattr(ids, "input_ids"):
+    ids = ids.input_ids
+if ids and isinstance(ids[0], list):
+    ids = ids[0]
+ids = [int(t) for t in ids]
 stop_ids = [tok.convert_tokens_to_ids(s) for s in ("<|im_end|>", "<|endoftext|>")
             if tok.convert_tokens_to_ids(s) >= 0]
 print(json.dumps({"prompt_ids": ids, "stop_token_ids": stop_ids}))
@@ -131,8 +140,16 @@ STOP_IDS=$(echo "$TOKENS_JSON" | python -c "import sys,json; print(json.dumps(js
 N_PROMPT=$(echo "$PROMPT_IDS" | python -c "import sys,json; print(len(json.load(sys.stdin)))")
 echo "[tito] Prompt token count: $N_PROMPT"
 
-# rl-sdk-1 wire shape: nvext.token_data only (no top-level prompt_token_ids).
-# stop_token_ids -> inside nvext as well (top-level rejected by validator).
+# rl-sdk-2 wire shape:
+#   - nvext.token_data           pre-tokenized prompt (preprocessor consumes it)
+#   - extra_body.stop_token_ids  whitelisted via PASSTHROUGH_EXTRA_FIELDS,
+#                                plumbed into common::StopConditions.stop_token_ids
+#   - extra_body.cache_salt      whitelisted too (RL prefix-cache isolation)
+#   - nvext.extra_fields=["engine_data"]
+#                                opts into nvext.engine_data on the response,
+#                                which carries completion_token_ids (+ logprobs)
+#                                emitted by the vLLM backend handler. Mirrors
+#                                PR #8119's SGLang shape.
 PAYLOAD=$(python -c "
 import json
 print(json.dumps({
@@ -141,10 +158,12 @@ print(json.dumps({
     'stream': False,
     'max_tokens': 24,
     'temperature': 0.0,
+    'logprobs': True,
+    'stop_token_ids': $STOP_IDS,
+    'cache_salt': 'smoke_tito_v1',
     'nvext': {
         'token_data': $PROMPT_IDS,
-        'stop_token_ids': $STOP_IDS,
-        'extra_fields': ['completion_token_ids']
+        'extra_fields': ['engine_data']
     }
 }))
 ")
@@ -175,10 +194,30 @@ if prompt_tokens != expected:
     print(f'FAIL: prompt_tokens={prompt_tokens} expected={expected} (TITO input not honored)')
     sys.exit(1)
 
-# Check for completion token IDs (may be in nvext OR choices, depending on branch)
-out_tok = c0.get('token_ids') or (data.get('nvext') or {}).get('completion_token_ids')
-loc = 'choices[0].token_ids' if c0.get('token_ids') else 'nvext.completion_token_ids' if out_tok else 'absent'
-print(f'PASS: prompt_tokens={prompt_tokens} (TITO input honored) completion_token_ids_at={loc} n={len(out_tok or [])} text={text[:60]!r}')
+# Canonical channel (PR #8119 + rl-sdk-2): response.nvext.engine_data.*
+nvext_resp = data.get('nvext') or {}
+engine_data = nvext_resp.get('engine_data') or {}
+out_tok = engine_data.get('completion_token_ids') or []
+out_lp  = engine_data.get('completion_logprobs') or []
+
+if not out_tok:
+    print('FAIL: nvext.engine_data.completion_token_ids missing or empty')
+    print('nvext keys:', list(nvext_resp.keys()))
+    print('engine_data keys:', list(engine_data.keys()) if engine_data else '(absent)')
+    sys.exit(1)
+
+if len(out_tok) != usage.get('completion_tokens', -1):
+    print(f'FAIL: len(completion_token_ids)={len(out_tok)} != usage.completion_tokens={usage.get(\"completion_tokens\")}')
+    sys.exit(1)
+
+if out_lp and len(out_lp) != len(out_tok):
+    print(f'FAIL: len(completion_logprobs)={len(out_lp)} != len(completion_token_ids)={len(out_tok)}')
+    sys.exit(1)
+
+print(f'PASS: prompt_tokens={prompt_tokens} (TITO input honored)')
+print(f'      nvext.engine_data.completion_token_ids: n={len(out_tok)}')
+print(f'      nvext.engine_data.completion_logprobs:  n={len(out_lp)} (flat list[float])')
+print(f'      text={text[:60]!r}')
 "; then
   echo "[tito] FAIL: TITO before weight update"
   exit 1
@@ -272,9 +311,14 @@ text = c0.get('message',{}).get('content','')
 prompt_tokens = data.get('usage', {}).get('prompt_tokens', 0)
 if prompt_tokens != $N_PROMPT:
     print(f'FAIL: prompt_tokens={prompt_tokens} after update'); sys.exit(1)
-out_tok = c0.get('token_ids') or (data.get('nvext') or {}).get('completion_token_ids')
-loc = 'choices[0].token_ids' if c0.get('token_ids') else 'nvext.completion_token_ids' if out_tok else 'absent'
-print(f'PASS: prompt_tokens={prompt_tokens} (TITO honored) completion_at={loc} n={len(out_tok or [])} text={text[:60]!r}')
+
+# Canonical channel: nvext.engine_data.completion_token_ids
+engine_data = (data.get('nvext') or {}).get('engine_data') or {}
+out_tok = engine_data.get('completion_token_ids') or []
+if not out_tok:
+    print('FAIL: nvext.engine_data.completion_token_ids missing after weight update')
+    sys.exit(1)
+print(f'PASS: prompt_tokens={prompt_tokens} (TITO honored) n_completion_token_ids={len(out_tok)} text={text[:60]!r}')
 "; then
   echo "[tito] FAIL: TITO after weight update"
   exit 1
@@ -288,8 +332,7 @@ ld = sys.argv[1]
 b = json.load(open(os.path.join(ld, 'resp_before.json')))
 a = json.load(open(os.path.join(ld, 'resp_after.json')))
 def toks(d):
-    c0 = d['choices'][0]
-    return c0.get('token_ids') or (d.get('nvext') or {}).get('completion_token_ids') or []
+    return ((d.get('nvext') or {}).get('engine_data') or {}).get('completion_token_ids') or []
 bt, at = toks(b), toks(a)
 print(f'before n={len(bt)} {bt[:8]}...')
 print(f'after  n={len(at)} {at[:8]}...')
@@ -297,10 +340,12 @@ print('PASS: deterministic' if bt == at else 'WARN: outputs differ')
 PYEOF
 
 echo ""
-echo "[tito] === Stop-token verification (informational): forced early stop on token 198 ==="
-# On rl-sdk-1, nvext.stop_token_ids is not yet plumbed into the engine path
-# (the wiring lives on bis/dynamo-rl in commit f03417149a). We probe it here
-# so the smoke surfaces this gap, but don't fail the smoke on it.
+echo "[tito] === Stop-token verification: forced early stop via extra_body.stop_token_ids ==="
+# rl-sdk-2 plumbing:
+#   PASSTHROUGH_EXTRA_FIELDS accepts extra_body.stop_token_ids → provider's
+#   get_stop_token_ids() reads it → common::StopConditions.stop_token_ids →
+#   vLLM SamplingParams.stop_token_ids. Picking a token that any sampled
+#   continuation must hit early (token id 198 = "\n" in Qwen tokenizers).
 STOP_PAYLOAD=$(python -c "
 import json
 print(json.dumps({
@@ -309,10 +354,10 @@ print(json.dumps({
     'stream': False,
     'max_tokens': 32,
     'temperature': 0.0,
+    'stop_token_ids': [198],
     'nvext': {
         'token_data': $PROMPT_IDS,
-        'stop_token_ids': [198],
-        'extra_fields': ['completion_token_ids']
+        'extra_fields': ['engine_data']
     }
 }))
 ")
@@ -323,20 +368,23 @@ echo "$RESP_STOP" | python -c "
 import sys, json
 d = json.load(sys.stdin)
 c0 = d['choices'][0]
-out = c0.get('token_ids') or (d.get('nvext') or {}).get('completion_token_ids') or []
 finish = c0.get('finish_reason')
-honored = finish == 'stop' and len(out) <= 3 and 198 in out
-status = 'PASS' if honored else 'INFO (not shipped on rl-sdk-1)'
-print(f'{status}: finish={finish} n_tokens={len(out)} stop_token_id=198 nvext_stop_honored={honored}')
+engine_data = (d.get('nvext') or {}).get('engine_data') or {}
+out = engine_data.get('completion_token_ids') or []
+honored = finish == 'stop' and len(out) <= 3
+status = 'PASS' if honored else 'INFO'
+print(f'{status}: finish={finish} n_tokens={len(out)} tokens={out} (stop_token_id=198 honored={honored})')
 " || true
 
 echo ""
 echo "========================================"
-echo "[tito] rl-sdk-1 smoke PASSED — admin plane + TITO input verified"
-echo "[tito]   ✓ /v1/rl/engine generic dispatcher (pause/update/resume) — PR #9382 surface"
-echo "[tito]   ✓ TITO input (nvext.token_data) — preprocessor skip-tokenize"
+echo "[tito] rl-sdk-2 TITO smoke PASSED"
+echo "[tito]   ✓ /v1/rl/engine generic dispatcher (pause/update/resume)"
+echo "[tito]   ✓ TITO input via nvext.token_data — preprocessor skip-tokenize"
 echo "[tito]   ✓ FileSystemWeightUpdateWorker FT round-trip"
-echo "[tito]   ○ TITO output (completion_token_ids) — deferred to follow-up PR"
+echo "[tito]   ✓ TITO output via nvext.engine_data.completion_token_ids (PR #8119 channel)"
+echo "[tito]   ✓ extra_body.stop_token_ids whitelisted + plumbed to SamplingParams"
+echo "[tito]   ✓ extra_body.cache_salt whitelisted"
 echo "[tito]   ○ nvext.stop_token_ids honored — deferred to follow-up PR"
 echo "[tito] Artifacts: $LOG_DIR"
 echo "========================================"
