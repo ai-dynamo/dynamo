@@ -257,7 +257,7 @@ pub(crate) struct TraceRequestStatsSnapshot {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct TraceCollector {
+pub struct TraceCollector {
     requests: FxHashMap<Uuid, TraceRequestStats>,
 }
 
@@ -336,6 +336,15 @@ impl TraceCollector {
         let ttft_ms = (first_token_ms - stats.arrival_time_ms).max(0.0);
         let mean_itl_ms = stats.mean_tpot_ms().unwrap_or(0.0);
         Some((ttft_ms, mean_itl_ms))
+    }
+
+    /// Return the number of tokens emitted so far for a request, or 0
+    /// if the request has not been arrived. Used by the offline runtime
+    /// to derive the engine-side finish_reason at completion time.
+    pub(crate) fn tokens_emitted(&self, uuid: Uuid) -> usize {
+        self.requests
+            .get(&uuid)
+            .map_or(0, |stats| stats.token_times_ms.len())
     }
 
     pub(crate) fn finish(self) -> TraceSimulationReport {
@@ -458,6 +467,26 @@ impl TraceCollector {
                 reused_input_tokens: stats.reused_input_tokens,
             })
             .collect()
+    }
+}
+
+impl crate::replay::offline::EventSink for TraceCollector {
+    fn on_arrival(
+        &mut self,
+        uuid: Uuid,
+        arrival_time_ms: f64,
+        input_length: usize,
+        output_length: usize,
+    ) {
+        TraceCollector::on_arrival(self, uuid, arrival_time_ms, input_length, output_length);
+    }
+
+    fn on_admit(&mut self, uuid: Uuid, admit_time_ms: f64, reused_input_tokens: usize) {
+        TraceCollector::on_admit(self, uuid, admit_time_ms, reused_input_tokens);
+    }
+
+    fn on_token(&mut self, uuid: Uuid, token_time_ms: f64) {
+        TraceCollector::on_token(self, uuid, token_time_ms);
     }
 }
 

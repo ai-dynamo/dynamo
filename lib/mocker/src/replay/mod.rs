@@ -4,8 +4,8 @@
 mod artifacts;
 mod collector;
 mod entrypoints;
-pub(crate) mod offline;
-mod online;
+pub mod offline;
+pub(crate) mod online;
 mod planner_handle;
 mod router_shared;
 mod validate;
@@ -19,7 +19,7 @@ use dynamo_kv_router::PrefillLoadEstimator;
 pub use artifacts::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
 };
-pub(crate) use collector::TraceCollector;
+pub use collector::TraceCollector;
 #[cfg(test)]
 pub(crate) use collector::TraceRequestStatsSnapshot;
 pub use collector::{

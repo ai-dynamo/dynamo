@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::common::protocols::MockEngineArgs;
-use crate::replay::TraceCollector;
+use crate::replay::offline::EventSink;
 use crate::scheduler::{EngineCore, EnginePassResult, SglangCore, VllmCore};
 use dynamo_kv_router::protocols::WorkerId;
 
@@ -66,9 +66,9 @@ impl ReplayWorkerCore {
 
     pub(crate) fn execute_pass(
         &mut self,
-        collector: &mut TraceCollector,
+        sink: &mut dyn EventSink,
         now_ms: f64,
     ) -> EnginePassResult {
-        self.core.execute_pass(collector, now_ms)
+        self.core.execute_pass(sink, now_ms)
     }
 }

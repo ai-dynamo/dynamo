@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::common::protocols::{DirectRequest, KvEventPublishers, MockEngineArgs, WorkerType};
 use crate::kv_manager::SglangKvManager;
-use crate::replay::TraceCollector;
+use crate::replay::offline::EventSink;
 
 use super::config::SglangConfig;
 use super::decode::{cache_materialized_prefix, simulate_decode_step};
@@ -96,10 +96,10 @@ impl SglangCore {
 
     pub(crate) fn execute_pass(
         &mut self,
-        collector: &mut TraceCollector,
+        sink: &mut dyn EventSink,
         now_ms: f64,
     ) -> EnginePassResult {
-        self.execute_pass_internal(Some(collector), now_ms)
+        self.execute_pass_internal(Some(sink), now_ms)
     }
 
     pub(crate) fn execute_hidden_pass(&mut self, now_ms: f64) -> EnginePassResult {
@@ -108,7 +108,7 @@ impl SglangCore {
 
     pub(super) fn execute_pass_internal(
         &mut self,
-        mut collector: Option<&mut TraceCollector>,
+        mut sink: Option<&mut dyn EventSink>,
         now_ms: f64,
     ) -> EnginePassResult {
         apply_schedule_policy(&mut self.waiting, &self.kv_manager, &self.config);
@@ -126,8 +126,8 @@ impl SglangCore {
         }
 
         for admission in &admit.admissions {
-            if let Some(collector) = collector.as_deref_mut() {
-                collector.on_admit(admission.uuid, now_ms, admission.reused_input_tokens);
+            if let Some(sink) = sink.as_deref_mut() {
+                sink.on_admit(admission.uuid, now_ms, admission.reused_input_tokens);
             }
         }
 
@@ -173,9 +173,9 @@ impl SglangCore {
             true,
         );
 
-        if let Some(collector) = collector {
+        if let Some(sink) = sink {
             for signal in &decode.output_signals {
-                collector.on_token(signal.uuid, decode.end_ms);
+                sink.on_token(signal.uuid, decode.end_ms);
             }
         }
 

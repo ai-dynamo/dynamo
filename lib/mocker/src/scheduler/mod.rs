@@ -173,12 +173,12 @@ impl EngineCore {
 
     pub(crate) fn execute_pass(
         &mut self,
-        collector: &mut crate::replay::TraceCollector,
+        sink: &mut dyn crate::replay::offline::EventSink,
         now_ms: f64,
     ) -> EnginePassResult {
         match self {
-            Self::Vllm(core) => core.execute_pass(collector, now_ms),
-            Self::Sglang(core) => core.execute_pass(collector, now_ms),
+            Self::Vllm(core) => core.execute_pass(sink, now_ms),
+            Self::Sglang(core) => core.execute_pass(sink, now_ms),
         }
     }
 
