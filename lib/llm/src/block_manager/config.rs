@@ -4,7 +4,7 @@
 use super::events::EventManager;
 use super::*;
 use crate::block_manager::offload::filter::OffloadFilter;
-use crate::block_manager::offload::g3pb_filter::G3pbAdmissionFilter;
+use crate::block_manager::offload::g2pb_filter::G2pbAdmissionFilter;
 use dynamo_runtime::config::environment_names::kvbm::cpu_cache as env_cpu_cache;
 use dynamo_runtime::config::environment_names::kvbm::disk_cache as env_disk_cache;
 use prometheus::Registry;
@@ -89,32 +89,32 @@ impl KvManagerModelConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum G3pbAdmissionPolicy {
+pub enum G2pbAdmissionPolicy {
     #[default]
     AfterFirstReuse,
     Eager,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct G3pbAdmissionConfig {
-    pub policy: G3pbAdmissionPolicy,
+pub struct G2pbAdmissionConfig {
+    pub policy: G2pbAdmissionPolicy,
 }
 
-impl G3pbAdmissionConfig {
+impl G2pbAdmissionConfig {
     pub fn after_first_reuse() -> Self {
         Self {
-            policy: G3pbAdmissionPolicy::AfterFirstReuse,
+            policy: G2pbAdmissionPolicy::AfterFirstReuse,
         }
     }
 
     pub fn eager() -> Self {
         Self {
-            policy: G3pbAdmissionPolicy::Eager,
+            policy: G2pbAdmissionPolicy::Eager,
         }
     }
 
     pub fn from_legacy_env() -> Option<Self> {
-        match std::env::var("G3PB_OFFLOAD_ALL") {
+        match std::env::var("G2PB_OFFLOAD_ALL") {
             Ok(value) => {
                 let eager = value == "1" || value.eq_ignore_ascii_case("true");
                 Some(if eager {
@@ -128,7 +128,7 @@ impl G3pbAdmissionConfig {
     }
 
     pub fn build_filter(&self) -> Arc<dyn OffloadFilter> {
-        Arc::new(G3pbAdmissionFilter::from_config(self.clone()))
+        Arc::new(G2pbAdmissionFilter::from_config(self.clone()))
     }
 }
 
@@ -262,12 +262,12 @@ pub struct KvBlockManagerConfig {
     pub consolidator_config:
         Option<crate::block_manager::kv_consolidator::KvEventConsolidatorConfig>,
 
-    /// Optional G3PB admission policy.
+    /// Optional G2PB admission policy.
     ///
-    /// When set, KVBM installs the G3PB admission filter on the host layout
+    /// When set, KVBM installs the G2PB admission filter on the host layout
     /// unless an explicit host offload filter has already been provided.
     #[builder(default, setter(strip_option))]
-    pub g3pb_admission: Option<G3pbAdmissionConfig>,
+    pub g2pb_admission: Option<G2pbAdmissionConfig>,
 }
 
 impl KvBlockManagerConfig {

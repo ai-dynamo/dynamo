@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{G3pbError, G3pbPutBlock, G3pbQueryHit, G3pbTransferBlock};
+use super::{G2pbError, G2pbPutBlock, G2pbQueryHit, G2pbTransferBlock};
 use crate::block_manager::storage::Storage;
 use crate::tokens::SequenceHash;
 
@@ -17,45 +17,45 @@ use std::time::Duration;
 const DEFAULT_METADATA_SHARDS: usize = 16;
 
 #[async_trait]
-pub trait G3pbPeerStorage: Send + Sync {
-    async fn put_blocks(&self, blocks: Vec<G3pbPutBlock>);
-    async fn offer_blocks(&self, blocks: &[G3pbPutBlock]) -> Vec<SequenceHash>;
-    async fn put_payload_blocks(&self, blocks: Vec<G3pbTransferBlock>) -> Result<(), G3pbError>;
-    async fn delete_blocks(&self, sequence_hashes: &[SequenceHash]) -> Result<(), G3pbError>;
+pub trait G2pbPeerStorage: Send + Sync {
+    async fn put_blocks(&self, blocks: Vec<G2pbPutBlock>);
+    async fn offer_blocks(&self, blocks: &[G2pbPutBlock]) -> Vec<SequenceHash>;
+    async fn put_payload_blocks(&self, blocks: Vec<G2pbTransferBlock>) -> Result<(), G2pbError>;
+    async fn delete_blocks(&self, sequence_hashes: &[SequenceHash]) -> Result<(), G2pbError>;
     async fn query_blocks(
         &self,
         instance_id: u64,
         sequence_hashes: &[SequenceHash],
-    ) -> Vec<G3pbQueryHit>;
+    ) -> Vec<G2pbQueryHit>;
     async fn fetch_blocks(
         &self,
         instance_id: u64,
         sequence_hashes: &[SequenceHash],
-    ) -> Result<Vec<G3pbTransferBlock>, G3pbError>;
+    ) -> Result<Vec<G2pbTransferBlock>, G2pbError>;
 }
 
 #[derive(Clone, Debug)]
-struct InMemoryG3pbEntry {
-    meta: G3pbPutBlock,
+struct InMemoryG2pbEntry {
+    meta: G2pbPutBlock,
     payload: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
-pub struct InMemoryG3pbPeerStorage {
-    blocks: RwLock<HashMap<SequenceHash, InMemoryG3pbEntry>>,
+pub struct InMemoryG2pbPeerStorage {
+    blocks: RwLock<HashMap<SequenceHash, InMemoryG2pbEntry>>,
 }
 
 #[async_trait]
-impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
-    async fn put_blocks(&self, blocks: Vec<G3pbPutBlock>) {
-        let mut guard = self.blocks.write().expect("g3pb peer storage poisoned");
+impl G2pbPeerStorage for InMemoryG2pbPeerStorage {
+    async fn put_blocks(&self, blocks: Vec<G2pbPutBlock>) {
+        let mut guard = self.blocks.write().expect("g2pb peer storage poisoned");
         for block in blocks {
             let payload = guard
                 .remove(&block.sequence_hash)
                 .and_then(|entry| entry.payload);
             guard.insert(
                 block.sequence_hash,
-                InMemoryG3pbEntry {
+                InMemoryG2pbEntry {
                     meta: block,
                     payload,
                 },
@@ -63,8 +63,8 @@ impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
         }
     }
 
-    async fn offer_blocks(&self, blocks: &[G3pbPutBlock]) -> Vec<SequenceHash> {
-        let guard = self.blocks.read().expect("g3pb peer storage poisoned");
+    async fn offer_blocks(&self, blocks: &[G2pbPutBlock]) -> Vec<SequenceHash> {
+        let guard = self.blocks.read().expect("g2pb peer storage poisoned");
         let mut seen = HashSet::new();
         blocks
             .iter()
@@ -76,13 +76,13 @@ impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
             .collect()
     }
 
-    async fn put_payload_blocks(&self, blocks: Vec<G3pbTransferBlock>) -> Result<(), G3pbError> {
-        let mut guard = self.blocks.write().expect("g3pb peer storage poisoned");
+    async fn put_payload_blocks(&self, blocks: Vec<G2pbTransferBlock>) -> Result<(), G2pbError> {
+        let mut guard = self.blocks.write().expect("g2pb peer storage poisoned");
         for block in blocks {
             block.validate_payload_size()?;
             guard.insert(
                 block.meta.sequence_hash,
-                InMemoryG3pbEntry {
+                InMemoryG2pbEntry {
                     meta: block.meta.clone(),
                     payload: Some(block.payload),
                 },
@@ -92,8 +92,8 @@ impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
         Ok(())
     }
 
-    async fn delete_blocks(&self, sequence_hashes: &[SequenceHash]) -> Result<(), G3pbError> {
-        let mut guard = self.blocks.write().expect("g3pb peer storage poisoned");
+    async fn delete_blocks(&self, sequence_hashes: &[SequenceHash]) -> Result<(), G2pbError> {
+        let mut guard = self.blocks.write().expect("g2pb peer storage poisoned");
         for sequence_hash in sequence_hashes {
             guard.remove(sequence_hash);
         }
@@ -104,12 +104,12 @@ impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
         &self,
         instance_id: u64,
         sequence_hashes: &[SequenceHash],
-    ) -> Vec<G3pbQueryHit> {
-        let guard = self.blocks.read().expect("g3pb peer storage poisoned");
+    ) -> Vec<G2pbQueryHit> {
+        let guard = self.blocks.read().expect("g2pb peer storage poisoned");
         sequence_hashes
             .iter()
             .filter_map(|sequence_hash| {
-                guard.get(sequence_hash).map(|entry| G3pbQueryHit {
+                guard.get(sequence_hash).map(|entry| G2pbQueryHit {
                     instance_id,
                     sequence_hash: *sequence_hash,
                     size_bytes: entry.meta.size_bytes,
@@ -123,8 +123,8 @@ impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
         &self,
         instance_id: u64,
         sequence_hashes: &[SequenceHash],
-    ) -> Result<Vec<G3pbTransferBlock>, G3pbError> {
-        let guard = self.blocks.read().expect("g3pb peer storage poisoned");
+    ) -> Result<Vec<G2pbTransferBlock>, G2pbError> {
+        let guard = self.blocks.read().expect("g2pb peer storage poisoned");
         let mut missing = Vec::new();
         let mut blocks = Vec::with_capacity(sequence_hashes.len());
 
@@ -135,7 +135,7 @@ impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
                         missing.push(*sequence_hash);
                         continue;
                     };
-                    blocks.push(G3pbTransferBlock {
+                    blocks.push(G2pbTransferBlock {
                         meta: entry.meta.clone(),
                         payload,
                     });
@@ -145,7 +145,7 @@ impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
         }
 
         if !missing.is_empty() {
-            return Err(G3pbError::NotFound {
+            return Err(G2pbError::NotFound {
                 instance_id,
                 sequence_hashes: missing,
             });
@@ -156,12 +156,12 @@ impl G3pbPeerStorage for InMemoryG3pbPeerStorage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct G3pbStorageConfig {
+pub struct G2pbStorageConfig {
     pub g2_capacity_bytes: usize,
     pub device_id: usize,
 }
 
-impl G3pbStorageConfig {
+impl G2pbStorageConfig {
     pub const DEFAULT_G2_CAPACITY_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
     pub fn new(device_id: usize) -> Self {
@@ -173,9 +173,9 @@ impl G3pbStorageConfig {
 }
 
 #[derive(Debug, Clone)]
-struct G3pbCacheMetadata {
+struct G2pbCacheMetadata {
     size_bytes: usize,
-    location: G3pbCacheLocation,
+    location: G2pbCacheLocation,
     priority: u32,
     returned_tick: u64,
     acquired_tick: u64,
@@ -187,7 +187,7 @@ struct G3pbCacheMetadata {
 /// Sharded metadata storage to reduce lock contention
 /// Each shard has its own RwLock, allowing concurrent access to different shards
 struct ShardedMetadata {
-    shards: Vec<RwLock<HashMap<SequenceHash, G3pbCacheMetadata>>>,
+    shards: Vec<RwLock<HashMap<SequenceHash, G2pbCacheMetadata>>>,
     num_shards: usize,
 }
 
@@ -209,7 +209,7 @@ impl ShardedMetadata {
     fn read_shard(
         &self,
         sequence_hash: SequenceHash,
-    ) -> Result<std::sync::RwLockReadGuard<'_, HashMap<SequenceHash, G3pbCacheMetadata>>> {
+    ) -> Result<std::sync::RwLockReadGuard<'_, HashMap<SequenceHash, G2pbCacheMetadata>>> {
         let idx = self.shard_index(sequence_hash);
         self.shards[idx]
             .read()
@@ -220,7 +220,7 @@ impl ShardedMetadata {
     fn write_shard(
         &self,
         sequence_hash: SequenceHash,
-    ) -> Result<std::sync::RwLockWriteGuard<'_, HashMap<SequenceHash, G3pbCacheMetadata>>> {
+    ) -> Result<std::sync::RwLockWriteGuard<'_, HashMap<SequenceHash, G2pbCacheMetadata>>> {
         let idx = self.shard_index(sequence_hash);
         self.shards[idx]
             .write()
@@ -228,7 +228,7 @@ impl ShardedMetadata {
     }
 
     /// Get read guards for multiple sequence hashes (may return duplicates for same shard)
-    fn get(&self, sequence_hash: SequenceHash) -> Result<Option<G3pbCacheMetadata>> {
+    fn get(&self, sequence_hash: SequenceHash) -> Result<Option<G2pbCacheMetadata>> {
         let guard = self.read_shard(sequence_hash)?;
         Ok(guard.get(&sequence_hash).cloned())
     }
@@ -238,7 +238,7 @@ impl ShardedMetadata {
         Ok(guard.contains_key(&sequence_hash))
     }
 
-    fn insert(&self, sequence_hash: SequenceHash, metadata: G3pbCacheMetadata) -> Result<()> {
+    fn insert(&self, sequence_hash: SequenceHash, metadata: G2pbCacheMetadata) -> Result<()> {
         let mut guard = self.write_shard(sequence_hash)?;
         guard.insert(sequence_hash, metadata);
         Ok(())
@@ -246,7 +246,7 @@ impl ShardedMetadata {
 
     fn update<F>(&self, sequence_hash: SequenceHash, f: F) -> Result<()>
     where
-        F: FnOnce(&mut G3pbCacheMetadata),
+        F: FnOnce(&mut G2pbCacheMetadata),
     {
         let mut guard = self.write_shard(sequence_hash)?;
         if let Some(metadata) = guard.get_mut(&sequence_hash) {
@@ -255,12 +255,12 @@ impl ShardedMetadata {
         Ok(())
     }
 
-    fn remove(&self, sequence_hash: SequenceHash) -> Result<Option<G3pbCacheMetadata>> {
+    fn remove(&self, sequence_hash: SequenceHash) -> Result<Option<G2pbCacheMetadata>> {
         let mut guard = self.write_shard(sequence_hash)?;
         Ok(guard.remove(&sequence_hash))
     }
 
-    fn snapshot(&self) -> Result<Vec<(SequenceHash, G3pbCacheMetadata)>> {
+    fn snapshot(&self) -> Result<Vec<(SequenceHash, G2pbCacheMetadata)>> {
         let mut items = Vec::new();
         for shard in &self.shards {
             let guard = shard
@@ -273,22 +273,22 @@ impl ShardedMetadata {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum G3pbCacheLocation {
+enum G2pbCacheLocation {
     G2 { offset: usize },
 }
 
-pub struct G3pbCacheStorage {
+pub struct G2pbCacheStorage {
     g2_storage: Arc<crate::block_manager::storage::PinnedStorage>,
     metadata: ShardedMetadata,
     tick_counter: AtomicU64,
     _g2_allocator: Arc<crate::block_manager::storage::PinnedAllocator>,
     g2_free_list: RwLock<VecDeque<(usize, usize)>>, // (offset, size)
     g2_allocated: AtomicU64,
-    config: G3pbStorageConfig,
+    config: G2pbStorageConfig,
 }
 
-impl G3pbCacheStorage {
-    pub async fn new(config: G3pbStorageConfig) -> Result<Self> {
+impl G2pbCacheStorage {
+    pub async fn new(config: G2pbStorageConfig) -> Result<Self> {
         use crate::block_manager::storage::{PinnedAllocator, StorageAllocator};
 
         let g2_allocator = Arc::new(PinnedAllocator::new(config.device_id)?);
@@ -370,7 +370,7 @@ impl G3pbCacheStorage {
         }
     }
 
-    async fn get_stored_location(&self, sequence_hash: SequenceHash) -> Option<G3pbCacheLocation> {
+    async fn get_stored_location(&self, sequence_hash: SequenceHash) -> Option<G2pbCacheLocation> {
         let meta = self.metadata.get(sequence_hash).ok()??;
         meta.payload_ready.then_some(meta.location)
     }
@@ -381,7 +381,7 @@ impl G3pbCacheStorage {
                 .metadata
                 .snapshot()?
                 .into_iter()
-                .filter(|(_, meta)| matches!(meta.location, G3pbCacheLocation::G2 { .. }))
+                .filter(|(_, meta)| matches!(meta.location, G2pbCacheLocation::G2 { .. }))
                 .collect();
             g2_blocks.sort_by_key(|(_, meta)| (meta.returned_tick, meta.priority));
 
@@ -393,7 +393,7 @@ impl G3pbCacheStorage {
                     break;
                 }
 
-                let G3pbCacheLocation::G2 { offset } = meta.location;
+                let G2pbCacheLocation::G2 { offset } = meta.location;
                 freed_size += meta.size_bytes;
                 to_evict.push((hash, offset, meta.size_bytes));
             }
@@ -419,8 +419,8 @@ impl G3pbCacheStorage {
 }
 
 #[async_trait]
-impl G3pbPeerStorage for G3pbCacheStorage {
-    async fn put_blocks(&self, blocks: Vec<G3pbPutBlock>) {
+impl G2pbPeerStorage for G2pbCacheStorage {
+    async fn put_blocks(&self, blocks: Vec<G2pbPutBlock>) {
         let tick = self.next_tick();
 
         for block in blocks {
@@ -435,7 +435,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
             self.metadata
                 .insert(
                     block.sequence_hash,
-                    G3pbCacheMetadata {
+                    G2pbCacheMetadata {
                         size_bytes: block.size_bytes,
                         location,
                         priority: 0,
@@ -450,7 +450,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
         }
     }
 
-    async fn offer_blocks(&self, blocks: &[G3pbPutBlock]) -> Vec<SequenceHash> {
+    async fn offer_blocks(&self, blocks: &[G2pbPutBlock]) -> Vec<SequenceHash> {
         let mut accepted = Vec::new();
         let mut seen = HashSet::new();
 
@@ -472,7 +472,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
         accepted
     }
 
-    async fn put_payload_blocks(&self, blocks: Vec<G3pbTransferBlock>) -> Result<(), G3pbError> {
+    async fn put_payload_blocks(&self, blocks: Vec<G2pbTransferBlock>) -> Result<(), G2pbError> {
         let tick = self.next_tick();
 
         for block in blocks {
@@ -488,7 +488,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
 
             if let Some((location, _)) = existing_location {
                 match location {
-                    G3pbCacheLocation::G2 { offset } => {
+                    G2pbCacheLocation::G2 { offset } => {
                         self.write_to_g2(offset, &block.payload).await;
                     }
                 }
@@ -502,15 +502,15 @@ impl G3pbPeerStorage for G3pbCacheStorage {
                     .expect("metadata lock poisoned");
             } else {
                 let (offset, _) = self.allocate_in_g2(block.payload.len()).await.map_err(|_| {
-                    G3pbError::UnknownPeer { instance_id: 0 }
+                    G2pbError::UnknownPeer { instance_id: 0 }
                 })?;
                 self.write_to_g2(offset, &block.payload).await;
-                let location = G3pbCacheLocation::G2 { offset };
+                let location = G2pbCacheLocation::G2 { offset };
 
                 self.metadata
                     .insert(
                         block.meta.sequence_hash,
-                        G3pbCacheMetadata {
+                        G2pbCacheMetadata {
                             size_bytes: block.meta.size_bytes,
                             location,
                             priority: 0,
@@ -528,14 +528,14 @@ impl G3pbPeerStorage for G3pbCacheStorage {
         Ok(())
     }
 
-    async fn delete_blocks(&self, sequence_hashes: &[SequenceHash]) -> Result<(), G3pbError> {
+    async fn delete_blocks(&self, sequence_hashes: &[SequenceHash]) -> Result<(), G2pbError> {
         for sequence_hash in sequence_hashes {
             if let Some(metadata) = self
                 .metadata
                 .remove(*sequence_hash)
                 .expect("metadata lock poisoned")
             {
-                let G3pbCacheLocation::G2 { offset } = metadata.location;
+                let G2pbCacheLocation::G2 { offset } = metadata.location;
                 self.free_in_g2(offset, metadata.size_bytes).await;
             }
         }
@@ -547,7 +547,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
         &self,
         instance_id: u64,
         sequence_hashes: &[SequenceHash],
-    ) -> Vec<G3pbQueryHit> {
+    ) -> Vec<G2pbQueryHit> {
         let mut hits = Vec::new();
 
         // Group by shard to minimize lock acquisitions
@@ -571,7 +571,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
                 if let Some(meta) = guard.get(sequence_hash)
                     && meta.payload_ready
                 {
-                    hits.push(G3pbQueryHit {
+                    hits.push(G2pbQueryHit {
                     instance_id,
                     sequence_hash: *sequence_hash,
                     size_bytes: meta.size_bytes,
@@ -588,7 +588,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
         &self,
         instance_id: u64,
         sequence_hashes: &[SequenceHash],
-    ) -> Result<Vec<G3pbTransferBlock>, G3pbError> {
+    ) -> Result<Vec<G2pbTransferBlock>, G2pbError> {
         let tick = self.next_tick();
         let mut missing = Vec::new();
         let mut blocks = Vec::with_capacity(sequence_hashes.len());
@@ -649,11 +649,11 @@ impl G3pbPeerStorage for G3pbCacheStorage {
         // Third pass: fetch blocks (outside lock)
         for (sequence_hash, location, size) in block_locations {
             let payload = match location {
-                G3pbCacheLocation::G2 { offset } => self.read_from_g2(offset, size).await,
+                G2pbCacheLocation::G2 { offset } => self.read_from_g2(offset, size).await,
             };
 
-            blocks.push(G3pbTransferBlock {
-                meta: G3pbPutBlock {
+            blocks.push(G2pbTransferBlock {
+                meta: G2pbPutBlock {
                     sequence_hash,
                     size_bytes: size,
                     checksum: None,
@@ -663,7 +663,7 @@ impl G3pbPeerStorage for G3pbCacheStorage {
         }
 
         if !missing.is_empty() {
-            return Err(G3pbError::NotFound {
+            return Err(G2pbError::NotFound {
                 instance_id,
                 sequence_hashes: missing,
             });
@@ -691,19 +691,19 @@ where
         })
         .collect()
 }
-pub struct G3pbStorageAgent {
+pub struct G2pbStorageAgent {
     instance_id: u64,
-    storage: Arc<dyn G3pbPeerStorage>,
+    storage: Arc<dyn G2pbPeerStorage>,
     #[cfg(test)]
     query_delay: Option<Duration>,
 }
 
-impl G3pbStorageAgent {
+impl G2pbStorageAgent {
     pub fn new(instance_id: u64) -> Self {
-        Self::new_with_storage(instance_id, Arc::new(InMemoryG3pbPeerStorage::default()))
+        Self::new_with_storage(instance_id, Arc::new(InMemoryG2pbPeerStorage::default()))
     }
 
-    pub fn new_with_storage(instance_id: u64, storage: Arc<dyn G3pbPeerStorage>) -> Self {
+    pub fn new_with_storage(instance_id: u64, storage: Arc<dyn G2pbPeerStorage>) -> Self {
         Self {
             instance_id,
             storage,
@@ -722,20 +722,20 @@ impl G3pbStorageAgent {
         self
     }
 
-    pub async fn put_blocks(&self, blocks: Vec<G3pbPutBlock>) {
+    pub async fn put_blocks(&self, blocks: Vec<G2pbPutBlock>) {
         self.storage.put_blocks(blocks).await;
     }
 
-    pub async fn offer_blocks(&self, blocks: &[G3pbPutBlock]) -> Vec<SequenceHash> {
+    pub async fn offer_blocks(&self, blocks: &[G2pbPutBlock]) -> Vec<SequenceHash> {
         self.storage.offer_blocks(blocks).await
     }
 
-    pub async fn offered_blocks(&self, blocks: Vec<G3pbPutBlock>) -> Vec<G3pbPutBlock> {
+    pub async fn offered_blocks(&self, blocks: Vec<G2pbPutBlock>) -> Vec<G2pbPutBlock> {
         let accepted_hashes: HashSet<_> = self.offer_blocks(&blocks).await.into_iter().collect();
         filter_first_sequence_hash_matches(blocks, |block| block.sequence_hash, &accepted_hashes)
     }
 
-    pub async fn offer_and_put_blocks(&self, blocks: Vec<G3pbPutBlock>) -> Vec<G3pbPutBlock> {
+    pub async fn offer_and_put_blocks(&self, blocks: Vec<G2pbPutBlock>) -> Vec<G2pbPutBlock> {
         let accepted_blocks = self.offered_blocks(blocks).await;
         if !accepted_blocks.is_empty() {
             self.put_blocks(accepted_blocks.clone()).await;
@@ -745,8 +745,8 @@ impl G3pbStorageAgent {
 
     pub async fn offered_payload_blocks(
         &self,
-        blocks: Vec<G3pbTransferBlock>,
-    ) -> Result<Vec<G3pbTransferBlock>, G3pbError> {
+        blocks: Vec<G2pbTransferBlock>,
+    ) -> Result<Vec<G2pbTransferBlock>, G2pbError> {
         for block in &blocks {
             block.validate_payload_size()?;
         }
@@ -763,8 +763,8 @@ impl G3pbStorageAgent {
 
     pub async fn offer_and_put_payload_blocks(
         &self,
-        blocks: Vec<G3pbTransferBlock>,
-    ) -> Result<Vec<G3pbTransferBlock>, G3pbError> {
+        blocks: Vec<G2pbTransferBlock>,
+    ) -> Result<Vec<G2pbTransferBlock>, G2pbError> {
         let accepted_blocks = self.offered_payload_blocks(blocks).await?;
         if !accepted_blocks.is_empty() {
             self.storage
@@ -774,7 +774,7 @@ impl G3pbStorageAgent {
         Ok(accepted_blocks)
     }
 
-    pub async fn query_blocks(&self, sequence_hashes: &[SequenceHash]) -> Vec<G3pbQueryHit> {
+    pub async fn query_blocks(&self, sequence_hashes: &[SequenceHash]) -> Vec<G2pbQueryHit> {
         #[cfg(test)]
         if let Some(query_delay) = self.query_delay {
             tokio::time::sleep(query_delay).await;
@@ -788,13 +788,13 @@ impl G3pbStorageAgent {
     pub async fn fetch_blocks(
         &self,
         sequence_hashes: &[SequenceHash],
-    ) -> Result<Vec<G3pbTransferBlock>, G3pbError> {
+    ) -> Result<Vec<G2pbTransferBlock>, G2pbError> {
         self.storage
             .fetch_blocks(self.instance_id, sequence_hashes)
             .await
     }
 
-    pub async fn delete_blocks(&self, sequence_hashes: &[SequenceHash]) -> Result<(), G3pbError> {
+    pub async fn delete_blocks(&self, sequence_hashes: &[SequenceHash]) -> Result<(), G2pbError> {
         self.storage.delete_blocks(sequence_hashes).await
     }
 }

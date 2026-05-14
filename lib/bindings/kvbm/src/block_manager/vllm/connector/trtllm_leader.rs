@@ -16,9 +16,9 @@ use anyhow::Context;
 use dynamo_llm::block_manager::block::transfer::{PoolConfig, TransferContext, read_from_remote};
 use dynamo_llm::block_manager::connector::protocol::RequestType;
 use dynamo_llm::block_manager::distributed::{
-    G3PB_COMPONENT_NAME, G3PB_NAMESPACE, G3pbFetchBlocksResponse, G3pbFetchRequest,
-    G3pbPeerResolver, G3pbQueryHit, G3pbQueryRequest, G3pbRequestPlaneClient,
-    route_g3pb_sequence_hashes_by_owner,
+    G2PB_COMPONENT_NAME, G2PB_NAMESPACE, G2pbFetchBlocksResponse, G2pbFetchRequest,
+    G2pbPeerResolver, G2pbQueryHit, G2pbQueryRequest, G2pbRequestPlaneClient,
+    route_g2pb_sequence_hashes_by_owner,
 };
 use dynamo_llm::block_manager::kv_consolidator::EventSource;
 use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
@@ -36,8 +36,8 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 struct RemotePrefetchContext {
-    request_client: G3pbRequestPlaneClient,
-    peer_resolver: G3pbPeerResolver,
+    request_client: G2pbRequestPlaneClient,
+    peer_resolver: G2pbPeerResolver,
     transfer_context: Arc<TransferContext>,
     imported_instances: Arc<Mutex<HashSet<u64>>>,
 }
@@ -246,25 +246,25 @@ impl KvConnectorLeader {
             return Ok(None);
         };
 
-        let component = drt.namespace(G3PB_NAMESPACE)?.component(G3PB_COMPONENT_NAME)?;
+        let component = drt.namespace(G2PB_NAMESPACE)?.component(G2PB_COMPONENT_NAME)?;
         let request_client = tokio::task::block_in_place(|| {
             get_current_tokio_handle().block_on(async {
                 tokio::time::timeout(
                     Duration::from_millis(timeout_ms),
-                    G3pbRequestPlaneClient::new(component),
+                    G2pbRequestPlaneClient::new(component),
                 )
                 .await
-                .context("timed out waiting for G3PB request plane")?
+                .context("timed out waiting for G2PB request plane")?
             })
         })?;
         let peer_resolver = tokio::task::block_in_place(|| {
             get_current_tokio_handle().block_on(async {
                 tokio::time::timeout(
                     Duration::from_millis(timeout_ms),
-                    G3pbPeerResolver::new(request_client.clone()),
+                    G2pbPeerResolver::new(request_client.clone()),
                 )
                 .await
-                .context("timed out waiting for G3PB peer discovery")?
+                .context("timed out waiting for G2PB peer discovery")?
             })
         })?;
         let pool_config = PoolConfig {
@@ -349,8 +349,8 @@ async fn execute_remote_prefetch(
         .iter()
         .map(|block| block.sequence_hash())
         .collect();
-    let query_routes = route_g3pb_sequence_hashes_by_owner(&missing_hashes, &peer_list)?;
-    let mut hit_map = HashMap::<SequenceHash, G3pbQueryHit>::new();
+    let query_routes = route_g2pb_sequence_hashes_by_owner(&missing_hashes, &peer_list)?;
+    let mut hit_map = HashMap::<SequenceHash, G2pbQueryHit>::new();
 
     for (instance_id, owner_hashes) in query_routes {
         let instance_id = discovered_peers.instance_id(instance_id)?;
@@ -358,7 +358,7 @@ async fn execute_remote_prefetch(
             .request_client
             .query(
                 instance_id,
-                G3pbQueryRequest {
+                G2pbQueryRequest {
                     sequence_hashes: owner_hashes,
                 },
             )
@@ -372,8 +372,8 @@ async fn execute_remote_prefetch(
         contiguous_remote_prefix_and_post_gap_hits(missing_blocks, &hit_map);
 
     if post_gap_hits > 0 {
-        kvbm_metrics.g3pb_post_gap_requests.inc();
-        kvbm_metrics.g3pb_post_gap_blocks.inc_by(post_gap_hits as u64);
+        kvbm_metrics.g2pb_post_gap_requests.inc();
+        kvbm_metrics.g2pb_post_gap_blocks.inc_by(post_gap_hits as u64);
     }
 
     if contiguous_remote.len() < min_blocks {
@@ -393,16 +393,16 @@ async fn execute_remote_prefetch(
         .host()
         .ok_or_else(|| anyhow::anyhow!("block manager has no host pool"))?;
 
-    let fetch_routes = route_g3pb_sequence_hashes_by_owner(&contiguous_hashes, &peer_list)?;
+    let fetch_routes = route_g2pb_sequence_hashes_by_owner(&contiguous_hashes, &peer_list)?;
     let mut prefetched = 0usize;
 
     for (instance_id, owner_hashes) in fetch_routes {
         let instance_id = discovered_peers.instance_id(instance_id)?;
-        let fetched: G3pbFetchBlocksResponse = context
+        let fetched: G2pbFetchBlocksResponse = context
             .request_client
             .fetch(
                 instance_id,
-                G3pbFetchRequest {
+                G2pbFetchRequest {
                     sequence_hashes: owner_hashes.clone(),
                 },
             )
@@ -444,7 +444,7 @@ async fn execute_remote_prefetch(
 
 fn contiguous_remote_prefix_and_post_gap_hits(
     missing_blocks: &[TokenBlock],
-    hit_map: &HashMap<SequenceHash, G3pbQueryHit>,
+    hit_map: &HashMap<SequenceHash, G2pbQueryHit>,
 ) -> (Vec<TokenBlock>, usize) {
     let contiguous_remote: Vec<TokenBlock> = missing_blocks
         .iter()
@@ -1108,13 +1108,13 @@ mod tests {
     #[test]
     fn contiguous_remote_prefix_stops_at_first_gap_and_counts_tail_hits() {
         let sequence_blocks = build_sequence_blocks(5);
-        let mut hit_map = HashMap::<SequenceHash, G3pbQueryHit>::new();
+        let mut hit_map = HashMap::<SequenceHash, G2pbQueryHit>::new();
 
         for index in [0usize, 1, 3, 4] {
             let block = &sequence_blocks[index];
             hit_map.insert(
                 block.sequence_hash(),
-                G3pbQueryHit {
+                G2pbQueryHit {
                     instance_id: 11,
                     sequence_hash: block.sequence_hash(),
                     size_bytes: 1024,

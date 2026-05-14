@@ -12,9 +12,9 @@ use dynamo_llm::block_manager::config::{
     KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig,
 };
 use dynamo_llm::block_manager::distributed::{
-    G3PB_COMPONENT_NAME, G3PB_ENDPOINT_NAME, G3PB_NAMESPACE, G3pbCacheStorage, G3pbError,
-    G3pbFetchBlocksResponse, G3pbHealthResponse, G3pbPutBlock, G3pbQueryHit, G3pbRpcRequest,
-    G3pbRpcResponse, G3pbStageBlocksResponse, G3pbStorageAgent, G3pbStorageConfig,
+    G2PB_COMPONENT_NAME, G2PB_ENDPOINT_NAME, G2PB_NAMESPACE, G2pbCacheStorage, G2pbError,
+    G2pbFetchBlocksResponse, G2pbHealthResponse, G2pbPutBlock, G2pbQueryHit, G2pbRpcRequest,
+    G2pbRpcResponse, G2pbStageBlocksResponse, G2pbStorageAgent, G2pbStorageConfig,
 };
 use dynamo_llm::block_manager::locality::Local as LocalityLocal;
 use dynamo_llm::block_manager::storage::{PinnedAllocator, PinnedStorage, nixl::NixlAgent};
@@ -42,7 +42,7 @@ fn make_descriptor_list(
     );
 
     // BlockDescriptorList still uses the lower-level transfer schema field
-    // name `worker_id`; for G3PB remote peers we populate it with the
+    // name `worker_id`; for G2PB remote peers we populate it with the
     // discovery/routing `instance_id`.
     Ok(serde_json::from_value(json!({
         "worker_id": instance_id,
@@ -74,7 +74,7 @@ impl Default for Args {
             num_layers: 1,
             outer_dim: 1,
             dtype_width_bytes: 2,
-            g2_bytes: G3pbStorageConfig::DEFAULT_G2_CAPACITY_BYTES,
+            g2_bytes: G2pbStorageConfig::DEFAULT_G2_CAPACITY_BYTES,
         }
     }
 }
@@ -133,7 +133,7 @@ impl Args {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "kvbm_g3pb_backend
+                        "kvbm_g2pb_service
   --device-id <id>                CUDA device id for pinned host registration (default 0)
   --host-blocks <n>               pinned host staging capacity (default 64)
   --page-size <n>                 KVBM page size (default 32)
@@ -156,7 +156,7 @@ impl Args {
 type HostBlockManager = KvBlockManager<LocalityLocal, BasicMetadata>;
 
 struct StagedBlock {
-    meta: G3pbPutBlock,
+    meta: G2pbPutBlock,
     block_id: usize,
     block: MutableBlock<PinnedStorage, Local, BasicMetadata>,
 }
@@ -167,22 +167,22 @@ struct CommittedBlock {
 }
 
 #[derive(Default)]
-struct G3pbPeerRuntimeState {
+struct G2pbPeerRuntimeState {
     reserved: HashSet<u64>,
     staged: HashMap<u64, StagedBlock>,
     committed: HashMap<u64, CommittedBlock>,
     access_clock: u64,
 }
 
-struct G3pbPeerRuntime {
+struct G2pbPeerRuntime {
     instance_id: u64,
     block_manager: HostBlockManager,
     blockset: dynamo_llm::block_manager::block::nixl::SerializedNixlBlockSet,
-    state: RwLock<G3pbPeerRuntimeState>,
+    state: RwLock<G2pbPeerRuntimeState>,
 }
 
-impl G3pbPeerRuntime {
-    fn next_access_tick(state: &mut G3pbPeerRuntimeState) -> u64 {
+impl G2pbPeerRuntime {
+    fn next_access_tick(state: &mut G2pbPeerRuntimeState) -> u64 {
         let tick = state.access_clock;
         state.access_clock += 1;
         tick
@@ -223,13 +223,13 @@ impl G3pbPeerRuntime {
             instance_id,
             block_manager,
             blockset,
-            state: RwLock::new(G3pbPeerRuntimeState::default()),
+            state: RwLock::new(G2pbPeerRuntimeState::default()),
         })
     }
 
-    async fn offer_blocks(&self, agent: &G3pbStorageAgent, blocks: &[G3pbPutBlock]) -> Vec<u64> {
+    async fn offer_blocks(&self, agent: &G2pbStorageAgent, blocks: &[G2pbPutBlock]) -> Vec<u64> {
         let offerable: Vec<_> = {
-            let guard = self.state.read().expect("g3pb runtime state poisoned");
+            let guard = self.state.read().expect("g2pb runtime state poisoned");
             blocks
                 .iter()
                 .filter(|block| {
@@ -246,11 +246,11 @@ impl G3pbPeerRuntime {
 
     async fn stage_put_blocks(
         &self,
-        agent: &G3pbStorageAgent,
-        blocks: Vec<G3pbPutBlock>,
-    ) -> Result<G3pbStageBlocksResponse> {
+        agent: &G2pbStorageAgent,
+        blocks: Vec<G2pbPutBlock>,
+    ) -> Result<G2pbStageBlocksResponse> {
         {
-            let state = self.state.read().expect("g3pb runtime state poisoned");
+            let state = self.state.read().expect("g2pb runtime state poisoned");
             for meta in &blocks {
                 anyhow::ensure!(
                     !state.reserved.contains(&meta.sequence_hash)
@@ -266,7 +266,7 @@ impl G3pbPeerRuntime {
         let host_pool = self
             .block_manager
             .host()
-            .context("backend runtime has no host staging pool")?;
+            .context("service runtime has no host staging pool")?;
         let mutable_blocks = host_pool.allocate_blocks(blocks.len()).await?;
         let block_set_idx = mutable_blocks
             .first()
@@ -277,7 +277,7 @@ impl G3pbPeerRuntime {
             .map(|block| block.block_id())
             .collect::<Vec<_>>();
 
-        let mut state = self.state.write().expect("g3pb runtime state poisoned");
+        let mut state = self.state.write().expect("g2pb runtime state poisoned");
         for (meta, block) in blocks.into_iter().zip(mutable_blocks.into_iter()) {
             state.reserved.insert(meta.sequence_hash);
             state.staged.insert(
@@ -291,7 +291,7 @@ impl G3pbPeerRuntime {
         }
         drop(state);
 
-        Ok(G3pbStageBlocksResponse {
+        Ok(G2pbStageBlocksResponse {
             instance_id: self.instance_id,
             blockset: self.blockset.clone(),
             descriptors: make_descriptor_list(
@@ -305,12 +305,12 @@ impl G3pbPeerRuntime {
 
     async fn commit_staged_blocks(
         &self,
-        agent: &G3pbStorageAgent,
+        agent: &G2pbStorageAgent,
         sequence_hashes: &[u64],
     ) -> Result<()> {
         let mut committed_meta = Vec::with_capacity(sequence_hashes.len());
         {
-            let mut state = self.state.write().expect("g3pb runtime state poisoned");
+            let mut state = self.state.write().expect("g2pb runtime state poisoned");
             for sequence_hash in sequence_hashes {
                 let staged = state
                     .staged
@@ -335,18 +335,18 @@ impl G3pbPeerRuntime {
 
     async fn query_blocks(
         &self,
-        agent: &G3pbStorageAgent,
+        agent: &G2pbStorageAgent,
         sequence_hashes: &[u64],
-    ) -> Vec<G3pbQueryHit> {
+    ) -> Vec<G2pbQueryHit> {
         let mut hits = Vec::new();
         let mut missing = Vec::new();
         {
-            let mut state = self.state.write().expect("g3pb runtime state poisoned");
+            let mut state = self.state.write().expect("g2pb runtime state poisoned");
             for sequence_hash in sequence_hashes {
                 let tick = Self::next_access_tick(&mut state);
                 if let Some(block) = state.committed.get_mut(sequence_hash) {
                     block.last_access_tick = tick;
-                    hits.push(G3pbQueryHit {
+                    hits.push(G2pbQueryHit {
                         instance_id: self.instance_id,
                         sequence_hash: *sequence_hash,
                         size_bytes: block.staged.meta.size_bytes,
@@ -375,15 +375,15 @@ impl G3pbPeerRuntime {
     fn fetch_descriptors(
         &self,
         sequence_hashes: &[u64],
-    ) -> Result<G3pbFetchBlocksResponse, G3pbError> {
-        let mut state = self.state.write().expect("g3pb runtime state poisoned");
+    ) -> Result<G2pbFetchBlocksResponse, G2pbError> {
+        let mut state = self.state.write().expect("g2pb runtime state poisoned");
         let mut block_ids = Vec::with_capacity(sequence_hashes.len());
         let mut block_set_idx = None;
 
         for sequence_hash in sequence_hashes {
             let tick = Self::next_access_tick(&mut state);
             let Some(block) = state.committed.get_mut(sequence_hash) else {
-                return Err(G3pbError::NotFound {
+                return Err(G2pbError::NotFound {
                     instance_id: self.instance_id,
                     sequence_hashes: vec![*sequence_hash],
                 });
@@ -394,11 +394,11 @@ impl G3pbPeerRuntime {
             block_set_idx.get_or_insert(block.staged.block.block_data().block_set_id());
         }
 
-        let block_set_idx = block_set_idx.ok_or(G3pbError::NotFound {
+        let block_set_idx = block_set_idx.ok_or(G2pbError::NotFound {
             instance_id: self.instance_id,
             sequence_hashes: sequence_hashes.to_vec(),
         })?;
-        Ok(G3pbFetchBlocksResponse {
+        Ok(G2pbFetchBlocksResponse {
             instance_id: self.instance_id,
             blockset: self.blockset.clone(),
             descriptors: make_descriptor_list(
@@ -407,7 +407,7 @@ impl G3pbPeerRuntime {
                 BlockMutability::Immutable,
                 block_ids,
             )
-            .map_err(|_| G3pbError::NotFound {
+            .map_err(|_| G2pbError::NotFound {
                 instance_id: self.instance_id,
                 sequence_hashes: sequence_hashes.to_vec(),
             })?,
@@ -416,13 +416,13 @@ impl G3pbPeerRuntime {
 
     async fn ensure_staging_capacity(
         &self,
-        agent: &G3pbStorageAgent,
+        agent: &G2pbStorageAgent,
         required_blocks: usize,
     ) -> Result<()> {
         let host_pool = self
             .block_manager
             .host()
-            .context("backend runtime has no host staging pool")?;
+            .context("service runtime has no host staging pool")?;
         let available_blocks = host_pool.available_blocks() as usize;
         if available_blocks >= required_blocks {
             return Ok(());
@@ -434,13 +434,13 @@ impl G3pbPeerRuntime {
         Ok(())
     }
 
-    async fn evict_committed_blocks(&self, agent: &G3pbStorageAgent, count: usize) -> Result<()> {
+    async fn evict_committed_blocks(&self, agent: &G2pbStorageAgent, count: usize) -> Result<()> {
         if count == 0 {
             return Ok(());
         }
 
         let (evicted_hashes, evicted_blocks) = {
-            let mut state = self.state.write().expect("g3pb runtime state poisoned");
+            let mut state = self.state.write().expect("g2pb runtime state poisoned");
             let mut candidates: Vec<_> = state
                 .committed
                 .iter()
@@ -472,7 +472,7 @@ impl G3pbPeerRuntime {
         let host_pool = self
             .block_manager
             .host()
-            .context("backend runtime has no host staging pool")?;
+            .context("service runtime has no host staging pool")?;
         let target_available_blocks = host_pool.available_blocks() as usize + evicted_hashes.len();
         drop(evicted_blocks);
 
@@ -496,27 +496,27 @@ impl G3pbPeerRuntime {
 }
 
 #[derive(Clone)]
-struct G3pbBackendService {
+struct G2pbBackendService {
     endpoint_id: String,
-    agent: Arc<G3pbStorageAgent>,
-    runtime: Arc<G3pbPeerRuntime>,
+    agent: Arc<G2pbStorageAgent>,
+    runtime: Arc<G2pbPeerRuntime>,
 }
 
 #[derive(Clone)]
-struct G3pbEndpointHandler {
-    service: Arc<G3pbBackendService>,
+struct G2pbEndpointHandler {
+    service: Arc<G2pbBackendService>,
 }
 
-impl G3pbBackendService {
+impl G2pbBackendService {
     async fn new(args: &Args, instance_id: u64) -> Result<Self> {
-        let mut config = G3pbStorageConfig::new(args.device_id);
+        let mut config = G2pbStorageConfig::new(args.device_id);
         config.g2_capacity_bytes = args.g2_bytes;
-        let storage = Arc::new(G3pbCacheStorage::new(config).await?);
-        let agent = Arc::new(G3pbStorageAgent::new_with_storage(instance_id, storage));
-        let runtime = Arc::new(G3pbPeerRuntime::new(args, instance_id).await?);
+        let storage = Arc::new(G2pbCacheStorage::new(config).await?);
+        let agent = Arc::new(G2pbStorageAgent::new_with_storage(instance_id, storage));
+        let runtime = Arc::new(G2pbPeerRuntime::new(args, instance_id).await?);
 
         Ok(Self {
-            endpoint_id: format!("{G3PB_NAMESPACE}/{G3PB_COMPONENT_NAME}/{G3PB_ENDPOINT_NAME}"),
+            endpoint_id: format!("{G2PB_NAMESPACE}/{G2PB_COMPONENT_NAME}/{G2PB_ENDPOINT_NAME}"),
             agent,
             runtime,
         })
@@ -526,65 +526,65 @@ impl G3pbBackendService {
         self.agent.instance_id()
     }
 
-    async fn handle_rpc(&self, request: G3pbRpcRequest) -> Result<G3pbRpcResponse> {
+    async fn handle_rpc(&self, request: G2pbRpcRequest) -> Result<G2pbRpcResponse> {
         match request {
-            G3pbRpcRequest::Health => Ok(G3pbRpcResponse::Health(G3pbHealthResponse {
+            G2pbRpcRequest::Health => Ok(G2pbRpcResponse::Health(G2pbHealthResponse {
                 instance_id: self.agent.instance_id(),
                 listen: self.endpoint_id.clone(),
                 hostname: std::env::var("HOSTNAME").unwrap_or_default(),
             })),
-            G3pbRpcRequest::PutBlocks(blocks) => {
+            G2pbRpcRequest::PutBlocks(blocks) => {
                 self.agent.put_blocks(blocks).await;
-                Ok(G3pbRpcResponse::Ack)
+                Ok(G2pbRpcResponse::Ack)
             }
-            G3pbRpcRequest::Offer(request) => {
+            G2pbRpcRequest::Offer(request) => {
                 let accepted = self
                     .runtime
                     .offer_blocks(&self.agent, &request.blocks)
                     .await;
-                Ok(G3pbRpcResponse::Offer(
-                    dynamo_llm::block_manager::distributed::G3pbOfferResponse { accepted },
+                Ok(G2pbRpcResponse::Offer(
+                    dynamo_llm::block_manager::distributed::G2pbOfferResponse { accepted },
                 ))
             }
-            G3pbRpcRequest::PutPayload(request) => Ok(G3pbRpcResponse::PutPayload(
+            G2pbRpcRequest::PutPayload(request) => Ok(G2pbRpcResponse::PutPayload(
                 self.agent
                     .offer_and_put_payload_blocks(request.blocks)
                     .await?,
             )),
-            G3pbRpcRequest::Query(request) => Ok(G3pbRpcResponse::Query(
+            G2pbRpcRequest::Query(request) => Ok(G2pbRpcResponse::Query(
                 self.runtime
                     .query_blocks(&self.agent, &request.sequence_hashes)
                     .await,
             )),
-            G3pbRpcRequest::Fetch(request) => Ok(G3pbRpcResponse::Fetch(
+            G2pbRpcRequest::Fetch(request) => Ok(G2pbRpcResponse::Fetch(
                 self.runtime.fetch_descriptors(&request.sequence_hashes)?,
             )),
-            G3pbRpcRequest::StagePut(request) => Ok(G3pbRpcResponse::StagePut(
+            G2pbRpcRequest::StagePut(request) => Ok(G2pbRpcResponse::StagePut(
                 self.runtime
                     .stage_put_blocks(&self.agent, request.blocks)
                     .await?,
             )),
-            G3pbRpcRequest::CommitPut(request) => {
+            G2pbRpcRequest::CommitPut(request) => {
                 self.runtime
                     .commit_staged_blocks(&self.agent, &request.sequence_hashes)
                     .await?;
-                Ok(G3pbRpcResponse::Ack)
+                Ok(G2pbRpcResponse::Ack)
             }
-            G3pbRpcRequest::LoadRemote(request) => {
+            G2pbRpcRequest::LoadRemote(request) => {
                 self.runtime.load_remote_blockset(request.blockset)?;
-                Ok(G3pbRpcResponse::Ack)
+                Ok(G2pbRpcResponse::Ack)
             }
         }
     }
 
     async fn serve(self: Arc<Self>, distributed: &DistributedRuntime) -> Result<()> {
-        let ingress = Ingress::for_engine(G3pbEndpointHandler::new(self.clone()))?;
+        let ingress = Ingress::for_engine(G2pbEndpointHandler::new(self.clone()))?;
         let component = distributed
-            .namespace(G3PB_NAMESPACE)?
-            .component(G3PB_COMPONENT_NAME)?;
+            .namespace(G2PB_NAMESPACE)?
+            .component(G2PB_COMPONENT_NAME)?;
 
         component
-            .endpoint(G3PB_ENDPOINT_NAME)
+            .endpoint(G2PB_ENDPOINT_NAME)
             .endpoint_builder()
             .handler(ingress)
             .graceful_shutdown(true)
@@ -593,20 +593,20 @@ impl G3pbBackendService {
     }
 }
 
-impl G3pbEndpointHandler {
-    fn new(service: Arc<G3pbBackendService>) -> Arc<Self> {
+impl G2pbEndpointHandler {
+    fn new(service: Arc<G2pbBackendService>) -> Arc<Self> {
         Arc::new(Self { service })
     }
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<G3pbRpcRequest>, ManyOut<Annotated<G3pbRpcResponse>>, Error>
-    for G3pbEndpointHandler
+impl AsyncEngine<SingleIn<G2pbRpcRequest>, ManyOut<Annotated<G2pbRpcResponse>>, Error>
+    for G2pbEndpointHandler
 {
     async fn generate(
         &self,
-        input: SingleIn<G3pbRpcRequest>,
-    ) -> anyhow::Result<ManyOut<Annotated<G3pbRpcResponse>>> {
+        input: SingleIn<G2pbRpcRequest>,
+    ) -> anyhow::Result<ManyOut<Annotated<G2pbRpcResponse>>> {
         let (request, ctx) = input.into_parts();
         let response = match self.service.handle_rpc(request).await {
             Ok(response) => Annotated::from_data(response),
@@ -632,10 +632,10 @@ async fn app(runtime: Runtime) -> Result<()> {
     let args = Args::parse()?;
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
     let instance_id = distributed.connection_id();
-    let service = Arc::new(G3pbBackendService::new(&args, instance_id).await?);
+    let service = Arc::new(G2pbBackendService::new(&args, instance_id).await?);
 
     println!(
-        "kvbm_g3pb_backend registering instance_id={} on {G3PB_NAMESPACE}/{G3PB_COMPONENT_NAME}/{G3PB_ENDPOINT_NAME}",
+        "kvbm_g2pb_service registering instance_id={} on {G2PB_NAMESPACE}/{G2PB_COMPONENT_NAME}/{G2PB_ENDPOINT_NAME}",
         service.instance_id()
     );
     service.serve(&distributed).await

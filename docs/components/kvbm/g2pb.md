@@ -1,12 +1,12 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: KVBM G3PB
+title: KVBM G2PB
 ---
 
-# KVBM G3PB
+# KVBM G2PB
 
-`G3PB` is a peer-backed remote cache for KVBM.
+`G2PB` is a peer-backed remote cache for KVBM.
 
 It lets one KVBM-enabled worker copy eligible KV blocks to other live peers and
 later query or fetch them by `sequence_hash`. It is a cache, not a source of
@@ -21,7 +21,7 @@ truth: misses are allowed and fall back to normal recompute or local paths.
 
 ## What It Does Not Do
 
-- it does not add a separate discovery system just for G3PB
+- it does not add a separate discovery system just for G2PB
 - it does not expose peer-local disk layout to callers
 - it does not provide strong consistency or durable ownership guarantees
 - it does not turn remote disk into a directly addressable GPU transfer tier
@@ -30,17 +30,17 @@ truth: misses are allowed and fall back to normal recompute or local paths.
 
 You enable KVBM the normal way through the runtime connector.
 
-Then you opt into native G3PB admission with:
+Then you opt into native G2PB admission with:
 
 ```bash
-export DYN_KVBM_G3PB_ADMISSION_POLICY=after_first_reuse
+export DYN_KVBM_G2PB_ADMISSION_POLICY=after_first_reuse
 ```
 
 Supported values today:
 
-- `after_first_reuse`: admit a block to G3PB after it is seen again
+- `after_first_reuse`: admit a block to G2PB after it is seen again
 - `eager`: admit immediately
-- `disabled`: do not use G3PB admission
+- `disabled`: do not use G2PB admission
 
 This is a KVBM policy surface, not a separate serving mode.
 
@@ -65,12 +65,12 @@ logical shard identity even if its live `instance_id` changes.
 
 ## How Discovery Works
 
-G3PB uses normal Dynamo component discovery.
+G2PB uses normal Dynamo component discovery.
 
-The backend registers the peer-cache endpoint at:
+The service registers the G2PB endpoint at:
 
 ```text
-kvbm-g3pb/peer-cache/g3pb
+kvbm-g2pb/service/g2pb
 ```
 
 The worker-side client:
@@ -80,7 +80,7 @@ The worker-side client:
 3. builds a local peer snapshot
 4. refreshes that snapshot when discovery changes
 
-There is no separate G3PB registry layered on top of Dynamo.
+There is no separate G2PB registry layered on top of Dynamo.
 
 ## Data Flow
 
@@ -116,12 +116,12 @@ Important properties:
 - it prefetches into local host cache first, then relies on the existing
   host-to-device onboarding path later
 
-This keeps G3PB as a cache-assist mechanism rather than making remote peer hits
+This keeps G2PB as a cache-assist mechanism rather than making remote peer hits
 part of the correctness contract for scheduling.
 
 ## Operational Notes
 
-- G3PB is best treated as a cache extension, not a durability layer.
+- G2PB is best treated as a cache extension, not a durability layer.
 - Misses are normal and degrade to local miss handling.
 - Brief peer churn should cause limited remapping because ownership uses
   rendezvous hashing.
@@ -130,27 +130,23 @@ part of the correctness contract for scheduling.
 
 ## Current Storage Choice
 
-The current peer-local storage backend uses `foyer`.
 
 We chose it for practical reasons:
 
 - it already gives us a hybrid cache structure that fits the peer-backed model
-- it supports `io_uring`
-- it supports sharding across multiple disks
 - it supports persistence across process restart
 - it provides a more capable LRU-style eviction policy based on recent access
 
 This was informed by previous good experience with it in earlier Chroma
 workplane work.
 
-The tradeoff is that this does not give us direct remote-disk access as a KVBM
+The tradeoff is that this does not give us direct cpu access as a KVBM
 transfer tier.
 
 That is also partly intentional:
 
-- remote disks are often slow or operationally unreliable
-- some remote media may be spinning or network-backed
-- holding remote GPU-visible staging for the duration of a slow disk read would
+- remote transfers are often slow or operationally unreliable
+- holding remote GPU-visible staging for the duration of a slow cpu read would
   tie up remote memory until local onboard completes
 
 So the current choice is to keep peer distribution and cache ownership simple
@@ -167,4 +163,4 @@ Today, the implemented surface is:
 - owner selection through rendezvous hashing
 - remote `offer`, `query`, `fetch`, `stage_put`, and `commit_put`
 - NIXL-backed staged transfers
-- KVBM-native admission policy via `DYN_KVBM_G3PB_ADMISSION_POLICY`
+- KVBM-native admission policy via `DYN_KVBM_G2PB_ADMISSION_POLICY`

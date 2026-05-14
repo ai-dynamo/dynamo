@@ -26,11 +26,11 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
-fn apply_g3pb_admission_config(config: &mut KvBlockManagerConfig) {
+fn apply_g2pb_admission_config(config: &mut KvBlockManagerConfig) {
     let admission = config
-        .g3pb_admission
+        .g2pb_admission
         .clone()
-        .or_else(config::G3pbAdmissionConfig::from_legacy_env);
+        .or_else(config::G2pbAdmissionConfig::from_legacy_env);
 
     if let (Some(admission), Some(host_layout)) = (admission, config.host_layout.as_mut())
         && host_layout.offload_filter.is_none()
@@ -244,7 +244,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
     KvBlockManagerState<locality::Logical<R>, Metadata>
 {
     pub async fn new(mut config: KvBlockManagerConfig, logical_resources: R) -> Result<Arc<Self>> {
-        apply_g3pb_admission_config(&mut config);
+        apply_g2pb_admission_config(&mut config);
         let model_config = config.model.clone();
         let mut resources = Resources::new(config).await?;
         let block_data_factories =
@@ -364,7 +364,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
 // - this will allow us to use the locality abstraction to build our factories and block pools
 impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
     pub async fn new(mut config: KvBlockManagerConfig) -> Result<Arc<Self>> {
-        apply_g3pb_admission_config(&mut config);
+        apply_g2pb_admission_config(&mut config);
         let model_config = config.model.clone();
         let mut resources = Resources::new(config).await?;
         let block_data_factories = local::LocalBlockDataFactories::new(&mut resources)?;
@@ -488,7 +488,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
 mod tests {
     use super::*;
     use crate::block_manager::config::{
-        G3pbAdmissionConfig, KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig,
+        G2pbAdmissionConfig, KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig,
     };
     use crate::block_manager::storage::{DeviceStorage, PinnedStorage};
 
@@ -529,23 +529,23 @@ mod tests {
     }
 
     #[test]
-    fn apply_g3pb_admission_config_installs_host_filter() {
+    fn apply_g2pb_admission_config_installs_host_filter() {
         let mut config = base_config();
-        config.g3pb_admission = Some(G3pbAdmissionConfig::eager());
+        config.g2pb_admission = Some(G2pbAdmissionConfig::eager());
 
-        apply_g3pb_admission_config(&mut config);
+        apply_g2pb_admission_config(&mut config);
 
         assert!(config.host_layout.unwrap().offload_filter.is_some());
     }
 
     #[test]
-    fn apply_g3pb_admission_config_preserves_explicit_host_filter() {
+    fn apply_g2pb_admission_config_preserves_explicit_host_filter() {
         let mut config = base_config();
-        let explicit = crate::block_manager::offload::g3pb_filter::G3pbAdmissionFilter::default();
+        let explicit = crate::block_manager::offload::g2pb_filter::G2pbAdmissionFilter::default();
         config.host_layout.as_mut().unwrap().offload_filter = Some(Arc::new(explicit));
-        config.g3pb_admission = Some(G3pbAdmissionConfig::eager());
+        config.g2pb_admission = Some(G2pbAdmissionConfig::eager());
 
-        apply_g3pb_admission_config(&mut config);
+        apply_g2pb_admission_config(&mut config);
 
         assert!(config.host_layout.unwrap().offload_filter.is_some());
     }

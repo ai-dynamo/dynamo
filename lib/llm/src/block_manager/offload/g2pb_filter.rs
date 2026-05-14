@@ -5,49 +5,49 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 
-use crate::block_manager::config::{G3pbAdmissionConfig, G3pbAdmissionPolicy};
+use crate::block_manager::config::{G2pbAdmissionConfig, G2pbAdmissionPolicy};
 use crate::tokens::SequenceHash;
 
 use super::OffloadFilter;
 
-/// A filter that admits blocks to G3PB based on reuse frequency.
+/// A filter that admits blocks to G2PB based on reuse frequency.
 ///
 /// The default policy is to admit blocks that have been reused at least once.
-/// This can be overridden with the `G3PB_OFFLOAD_ALL` environment variable to
+/// This can be overridden with the `G2PB_OFFLOAD_ALL` environment variable to
 /// eagerly admit every block.
 ///
 /// The semantics are copy/replication, not ownership transfer - blocks remain
-/// available locally after being admitted to G3PB.
+/// available locally after being admitted to G2PB.
 #[derive(Debug, Clone)]
-pub struct G3pbAdmissionFilter {
+pub struct G2pbAdmissionFilter {
     /// Track reuse count for each sequence hash
     reuse_map: Arc<Mutex<HashMap<SequenceHash, usize>>>,
     /// If true, admit all blocks regardless of reuse count
     offload_all: bool,
 }
 
-impl G3pbAdmissionFilter {
-    /// Create a new G3PB admission filter.
+impl G2pbAdmissionFilter {
+    /// Create a new G2PB admission filter.
     ///
     /// By default, blocks are admitted after being reused at least once.
-    /// Set the `G3PB_OFFLOAD_ALL` environment variable to "1" or "true" to
+    /// Set the `G2PB_OFFLOAD_ALL` environment variable to "1" or "true" to
     /// eagerly admit every block.
     pub fn new() -> Self {
-        let config = G3pbAdmissionConfig::from_legacy_env().unwrap_or_default();
+        let config = G2pbAdmissionConfig::from_legacy_env().unwrap_or_default();
         Self::from_config(config)
     }
 
-    pub fn from_config(config: G3pbAdmissionConfig) -> Self {
+    pub fn from_config(config: G2pbAdmissionConfig) -> Self {
         Self {
             reuse_map: Arc::new(Mutex::new(HashMap::new())),
-            offload_all: matches!(config.policy, G3pbAdmissionPolicy::Eager),
+            offload_all: matches!(config.policy, G2pbAdmissionPolicy::Eager),
         }
     }
 
-    /// Check if a block should be admitted to G3PB.
+    /// Check if a block should be admitted to G2PB.
     ///
     /// Returns true if:
-    /// - `G3PB_OFFLOAD_ALL` is set, OR
+    /// - `G2PB_OFFLOAD_ALL` is set, OR
     /// - The block has been reused at least once (i.e., this is the second or later access)
     pub fn should_admit(&self, sequence_hash: SequenceHash) -> bool {
         if self.offload_all {
@@ -63,13 +63,13 @@ impl G3pbAdmissionFilter {
     }
 }
 
-impl OffloadFilter for G3pbAdmissionFilter {
+impl OffloadFilter for G2pbAdmissionFilter {
     fn should_offload(&self, sequence_hash: SequenceHash) -> bool {
         self.should_admit(sequence_hash)
     }
 }
 
-impl Default for G3pbAdmissionFilter {
+impl Default for G2pbAdmissionFilter {
     fn default() -> Self {
         Self::new()
     }
@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn test_default_admission_requires_reuse() {
-        let filter = G3pbAdmissionFilter::from_config(G3pbAdmissionConfig::after_first_reuse());
+        let filter = G2pbAdmissionFilter::from_config(G2pbAdmissionConfig::after_first_reuse());
 
         // First access should not be admitted
         assert!(!filter.should_offload(hash(1)));
@@ -105,9 +105,9 @@ mod tests {
 
     #[test]
     fn test_offload_all_admits_immediately() {
-        let filter = G3pbAdmissionFilter::from_config(G3pbAdmissionConfig::eager());
+        let filter = G2pbAdmissionFilter::from_config(G2pbAdmissionConfig::eager());
 
-        // First access should be admitted when G3PB_OFFLOAD_ALL is set
+        // First access should be admitted when G2PB_OFFLOAD_ALL is set
         assert!(filter.should_offload(hash(1)));
         assert!(filter.should_offload(hash(2)));
         assert!(filter.should_offload(hash(3)));
@@ -117,15 +117,15 @@ mod tests {
     fn test_legacy_env_true_string() {
         let _guard = env_lock().lock().unwrap();
         unsafe {
-            std::env::set_var("G3PB_OFFLOAD_ALL", "true");
+            std::env::set_var("G2PB_OFFLOAD_ALL", "true");
         }
-        let filter = G3pbAdmissionFilter::new();
+        let filter = G2pbAdmissionFilter::new();
 
-        // First access should be admitted when G3PB_OFFLOAD_ALL is "true"
+        // First access should be admitted when G2PB_OFFLOAD_ALL is "true"
         assert!(filter.should_offload(hash(1)));
 
         unsafe {
-            std::env::remove_var("G3PB_OFFLOAD_ALL");
+            std::env::remove_var("G2PB_OFFLOAD_ALL");
         }
     }
 
@@ -133,21 +133,21 @@ mod tests {
     fn test_legacy_env_false_string() {
         let _guard = env_lock().lock().unwrap();
         unsafe {
-            std::env::set_var("G3PB_OFFLOAD_ALL", "false");
+            std::env::set_var("G2PB_OFFLOAD_ALL", "false");
         }
-        let filter = G3pbAdmissionFilter::new();
+        let filter = G2pbAdmissionFilter::new();
 
-        // First access should not be admitted when G3PB_OFFLOAD_ALL is "false"
+        // First access should not be admitted when G2PB_OFFLOAD_ALL is "false"
         assert!(!filter.should_offload(hash(1)));
 
         unsafe {
-            std::env::remove_var("G3PB_OFFLOAD_ALL");
+            std::env::remove_var("G2PB_OFFLOAD_ALL");
         }
     }
 
     #[test]
     fn test_multiple_hashes_tracked_separately() {
-        let filter = G3pbAdmissionFilter::from_config(G3pbAdmissionConfig::after_first_reuse());
+        let filter = G2pbAdmissionFilter::from_config(G2pbAdmissionConfig::after_first_reuse());
 
         // First access to each hash should not be admitted
         assert!(!filter.should_offload(hash(1)));
@@ -168,9 +168,9 @@ mod tests {
     fn test_default_trait() {
         let _guard = env_lock().lock().unwrap();
         unsafe {
-            std::env::remove_var("G3PB_OFFLOAD_ALL");
+            std::env::remove_var("G2PB_OFFLOAD_ALL");
         }
-        let filter = G3pbAdmissionFilter::default();
+        let filter = G2pbAdmissionFilter::default();
         // Should behave the same as new()
         assert!(!filter.should_offload(hash(1)));
         assert!(filter.should_offload(hash(1)));

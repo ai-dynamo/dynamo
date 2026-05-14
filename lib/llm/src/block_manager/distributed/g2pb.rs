@@ -7,18 +7,18 @@ use crate::tokens::{SequenceHash, compute_hash_v2};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-pub const G3PB_NAMESPACE: &str = "kvbm-g3pb";
-pub const G3PB_COMPONENT_NAME: &str = "peer-cache";
-pub const G3PB_ENDPOINT_NAME: &str = "g3pb";
+pub const G2PB_NAMESPACE: &str = "kvbm-g2pb";
+pub const G2PB_COMPONENT_NAME: &str = "service";
+pub const G2PB_ENDPOINT_NAME: &str = "g2pb";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct G3pbPeer {
+pub struct G2pbPeer {
     pub instance_id: u64,
     pub endpoint: String,
     pub hostname: String,
 }
 
-impl G3pbPeer {
+impl G2pbPeer {
     pub fn routing_id(&self) -> u64 {
         if self.hostname.is_empty() {
             return self.instance_id;
@@ -29,14 +29,14 @@ impl G3pbPeer {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct G3pbPutBlock {
+pub struct G2pbPutBlock {
     pub sequence_hash: SequenceHash,
     pub size_bytes: usize,
     pub checksum: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct G3pbQueryHit {
+pub struct G2pbQueryHit {
     pub instance_id: u64,
     pub sequence_hash: SequenceHash,
     pub size_bytes: usize,
@@ -44,16 +44,16 @@ pub struct G3pbQueryHit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct G3pbTransferBlock {
-    pub meta: G3pbPutBlock,
+pub struct G2pbTransferBlock {
+    pub meta: G2pbPutBlock,
     pub payload: Vec<u8>,
 }
 
-impl G3pbTransferBlock {
-    fn validate_payload_size(&self) -> Result<(), G3pbError> {
+impl G2pbTransferBlock {
+    fn validate_payload_size(&self) -> Result<(), G2pbError> {
         let actual_size_bytes = self.payload.len();
         if actual_size_bytes != self.meta.size_bytes {
-            return Err(G3pbError::InvalidPayloadSize {
+            return Err(G2pbError::InvalidPayloadSize {
                 sequence_hash: self.meta.sequence_hash,
                 expected_size_bytes: self.meta.size_bytes,
                 actual_size_bytes,
@@ -65,110 +65,110 @@ impl G3pbTransferBlock {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct G3pbOfferRequest {
-    pub blocks: Vec<G3pbPutBlock>,
+pub struct G2pbOfferRequest {
+    pub blocks: Vec<G2pbPutBlock>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct G3pbHealthResponse {
+pub struct G2pbHealthResponse {
     pub instance_id: u64,
     pub listen: String,
     pub hostname: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct G3pbQueryRequest {
+pub struct G2pbQueryRequest {
     pub sequence_hashes: Vec<SequenceHash>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct G3pbOfferResponse {
+pub struct G2pbOfferResponse {
     pub accepted: Vec<SequenceHash>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct G3pbPutPayloadRequest {
-    pub blocks: Vec<G3pbTransferBlock>,
+pub struct G2pbPutPayloadRequest {
+    pub blocks: Vec<G2pbTransferBlock>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct G3pbFetchRequest {
+pub struct G2pbFetchRequest {
     pub sequence_hashes: Vec<SequenceHash>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct G3pbFetchResponse {
-    pub blocks: Vec<G3pbTransferBlock>,
+pub struct G2pbFetchResponse {
+    pub blocks: Vec<G2pbTransferBlock>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum G3pbRpcRequest {
+pub enum G2pbRpcRequest {
     Health,
-    PutBlocks(Vec<G3pbPutBlock>),
-    Offer(G3pbOfferRequest),
-    PutPayload(G3pbPutPayloadRequest),
-    Query(G3pbQueryRequest),
-    Fetch(G3pbFetchRequest),
-    StagePut(G3pbStageBlocksRequest),
-    CommitPut(G3pbCommitRequest),
-    LoadRemote(G3pbLoadRemoteRequest),
+    PutBlocks(Vec<G2pbPutBlock>),
+    Offer(G2pbOfferRequest),
+    PutPayload(G2pbPutPayloadRequest),
+    Query(G2pbQueryRequest),
+    Fetch(G2pbFetchRequest),
+    StagePut(G2pbStageBlocksRequest),
+    CommitPut(G2pbCommitRequest),
+    LoadRemote(G2pbLoadRemoteRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum G3pbRpcResponse {
+pub enum G2pbRpcResponse {
     Ack,
-    Health(G3pbHealthResponse),
-    Offer(G3pbOfferResponse),
-    PutPayload(Vec<G3pbTransferBlock>),
-    Query(Vec<G3pbQueryHit>),
-    Fetch(G3pbFetchBlocksResponse),
-    StagePut(G3pbStageBlocksResponse),
+    Health(G2pbHealthResponse),
+    Offer(G2pbOfferResponse),
+    PutPayload(Vec<G2pbTransferBlock>),
+    Query(Vec<G2pbQueryHit>),
+    Fetch(G2pbFetchBlocksResponse),
+    StagePut(G2pbStageBlocksResponse),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct G3pbStageBlocksRequest {
-    pub blocks: Vec<G3pbPutBlock>,
+pub struct G2pbStageBlocksRequest {
+    pub blocks: Vec<G2pbPutBlock>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct G3pbStageBlocksResponse {
+pub struct G2pbStageBlocksResponse {
     pub instance_id: u64,
     pub blockset: SerializedNixlBlockSet,
     pub descriptors: BlockDescriptorList,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct G3pbCommitRequest {
+pub struct G2pbCommitRequest {
     pub sequence_hashes: Vec<SequenceHash>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct G3pbLoadRemoteRequest {
+pub struct G2pbLoadRemoteRequest {
     pub blockset: SerializedNixlBlockSet,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct G3pbFetchBlocksResponse {
+pub struct G2pbFetchBlocksResponse {
     pub instance_id: u64,
     pub blockset: SerializedNixlBlockSet,
     pub descriptors: BlockDescriptorList,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum G3pbError {
-    #[error("no live G3PB peers are available")]
+pub enum G2pbError {
+    #[error("no live G2PB peers are available")]
     NoPeers,
-    #[error("owning G3PB peer instance {instance_id} is not available")]
+    #[error("owning G2PB peer instance {instance_id} is not available")]
     UnknownPeer { instance_id: u64 },
     #[error(
-        "requested G3PB blocks were not found on peer instance {instance_id}: {sequence_hashes:?}"
+        "requested G2PB blocks were not found on peer instance {instance_id}: {sequence_hashes:?}"
     )]
     NotFound {
         instance_id: u64,
         sequence_hashes: Vec<SequenceHash>,
     },
     #[error(
-        "G3PB payload for sequence hash {sequence_hash} had size {actual_size_bytes}, expected {expected_size_bytes}"
+        "G2PB payload for sequence hash {sequence_hash} had size {actual_size_bytes}, expected {expected_size_bytes}"
     )]
     InvalidPayloadSize {
         sequence_hash: SequenceHash,
@@ -177,16 +177,16 @@ pub enum G3pbError {
     },
 }
 
-mod g3pb_client;
-mod g3pb_service;
+mod g2pb_client;
+mod g2pb_service;
 
-pub use g3pb_client::{
-    G3pbDiscoveredPeers, G3pbPeerInstance, G3pbPeerResolver, G3pbRequestPlaneClient,
-    G3pbStorageClient, discover_g3pb_peers, route_g3pb_put_blocks_by_owner,
-    route_g3pb_sequence_hashes_by_owner, route_g3pb_transfer_blocks_by_owner, select_g3pb_owner,
+pub use g2pb_client::{
+    G2pbDiscoveredPeers, G2pbPeerInstance, G2pbPeerResolver, G2pbRequestPlaneClient,
+    G2pbStorageClient, discover_g2pb_peers, route_g2pb_put_blocks_by_owner,
+    route_g2pb_sequence_hashes_by_owner, route_g2pb_transfer_blocks_by_owner, select_g2pb_owner,
 };
-pub use g3pb_service::{
-    G3pbCacheStorage, G3pbStorageAgent, G3pbStorageConfig,
+pub use g2pb_service::{
+    G2pbCacheStorage, G2pbStorageAgent, G2pbStorageConfig,
 };
 #[cfg(test)]
 mod tests {
@@ -195,22 +195,22 @@ mod tests {
     use anyhow::Result;
     use tokio::time::Instant;
 
-    fn peers() -> Vec<G3pbPeer> {
+    fn peers() -> Vec<G2pbPeer> {
         vec![
-            G3pbPeer {
+            G2pbPeer {
                 instance_id: 101,
                 endpoint: "tcp://peer-10".to_string(),
-                hostname: "g3pb-10".to_string(),
+                hostname: "g2pb-10".to_string(),
             },
-            G3pbPeer {
+            G2pbPeer {
                 instance_id: 202,
                 endpoint: "tcp://peer-20".to_string(),
-                hostname: "g3pb-20".to_string(),
+                hostname: "g2pb-20".to_string(),
             },
-            G3pbPeer {
+            G2pbPeer {
                 instance_id: 303,
                 endpoint: "tcp://peer-30".to_string(),
-                hostname: "g3pb-30".to_string(),
+                hostname: "g2pb-30".to_string(),
             },
         ]
     }
@@ -220,11 +220,11 @@ mod tests {
         let peers = peers();
         let sequence_hash = 0xdead_beef_u64;
 
-        let owner_a = select_g3pb_owner(sequence_hash, &peers).unwrap();
+        let owner_a = select_g2pb_owner(sequence_hash, &peers).unwrap();
 
         let mut reversed = peers.clone();
         reversed.reverse();
-        let owner_b = select_g3pb_owner(sequence_hash, &reversed).unwrap();
+        let owner_b = select_g2pb_owner(sequence_hash, &reversed).unwrap();
 
         assert_eq!(owner_a, owner_b);
     }
@@ -234,7 +234,7 @@ mod tests {
         let peer_list = peers();
         let sequence_hashes = vec![1_u64, 2_u64, 3_u64, 4_u64];
 
-        let routed = route_g3pb_sequence_hashes_by_owner(&sequence_hashes, &peer_list).unwrap();
+        let routed = route_g2pb_sequence_hashes_by_owner(&sequence_hashes, &peer_list).unwrap();
 
         for hashes in routed.values() {
             let mut expected = hashes.clone();
@@ -250,21 +250,21 @@ mod tests {
 
     #[test]
     fn discovered_peers_reject_duplicate_instance_ids() {
-        let err = G3pbDiscoveredPeers::from_health_responses(vec![
+        let err = G2pbDiscoveredPeers::from_health_responses(vec![
             (
                 101,
-                G3pbHealthResponse {
+                G2pbHealthResponse {
                     instance_id: 10,
                     listen: "tcp://peer-10-a".to_string(),
-                    hostname: "g3pb-10-a".to_string(),
+                    hostname: "g2pb-10-a".to_string(),
                 },
             ),
             (
                 202,
-                G3pbHealthResponse {
+                G2pbHealthResponse {
                     instance_id: 10,
                     listen: "tcp://peer-10-b".to_string(),
-                    hostname: "g3pb-10-b".to_string(),
+                    hostname: "g2pb-10-b".to_string(),
                 },
             ),
         ])
@@ -278,29 +278,29 @@ mod tests {
 
     #[test]
     fn discovered_peers_sort_instances_by_routing_id() {
-        let discovered = G3pbDiscoveredPeers::from_health_responses(vec![
+        let discovered = G2pbDiscoveredPeers::from_health_responses(vec![
             (
                 303,
-                G3pbHealthResponse {
+                G2pbHealthResponse {
                     instance_id: 30,
                     listen: "tcp://peer-30".to_string(),
-                    hostname: "g3pb-30".to_string(),
+                    hostname: "g2pb-30".to_string(),
                 },
             ),
             (
                 101,
-                G3pbHealthResponse {
+                G2pbHealthResponse {
                     instance_id: 10,
                     listen: "tcp://peer-10".to_string(),
-                    hostname: "g3pb-10".to_string(),
+                    hostname: "g2pb-10".to_string(),
                 },
             ),
             (
                 202,
-                G3pbHealthResponse {
+                G2pbHealthResponse {
                     instance_id: 20,
                     listen: "tcp://peer-20".to_string(),
-                    hostname: "g3pb-20".to_string(),
+                    hostname: "g2pb-20".to_string(),
                 },
             ),
         ])
@@ -327,20 +327,20 @@ mod tests {
 
     #[tokio::test]
     async fn agent_query_and_fetch_use_in_memory_peer_cache() {
-        let agent = G3pbStorageAgent::new(7);
+        let agent = G2pbStorageAgent::new(7);
 
         agent
             .offer_and_put_payload_blocks(vec![
-                G3pbTransferBlock {
-                    meta: G3pbPutBlock {
+                G2pbTransferBlock {
+                    meta: G2pbPutBlock {
                         sequence_hash: 11,
                         size_bytes: 4,
                         checksum: None,
                     },
                     payload: vec![1, 2, 3, 4],
                 },
-                G3pbTransferBlock {
-                    meta: G3pbPutBlock {
+                G2pbTransferBlock {
+                    meta: G2pbPutBlock {
                         sequence_hash: 12,
                         size_bytes: 2,
                         checksum: Some([3; 32]),
@@ -361,16 +361,16 @@ mod tests {
         assert_eq!(
             fetched,
             vec![
-                G3pbTransferBlock {
-                    meta: G3pbPutBlock {
+                G2pbTransferBlock {
+                    meta: G2pbPutBlock {
                         sequence_hash: 11,
                         size_bytes: 4,
                         checksum: None,
                     },
                     payload: vec![1, 2, 3, 4],
                 },
-                G3pbTransferBlock {
-                    meta: G3pbPutBlock {
+                G2pbTransferBlock {
+                    meta: G2pbPutBlock {
                         sequence_hash: 12,
                         size_bytes: 2,
                         checksum: Some([3; 32]),
@@ -383,10 +383,10 @@ mod tests {
 
     #[tokio::test]
     async fn agent_fetch_reports_not_found() {
-        let agent = G3pbStorageAgent::new(3);
+        let agent = G2pbStorageAgent::new(3);
 
         agent
-            .put_blocks(vec![G3pbPutBlock {
+            .put_blocks(vec![G2pbPutBlock {
                 sequence_hash: 44,
                 size_bytes: 8,
                 checksum: None,
@@ -396,7 +396,7 @@ mod tests {
         let err = agent.fetch_blocks(&[44]).await.unwrap_err();
         assert!(matches!(
             err,
-            G3pbError::NotFound {
+            G2pbError::NotFound {
                 instance_id: 3,
                 sequence_hashes
             } if sequence_hashes == vec![44]
@@ -405,9 +405,9 @@ mod tests {
 
     #[tokio::test]
     async fn agent_offer_only_accepts_missing_blocks() {
-        let agent = G3pbStorageAgent::new(7);
+        let agent = G2pbStorageAgent::new(7);
         agent
-            .put_blocks(vec![G3pbPutBlock {
+            .put_blocks(vec![G2pbPutBlock {
                 sequence_hash: 100,
                 size_bytes: 16,
                 checksum: None,
@@ -416,17 +416,17 @@ mod tests {
 
         let accepted = agent
             .offered_blocks(vec![
-                G3pbPutBlock {
+                G2pbPutBlock {
                     sequence_hash: 100,
                     size_bytes: 16,
                     checksum: None,
                 },
-                G3pbPutBlock {
+                G2pbPutBlock {
                     sequence_hash: 200,
                     size_bytes: 32,
                     checksum: None,
                 },
-                G3pbPutBlock {
+                G2pbPutBlock {
                     sequence_hash: 200,
                     size_bytes: 32,
                     checksum: None,
@@ -436,7 +436,7 @@ mod tests {
 
         assert_eq!(
             accepted,
-            vec![G3pbPutBlock {
+            vec![G2pbPutBlock {
                 sequence_hash: 200,
                 size_bytes: 32,
                 checksum: None,
@@ -446,20 +446,20 @@ mod tests {
 
     #[tokio::test]
     async fn agent_offer_and_put_registers_only_missing_blocks() {
-        let agent = G3pbStorageAgent::new(7);
+        let agent = G2pbStorageAgent::new(7);
         let accepted = agent
             .offer_and_put_blocks(vec![
-                G3pbPutBlock {
+                G2pbPutBlock {
                     sequence_hash: 5,
                     size_bytes: 16,
                     checksum: None,
                 },
-                G3pbPutBlock {
+                G2pbPutBlock {
                     sequence_hash: 6,
                     size_bytes: 32,
                     checksum: Some([9; 32]),
                 },
-                G3pbPutBlock {
+                G2pbPutBlock {
                     sequence_hash: 6,
                     size_bytes: 32,
                     checksum: Some([9; 32]),
@@ -477,11 +477,11 @@ mod tests {
 
     #[tokio::test]
     async fn agent_offer_payload_blocks_rejects_size_mismatch() {
-        let agent = G3pbStorageAgent::new(7);
+        let agent = G2pbStorageAgent::new(7);
 
         let err = agent
-            .offered_payload_blocks(vec![G3pbTransferBlock {
-                meta: G3pbPutBlock {
+            .offered_payload_blocks(vec![G2pbTransferBlock {
+                meta: G2pbPutBlock {
                     sequence_hash: 5,
                     size_bytes: 4,
                     checksum: None,
@@ -493,7 +493,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            G3pbError::InvalidPayloadSize {
+            G2pbError::InvalidPayloadSize {
                 sequence_hash: 5,
                 expected_size_bytes: 4,
                 actual_size_bytes: 3
@@ -504,15 +504,15 @@ mod tests {
     #[tokio::test]
     async fn client_put_and_query_route_by_owner() {
         let peer_list = peers();
-        let owner = select_g3pb_owner(1234, &peer_list).unwrap();
-        let agent = Arc::new(G3pbStorageAgent::new(owner.instance_id));
-        let client = G3pbStorageClient::new(
+        let owner = select_g2pb_owner(1234, &peer_list).unwrap();
+        let agent = Arc::new(G2pbStorageAgent::new(owner.instance_id));
+        let client = G2pbStorageClient::new(
             peer_list,
             HashMap::from_iter([(owner.instance_id, agent.clone())]),
         );
 
         client
-            .put_blocks(vec![G3pbPutBlock {
+            .put_blocks(vec![G2pbPutBlock {
                 sequence_hash: 1234,
                 size_bytes: 64,
                 checksum: Some([7; 32]),
@@ -534,39 +534,39 @@ mod tests {
         for peer in &peer_list {
             agents.insert(
                 peer.instance_id,
-                Arc::new(G3pbStorageAgent::new(peer.instance_id)),
+                Arc::new(G2pbStorageAgent::new(peer.instance_id)),
             );
         }
 
         let existing_hash = 200_u64;
-        let existing_owner = select_g3pb_owner(existing_hash, &peer_list).unwrap();
+        let existing_owner = select_g2pb_owner(existing_hash, &peer_list).unwrap();
         agents[&existing_owner.instance_id]
-            .put_blocks(vec![G3pbPutBlock {
+            .put_blocks(vec![G2pbPutBlock {
                 sequence_hash: existing_hash,
                 size_bytes: 8,
                 checksum: None,
             }])
             .await;
 
-        let client = G3pbStorageClient::new(peer_list, agents);
+        let client = G2pbStorageClient::new(peer_list, agents);
         let accepted = client
             .offer_blocks(vec![
-                G3pbPutBlock {
+                G2pbPutBlock {
                     sequence_hash: 100,
                     size_bytes: 8,
                     checksum: None,
                 },
-                G3pbPutBlock {
+                G2pbPutBlock {
                     sequence_hash: existing_hash,
                     size_bytes: 8,
                     checksum: None,
                 },
-                G3pbPutBlock {
+                G2pbPutBlock {
                     sequence_hash: 300,
                     size_bytes: 8,
                     checksum: None,
                 },
-                G3pbPutBlock {
+                G2pbPutBlock {
                     sequence_hash: 100,
                     size_bytes: 8,
                     checksum: None,
@@ -591,31 +591,31 @@ mod tests {
         for peer in &peer_list {
             agents.insert(
                 peer.instance_id,
-                Arc::new(G3pbStorageAgent::new(peer.instance_id)),
+                Arc::new(G2pbStorageAgent::new(peer.instance_id)),
             );
         }
 
-        let client = G3pbStorageClient::new(peer_list.clone(), agents.clone());
+        let client = G2pbStorageClient::new(peer_list.clone(), agents.clone());
         let accepted = client
             .offer_and_put_payload_blocks(vec![
-                G3pbTransferBlock {
-                    meta: G3pbPutBlock {
+                G2pbTransferBlock {
+                    meta: G2pbPutBlock {
                         sequence_hash: 1,
                         size_bytes: 2,
                         checksum: None,
                     },
                     payload: vec![1, 2],
                 },
-                G3pbTransferBlock {
-                    meta: G3pbPutBlock {
+                G2pbTransferBlock {
+                    meta: G2pbPutBlock {
                         sequence_hash: 2,
                         size_bytes: 2,
                         checksum: None,
                     },
                     payload: vec![3, 4],
                 },
-                G3pbTransferBlock {
-                    meta: G3pbPutBlock {
+                G2pbTransferBlock {
+                    meta: G2pbPutBlock {
                         sequence_hash: 1,
                         size_bytes: 2,
                         checksum: None,
@@ -651,15 +651,15 @@ mod tests {
         let mut agents = HashMap::new();
 
         for sequence_hash in &sequence_hashes {
-            let owner = select_g3pb_owner(*sequence_hash, &peer_list).unwrap();
+            let owner = select_g2pb_owner(*sequence_hash, &peer_list).unwrap();
             agents.entry(owner.instance_id).or_insert_with(|| {
                 Arc::new(
-                    G3pbStorageAgent::new(owner.instance_id)
+                    G2pbStorageAgent::new(owner.instance_id)
                         .with_query_delay(Duration::from_millis(75)),
                 )
             });
             agents[&owner.instance_id]
-                .put_blocks(vec![G3pbPutBlock {
+                .put_blocks(vec![G2pbPutBlock {
                     sequence_hash: *sequence_hash,
                     size_bytes: 8,
                     checksum: None,
@@ -667,7 +667,7 @@ mod tests {
                 .await;
         }
 
-        let client = G3pbStorageClient::new(peer_list, agents);
+        let client = G2pbStorageClient::new(peer_list, agents);
         let start = Instant::now();
         let hits = client.query_blocks(&sequence_hashes).await;
         let elapsed = start.elapsed();
@@ -679,10 +679,10 @@ mod tests {
     #[tokio::test]
     async fn client_treats_missing_fetches_as_cache_miss() {
         let peer_list = peers();
-        let owner = select_g3pb_owner(1234, &peer_list).unwrap();
-        let agent = Arc::new(G3pbStorageAgent::new(owner.instance_id));
+        let owner = select_g2pb_owner(1234, &peer_list).unwrap();
+        let agent = Arc::new(G2pbStorageAgent::new(owner.instance_id));
         agent
-            .put_blocks(vec![G3pbPutBlock {
+            .put_blocks(vec![G2pbPutBlock {
                 sequence_hash: 1234,
                 size_bytes: 4,
                 checksum: None,
@@ -690,22 +690,22 @@ mod tests {
             .await;
 
         let client =
-            G3pbStorageClient::new(peer_list, HashMap::from_iter([(owner.instance_id, agent)]));
+            G2pbStorageClient::new(peer_list, HashMap::from_iter([(owner.instance_id, agent)]));
         let fetched = client.fetch_blocks(&[1234]).await;
         assert!(fetched.is_empty());
     }
 
     #[tokio::test]
-    async fn g3pb_cache_storage_supports_basic_operations() -> Result<()> {
-        let mut config = G3pbStorageConfig::new(0);
+    async fn g2pb_cache_storage_supports_basic_operations() -> Result<()> {
+        let mut config = G2pbStorageConfig::new(0);
         config.g2_capacity_bytes = 4 * 1024;
 
-        let storage = Arc::new(G3pbCacheStorage::new(config).await?);
-        let agent = G3pbStorageAgent::new_with_storage(77, storage.clone());
+        let storage = Arc::new(G2pbCacheStorage::new(config).await?);
+        let agent = G2pbStorageAgent::new_with_storage(77, storage.clone());
 
         agent
-            .offer_and_put_payload_blocks(vec![G3pbTransferBlock {
-                meta: G3pbPutBlock {
+            .offer_and_put_payload_blocks(vec![G2pbTransferBlock {
+                meta: G2pbPutBlock {
                     sequence_hash: 1001,
                     size_bytes: 8,
                     checksum: None,
@@ -722,12 +722,12 @@ mod tests {
         // Test offer blocks
         let accepted = agent
             .offer_blocks(&[
-                G3pbPutBlock {
+                G2pbPutBlock {
                     sequence_hash: 1001,
                     size_bytes: 8,
                     checksum: None,
                 },
-                G3pbPutBlock {
+                G2pbPutBlock {
                     sequence_hash: 2001,
                     size_bytes: 16,
                     checksum: None,
@@ -741,7 +741,7 @@ mod tests {
         assert!(agent.query_blocks(&[1001]).await.is_empty());
         assert!(matches!(
             agent.fetch_blocks(&[1001]).await,
-            Err(G3pbError::NotFound {
+            Err(G2pbError::NotFound {
                 instance_id: 77,
                 sequence_hashes,
             }) if sequence_hashes == vec![1001]

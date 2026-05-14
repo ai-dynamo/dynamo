@@ -19,10 +19,10 @@ use dynamo_llm::block_manager::config::{
     KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig, KvManagerRuntimeConfig,
 };
 use dynamo_llm::block_manager::distributed::{
-    G3PB_COMPONENT_NAME, G3PB_NAMESPACE, G3pbCommitRequest, G3pbFetchBlocksResponse,
-    G3pbFetchRequest, G3pbOfferRequest, G3pbPeerResolver, G3pbPutBlock, G3pbQueryHit,
-    G3pbQueryRequest, G3pbRequestPlaneClient, G3pbStageBlocksRequest,
-    route_g3pb_put_blocks_by_owner, route_g3pb_sequence_hashes_by_owner, select_g3pb_owner,
+    G2PB_COMPONENT_NAME, G2PB_NAMESPACE, G2pbCommitRequest, G2pbFetchBlocksResponse,
+    G2pbFetchRequest, G2pbOfferRequest, G2pbPeerResolver, G2pbPutBlock, G2pbQueryHit,
+    G2pbQueryRequest, G2pbRequestPlaneClient, G2pbStageBlocksRequest,
+    route_g2pb_put_blocks_by_owner, route_g2pb_sequence_hashes_by_owner, select_g2pb_owner,
 };
 use dynamo_llm::block_manager::locality::Local;
 use dynamo_llm::block_manager::offload::max_transfer_batch_size;
@@ -131,9 +131,9 @@ impl Args {
                 }
                 "--help" | "-h" => {
                     println!(
-                        "kvbm_g3pb_worker_smoke
-  note: requires kvbm_g3pb_backend to be running and discoverable
-  note: ETCD_ENDPOINTS must be set so the worker can find the backend
+                        "kvbm_g2pb_client_smoke
+  note: requires kvbm_g2pb_service to be running and discoverable
+  note: ETCD_ENDPOINTS must be set so the client can find the service
   --worker-id <id>                local worker id (default 11)
   --device-id <id>                CUDA device id (default 0)
   --num-device-blocks <n>         local worker device blocks (default 8)
@@ -376,9 +376,9 @@ fn build_transfer_context(
     )?))
 }
 
-// This smoke exercises the worker side only. A separate `kvbm_g3pb_backend`
+// This smoke exercises the worker side only. A separate `kvbm_g2pb_service`
 // process must already be running, and `ETCD_ENDPOINTS` must be set so
-// discovery can resolve the backend endpoint.
+// discovery can resolve the service endpoint.
 async fn app(runtime: Runtime) -> Result<()> {
     let args = Args::parse()?;
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
@@ -397,18 +397,18 @@ async fn app(runtime: Runtime) -> Result<()> {
     let missing_demo_block = &demo_blocks[args.count];
     let local_blockset = block_manager.export_local_blockset()?;
 
-    let g3pb_component = distributed
-        .namespace(G3PB_NAMESPACE)?
-        .component(G3PB_COMPONENT_NAME)?;
-    let request_client = G3pbRequestPlaneClient::new(g3pb_component).await?;
-    let peer_resolver = G3pbPeerResolver::new(request_client.clone()).await?;
+    let g2pb_component = distributed
+        .namespace(G2PB_NAMESPACE)?
+        .component(G2PB_COMPONENT_NAME)?;
+    let request_client = G2pbRequestPlaneClient::new(g2pb_component).await?;
+    let peer_resolver = G2pbPeerResolver::new(request_client.clone()).await?;
     let mut rpc_timings = Vec::new();
 
     let health_start = Instant::now();
     let discovered_peers = peer_resolver.snapshot().await;
     for resolved in discovered_peers.instances() {
         println!(
-            "remote backend ready: instance_id={} endpoint={}",
+            "remote service ready: instance_id={} endpoint={}",
             resolved.peer.instance_id, resolved.peer.endpoint
         );
     }
@@ -421,7 +421,7 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     anyhow::ensure!(
         !discovered_peers.is_empty(),
-        "no healthy G3PB backends discovered in {G3PB_NAMESPACE}/{G3PB_COMPONENT_NAME}"
+        "no healthy G2PB services discovered in {G2PB_NAMESPACE}/{G2PB_COMPONENT_NAME}"
     );
 
     let load_remote_start = Instant::now();
@@ -438,16 +438,16 @@ async fn app(runtime: Runtime) -> Result<()> {
         .iter()
         .map(|block| (block.sequence_hash, block))
         .collect();
-    let blocks: Vec<G3pbPutBlock> = uploaded_demo_blocks
+    let blocks: Vec<G2pbPutBlock> = uploaded_demo_blocks
         .iter()
-        .map(|block| G3pbPutBlock {
+        .map(|block| G2pbPutBlock {
             sequence_hash: block.sequence_hash,
             size_bytes: block.size_bytes,
             checksum: None,
         })
         .collect();
 
-    let offered_by_owner = route_g3pb_put_blocks_by_owner(blocks.clone(), &remote_workers)?;
+    let offered_by_owner = route_g2pb_put_blocks_by_owner(blocks.clone(), &remote_workers)?;
     let offer_ops = offered_by_owner.len();
     let offer_start = Instant::now();
     let offers = join_all(offered_by_owner.into_iter().map(|(instance_id, blocks)| {
@@ -456,7 +456,7 @@ async fn app(runtime: Runtime) -> Result<()> {
         async move {
             let instance_id = instance_id?;
             let offer = request_client
-                .offer(instance_id, G3pbOfferRequest { blocks })
+                .offer(instance_id, G2pbOfferRequest { blocks })
                 .await?;
             Ok::<_, anyhow::Error>((instance_id, offer.accepted))
         }
@@ -478,10 +478,10 @@ async fn app(runtime: Runtime) -> Result<()> {
         accepted_by_instance.insert(instance_id, accepted.into_iter().collect());
     }
 
-    let accepted_blocks: Vec<G3pbPutBlock> = blocks
+    let accepted_blocks: Vec<G2pbPutBlock> = blocks
         .iter()
         .filter(|block| {
-            select_g3pb_owner(block.sequence_hash, &remote_workers)
+            select_g2pb_owner(block.sequence_hash, &remote_workers)
                 .and_then(|owner| accepted_by_instance.get(&owner.instance_id))
                 .is_some_and(|accepted| accepted.contains(&block.sequence_hash))
         })
@@ -490,9 +490,9 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     let host_pool = block_manager
         .host()
-        .context("local block manager has no host pool for G3pb staging")?;
+        .context("local block manager has no host pool for G2pb staging")?;
     let mut imported_instances = HashSet::new();
-    let staged_by_owner = route_g3pb_put_blocks_by_owner(accepted_blocks.clone(), &remote_workers)?;
+    let staged_by_owner = route_g2pb_put_blocks_by_owner(accepted_blocks.clone(), &remote_workers)?;
     let stage_put_ops = staged_by_owner.len();
     let stage_put_start = Instant::now();
     let staged_responses = join_all(staged_by_owner.into_iter().map(|(instance_id, blocks)| {
@@ -503,7 +503,7 @@ async fn app(runtime: Runtime) -> Result<()> {
             let response = request_client
                 .stage_put(
                     instance_id,
-                    G3pbStageBlocksRequest {
+                    G2pbStageBlocksRequest {
                         blocks: blocks.clone(),
                     },
                 )
@@ -542,7 +542,7 @@ async fn app(runtime: Runtime) -> Result<()> {
         request_client
             .commit_put(
                 instance_id,
-                G3pbCommitRequest {
+                G2pbCommitRequest {
                     sequence_hashes: blocks.iter().map(|block| block.sequence_hash).collect(),
                 },
             )
@@ -557,10 +557,10 @@ async fn app(runtime: Runtime) -> Result<()> {
         elapsed: commit_put_elapsed,
     });
 
-    let duplicate_offer_blocks: Vec<G3pbPutBlock> = accepted_blocks.iter().cloned().collect();
+    let duplicate_offer_blocks: Vec<G2pbPutBlock> = accepted_blocks.iter().cloned().collect();
     if !duplicate_offer_blocks.is_empty() {
         let duplicate_offer_routes =
-            route_g3pb_put_blocks_by_owner(duplicate_offer_blocks, &remote_workers)?;
+            route_g2pb_put_blocks_by_owner(duplicate_offer_blocks, &remote_workers)?;
         for result in join_all(
             duplicate_offer_routes
                 .into_iter()
@@ -570,7 +570,7 @@ async fn app(runtime: Runtime) -> Result<()> {
                     async move {
                         let instance_id = instance_id?;
                         let offer = request_client
-                            .offer(instance_id, G3pbOfferRequest { blocks })
+                            .offer(instance_id, G2pbOfferRequest { blocks })
                             .await?;
                         Ok::<_, anyhow::Error>((instance_id, offer.accepted))
                     }
@@ -592,8 +592,8 @@ async fn app(runtime: Runtime) -> Result<()> {
         .iter()
         .map(|block| block.sequence_hash)
         .collect();
-    let query_routes = route_g3pb_sequence_hashes_by_owner(&query_hashes, &remote_workers)?;
-    let mut hits = Vec::<G3pbQueryHit>::new();
+    let query_routes = route_g2pb_sequence_hashes_by_owner(&query_hashes, &remote_workers)?;
+    let mut hits = Vec::<G2pbQueryHit>::new();
     let query_ops = query_routes.len();
     let query_start = Instant::now();
     for result in join_all(
@@ -605,7 +605,7 @@ async fn app(runtime: Runtime) -> Result<()> {
                 async move {
                     let instance_id = instance_id?;
                     let hits = request_client
-                        .query(instance_id, G3pbQueryRequest { sequence_hashes })
+                        .query(instance_id, G2pbQueryRequest { sequence_hashes })
                         .await?;
                     Ok::<_, anyhow::Error>(hits)
                 }
@@ -621,7 +621,7 @@ async fn app(runtime: Runtime) -> Result<()> {
         elapsed: query_start.elapsed(),
     });
 
-    let hit_by_sequence_hash: HashMap<u64, G3pbQueryHit> = hits
+    let hit_by_sequence_hash: HashMap<u64, G2pbQueryHit> = hits
         .iter()
         .cloned()
         .map(|hit| (hit.sequence_hash, hit))
@@ -643,7 +643,7 @@ async fn app(runtime: Runtime) -> Result<()> {
         cache_miss_hashes
     );
 
-    let fetch_routes = route_g3pb_sequence_hashes_by_owner(&fetch_hashes, &remote_workers)?;
+    let fetch_routes = route_g2pb_sequence_hashes_by_owner(&fetch_hashes, &remote_workers)?;
     let mut fetched_transfer_count = 0usize;
     let fetch_ops = fetch_routes.len();
     let fetch_start = Instant::now();
@@ -653,10 +653,10 @@ async fn app(runtime: Runtime) -> Result<()> {
             let instance_id = discovered_peers.instance_id(instance_id);
             async move {
                 let instance_id = instance_id?;
-                let fetched: G3pbFetchBlocksResponse = request_client
+                let fetched: G2pbFetchBlocksResponse = request_client
                     .fetch(
                         instance_id,
-                        G3pbFetchRequest {
+                        G2pbFetchRequest {
                             sequence_hashes: sequence_hashes.clone(),
                         },
                     )
@@ -733,7 +733,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     }
     let device_pool = block_manager
         .device()
-        .context("local block manager has no device pool for onboarded G3pb blocks")?;
+        .context("local block manager has no device pool for onboarded G2pb blocks")?;
     let matched_device_blocks = device_pool
         .match_sequence_hashes(fetch_hashes.as_slice())
         .await?;
@@ -769,12 +769,12 @@ async fn app(runtime: Runtime) -> Result<()> {
         onboarded_sequence_hashes
     );
     println!(
-        "transferred {} blocks / {} bytes via staged G3PB NIXL descriptors",
+        "transferred {} blocks / {} bytes via staged G2PB NIXL descriptors",
         fetched_transfer_count, transferred_bytes
     );
     print_rpc_timings(&rpc_timings);
     println!(
-        "note: this validates staged remote host writes, remote host reads, local host registration, and device onboard over the G3PB smoke path."
+        "note: this validates staged remote host writes, remote host reads, local host registration, and device onboard over the G2PB smoke path."
     );
 
     Ok(())

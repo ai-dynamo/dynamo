@@ -9,7 +9,7 @@ use dynamo_llm::block_manager::block::{
 use dynamo_llm::block_manager::kv_consolidator::EventSource;
 use dynamo_llm::block_manager::offload::filter::FrequencyFilter;
 use dynamo_llm::block_manager::{
-    BasicMetadata, BlockParallelismStrategy, G3pbAdmissionConfig, G3pbAdmissionPolicy,
+    BasicMetadata, BlockParallelismStrategy, G2pbAdmissionConfig, G2pbAdmissionPolicy,
 };
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::environment_names::kvbm as env_kvbm;
@@ -80,8 +80,8 @@ fn create_disk_offload_filter(
     Ok(Some(Arc::new(frequency_filter)))
 }
 
-fn read_g3pb_admission_config() -> Result<Option<G3pbAdmissionConfig>> {
-    let Some(value) = std::env::var(env_kvbm::DYN_KVBM_G3PB_ADMISSION_POLICY)
+fn read_g2pb_admission_config() -> Result<Option<G2pbAdmissionConfig>> {
+    let Some(value) = std::env::var(env_kvbm::DYN_KVBM_G2PB_ADMISSION_POLICY)
         .ok()
         .map(|value| value.trim().to_ascii_lowercase())
     else {
@@ -95,19 +95,19 @@ fn read_g3pb_admission_config() -> Result<Option<G3pbAdmissionConfig>> {
 
     let policy = match value.as_str() {
         "after_first_reuse" | "after-first-reuse" | "default" => {
-            G3pbAdmissionPolicy::AfterFirstReuse
+            G2pbAdmissionPolicy::AfterFirstReuse
         }
-        "eager" | "all" => G3pbAdmissionPolicy::Eager,
+        "eager" | "all" => G2pbAdmissionPolicy::Eager,
         other => {
             anyhow::bail!(
                 "{} must be one of: after_first_reuse, eager, disabled; got {}",
-                env_kvbm::DYN_KVBM_G3PB_ADMISSION_POLICY,
+                env_kvbm::DYN_KVBM_G2PB_ADMISSION_POLICY,
                 other
             )
         }
     };
 
-    Ok(Some(G3pbAdmissionConfig { policy }))
+    Ok(Some(G2pbAdmissionConfig { policy }))
 }
 
 #[pyclass]
@@ -140,8 +140,8 @@ impl BlockManager {
         let mut config =
             dynamo_llm::block_manager::KvBlockManagerConfig::builder().runtime(runtime_config);
 
-        if let Some(g3pb_admission) = read_g3pb_admission_config().map_err(to_pyerr)? {
-            config = config.g3pb_admission(g3pb_admission);
+        if let Some(g2pb_admission) = read_g2pb_admission_config().map_err(to_pyerr)? {
+            config = config.g2pb_admission(g2pb_admission);
         }
 
         let model_config = dynamo_llm::block_manager::KvManagerModelConfig::builder()
@@ -355,8 +355,8 @@ impl BlockManagerBuilder {
         let mut config =
             dynamo_llm::block_manager::KvBlockManagerConfig::builder().runtime(runtime_config);
 
-        if let Some(g3pb_admission) = read_g3pb_admission_config()? {
-            config = config.g3pb_admission(g3pb_admission);
+        if let Some(g2pb_admission) = read_g2pb_admission_config()? {
+            config = config.g2pb_admission(g2pb_admission);
         }
 
         let model_config = dynamo_llm::block_manager::KvManagerModelConfig::builder()
@@ -443,64 +443,64 @@ mod tests {
     }
 
     #[test]
-    fn read_g3pb_admission_config_defaults_to_none() {
+    fn read_g2pb_admission_config_defaults_to_none() {
         let _guard = env_lock().lock().unwrap();
         unsafe {
-            std::env::remove_var(env_kvbm::DYN_KVBM_G3PB_ADMISSION_POLICY);
+            std::env::remove_var(env_kvbm::DYN_KVBM_G2PB_ADMISSION_POLICY);
         }
 
-        assert_eq!(read_g3pb_admission_config().unwrap(), None);
+        assert_eq!(read_g2pb_admission_config().unwrap(), None);
     }
 
     #[test]
-    fn read_g3pb_admission_config_accepts_after_first_reuse() {
+    fn read_g2pb_admission_config_accepts_after_first_reuse() {
         let _guard = env_lock().lock().unwrap();
         unsafe {
             std::env::set_var(
-                env_kvbm::DYN_KVBM_G3PB_ADMISSION_POLICY,
+                env_kvbm::DYN_KVBM_G2PB_ADMISSION_POLICY,
                 "after_first_reuse",
             );
         }
 
         assert_eq!(
-            read_g3pb_admission_config().unwrap(),
-            Some(G3pbAdmissionConfig::after_first_reuse())
+            read_g2pb_admission_config().unwrap(),
+            Some(G2pbAdmissionConfig::after_first_reuse())
         );
 
         unsafe {
-            std::env::remove_var(env_kvbm::DYN_KVBM_G3PB_ADMISSION_POLICY);
+            std::env::remove_var(env_kvbm::DYN_KVBM_G2PB_ADMISSION_POLICY);
         }
     }
 
     #[test]
-    fn read_g3pb_admission_config_accepts_eager() {
+    fn read_g2pb_admission_config_accepts_eager() {
         let _guard = env_lock().lock().unwrap();
         unsafe {
-            std::env::set_var(env_kvbm::DYN_KVBM_G3PB_ADMISSION_POLICY, "eager");
+            std::env::set_var(env_kvbm::DYN_KVBM_G2PB_ADMISSION_POLICY, "eager");
         }
 
         assert_eq!(
-            read_g3pb_admission_config().unwrap(),
-            Some(G3pbAdmissionConfig::eager())
+            read_g2pb_admission_config().unwrap(),
+            Some(G2pbAdmissionConfig::eager())
         );
 
         unsafe {
-            std::env::remove_var(env_kvbm::DYN_KVBM_G3PB_ADMISSION_POLICY);
+            std::env::remove_var(env_kvbm::DYN_KVBM_G2PB_ADMISSION_POLICY);
         }
     }
 
     #[test]
-    fn read_g3pb_admission_config_rejects_invalid_values() {
+    fn read_g2pb_admission_config_rejects_invalid_values() {
         let _guard = env_lock().lock().unwrap();
         unsafe {
-            std::env::set_var(env_kvbm::DYN_KVBM_G3PB_ADMISSION_POLICY, "bogus");
+            std::env::set_var(env_kvbm::DYN_KVBM_G2PB_ADMISSION_POLICY, "bogus");
         }
 
-        let error = read_g3pb_admission_config().unwrap_err().to_string();
-        assert!(error.contains(env_kvbm::DYN_KVBM_G3PB_ADMISSION_POLICY));
+        let error = read_g2pb_admission_config().unwrap_err().to_string();
+        assert!(error.contains(env_kvbm::DYN_KVBM_G2PB_ADMISSION_POLICY));
 
         unsafe {
-            std::env::remove_var(env_kvbm::DYN_KVBM_G3PB_ADMISSION_POLICY);
+            std::env::remove_var(env_kvbm::DYN_KVBM_G2PB_ADMISSION_POLICY);
         }
     }
 }
