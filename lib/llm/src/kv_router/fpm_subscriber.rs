@@ -195,7 +195,9 @@ fn handle_message<P, C, S, Sel>(
         metrics.scheduled_requests.num_decode_requests,
     );
 
-    scheduler.selector().update_from_fpm(worker, waiting, running);
+    scheduler
+        .selector()
+        .update_from_fpm(worker, waiting, running);
 }
 
 fn nonneg_sum_u32(a: i32, b: i32) -> u32 {
