@@ -38,18 +38,47 @@ pytestmark = [
 
 
 def _make_trtllm_stub() -> None:
+    """Stub the entire tensorrt_llm namespace.
+
+    handler_base.py imports tensorrt_llm.executor.{request,result,utils},
+    tensorrt_llm.llmapi.{disagg_utils,llm}, tensorrt_llm.sampling_params, and
+    tensorrt_llm.scheduling_params.  Rather than enumerate every sub-module,
+    install a meta_path finder that auto-creates a MagicMock-backed stub for
+    any tensorrt_llm.* import that isn't already satisfied, so this file stays
+    correct as new trtllm sub-imports are added.
+    """
+    import importlib.abc
     import importlib.machinery
 
-    trtllm = types.ModuleType("tensorrt_llm")
-    # __spec__ required so importlib.util.find_spec("tensorrt_llm") doesn't
-    # raise ValueError when pytest-marker-report collects the full suite.
-    trtllm.__spec__ = importlib.machinery.ModuleSpec("tensorrt_llm", None)
-    trtllm.llmapi = types.ModuleType("tensorrt_llm.llmapi")
-    trtllm.llmapi.__spec__ = importlib.machinery.ModuleSpec("tensorrt_llm.llmapi", None)
-    trtllm.llmapi.DisaggregatedParams = MagicMock
-    trtllm.llmapi.RequestOutput = MagicMock
-    sys.modules.setdefault("tensorrt_llm", trtllm)
-    sys.modules.setdefault("tensorrt_llm.llmapi", trtllm.llmapi)
+    PREFIX = "tensorrt_llm"
+
+    def _make_stub(fullname: str) -> types.ModuleType:
+        mod = types.ModuleType(fullname)
+        mod.__spec__ = importlib.machinery.ModuleSpec(
+            fullname, loader=None, is_package=True
+        )
+        mod.__path__ = []  # makes it look like a package to the importer
+        sys.modules[fullname] = mod
+        return mod
+
+    class _TrtllmFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path, target=None):
+            if fullname != PREFIX and not fullname.startswith(PREFIX + "."):
+                return None
+            if fullname not in sys.modules:
+                _make_stub(fullname)
+            return sys.modules[fullname].__spec__
+
+    # Only install once; setdefault guards against repeated test collection.
+    if not any(type(f).__name__ == "_TrtllmFinder" for f in sys.meta_path):
+        sys.meta_path.insert(0, _TrtllmFinder())
+
+    # Pre-populate the root and the symbols explicitly used by our tests.
+    trtllm = _make_stub(PREFIX)
+    llmapi = _make_stub(f"{PREFIX}.llmapi")
+    llmapi.DisaggregatedParams = MagicMock
+    llmapi.RequestOutput = MagicMock
+    trtllm.llmapi = llmapi
 
 
 def _make_dynamo_core_stub() -> None:
