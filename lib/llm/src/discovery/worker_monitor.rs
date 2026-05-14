@@ -633,34 +633,14 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
                         // Update worker load state per dp_rank (for busy detection only)
                         // Note: Prometheus gauges are updated directly by sequence.rs
-                        let (worker_busy, total_blocks) = {
+                        let total_blocks = {
                             let mut state = worker_load_states.entry(worker_id).or_default();
                             state.update_from_active_load(
                                 &active_load,
                                 cfg.active_decode_blocks_threshold,
                             );
-                            let total_blocks = state.kv_total_blocks.get(&dp_rank).copied();
-                            let worker_busy = state.is_busy(
-                                cfg.active_decode_blocks_threshold,
-                                cfg.active_prefill_tokens_threshold,
-                                cfg.active_prefill_tokens_threshold_frac,
-                            );
-                            (worker_busy, total_blocks)
+                            state.kv_total_blocks.get(&dp_rank).copied()
                         };
-
-                        tracing::debug!(
-                            worker_id,
-                            dp_rank,
-                            active_decode_blocks = ?active_load.active_decode_blocks,
-                            kv_used_blocks = ?active_load.kv_used_blocks,
-                            active_prefill_tokens = ?active_load.active_prefill_tokens,
-                            total_blocks = ?total_blocks,
-                            active_decode_blocks_threshold = ?cfg.active_decode_blocks_threshold,
-                            active_prefill_tokens_threshold = ?cfg.active_prefill_tokens_threshold,
-                            active_prefill_tokens_threshold_frac = ?cfg.active_prefill_tokens_threshold_frac,
-                            worker_busy,
-                            "processed active load update"
-                        );
 
                         // Recalculate all busy instances and update
                         let busy_instances: Vec<u64> = worker_load_states
@@ -676,6 +656,23 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     .then_some(*entry.key())
                             })
                             .collect();
+
+                        if tracing::enabled!(tracing::Level::DEBUG) {
+                            let worker_busy = busy_instances.contains(&worker_id);
+                            tracing::debug!(
+                                worker_id,
+                                dp_rank,
+                                active_decode_blocks = ?active_load.active_decode_blocks,
+                                kv_used_blocks = ?active_load.kv_used_blocks,
+                                active_prefill_tokens = ?active_load.active_prefill_tokens,
+                                total_blocks = ?total_blocks,
+                                active_decode_blocks_threshold = ?cfg.active_decode_blocks_threshold,
+                                active_prefill_tokens_threshold = ?cfg.active_prefill_tokens_threshold,
+                                active_prefill_tokens_threshold_frac = ?cfg.active_prefill_tokens_threshold_frac,
+                                worker_busy,
+                                "processed active load update"
+                            );
+                        }
 
                         // Only update if busy_instances has changed
                         if busy_instances != previous_busy_instances {
