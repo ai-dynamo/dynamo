@@ -254,6 +254,56 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_handle_non_leader_node_skips_kv_publish_without_resolved_worker(
+    monkeypatch,
+):
+    resolution_done = asyncio.Event()
+    init_called = asyncio.Event()
+    cleanup_called = asyncio.Event()
+
+    async def missing_resolution(generate_endpoint, server_args):
+        resolution_done.set()
+        return None
+
+    class FakePublisher:
+        generate_endpoint = object()
+        server_args = SimpleNamespace(kv_events_config='{"endpoint": "tcp://*:5557"}')
+        kv_worker_id = None
+
+        def init_kv_event_publish(self):
+            init_called.set()
+
+        def cleanup(self):
+            cleanup_called.set()
+
+    monkeypatch.setattr(
+        publisher_mod,
+        "_resolve_multinode_leader_worker_id",
+        missing_resolution,
+    )
+    metrics_task = asyncio.create_task(asyncio.Event().wait())
+    task = asyncio.create_task(
+        handle_non_leader_node(
+            SimpleNamespace(server_args=SimpleNamespace(node_rank=1)),
+            FakePublisher(),
+            metrics_task,
+        )
+    )
+
+    await asyncio.wait_for(resolution_done.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert not init_called.is_set()
+    assert not task.done()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleanup_called.is_set()
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.asyncio
 async def test_handle_non_leader_node_cleans_up_when_resolution_fails(monkeypatch):
     cleanup_called = asyncio.Event()
 

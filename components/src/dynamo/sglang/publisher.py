@@ -113,7 +113,7 @@ async def _resolve_multinode_leader_worker_id(
 
     logging.warning(
         "Expected exactly one SGLang leader endpoint instance for non-leader "
-        "KV event attribution, got %d; using local worker id",
+        "KV event attribution, got %d; skipping non-leader KV event publishing",
         len(instances),
     )
     return None
@@ -549,11 +549,13 @@ async def handle_non_leader_node(
 
     try:
         if publisher.server_args.kv_events_config:
-            publisher.kv_worker_id = await _resolve_multinode_leader_worker_id(
+            kv_worker_id = await _resolve_multinode_leader_worker_id(
                 publisher.generate_endpoint,
                 publisher.server_args,
             )
-            publisher.init_kv_event_publish()
+            if kv_worker_id is not None:
+                publisher.kv_worker_id = kv_worker_id
+                publisher.init_kv_event_publish()
 
         await asyncio.Event().wait()
     finally:
