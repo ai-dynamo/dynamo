@@ -299,6 +299,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             }
         }
 
+        // rl-sdk-2 TITO parity: clone token_ids before moving them into
+        // create_logprobs, so build_response_nvext can also see them when
+        // the client asked for `completion_token_ids`.
+        let completion_token_ids_for_nvext: Vec<TokenIdType> = delta.token_ids.clone();
         let logprobs = self.create_logprobs(
             delta.tokens,
             delta.token_ids,
@@ -325,12 +329,17 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
         // completions delta generators go through the same helper so the gating
         // rules stay in one place.
+        // rl-sdk-2 TITO parity: token_ids was already moved into create_logprobs
+        // above (see clone made into `completion_token_ids_for_nvext`).
+        let prompt_logprobs_payload = delta.prompt_logprobs;
         if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
             self.tracker.as_ref(),
             delta.disaggregated_params.as_ref(),
             finish_reason.is_some(),
             delta.engine_data,
             stop_reason,
+            Some(&completion_token_ids_for_nvext),
+            prompt_logprobs_payload,
         ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
             response.nvext = Some(nvext_json);
@@ -344,6 +353,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             if let Some(ref tokens) = nvext_response.token_ids {
                 tracing::debug!(
                     "Injected token_ids into completions nvext: {} tokens",
+                    tokens.len()
+                );
+            }
+            if let Some(ref tokens) = nvext_response.completion_token_ids {
+                tracing::debug!(
+                    "Injected completion_token_ids into completions nvext: {} tokens",
                     tokens.len()
                 );
             }
@@ -426,6 +441,7 @@ mod tests {
                 "routed_experts": {"layer_0": [1, 3]}
             })),
             engine_data: None,
+            prompt_logprobs: None,
         }
     }
 
@@ -469,6 +485,7 @@ mod tests {
                 "disaggregated_kv_transfer_time_ms": 8.1,
                 "prefill_compute_time_ms": 45.6
             })),
+            prompt_logprobs: None,
         }
     }
 
@@ -735,6 +752,7 @@ mod tests {
             completion_usage: None,
             disaggregated_params: None,
             engine_data: None, // engine didn't provide any data
+            prompt_logprobs: None,
         };
 
         let response = generator

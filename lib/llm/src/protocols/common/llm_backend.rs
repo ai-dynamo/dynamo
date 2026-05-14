@@ -14,6 +14,24 @@ use dynamo_runtime::protocols::maybe_error::MaybeError;
 pub type TokenType = Option<String>;
 pub type LogProbs = Vec<f64>;
 
+/// Per-position prompt logprob entry (rl-sdk-2 TITO parity).
+///
+/// Mirrors vLLM's `Logprob` shape so prime-rl's parser at
+/// `orchestrator/utils.py:compute_teacher_logprobs` reads it unchanged.
+/// `rank` and `decoded_token` are optional; only `logprob` is guaranteed.
+#[derive(Serialize, Deserialize, utoipa::ToSchema, Debug, Clone, PartialEq)]
+pub struct PromptLogprobEntry {
+    pub logprob: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoded_token: Option<String>,
+}
+
+/// Per-token map of `token_id -> PromptLogprobEntry`. The first position
+/// is `None` (no logprob exists for BOS / the very first prompt token).
+pub type PromptLogprobs = Vec<Option<std::collections::HashMap<TokenIdType, PromptLogprobEntry>>>;
+
 /// Output type discriminator for different modalities
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -111,6 +129,14 @@ pub struct BackendOutput {
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
+
+    /// Per-prompt-token top-k logprobs (rl-sdk-2 TITO parity).
+    ///
+    /// Carried through from `LLMEngineOutput.prompt_logprobs`; surfaced to
+    /// clients on the final response chunk via `nvext.prompt_logprobs` when
+    /// they opted in with `nvext.extra_fields = ["prompt_logprobs"]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_logprobs: Option<PromptLogprobs>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
@@ -177,6 +203,16 @@ pub struct LLMEngineOutput {
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
+
+    /// Per-prompt-token top-k logprobs (rl-sdk-2 TITO parity).
+    ///
+    /// Populated by engine adapters when the request set
+    /// `common_ext.prompt_logprobs = Some(k)`. Surfaced to clients via
+    /// `nvext.prompt_logprobs` when they also include
+    /// `"prompt_logprobs"` in `nvext.extra_fields`. Backends that don't
+    /// support prompt logprobs leave this as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_logprobs: Option<PromptLogprobs>,
 }
 
 impl LLMEngineOutput {
@@ -197,6 +233,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            prompt_logprobs: None,
         }
     }
 
@@ -217,6 +254,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            prompt_logprobs: None,
         }
     }
 
@@ -237,6 +275,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            prompt_logprobs: None,
         }
     }
 
@@ -257,6 +296,7 @@ impl LLMEngineOutput {
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            prompt_logprobs: None,
         }
     }
 }

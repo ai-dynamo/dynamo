@@ -415,12 +415,21 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
         // completions delta generators go through the same helper so the gating
         // rules stay in one place.
+        // rl-sdk-2 TITO parity: partial-move `delta.prompt_logprobs` for the
+        // prompt_logprobs gate (final-chunk only) and borrow `delta.token_ids`
+        // as the per-chunk delta payload for `completion_token_ids`. Order:
+        // partial move first, borrow second, then issue the call so we never
+        // borrow a partially-moved field.
+        let prompt_logprobs_payload = delta.prompt_logprobs;
+        let completion_token_ids_slice: &[u32] = &delta.token_ids;
         if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
             self.tracker.as_ref(),
             delta.disaggregated_params.as_ref(),
             finish_reason.is_some(),
             delta.engine_data,
             stop_reason,
+            Some(completion_token_ids_slice),
+            prompt_logprobs_payload,
         ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
             stream_response.nvext = Some(nvext_json);
@@ -434,6 +443,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             if let Some(ref tokens) = nvext_response.token_ids {
                 tracing::debug!(
                     "Injected token_ids into chat completion nvext: {} tokens",
+                    tokens.len()
+                );
+            }
+            if let Some(ref tokens) = nvext_response.completion_token_ids {
+                tracing::debug!(
+                    "Injected completion_token_ids into chat completion nvext: {} tokens",
                     tokens.len()
                 );
             }
@@ -563,6 +578,7 @@ mod tests {
                 "routed_experts": {"layer_0": [1, 3]}
             })),
             engine_data: None,
+            prompt_logprobs: None,
         }
     }
 
@@ -615,6 +631,7 @@ mod tests {
                 "disaggregated_kv_transfer_time_ms": 8.1,
                 "prefill_compute_time_ms": 45.6
             })),
+            prompt_logprobs: None,
         }
     }
 
@@ -817,6 +834,7 @@ mod tests {
             completion_usage: None,
             disaggregated_params: None,
             engine_data: None, // engine didn't provide any data
+            prompt_logprobs: None,
         };
 
         let response = generator
