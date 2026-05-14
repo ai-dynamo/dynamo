@@ -25,9 +25,22 @@ cases:
           timezone:
             type: string
     expected:
-      calls: []
-      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-        to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|>
+      dynamo:
+        calls: []
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
+          to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|>
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            timezone: EST
+          name: get_time
+        normal_text: ''
+        reason: "Dynamo drops back-to-back commentary blocks; SGLang extracts them"
   PARSER.batch.2.c:
     description: With surrounding narration
     ref: dynamo
@@ -37,9 +50,21 @@ cases:
     - *id001
     - *id002
     expected:
-      calls: []
-      normal_text: I need both. <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-        to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|> Done.
+      dynamo:
+        calls: []
+        normal_text: I need both. <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
+          to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|> Done.
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            timezone: EST
+          name: get_time
+        normal_text: I need both.   Done.
   PARSER.batch.2.d:
     description: Same-name twice
     ref: dynamo
@@ -49,6 +74,18 @@ cases:
     - *id001
     - *id001
     expected:
-      calls: []
-      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-        to=functions.get_weather <|constrain|>json<|message|>{"location":"LA"}<|call|>
+      dynamo:
+        calls: []
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
+          to=functions.get_weather <|constrain|>json<|message|>{"location":"LA"}<|call|>
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            location: LA
+          name: get_weather
+        normal_text: ''

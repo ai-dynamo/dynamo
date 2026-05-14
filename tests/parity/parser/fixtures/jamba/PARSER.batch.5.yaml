@@ -17,15 +17,18 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
   PARSER.batch.5.b:
     description: Closing </tool_calls> without matching <tool_calls> open
     ref: dynamo
@@ -33,8 +36,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls>'
+      dynamo: &d_5_b
+        calls: []
+        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls>'
+      vllm: *d_5_b
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
   PARSER.batch.5.c:
     description: Truncation mid-arguments JSON
     ref: dynamo
@@ -42,5 +49,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"loc'
+      dynamo: &d_5_c
+        calls: []
+        normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"loc'
+      vllm: *d_5_c
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'

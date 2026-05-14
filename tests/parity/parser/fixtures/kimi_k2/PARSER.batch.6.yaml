@@ -15,10 +15,13 @@ cases:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &d_6_a
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *d_6_a
+      sglang: *d_6_a
   PARSER.batch.6.b:
     description: Whitespace inside empty {}
     ref: dynamo
@@ -26,10 +29,13 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &d_6_b
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *d_6_b
+      sglang: *d_6_b
   PARSER.batch.6.c:
     description: No argument body (skip argument_begin → end)
     ref: dynamo
@@ -37,5 +43,8 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
+      dynamo: &d_6_c
+        calls: []
+        normal_text: ''
+      vllm: *d_6_c
+      sglang: *d_6_c

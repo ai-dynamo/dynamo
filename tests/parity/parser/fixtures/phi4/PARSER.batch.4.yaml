@@ -17,8 +17,12 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: ''
+      dynamo: &d_4_a
+        calls: []
+        normal_text: ''
+      vllm: *d_4_a
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.4.b:
     description: Missing close brace
     ref: dynamo
@@ -26,8 +30,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
+      dynamo: &d_4_b
+        calls: []
+        normal_text: ''
+      vllm: *d_4_b
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.4.c:
     description: Missing name key
     ref: dynamo
@@ -35,12 +43,15 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: 'functools[{"arguments": {"location": "NYC"}}]'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: 'functools[{"arguments": {"location": "NYC"}}]'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.4.d:
     description: Missing closing ]
     ref: dynamo
@@ -48,9 +59,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'

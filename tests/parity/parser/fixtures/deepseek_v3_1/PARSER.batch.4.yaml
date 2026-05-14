@@ -17,12 +17,17 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: None
+      dynamo:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
+      vllm:
+        calls: []
+        normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"
   PARSER.batch.4.b:
     description: Unterminated JSON string in args
     ref: dynamo
@@ -30,12 +35,16 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': '{"location":"NYC'}]
-    #   normal_text: None
+      dynamo: &d_4_b
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      vllm:
+        calls:
+        - arguments: '{"location":"NYC'
+          name: get_weather
+        normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang: *d_4_b
   PARSER.batch.4.c:
     description: Missing function name (no token before tool_sep)
     ref: dynamo
@@ -43,12 +52,20 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜><｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: [{'name': '', 'arguments': {'location': 'NYC'}}]
-    #   normal_text: None
+      dynamo:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜><｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      vllm:
+        calls:
+        - arguments:
+            location: NYC
+          name: ''
+        normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"
   PARSER.batch.4.d:
     description: Mismatched fences (calls_end without call_end)
     ref: dynamo
@@ -56,9 +73,14 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁calls▁end｜>
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: None
+      dynamo:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁calls▁end｜>
+      vllm:
+        calls: []
+        normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"

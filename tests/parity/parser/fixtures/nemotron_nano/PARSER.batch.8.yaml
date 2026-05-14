@@ -24,11 +24,16 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: 'I will check the weather. '
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: 'I will check the weather. '
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'
   PARSER.batch.8.b:
     description: Narration after tool call only
     ref: dynamo
@@ -43,11 +48,16 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'
   PARSER.batch.8.c:
     description: Narration both before and after (sandwich)
     ref: dynamo
@@ -62,11 +72,16 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: 'I will check the weather. '
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: 'I will check the weather. '
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'
   PARSER.batch.8.d:
     description: Narration between multiple tool calls
     ref: dynamo
@@ -87,11 +102,16 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: 'I will check the weather. '
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: 'I will check the weather. '
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'

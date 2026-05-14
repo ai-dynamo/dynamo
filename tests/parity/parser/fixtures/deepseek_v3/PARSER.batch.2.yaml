@@ -31,14 +31,17 @@ cases:
           timezone:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
+      dynamo: &d_2_a
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm: *d_2_a
+      sglang: *d_2_a
   PARSER.batch.2.b:
     description: Two back-to-back fence pairs
     ref: dynamo
@@ -54,14 +57,17 @@ cases:
     - *id001
     - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
+      dynamo: &d_2_b
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm: *d_2_b
+      sglang: *d_2_b
   PARSER.batch.2.c:
     description: With surrounding narration
     ref: dynamo
@@ -77,14 +83,26 @@ cases:
     - *id001
     - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: 'Both: '
+      dynamo: &d_2_c
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both: '
+      vllm: *d_2_c
+      sglang:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            timezone: EST
+          name: get_time
+        normal_text: 'Both:'
+        reason: "trims trailing space from preceding normal_text"
   PARSER.batch.2.d:
     description: Same-name twice
     ref: dynamo
@@ -100,11 +118,14 @@ cases:
     - *id001
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: ''
+      dynamo: &d_2_d
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *d_2_d
+      sglang: *d_2_d
