@@ -3,11 +3,14 @@
 
 """Shared utilities for frontend chat processors (vLLM, SGLang)."""
 
+import asyncio
 import logging
+import os
 import uuid
 from typing import Any
 
 _MASK_64_BITS = (1 << 64) - 1
+logger = logging.getLogger(__name__)
 
 
 def random_uuid() -> str:
@@ -44,6 +47,61 @@ class PreprocessError(Exception):
 
     def __init__(self, message: str):
         super().__init__(message)
+
+
+class FrontendRoundRobinRouter:
+    """Frontend-managed round-robin over the current runtime client membership.
+
+    This avoids sticky routing behavior in the opaque runtime round-robin client by
+    selecting an instance in Python and sending the request via ``Client.direct``.
+    """
+
+    def __init__(self, client: Any, endpoint_name: str):
+        self._client = client
+        self._endpoint_name = endpoint_name
+        self._cursor = 0
+        self._lock = asyncio.Lock()
+        self._debug = os.getenv("DYN_FRONTEND_ROUTING_DEBUG", "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    async def generate(self, request: dict[str, Any], **kwargs: Any):
+        annotated = kwargs.pop("annotated", None)
+        if kwargs:
+            raise TypeError(
+                f"Unsupported kwargs for frontend round-robin router: {sorted(kwargs)}"
+            )
+
+        instance_ids = list(self._client.instance_ids())
+        if not instance_ids:
+            instance_ids = list(await self._client.wait_for_instances())
+        if not instance_ids:
+            raise RuntimeError(
+                f"No active backend instances available for {self._endpoint_name}"
+            )
+
+        instance_ids = sorted(instance_ids)
+        async with self._lock:
+            instance_id = instance_ids[self._cursor % len(instance_ids)]
+            self._cursor += 1
+
+        if self._debug:
+            logger.info(
+                "Frontend routing selected endpoint=%s instance=%s instances=%s annotated=%s",
+                self._endpoint_name,
+                instance_id,
+                instance_ids,
+                annotated,
+            )
+
+        return await self._client.direct(
+            request,
+            instance_id=instance_id,
+            annotated=annotated,
+        )
 
 
 # Content part types that carry media URLs, mapped to the key used in the

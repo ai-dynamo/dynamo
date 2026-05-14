@@ -46,6 +46,7 @@ from dynamo.runtime import Client, DistributedRuntime
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .utils import (
+    FrontendRoundRobinRouter,
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
@@ -870,9 +871,16 @@ class EngineFactory:
                 kv_router_config=self.router_config.kv_router_config,
             )
         else:
-            router = await generate_endpoint.client(
+            client = await generate_endpoint.client(
                 router_mode=self.router_config.router_mode
             )
+            if self.router_config.router_mode == RouterMode.RoundRobin:
+                router = FrontendRoundRobinRouter(
+                    client,
+                    f"{namespace_name}.{component_name}.{endpoint_name}",
+                )
+            else:
+                router = client
 
         block_size = self.config.kv_cache_block_size or 16
 

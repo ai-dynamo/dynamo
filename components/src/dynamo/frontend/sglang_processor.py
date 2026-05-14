@@ -42,6 +42,7 @@ from .sglang_prepost import (
     preprocess_chat_request,
 )
 from .utils import (
+    FrontendRoundRobinRouter,
     PreprocessError,
     extract_mm_urls,
     nvext_extra_field_requested,
@@ -683,9 +684,16 @@ class SglangEngineFactory:
                 kv_router_config=self.router_config.kv_router_config,
             )
         else:
-            router = await generate_endpoint.client(
+            client = await generate_endpoint.client(
                 router_mode=self.router_config.router_mode
             )
+            if self.router_config.router_mode == RouterMode.RoundRobin:
+                router = FrontendRoundRobinRouter(
+                    client,
+                    f"{namespace_name}.{component_name}.{endpoint_name}",
+                )
+            else:
+                router = client
 
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
