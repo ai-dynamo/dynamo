@@ -71,8 +71,13 @@ pub async fn spawn(
                         }
                     };
 
-                    let mut guard = tracker.write().await;
+                    // Acquire the write lock per event rather than per batch so the
+                    // publisher drain and kvbm-bridge writes can interleave between
+                    // events. Each `RawKvEvent` is the atomic unit — the parent chain
+                    // inside `BlockStored` lives entirely within one event, so dropping
+                    // the lock between events does not break chaining.
                     for event in batch.events {
+                        let mut guard = tracker.write().await;
                         process_event(&mut guard, event, engine_source);
                     }
                 }

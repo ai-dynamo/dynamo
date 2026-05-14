@@ -24,9 +24,15 @@ Until this crate landed, `TokenBlock::from_chunk` and `SaltPayload` only knew ab
 
 This crate's `Request` carries `mm_info: Vec<RequestMmObjectInfo>`. Block formation in `lib/tokens` was extended (`TokenBlockSequence::new_with_mm`, `TokenBlock::from_chunk_with_mm`-equivalent path) so MM placeholders are first-class block slots, matching vLLM's prefix-cache model: a block of `block_size=16` with 7 placeholder slots holds 9 real tokens, and the block hash incorporates the placeholder identifiers at their correct in-block positions.
 
-**Per-slot byte encoding:**
-- Real token slot: 4 bytes (`u32 LE` token id).
-- Placeholder slot: 12 bytes (`u64 LE mm_hash` + `u32 LE run_offset`), where `run_offset = global_position - mm_run.offset`.
+**Per-block byte encoding — two layouts, selected per block:**
+
+1. **Zero-MM block** (no run overlaps the block): 4 bytes/slot, `bytemuck::cast_slice(tokens)` (`u32 LE` token id). Byte-identical to the pre-MM `TokenBlock` encoding, so non-MM blocks keep their existing cache identity.
+
+2. **MM-affected block** (at least one run overlaps the block): every slot — real-token *and* placeholder — emits a fixed **13-byte frame** so the buffer is self-delimiting and slot-position-preserving:
+   - Real-token slot: `[tag=0x00 | u32 LE token_id | u64 LE 0]` (the trailing `u64` is frame padding to match placeholder width; it has no semantic meaning).
+   - Placeholder slot: `[tag=0x01 | u32 LE run_offset | u64 LE mm_hash]`, where `run_offset = global_position - mm_run.offset`.
+
+The differing per-slot widths (4 vs 13) guarantee an all-tokens block can never collide with an MM-affected block. The tag byte plus fixed frame guarantee a real-token slot and a placeholder slot at the same position can never collide. Slot kind is determined solely by `mm_runs` membership; token IDs at placeholder positions are ignored.
 
 `run_offset` (relative to the start of the multimodal run, not the block) ensures that the same image at the same global token position produces identical placeholder bytes regardless of where block boundaries fall — preserving cross-request prefix sharing across alignment shifts. A multi-block MM run produces distinct `block_hash`es for each of its blocks because `run_offset` increases monotonically across blocks (verified by `tokens_mm_multi_block_run`).
 
@@ -104,16 +110,16 @@ This PR delivers the contract. Adoption is in follow-up phases:
 ```rust
 use dynamo_kv_hashing::{Request, RequestMmObjectInfo};
 
-let request = Request::new(
-    tokens,                                    // Vec<u32>
-    Some("lora-name".into()),                  // Option<String>
-    Some("model-arch-tag".into()),             // Option<String> — free-form salt
-    vec![RequestMmObjectInfo {                 // multimodal placeholder runs
+let request = Request::builder()
+    .tokens(tokens)                            // Vec<u32>
+    .lora_name(Some("lora-name".into()))       // Option<String>
+    .salt(Some("model-arch-tag".into()))       // Option<String> — free-form salt
+    .mm_info(vec![RequestMmObjectInfo {        // multimodal placeholder runs
         mm_hash: image_hash,
         offset: 12,
         length: 256,
-    }],
-)?;
+    }])
+    .build()?;
 
 let blocks = request.into_blocks(16)?;         // Vec<UniversalBlock>
 let plhs   = request.positional_lineage_hashes(16)?;  // transport-friendly
