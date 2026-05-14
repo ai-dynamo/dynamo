@@ -22,14 +22,7 @@ name = "_core"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# `jemalloc` is on by default on platforms that support it. The HuggingFace
-# tokenizers, serde, and bytes hot paths drive a high churn of small Rust
-# allocations under long-context streaming workloads; with glibc malloc those
-# free()s contend on the single per-arena mutex (see #9466). jemalloc's
-# per-thread tcaches absorb the same churn lock-free.
-# Build without it via `--no-default-features`.
-default = ["jemalloc"]
-jemalloc = ["dep:tikv-jemallocator"]
+default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 kv-indexer = ["dep:clap", "dep:tracing-subscriber"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
@@ -97,15 +90,6 @@ dynamo-llm = { path = "../../llm" }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 dynamo-llm = { path = "../../llm", default-features = false }
-
-# jemalloc is excluded on musl: `target_os = "linux"` alone matches musl,
-# so we add `not(target_env = "musl")` to keep musl on the system allocator.
-#
-# `disable_initial_exec_tls`: we're a cdylib that gets dlopen()-ed by Python,
-# so jemalloc's TLS must use general-dynamic, not initial-exec — otherwise
-# we hit "cannot allocate memory in static TLS block" on import.
-[target.'cfg(any(all(target_os = "linux", not(target_env = "musl")), target_os = "macos"))'.dependencies]
-tikv-jemallocator = { version = "0.6", optional = true, features = ["disable_initial_exec_tls"] }
 
 [dev-dependencies]
 
