@@ -21,15 +21,55 @@ import asyncio
 import logging
 import warnings
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Optional
 
 from dynamo._core import backend as _backend
+from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine import LLMEngine
 
 logger = logging.getLogger(__name__)
+
+# Map the user-facing `dynamo.common.constants.DisaggregationMode` (which
+# carries 4 modes including ENCODE) to the 3-mode Rust enum. ENCODE is not
+# supported by the unified abstraction yet — multimodal encode workers stay
+# on the legacy main.py path until they migrate.
+_DISAGG_MODE_TO_RUST = {
+    DisaggregationMode.AGGREGATED: _backend.DisaggregationMode.Aggregated,
+    DisaggregationMode.PREFILL: _backend.DisaggregationMode.Prefill,
+    DisaggregationMode.DECODE: _backend.DisaggregationMode.Decode,
+}
+
+
+def _to_rust_disaggregation_mode(mode: DisaggregationMode):
+    try:
+        return _DISAGG_MODE_TO_RUST[mode]
+    except KeyError as e:
+        raise NotImplementedError(
+            f"DisaggregationMode.{mode.name} is not supported by the unified "
+            "backend abstraction; use the legacy backend entry point for this "
+            "worker role"
+        ) from e
+
+
+def _coerce_disagg_mode(value) -> DisaggregationMode:
+    """`None` → `AGGREGATED`. Native `DisaggregationMode` passes through.
+    Foreign enums (e.g. TRT-LLM's local `DisaggregationMode`) coerce by
+    `name` — same name → same mode, regardless of value-string. Anything
+    else raises so a typo-string can't be silently mapped to AGG."""
+    if value is None:
+        return DisaggregationMode.AGGREGATED
+    if isinstance(value, DisaggregationMode):
+        return value
+    if isinstance(value, Enum) and value.name in DisaggregationMode.__members__:
+        return DisaggregationMode[value.name]
+    raise TypeError(
+        f"disaggregation_mode is {type(value).__name__}({value!r}); "
+        "expected dynamo.common.constants.DisaggregationMode"
+    )
 
 
 @dataclass
@@ -51,6 +91,11 @@ class WorkerConfig:
     exclude_tools_when_tool_choice_none: bool = True
     enable_local_indexer: bool = True
     metrics_labels: list[tuple[str, str]] = field(default_factory=list)
+    # Disaggregation role; default AGGREGATED keeps existing callers unchanged.
+    # The Rust Worker reads this for registration (Prefill→ModelType::Prefill,
+    # Decode→disable local indexer); engines read it from their own runtime
+    # config to switch per-mode protocol behavior in `generate()`.
+    disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED
 
     @classmethod
     def from_runtime_config(
@@ -89,6 +134,17 @@ class WorkerConfig:
             ),
             "enable_local_indexer": getattr(runtime_cfg, "enable_local_indexer", True),
         }
+        # vLLM/TRT-LLM expose `disaggregation_mode`; SGLang exposes
+        # `serving_mode`. Skip the probe when an override is supplied so
+        # backends with a foreign enum (TRT-LLM) bypass the coercer.
+        if "disaggregation_mode" not in overrides:
+            kwargs["disaggregation_mode"] = _coerce_disagg_mode(
+                getattr(
+                    runtime_cfg,
+                    "disaggregation_mode",
+                    getattr(runtime_cfg, "serving_mode", None),
+                )
+            )
         if model_input is not None:
             kwargs["model_input"] = model_input
         kwargs.update(overrides)
@@ -139,6 +195,9 @@ class Worker:
             ),
             enable_local_indexer=self.config.enable_local_indexer,
             metrics_labels=list(self.config.metrics_labels),
+            disaggregation_mode=_to_rust_disaggregation_mode(
+                self.config.disaggregation_mode
+            ),
             runtime=runtime_cfg,
         )
 

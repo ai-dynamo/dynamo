@@ -67,8 +67,8 @@ async def worker(runtime: DistributedRuntime):
         runtime=runtime,
         config_path=config.config_path,
         model_name=config.model_name,
-        default_ttft_target=config.default_ttft_target,
-        default_itl_target=config.default_itl_target,
+        default_ttft_target_ms=config.default_ttft_target_ms,
+        default_itl_target_ms=config.default_itl_target_ms,
     )
 
     # Initialize connections to local routers

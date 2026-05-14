@@ -124,7 +124,7 @@ class DiagnosticsRecorder:
             return
 
         diag = effects.diagnostics or TickDiagnostics()
-        interval = self.config.throughput_adjustment_interval
+        interval = self.config.throughput_adjustment_interval_seconds
 
         prefill_engines: list[PerEngineFpm] = []
         decode_engines: list[PerEngineFpm] = []
@@ -344,10 +344,10 @@ class DiagnosticsRecorder:
             col=1,
         )
         fig.add_hline(
-            y=self.config.ttft,
+            y=self.config.ttft_ms,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"SLA ({self.config.ttft:.0f}ms)",
+            annotation_text=f"SLA ({self.config.ttft_ms:.0f}ms)",
             row=2,
             col=1,
         )
@@ -365,10 +365,10 @@ class DiagnosticsRecorder:
             col=2,
         )
         fig.add_hline(
-            y=self.config.itl,
+            y=self.config.itl_ms,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"SLA ({self.config.itl:.0f}ms)",
+            annotation_text=f"SLA ({self.config.itl_ms:.0f}ms)",
             row=2,
             col=2,
         )
@@ -387,10 +387,10 @@ class DiagnosticsRecorder:
             col=1,
         )
         fig.add_hline(
-            y=self.config.ttft,
+            y=self.config.ttft_ms,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"SLA ({self.config.ttft:.0f}ms)",
+            annotation_text=f"SLA ({self.config.ttft_ms:.0f}ms)",
             row=3,
             col=1,
         )
@@ -408,10 +408,10 @@ class DiagnosticsRecorder:
             col=2,
         )
         fig.add_hline(
-            y=self.config.itl,
+            y=self.config.itl_ms,
             line_dash="dash",
             line_color="red",
-            annotation_text=f"SLA ({self.config.itl:.0f}ms)",
+            annotation_text=f"SLA ({self.config.itl_ms:.0f}ms)",
             row=3,
             col=2,
         )
@@ -750,7 +750,7 @@ class DiagnosticsRecorder:
             f"Time range: {t0} — {t1} ({len(snaps)} ticks)<br>"
             f"Replica transitions: {num_scaling_events} | "
             f"GPU hours: {snaps[-1].gpu_hours:.2f}<br>"
-            f"SLA targets: TTFT={self.config.ttft:.0f}ms, ITL={self.config.itl:.0f}ms"
+            f"SLA targets: TTFT={self.config.ttft_ms:.0f}ms, ITL={self.config.itl_ms:.0f}ms"
         )
         fig.update_layout(
             title=dict(text=summary, font=dict(size=14), y=0.99, yanchor="top"),

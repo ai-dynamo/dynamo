@@ -80,7 +80,7 @@ func PrepareRestorePodSpec(
 			return fmt.Errorf("restore target container %q not found in pod spec (from %s annotation)", name, TargetContainersAnnotation)
 		}
 		if storage.BasePath != "" {
-			injectCheckpointVolumeMount(container, storage.BasePath)
+			InjectCheckpointVolumeMount(container, storage.BasePath)
 		}
 		EnsureControlVolume(podSpec, container)
 		if isCheckpointReady {
@@ -350,7 +350,7 @@ func InjectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {
 	})
 }
 
-func injectCheckpointVolumeMount(container *corev1.Container, basePath string) {
+func InjectCheckpointVolumeMount(container *corev1.Container, basePath string) {
 	for _, mount := range container.VolumeMounts {
 		if mount.Name == CheckpointVolumeName {
 			return
