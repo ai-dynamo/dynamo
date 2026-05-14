@@ -285,6 +285,22 @@ impl NvExtResponseFieldSelection {
     }
 }
 
+/// OpenAPI-facing schema for request taints.
+///
+/// Runtime serialization still uses `dynamo_kv_router::protocols::Taints`;
+/// this mirror exists so `NvExt` can expose the concrete field shape without
+/// making the kv-router crate depend on utoipa.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct TaintsSchema {
+    /// Taints that must be matched for the request to be eligible for a worker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required: Vec<String>,
+
+    /// Reserved for future soft-preference routing. Currently not used by routing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preferred: Vec<String>,
+}
+
 /// NVIDIA LLM extensions to the OpenAI API
 #[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone)]
 #[validate(schema(function = "validate_nv_ext"))]
@@ -389,6 +405,7 @@ pub struct NvExt {
     /// Request taints used to constrain or prefer tainted workers.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = TaintsSchema)]
     pub taints: Option<Taints>,
 }
 
