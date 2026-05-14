@@ -15,8 +15,6 @@
 //! - `by-instance/<uuid>` &rarr; JSON-encoded [`PeerInfo`]
 //! - `by-worker/<u64>`    &rarr; UUID string (hop &rarr; instance entry)
 
-use std::sync::Arc;
-
 use anyhow::{Context as _, Result, anyhow};
 use futures::future::BoxFuture;
 use uuid::Uuid;
@@ -27,7 +25,7 @@ use ::velo::{InstanceId, PeerInfo, WorkerId};
 use crate::storage::kv::{self, Bucket as _, Key};
 
 /// Default bucket name used for velo peer entries.
-pub const VELO_PEERS_BUCKET: &str = "velo-peers";
+pub(crate) const VELO_PEERS_BUCKET: &str = "velo-peers";
 
 fn instance_key(id: &InstanceId) -> Key {
     Key::new(format!("by-instance/{}", id.as_uuid()))
@@ -38,26 +36,21 @@ fn worker_key(wid: WorkerId) -> Key {
 }
 
 /// Velo [`PeerDiscovery`] adapter backed by a Dynamo [`kv::Manager`].
+///
+/// `kv::Manager` is itself a cheap-to-clone `Arc` newtype, so it is stored by
+/// value rather than wrapped in another `Arc`.
 #[derive(Clone)]
 pub struct KvPeerDiscovery {
-    kv: Arc<kv::Manager>,
+    kv: kv::Manager,
     bucket: String,
 }
 
 impl KvPeerDiscovery {
     /// Create a new adapter that stores peers in [`VELO_PEERS_BUCKET`].
-    pub fn new(kv: Arc<kv::Manager>) -> Self {
+    pub fn new(kv: kv::Manager) -> Self {
         Self {
             kv,
             bucket: VELO_PEERS_BUCKET.to_string(),
-        }
-    }
-
-    /// Create a new adapter using a custom bucket name (mostly useful for tests).
-    pub fn with_bucket(kv: Arc<kv::Manager>, bucket: impl Into<String>) -> Self {
-        Self {
-            kv,
-            bucket: bucket.into(),
         }
     }
 
@@ -162,7 +155,7 @@ impl PeerDiscovery for KvPeerDiscovery {
 
 /// Removes the `by-instance` and `by-worker` keys for a peer when dropped or unregistered.
 pub struct KvPeerRegistrationGuard {
-    kv: Arc<kv::Manager>,
+    kv: kv::Manager,
     bucket: String,
     by_inst: Option<Key>,
     by_worker: Option<Key>,
@@ -256,7 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_and_discover_round_trip() {
-        let kv = Arc::new(kv::Manager::memory());
+        let kv = kv::Manager::memory();
         let disco = KvPeerDiscovery::new(kv.clone());
 
         let peer = dummy_peer();
@@ -277,7 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn unregister_removes_entries() {
-        let kv = Arc::new(kv::Manager::memory());
+        let kv = kv::Manager::memory();
         let disco = KvPeerDiscovery::new(kv.clone());
 
         let peer = dummy_peer();
@@ -292,7 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_peer_errors() {
-        let kv = Arc::new(kv::Manager::memory());
+        let kv = kv::Manager::memory();
         let disco = KvPeerDiscovery::new(kv);
         let id = InstanceId::new_v4();
         let res = disco.discover_by_instance_id(id).await;

@@ -328,7 +328,6 @@ fn build_transport_type_inner(
             endpoint_id,
             connection_id,
         ))),
-        #[cfg(feature = "velo-transport")]
         RequestPlaneMode::Velo => {
             let velo_id = crate::pipeline::network::velo::current_velo_instance_id()?;
             let address = crate::pipeline::network::velo::encode_velo_address(
@@ -367,7 +366,6 @@ pub async fn build_transport_type(
             .filter(|&p| p != 0)
             .is_some(),
         RequestPlaneMode::Nats => true, // NATS doesn't need port init
-        #[cfg(feature = "velo-transport")]
         RequestPlaneMode::Velo => false, // velo node must be initialized to read its InstanceId
     };
 

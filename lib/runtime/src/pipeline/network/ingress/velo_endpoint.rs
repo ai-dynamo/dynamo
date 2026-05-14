@@ -11,13 +11,12 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use async_trait::async_trait;
-use bytes::Bytes;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 
-use ::velo::{Context as VeloContext, Handler, UnifiedResponse, Velo};
+use ::velo::{Context as VeloContext, Handler, Velo};
 
 use super::unified_server::RequestPlaneServer;
 use super::*;
@@ -25,6 +24,7 @@ use crate::SystemHealth;
 use crate::pipeline::network::PushWorkHandler;
 use crate::pipeline::network::velo::{
     ENDPOINT_HEADER, REQUEST_ID_HEADER, REQUEST_PLANE_HANDLER, encode_velo_node_prefix,
+    endpoint_key,
 };
 
 /// Velo `RequestPlaneServer` implementation.
@@ -35,7 +35,6 @@ pub struct VeloRequestPlaneServer {
     handlers: Arc<DashMap<String, EndpointHandler>>,
 }
 
-#[derive(Clone)]
 struct EndpointHandler {
     service_handler: Arc<dyn PushWorkHandler>,
     endpoint_name: String,
@@ -44,9 +43,12 @@ struct EndpointHandler {
 
 impl VeloRequestPlaneServer {
     /// Construct a new server bound to the given velo instance and register the
-    /// single multiplexed velo handler. Idempotent registration is the caller's
-    /// responsibility — invoke this exactly once per process (the `NetworkManager`
-    /// global takes care of that).
+    /// single multiplexed velo handler.
+    ///
+    /// Must be called **at most once per process**: velo's `register_handler`
+    /// rejects a duplicate handler name, so a second call returns an error.
+    /// `NetworkManager` upholds this by building the server through a
+    /// `OnceCell` (and the velo instance itself through `GLOBAL_VELO`).
     pub fn new(velo: Arc<Velo>) -> Result<Arc<Self>> {
         let handlers: Arc<DashMap<String, EndpointHandler>> = Arc::new(DashMap::new());
 
@@ -69,23 +71,18 @@ impl VeloRequestPlaneServer {
 
         Ok(Arc::new(Self { velo, handlers }))
     }
-
-    /// Cloned reference to the underlying velo instance (mainly for tests).
-    pub fn velo(&self) -> &Arc<Velo> {
-        &self.velo
-    }
-
-    fn endpoint_key(instance_id: u64, endpoint_name: &str) -> String {
-        format!("{instance_id:x}/{endpoint_name}")
-    }
 }
 
 /// The single demux handler. Reads the demux key from headers, looks up the
 /// corresponding [`PushWorkHandler`] in the DashMap, and invokes it.
+///
+/// The velo handler return type is `anyhow::Result<Option<bytes::Bytes>>`
+/// (velo's `UnifiedResponse`): `Ok(None)` is an empty ACK, `Err(_)` propagates
+/// back to the caller.
 async fn dispatch(
     handlers: Arc<DashMap<String, EndpointHandler>>,
     ctx: VeloContext,
-) -> UnifiedResponse {
+) -> anyhow::Result<Option<bytes::Bytes>> {
     let headers = match ctx.headers.as_ref() {
         Some(h) => h,
         None => {
@@ -116,7 +113,7 @@ async fn dispatch(
     handler
         .handle_payload(ctx.payload, request_id)
         .await
-        .map_err(|e| anyhow!("dynamo handler for {endpoint_key} failed: {e}"))?;
+        .with_context(|| format!("dynamo handler for {endpoint_key} failed"))?;
 
     // ACK with empty payload — streaming responses flow over the dedicated
     // `ResponseService` (TCP), not over the velo unary path.
@@ -134,7 +131,7 @@ impl RequestPlaneServer for VeloRequestPlaneServer {
         component_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
-        let key = Self::endpoint_key(instance_id, &endpoint_name);
+        let key = endpoint_key(instance_id, &endpoint_name);
         let fqn = format!("{namespace}.{component_name}.{endpoint_name}");
 
         self.handlers.insert(
@@ -158,6 +155,11 @@ impl RequestPlaneServer for VeloRequestPlaneServer {
     }
 
     async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()> {
+        // The `RequestPlaneServer` trait only passes `endpoint_name` (no
+        // instance_id), so we match every demux key ending in `/{name}`. This
+        // mirrors `SharedTcpServer` / `SharedHttpServer` and is safe because a
+        // Dynamo process registers a single `instance_id`, so at most one key
+        // per endpoint name exists.
         let suffix = format!("/{endpoint_name}");
         let keys: Vec<String> = self
             .handlers

@@ -37,12 +37,13 @@ pub use ::velo::InstanceId;
 pub use ::velo::Velo;
 use ::velo::transports::tcp::TcpTransportBuilder;
 
-pub use self::kv_discovery::{KvPeerDiscovery, KvPeerRegistrationGuard, VELO_PEERS_BUCKET};
+pub(crate) use self::kv_discovery::VELO_PEERS_BUCKET;
+pub use self::kv_discovery::{KvPeerDiscovery, KvPeerRegistrationGuard};
 
 use crate::storage::kv;
 
 /// Scheme prefix for velo addresses.
-pub const VELO_SCHEME: &str = "velo://";
+pub(crate) const VELO_SCHEME: &str = "velo://";
 
 /// Header carrying the demux key (`{instance_id_hex}/{endpoint_name}`) on velo
 /// requests so a single registered velo handler can dispatch to many Dynamo
@@ -53,11 +54,20 @@ pub const ENDPOINT_HEADER: &str = "x-dynamo-endpoint";
 pub const REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
 /// Name of the single multiplexed velo handler all Dynamo endpoints register through.
-pub const REQUEST_PLANE_HANDLER: &str = "dynamo-request-plane";
+pub(crate) const REQUEST_PLANE_HANDLER: &str = "dynamo-request-plane";
+
+/// Build the per-endpoint demux key: `{dynamo_instance_id_hex}/{endpoint_name}`.
+///
+/// Single source of truth for the key format — it is both the suffix of a
+/// `velo://` address and the `DashMap` key the velo server demuxes on, so both
+/// [`encode_velo_address`] and the velo server use this helper.
+pub(crate) fn endpoint_key(dynamo_instance_id: u64, endpoint_name: &str) -> String {
+    format!("{dynamo_instance_id:x}/{endpoint_name}")
+}
 
 /// Configuration for the per-process velo instance.
 #[derive(Debug, Clone)]
-pub struct VeloRuntimeConfig {
+pub(crate) struct VeloRuntimeConfig {
     /// IP to bind the velo TCP transport on. Defaults to `0.0.0.0`.
     pub bind_host: IpAddr,
     /// TCP port for the velo transport. `None` lets the OS assign one.
@@ -75,7 +85,7 @@ impl Default for VeloRuntimeConfig {
 
 impl VeloRuntimeConfig {
     /// Read [`VeloRuntimeConfig`] from `DYN_VELO_HOST` / `DYN_VELO_PORT`.
-    pub fn from_env() -> Self {
+    pub(crate) fn from_env() -> Self {
         let bind_host = std::env::var("DYN_VELO_HOST")
             .ok()
             .and_then(|s| s.parse::<IpAddr>().ok())
@@ -96,7 +106,7 @@ impl VeloRuntimeConfig {
 
 /// Decoded view of a `velo://...` address published in service discovery.
 #[derive(Debug, Clone)]
-pub struct VeloAddress {
+pub(crate) struct VeloAddress {
     /// Velo instance to dial.
     pub velo_instance: InstanceId,
     /// Demux key: `{dynamo_instance_id_hex}/{endpoint_name}`.
@@ -110,11 +120,10 @@ pub fn encode_velo_address(
     endpoint_name: &str,
 ) -> String {
     format!(
-        "{}{}/{:x}/{}",
+        "{}{}/{}",
         VELO_SCHEME,
         velo_instance.as_uuid(),
-        dynamo_instance_id,
-        endpoint_name,
+        endpoint_key(dynamo_instance_id, endpoint_name),
     )
 }
 
@@ -123,13 +132,13 @@ pub fn encode_velo_address(
 /// Returned by [`super::ingress::velo_endpoint::VeloRequestPlaneServer::address`]
 /// for logging / debugging purposes; full addresses for clients to dial are
 /// constructed by `build_transport_type` using [`encode_velo_address`].
-pub fn encode_velo_node_prefix(velo_instance: InstanceId) -> String {
+pub(crate) fn encode_velo_node_prefix(velo_instance: InstanceId) -> String {
     format!("{}{}", VELO_SCHEME, velo_instance.as_uuid())
 }
 
 /// Parse a velo address. The endpoint key is `<dynamo_instance_id_hex>/<endpoint_name>`
 /// and is preserved verbatim so it matches the demux DashMap on the server.
-pub fn decode_velo_address(address: &str) -> Result<VeloAddress> {
+pub(crate) fn decode_velo_address(address: &str) -> Result<VeloAddress> {
     let rest = address
         .strip_prefix(VELO_SCHEME)
         .ok_or_else(|| anyhow!("address {address} is missing `{VELO_SCHEME}` prefix"))?;
@@ -163,22 +172,16 @@ pub(crate) static GLOBAL_VELO_TOKEN: std::sync::LazyLock<CancellationToken> =
 
 /// Owning handle for the per-process velo instance. The discovery guard keeps
 /// the local peer entry alive in the KV for the lifetime of the process.
-pub struct VeloHandle {
+pub(crate) struct VeloHandle {
     velo: Arc<Velo>,
-    discovery: Arc<KvPeerDiscovery>,
     // Held to keep the local peer registered for the lifetime of the process.
     _registration: KvPeerRegistrationGuard,
 }
 
 impl VeloHandle {
     /// The shared velo instance.
-    pub fn velo(&self) -> &Arc<Velo> {
+    pub(crate) fn velo(&self) -> &Arc<Velo> {
         &self.velo
-    }
-
-    /// The KV-backed discovery adapter wired into this velo instance.
-    pub fn discovery(&self) -> &Arc<KvPeerDiscovery> {
-        &self.discovery
     }
 }
 
@@ -186,7 +189,7 @@ impl VeloHandle {
 /// it has not been initialized yet (the velo `RequestPlaneServer` must be
 /// created before this is called — that is the contract that
 /// `build_transport_type` upholds).
-pub fn current_velo_instance_id() -> Result<InstanceId> {
+pub(crate) fn current_velo_instance_id() -> Result<InstanceId> {
     GLOBAL_VELO
         .get()
         .map(|h| h.velo.instance_id())
@@ -203,8 +206,8 @@ pub fn current_velo_instance_id() -> Result<InstanceId> {
 /// `kv_manager` is used as the backing store for the `PeerDiscovery` adapter so
 /// that velo peer lookups share a single discovery surface with the rest of
 /// the runtime (memory / file / etcd, depending on `DYN_DISCOVERY_BACKEND`).
-pub async fn global_velo(
-    kv_manager: Arc<kv::Manager>,
+pub(crate) async fn global_velo(
+    kv_manager: kv::Manager,
     config: VeloRuntimeConfig,
 ) -> Result<&'static VeloHandle> {
     GLOBAL_VELO
@@ -213,7 +216,7 @@ pub async fn global_velo(
 }
 
 async fn build_velo_handle(
-    kv_manager: Arc<kv::Manager>,
+    kv_manager: kv::Manager,
     config: VeloRuntimeConfig,
 ) -> Result<VeloHandle> {
     let bind_addr = config.bind_socket();
@@ -250,7 +253,6 @@ async fn build_velo_handle(
 
     Ok(VeloHandle {
         velo,
-        discovery,
         _registration: registration,
     })
 }

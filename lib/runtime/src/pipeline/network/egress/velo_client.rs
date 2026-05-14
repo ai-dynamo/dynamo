@@ -48,6 +48,10 @@ impl VeloRequestPlaneClient {
         if self.known_peers.contains_key(&target) {
             return Ok(());
         }
+        // A `DashMap::entry` here would hold a shard lock across the
+        // `discover_and_register_peer` await; the benign double-discover on a
+        // race is cheaper than serializing the shard across a network call —
+        // `discover_and_register_peer` is idempotent.
         self.velo
             .discover_and_register_peer(target)
             .await

@@ -771,9 +771,8 @@ impl DistributedConfig {
             nats_config: None,
             // This won't be used in process local, so we likely need a "none" option to
             // communicate that and avoid opening the ports.
-            // Stays Tcp even when the velo-transport feature is enabled: velo's TCP backend
-            // opens a listening socket on build(), which defeats the "zero network footprint"
-            // intent of process_local().
+            // Stays Tcp rather than Velo: velo's TCP backend opens a listening socket on
+            // build(), which defeats the "zero network footprint" intent of process_local().
             request_plane: RequestPlaneMode::Tcp,
             event_transport_kind: crate::discovery::EventTransportKind::Zmq,
         }
@@ -786,7 +785,7 @@ impl DistributedConfig {
 /// - `Nats`: Use NATS for request distribution (legacy)
 /// - `Http`: Use HTTP/2 for request distribution
 /// - `Tcp`: Use raw TCP for request distribution with msgpack support (default)
-/// - `Velo`: Use the velo messenger as the request plane (gated by `velo-transport` feature)
+/// - `Velo`: Use the velo messenger as the request plane
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RequestPlaneMode {
     /// Use NATS for request plane
@@ -798,7 +797,6 @@ pub enum RequestPlaneMode {
     Tcp,
     /// Use velo as the request plane. Streaming responses still flow over the
     /// existing TCP `ResponseService`; only the request path goes via velo.
-    #[cfg(feature = "velo-transport")]
     Velo,
 }
 
@@ -808,7 +806,6 @@ impl fmt::Display for RequestPlaneMode {
             Self::Nats => write!(f, "nats"),
             Self::Http => write!(f, "http"),
             Self::Tcp => write!(f, "tcp"),
-            #[cfg(feature = "velo-transport")]
             Self::Velo => write!(f, "velo"),
         }
     }
@@ -822,16 +819,10 @@ impl std::str::FromStr for RequestPlaneMode {
             "nats" => Ok(Self::Nats),
             "http" => Ok(Self::Http),
             "tcp" => Ok(Self::Tcp),
-            #[cfg(feature = "velo-transport")]
             "velo" => Ok(Self::Velo),
             _ => Err(anyhow::anyhow!(
-                "Invalid request plane mode: '{}'. Valid options are: 'nats', 'http', 'tcp'{}",
+                "Invalid request plane mode: '{}'. Valid options are: 'nats', 'http', 'tcp', 'velo'",
                 s,
-                if cfg!(feature = "velo-transport") {
-                    ", 'velo'"
-                } else {
-                    ""
-                }
             )),
         }
     }

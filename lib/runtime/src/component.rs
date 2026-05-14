@@ -77,8 +77,6 @@ pub enum TransportType {
     Http(String),
     Tcp(String),
     /// Velo-backed request plane address (`velo://<uuid>/<inst_hex>/<endpoint>`).
-    /// Always present in the type so deserialization across feature boundaries stays
-    /// stable; only constructable when the `velo-transport` feature is on.
     Velo(String),
 }
 

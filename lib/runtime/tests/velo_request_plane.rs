@@ -5,9 +5,7 @@
 //! and `RequestPlaneClient` using two velo nodes that share a KV-backed
 //! `PeerDiscovery`.
 //!
-//! Run with: `timeout 60 cargo test -p dynamo-runtime --features velo-transport --test velo_request_plane -- --nocapture`
-
-#![cfg(feature = "velo-transport")]
+//! Run with: `timeout 60 cargo test -p dynamo-runtime --test velo_request_plane -- --nocapture`
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -31,15 +29,28 @@ use dynamo_runtime::pipeline::network::ingress::velo_endpoint::VeloRequestPlaneS
 use dynamo_runtime::pipeline::network::velo::{KvPeerDiscovery, encode_velo_address};
 use dynamo_runtime::storage::kv;
 
-/// Test handler that records every payload and request id it receives.
+/// Test handler that records every payload and request id it receives, and
+/// signals via [`Notify`] after each delivery so tests can await it instead of
+/// polling.
 #[derive(Default)]
 struct RecordingHandler {
     received: Mutex<Vec<(Bytes, Option<String>)>>,
+    delivered: Notify,
 }
 
 impl RecordingHandler {
     fn snapshot(&self) -> Vec<(Bytes, Option<String>)> {
         self.received.lock().clone()
+    }
+
+    /// Wait until at least one payload has been delivered, or time out.
+    async fn wait_for_delivery(&self) {
+        if !self.received.lock().is_empty() {
+            return;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.delivered.notified())
+            .await
+            .expect("handler did not receive a payload within 5s");
     }
 }
 
@@ -51,6 +62,7 @@ impl PushWorkHandler for RecordingHandler {
         request_id: Option<String>,
     ) -> Result<(), PipelineError> {
         self.received.lock().push((payload, request_id));
+        self.delivered.notify_one();
         Ok(())
     }
 
@@ -99,7 +111,7 @@ async fn build_velo_node(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn velo_request_plane_round_trip() {
     // Single shared kv::Manager (memory) acts as the discovery surface for both nodes.
-    let kv = Arc::new(kv::Manager::memory());
+    let kv = kv::Manager::memory();
     let disco = Arc::new(KvPeerDiscovery::new(kv));
 
     // Server side: velo node A + VeloRequestPlaneServer.
@@ -153,12 +165,9 @@ async fn velo_request_plane_round_trip() {
         ack.len()
     );
 
-    // Allow velo's spawn-by-default dispatch to land before we read the recording.
-    let mut tries = 0;
-    while handler.snapshot().is_empty() && tries < 50 {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        tries += 1;
-    }
+    // velo's dispatch is spawn-by-default, so the handler may run slightly after
+    // the ACK returns; await its delivery signal instead of polling.
+    handler.wait_for_delivery().await;
     let recorded = handler.snapshot();
     assert_eq!(recorded.len(), 1, "expected exactly one delivery");
     assert_eq!(recorded[0].0, payload);
@@ -167,7 +176,7 @@ async fn velo_request_plane_round_trip() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn velo_two_nodes_can_discover_each_other_via_kv() {
-    let kv = Arc::new(kv::Manager::memory());
+    let kv = kv::Manager::memory();
     let disco = Arc::new(KvPeerDiscovery::new(kv));
 
     let (velo_a, _guard_a) = build_velo_node(disco.clone()).await;
@@ -189,7 +198,7 @@ async fn velo_two_nodes_can_discover_each_other_via_kv() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn velo_request_plane_unknown_endpoint_errors() {
-    let kv = Arc::new(kv::Manager::memory());
+    let kv = kv::Manager::memory();
     let disco = Arc::new(KvPeerDiscovery::new(kv));
 
     let (velo_server, _server_guard) = build_velo_node(disco.clone()).await;

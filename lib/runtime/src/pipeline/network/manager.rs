@@ -132,10 +132,8 @@ struct NetworkConfig {
     // NATS configuration (provided externally, not from env)
     nats_client: Option<async_nats::Client>,
 
-    // Velo bind config (only meaningful when the velo-transport feature is enabled,
-    // but stored unconditionally so the NetworkConfig type is feature-stable).
-    velo_host: String,
-    velo_port: Option<u16>,
+    // Velo bind config (host/port for the velo TCP transport).
+    velo: super::velo::VeloRuntimeConfig,
 }
 
 impl NetworkConfig {
@@ -171,11 +169,8 @@ impl NetworkConfig {
             // NATS (external)
             nats_client,
 
-            // Velo bind configuration: defaults to 0.0.0.0 with OS-assigned port.
-            velo_host: std::env::var("DYN_VELO_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
-            velo_port: std::env::var("DYN_VELO_PORT")
-                .ok()
-                .and_then(|p| p.parse().ok()),
+            // Velo bind configuration (reads DYN_VELO_HOST / DYN_VELO_PORT).
+            velo: super::velo::VeloRuntimeConfig::from_env(),
         }
     }
 }
@@ -207,7 +202,7 @@ impl NetworkConfig {
 /// server.register_endpoint(...).await?;
 ///
 /// // Create client (not cached, lightweight)
-/// let client = manager.create_client()?;
+/// let client = manager.create_client().await?;
 /// client.send_request(...).await?;
 /// ```
 pub struct NetworkManager {
@@ -278,12 +273,11 @@ impl NetworkManager {
                     "Initializing NetworkManager with NATS request plane"
                 );
             }
-            #[cfg(feature = "velo-transport")]
             RequestPlaneMode::Velo => {
                 tracing::info!(
                     %mode,
-                    host = %config.velo_host,
-                    port = ?config.velo_port,
+                    host = %config.velo.bind_host,
+                    port = ?config.velo.bind_port,
                     "Initializing NetworkManager with velo request plane"
                 );
             }
@@ -336,13 +330,12 @@ impl NetworkManager {
     /// Returns an error if:
     /// - Client creation fails (e.g., invalid configuration)
     /// - NATS mode is selected but NATS client is not available
-    pub fn create_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
+    pub async fn create_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
         match self.mode {
             RequestPlaneMode::Http => self.create_http_client(),
             RequestPlaneMode::Tcp => self.create_tcp_client(),
             RequestPlaneMode::Nats => self.create_nats_client(),
-            #[cfg(feature = "velo-transport")]
-            RequestPlaneMode::Velo => self.create_velo_client_blocking(),
+            RequestPlaneMode::Velo => self.create_velo_client().await,
         }
     }
 
@@ -363,7 +356,6 @@ impl NetworkManager {
             RequestPlaneMode::Http => self.create_http_server().await,
             RequestPlaneMode::Tcp => self.create_tcp_server().await,
             RequestPlaneMode::Nats => self.create_nats_server().await,
-            #[cfg(feature = "velo-transport")]
             RequestPlaneMode::Velo => self.create_velo_server().await,
         }
     }
@@ -501,27 +493,12 @@ impl NetworkManager {
     }
 
     // ============================================================================
-    // PRIVATE: Velo (gated by `velo-transport` feature)
+    // PRIVATE: Velo
     // ============================================================================
 
-    #[cfg(feature = "velo-transport")]
-    fn velo_runtime_config(&self) -> super::velo::VeloRuntimeConfig {
-        use std::net::IpAddr;
-        let bind_host: IpAddr = self
-            .config
-            .velo_host
-            .parse()
-            .unwrap_or_else(|_| IpAddr::from([0, 0, 0, 0]));
-        super::velo::VeloRuntimeConfig {
-            bind_host,
-            bind_port: self.config.velo_port,
-        }
-    }
-
-    #[cfg(feature = "velo-transport")]
-    fn velo_kv_manager(&self) -> Result<Arc<kv::Manager>> {
+    fn velo_kv_manager(&self) -> Result<kv::Manager> {
         match &self.kv_manager {
-            Some(km) => Ok(Arc::new(km.clone())),
+            Some(km) => Ok(km.clone()),
             None => Err(anyhow::anyhow!(
                 "velo request plane requires a KV-store discovery backend (etcd/file/memory); \
                  Kubernetes-only deployments are not yet supported by the velo transport"
@@ -529,31 +506,22 @@ impl NetworkManager {
         }
     }
 
-    #[cfg(feature = "velo-transport")]
     async fn create_velo_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
         use super::ingress::velo_endpoint::VeloRequestPlaneServer;
         let kv = self.velo_kv_manager()?;
-        let handle = super::velo::global_velo(kv, self.velo_runtime_config()).await?;
+        let handle = super::velo::global_velo(kv, self.config.velo.clone()).await?;
         let server = VeloRequestPlaneServer::new(handle.velo().clone())?;
         Ok(server as Arc<dyn RequestPlaneServer>)
     }
 
-    /// Synchronous wrapper around the async velo build. Required because
-    /// `RequestPlaneClient` creation is sync in the existing API. The velo
-    /// instance is initialized lazily on first call.
-    #[cfg(feature = "velo-transport")]
-    fn create_velo_client_blocking(&self) -> Result<Arc<dyn RequestPlaneClient>> {
+    /// Build the velo request-plane client. Lazily initializes the per-process
+    /// velo instance on first call (a router-only process never calls
+    /// [`create_server`](Self::create_server), so the client path can't rely on
+    /// the server having initialized it first).
+    async fn create_velo_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
         use super::egress::velo_client::VeloRequestPlaneClient;
         let kv = self.velo_kv_manager()?;
-        let cfg = self.velo_runtime_config();
-        let handle = match tokio::runtime::Handle::try_current() {
-            Ok(h) => tokio::task::block_in_place(|| h.block_on(super::velo::global_velo(kv, cfg)))?,
-            Err(_) => {
-                return Err(anyhow::anyhow!(
-                    "velo client creation must run within a tokio runtime"
-                ));
-            }
-        };
+        let handle = super::velo::global_velo(kv, self.config.velo.clone()).await?;
         let client = VeloRequestPlaneClient::new(handle.velo().clone());
         Ok(client as Arc<dyn RequestPlaneClient>)
     }
