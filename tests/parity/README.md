@@ -336,8 +336,13 @@ Impl tag is `#vllm` or `#sglang`.
 
 ### 4. Decide who's right
 
-**Two goals; they sometimes conflict.**
+**Goals, in priority order.** Higher goals trump lower ones when they conflict.
 
+0. **Spec, if one exists.** If the parser family has a published
+   upstream spec (chat template, tokenizer config, model-card section,
+   vendor docs), align to the spec regardless of what either engine
+   does. Add `spec_ref:` to the fixture (see step 8). This is rare —
+   most families don't have a written spec; skip to goal 1 in that case.
 1. **No tag/marker leakage.** Tool-calling tags like `<｜tool_call｜>`,
    `<tool_call>`, `[TOOL_CALLS]`, etc. must never reach `message.content`
    rendered to a user. If one engine leaks and the other doesn't, prefer
@@ -348,6 +353,8 @@ Impl tag is `#vllm` or `#sglang`.
 
 **Decision rubric (apply in order):**
 
+- **Spec exists** → follow it; record `spec_ref:` in the fixture; both
+  engines disagreeing with the spec are upstream bugs to file.
 - **Customer complains in production** → align to that customer's engine
   *now* to unblock. Add a `reason:` string referencing the incident and
   the engine you aligned to (e.g.
