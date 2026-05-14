@@ -1110,8 +1110,8 @@ mod tests {
 
         let (mut req, rx) = make_request("tainted", 256);
         req.routing_constraints = crate::protocols::RoutingConstraints {
-            required: vec!["mdc-b".to_string()],
-            preferred: Vec::new(),
+            required_taints: vec!["mdc-b".to_string()],
+            preferred_taints: Vec::new(),
         };
 
         queue.enqueue(req).await;

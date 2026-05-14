@@ -547,13 +547,13 @@ class ModelRuntimeConfig:
         ...
 
 class RoutingConstraints:
-    required: List[str]
-    preferred: List[str]
+    required_taints: List[str]
+    preferred_taints: List[str]
 
     def __init__(
         self,
-        required: Optional[List[str]] = None,
-        preferred: Optional[List[str]] = None,
+        required_taints: Optional[List[str]] = None,
+        preferred_taints: Optional[List[str]] = None,
     ) -> None: ...
 
 class OverlapScores:

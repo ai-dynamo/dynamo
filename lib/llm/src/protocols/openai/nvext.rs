@@ -294,11 +294,11 @@ impl NvExtResponseFieldSelection {
 pub struct RoutingConstraintsSchema {
     /// Worker taints that must be matched for the request to be eligible.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required: Vec<String>,
+    pub required_taints: Vec<String>,
 
     /// Reserved for future soft-preference routing. Currently not used by routing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub preferred: Vec<String>,
+    pub preferred_taints: Vec<String>,
 }
 
 /// NVIDIA LLM extensions to the OpenAI API

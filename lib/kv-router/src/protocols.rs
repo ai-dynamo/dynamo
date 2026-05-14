@@ -173,18 +173,18 @@ pub trait WorkerConfigLike {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct RoutingConstraints {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required: Vec<String>,
+    pub required_taints: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub preferred: Vec<String>,
+    pub preferred_taints: Vec<String>,
 }
 
 impl RoutingConstraints {
     pub fn is_empty(&self) -> bool {
-        self.required.is_empty() && self.preferred.is_empty()
+        self.required_taints.is_empty() && self.preferred_taints.is_empty()
     }
 
     pub fn is_compatible_with_worker_taints(&self, worker_taints: &[String]) -> bool {
-        self.required.iter().all(|taint| {
+        self.required_taints.iter().all(|taint| {
             worker_taints
                 .iter()
                 .any(|worker_taint| worker_taint == taint)

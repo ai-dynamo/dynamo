@@ -15,34 +15,34 @@ pub struct RoutingConstraints {
 #[pymethods]
 impl RoutingConstraints {
     #[new]
-    #[pyo3(signature = (required=None, preferred=None))]
-    fn new(required: Option<Vec<String>>, preferred: Option<Vec<String>>) -> Self {
+    #[pyo3(signature = (required_taints=None, preferred_taints=None))]
+    fn new(required_taints: Option<Vec<String>>, preferred_taints: Option<Vec<String>>) -> Self {
         Self {
             inner: RsRoutingConstraints {
-                required: required.unwrap_or_default(),
-                preferred: preferred.unwrap_or_default(),
+                required_taints: required_taints.unwrap_or_default(),
+                preferred_taints: preferred_taints.unwrap_or_default(),
             },
         }
     }
 
     #[getter]
-    fn required(&self) -> Vec<String> {
-        self.inner.required.clone()
+    fn required_taints(&self) -> Vec<String> {
+        self.inner.required_taints.clone()
     }
 
     #[setter]
-    fn set_required(&mut self, required: Vec<String>) {
-        self.inner.required = required;
+    fn set_required_taints(&mut self, required_taints: Vec<String>) {
+        self.inner.required_taints = required_taints;
     }
 
     #[getter]
-    fn preferred(&self) -> Vec<String> {
-        self.inner.preferred.clone()
+    fn preferred_taints(&self) -> Vec<String> {
+        self.inner.preferred_taints.clone()
     }
 
     #[setter]
-    fn set_preferred(&mut self, preferred: Vec<String>) {
-        self.inner.preferred = preferred;
+    fn set_preferred_taints(&mut self, preferred_taints: Vec<String>) {
+        self.inner.preferred_taints = preferred_taints;
     }
 }
 

@@ -626,8 +626,8 @@ mod tests {
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints {
-                required: vec!["mdc-b".to_string()],
-                preferred: Vec::new(),
+                required_taints: vec!["mdc-b".to_string()],
+                preferred_taints: Vec::new(),
             },
             shared_cache_hits: None,
             resp_tx: None,
@@ -672,8 +672,8 @@ mod tests {
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints {
-                required: vec!["mdc-b".to_string()],
-                preferred: Vec::new(),
+                required_taints: vec!["mdc-b".to_string()],
+                preferred_taints: Vec::new(),
             },
             shared_cache_hits: None,
             resp_tx: None,
@@ -734,8 +734,8 @@ mod tests {
                 pinned_worker: None,
                 allowed_worker_ids: None,
                 routing_constraints: crate::protocols::RoutingConstraints {
-                    required: vec![required_taint.clone()],
-                    preferred: Vec::new(),
+                    required_taints: vec![required_taint.clone()],
+                    preferred_taints: Vec::new(),
                 },
                 shared_cache_hits: None,
                 resp_tx: None,
