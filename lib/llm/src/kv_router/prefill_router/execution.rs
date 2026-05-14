@@ -145,10 +145,10 @@ impl PrefillRouter {
                 )
             })?;
 
-        // Release the phase barrier now that routing completed and worker recording already ran.
-        // Decode may proceed without waiting for prefill output streaming to finish.
-        drop(phase_transition_permit);
-
+        // Release the phase barrier only after prefill starts streaming, confirming
+        // the prefill worker has entered async_generate() and registered the NIXL room.
+        // This gates the phase transition to Decode on the prefill worker being ready,
+        // which closes the race where decode-side NIXL connect lands before the room exists.
         let Some(first_output) = prefill_response.next().await else {
             return Err(PrefillError::PrefillError(
                 "Prefill router returned no output (stream ended)".to_string(),
@@ -156,8 +156,11 @@ impl PrefillRouter {
             ));
         };
 
+        // Release the phase barrier now that routing completed and the prefill worker
+        // has entered async_generate() and registered the NIXL room. Decode may proceed.
+        drop(phase_transition_permit);
+
         // Record when prefill result arrived at the router (for KV transfer latency metric).
-        // This is after drop(phase_transition_permit) and after first_output is received.
         if let Some(ref tracker) = tracker {
             tracker.record_prefill_complete();
         }
