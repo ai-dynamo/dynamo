@@ -471,6 +471,7 @@ impl RouterHandles {
                 lora_name,
                 priority_jump,
                 allowed_worker_ids,
+                Taints::default(),
             )
             .await
             .map_err(|e| {
@@ -529,6 +530,7 @@ impl RouterHandles {
                 priority_jump,
                 None,
                 allowed_worker_ids,
+                Taints::default(),
             )
             .await
             .map_err(|e| {
