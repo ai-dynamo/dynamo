@@ -33,6 +33,8 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
     acting_decay_tau_seconds: float
     scheduler_interval_seconds: float
     scheduling_enabled: bool
+    cache_aware_admission: bool
+    shared_tokens_enabled: bool
     model_name: Optional[str] = None
     model_path: Optional[str] = None
 
@@ -49,6 +51,8 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
             acting_decay_tau_seconds=self.acting_decay_tau_seconds,
             scheduler_interval_seconds=self.scheduler_interval_seconds,
             scheduling_enabled=self.scheduling_enabled,
+            cache_aware_admission=self.cache_aware_admission,
+            shared_tokens_enabled=self.shared_tokens_enabled,
         )
 
     def validate(self) -> None:  # type: ignore[override]
@@ -163,6 +167,26 @@ class ThunderAgentArgGroup(ArgGroup):
             default=5.0,
             help="Period of the background pause/resume scheduler tick (default: 5.0)",
             arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--shared-tokens-enabled",
+            env_var="DYN_THUNDERAGENT_SHARED_TOKENS_ENABLED",
+            default=False,
+            help="When set, maintain a per-worker EMA of prefix-cache hit "
+            "rate from response usage and deduct from the pause-side "
+            "denominator. Mirrors upstream TA shared_tokens.",
+            arg_type=bool,
+        )
+        add_argument(
+            g,
+            flag_name="--cache-aware-admission",
+            env_var="DYN_THUNDERAGENT_CACHE_AWARE_ADMISSION",
+            default=False,
+            help="When set, new-program admission queries KvRouter for "
+            "per-worker prefix-cache overlap and prefers prefix-local "
+            "workers. Off by default.",
+            arg_type=bool,
         )
         add_argument(
             g,

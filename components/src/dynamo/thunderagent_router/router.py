@@ -86,6 +86,23 @@ class ThunderAgentConfig:
     buffer_per_program: int = 100
     """Headroom reserved per program when BFD-packing during resume."""
 
+    cache_aware_admission: bool = False
+    """When True, the handler precomputes per-worker prefix-cache overlap via
+    KvRouter.get_potential_loads(token_ids) and passes it to before_request.
+    New-program admission prefers workers where the prompt is already cached,
+    and treats cached tokens as a deduction from required capacity. Off by
+    default so we can A/B this against the no-cache baseline."""
+
+    shared_tokens_enabled: bool = False
+    """When True, maintain a per-worker EMA of prefix-cache hit rate from
+    chat-completions ``usage.prompt_tokens_details.cached_tokens`` and
+    deduct ``cache_hit_rate * worker_used`` from the pause-side denominator.
+    Mirrors upstream TA's ``shared_tokens`` which it polls from vLLM
+    ``/metrics``. Off by default for A/B testing."""
+
+    cache_hit_rate_alpha: float = 0.2
+    """EMA smoothing factor for shared_tokens cache hit rate."""
+
 
 class ThunderAgentScheduler:
     """Outer-loop program scheduler.
@@ -106,6 +123,9 @@ class ThunderAgentScheduler:
         self._lock = asyncio.Lock()
         self._scheduler_task: Optional[asyncio.Task] = None
         self._stat_forced_resumes = 0
+        # Per-worker EMA of (cached_tokens / prompt_tokens), updated from
+        # response usage when shared_tokens_enabled.
+        self._worker_cache_hit_rate: dict[int, float] = {}
 
     def start(self) -> None:
         if self._scheduler_task is not None:
@@ -132,9 +152,17 @@ class ThunderAgentScheduler:
         self._scheduler_task = None
 
     async def before_request(
-        self, program_id: str, estimated_prompt_tokens: int = 0
+        self,
+        program_id: str,
+        estimated_prompt_tokens: int = 0,
+        worker_cached_tokens: Optional[dict[int, int]] = None,
     ) -> PauseDecision:
-        """Admission gate. Blocks if the program is currently PAUSED."""
+        """Admission gate. Blocks if the program is currently PAUSED.
+
+        ``worker_cached_tokens`` (when cache_aware_admission is on) maps
+        worker_id -> tokens of this prompt already cached on that worker.
+        Used by new-program admission to prefer prefix-local workers.
+        """
         if not self._cfg.scheduling_enabled:
             async with self._lock:
                 self._table.begin_request(program_id, estimated_prompt_tokens)
@@ -143,7 +171,7 @@ class ThunderAgentScheduler:
         wait_started = time.monotonic()
         async with self._lock:
             wait_event, was_paused = self._admit_locked(
-                program_id, estimated_prompt_tokens
+                program_id, estimated_prompt_tokens, worker_cached_tokens
             )
 
         if wait_event is not None:
@@ -191,7 +219,10 @@ class ThunderAgentScheduler:
             )
 
     def _admit_locked(
-        self, program_id: str, estimated_prompt_tokens: int
+        self,
+        program_id: str,
+        estimated_prompt_tokens: int,
+        worker_cached_tokens: Optional[dict[int, int]] = None,
     ) -> tuple[Optional[asyncio.Event], bool]:
         """Resolve the admission state for a turn. Returns (wait_event, was_paused).
 
@@ -211,7 +242,7 @@ class ThunderAgentScheduler:
         if not capacities:
             return None, False
         worker_id = self._select_worker_for_new_program_locked(
-            capacities, program.token_total
+            capacities, program.token_total, worker_cached_tokens
         )
         if worker_id is not None:
             program.assigned_worker_id = worker_id
@@ -264,6 +295,21 @@ class ThunderAgentScheduler:
         program = self._table.programs.get(program_id)
         if program is not None:
             program.assigned_worker_id = worker_id
+
+    def update_cache_hit_rate(
+        self, worker_id: int, cached_tokens: int, prompt_tokens: int
+    ) -> None:
+        """EMA update of per-worker prefix-cache hit rate from response usage.
+
+        Only meaningful when shared_tokens_enabled; the deduction is applied
+        in _worker_used. Lock-free per the same GIL contract as record_output_tokens.
+        """
+        if not self._cfg.shared_tokens_enabled or prompt_tokens <= 0:
+            return
+        sample = max(0.0, min(1.0, cached_tokens / prompt_tokens))
+        prev = self._worker_cache_hit_rate.get(worker_id, 0.0)
+        alpha = self._cfg.cache_hit_rate_alpha
+        self._worker_cache_hit_rate[worker_id] = alpha * sample + (1 - alpha) * prev
 
     async def _scheduler_loop(self) -> None:
         consecutive_failures = 0
@@ -319,7 +365,15 @@ class ThunderAgentScheduler:
     def _worker_used(self, worker_id: int, *, decayed: bool = False) -> int:
         programs = self._active_programs_for_worker(worker_id)
         tokens = sum(self._program_tokens(p, decayed=decayed) for p in programs)
-        return tokens + len(programs) * self._cfg.buffer_per_program
+        used = tokens + len(programs) * self._cfg.buffer_per_program
+        if self._cfg.shared_tokens_enabled:
+            # Upstream-style shared_tokens deduction: a fraction of "active"
+            # tokens is actually shared with the prefix cache and not real
+            # capacity pressure.
+            hit_rate = self._worker_cache_hit_rate.get(worker_id, 0.0)
+            shared = int(tokens * hit_rate)
+            used = max(0, used - shared)
+        return used
 
     def _least_loaded_worker_locked(self, capacities: dict[int, int]) -> Optional[int]:
         if not capacities:
@@ -330,18 +384,27 @@ class ThunderAgentScheduler:
         )
 
     def _select_worker_for_new_program_locked(
-        self, capacities: dict[int, int], estimated_tokens: int
+        self,
+        capacities: dict[int, int],
+        estimated_tokens: int,
+        worker_cached_tokens: Optional[dict[int, int]] = None,
     ) -> Optional[int]:
         # Upstream TA queues new programs behind any existing paused program for
         # fairness; don't let a fresh trajectory jump the global waiting queue.
         if self._table.paused:
             return None
-        required = estimated_tokens + self._cfg.buffer_per_program
-        candidates = [
-            (w, self._worker_used(w))
-            for w, c in capacities.items()
-            if c - self._worker_used(w) >= required
-        ]
+        buffer = self._cfg.buffer_per_program
+        cache_aware = worker_cached_tokens is not None
+        candidates: list[tuple[int, int]] = []
+        for w, c in capacities.items():
+            cached = worker_cached_tokens.get(w, 0) if cache_aware else 0
+            required = max(buffer, estimated_tokens - cached + buffer)
+            used = self._worker_used(w)
+            if c - used >= required:
+                # Effective load = used minus prefix cached for this prompt.
+                # Workers with the prefix already resident look less loaded,
+                # so we naturally prefer them.
+                candidates.append((w, used - cached))
         if not candidates:
             return None
         return min(candidates, key=lambda item: item[1])[0]
