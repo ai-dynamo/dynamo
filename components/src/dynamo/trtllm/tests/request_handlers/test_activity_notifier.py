@@ -42,18 +42,34 @@ def _make_trtllm_stub() -> None:
 
     handler_base.py imports tensorrt_llm.executor.{request,result,utils},
     tensorrt_llm.llmapi.{disagg_utils,llm}, tensorrt_llm.sampling_params, and
-    tensorrt_llm.scheduling_params.  Rather than enumerate every sub-module,
-    install a meta_path finder that auto-creates a MagicMock-backed stub for
-    any tensorrt_llm.* import that isn't already satisfied, so this file stays
-    correct as new trtllm sub-imports are added.
+    tensorrt_llm.scheduling_params.
+
+    The stub uses a custom Module subclass whose __getattr__ returns MagicMock
+    for any unknown attribute.  This prevents Python's import machinery from
+    attempting to load a *submodule* named e.g. tensorrt_llm.executor.utils.RequestError
+    when handler_base.py does ``from tensorrt_llm.executor.utils import RequestError``.
+    Without __getattr__, the attribute lookup falls through to a submodule import
+    which creates a plain Module, and then calling RequestError(...) raises
+    ``TypeError: module() takes at most 2 arguments``.
     """
     import importlib.abc
     import importlib.machinery
 
     PREFIX = "tensorrt_llm"
 
-    def _make_stub(fullname: str) -> types.ModuleType:
-        mod = types.ModuleType(fullname)
+    class _AutoMockModule(types.ModuleType):
+        """Module stub that returns MagicMock for any attribute that isn't set."""
+
+        def __getattr__(self, name: str):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            mock = MagicMock()
+            # Cache so repeated access returns the same object.
+            object.__setattr__(self, name, mock)
+            return mock
+
+    def _make_stub(fullname: str) -> "_AutoMockModule":
+        mod = _AutoMockModule(fullname)
         mod.__spec__ = importlib.machinery.ModuleSpec(
             fullname, loader=None, is_package=True
         )
@@ -69,7 +85,7 @@ def _make_trtllm_stub() -> None:
                 _make_stub(fullname)
             return sys.modules[fullname].__spec__
 
-    # Only install once; setdefault guards against repeated test collection.
+    # Only install once; guard against repeated test collection.
     if not any(type(f).__name__ == "_TrtllmFinder" for f in sys.meta_path):
         sys.meta_path.insert(0, _TrtllmFinder())
 
