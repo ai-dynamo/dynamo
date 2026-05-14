@@ -420,9 +420,13 @@ pub fn try_tool_call_parse_basic_json(
                         // Single token case
                         let result = handle_single_token_tool_calls(&json, start_token);
                         if let Some(content) = result {
-                            // Check if we found a start token but got empty JSON back
-                            // This indicates the token was found but no valid JSON followed
-                            if content.is_empty() {
+                            // Mark "start token seen but no valid JSON" when content is either
+                            // empty (start token present, nothing parseable after it) OR
+                            // non-array (template passthrough text like "WinRM: [status]").
+                            // Valid tool call extraction always wraps items in "[...]".
+                            // Without this flag, the caller falls through to returning the
+                            // original full input as normal_text, leaking the start token.
+                            if !content.starts_with('[') {
                                 found_start_token_with_no_valid_json = true;
                             }
 
