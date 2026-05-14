@@ -42,6 +42,7 @@ pub use dynamo_kv_router::scheduling;
 pub use dynamo_kv_router::selector;
 
 pub mod agent_controller;
+pub mod fpm_subscriber;
 pub mod indexer;
 pub mod metrics;
 pub mod prefill_router;

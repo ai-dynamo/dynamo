@@ -54,6 +54,11 @@ pub enum RouterMode {
     Direct,
     LeastLoaded,
     DeviceAwareWeighted,
+    /// vLLM-style DP load-balancing: routes by `waiting * w + running`, rotated
+    /// tie-break, no KV-cache awareness. Goes through the KV router chooser
+    /// pipeline so per-worker waiting/running counters can be tracked via the
+    /// selector lifecycle hooks.
+    VllmDplb,
 }
 
 impl From<RouterMode> for RsRouterMode {
@@ -66,6 +71,7 @@ impl From<RouterMode> for RsRouterMode {
             RouterMode::Direct => Self::Direct,
             RouterMode::LeastLoaded => Self::LeastLoaded,
             RouterMode::DeviceAwareWeighted => Self::DeviceAwareWeighted,
+            RouterMode::VllmDplb => Self::VllmDplb,
         }
     }
 }

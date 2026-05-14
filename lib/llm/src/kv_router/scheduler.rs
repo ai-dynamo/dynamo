@@ -92,6 +92,18 @@ where
             watch_worker_configs,
         ));
 
+        // If the selector wants engine-authoritative `(waiting, running)`
+        // counters (currently `VllmDPLBSelector`), start a background task
+        // that subscribes to ForwardPassMetrics on the event plane and
+        // pushes the counts into the selector. The task no-ops if the
+        // active selector returns `wants_fpm() == false`.
+        crate::kv_router::fpm_subscriber::spawn(
+            component.clone(),
+            Arc::clone(&inner),
+            component.drt().child_token(),
+            worker_type,
+        );
+
         let metrics_scheduler = Arc::clone(&inner);
         let metrics_cancel_token = component.drt().child_token();
         let mut queue_updates = inner.subscribe_queue_updates();

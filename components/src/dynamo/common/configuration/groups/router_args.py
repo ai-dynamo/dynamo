@@ -70,9 +70,12 @@ class RouterArgGroup(ArgGroup):
                 "How to route the request. power-of-two picks 2 random workers and "
                 "routes to the one with fewer in-flight requests. least-loaded routes to "
                 "the worker with the fewest active requests. device-aware-weighted routes "
-                "based on worker device type (CPU/CUDA). In disaggregated prefill mode, "
-                "both power-of-two and least-loaded skip bootstrap optimization and fall "
-                "back to the synchronous prefill path."
+                "based on worker device type (CPU/CUDA). vllm-dplb routes using vLLM's "
+                "DP load-balancer algorithm (waiting * w + running, rotated tie-break, no "
+                "KV-cache awareness); implies the load-aware preset so cache-aware signals "
+                "are disabled. In disaggregated prefill mode, both power-of-two and "
+                "least-loaded skip bootstrap optimization and fall back to the synchronous "
+                "prefill path."
             ),
             choices=[
                 "round-robin",
@@ -82,6 +85,7 @@ class RouterArgGroup(ArgGroup):
                 "direct",
                 "least-loaded",
                 "device-aware-weighted",
+                "vllm-dplb",
             ],
         )
         add_argument(

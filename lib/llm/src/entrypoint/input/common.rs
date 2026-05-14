@@ -314,10 +314,14 @@ where
         Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics).into_operator();
     let min_initial_workers = min_initial_workers_from_env()?;
 
-    // For KV routing, use the client from the chooser to ensure shared state
-    let router_client = if router_mode == RouterMode::KV {
+    // For routes that go through the KV chooser pipeline (KV + VllmDplb), reuse
+    // the chooser's client so chooser-side and dispatch-side share state.
+    let router_client = if router_mode.is_kv_routing() {
         let Some(ref chooser) = chooser else {
-            anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
+            anyhow::bail!(
+                "Router mode {:?} requires KVRouter chooser to not be null",
+                router_mode
+            );
         };
         chooser.client().clone()
     } else {
@@ -352,9 +356,12 @@ where
         | RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
         | RouterMode::DeviceAwareWeighted => ServiceBackend::from_engine(Arc::new(router)),
-        RouterMode::KV => {
+        RouterMode::KV | RouterMode::VllmDplb => {
             let Some(chooser) = chooser else {
-                anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
+                anyhow::bail!(
+                    "Router mode {:?} requires KVRouter chooser to not be null",
+                    router_mode
+                );
             };
             ServiceBackend::from_engine(Arc::new(KvPushRouter::new(router, chooser)))
         }

@@ -167,11 +167,19 @@ pub enum RouterMode {
     LeastLoaded,
     /// Device-aware weighted routing for heterogeneous workers.
     DeviceAwareWeighted,
+    /// vLLM-style DP load-balancing (`waiting * w + running`, rotated tie-break).
+    /// Goes through the KV router chooser pipeline for lifecycle hooks, but the
+    /// selector ignores prefix-cache state entirely.
+    VllmDplb,
 }
 
 impl RouterMode {
+    /// True for modes that route through the KvRouter chooser. Both `KV` and
+    /// `VllmDplb` share that pipeline (admission gate, scheduler queue, selector
+    /// lifecycle hooks); they differ only in which `WorkerSelector` is wired
+    /// inside the chooser.
     pub fn is_kv_routing(&self) -> bool {
-        *self == RouterMode::KV
+        matches!(self, RouterMode::KV | RouterMode::VllmDplb)
     }
 
     pub fn is_direct_routing(&self) -> bool {
@@ -725,7 +733,7 @@ where
             | RouterMode::Direct
             | RouterMode::LeastLoaded
             | RouterMode::DeviceAwareWeighted => None,
-            RouterMode::KV => {
+            RouterMode::KV | RouterMode::VllmDplb => {
                 panic!(
                     "select_next_worker should not be called for {:?} routing mode",
                     self.router_mode
@@ -760,7 +768,7 @@ where
             | RouterMode::Direct
             | RouterMode::LeastLoaded
             | RouterMode::DeviceAwareWeighted => None,
-            RouterMode::KV => {
+            RouterMode::KV | RouterMode::VllmDplb => {
                 panic!(
                     "peek_next_worker should not be called for {:?} routing mode",
                     self.router_mode
@@ -1003,8 +1011,11 @@ where
             RouterMode::Random => self.random(request).await,
             RouterMode::RoundRobin => self.round_robin(request).await,
             RouterMode::PowerOfTwoChoices => self.power_of_two_choices(request).await,
-            RouterMode::KV => {
-                anyhow::bail!("KV routing should not call generate on PushRouter");
+            RouterMode::KV | RouterMode::VllmDplb => {
+                anyhow::bail!(
+                    "{:?} routing should not call generate on PushRouter",
+                    self.router_mode
+                );
             }
             RouterMode::Direct => {
                 anyhow::bail!(

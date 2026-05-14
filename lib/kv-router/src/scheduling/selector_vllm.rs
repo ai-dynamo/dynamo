@@ -115,9 +115,12 @@ impl VllmDPLBSelector {
         (c.waiting as u64) * (self.waiting_weight as u64) + (c.running as u64)
     }
 
-    /// Test-only setter so unit tests can stage `(waiting, running)` directly.
-    #[cfg(test)]
-    fn set_counts(&self, worker: WorkerWithDpRank, waiting: u32, running: u32) {
+    /// Overwrite the per-worker counts directly. Use this when an external
+    /// source provides engine-authoritative `(waiting, running)` for
+    /// `worker` — for example, a ForwardPassMetrics subscriber. The
+    /// lifecycle hooks (`on_admit`/`on_running`/`on_finish`) still update
+    /// the same map; whichever signal arrives latest wins.
+    pub fn set_counts(&self, worker: WorkerWithDpRank, waiting: u32, running: u32) {
         self.counts
             .write()
             .insert(worker, Counts { waiting, running });
@@ -217,6 +220,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for VllmDPLBSelector {
     fn on_forget_worker(&self, worker_id: WorkerId) {
         self.forget_worker(worker_id);
     }
+
+    fn update_from_fpm(&self, worker: WorkerWithDpRank, waiting: u32, running: u32) {
+        self.set_counts(worker, waiting, running);
+    }
+
+    fn wants_fpm(&self) -> bool {
+        true
+    }
 }
 
 /// Config-driven enum dispatch over [`DefaultWorkerSelector`] and
@@ -296,6 +307,24 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for AnyWorkerSelector {
             Self::VllmDplb(s) => {
                 <VllmDPLBSelector as WorkerSelector<C>>::on_forget_worker(s, worker_id)
             }
+        }
+    }
+
+    fn update_from_fpm(&self, worker: WorkerWithDpRank, waiting: u32, running: u32) {
+        match self {
+            Self::Default(s) => <DefaultWorkerSelector as WorkerSelector<C>>::update_from_fpm(
+                s, worker, waiting, running,
+            ),
+            Self::VllmDplb(s) => <VllmDPLBSelector as WorkerSelector<C>>::update_from_fpm(
+                s, worker, waiting, running,
+            ),
+        }
+    }
+
+    fn wants_fpm(&self) -> bool {
+        match self {
+            Self::Default(s) => <DefaultWorkerSelector as WorkerSelector<C>>::wants_fpm(s),
+            Self::VllmDplb(s) => <VllmDPLBSelector as WorkerSelector<C>>::wants_fpm(s),
         }
     }
 }

@@ -20,7 +20,7 @@ use dynamo_runtime::{
         ModelCardInstanceId,
     },
     pipeline::{
-        ManyOut, Operator, RouterMode, SegmentSource, ServiceBackend, SingleIn, Source,
+        ManyOut, Operator, SegmentSource, ServiceBackend, SingleIn, Source,
         network::egress::push_router::PushRouter,
     },
     protocols::{EndpointId, annotated::Annotated},
@@ -727,7 +727,7 @@ impl ModelWatcher {
             let needs_local_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_none();
             let needs_local_completions_pipeline = card.model_type.supports_completions();
-            let kv_chooser = if router_config.router_mode == RouterMode::KV
+            let kv_chooser = if router_config.router_mode.is_kv_routing()
                 && (needs_local_chat_pipeline || needs_local_completions_pipeline)
             {
                 Some(

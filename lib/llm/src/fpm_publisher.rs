@@ -27,7 +27,9 @@ use dynamo_runtime::transports::event_plane::EventPublisher;
 
 use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
-const FPM_TOPIC: &str = "forward-pass-metrics";
+/// Event-plane topic for ForwardPassMetrics messages. Publishers and
+/// subscribers must use the exact same string for routing to work.
+pub const FPM_TOPIC: &str = "forward-pass-metrics";
 const FPM_VERSION: i32 = 1;
 /// Matches Python `_FpmPublisherThread.HEARTBEAT_INTERVAL`.
 const IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);

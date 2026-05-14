@@ -252,6 +252,14 @@ where
         Ok(())
     }
 
+    /// Read-only access to the worker selector. Background tasks (e.g. the
+    /// forward-pass-metrics subscriber) use this to deliver engine-side
+    /// signals into the selector via [`WorkerSelector::update_from_fpm`]
+    /// and friends.
+    pub fn selector(&self) -> &Sel {
+        self.queue.selector()
+    }
+
     pub fn pending_count(&self) -> usize {
         self.queue.pending_count()
     }

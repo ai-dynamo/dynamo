@@ -36,6 +36,21 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
     /// Called when `worker_id` leaves the fleet so selectors can drop any
     /// per-worker state they may hold.
     fn on_forget_worker(&self, _worker_id: WorkerId) {}
+
+    /// Engine-authoritative counter update from a ForwardPassMetrics message.
+    /// `waiting` and `running` are the latest queued/scheduled request counts
+    /// observed inside the engine's scheduler for `worker`. Selectors that
+    /// maintain per-worker load (`VllmDPLBSelector`) override this; others
+    /// keep the default no-op so the FPM subscriber is harmless when the
+    /// active selector cannot use the data.
+    fn update_from_fpm(&self, _worker: WorkerWithDpRank, _waiting: u32, _running: u32) {}
+
+    /// Whether this selector benefits from a forward-pass-metrics subscriber.
+    /// When `true`, the router starts a background task that subscribes to
+    /// FPM events and feeds them through [`Self::update_from_fpm`].
+    fn wants_fpm(&self) -> bool {
+        false
+    }
 }
 
 /// Helper function for softmax sampling.

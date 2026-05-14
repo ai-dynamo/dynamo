@@ -211,6 +211,13 @@ async def async_main():
     if config.router_mode == "kv":
         router_mode = RouterMode.KV
         kv_router_config = KvRouterConfig(**config.kv_router_kwargs())
+    elif config.router_mode == "vllm-dplb":
+        router_mode = RouterMode.VllmDplb
+        # vllm-dplb is load-only: force the matching selector and turn off
+        # cache-aware signals so we don't pay for KV indexing we won't use.
+        config.selector_kind = "vllm_dplb"
+        config.load_aware = True
+        kv_router_config = KvRouterConfig(**config.kv_router_kwargs())
     elif config.router_mode == "random":
         router_mode = RouterMode.Random
         kv_router_config = None
