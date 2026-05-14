@@ -306,6 +306,40 @@ def _compute_mm_uuids(
 # `components/src/dynamo/sglang/request_handlers/llm/decode_handler.py`.
 
 
+def _serialize_prompt_logprobs(
+    raw_prompt_logprobs: list,
+) -> list:
+    """Convert vLLM's ``RequestOutput.prompt_logprobs`` into the dict shape
+    expected by Dynamo's Rust ``PromptLogprobEntry`` (serde deserialization).
+
+    vLLM shape: ``list[dict[int, Logprob] | None]`` where ``Logprob`` has
+    ``.logprob``, ``.rank``, ``.decoded_token`` attributes.
+
+    Output shape: ``list[dict[int, {"logprob": float, ...}] | None]`` —
+    matches ``LLMEngineOutput.prompt_logprobs`` so the Rust postprocessor
+    can surface it on ``NvExtResponse.prompt_logprobs``.
+    """
+    result: list = []
+    for entry in raw_prompt_logprobs:
+        if entry is None:
+            result.append(None)
+        else:
+            converted: Dict[int, Dict[str, Any]] = {}
+            for token_id, logprob_obj in entry.items():
+                lp_dict: Dict[str, Any] = {
+                    "logprob": float(logprob_obj.logprob),
+                }
+                rank = getattr(logprob_obj, "rank", None)
+                if rank is not None:
+                    lp_dict["rank"] = int(rank)
+                decoded = getattr(logprob_obj, "decoded_token", None)
+                if decoded is not None:
+                    lp_dict["decoded_token"] = decoded
+                converted[int(token_id)] = lp_dict
+            result.append(converted)
+    return result
+
+
 def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     """Return True iff the request opted into the given nvext extra field.
 
@@ -491,6 +525,10 @@ def build_sampling_params(
                 logger.warning(
                     f"Invalid prompt_logprobs value: {prompt_logprobs_value} (must be integer), ignoring"
                 )
+
+        skip_special_tokens_value = output_options.get("skip_special_tokens")
+        if skip_special_tokens_value is not None:
+            sampling_params.skip_special_tokens = bool(skip_special_tokens_value)
 
     # If max_tokens wasn't provided (None or missing), compute a dynamic default
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
@@ -2768,6 +2806,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             request_output=res,
                             embedding_sequence_length=embedding_sequence_length,
                         )
+                        if res.prompt_logprobs is not None:
+                            out["prompt_logprobs"] = _serialize_prompt_logprobs(
+                                res.prompt_logprobs
+                            )
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "
@@ -2963,6 +3005,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if error is not None:
             yield error
             return
+
+        extra_args = request.get("extra_args") or {}
+        nvext_args = extra_args.get("nvext") or {}
+        cache_salt = nvext_args.get("cache_salt")
+        if cache_salt is not None and isinstance(prompt, dict):
+            prompt["cache_salt"] = cache_salt
 
         # Build sampling params from request
         sampling_params = build_sampling_params(
