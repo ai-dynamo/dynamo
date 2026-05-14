@@ -120,6 +120,15 @@ pub trait OAIChatLikeRequest {
 pub trait OAIPromptFormatter: Send + Sync + 'static {
     fn supports_add_generation_prompt(&self) -> bool;
     fn render(&self, req: &dyn OAIChatLikeRequest) -> Result<String>;
+
+    /// Per-family image-placeholder template used when the chat template
+    /// requires string content and the request contains images. `{n}` in
+    /// the template is the 1-based image index. `None` when the
+    /// formatter has no flatten strategy — MM-aware routing falls back
+    /// to text-prefix routing for those families.
+    fn image_placeholder_template(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 #[derive(Clone)]

@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated Dynamo on a single H100, with multimodal frontend-decoding
+# and embedding-cache enabled. Modeled on
+# recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml but
+# adapted for Qwen3.6-35B-A3B-FP8 (TP=1, max-model-len 32768) and the
+# PR 8235 `dynamo-fd-ec` config:
+#   - --enable-multimodal           : MM request handling on
+#   - --frontend-decoding           : Frontend (Rust) decodes images; worker receives embeddings
+#   - --multimodal-embedding-cache-capacity-gb 8 : 8 GiB EC per worker (DRAM-backed post-encoder cache)
+#   - --mm-processor-cache-gb 30    : 30 GiB HF processor cache (pre-encoder)
+#   - --dyn-tool-call-parser / --dyn-reasoning-parser : qwen3 tool/reasoning routing
+#
+# DGD's operator auto-creates a Service named `qwen36-dynamo-fd-ec-frontend`
+# on port 8000 which perf.yaml targets.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen36-dynamo-fd-ec
+  labels:
+    app.kubernetes.io/name: qwen3.6-35b
+    app.kubernetes.io/component: dynamo-fd-ec
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  pvcs:
+    - create: false
+      name: shared-model-cache
+  services:
+    Frontend:
+      componentType: frontend
+      envs:
+        - name: HF_HOME
+          value: /home/dynamo/.cache/huggingface
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+        - name: DYN_HTTP_BODY_LIMIT_MB
+          value: "200"
+      extraPodSpec:
+        # Hostname pin + toleration + image come from hw/${HW}.env
+        # (shared across vllm-serve, dynamo-fd, dynamo-fd-ec). Both
+        # Frontend and VllmWorker get the same nodeSelector so the
+        # gang scheduler places both on that exact node. This
+        # supersedes inter-pod podAffinity (which never worked under
+        # kai-scheduler gang scheduling — see git log).
+        # If the pinned host has no free GPU at apply time, both pods
+        # stay Pending — edit hw/${HW}.env to retarget.
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+      # Frontend-decoding does CPU-side image decode + base64 parsing,
+      # so we give it more CPU than the qwen3-vl-30b recipe's cpu=1.
+      replicas: 1
+      resources:
+        requests:
+          cpu: "4"
+          memory: 16Gi
+        limits:
+          cpu: "8"
+          memory: 32Gi
+      subComponentType: null
+
+    VllmWorker:
+      componentType: worker
+      extraPodSpec:
+        # Same hostname pin as Frontend — keeps the NIXL embedding
+        # transfer a same-node memcpy.
+        nodeSelector: ${HW_NODE_SELECTOR}
+        tolerations: ${HW_TOLERATIONS}
+        mainContainer:
+          command:
+            - /bin/bash
+            - -lc
+          args:
+            - |
+              set -euo pipefail
+              ulimit -l unlimited
+              python3 -m dynamo.vllm \
+                --model "${MODEL_NAME}" \
+                --enable-multimodal \
+                --frontend-decoding \
+                --multimodal-embedding-cache-capacity-gb "${DYN_MULTIMODAL_EMBEDDING_CACHE_GB}" \
+                --mm-processor-cache-gb 30 \
+                --dyn-tool-call-parser qwen3_coder \
+                --dyn-reasoning-parser qwen3 \
+                --tensor-parallel-size 1 \
+                --gpu-memory-utilization 0.85 \
+                --max-model-len 32768 \
+                --enable-prefix-caching \
+                --no-enable-log-requests
+          image: ${VLLM_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_NAME
+              value: "Qwen/Qwen3.6-35B-A3B-FP8"
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: DYN_REQUEST_PLANE
+              value: tcp
+            # nixl-write is the EC connector's transfer mode for the
+            # post-encoder embeddings between workers (only matters at
+            # TP>1, but harmless at TP=1).
+            - name: DYN_VLLM_EMBEDDING_TRANSFER_MODE
+              value: nixl-write
+            # 8 GiB embedding cache per worker (= 8 GiB total at TP=1).
+            - name: DYN_MULTIMODAL_EMBEDDING_CACHE_GB
+              value: "8"
+            # Permit http:// image URLs (our jsonl uses local PNG paths,
+            # not URLs — keeping this on doesn't hurt and future-proofs).
+            - name: DYN_MM_ALLOW_INTERNAL
+              value: "1"
+          workingDir: /workspace
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"
+      subComponentType: null
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+          # Same shared FSx HF cache as vllm-serve recipe. No subPath →
+          # benefit from already-downloaded weights. Compilation cache
+          # is NOT persisted here (single PVC, single mount point in
+          # DGD's volumeMounts grammar); we eat a ~1 min torch.compile +
+          # DeepGEMM JIT penalty per pod restart. Acceptable for bench
+          # runs that stay up for the entire sweep.

@@ -1,0 +1,147 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Shared aiperf benchmark pod template for all 3 configs (vllm-serve,
+# dynamo-fd, dynamo-fd-ec). run-benchmark.sh exports the per-config
+# values (${BENCH_POD}, ${BENCH_FRONTEND}, ${BENCH_RUN_LABEL}) plus
+# the per-hardware ones (${HW_NODE_SELECTOR}, ${HW_TOLERATIONS}) and
+# pipes this file through `envsubst` before `kubectl apply`.
+#
+# AIPERF_GIT_REF must include https://github.com/ai-dynamo/aiperf/pull/824
+# ("add session_id to single-turn for causal ordering"). Our
+# sliding-window jsonl writes session_id=user_<N> per row; PR 824 is
+# what makes single_turn mode honor that ordering so prefix-cache
+# hits across the 8 turns of a given user actually land.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${BENCH_POD}
+  labels:
+    app.kubernetes.io/name: qwen3.6-35b
+    app.kubernetes.io/component: benchmark
+    app.kubernetes.io/managed-by: dynamo-recipe
+spec:
+  restartPolicy: Never
+  # Hostname pin + toleration come from hw/${HW}.env — same target
+  # as the deploy target (vllm-serve Deployment, or DGD Frontend +
+  # Worker). That same-node guarantee is what we actually rely on;
+  # we deliberately do NOT add a podAffinity rule:
+  #   * vllm-serve vs DGD pods carry different label schemas, so a
+  #     single rule wouldn't cover all three configs.
+  #   * podAffinity would be a no-op anyway given the hostname pin.
+  nodeSelector: ${HW_NODE_SELECTOR}
+  tolerations: ${HW_TOLERATIONS}
+  containers:
+    - name: benchmark
+      image: python:3.11
+      command:
+        - /bin/bash
+        - -lc
+        - |
+          set -euo pipefail
+          ulimit -n 1048576
+          ulimit -u 65536
+
+          apt update && apt install -y --no-install-recommends curl jq git
+
+          # Pin to a recent aiperf main SHA that includes PR 824
+          # (session_id for single-turn) + PR 903 (HF image-byte-dict fix).
+          # Bump AIPERF_GIT_REF to roll forward.
+          pip install --no-cache-dir "aiperf @ git+https://github.com/ai-dynamo/aiperf.git@${AIPERF_GIT_REF}"
+          python -c "import aiperf, sys; print('aiperf', aiperf.__version__ if hasattr(aiperf,'__version__') else 'sha-pinned', 'OK')"
+
+          echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models ..."
+          until curl -s "http://${FRONTEND}:8000/v1/models" \
+              | jq -e --arg m "${MODEL_NAME}" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+            echo "[$(date '+%H:%M:%S')] not ready, sleeping 10s"
+            sleep 10
+          done
+          echo "Model '${MODEL_NAME}' is ready."
+
+          INPUT_FILE="${DATASET_DIR}/30u_8t_5w_8000word_base64.jsonl"
+          if [[ ! -f "${INPUT_FILE}" ]]; then
+            echo "Dataset not found: ${INPUT_FILE}" >&2
+            exit 1
+          fi
+
+          RUN_DIR="${ARTIFACT_BASE_DIR}/${RUN_LABEL}"
+          mkdir -p "${RUN_DIR}"
+          echo "Running benchmark; artifacts → ${RUN_DIR}"
+
+          # single_turn (NOT multi_turn): each jsonl row is one request.
+          # PR 824 makes single_turn respect session_id, so the 8 turns
+          # of user_<N> are issued in causal order (no out-of-order
+          # interleave across user_<M>'s turns).
+          aiperf profile \
+            --model "${MODEL_NAME}" \
+            --input-file "${INPUT_FILE}" \
+            --custom-dataset-type single_turn \
+            --url "http://${FRONTEND}:8000" \
+            --streaming \
+            --ui-type none \
+            --request-count "${REQUEST_COUNT}" \
+            --concurrency "${CONCURRENCY}" \
+            --request-rate-mode constant \
+            --warmup-request-count "${WARMUP_REQUEST_COUNT}" \
+            --artifact-dir "${RUN_DIR}" \
+            --extra-inputs "max_tokens:${MAX_TOKENS}" \
+            --extra-inputs "min_tokens:${MAX_TOKENS}" \
+            --extra-inputs "ignore_eos:true"
+
+          # aiperf writes inputs.json containing every prompt + every
+          # base64 image actually sent — ~4-12 GB for our multimodal
+          # datasets, vs ~30 MB of actual metric outputs. It's
+          # regenerable from the input jsonl + aiperf args, so we drop
+          # it by default. Set KEEP_INPUTS_JSON=1 to retain it for
+          # individual-request debugging.
+          if [[ "${KEEP_INPUTS_JSON:-}" != "1" ]]; then
+            rm -fv "${RUN_DIR}/inputs.json" || true
+          else
+            echo "KEEP_INPUTS_JSON=1 → retaining $(du -sh ${RUN_DIR}/inputs.json 2>/dev/null | cut -f1) inputs.json"
+          fi
+
+          echo "Run complete. Artifacts in ${RUN_DIR}"
+          sleep 3600
+      env:
+        - name: MODEL_NAME
+          value: Qwen/Qwen3.6-35B-A3B-FP8
+        - name: FRONTEND
+          value: ${BENCH_FRONTEND}
+        - name: RUN_LABEL
+          value: ${BENCH_RUN_LABEL}
+        # Pin to current aiperf main HEAD; includes PR 824 + PR 903.
+        # To roll back to PR 824's exact merge commit:
+        #   fd7c2ad4abc43cc0c73079d27c016513e29309e7
+        - name: AIPERF_GIT_REF
+          value: "79de74ece808"
+        - name: MAX_TOKENS
+          value: "1024"
+        - name: REQUEST_COUNT
+          value: "240"  # 30 users × 8 turns
+        - name: CONCURRENCY
+          value: "30"
+        - name: WARMUP_REQUEST_COUNT
+          value: "2"
+        - name: DATASET_DIR
+          value: /perf-cache/datasets
+        - name: ARTIFACT_BASE_DIR
+          value: /perf-cache/artifacts/qwen36_fp8
+        - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+          value: "1800"
+        - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+          value: "1800"
+      resources:
+        requests:
+          cpu: "8"
+          memory: 16Gi
+        limits:
+          cpu: "16"
+          memory: 32Gi
+      volumeMounts:
+        - name: shared-model-cache
+          mountPath: /perf-cache
+          subPath: qwen36-bench/perf-cache
+  volumes:
+    - name: shared-model-cache
+      persistentVolumeClaim:
+        claimName: shared-model-cache

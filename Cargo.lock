@@ -220,6 +220,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-lock"
+version = "3.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "290f7f2596bd5b78a9fec8088ccd89180d7f9f55b94b0576823bbbdc72ee8311"
+dependencies = [
+ "event-listener",
+ "event-listener-strategy",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "async-nats"
 version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2323,6 +2334,8 @@ dependencies = [
  "dynamo-protocols",
  "dynamo-runtime",
  "futures",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2471,6 +2484,7 @@ dependencies = [
  "mockito",
  "modelexpress-client",
  "modelexpress-common",
+ "moka",
  "ndarray 0.16.1",
  "nix 0.26.4",
  "nixl-sys",
@@ -2581,6 +2595,7 @@ dependencies = [
  "dynamo-runtime",
  "futures",
  "rand 0.9.4",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
@@ -4679,6 +4694,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tracing-mutex",
  "tracing-subscriber",
  "xxhash-rust",
 ]
@@ -5267,6 +5283,26 @@ dependencies = [
  "tonic 0.13.1",
  "tonic-build 0.13.1",
  "tracing",
+]
+
+[[package]]
+name = "moka"
+version = "0.12.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "957228ad12042ee839f93c8f257b62b4c0ab5eaae1d4fa60de53b27c9d7c5046"
+dependencies = [
+ "async-lock",
+ "crossbeam-channel",
+ "crossbeam-epoch",
+ "crossbeam-utils",
+ "equivalent",
+ "event-listener",
+ "futures-util",
+ "parking_lot",
+ "portable-atomic",
+ "smallvec",
+ "tagptr",
+ "uuid",
 ]
 
 [[package]]
@@ -8422,6 +8458,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "tagptr"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b2093cf4c8eb1e67749a6762251bc9cd836b6fc171623bd0a9d324d37af2417"
+
+[[package]]
 name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9187,6 +9229,17 @@ dependencies = [
  "log",
  "once_cell",
  "tracing-core",
+]
+
+[[package]]
+name = "tracing-mutex"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ab88ec7082243b1c0b6087242d8d52d07fefc7c5bd1961f1ad50c6853faac76"
+dependencies = [
+ "autocfg",
+ "lock_api",
+ "parking_lot",
 ]
 
 [[package]]

@@ -86,7 +86,7 @@ async def main():
             "top_p": 0.9,
         },
         router_config_override={
-            "overlap_score_weight": 2.0,    # Prioritize cache hits for this request
+            "overlap_score_credit": 1.0,    # Prioritize cache hits for this request
             "router_temperature": 0.5,       # Add routing randomness
         }
     )
@@ -105,13 +105,13 @@ if __name__ == "__main__":
 
 ## K8s Examples
 
-For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployment section](README.md#kubernetes-deployment) in the Quick Start guide.
+For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployment section](router-guide.md#kubernetes-deployment) in the Router Guide.
 
 ### Complete K8s Examples
 
-- [TRT-LLM aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/agg_router.yaml)
-- [vLLM aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/agg_router.yaml)
-- [SGLang aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/agg_router.yaml)
+- [TRT-LLM aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/agg_router.yaml)
+- [vLLM aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_router.yaml)
+- [SGLang aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg_router.yaml)
 - [Kubernetes deployment guide](../../kubernetes/README.md)
 
 **For A/B Testing and Advanced K8s Setup:**
@@ -134,7 +134,9 @@ spec:
           value: kv
         - name: DYN_ROUTER_TEMPERATURE
           value: "0.5"  # Add some randomness to prevent worker saturation
-        - name: DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT
+        - name: DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT
+          value: "1.0"  # Prefer device-local KV cache reuse
+        - name: DYN_ROUTER_PREFILL_LOAD_SCALE
           value: "1.5"  # Prioritize TTFT over ITL
         - name: DYN_KV_CACHE_BLOCK_SIZE
           value: "16"
