@@ -12,4 +12,4 @@ This directory contains example Grafana dashboards for Dynamo observability. The
 
 For setup instructions and usage, see [Observability Documentation](../../../docs/observability/).
 
-For Kubernetes deployment setup, see [../k8s/MONITORING_SETUP.md](../k8s/MONITORING_SETUP.md).
+For Kubernetes deployment setup, see [deploy/observability/MONITORING_SETUP.md](../../../deploy/observability/MONITORING_SETUP.md).
