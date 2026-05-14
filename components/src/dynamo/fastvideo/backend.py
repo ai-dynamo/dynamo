@@ -101,6 +101,11 @@ class FastVideoHandler:
             raise ValueError(
                 f"Invalid size '{size_value}', width and height must be positive"
             )
+        if width > self.config.max_video_width or height > self.config.max_video_height:
+            raise ValueError(
+                f"Invalid size '{size_value}', exceeds maximum "
+                f"{self.config.max_video_width}x{self.config.max_video_height}"
+            )
 
         return width, height
 

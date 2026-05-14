@@ -32,6 +32,8 @@ DEFAULT_NUM_FRAMES = 125
 DEFAULT_NUM_INFERENCE_STEPS = 50
 DEFAULT_GUIDANCE_SCALE = 1.0
 DEFAULT_SEED = 1024
+DEFAULT_MAX_VIDEO_WIDTH = 4096
+DEFAULT_MAX_VIDEO_HEIGHT = 4096
 ATTENTION_BACKEND_CHOICES = (
     "FLASH_ATTN",
     "TORCH_SDPA",
@@ -201,6 +203,22 @@ class FastVideoArgGroup(ArgGroup):
                 "FastVideo build."
             ),
         )
+        add_argument(
+            group,
+            flag_name="--max-video-width",
+            env_var="DYN_FASTVIDEO_MAX_VIDEO_WIDTH",
+            default=DEFAULT_MAX_VIDEO_WIDTH,
+            arg_type=int,
+            help="Maximum request video width accepted by the backend.",
+        )
+        add_argument(
+            group,
+            flag_name="--max-video-height",
+            env_var="DYN_FASTVIDEO_MAX_VIDEO_HEIGHT",
+            default=DEFAULT_MAX_VIDEO_HEIGHT,
+            arg_type=int,
+            help="Maximum request video height accepted by the backend.",
+        )
 
 
 class FastVideoConfig(DynamoRuntimeConfig):
@@ -236,12 +254,18 @@ class FastVideoConfig(DynamoRuntimeConfig):
     default_num_inference_steps: int = DEFAULT_NUM_INFERENCE_STEPS
     default_guidance_scale: float = DEFAULT_GUIDANCE_SCALE
     default_seed: int = DEFAULT_SEED
+    max_video_width: int = DEFAULT_MAX_VIDEO_WIDTH
+    max_video_height: int = DEFAULT_MAX_VIDEO_HEIGHT
 
     def validate(self) -> None:
         super().validate()
 
         if self.num_gpus <= 0:
             raise ValueError("--num-gpus must be > 0")
+        if self.max_video_width <= 0:
+            raise ValueError("--max-video-width must be > 0")
+        if self.max_video_height <= 0:
+            raise ValueError("--max-video-height must be > 0")
         attention_backend_choices = get_attention_backend_choices()
         if self.attention_backend not in attention_backend_choices:
             raise ValueError(
@@ -319,6 +343,11 @@ class FastVideoConfig(DynamoRuntimeConfig):
             raise ValueError(
                 f"Invalid default_size '{self.default_size}', "
                 "width and height must be positive"
+            )
+        if width > self.max_video_width or height > self.max_video_height:
+            raise ValueError(
+                f"Invalid default_size '{self.default_size}', exceeds maximum "
+                f"{self.max_video_width}x{self.max_video_height}"
             )
 
 

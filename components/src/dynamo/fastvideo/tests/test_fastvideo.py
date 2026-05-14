@@ -92,6 +92,8 @@ def test_parse_fastvideo_args_uses_builtin_defaults():
     assert config.torch_compile_fullgraph is True
     assert config.torch_compile_dynamic is False
     assert config.enable_fp4_quantization is False
+    assert config.max_video_width == 4096
+    assert config.max_video_height == 4096
     assert config.namespace == "dynamo"
     assert config.component == "backend"
     assert config.endpoint == "generate"
@@ -127,6 +129,10 @@ def test_parse_fastvideo_args_applies_explicit_overrides():
             "--no-torch-compile-fullgraph",
             "--torch-compile-dynamic",
             "--fp4-quantization",
+            "--max-video-width",
+            "1920",
+            "--max-video-height",
+            "1080",
         ]
     )
 
@@ -147,6 +153,8 @@ def test_parse_fastvideo_args_applies_explicit_overrides():
     assert config.torch_compile_fullgraph is False
     assert config.torch_compile_dynamic is True
     assert config.enable_fp4_quantization is True
+    assert config.max_video_width == 1920
+    assert config.max_video_height == 1080
     assert config.namespace == "dynamo"
     assert config.component == "backend"
     assert config.endpoint == "generate"
@@ -399,3 +407,30 @@ async def test_fastvideo_handler_rejects_input_reference_requests():
     assert response["progress"] == 0
     assert response["data"] == []
     assert "input_reference" in response["error"]
+
+
+@pytest.mark.asyncio
+async def test_fastvideo_handler_rejects_oversized_video_request():
+    from dynamo.fastvideo.args import parse_fastvideo_args
+    from dynamo.fastvideo.backend import FastVideoHandler
+
+    config = parse_fastvideo_args(["--model", "org/model"])
+    handler = FastVideoHandler(config, generator=_GeneratorShouldNotRun())
+
+    results = []
+    async for result in handler.generate(
+        {
+            "prompt": "A test prompt",
+            "model": "org/model",
+            "size": "4097x4096",
+        },
+        _FakeContext(),
+    ):
+        results.append(result)
+
+    assert len(results) == 1
+    response = results[0]
+    assert response["status"] == "failed"
+    assert response["progress"] == 0
+    assert response["data"] == []
+    assert "exceeds maximum 4096x4096" in response["error"]
