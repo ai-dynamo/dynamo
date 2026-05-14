@@ -116,8 +116,6 @@ pytestmark = [
     pytest.mark.slow,
     pytest.mark.gpu_1,
     pytest.mark.nightly,
-    pytest.mark.vllm,
-    pytest.mark.trtllm,
 ]
 
 
@@ -550,7 +548,6 @@ class TestDeterminismAgg(BaseTestDeterminism):
         indirect=True,
         ids=[cfg.short_name for cfg in _MODEL_CONFIGS],
     )
-    @pytest.mark.kvbm
     @pytest.mark.kvbm_concurrency
     @pytest.mark.skipif(
         not HAS_VLLM_BENCH, reason="requires vllm bench (vllm module not found)"

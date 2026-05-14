@@ -40,10 +40,9 @@ if HAS_VLLM:
 if HAS_TRTLLM:
     AVAILABLE_ENGINES.append("trtllm")
 
+# Test markers
 pytestmark = [
     pytest.mark.kvbm,
-    pytest.mark.vllm,
-    pytest.mark.trtllm,
     pytest.mark.e2e,
     pytest.mark.slow,
     pytest.mark.gpu_1,
