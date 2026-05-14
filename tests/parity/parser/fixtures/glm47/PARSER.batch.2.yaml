@@ -62,6 +62,7 @@ cases:
           arguments:
             timezone: EST
         normal_text: 'Checking: '
+        reason: vLLM glm47 only emits the prefix before the first <tool_call> as normal_text — trailing prose after the last </tool_call> is dropped; Dynamo and SGLang preserve it
       sglang: *id004
   PARSER.batch.2.d:
     description: Same-name twice (id distinctness)

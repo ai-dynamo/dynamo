@@ -38,3 +38,4 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: SGLang glm47 rejects whitespace between the function name and </tool_call> (`get_time `), emitting no calls; Dynamo and vLLM both tolerate it and extract the empty-args call

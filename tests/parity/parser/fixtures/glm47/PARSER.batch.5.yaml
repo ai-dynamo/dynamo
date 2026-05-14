@@ -17,10 +17,13 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id001
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm: &id001
         calls: []
         normal_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value>
-      vllm: *id001
+        reason: vLLM and SGLang preserve the truncated <tool_call>... markup as content on missing-end-token recovery; Dynamo drops to keep wire tags out of message.content
       sglang: *id001
   PARSER.batch.5.b:
     description: Closing </tool_call> without matching <tool_call> open
@@ -41,10 +44,13 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo: &id004
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm: &id004
         calls: []
         normal_text: <tool_call>get_weather<arg_key>location</arg_key><arg_value>N
-      vllm: *id004
+        reason: vLLM and SGLang preserve the truncated <tool_call>... prefix as content on mid-arg-value truncation; Dynamo drops to keep wire tags out of message.content
       sglang: *id004
   PARSER.batch.5.d:
     description: Multi-call, last call missing only </tool_call> end marker (body complete)
@@ -54,20 +60,26 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo: &id005
+      dynamo:
         calls:
         - name: get_weather
           arguments:
             location: Boston
-        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New
-          York</arg_value>
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:
         calls:
         - name: get_weather
           arguments:
             location: Boston
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
-      sglang: *id005
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New
+          York</arg_value>
+        reason: SGLang preserves the trailing truncated <tool_call>... block as content; Dynamo and vLLM both drop it
   PARSER.batch.5.e:
     description: Multi-call, last call truncated mid-arg-value
     ref: dynamo
@@ -76,17 +88,23 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo: &id006
+      dynamo:
         calls:
         - name: get_weather
           arguments:
             location: Boston
-        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New
-          York
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:
         calls:
         - name: get_weather
           arguments:
             location: Boston
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
-      sglang: *id006
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>New
+          York
+        reason: SGLang preserves the trailing truncated <tool_call>... block as content; Dynamo and vLLM both drop it

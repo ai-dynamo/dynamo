@@ -10,14 +10,14 @@ cases:
     model_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}};{"name": "get_time", "arguments":
       {"timezone": "EST"}}'
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
         properties:
           location:
             type: string
-    - &id002
+    - &id003
       name: get_time
       parameters:
         type: object
@@ -25,7 +25,7 @@ cases:
           timezone:
             type: string
     expected:
-      dynamo: &d_2a
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
@@ -34,7 +34,7 @@ cases:
           arguments:
             timezone: EST
         normal_text: ''
-      vllm: *d_2a
+      vllm: *id001
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
   PARSER.batch.2.c:
@@ -43,10 +43,10 @@ cases:
     model_text: 'Both: <|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}};{"name": "get_time", "arguments":
       {"timezone": "EST"}} Done.'
     tools:
-    - *id001
     - *id002
+    - *id003
     expected:
-      dynamo: &d_2c
+      dynamo:
         calls:
         - name: get_weather
           arguments:
@@ -64,7 +64,7 @@ cases:
           arguments:
             timezone: EST
         normal_text: ''
-        reason: "vLLM llama3_json drops leading normal_text before the python_tag token"
+        reason: vLLM llama3_json drops leading normal_text before the python_tag token
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
   PARSER.batch.2.d:
@@ -73,10 +73,10 @@ cases:
     model_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}};{"name": "get_weather", "arguments":
       {"location": "LA"}}'
     tools:
-    - *id001
-    - *id001
+    - *id002
+    - *id002
     expected:
-      dynamo: &d_2d
+      dynamo: &id004
         calls:
         - name: get_weather
           arguments:
@@ -85,6 +85,6 @@ cases:
           arguments:
             location: LA
         normal_text: ''
-      vllm: *d_2d
+      vllm: *id004
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'

@@ -49,8 +49,11 @@ cases:
     - *id001
     expected:
       dynamo:
-        calls: []
-        normal_text: ''
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
       vllm:

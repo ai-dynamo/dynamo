@@ -110,15 +110,16 @@ cases:
     - *id001
     expected:
       dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: Boston
-        - name: get_weather
-          arguments:
-            location: New York
-        normal_text: |
+        calls: []
+        normal_text: |-
           I'll start by fetching the weather for both Boston and New York at the same time!
+          <minimax:tool_call>
+          <invoke name="get_weather">
+          <parameter name="location">Boston</parameter>
+          </invoke>
+          <invoke name="get_weather">
+          <parameter name="location">New York</parameter>
+          </invoke>
       vllm:
         calls: []
         normal_text: |-
@@ -156,15 +157,15 @@ cases:
     - *id001
     expected:
       dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: Boston
-        - name: get_weather
-          arguments:
-            location: New York
-        normal_text: |
+        calls: []
+        normal_text: |-
           I'll start by fetching the weather for both Boston and New York at the same time!
+          <minimax:tool_call>
+          <invoke name="get_weather">
+          <parameter name="location">Boston</parameter>
+          </invoke>
+          <invoke name="get_weather">
+          <parameter name="location">New York
       vllm:
         calls: []
         normal_text: |-
