@@ -135,14 +135,23 @@ jobs:
       #   run: |
       #     source ./.github/scripts/retry_docker.sh
       #     retry_pull ${{ steps.image.outputs.runtime_image }}
+      - name: Select cargo target dir (prefer NVMe scratch)
+        shell: bash
+        run: |
+          # GPU runners mount /scratch (nvme-scratch emptyDir, RAID0 instance store).
+          CARGO_TARGET_DIR=/tmp/cargo-target
+          if [[ -d /scratch ]]; then
+            CARGO_TARGET_DIR=/scratch/cargo-target
+            echo "✅ NVMe scratch available, using ${CARGO_TARGET_DIR}"
+          fi
+          mkdir -p "${CARGO_TARGET_DIR}"
+          echo "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}" >> "$GITHUB_ENV"
+
       - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
         working-directory: /workspace/lib/llm
         env:
           SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
           SCCACHE_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
-          # Image sets CARGO_TARGET_DIR=/opt/dynamo/target owned by uid 1000;
-          # the ARC runner runs as uid 1001, so redirect to a writable path.
-          CARGO_TARGET_DIR: /__w/dynamo/dynamo/target
         shell: bash
         run: |
           /workspace/container/use-sccache.sh install
