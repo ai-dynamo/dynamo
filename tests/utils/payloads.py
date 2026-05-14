@@ -405,12 +405,31 @@ class CachedTokensChatPayload(ChatPayload):
         timeout: int = 60,
         min_cached_tokens: int = 1,
         router_nvext_expectation: RouterNvextExpectation | None = None,
+        require_lightseek_init: bool = False,
+        require_vllm_mm_processor_init: bool = False,
+        min_routing_total_blocks: int = 0,
     ):
+        # Strong-gating: when these opt-ins are set, fail closed if MM-aware
+        # routing silently degrades to text-prefix overlap (which would
+        # otherwise still satisfy cached_tokens >= 1 via prompt-prefix luck).
+        log_patterns: List[str] = list(expected_log or [])
+        if require_lightseek_init:
+            log_patterns.append(r"MM-aware KV routing enabled \(lightseek\)")
+        if require_vllm_mm_processor_init:
+            log_patterns.append(r"\[mm-routing\] Transfer mode:")
+        if min_routing_total_blocks > 0:
+            # Regex requires the M side of "X/M blocks overlap" to start
+            # with a non-zero digit and have at least min_digits digits.
+            # Threshold should be a power of 10 (10, 100, …).
+            min_digits = len(str(min_routing_total_blocks))
+            log_patterns.append(
+                rf"\[ROUTING\].*with\s+\d+/[1-9]\d{{{min_digits - 1},}}\s+blocks overlap"
+            )
         super().__init__(
             body=body,
             repeat_count=repeat_count,
             expected_response=expected_response or [],
-            expected_log=expected_log or [],
+            expected_log=log_patterns,
             timeout=timeout,
         )
         self.min_cached_tokens = min_cached_tokens

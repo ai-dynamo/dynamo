@@ -119,7 +119,15 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=18.7,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 env={"SINGLE_GPU": "true"},
-                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
+                tests=[
+                    MmCase(
+                        payload=make_image_payload_cached_tokens(
+                            ["green"],
+                            require_lightseek_init=True,
+                            min_routing_total_blocks=10,
+                        )
+                    )
+                ],
             ),
             # The chat-processor variant of the MM-aware router: same routing
             # architecture, but the frontend uses --dyn-chat-processor=vllm
@@ -217,7 +225,15 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 # needs both to route MM requests correctly. Pre-fix this
                 # would have silently fallen back to text-prefix routing
                 # and cached_tokens would be 0.
-                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
+                tests=[
+                    MmCase(
+                        payload=make_image_payload_cached_tokens(
+                            ["green"],
+                            require_lightseek_init=True,
+                            min_routing_total_blocks=10,
+                        )
+                    )
+                ],
             ),
         },
     ),
@@ -233,7 +249,15 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 env={"SINGLE_GPU": "true"},
                 # See qwen2.5-vl-3b note above on the dual-token routing
                 # path that this assertion validates.
-                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
+                tests=[
+                    MmCase(
+                        payload=make_image_payload_cached_tokens(
+                            ["green"],
+                            require_lightseek_init=True,
+                            min_routing_total_blocks=10,
+                        )
+                    )
+                ],
             ),
         },
     ),
@@ -256,7 +280,15 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 # engaged (2nd identical request hits the warm worker's KV
                 # cache); a silent regression to text-prefix-only routing
                 # would still return "green" but 0 cached tokens.
-                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
+                tests=[
+                    MmCase(
+                        payload=make_image_payload_cached_tokens(
+                            ["green"],
+                            require_lightseek_init=True,
+                            min_routing_total_blocks=10,
+                        )
+                    )
+                ],
             ),
         },
         # Phi-3-vision uses --trust-remote-code for its custom processor.
@@ -376,7 +408,15 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=4_318_854_000,
                 # cached_tokens-asserting payload proves MM-aware routing
                 # engaged for LLaVA-1.5 (placeholder-template `<image>` path).
-                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
+                tests=[
+                    MmCase(
+                        payload=make_image_payload_cached_tokens(
+                            ["green"],
+                            require_lightseek_init=True,
+                            min_routing_total_blocks=10,
+                        )
+                    )
+                ],
             ),
             "agg": TopologyConfig(
                 # nightly-only: 7B 1-GPU footprint is tight (vram=19.2 GiB).
@@ -494,7 +534,15 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=4_318_854_000,
                 # cached_tokens-asserting payload proves MM-aware routing
                 # engaged for LLaVA-NeXT (anyres multi-crop processor).
-                tests=[MmCase(payload=make_image_payload_cached_tokens(["green"]))],
+                tests=[
+                    MmCase(
+                        payload=make_image_payload_cached_tokens(
+                            ["green"],
+                            require_lightseek_init=True,
+                            min_routing_total_blocks=10,
+                        )
+                    )
+                ],
             ),
         },
     ),

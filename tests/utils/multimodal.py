@@ -68,19 +68,16 @@ def make_image_payload_cached_tokens(
     *,
     repeat_count: int = 2,
     min_cached_tokens: int = 1,
+    require_lightseek_init: bool = False,
+    require_vllm_mm_processor_init: bool = False,
+    min_routing_total_blocks: int = 0,
 ) -> CachedTokensChatPayload:
-    """Image payload that also asserts MM-aware KV cache reuse on repeats.
+    """Image payload that asserts MM-aware KV cache reuse on repeats.
 
-    Same body shape as :func:`make_image_payload`, but wrapped in a
-    :class:`CachedTokensChatPayload` so the 2nd+ request validates that
-    ``usage.prompt_tokens_details.cached_tokens >= min_cached_tokens``.
-    Two identical MM requests through an MM-routing-aware frontend must
-    land on the same warm worker and reuse the prefix cache; if routing
-    silently regresses to text-only the second request will report 0
-    cached tokens and this payload fails.
-
-    Used to harden the ``agg_router`` pre_merge smoke against silent
-    regressions in the Rust+lightseek routing path.
+    ``require_lightseek_init`` (Rust path) / ``require_vllm_mm_processor_init``
+    (chat-processor path) plus ``min_routing_total_blocks`` form a strong
+    gate: the [ROUTING] block count is well above what text-prefix-only
+    routing produces (~1-3 blocks), and the corresponding init log fired.
     """
     return CachedTokensChatPayload(
         body={
@@ -103,6 +100,9 @@ def make_image_payload_cached_tokens(
         repeat_count=repeat_count,
         expected_response=expected_response,
         min_cached_tokens=min_cached_tokens,
+        require_lightseek_init=require_lightseek_init,
+        require_vllm_mm_processor_init=require_vllm_mm_processor_init,
+        min_routing_total_blocks=min_routing_total_blocks,
     )
 
 
