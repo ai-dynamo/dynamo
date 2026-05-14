@@ -70,6 +70,14 @@ cases:
       dynamo:
         calls: []
         normal_text: ''
+        reason: |-
+          Strict per MiniMax-M2 reference parser
+          (https://huggingface.co/MiniMaxAI/MiniMax-M2/blob/main/docs/tool_calling_guide.md):
+          the published `<invoke name=(.*?)</invoke>` regex requires both
+          fences, so missing `</invoke>` yields no match and no recovered
+          call. Wrapper markup is intentionally dropped (not echoed to
+          normal_text) so tool-call protocol markers don't leak to
+          user-facing content.
       vllm:
         calls: []
         normal_text: |-
@@ -84,3 +92,9 @@ cases:
           arguments:
             location: NYC
         normal_text: ''
+        reason: |-
+          SGLang's MinimaxM2Detector regex
+          (`r"<invoke name=\"(.*?)</invoke>|<invoke name=\"(.*)$"`) has an
+          `|$` end-of-input alternation that lets a missing `</invoke>`
+          still produce a call — contradicts MiniMax-M2 reference parser.
+          Should be filed against sgl-project/sglang.
