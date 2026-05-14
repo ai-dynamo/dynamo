@@ -10,15 +10,16 @@ and feature gap details.
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import dataclasses
 import json
 import logging
 import re
 import sys
+import threading
+import time
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import asdict
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
@@ -127,23 +128,13 @@ class TrtllmLLMEngine(LLMEngine):
         # Set in start() from worker_id. 10-bit field is a TRT-LLM API
         # constraint; collisions possible at scale (~30 replicas).
         self._disagg_machine_id: int = 0
-        # KV-events and metrics polling run as asyncio tasks on the engine
-        # loop. The thread-based path can't use TRT-LLM's `get_kv_cache_events`
-        # / `get_stats` because, once `_iter_kv_events_result` is initialised
-        # by a generate_async call running inside the asyncio loop, the
-        # underlying queue becomes an `AsyncQueue`; its sync get returns
-        # `None` on timeout instead of raising `queue.Empty`, and downstream
-        # `json.loads(None)` throws, swallowing every batch of events.
-        # The async path uses the native AsyncQueue and matches the legacy
-        # `dynamo.trtllm.publisher` polling loop.
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._metrics_task: Optional[asyncio.Task[None]] = None
-        self._kv_events_task: Optional[concurrent.futures.Future[None]] = None
-        self._publish_stop_event: Optional[asyncio.Event] = None
+        self._publish_stop = threading.Event()
+        self._metrics_thread: Optional[threading.Thread] = None
+        self._kv_events_thread: Optional[threading.Thread] = None
         self._attention_dp_size: int = 1
         # Worker invokes on_ready callbacks serially during setup (see
         # `setup_kv_publishers` in lib/backend-common/src/publisher.rs); the
-        # dict is fully populated before the kv-events task starts and
+        # dict is fully populated before `_kv_events_thread` starts and
         # read-only thereafter.
         self._kv_publishers: dict[int, KvEventPublisher] = {}
         # Written by `_metrics_poll_loop`, read by snapshot lambdas under the
@@ -271,14 +262,12 @@ class TrtllmLLMEngine(LLMEngine):
         await self._engine.initialize()
 
         self._attention_dp_size = self._engine.get_attention_dp_size()
-        # Loop reference is captured here so on_ready (called on a Rust
-        # tokio worker thread during publisher setup) can schedule the
-        # kv-events task back onto this asyncio loop.
-        self._loop = asyncio.get_running_loop()
-        self._publish_stop_event = asyncio.Event()
-        self._metrics_task = asyncio.create_task(
-            self._metrics_poll_loop(), name="trtllm-metrics-poll"
+        self._metrics_thread = threading.Thread(
+            target=self._metrics_poll_loop,
+            daemon=True,
+            name="trtllm-metrics-poll",
         )
+        self._metrics_thread.start()
 
         return EngineConfig(
             model=self.model_name,
@@ -313,67 +302,72 @@ class TrtllmLLMEngine(LLMEngine):
         ]
 
     def _make_on_publisher_ready(self, rank: int):
-        # Worker invokes on_ready serially during setup on a Rust tokio
-        # worker thread; the call that completes the publisher set
-        # schedules the kv-events task onto the engine's asyncio loop.
+        # Worker invokes on_ready serially during setup; the call that
+        # completes the publisher set starts the dispatch thread.
         def on_ready(publisher: KvEventPublisher) -> None:
             self._kv_publishers[rank] = publisher
             if (
                 len(self._kv_publishers) == self._attention_dp_size
-                and self._kv_events_task is None
-                and self._loop is not None
+                and self._kv_events_thread is None
             ):
-                self._kv_events_task = asyncio.run_coroutine_threadsafe(
-                    self._kv_events_poll_loop(), self._loop
+                self._kv_events_thread = threading.Thread(
+                    target=self._kv_events_poll_loop,
+                    daemon=True,
+                    name="trtllm-kv-events-poll",
                 )
+                self._kv_events_thread.start()
 
         return on_ready
 
     # Stats payloads use camelCase keys (`attentionDpRank`, `kvCacheStats`);
     # the KV-event payloads in `_dispatch_kv_event` use snake_case
     # (`attention_dp_rank`). Both match TRT-LLM's upstream conventions.
-    async def _metrics_poll_loop(self) -> None:
+    def _metrics_poll_loop(self) -> None:
         assert self._engine is not None
-        assert self._publish_stop_event is not None
-        while not self._publish_stop_event.is_set():
+        while not self._publish_stop.is_set():
             try:
-                async for snap in self._engine.llm.get_stats_async(
-                    timeout=_STATS_POLL_TIMEOUT_S
-                ):
-                    kv_used = snap.get("kvCacheStats", {}).get("usedNumBlocks")
-                    if kv_used is None:
-                        continue
-                    rank = int(snap.get("attentionDpRank", 0))
-                    self._latest_metrics[rank] = Metrics(kv_used_blocks=int(kv_used))
-            except asyncio.CancelledError:
-                raise
+                snaps = self._engine.llm.get_stats(timeout=_STATS_POLL_TIMEOUT_S)
             except Exception as e:
-                logger.debug("trtllm get_stats_async raised: %s", e)
-            await asyncio.sleep(_IDLE_SLEEP_S)
+                logger.debug("trtllm get_stats raised: %s", e)
+                time.sleep(_IDLE_SLEEP_S)
+                continue
+            if not snaps:
+                time.sleep(_IDLE_SLEEP_S)
+                continue
+            # Per-rank latest snapshot. Stats from different ranks are
+            # interleaved; keep the freshest per `attentionDpRank`.
+            for snap in snaps:
+                kv_used = snap.get("kvCacheStats", {}).get("usedNumBlocks")
+                if kv_used is None:
+                    continue
+                rank = int(snap.get("attentionDpRank", 0))
+                self._latest_metrics[rank] = Metrics(kv_used_blocks=int(kv_used))
 
-    async def _kv_events_poll_loop(self) -> None:
+    def _kv_events_poll_loop(self) -> None:
         assert self._engine is not None
-        assert self._publish_stop_event is not None
-        while not self._publish_stop_event.is_set():
+        while not self._publish_stop.is_set():
             try:
-                async for event in self._engine.llm.get_kv_cache_events_async(
+                events = self._engine.llm.get_kv_cache_events(
                     timeout=_KV_EVENTS_POLL_TIMEOUT_S
-                ):
-                    try:
-                        self._dispatch_kv_event(event)
-                    except Exception as e:
-                        if not self._warned_dispatch_failed:
-                            self._warned_dispatch_failed = True
-                            logger.exception(
-                                "Failed to dispatch KV event; suppressing "
-                                "further tracebacks (last error: %s)",
-                                e,
-                            )
-            except asyncio.CancelledError:
-                raise
+                )
             except Exception as e:
-                logger.debug("trtllm get_kv_cache_events_async raised: %s", e)
-            await asyncio.sleep(_IDLE_SLEEP_S)
+                logger.debug("trtllm get_kv_cache_events raised: %s", e)
+                time.sleep(_IDLE_SLEEP_S)
+                continue
+            if not events:
+                time.sleep(_IDLE_SLEEP_S)
+                continue
+            for event in events:
+                try:
+                    self._dispatch_kv_event(event)
+                except Exception as e:
+                    if not self._warned_dispatch_failed:
+                        self._warned_dispatch_failed = True
+                        logger.exception(
+                            "Failed to dispatch KV event; suppressing further "
+                            "tracebacks (last error: %s)",
+                            e,
+                        )
 
     def _dispatch_kv_event(self, event: dict[str, Any]) -> None:
         """Forward stored / removed events to the right publisher. Other
@@ -661,41 +655,19 @@ class TrtllmLLMEngine(LLMEngine):
         )
 
     async def cleanup(self) -> None:
-        # Stop the publisher tasks BEFORE engine shutdown so they don't
-        # observe a half-torn-down RPC client. Setting the asyncio event
-        # lets the poll loops exit on their next iteration; cancellation
-        # is the backstop if they're stuck mid-iteration.
-        if self._publish_stop_event is not None:
-            self._publish_stop_event.set()
-        await self._cancel_publish_task(self._kv_events_task)
-        await self._cancel_publish_task(self._metrics_task)
-        self._kv_events_task = None
-        self._metrics_task = None
-        self._publish_stop_event = None
-        self._loop = None
+        # Stop the publisher threads BEFORE engine shutdown so they don't
+        # observe a half-torn-down RPC client. Each thread already loops on
+        # `_publish_stop`; the join bounds the wait at the poll timeout.
+        self._publish_stop.set()
+        for thread in (self._kv_events_thread, self._metrics_thread):
+            if thread is not None:
+                thread.join(timeout=_KV_EVENTS_POLL_TIMEOUT_S * 2 + 0.5)
+        self._kv_events_thread = None
+        self._metrics_thread = None
         self._kv_publishers.clear()
         if self._engine is not None:
             await self._engine.cleanup()
             logger.info("TensorRT-LLM engine shutdown")
-
-    @staticmethod
-    async def _cancel_publish_task(
-        task: Optional[Union[asyncio.Task[None], concurrent.futures.Future[None]]],
-    ) -> None:
-        # `_metrics_task` is an asyncio.Task created on the engine loop;
-        # `_kv_events_task` is a concurrent.futures.Future from
-        # `asyncio.run_coroutine_threadsafe`. Both expose `cancel()` and
-        # awaiting them surfaces any pending exception.
-        if task is None or task.done():
-            return
-        task.cancel()
-        try:
-            if isinstance(task, asyncio.Task):
-                await task
-            else:
-                await asyncio.wrap_future(task)
-        except (asyncio.CancelledError, Exception):
-            pass
 
     @staticmethod
     def _override_sampling_params(
