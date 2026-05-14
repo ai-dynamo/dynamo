@@ -1,10 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# TODO_REVERT_DYNAMO_PIPELINE_TEST: this file is temporarily configured to run
-# ONLY the dynamo-pipeline job. Every other job in this workflow has `if: false`
-# with a `TODO_REVERT_DYNAMO_PIPELINE_TEST` marker. Search for that marker and
-# restore each original `if:` condition to revert.
 
 name: PR
 
@@ -12,7 +7,6 @@ on:
   push:
     branches:
       - "pull-request/[0-9]+"
-      - rrubin/remove-dind-runners
 
 concurrency:
   # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
@@ -79,8 +73,7 @@ jobs:
       - planner-build
       - planner-test
       - frontend-build
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: always()`
-    if: false
+    if: always()
     steps:
       - name: Check all dependent jobs
         run: |
@@ -89,8 +82,7 @@ jobs:
   deploy-status-check:
     runs-on: ubuntu-latest
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: always()`
-    if: false
+    if: always()
     steps:
       - name: Check all deploy test jobs
         run: |
@@ -113,8 +105,7 @@ jobs:
 
   operator:
     needs: changed-files
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.operator == 'true'`
-    if: false
+    if: needs.changed-files.outputs.operator == 'true'
     name: Operator
     runs-on: prod-default-v2
     outputs:
@@ -145,8 +136,7 @@ jobs:
 
   helm-chart-tests:
     needs: changed-files
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.operator == 'true'`
-    if: false
+    if: needs.changed-files.outputs.operator == 'true'
     name: Helm Chart Tests
     runs-on: ubuntu-latest
     steps:
@@ -165,8 +155,7 @@ jobs:
 
   snapshot-agent:
     needs: changed-files
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.deploy == 'true'`
-    if: false
+    if: needs.changed-files.outputs.deploy == 'true'
     name: Snapshot Agent
     runs-on: prod-default-v2
     steps:
@@ -193,8 +182,7 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files]
     # `sample` is here because sample tests piggyback on this image and run as part of vllm-test.
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -208,8 +196,7 @@ jobs:
   vllm-dev-build:
     name: vllm-dev
     needs: [changed-files]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -224,8 +211,7 @@ jobs:
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -239,8 +225,7 @@ jobs:
   sglang-dev-build:
     name: sglang-dev
     needs: [changed-files]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -255,8 +240,7 @@ jobs:
   trtllm-build:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -270,8 +254,7 @@ jobs:
   trtllm-dev-build:
     name: trtllm-dev
     needs: [changed-files]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
@@ -286,8 +269,7 @@ jobs:
   planner-build:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -301,8 +283,7 @@ jobs:
   frontend-build:
     name: frontend
     needs: [changed-files]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.frontend == 'true'`
-    if: false
+    if: needs.changed-files.outputs.frontend == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -320,8 +301,7 @@ jobs:
   vllm-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
@@ -343,8 +323,7 @@ jobs:
   vllm-multi-gpu-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
@@ -361,8 +340,7 @@ jobs:
   sglang-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
@@ -384,8 +362,7 @@ jobs:
   sglang-multi-gpu-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
@@ -402,8 +379,7 @@ jobs:
   trtllm-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
@@ -425,8 +401,7 @@ jobs:
   trtllm-multi-gpu-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
@@ -443,8 +418,7 @@ jobs:
   planner-test:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files, planner-build]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: planner
@@ -468,10 +442,14 @@ jobs:
   dynamo-pipeline:
     name: dynamo-runtime
     needs: [changed-files]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: original gate was a multi-output OR over
-    # changed-files (core/planner/frontend/vllm/sglang/trtllm/benchmarks). Forced
-    # to always run so we can test the dynamo-pipeline workflow in isolation.
-    if: true
+    if: |
+      needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.planner == 'true' ||
+      needs.changed-files.outputs.frontend == 'true' ||
+      needs.changed-files.outputs.vllm == 'true' ||
+      needs.changed-files.outputs.sglang == 'true' ||
+      needs.changed-files.outputs.trtllm == 'true' ||
+      needs.changed-files.outputs.benchmarks == 'true'
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
@@ -487,8 +465,7 @@ jobs:
   vllm-compliance:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: vllm
@@ -501,8 +478,7 @@ jobs:
   sglang-compliance:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: sglang
@@ -515,8 +491,7 @@ jobs:
   trtllm-compliance:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: trtllm
@@ -529,8 +504,7 @@ jobs:
   planner-compliance:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files, planner-build]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'`
-    if: false
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
     uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: dynamo
@@ -543,8 +517,7 @@ jobs:
   frontend-compliance:
     name: frontend # This name overlaps with other frontend jobs to group them in the UI
     needs: [changed-files, frontend-build]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: needs.changed-files.outputs.frontend == 'true'`
-    if: false
+    if: needs.changed-files.outputs.frontend == 'true'
     uses: ./.github/workflows/shared-compliance.yml
     with:
       framework: dynamo
@@ -561,8 +534,11 @@ jobs:
   vllm-copy-to-acr:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build, vllm-test]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was a multi-line `if: always() && !cancelled() && (core||vllm||deploy) && vllm-build.success && (vllm-test.success||skipped)`
-    if: false
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      needs.vllm-build.result == 'success' &&
+      (needs.vllm-test.result == 'success' || needs.vllm-test.result == 'skipped')
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -574,8 +550,11 @@ jobs:
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build, sglang-test]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was a multi-line `if: always() && !cancelled() && (core||sglang||deploy) && sglang-build.success && (sglang-test.success||skipped)`
-    if: false
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      needs.sglang-build.result == 'success' &&
+      (needs.sglang-test.result == 'success' || needs.sglang-test.result == 'skipped')
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
@@ -587,8 +566,11 @@ jobs:
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build, trtllm-test]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was a multi-line `if: always() && !cancelled() && (core||trtllm||deploy) && trtllm-build.success && (trtllm-test.success||skipped)`
-    if: false
+    if: |
+      always() && !cancelled() &&
+      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      needs.trtllm-build.result == 'success' &&
+      (needs.trtllm-test.result == 'success' || needs.trtllm-test.result == 'skipped')
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
@@ -602,8 +584,13 @@ jobs:
   # ============================================================================
 
   deploy-operator:
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was multi-line `if: !cancelled() && !failure() && (vllm||sglang||trtllm||deploy changed) && (operator.success||skipped)`
-    if: false
+    if: |
+      !cancelled() && !failure() &&
+      (needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.trtllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true') &&
+      (needs.operator.result == 'success' || needs.operator.result == 'skipped')
     needs: [changed-files, operator]
     runs-on: prod-default-small-v2
     outputs:
@@ -626,8 +613,9 @@ jobs:
   deploy-test-vllm:
     name: vllm Deploy Test
     needs: [changed-files, deploy-operator, vllm-copy-to-acr]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was multi-line `if: !cancelled() && !failure() && (vllm||deploy changed)`
-    if: false
+    if: |
+      !cancelled() && !failure() &&
+      (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true')
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
@@ -641,8 +629,9 @@ jobs:
   deploy-test-sglang:
     name: sglang Deploy Test
     needs: [changed-files, deploy-operator, sglang-copy-to-acr]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was multi-line `if: !cancelled() && !failure() && (sglang||deploy changed)`
-    if: false
+    if: |
+      !cancelled() && !failure() &&
+      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true')
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
@@ -656,8 +645,9 @@ jobs:
   deploy-test-trtllm:
     name: trtllm Deploy Test
     needs: [changed-files, deploy-operator, trtllm-copy-to-acr]
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was multi-line `if: !cancelled() && !failure() && (trtllm||deploy changed)`
-    if: false
+    if: |
+      !cancelled() && !failure() &&
+      (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true')
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
@@ -669,8 +659,7 @@ jobs:
     secrets: inherit
 
   deploy-cleanup:
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: always()`
-    if: false
+    if: always()
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
     runs-on: prod-default-small-v2
     steps:
@@ -686,8 +675,7 @@ jobs:
   clean-k8s-builder:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
-    # TODO_REVERT_DYNAMO_PIPELINE_TEST: was `if: always()`
-    if: false
+    if: always()
     needs:
       - changed-files
       - operator
