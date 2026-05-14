@@ -107,6 +107,22 @@ class TestConfigureKvEventBlockSize:
             )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("group_metadata", [[], [{"kind": "mamba_state", "block_size": 32}]])
+    async def test_raises_when_exact_match_required_and_main_attention_metadata_missing(
+        self,
+        group_metadata,
+    ):
+        vllm_config = _make_vllm_config()
+        engine = _make_engine(return_value=group_metadata)
+
+        with pytest.raises(RuntimeError, match="DYN_VLLM_KV_EVENT_BLOCK_SIZE"):
+            await configure_kv_event_block_size(
+                engine,
+                vllm_config,
+                require_exact_match=True,
+            )
+
+    @pytest.mark.asyncio
     async def test_warns_and_falls_back_when_exact_match_not_required(self, caplog):
         vllm_config = _make_vllm_config()
         engine = _make_engine(side_effect=AttributeError("missing method"))

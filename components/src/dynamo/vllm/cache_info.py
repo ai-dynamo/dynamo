@@ -20,6 +20,13 @@ MAIN_ATTENTION_KV_CACHE_KINDS = {
 }
 
 
+def _find_main_attention_block_size(group_metadata: list[dict[str, Any]]) -> int | None:
+    for group in group_metadata:
+        if group.get("kind") in MAIN_ATTENTION_KV_CACHE_KINDS:
+            return group.get("block_size")
+    return None
+
+
 def get_configured_kv_event_block_size(vllm_config: "VllmConfig") -> int:
     """Return the configured KV event block size, falling back to vLLM's cache block size."""
     if envs.is_set("DYN_VLLM_KV_EVENT_BLOCK_SIZE"):
@@ -37,14 +44,8 @@ def select_main_attention_block_size(
     fallback_block_size: int,
 ) -> int:
     """Select the main-attention KV block size from engine cache-group metadata."""
-    if not group_metadata:
-        return fallback_block_size
-
-    for group in group_metadata:
-        if group.get("kind") in MAIN_ATTENTION_KV_CACHE_KINDS:
-            return group.get("block_size", fallback_block_size)
-
-    return fallback_block_size
+    block_size = _find_main_attention_block_size(group_metadata)
+    return fallback_block_size if block_size is None else block_size
 
 
 async def configure_kv_event_block_size(
@@ -82,6 +83,14 @@ async def configure_kv_event_block_size(
                 )
                 kv_event_block_size = fallback_block_size
             else:
+                matched_block_size = _find_main_attention_block_size(group_metadata)
+                if require_exact_match and matched_block_size is None:
+                    raise RuntimeError(
+                        "Failed to determine the vLLM KV event block size from cache "
+                        "group metadata. Set DYN_VLLM_KV_EVENT_BLOCK_SIZE to an "
+                        "explicit value or run with a vLLM build that reports a main-"
+                        "attention cache group block_size."
+                    )
                 kv_event_block_size = select_main_attention_block_size(
                     group_metadata,
                     fallback_block_size,
