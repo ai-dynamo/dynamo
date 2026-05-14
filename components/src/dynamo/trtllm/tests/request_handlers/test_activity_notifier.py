@@ -58,8 +58,40 @@ def _make_dynamo_core_stub() -> None:
     sys.modules.setdefault("dynamo._core", core)
 
 
+def _make_dynamo_llm_stub() -> None:
+    """Stub dynamo.llm (compiled Rust/PyO3 extension) and related modules."""
+    import importlib.machinery
+
+    for name in [
+        "dynamo.llm",
+        "dynamo.llm._core",
+        "dynamo.llm.model_types",
+    ]:
+        mod = types.ModuleType(name)
+        mod.__spec__ = importlib.machinery.ModuleSpec(name, None)
+        mod.ModelType = MagicMock
+        sys.modules.setdefault(name, mod)
+
+
+def _make_dynamo_runtime_stub() -> None:
+    """Stub dynamo.runtime (also PyO3-backed) so import chains don't fail."""
+    import importlib.machinery
+
+    for name in [
+        "dynamo.runtime",
+        "dynamo.runtime.logging",
+    ]:
+        mod = types.ModuleType(name)
+        mod.__spec__ = importlib.machinery.ModuleSpec(name, None)
+        mod.DistributedRuntime = MagicMock
+        mod.configure_dynamo_logging = MagicMock
+        sys.modules.setdefault(name, mod)
+
+
 _make_trtllm_stub()
 _make_dynamo_core_stub()
+_make_dynamo_llm_stub()
+_make_dynamo_runtime_stub()
 
 
 # ---------------------------------------------------------------------------
