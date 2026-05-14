@@ -24,10 +24,7 @@ from dynamo.common.utils.prometheus import (
 )
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
-from dynamo.sglang._disagg import (
-    SGLANG_WORKER_GROUP_ID_KEY,
-    get_sglang_worker_group_id,
-)
+from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import Config
 
 SGLANG_WORKER_GROUP_LOOKUP_TIMEOUT_S = 300.0

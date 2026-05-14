@@ -8,10 +8,7 @@ import pytest
 
 import dynamo.sglang._disagg as disagg_mod
 import dynamo.sglang.publisher as publisher_mod
-from dynamo.sglang._disagg import (
-    SGLANG_WORKER_GROUP_ID_KEY,
-    get_sglang_worker_group_id,
-)
+from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.publisher import (
     DynamoSglangPublisher,
     _resolve_multinode_leader_worker_id,
