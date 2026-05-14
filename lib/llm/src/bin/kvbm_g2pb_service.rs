@@ -155,6 +155,27 @@ impl Args {
 
 type HostBlockManager = KvBlockManager<LocalityLocal, BasicMetadata>;
 
+fn read_host_block_payload(
+    block: &impl BlockDataProvider<StorageType = PinnedStorage>,
+) -> Result<Vec<u8>> {
+    let block_data = block.block_data();
+    let mut payload = Vec::new();
+
+    for layer_idx in 0..block_data.num_layers() {
+        for outer_idx in 0..block_data.num_outer_dims() {
+            let layer_view = block_data.layer_view(layer_idx, outer_idx)?;
+            unsafe {
+                payload.extend_from_slice(std::slice::from_raw_parts(
+                    layer_view.as_ptr(),
+                    layer_view.size(),
+                ));
+            }
+        }
+    }
+
+    Ok(payload)
+}
+
 struct StagedBlock {
     meta: G2pbPutBlock,
     block_id: usize,
@@ -307,7 +328,7 @@ impl G2pbPeerRuntime {
         &self,
         agent: &G2pbStorageAgent,
         sequence_hashes: &[u64],
-    ) -> Result<()> {
+    ) -> Result<(), G2pbError> {
         let mut committed_meta = Vec::with_capacity(sequence_hashes.len());
         {
             let mut state = self.state.write().expect("g2pb runtime state poisoned");
@@ -315,14 +336,35 @@ impl G2pbPeerRuntime {
                 let staged = state
                     .staged
                     .remove(sequence_hash)
-                    .with_context(|| format!("sequence hash {sequence_hash} is not staged"))?;
+                    .ok_or(G2pbError::NotFound {
+                        instance_id: self.instance_id,
+                        sequence_hashes: vec![*sequence_hash],
+                    })?;
                 state.reserved.remove(sequence_hash);
-                committed_meta.push(staged.meta.clone());
+                let payload = read_host_block_payload(&staged.block).map_err(|_| G2pbError::NotFound {
+                    instance_id: self.instance_id,
+                    sequence_hashes: vec![*sequence_hash],
+                })?;
+                let actual_checksum =
+                    dynamo_llm::block_manager::distributed::G2pbTransferBlock::compute_checksum(
+                        &payload,
+                    );
+                if staged.meta.checksum != actual_checksum {
+                    return Err(G2pbError::NotFound {
+                        instance_id: self.instance_id,
+                        sequence_hashes: vec![*sequence_hash],
+                    });
+                }
+                let committed = staged.meta.clone();
+                committed_meta.push(committed);
                 let tick = Self::next_access_tick(&mut state);
                 state.committed.insert(
                     *sequence_hash,
                     CommittedBlock {
-                        staged,
+                        staged: StagedBlock {
+                            meta: committed_meta.last().cloned().expect("committed metadata missing"),
+                            ..staged
+                        },
                         last_access_tick: tick,
                     },
                 );

@@ -6,6 +6,9 @@ use crate::tokens::{SequenceHash, compute_hash_v2};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use xxhash_rust::xxh3::xxh3_64;
+
+pub type G2pbChecksum = u64;
 
 pub const G2PB_NAMESPACE: &str = "kvbm-g2pb";
 pub const G2PB_COMPONENT_NAME: &str = "service";
@@ -32,7 +35,7 @@ impl G2pbPeer {
 pub struct G2pbPutBlock {
     pub sequence_hash: SequenceHash,
     pub size_bytes: usize,
-    pub checksum: Option<[u8; 32]>,
+    pub checksum: G2pbChecksum,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,7 +43,7 @@ pub struct G2pbQueryHit {
     pub instance_id: u64,
     pub sequence_hash: SequenceHash,
     pub size_bytes: usize,
-    pub checksum: Option<[u8; 32]>,
+    pub checksum: G2pbChecksum,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +53,10 @@ pub struct G2pbTransferBlock {
 }
 
 impl G2pbTransferBlock {
+    pub fn compute_checksum(payload: &[u8]) -> G2pbChecksum {
+        xxh3_64(payload)
+    }
+
     fn validate_payload_size(&self) -> Result<(), G2pbError> {
         let actual_size_bytes = self.payload.len();
         if actual_size_bytes != self.meta.size_bytes {
@@ -61,6 +68,28 @@ impl G2pbTransferBlock {
         }
 
         Ok(())
+    }
+
+    fn with_computed_checksum(mut self) -> Self {
+        self.meta.checksum = Self::compute_checksum(&self.payload);
+        self
+    }
+
+    fn validate_payload_checksum(&self) -> Result<(), G2pbError> {
+        let actual_checksum = Self::compute_checksum(&self.payload);
+        if actual_checksum != self.meta.checksum {
+            return Err(G2pbError::NotFound {
+                instance_id: 0,
+                sequence_hashes: vec![self.meta.sequence_hash],
+            });
+        }
+
+        Ok(())
+    }
+
+    fn validate_payload_integrity(&self) -> Result<(), G2pbError> {
+        self.validate_payload_size()?;
+        self.validate_payload_checksum()
     }
 }
 
@@ -193,6 +222,9 @@ mod tests {
     use super::*;
 
     use anyhow::Result;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Duration;
     use tokio::time::Instant;
 
     fn peers() -> Vec<G2pbPeer> {
@@ -328,6 +360,8 @@ mod tests {
     #[tokio::test]
     async fn agent_query_and_fetch_use_in_memory_peer_cache() {
         let agent = G2pbStorageAgent::new(7);
+        let checksum_11 = G2pbTransferBlock::compute_checksum(&[1, 2, 3, 4]);
+        let checksum_12 = G2pbTransferBlock::compute_checksum(&[5, 6]);
 
         agent
             .offer_and_put_payload_blocks(vec![
@@ -335,7 +369,7 @@ mod tests {
                     meta: G2pbPutBlock {
                         sequence_hash: 11,
                         size_bytes: 4,
-                        checksum: None,
+                        checksum: checksum_11,
                     },
                     payload: vec![1, 2, 3, 4],
                 },
@@ -343,7 +377,7 @@ mod tests {
                     meta: G2pbPutBlock {
                         sequence_hash: 12,
                         size_bytes: 2,
-                        checksum: Some([3; 32]),
+                        checksum: checksum_12,
                     },
                     payload: vec![5, 6],
                 },
@@ -365,7 +399,7 @@ mod tests {
                     meta: G2pbPutBlock {
                         sequence_hash: 11,
                         size_bytes: 4,
-                        checksum: None,
+                        checksum: checksum_11,
                     },
                     payload: vec![1, 2, 3, 4],
                 },
@@ -373,12 +407,42 @@ mod tests {
                     meta: G2pbPutBlock {
                         sequence_hash: 12,
                         size_bytes: 2,
-                        checksum: Some([3; 32]),
+                        checksum: checksum_12,
                     },
                     payload: vec![5, 6],
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn storage_rejects_payloads_with_mismatched_checksum() -> Result<()> {
+        use super::g2pb_service::{G2pbPeerStorage, InMemoryG2pbPeerStorage};
+
+        let storage = InMemoryG2pbPeerStorage::default();
+        let err = G2pbPeerStorage::put_payload_blocks(
+            &storage,
+            vec![G2pbTransferBlock {
+                meta: G2pbPutBlock {
+                    sequence_hash: 77,
+                    size_bytes: 4,
+                    checksum: 123,
+                },
+                payload: vec![1, 2, 3, 4],
+            }],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            G2pbError::NotFound {
+                instance_id: 0,
+                sequence_hashes
+            } if sequence_hashes == vec![77]
+        ));
+
+        Ok(())
     }
 
     #[tokio::test]
@@ -389,7 +453,7 @@ mod tests {
             .put_blocks(vec![G2pbPutBlock {
                 sequence_hash: 44,
                 size_bytes: 8,
-                checksum: None,
+                checksum: 0,
             }])
             .await;
 
@@ -410,7 +474,7 @@ mod tests {
             .put_blocks(vec![G2pbPutBlock {
                 sequence_hash: 100,
                 size_bytes: 16,
-                checksum: None,
+                checksum: 0,
             }])
             .await;
 
@@ -419,17 +483,17 @@ mod tests {
                 G2pbPutBlock {
                     sequence_hash: 100,
                     size_bytes: 16,
-                    checksum: None,
+                    checksum: 0,
                 },
                 G2pbPutBlock {
                     sequence_hash: 200,
                     size_bytes: 32,
-                    checksum: None,
+                    checksum: 0,
                 },
                 G2pbPutBlock {
                     sequence_hash: 200,
                     size_bytes: 32,
-                    checksum: None,
+                    checksum: 0,
                 },
             ])
             .await;
@@ -439,7 +503,7 @@ mod tests {
             vec![G2pbPutBlock {
                 sequence_hash: 200,
                 size_bytes: 32,
-                checksum: None,
+                checksum: 0,
             }]
         );
     }
@@ -452,17 +516,17 @@ mod tests {
                 G2pbPutBlock {
                     sequence_hash: 5,
                     size_bytes: 16,
-                    checksum: None,
+                    checksum: 0,
                 },
                 G2pbPutBlock {
                     sequence_hash: 6,
                     size_bytes: 32,
-                    checksum: Some([9; 32]),
+                    checksum: 9,
                 },
                 G2pbPutBlock {
                     sequence_hash: 6,
                     size_bytes: 32,
-                    checksum: Some([9; 32]),
+                    checksum: 9,
                 },
             ])
             .await;
@@ -484,7 +548,7 @@ mod tests {
                 meta: G2pbPutBlock {
                     sequence_hash: 5,
                     size_bytes: 4,
-                    checksum: None,
+                    checksum: 0,
                 },
                 payload: vec![1, 2, 3],
             }])
@@ -515,7 +579,7 @@ mod tests {
             .put_blocks(vec![G2pbPutBlock {
                 sequence_hash: 1234,
                 size_bytes: 64,
-                checksum: Some([7; 32]),
+                checksum: 7,
             }])
             .await
             .unwrap();
@@ -544,7 +608,7 @@ mod tests {
             .put_blocks(vec![G2pbPutBlock {
                 sequence_hash: existing_hash,
                 size_bytes: 8,
-                checksum: None,
+                checksum: 0,
             }])
             .await;
 
@@ -554,22 +618,22 @@ mod tests {
                 G2pbPutBlock {
                     sequence_hash: 100,
                     size_bytes: 8,
-                    checksum: None,
+                    checksum: 0,
                 },
                 G2pbPutBlock {
                     sequence_hash: existing_hash,
                     size_bytes: 8,
-                    checksum: None,
+                    checksum: 0,
                 },
                 G2pbPutBlock {
                     sequence_hash: 300,
                     size_bytes: 8,
-                    checksum: None,
+                    checksum: 0,
                 },
                 G2pbPutBlock {
                     sequence_hash: 100,
                     size_bytes: 8,
-                    checksum: None,
+                    checksum: 0,
                 },
             ])
             .await
@@ -602,7 +666,7 @@ mod tests {
                     meta: G2pbPutBlock {
                         sequence_hash: 1,
                         size_bytes: 2,
-                        checksum: None,
+                        checksum: 0,
                     },
                     payload: vec![1, 2],
                 },
@@ -610,7 +674,7 @@ mod tests {
                     meta: G2pbPutBlock {
                         sequence_hash: 2,
                         size_bytes: 2,
-                        checksum: None,
+                        checksum: 0,
                     },
                     payload: vec![3, 4],
                 },
@@ -618,7 +682,7 @@ mod tests {
                     meta: G2pbPutBlock {
                         sequence_hash: 1,
                         size_bytes: 2,
-                        checksum: None,
+                        checksum: 0,
                     },
                     payload: vec![5, 6],
                 },
@@ -662,7 +726,7 @@ mod tests {
                 .put_blocks(vec![G2pbPutBlock {
                     sequence_hash: *sequence_hash,
                     size_bytes: 8,
-                    checksum: None,
+                    checksum: 0,
                 }])
                 .await;
         }
@@ -685,7 +749,7 @@ mod tests {
             .put_blocks(vec![G2pbPutBlock {
                 sequence_hash: 1234,
                 size_bytes: 4,
-                checksum: None,
+                checksum: 0,
             }])
             .await;
 
@@ -708,7 +772,7 @@ mod tests {
                 meta: G2pbPutBlock {
                     sequence_hash: 1001,
                     size_bytes: 8,
-                    checksum: None,
+                    checksum: 0,
                 },
                 payload: vec![1, 2, 3, 4, 5, 6, 7, 8],
             }])
@@ -725,12 +789,12 @@ mod tests {
                 G2pbPutBlock {
                     sequence_hash: 1001,
                     size_bytes: 8,
-                    checksum: None,
+                    checksum: 0,
                 },
                 G2pbPutBlock {
                     sequence_hash: 2001,
                     size_bytes: 16,
-                    checksum: None,
+                    checksum: 0,
                 },
             ])
             .await;

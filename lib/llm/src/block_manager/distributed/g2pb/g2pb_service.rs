@@ -79,7 +79,8 @@ impl G2pbPeerStorage for InMemoryG2pbPeerStorage {
     async fn put_payload_blocks(&self, blocks: Vec<G2pbTransferBlock>) -> Result<(), G2pbError> {
         let mut guard = self.blocks.write().expect("g2pb peer storage poisoned");
         for block in blocks {
-            block.validate_payload_size()?;
+            let block = block.with_computed_checksum();
+            block.validate_payload_integrity()?;
             guard.insert(
                 block.meta.sequence_hash,
                 InMemoryG2pbEntry {
@@ -175,6 +176,7 @@ impl G2pbStorageConfig {
 #[derive(Debug, Clone)]
 struct G2pbCacheMetadata {
     size_bytes: usize,
+    checksum: u64,
     location: G2pbCacheLocation,
     priority: u32,
     returned_tick: u64,
@@ -437,6 +439,7 @@ impl G2pbPeerStorage for G2pbCacheStorage {
                     block.sequence_hash,
                     G2pbCacheMetadata {
                         size_bytes: block.size_bytes,
+                        checksum: block.checksum,
                         location,
                         priority: 0,
                         returned_tick: tick,
@@ -476,7 +479,8 @@ impl G2pbPeerStorage for G2pbCacheStorage {
         let tick = self.next_tick();
 
         for block in blocks {
-            block.validate_payload_size()?;
+            let block = block.with_computed_checksum();
+            block.validate_payload_integrity()?;
 
             // Check if block already exists and collect operations
             let existing_location = self
@@ -497,6 +501,7 @@ impl G2pbPeerStorage for G2pbCacheStorage {
                     .update(block.meta.sequence_hash, |meta| {
                         meta.returned_tick = tick;
                         meta.last_access_tick = tick;
+                        meta.checksum = block.meta.checksum;
                         meta.payload_ready = true;
                     })
                     .expect("metadata lock poisoned");
@@ -512,6 +517,7 @@ impl G2pbPeerStorage for G2pbCacheStorage {
                         block.meta.sequence_hash,
                         G2pbCacheMetadata {
                             size_bytes: block.meta.size_bytes,
+                            checksum: block.meta.checksum,
                             location,
                             priority: 0,
                             returned_tick: tick,
@@ -572,11 +578,11 @@ impl G2pbPeerStorage for G2pbCacheStorage {
                     && meta.payload_ready
                 {
                     hits.push(G2pbQueryHit {
-                    instance_id,
-                    sequence_hash: *sequence_hash,
-                    size_bytes: meta.size_bytes,
-                    checksum: None,
-                });
+                        instance_id,
+                        sequence_hash: *sequence_hash,
+                        size_bytes: meta.size_bytes,
+                        checksum: meta.checksum,
+                    });
                 }
             }
         }
@@ -641,25 +647,50 @@ impl G2pbPeerStorage for G2pbCacheStorage {
                         missing.push(*sequence_hash);
                         continue;
                     }
-                    block_locations.push((*sequence_hash, meta.location, meta.size_bytes));
+                    block_locations.push((
+                        *sequence_hash,
+                        meta.location,
+                        meta.size_bytes,
+                        meta.checksum,
+                    ));
                 }
             }
         }
 
         // Third pass: fetch blocks (outside lock)
-        for (sequence_hash, location, size) in block_locations {
+        let mut corrupt = Vec::new();
+        for (sequence_hash, location, size, checksum) in block_locations {
             let payload = match location {
                 G2pbCacheLocation::G2 { offset } => self.read_from_g2(offset, size).await,
             };
 
-            blocks.push(G2pbTransferBlock {
+            let block = G2pbTransferBlock {
                 meta: G2pbPutBlock {
                     sequence_hash,
                     size_bytes: size,
-                    checksum: None,
+                    checksum,
                 },
                 payload,
-            });
+            };
+
+            if block.validate_payload_integrity().is_err() {
+                corrupt.push(sequence_hash);
+                missing.push(sequence_hash);
+                continue;
+            }
+
+            blocks.push(block);
+        }
+
+        for sequence_hash in corrupt {
+            if let Some(metadata) = self
+                .metadata
+                .remove(sequence_hash)
+                .expect("metadata lock poisoned")
+            {
+                let G2pbCacheLocation::G2 { offset } = metadata.location;
+                self.free_in_g2(offset, metadata.size_bytes).await;
+            }
         }
 
         if !missing.is_empty() {
@@ -717,7 +748,7 @@ impl G2pbStorageAgent {
     }
 
     #[cfg(test)]
-    fn with_query_delay(mut self, query_delay: Duration) -> Self {
+    pub(crate) fn with_query_delay(mut self, query_delay: Duration) -> Self {
         self.query_delay = Some(query_delay);
         self
     }
@@ -747,8 +778,12 @@ impl G2pbStorageAgent {
         &self,
         blocks: Vec<G2pbTransferBlock>,
     ) -> Result<Vec<G2pbTransferBlock>, G2pbError> {
+        let blocks: Vec<_> = blocks
+            .into_iter()
+            .map(G2pbTransferBlock::with_computed_checksum)
+            .collect();
         for block in &blocks {
-            block.validate_payload_size()?;
+            block.validate_payload_integrity()?;
         }
 
         let metadata: Vec<_> = blocks.iter().map(|block| block.meta.clone()).collect();

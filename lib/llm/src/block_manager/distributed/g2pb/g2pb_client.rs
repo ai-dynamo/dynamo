@@ -544,7 +544,10 @@ impl G2pbStorageClient {
             };
 
             match agent.fetch_blocks(&owner_hashes).await {
-                Ok(mut blocks) => fetched.append(&mut blocks),
+                Ok(mut blocks) => {
+                    blocks.retain(|block| block.validate_payload_integrity().is_ok());
+                    fetched.append(&mut blocks);
+                }
                 Err(G2pbError::NotFound { .. }) => {
                     // G2PB is a cache. Fetch failures degrade to cache misses.
                 }

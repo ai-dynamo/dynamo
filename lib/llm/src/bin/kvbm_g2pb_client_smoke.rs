@@ -53,6 +53,7 @@ struct DemoBlock {
     sequence_hash: u64,
     payload: Vec<u8>,
     size_bytes: usize,
+    checksum: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -291,15 +292,18 @@ async fn prepare_demo_blocks(
         complete_block(block, &tokens)?;
         let sequence_hash = block.sequence_hash()?;
         let size_bytes = block_size_bytes(block)?;
-        let payload = (0..size_bytes)
+        let payload: Vec<u8> = (0..size_bytes)
             .map(|idx| ((idx + offset) % 251) as u8)
             .collect();
+        let checksum =
+            dynamo_llm::block_manager::distributed::G2pbTransferBlock::compute_checksum(&payload);
 
         demo_blocks.push(DemoBlock {
             tokens,
             sequence_hash,
             payload,
             size_bytes,
+            checksum,
         });
     }
 
@@ -443,7 +447,7 @@ async fn app(runtime: Runtime) -> Result<()> {
         .map(|block| G2pbPutBlock {
             sequence_hash: block.sequence_hash,
             size_bytes: block.size_bytes,
-            checksum: None,
+            checksum: block.checksum,
         })
         .collect();
 
@@ -717,6 +721,13 @@ async fn app(runtime: Runtime) -> Result<()> {
             anyhow::ensure!(
                 read_block_payload(host_block)? == expected.payload,
                 "host registration payload mismatch for sequence hash {}",
+                sequence_hash
+            );
+            anyhow::ensure!(
+                dynamo_llm::block_manager::distributed::G2pbTransferBlock::compute_checksum(
+                    &read_block_payload(host_block)?,
+                ) == expected.checksum,
+                "host registration checksum mismatch for sequence hash {}",
                 sequence_hash
             );
         }
