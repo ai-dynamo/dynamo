@@ -348,14 +348,14 @@ impl WorkerQueryClient {
 
         #[cfg(test)]
         {
-            return Some(Instance {
+            Some(Instance {
                 namespace: self.component.namespace().name().to_string(),
                 component: self.component.name().to_string(),
                 endpoint: worker_kv_indexer_query_endpoint(dp_rank),
                 instance_id: worker_id,
                 transport: dynamo_runtime::component::TransportType::Nats(String::new()),
                 device_type: None,
-            });
+            })
         }
 
         #[cfg(not(test))]
