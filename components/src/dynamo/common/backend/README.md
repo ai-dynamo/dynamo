@@ -1,21 +1,33 @@
 # Dynamo Python Backend
 
-> **Work in progress.** The unified backend currently supports minimal
-> aggregated inference only. See [Feature Gaps](#feature-gaps) at the bottom
-> for what remains to be implemented.
+**Supported today:** aggregated inference, disaggregated
+(prefill/decode) serving with bootstrap (SGLang) or internal KV
+transport (vLLM, TRT-LLM), request cancellation, graceful shutdown,
+`drain()` hook, error chain wrapping.
+
+> **Work in progress.** Multimodal, LoRA, logprobs, guided decoding,
+> and engine-level metrics are still on the non-unified path. See
+> [Feature Gaps](#feature-gaps) for the full matrix.
+
+> **Looking for a walkthrough?** Start with the
+> [Writing a Python Unified Backend](../../../../../docs/development/python-backend-guide.md)
+> guide. This README is the in-tree reference: file layout, per-engine
+> cancellation cookbook, disaggregation contract, error-handling table,
+> and the feature-gap matrix.
 
 A two-class abstraction that separates **runtime integration** (common across
 all backends) from **engine logic** (vLLM, SGLang, TensorRT-LLM, etc.).
 
 ## Architecture
 
-```
+```text
 LLMEngine (ABC)                <-- engine boundary (engine.py)
     |   - from_args(argv) -> (LLMEngine, WorkerConfig)  (factory)
-    |   - start() -> EngineConfig        (start engine, return metadata)
-    |   - generate(request, context)    (streaming inference)
-    |   - abort(context)                (cancel request, optional)
-    |   - cleanup()                     (shutdown)
+    |   - start(worker_id) -> EngineConfig    (start engine, return metadata)
+    |   - generate(request, context)         (streaming inference)
+    |   - abort(context)                     (cancel request, optional)
+    |   - drain()                            (pre-cleanup drain, optional)
+    |   - cleanup()                          (shutdown)
     |
     +-- VllmLLMEngine          <-- vllm/llm_engine.py
     +-- SglangLLMEngine        <-- sglang/llm_engine.py
@@ -26,9 +38,9 @@ Worker                  <-- runtime integration (worker.py)
     - receives WorkerConfig from from_args()
     - creates DistributedRuntime
     - sets up endpoints, signal handlers
-    - calls engine.start(), registers model
+    - calls engine.start(worker_id), registers model
     - serves generate endpoint with cancellation monitoring
-    - calls engine.cleanup() on shutdown
+    - calls engine.drain() then engine.cleanup() on shutdown
 ```
 
 ## Quick Start
@@ -80,13 +92,16 @@ class MyEngine(LLMEngine):
         )
         return engine, worker_config
 
-    async def start(self) -> EngineConfig:
+    async def start(self, worker_id: int) -> EngineConfig:
         # Start the engine, return metadata for model registration.
         # After this returns, generate() MUST be ready to accept calls.
+        # `worker_id` is an opaque per-worker key; most engines ignore it.
         return EngineConfig(
             model="my-model",
             context_length=4096,
             kv_cache_block_size=16,
+            # Populate `bootstrap_host` / `bootstrap_port` here on prefill
+            # workers that advertise a Dynamo-level handshake address.
         )
 
     async def generate(self, request, context):
@@ -283,33 +298,37 @@ differently.
 
 ## File Index
 
-```
+```text
 common/backend/
     __init__.py          # Re-exports: LLMEngine, EngineConfig,
+                         #   GenerateChunk, GenerateRequest,
                          #   Worker, WorkerConfig
-    engine.py            # LLMEngine ABC + EngineConfig dataclass
-    worker.py            # Worker + WorkerConfig
+    engine.py            # LLMEngine ABC + EngineConfig dataclass +
+                         #   GenerateRequest/GenerateChunk TypedDicts
+    worker.py            # Worker + WorkerConfig (incl. disaggregation_mode)
     disagg.py            # Disagg request helpers (prefill clamp,
                          #   prefill_result extraction)
     run.py               # Common entry point: run(engine_cls)
     sample_engine.py     # SampleLLMEngine (reference impl)
     sample_main.py       # Entry point for sample engine
+    tests/               # test_backend_bindings, test_disagg_helpers,
+                         #   test_sample_engine
+    CLAUDE.md            # Design notes (rationale, invariants)
 
-vllm/llm_engine.py       # VllmLLMEngine
+vllm/llm_engine.py       # VllmLLMEngine (agg + disagg)
 vllm/unified_main.py     # Entry point -> run(VllmLLMEngine)
 
-sglang/llm_engine.py     # SglangLLMEngine
+sglang/llm_engine.py     # SglangLLMEngine (agg + disagg, bootstrap handshake)
 sglang/unified_main.py   # Entry point -> run(SglangLLMEngine)
 
-trtllm/llm_engine.py     # TrtllmLLMEngine
+trtllm/llm_engine.py     # TrtllmLLMEngine (agg + disagg)
 trtllm/unified_main.py   # Entry point -> run(TrtllmLLMEngine)
 ```
 
 ## Feature Gaps
 
-The unified path currently supports **minimal aggregated inference** only.
-Below is a summary of what the existing (non-unified) backends provide that
-the unified path does not yet support.
+Below is a summary of what the existing (non-unified) backends provide
+that the unified path does not yet support.
 
 ### What works today
 
