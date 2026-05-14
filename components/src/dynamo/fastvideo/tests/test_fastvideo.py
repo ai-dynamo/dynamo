@@ -169,7 +169,6 @@ def test_fastvideo_attention_backend_choices_are_hardcoded():
 
 
 def test_config_to_generator_config_mapping():
-    from dynamo.fastvideo.args import parse_fastvideo_args
     from fastvideo.api import (
         CompileConfig,
         EngineConfig,
@@ -178,6 +177,8 @@ def test_config_to_generator_config_mapping():
         PipelineSelection,
         QuantizationConfig,
     )
+
+    from dynamo.fastvideo.args import parse_fastvideo_args
 
     config = parse_fastvideo_args(
         [

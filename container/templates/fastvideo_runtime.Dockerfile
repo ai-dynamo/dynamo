@@ -38,7 +38,7 @@ ENV PATH="/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:${PA
     TRITON_CUOBJDUMP_PATH=/usr/local/cuda/bin/cuobjdump \
     TRITON_NVDISASM_PATH=/usr/local/cuda/bin/nvdisasm \
     TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
-    TRITON_CUDART_PATH=/usr/local/cuda/include
+    TRITON_CUDART_PATH=/usr/local/cuda/lib64
 
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -m -s /bin/bash -g 0 dynamo \

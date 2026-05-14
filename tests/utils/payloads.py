@@ -1449,7 +1449,9 @@ class VideoGenerationPayload(BasePayload):
             return
 
         url = entry.get("url")
-        assert isinstance(url, str) and url, "Video response must include a non-empty url"
+        assert (
+            isinstance(url, str) and url
+        ), "Video response must include a non-empty url"
 
 
 @dataclass

@@ -1242,7 +1242,7 @@ func ParseBackendFramework(framework string) (BackendFramework, error) {
 	case BackendFrameworkVLLM, BackendFrameworkSGLang, BackendFrameworkTRTLLM, BackendFrameworkFastVideo, BackendFrameworkNoop:
 		return bf, nil
 	default:
-		return "", fmt.Errorf("unsupported backend framework: %s (valid values: vllm, sglang, trtllm, fastvideo)", framework)
+		return "", fmt.Errorf("unsupported backend framework: %s (valid values: vllm, sglang, trtllm, fastvideo, noop)", framework)
 	}
 }
 
