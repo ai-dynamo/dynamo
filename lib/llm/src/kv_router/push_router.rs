@@ -415,25 +415,21 @@ impl KvPushRouter {
                 Some(config)
                     if !routing_constraints.is_compatible_with_worker_taints(config.taints()) =>
                 {
-                    tracing::warn!(
-                        request_id = %context_id,
-                        worker_id = pinned_worker_id,
-                        dp_rank = ?resolved_dp_rank,
-                        requested_taints = ?routing_constraints.required_taints,
-                        worker_taints = ?config.taints(),
-                        ?phase,
-                        "Pinned worker fallback bypassed incompatible required taints"
-                    );
+                    return Err(anyhow::anyhow!(
+                        "Pinned worker {} does not satisfy required taints {:?}; worker taints: {:?}",
+                        pinned_worker_id,
+                        routing_constraints.required_taints,
+                        config.taints()
+                    )
+                    .into());
                 }
                 None => {
-                    tracing::warn!(
-                        request_id = %context_id,
-                        worker_id = pinned_worker_id,
-                        dp_rank = ?resolved_dp_rank,
-                        requested_taints = ?routing_constraints.required_taints,
-                        ?phase,
-                        "Pinned worker fallback could not validate required taints because worker config was unavailable"
-                    );
+                    return Err(anyhow::anyhow!(
+                        "Pinned worker {} could not be validated against required taints {:?} because worker config was unavailable",
+                        pinned_worker_id,
+                        routing_constraints.required_taints
+                    )
+                    .into());
                 }
                 _ => {}
             }
