@@ -59,7 +59,6 @@ _PACKAGE: dict[str, str] = {
 }
 
 
-
 def _case_sort_key(case_id: str) -> tuple[int, str]:
     """Sort key for case IDs that may carry a sub-letter.
 
