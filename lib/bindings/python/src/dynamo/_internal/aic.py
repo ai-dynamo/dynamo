@@ -115,6 +115,13 @@ class AicSession:
                 f"effective_isl must be positive, got effective_isl={effective_isl}"
             )
 
+        if not self._model.context_ops:
+            logger.warning(
+                "AIC: context_ops is empty for model=%s; returning 0.0",
+                self._model_name,
+            )
+            return 0.0
+
         total_latency = 0.0
         for op in self._model.context_ops:
             op_name = getattr(op, "_name", "")
@@ -129,6 +136,14 @@ class AicSession:
                 model_name=self._model_name,
                 seq_imbalance_correction_scale=1.0,
             )
+            if result is None:
+                logger.debug(
+                    "AIC op=%s returned None for model=%s, x=%s; skipping",
+                    op_name,
+                    self._model_name,
+                    x,
+                )
+                continue
             total_latency += float(result)
 
         return total_latency
@@ -137,7 +152,15 @@ class AicSession:
         if osl <= 1:
             return 0.0
 
-        effective_batch_size = batch_size * (self._model._nextn + 1)
+        if not self._model.generation_ops:
+            logger.warning(
+                "AIC: generation_ops is empty for model=%s; returning 0.0",
+                self._model_name,
+            )
+            return 0.0
+
+        _nextn = getattr(self._model, "_nextn", None) or 0
+        effective_batch_size = batch_size * (_nextn + 1)
         total_latency = 0.0
 
         for step in range(0, osl - 1, DEFAULT_STATIC_STRIDE):
@@ -152,6 +175,14 @@ class AicSession:
                     model_name=self._model_name,
                     gen_seq_imbalance_correction_scale=1.0,
                 )
+                if result is None:
+                    logger.debug(
+                        "AIC op=%s returned None for model=%s, x=%s; skipping",
+                        getattr(op, "_name", ""),
+                        self._model_name,
+                        effective_batch_size,
+                    )
+                    continue
                 step_latency += float(result)
 
             repeat_count = min(DEFAULT_STATIC_STRIDE, osl - 1 - step)
