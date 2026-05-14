@@ -120,9 +120,9 @@ impl PrefillRouter {
     ///
     /// Uses direct routing to target_worker when specified (for non-KV modes with bootstrap optimization).
     ///
-    /// If `phase_transition_permit` is provided, it is dropped immediately after routing completes,
-    /// allowing subsequent `set_phase` calls to proceed. This preserves the current synchronization:
-    /// the prefill route must finish worker recording before the phase can change to Decode.
+    /// If `phase_transition_permit` is provided, it is held until the first prefill stream item
+    /// arrives (i.e. until the SGLang worker has registered its NIXL bootstrap room), then dropped
+    /// to allow subsequent `set_phase(Decode)` calls to proceed.
     ///
     /// Returns (PrefillResult, Option<(worker_id, dp_rank)>).
     pub(super) async fn execute_prefill(
@@ -228,8 +228,8 @@ impl PrefillRouter {
     ///
     /// Uses direct routing to target_worker when specified (for non-KV modes with bootstrap optimization).
     ///
-    /// The `phase_transition_permit` is passed to the spawned task and released after routing
-    /// completes, allowing the main task's `set_phase(Decode)` to proceed.
+    /// The `phase_transition_permit` is passed to the spawned task and held until the first
+    /// prefill stream item arrives, then released to allow `set_phase(Decode)` to proceed.
     pub(super) fn spawn_prefill_task(
         &self,
         prefill_request: SingleIn<PreprocessedRequest>,
