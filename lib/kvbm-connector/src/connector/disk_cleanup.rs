@@ -132,8 +132,14 @@ fn cleanup_all() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::time::Duration;
     use tempfile::TempDir;
+
+    // The G3_PATHS registry is process-global, and `cleanup_all()` unlinks
+    // every path in it. These tests share that registry, so they must run
+    // serially — otherwise one test's `cleanup_all()` deletes another's
+    // freshly registered file. All four are marked `#[serial]`.
 
     /// Insert a path into the registry without triggering the signal task —
     /// each test manages its own cleanup expectations.
@@ -148,6 +154,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn cleanup_all_unlinks_registered_files() {
         let dir = TempDir::new().expect("tempdir");
         let p1 = make_temp_file(&dir, "kvbm_g3_test_a.bin");
@@ -167,6 +174,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn cleanup_all_tolerates_missing_files() {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("kvbm_g3_test_already_gone.bin");
@@ -180,6 +188,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn deregister_removes_path_from_registry() {
         let dir = TempDir::new().expect("tempdir");
         let path = make_temp_file(&dir, "kvbm_g3_test_dereg.bin");
@@ -201,6 +210,7 @@ mod tests {
     /// SIGTERM/SIGINT to be sent by external tooling (e.g. cargo, IDE)
     /// during the brief test window.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
     async fn signal_task_triggers_cleanup_on_sighup() {
         let dir = TempDir::new().expect("tempdir");
         let path = make_temp_file(&dir, "kvbm_g3_test_signal.bin");
