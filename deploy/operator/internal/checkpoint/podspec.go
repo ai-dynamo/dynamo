@@ -117,6 +117,18 @@ func resolvePodInfoContainers(podSpec *corev1.PodSpec, targets []string) []*core
 	return out
 }
 
+func RequireMainContainer(podSpec *corev1.PodSpec) (*corev1.Container, error) {
+	if podSpec == nil {
+		return nil, fmt.Errorf("pod spec is nil")
+	}
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
+			return &podSpec.Containers[i], nil
+		}
+	}
+	return nil, fmt.Errorf("pod spec has no container named %q", commonconsts.MainContainerName)
+}
+
 func InjectCheckpointIntoPodSpec(
 	ctx context.Context,
 	reader ctrlclient.Reader,
