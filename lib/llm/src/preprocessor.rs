@@ -167,7 +167,15 @@ pub struct MmImageEntry {
 #[cfg(feature = "lightseek-mm")]
 fn mdc_model_dir(mdc: &ModelDeploymentCard) -> Option<std::path::PathBuf> {
     let ModelInfoType::HfConfigJson(cf) = mdc.model_info.as_ref()?;
-    cf.path()?.parent().map(std::path::PathBuf::from)
+    let by_slug = cf.path()?.parent().map(std::path::PathBuf::from);
+    // by-slug only carries the 5 typed slots (gh-8749). Fall back to the
+    // HF snapshot dir when the MM-routing inputs aren't there.
+    if let Some(ref dir) = by_slug {
+        if dir.join("preprocessor_config.json").exists() {
+            return by_slug;
+        }
+    }
+    crate::hub::find_local_snapshot(mdc.source_path())
 }
 
 /// Read the top-level `image_token_id` field from `config.json` in

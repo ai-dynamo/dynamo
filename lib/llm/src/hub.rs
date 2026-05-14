@@ -12,6 +12,25 @@ use modelexpress_common::download as mx;
 
 use dynamo_runtime::config::environment_names::model as env_model;
 
+/// Resolve `source` to a local directory containing the model's full HF
+/// artifact set (config.json, tokenizer.json, preprocessor_config.json,
+/// special_tokens_map.json, ...). Used by MM-aware routing for sibling
+/// files the MDC verify-and-cache pipeline doesn't currently stage
+/// (gh-8749). Pre-#9057 behavior was equivalent.
+///
+/// `source` is either a local directory path or an HF repo id (resolved
+/// via the existing HF cache layout — no network call). Returns `None`
+/// if neither resolves.
+pub fn find_local_snapshot(source: &str) -> Option<PathBuf> {
+    let p = PathBuf::from(source);
+    if p.is_dir() {
+        return Some(p);
+    }
+    let cache = Cache::new(get_model_express_cache_dir());
+    let repo = cache.model(source.to_string());
+    repo.get("config.json")?.parent().map(PathBuf::from)
+}
+
 /// Check if a model is already cached in the HuggingFace hub cache directory.
 /// Returns the path to the cached model directory if found, None otherwise.
 ///
