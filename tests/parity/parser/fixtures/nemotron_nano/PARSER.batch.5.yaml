@@ -47,14 +47,11 @@ cases:
     - *id001
     expected:
       dynamo:
-        calls: []
-        normal_text: |-
-          <function=get_weather>
-          <parameter=location>
-          NYC
-          </parameter>
-          </function>
-          </tool_call>
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='nemotron_nano'
       sglang:

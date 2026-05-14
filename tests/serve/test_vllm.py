@@ -74,6 +74,10 @@ vllm_configs = {
         name="aggregated",
         directory=vllm_dir,
         script_name="agg.sh",
+        # Forwarded through agg.sh -> dynamo.vllm. Required for the
+        # max_thinking_tokens payload below: vLLM only enables the thinking-
+        # budget logits processor when reasoning_config is populated.
+        script_args=["--reasoning-parser", "qwen3"],
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_1,
@@ -108,6 +112,17 @@ vllm_configs = {
                     "stop": ["song"],
                     "include_stop_str_in_output": True,
                 },
+            ),
+            # Smoke: nvext.max_thinking_tokens reaches vLLM's
+            # SamplingParams.thinking_token_budget without erroring. Requires
+            # the worker to be started with `--reasoning-parser qwen3`
+            # (see script_args above).
+            chat_payload(
+                "Solve: 1+1.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=64,
+                extra_body={"nvext": {"max_thinking_tokens": 16}},
             ),
             metric_payload_default(min_num_requests=6, backend="vllm"),
         ],
@@ -353,6 +368,51 @@ vllm_configs = {
         model="Qwen/Qwen3-0.6B",
         delayed_start=10,
         health_check_workers=True,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
+    "disaggregated_same_gpu_chat_processor": VLLMConfig(
+        name="disaggregated_same_gpu_chat_processor",
+        directory=vllm_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(7.3),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_023_525_000),
+            pytest.mark.timeout(300),
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=10,
+        health_check_workers=True,
+        env={"DYN_CHAT_PROCESSOR": "vllm"},
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
+    "disaggregated_same_gpu_chat_processor_kv_router": VLLMConfig(
+        name="disaggregated_same_gpu_chat_processor_kv_router",
+        directory=vllm_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(7.3),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_023_525_000),
+            pytest.mark.timeout(300),
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=10,
+        health_check_workers=True,
+        env={
+            "DYN_CHAT_PROCESSOR": "vllm",
+            "DYN_ROUTER_MODE": "kv",
+            # Deterministic hash for KV event IDs, matches disagg_router.sh.
+            "PYTHONHASHSEED": "0",
+        },
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),

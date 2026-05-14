@@ -15,7 +15,7 @@ cases:
       </parameter>
       </function>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -23,14 +23,14 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_5_a
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm: *d_5_a
-      sglang: *d_5_a
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.5.b:
     description: Closing </tool_call> without matching <tool_call> open
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_qwen3coder_tool_parser.py#L943
@@ -42,9 +42,22 @@ cases:
       </function>
       </tool_call>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_5_b
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: ''
+        reason: impl-defined recovery contract (see PARSER_CASES.md)
+      sglang:
         calls: []
         normal_text: |-
           <function=get_weather>
@@ -53,14 +66,6 @@ cases:
           </parameter>
           </function>
           </tool_call>
-      vllm:
-        calls:
-        - arguments:
-            location: NYC
-          name: get_weather
-        normal_text: ''
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
-      sglang: *d_5_b
   PARSER.batch.5.c:
     description: Truncation mid-parameter value
     ref: dynamo
@@ -70,13 +75,13 @@ cases:
       <parameter=location>
       NY
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_5_c
+      dynamo: &id003
         calls:
         - name: get_weather
           arguments:
             location: NY
         normal_text: ''
-      vllm: *d_5_c
-      sglang: *d_5_c
+      vllm: *id003
+      sglang: *id003

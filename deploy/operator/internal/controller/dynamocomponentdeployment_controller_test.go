@@ -1765,12 +1765,16 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		if got := gmsServer.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.server" { //nolint:goconst
 			t.Fatalf("expected weights server to run python module, got %#v", got)
 		}
-		// Restore: gms-server and loader are init sidecars (restartPolicy=Always)
+		// gms-server is a native sidecar (init + restartPolicy=Always); no probe.
 		if gmsServer.RestartPolicy == nil || *gmsServer.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 			t.Fatalf("expected restore gms-server to have RestartPolicy=Always, got %#v", gmsServer.RestartPolicy)
 		}
 		if gmsServer.StartupProbe != nil {
 			t.Fatalf("expected restore gms-server to have no StartupProbe")
+		}
+		// gms-loader is a regular sidecar (no container-level RestartPolicy override).
+		if loader.RestartPolicy != nil {
+			t.Fatalf("expected restore gms-loader to have no container-level RestartPolicy, got %#v", loader.RestartPolicy)
 		}
 		if got := loader.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.snapshot.loader" {
 			t.Fatalf("expected loader to run python module, got %#v", got)

@@ -12,7 +12,7 @@ cases:
       not a valid invoke
       </minimax:tool_call>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -20,19 +20,17 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_4_a
+      dynamo: &id001
         calls: []
         normal_text: ''
       vllm:
         calls: []
-        normal_text: '<minimax:tool_call>
-
+        normal_text: |-
+          <minimax:tool_call>
           not a valid invoke
-
-          </minimax:tool_call>'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
-      sglang: *d_4_a
-  # PARSER.batch.4.b (invalid JSON args) n/a: minimax_m2 uses attribute-encoded args, not JSON.
+          </minimax:tool_call>
+        reason: impl-defined recovery contract (see PARSER_CASES.md)
+      sglang: *id001
   PARSER.batch.4.c:
     description: Invoke without name attribute
     ref: dynamo
@@ -43,24 +41,21 @@ cases:
       </invoke>
       </minimax:tool_call>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_4_c
+      dynamo: &id003
         calls: []
         normal_text: ''
       vllm:
         calls: []
-        normal_text: '<minimax:tool_call>
-
+        normal_text: |-
+          <minimax:tool_call>
           <invoke>
-
           <parameter name="location">NYC</parameter>
-
           </invoke>
-
-          </minimax:tool_call>'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
-      sglang: *d_4_c
+          </minimax:tool_call>
+        reason: impl-defined recovery contract (see PARSER_CASES.md)
+      sglang: *id003
   PARSER.batch.4.d:
     description: Missing closing </invoke>
     ref: dynamo
@@ -70,22 +65,36 @@ cases:
       <parameter name="location">NYC</parameter>
       </minimax:tool_call>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_4_d
+      dynamo:
+        calls: []
+        normal_text: ''
+        reason: |-
+          Strict per MiniMax-M2 reference parser
+          (https://huggingface.co/MiniMaxAI/MiniMax-M2/blob/main/docs/tool_calling_guide.md):
+          the published `<invoke name=(.*?)</invoke>` regex requires both
+          fences, so missing `</invoke>` yields no match and no recovered
+          call. Wrapper markup is intentionally dropped (not echoed to
+          normal_text) so tool-call protocol markers don't leak to
+          user-facing content.
+      vllm:
+        calls: []
+        normal_text: |-
+          <minimax:tool_call>
+          <invoke name="get_weather">
+          <parameter name="location">NYC</parameter>
+          </minimax:tool_call>
+        reason: impl-defined recovery contract (see PARSER_CASES.md)
+      sglang:
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm:
-        calls: []
-        normal_text: '<minimax:tool_call>
-
-          <invoke name="get_weather">
-
-          <parameter name="location">NYC</parameter>
-
-          </minimax:tool_call>'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
-      sglang: *d_4_d
+        reason: |-
+          SGLang's MinimaxM2Detector regex
+          (`r"<invoke name=\"(.*?)</invoke>|<invoke name=\"(.*)$"`) has an
+          `|$` end-of-input alternation that lets a missing `</invoke>`
+          still produce a call — contradicts MiniMax-M2 reference parser.
+          Should be filed against sgl-project/sglang.

@@ -25,19 +25,16 @@ cases:
           timezone:
             type: string
     expected:
-      dynamo:
-        calls: []
-        normal_text: ''
-      vllm:
+      dynamo: &d_2a
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_time
+          arguments:
             timezone: EST
-          name: get_time
         normal_text: ''
-        reason: "vLLM llama3_json does not parse semicolon-separated calls the same way Dynamo does"
+      vllm: *d_2a
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
   PARSER.batch.2.c:
@@ -49,19 +46,25 @@ cases:
     - *id001
     - *id002
     expected:
-      dynamo:
-        calls: []
-        normal_text: ''
+      dynamo: &d_2c
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both:'
       vllm:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_time
+          arguments:
             timezone: EST
-          name: get_time
         normal_text: ''
-        reason: "vLLM llama3_json does not parse semicolon-separated calls the same way Dynamo does"
+        reason: "vLLM llama3_json drops leading normal_text before the python_tag token"
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
   PARSER.batch.2.d:
@@ -73,18 +76,15 @@ cases:
     - *id001
     - *id001
     expected:
-      dynamo:
-        calls: []
-        normal_text: ''
-      vllm:
+      dynamo: &d_2d
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_weather
+          arguments:
             location: LA
-          name: get_weather
         normal_text: ''
-        reason: "vLLM llama3_json does not parse semicolon-separated calls the same way Dynamo does"
+      vllm: *d_2d
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'

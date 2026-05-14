@@ -7,13 +7,16 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use crate::metrics::{BlockPoolMetrics, MetricsAggregator, short_type_name};
-use crate::{pools::backends::LineageBackend, tinylfu::TinyLFUTracker};
+use crate::tinylfu::TinyLFUTracker;
 
 use crate::{
     blocks::BlockMetadata,
     pools::{
         BlockDuplicationPolicy, BlockStore, InactiveIndex,
-        backends::{FifoReusePolicy, HashMapBackend, LruBackend, MultiLruBackend},
+        backends::{
+            FifoReusePolicy, HashMapBackend, LeafPolicy, LineageBackend, LruBackend,
+            MultiLruBackend,
+        },
     },
     registry::BlockRegistry,
 };
@@ -61,8 +64,33 @@ pub enum InactiveBackendConfig {
         /// Default: [3, 8, 15].
         frequency_thresholds: [u8; 3],
     },
-    /// Lineage backend.
-    Lineage,
+    /// Lineage backend with a selectable leaf-eviction policy.
+    Lineage {
+        /// Leaf-eviction ordering. Default: [`LineageEviction::Tick`].
+        eviction: LineageEviction,
+    },
+}
+
+/// Leaf-eviction ordering for the [`Lineage`](InactiveBackendConfig::Lineage)
+/// inactive backend.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LineageEviction {
+    /// `BTreeMap` ordered by a per-node insertion tick — a node that
+    /// re-becomes a leaf returns to its original position. Historical
+    /// behavior; the default. O(log n) per hook, with B-tree node churn.
+    #[default]
+    Tick,
+    /// Intrusive FIFO over leaves — O(1) and allocation-free, but a node
+    /// that re-becomes a leaf is appended at the tail.
+    Fifo,
+}
+
+/// Build the runtime [`LeafPolicy`] for a [`LineageEviction`] selection.
+fn lineage_leaf_policy(eviction: LineageEviction, capacity: usize) -> LeafPolicy {
+    match eviction {
+        LineageEviction::Tick => LeafPolicy::tick(capacity),
+        LineageEviction::Fifo => LeafPolicy::fifo(capacity),
+    }
 }
 
 /// Error types for [`BlockManager`] builder validation.
@@ -252,9 +280,18 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         self
     }
 
-    /// Use lineage backend.
+    /// Use the lineage backend with the default ([`Tick`](LineageEviction::Tick))
+    /// leaf-eviction policy.
     pub fn with_lineage_backend(mut self) -> Self {
-        self.inactive_backend = Some(InactiveBackendConfig::Lineage);
+        self.inactive_backend = Some(InactiveBackendConfig::Lineage {
+            eviction: LineageEviction::default(),
+        });
+        self
+    }
+
+    /// Use the lineage backend with an explicit leaf-eviction policy.
+    pub fn with_lineage_backend_eviction(mut self, eviction: LineageEviction) -> Self {
+        self.inactive_backend = Some(InactiveBackendConfig::Lineage { eviction });
         self
     }
 
@@ -392,13 +429,20 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
                     .map_err(|e| BlockManagerBuilderError::InvalidBackend(e.to_string()))?,
                 )
             }
-            Some(InactiveBackendConfig::Lineage) => {
-                tracing::info!("Using Lineage inactive backend");
-                Box::new(LineageBackend::default())
+            Some(InactiveBackendConfig::Lineage { eviction }) => {
+                tracing::info!("Using Lineage inactive backend ({eviction:?})");
+                Box::new(LineageBackend::with_policy(
+                    block_count,
+                    lineage_leaf_policy(eviction, block_count),
+                ))
             }
             None => {
-                tracing::info!("Using default inactive backend: Lineage");
-                Box::new(LineageBackend::default())
+                let eviction = LineageEviction::default();
+                tracing::info!("Using default inactive backend: Lineage ({eviction:?})");
+                Box::new(LineageBackend::with_policy(
+                    block_count,
+                    lineage_leaf_policy(eviction, block_count),
+                ))
             }
         };
 

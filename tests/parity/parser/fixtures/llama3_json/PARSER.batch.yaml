@@ -26,6 +26,32 @@ cases:
       vllm: *d_1
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
+  PARSER.batch.2:
+    description: Multiple tool calls (parallel, semicolon-separated)
+    model_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}};{"name": "get_time", "arguments":
+      {"timezone": "EST"}}'
+    tools:
+    - *id001
+    - &id002
+      name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo: &d_2
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm: *d_2
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
@@ -51,24 +77,71 @@ cases:
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
   PARSER.batch.10:
-    description: Duplicate calls (same name twice)
+    description: Duplicate calls (same name twice, semicolon-separated)
     model_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}};{"name": "get_weather", "arguments":
       {"location": "LA"}}'
     tools:
     - *id001
     expected:
-      dynamo:
-        calls: []
-        normal_text: ''
-      vllm:
+      dynamo: &d_10
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_weather
+          arguments:
             location: LA
-          name: get_weather
         normal_text: ''
-        reason: "vLLM llama3_json does not parse semicolon-separated calls the same way Dynamo does"
+      vllm: *d_10
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'
+  PARSER.batch.11:
+    description: Single call with semicolon inside argument string value
+    model_text: '<|python_tag|>{"name": "run_query", "arguments": {"sql": "SELECT a; SELECT b"}}'
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    expected:
+      dynamo: &d_11
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a; SELECT b
+        normal_text: ''
+      vllm: *d_11
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'
+  PARSER.batch.12:
+    description: Parallel calls where one argument contains a semicolon (streaming split safety)
+    model_text: '<|python_tag|>{"name": "run_query", "arguments": {"sql": "SELECT a; SELECT b"}};{"name": "get_time", "arguments": {"timezone": "EST"}}'
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    - &id_time
+      name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo: &d_12
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a; SELECT b
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm: *d_12
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
