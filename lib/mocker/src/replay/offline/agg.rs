@@ -812,6 +812,56 @@ mod tests {
             .unwrap()
     }
 
+    fn queueing_router_config(policy: RouterQueuePolicy) -> KvRouterConfig {
+        KvRouterConfig {
+            router_queue_threshold: Some(0.5),
+            router_queue_policy: policy,
+            ..KvRouterConfig::default()
+        }
+    }
+
+    fn run_trace_multi_queueing_collect_with_stats(
+        policy: RouterQueuePolicy,
+        requests: Vec<DirectRequest>,
+        num_workers: usize,
+    ) -> (TraceCollector, AggRuntimeStats) {
+        let args = queueing_router_args(policy);
+        let pending = normalize_trace_requests(requests, 1.0).unwrap();
+        AggRuntime::new(
+            &args,
+            Some(queueing_router_config(policy)),
+            None,
+            pending,
+            num_workers,
+            ReplayMode::Trace,
+            ReplayRouterMode::KvRouter,
+        )
+        .unwrap()
+        .run()
+        .unwrap()
+    }
+
+    fn run_concurrency_multi_queueing_collect_with_stats(
+        policy: RouterQueuePolicy,
+        requests: Vec<DirectRequest>,
+        max_in_flight: usize,
+        num_workers: usize,
+    ) -> (TraceCollector, AggRuntimeStats) {
+        let args = queueing_router_args(policy);
+        AggRuntime::new(
+            &args,
+            Some(queueing_router_config(policy)),
+            None,
+            VecDeque::from(requests),
+            num_workers,
+            ReplayMode::Concurrency { max_in_flight },
+            ReplayRouterMode::KvRouter,
+        )
+        .unwrap()
+        .run()
+        .unwrap()
+    }
+
     fn planner_router_config() -> KvRouterConfig {
         KvRouterConfig {
             router_queue_threshold: Some(0.5),
@@ -1024,10 +1074,11 @@ mod tests {
 
     #[test]
     fn test_multi_worker_trace_kv_router_debug_snapshot_tracks_queue_and_cached_dispatch() {
-        let args = queueing_router_args(RouterQueuePolicy::Fcfs);
+        let policy = RouterQueuePolicy::Fcfs;
+        let args = queueing_router_args(policy);
         let mut runtime = AggRuntime::new(
             &args,
-            None,
+            Some(queueing_router_config(policy)),
             None,
             normalize_trace_requests(
                 vec![
@@ -1465,9 +1516,8 @@ mod tests {
 
     #[test]
     fn test_multi_worker_trace_kv_router_queues_until_prefill_completion() {
-        let args = queueing_router_args(RouterQueuePolicy::Fcfs);
-        let (collector, stats) = run_trace_multi_collect_with_stats(
-            &args,
+        let (collector, stats) = run_trace_multi_queueing_collect_with_stats(
+            RouterQueuePolicy::Fcfs,
             vec![
                 DirectRequest {
                     tokens: vec![1; 64],
@@ -1492,7 +1542,6 @@ mod tests {
                 },
             ],
             2,
-            ReplayRouterMode::KvRouter,
         );
 
         let request_1 = collector.snapshot(Uuid::from_u128(1)).unwrap();
@@ -1543,18 +1592,13 @@ mod tests {
             },
         ];
 
-        let (_, fcfs_stats) = run_trace_multi_collect_with_stats(
-            &queueing_router_args(RouterQueuePolicy::Fcfs),
+        let (_, fcfs_stats) = run_trace_multi_queueing_collect_with_stats(
+            RouterQueuePolicy::Fcfs,
             requests.clone(),
             2,
-            ReplayRouterMode::KvRouter,
         );
-        let (_, lcfs_stats) = run_trace_multi_collect_with_stats(
-            &queueing_router_args(RouterQueuePolicy::Lcfs),
-            requests,
-            2,
-            ReplayRouterMode::KvRouter,
-        );
+        let (_, lcfs_stats) =
+            run_trace_multi_queueing_collect_with_stats(RouterQueuePolicy::Lcfs, requests, 2);
 
         assert!(fcfs_stats.max_router_pending_count > 0);
         assert!(lcfs_stats.max_router_pending_count > 0);
@@ -1610,18 +1654,13 @@ mod tests {
             },
         ];
 
-        let (fcfs_collector, fcfs_stats) = run_trace_multi_collect_with_stats(
-            &queueing_router_args(RouterQueuePolicy::Fcfs),
+        let (fcfs_collector, fcfs_stats) = run_trace_multi_queueing_collect_with_stats(
+            RouterQueuePolicy::Fcfs,
             requests.clone(),
             2,
-            ReplayRouterMode::KvRouter,
         );
-        let (lcfs_collector, lcfs_stats) = run_trace_multi_collect_with_stats(
-            &queueing_router_args(RouterQueuePolicy::Lcfs),
-            requests,
-            2,
-            ReplayRouterMode::KvRouter,
-        );
+        let (lcfs_collector, lcfs_stats) =
+            run_trace_multi_queueing_collect_with_stats(RouterQueuePolicy::Lcfs, requests, 2);
 
         let fcfs_request_30 = fcfs_collector.snapshot(Uuid::from_u128(30)).unwrap();
         let fcfs_request_40 = fcfs_collector.snapshot(Uuid::from_u128(40)).unwrap();
@@ -1644,9 +1683,8 @@ mod tests {
 
     #[test]
     fn test_multi_worker_concurrency_kv_router_respects_max_in_flight() {
-        let args = queueing_router_args(RouterQueuePolicy::Fcfs);
-        let (_, stats) = run_concurrency_multi_collect_with_stats(
-            &args,
+        let (_, stats) = run_concurrency_multi_queueing_collect_with_stats(
+            RouterQueuePolicy::Fcfs,
             vec![
                 DirectRequest {
                     tokens: vec![1; 64],
@@ -1679,7 +1717,6 @@ mod tests {
             ],
             3,
             2,
-            ReplayRouterMode::KvRouter,
         );
 
         assert_eq!(stats.max_in_flight_seen, 3);
