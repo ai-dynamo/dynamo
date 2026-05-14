@@ -284,7 +284,17 @@ class VllmLLMEngine(LLMEngine):
                 sampling_params.extra_args = {}
             sampling_params.extra_args["kv_transfer_params"] = kv_params
 
-        gen = self.engine_client.generate(prompt, sampling_params, request_id)
+        # Honour the router's DP rank decision. Without this, vLLM picks the
+        # rank itself, so KV events for the forced rank land on the wrong
+        # publisher and the per-rank indexer trees diverge from reality.
+        # Matches the legacy handler's `data_parallel_rank=...` plumbing.
+        local_dp_rank = self._to_local_dp_rank(
+            (request.get("routing") or {}).get("dp_rank")
+        )
+
+        gen = self.engine_client.generate(
+            prompt, sampling_params, request_id, data_parallel_rank=local_dp_rank
+        )
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
 
@@ -331,6 +341,25 @@ class VllmLLMEngine(LLMEngine):
 
                 yield out
                 num_output_tokens_so_far[output_idx] = next_total
+
+    def _to_local_dp_rank(self, dp_rank: int | None) -> int | None:
+        """Convert a router-supplied global DP rank to this worker's local
+        rank, or ``None`` if the rank is outside the range this worker owns
+        (in which case vLLM falls back to its internal load balancer).
+        Mirrors `handlers.DecodeWorkerHandler._to_local_dp_rank`."""
+        if dp_rank is None or self._dp_range is None:
+            return None
+        dp_start, dp_size = self._dp_range
+        if dp_rank < dp_start or dp_rank >= dp_start + dp_size:
+            logger.warning(
+                "Received DP rank %d is outside [%d, %d); falling back to "
+                "vLLM internal DP selection",
+                dp_rank,
+                dp_start,
+                dp_start + dp_size,
+            )
+            return None
+        return dp_rank - dp_start
 
     def _kv_routing_enabled(self) -> bool:
         # vLLM's KV-event publisher is gated on prefix caching being on, on

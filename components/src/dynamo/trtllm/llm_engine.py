@@ -28,6 +28,7 @@ from tensorrt_llm.llmapi.disagg_utils import get_global_disagg_request_id
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.sampling_params import GuidedDecodingParams
+from tensorrt_llm.scheduling_params import SchedulingParams
 from torch.cuda import device_count
 
 from dynamo._core import Context
@@ -489,6 +490,23 @@ class TrtllmLLMEngine(LLMEngine):
         if ignore_eos:
             sampling_params.ignore_eos = ignore_eos
 
+        # Honour the router's attention-DP rank decision. Without this,
+        # TRT-LLM picks the rank itself (typically rank 0) regardless of
+        # what the router decided, so KV events all land on rank 0's
+        # publisher and the per-rank indexer trees diverge from reality.
+        # Mirrors the legacy `handler_base._handle_decode_request` flow.
+        routing = request.get("routing") or {}
+        forced_dp_rank = routing.get("dp_rank")
+        scheduling_params: SchedulingParams | None = None
+        if (
+            forced_dp_rank is not None
+            and self._attention_dp_size > 1
+        ):
+            scheduling_params = SchedulingParams(
+                attention_dp_rank=int(forced_dp_rank),
+                attention_dp_relax=False,
+            )
+
         # Prefill returns one non-streaming chunk carrying the handoff —
         # matches the legacy disagg wire format.
         streaming = not is_prefill
@@ -497,6 +515,7 @@ class TrtllmLLMEngine(LLMEngine):
             sampling_params=sampling_params,
             streaming=streaming,
             disaggregated_params=disaggregated_params,
+            scheduling_params=scheduling_params,
         )
 
         request_id = context.id()

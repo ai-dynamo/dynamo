@@ -240,11 +240,17 @@ class SglangLLMEngine(LLMEngine):
         elif self.serving_mode == DisaggregationMode.DECODE:
             bootstrap_kwargs = self._resolve_decode_bootstrap(request)
 
+        # Honour the router's DP rank decision. Without this, SGLang picks
+        # the rank internally and KV events land on the wrong publisher.
+        # Mirrors `DecodeWorkerHandler.async_generate(data_parallel_rank=...)`.
+        forced_dp_rank = (request.get("routing") or {}).get("dp_rank")
+
         stream = await self.engine.async_generate(
             **input_param,
             sampling_params=sampling_params,
             stream=True,
             rid=context.trace_id,
+            data_parallel_rank=forced_dp_rank,
             **bootstrap_kwargs,
         )
 
