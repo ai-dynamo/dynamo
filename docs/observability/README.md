@@ -67,6 +67,7 @@ For detailed setup instructions and configuration, see [Prometheus + Grafana Set
 | Guide | Description | Environment Variables to Control |
 |-------|-------------|----------------------------------|
 | [Metrics Developer Guide](metrics-developer-guide.md) | Creating custom metrics in Rust and Python | `DYN_SYSTEM_PORT`† |
+| [Local Resource Monitor](local-resource-monitor.md) | Per-process VRAM / PCIe / CPU exporter for engine-startup profiling (200 ms scrape, profile-gated) | N/A (host-side script) |
 
 ## Kubernetes
 
