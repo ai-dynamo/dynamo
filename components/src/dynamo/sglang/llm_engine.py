@@ -98,6 +98,11 @@ class SglangLLMEngine(LLMEngine):
         self._metrics_task: Optional[asyncio.Task[None]] = None
         self._metrics_zmq_ctx: Optional[zmq.asyncio.Context] = None
         self._metrics_zmq_sock = None
+        # Local DP-rank slice this worker owns; resolved in `start()`
+        # via `_local_dp_rank_range`. Used to validate router-supplied
+        # `dp_rank` against this node's range before forwarding to SGLang.
+        self._dp_start: int = 0
+        self._dp_size: int = 1
 
     @classmethod
     async def from_args(
@@ -165,6 +170,8 @@ class SglangLLMEngine(LLMEngine):
         self._start_metrics_task()
 
         dp_start, dp_end = _local_dp_rank_range(self.server_args)
+        self._dp_start = dp_start
+        self._dp_size = dp_end - dp_start
         return EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
@@ -173,14 +180,9 @@ class SglangLLMEngine(LLMEngine):
             total_kv_blocks=total_kv_blocks,
             max_num_seqs=getattr(self.server_args, "max_running_requests", None),
             max_num_batched_tokens=max_num_batched_tokens,
-            # Number of DP ranks this worker hosts. Without this, the Rust
-            # runtime defaults to 1 and the router can't route to non-zero
-            # dp_ranks even though `kv_event_sources` registers them.
-            data_parallel_size=dp_end - dp_start,
-            # Global index of the first rank this worker hosts. Non-zero
-            # for multi-node DP-attention where each node owns a slice
-            # starting at `node_rank * local_dp_size`.
-            data_parallel_start_rank=dp_start,
+            # Router needs the rank range to enumerate per-rank load.
+            data_parallel_size=self._dp_size,
+            data_parallel_start_rank=self._dp_start,
             # Prefill-only — drives PrefillRouter's Bootstrap path.
             bootstrap_host=self._bootstrap_host,
             bootstrap_port=self._bootstrap_port,
@@ -240,10 +242,11 @@ class SglangLLMEngine(LLMEngine):
         elif self.serving_mode == DisaggregationMode.DECODE:
             bootstrap_kwargs = self._resolve_decode_bootstrap(request)
 
-        # Honour the router's DP rank decision. Without this, SGLang picks
-        # the rank internally and KV events land on the wrong publisher.
-        # Mirrors `DecodeWorkerHandler.async_generate(data_parallel_rank=...)`.
-        forced_dp_rank = (request.get("routing") or {}).get("dp_rank")
+        # Honour the router's DP rank decision; without it SGLang picks
+        # its own rank and KV events land on the wrong publisher.
+        forced_dp_rank = self._validate_forced_dp_rank(
+            (request.get("routing") or {}).get("dp_rank")
+        )
 
         stream = await self.engine.async_generate(
             **input_param,
@@ -395,6 +398,24 @@ class SglangLLMEngine(LLMEngine):
         if self.engine is not None:
             self.engine.shutdown()
             logger.info("SGLang engine shutdown")
+
+    def _validate_forced_dp_rank(self, dp_rank: int | None) -> int | None:
+        """Validate router-supplied global DP rank against this worker's
+        local slice. Out-of-range ranks fall back to SGLang's internal
+        load balancer."""
+        if dp_rank is None or self._dp_size <= 1:
+            return None
+        rank = int(dp_rank)
+        if not self._dp_start <= rank < self._dp_start + self._dp_size:
+            logger.warning(
+                "Received DP rank %d outside [%d, %d); falling back to "
+                "SGLang internal DP selection",
+                rank,
+                self._dp_start,
+                self._dp_start + self._dp_size,
+            )
+            return None
+        return rank
 
     def _resolve_prefill_bootstrap(self, request: GenerateRequest) -> dict[str, Any]:
         """Pick the (host, port, room) triple this prefill request will use.

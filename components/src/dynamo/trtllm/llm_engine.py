@@ -171,10 +171,9 @@ class TrtllmLLMEngine(LLMEngine):
             "tensor_parallel_size": config.tensor_parallel_size,
             "pipeline_parallel_size": config.pipeline_parallel_size,
             "moe_expert_parallel_size": config.expert_parallel_size,
-            # Required for attention-DP routing: TRT-LLM only exposes
-            # per-rank KV events / stats when attention_dp is on, and
-            # `get_attention_dp_size()` reads this flag back to size the
-            # publishers (engine.py:118-120).
+            # Required for per-rank KV events under attention-DP; without
+            # it `get_attention_dp_size()` collapses to 1 and only rank
+            # 0's publisher is created.
             "enable_attention_dp": config.enable_attention_dp,
             "backend": Backend.PYTORCH,
             "kv_cache_config": KvCacheConfig(
@@ -370,6 +369,22 @@ class TrtllmLLMEngine(LLMEngine):
                             e,
                         )
 
+    def _scheduling_params_for(
+        self, dp_rank: int | None
+    ) -> Optional[SchedulingParams]:
+        if dp_rank is None or self._attention_dp_size <= 1:
+            return None
+        rank = int(dp_rank)
+        if not 0 <= rank < self._attention_dp_size:
+            logger.warning(
+                "Received DP rank %d outside [0, %d); falling back to "
+                "TRT-LLM internal DP selection",
+                rank,
+                self._attention_dp_size,
+            )
+            return None
+        return SchedulingParams(attention_dp_rank=rank, attention_dp_relax=False)
+
     def _dispatch_kv_event(self, event: dict[str, Any]) -> None:
         """Forward stored / removed events to the right publisher. Other
         event types are dropped — the Python publisher has no path for them."""
@@ -490,22 +505,11 @@ class TrtllmLLMEngine(LLMEngine):
         if ignore_eos:
             sampling_params.ignore_eos = ignore_eos
 
-        # Honour the router's attention-DP rank decision. Without this,
-        # TRT-LLM picks the rank itself (typically rank 0) regardless of
-        # what the router decided, so KV events all land on rank 0's
-        # publisher and the per-rank indexer trees diverge from reality.
-        # Mirrors the legacy `handler_base._handle_decode_request` flow.
-        routing = request.get("routing") or {}
-        forced_dp_rank = routing.get("dp_rank")
-        scheduling_params: SchedulingParams | None = None
-        if (
-            forced_dp_rank is not None
-            and self._attention_dp_size > 1
-        ):
-            scheduling_params = SchedulingParams(
-                attention_dp_rank=int(forced_dp_rank),
-                attention_dp_relax=False,
-            )
+        # Honour the router's DP rank decision; without it TRT-LLM picks
+        # its own rank and KV events land on the wrong publisher.
+        scheduling_params = self._scheduling_params_for(
+            (request.get("routing") or {}).get("dp_rank")
+        )
 
         # Prefill returns one non-streaming chunk carrying the handoff —
         # matches the legacy disagg wire format.

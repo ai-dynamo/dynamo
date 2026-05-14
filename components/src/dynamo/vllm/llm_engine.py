@@ -68,9 +68,6 @@ class _DpRankMetricsCache:
         self._by_rank: dict[int, Metrics] = {}
 
     def set_num_gpu_blocks(self, num_gpu_blocks: int) -> None:
-        # Patched after AsyncLLM finishes KV profiling — vLLM only populates
-        # `cache_config.num_gpu_blocks` then, so the cache is constructed
-        # before init and updated once the real value is known.
         self._num_gpu_blocks = max(1, num_gpu_blocks)
 
     def update(self, dp_rank: int, scheduler_stats: SchedulerStats) -> None:
@@ -130,10 +127,8 @@ class VllmLLMEngine(LLMEngine):
         self._default_sampling_params: Any = None
         self._prometheus_temp_dir: tempfile.TemporaryDirectory[str] | None = None
         self._model_max_len: int | None = None
-        # `_dp_range` / `_metrics_cache` resolved in `start()`: the cache
-        # is built before AsyncLLM.from_vllm_config so the stat-logger
-        # factory can bind to it, then patched with the real
-        # `num_gpu_blocks` once vLLM finishes KV profiling.
+        # Resolved in `start()`; the cache is patched once vLLM finishes
+        # KV profiling and reports `num_gpu_blocks`.
         self._dp_range: Optional[tuple[int, int]] = None
         self._metrics_cache: Optional[_DpRankMetricsCache] = None
 
@@ -189,9 +184,8 @@ class VllmLLMEngine(LLMEngine):
         self._vllm_config = vllm_config
 
         self._dp_range = get_dp_range_for_worker(vllm_config)
-        # `cache_config.num_gpu_blocks` is None until vLLM's worker finishes
-        # KV profiling inside AsyncLLM.from_vllm_config. Construct the cache
-        # before init so loggers can bind to it, then patch the real value in.
+        # Constructed before init so the stat-logger factory can bind to
+        # it; `num_gpu_blocks` is patched below once KV profiling finishes.
         self._metrics_cache = _DpRankMetricsCache(num_gpu_blocks=0)
 
         self.engine_client = AsyncLLM.from_vllm_config(
@@ -221,13 +215,9 @@ class VllmLLMEngine(LLMEngine):
             total_kv_blocks=num_gpu_blocks,
             max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
             max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
-            # Number of DP ranks this worker hosts. Without this, the Rust
-            # runtime defaults to 1 and the router can't route to non-zero
-            # dp_ranks even though `kv_event_sources` registers them.
-            data_parallel_size=self._dp_range[1],
-            # Global index of the first rank this worker hosts. Non-zero
-            # under hybrid/external LB where each worker owns a sub-range.
+            # Router needs the rank range to enumerate per-rank load.
             data_parallel_start_rank=self._dp_range[0],
+            data_parallel_size=self._dp_range[1],
         )
 
     async def generate(
@@ -284,10 +274,8 @@ class VllmLLMEngine(LLMEngine):
                 sampling_params.extra_args = {}
             sampling_params.extra_args["kv_transfer_params"] = kv_params
 
-        # Honour the router's DP rank decision. Without this, vLLM picks the
-        # rank itself, so KV events for the forced rank land on the wrong
-        # publisher and the per-rank indexer trees diverge from reality.
-        # Matches the legacy handler's `data_parallel_rank=...` plumbing.
+        # Honour the router's DP rank decision; without it vLLM picks
+        # its own rank and KV events land on the wrong publisher.
         local_dp_rank = self._to_local_dp_rank(
             (request.get("routing") or {}).get("dp_rank")
         )
@@ -343,16 +331,14 @@ class VllmLLMEngine(LLMEngine):
                 num_output_tokens_so_far[output_idx] = next_total
 
     def _to_local_dp_rank(self, dp_rank: int | None) -> int | None:
-        """Convert a router-supplied global DP rank to this worker's local
-        rank, or ``None`` if the rank is outside the range this worker owns
-        (in which case vLLM falls back to its internal load balancer).
-        Mirrors `handlers.DecodeWorkerHandler._to_local_dp_rank`."""
+        """Map a global DP rank into this worker's local rank, or ``None``
+        if out of range (vLLM then falls back to internal LB)."""
         if dp_rank is None or self._dp_range is None:
             return None
         dp_start, dp_size = self._dp_range
         if dp_rank < dp_start or dp_rank >= dp_start + dp_size:
             logger.warning(
-                "Received DP rank %d is outside [%d, %d); falling back to "
+                "Received DP rank %d outside [%d, %d); falling back to "
                 "vLLM internal DP selection",
                 dp_rank,
                 dp_start,
