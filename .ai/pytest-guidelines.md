@@ -292,9 +292,7 @@ Apply when the test depends on a specific inference backend:
 Framework markers say **which backend** the test runs against. They are independent
 of the component marker (`multimodal` / `router` / `kvbm` / `core`), which says
 **which part of the backend** the test exercises. CI fans out one job per
-(framework × component), e.g. `pytest -m "vllm and multimodal"`. A test with a
-framework marker but no component marker is silently dropped from every component
-job — see "Required markers" #4 above.
+(framework × component), e.g. `pytest -m "vllm and multimodal"`.
 
 ### Timeouts
 
