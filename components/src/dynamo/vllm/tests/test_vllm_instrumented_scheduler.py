@@ -67,6 +67,81 @@ def _run_compute_queued(waiting, skipped_waiting):
     return InstrumentedScheduler._compute_queued(stub)
 
 
+class _CachedRequestStub:
+    def __init__(self, req_ids=None, num_computed_tokens=None, context_phase_ids=None):
+        self.req_ids = req_ids or []
+        self.num_computed_tokens = num_computed_tokens or []
+        self._context_phase_ids = set(context_phase_ids or [])
+
+    def is_context_phase(self, req_id):
+        return req_id in self._context_phase_ids
+
+
+def _make_new_request(req_id: str, prompt_len: int, num_computed_tokens: int):
+    return SimpleNamespace(
+        req_id=req_id,
+        prompt_token_ids=[0] * prompt_len,
+        num_computed_tokens=num_computed_tokens,
+    )
+
+
+def _run_extract_scheduled(
+    new_reqs,
+    num_scheduled_tokens,
+    *,
+    cached=None,
+    bench_decode_ids=None,
+):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._prompt_len_per_req = {}
+    stub._bench_active = bench_decode_ids is not None
+    stub._bench_phase = (
+        _BenchPhase.DECODE_SWEEP if bench_decode_ids is not None else _BenchPhase.IDLE
+    )
+    stub._bench_active_req_ids = set(bench_decode_ids or [])
+    output = SimpleNamespace(
+        scheduled_new_reqs=new_reqs,
+        scheduled_cached_reqs=cached or _CachedRequestStub(),
+        num_scheduled_tokens=num_scheduled_tokens,
+    )
+    return InstrumentedScheduler._extract_scheduled(stub, output)
+
+
+# ---------------------------------------------------------------------------
+# scheduled_requests classification
+# ---------------------------------------------------------------------------
+
+
+def test_extract_scheduled_counts_normal_new_requests_as_prefill():
+    metrics = _run_extract_scheduled(
+        [_make_new_request("req-1", prompt_len=128, num_computed_tokens=0)],
+        {"req-1": 128},
+    )
+
+    assert metrics.num_prefill_requests == 1
+    assert metrics.sum_prefill_tokens == 128
+    assert metrics.sum_prefill_kv_tokens == 0
+    assert metrics.num_decode_requests == 0
+    assert metrics.sum_decode_kv_tokens == 0
+
+
+def test_extract_scheduled_counts_benchmark_decode_new_requests_as_decode():
+    metrics = _run_extract_scheduled(
+        [
+            _make_new_request("__bench_0", prompt_len=17, num_computed_tokens=16),
+            _make_new_request("__bench_1", prompt_len=17, num_computed_tokens=16),
+        ],
+        {"__bench_0": 1, "__bench_1": 1},
+        bench_decode_ids={"__bench_0", "__bench_1"},
+    )
+
+    assert metrics.num_prefill_requests == 0
+    assert metrics.sum_prefill_tokens == 0
+    assert metrics.sum_prefill_kv_tokens == 0
+    assert metrics.num_decode_requests == 2
+    assert metrics.sum_decode_kv_tokens == 32
+
+
 # ---------------------------------------------------------------------------
 # self.waiting classification (existing behaviour — regression coverage)
 # ---------------------------------------------------------------------------

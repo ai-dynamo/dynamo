@@ -20,12 +20,18 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<minimax:tool_call>\nnot a valid invoke\n</minimax:tool_call>'
+      dynamo: &d_4_a
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<minimax:tool_call>
+
+          not a valid invoke
+
+          </minimax:tool_call>'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang: *d_4_a
   # PARSER.batch.4.b (invalid JSON args) n/a: minimax_m2 uses attribute-encoded args, not JSON.
   PARSER.batch.4.c:
     description: Invoke without name attribute
@@ -39,12 +45,22 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<minimax:tool_call>\n<invoke>\n<parameter name="location">NYC</parameter>\n</invoke>\n</minimax:tool_call>'
+      dynamo: &d_4_c
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<minimax:tool_call>
+
+          <invoke>
+
+          <parameter name="location">NYC</parameter>
+
+          </invoke>
+
+          </minimax:tool_call>'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang: *d_4_c
   PARSER.batch.4.d:
     description: Missing closing </invoke>
     ref: dynamo
@@ -56,12 +72,20 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<minimax:tool_call>\n<invoke name="get_weather">\n<parameter name="location">NYC</parameter>\n</minimax:tool_call>'
+      dynamo: &d_4_d
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<minimax:tool_call>
+
+          <invoke name="get_weather">
+
+          <parameter name="location">NYC</parameter>
+
+          </minimax:tool_call>'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang: *d_4_d

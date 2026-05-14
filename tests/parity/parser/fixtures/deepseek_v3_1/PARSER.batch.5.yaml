@@ -17,12 +17,23 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜>
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
-    #   normal_text: None
+      dynamo:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜>
+      vllm:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
   PARSER.batch.5.b:
     description: Closing tool_calls_end without matching tool_calls_begin
     ref: dynamo
@@ -30,8 +41,11 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      dynamo: &d_5_b
+        calls: []
+        normal_text: <｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      vllm: *d_5_b
+      sglang: *d_5_b
   PARSER.batch.5.c:
     description: Truncation mid-arguments JSON
     ref: dynamo
@@ -39,9 +53,14 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"loc
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: None
+      dynamo:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"loc
+      vllm:
+        calls: []
+        normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"

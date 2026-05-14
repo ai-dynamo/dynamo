@@ -17,8 +17,12 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
+      dynamo: &d_5_a
+        calls: []
+        normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
+      vllm: *d_5_a
+      sglang:
+        unavailable: SGLang has no detector for family='gemma4'
   PARSER.batch.5.b:
     description: Closing <tool_call|> without matching <|tool_call> open
     ref: dynamo
@@ -26,8 +30,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>
+      dynamo: &d_5_b
+        calls: []
+        normal_text: call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>
+      vllm: *d_5_b
+      sglang:
+        unavailable: SGLang has no detector for family='gemma4'
   PARSER.batch.5.c:
     description: Truncation mid-argument value
     ref: dynamo
@@ -35,5 +43,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|tool_call>call:get_weather{location:<|"|>N
+      dynamo: &d_5_c
+        calls: []
+        normal_text: <|tool_call>call:get_weather{location:<|"|>N
+      vllm: *d_5_c
+      sglang:
+        unavailable: SGLang has no detector for family='gemma4'
