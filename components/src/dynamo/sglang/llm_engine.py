@@ -188,11 +188,23 @@ class SglangLLMEngine(LLMEngine):
             bootstrap_port=self._bootstrap_port,
         )
 
+    def _kv_routing_enabled(self) -> bool:
+        # Operator opts in by setting `--kv-events-config` (the same
+        # signal `kv_event_sources` already keys on). Multi-node SGLang
+        # only emits events / metrics on the leader, and decode workers
+        # in disaggregated mode don't host the indexer — same shape as
+        # the vLLM and TRT-LLM helpers.
+        if not getattr(self.server_args, "kv_events_config", None):
+            return False
+        if (getattr(self.server_args, "node_rank", 0) or 0) != 0:
+            return False
+        if self.serving_mode == DisaggregationMode.DECODE:
+            return False
+        return True
+
     def _start_metrics_task(self) -> None:
-        # Only the leader node hosts the PUSH socket; others skip.
         assert self.engine is not None, "Engine not initialized"
-        node_rank = getattr(self.server_args, "node_rank", 0) or 0
-        if node_rank != 0:
+        if not self._kv_routing_enabled():
             return
         self._metrics_zmq_ctx = zmq.asyncio.Context()
         self._metrics_zmq_sock = get_zmq_socket(
@@ -539,7 +551,7 @@ class SglangLLMEngine(LLMEngine):
             )
 
     async def kv_event_sources(self) -> list[KvEventSource]:
-        if not getattr(self.server_args, "kv_events_config", None):
+        if not self._kv_routing_enabled():
             return []
         kv_events = json.loads(self.server_args.kv_events_config)
         base_ep = kv_events.get("endpoint")
@@ -567,10 +579,7 @@ class SglangLLMEngine(LLMEngine):
         return sources
 
     async def metrics_sources(self) -> list[SnapshotSource]:
-        # Only the leader node hosts the PULL socket that feeds
-        # `_latest_metrics`; non-leader ranks would advertise closures
-        # that stay `None` forever, so skip them.
-        if (getattr(self.server_args, "node_rank", 0) or 0) != 0:
+        if not self._kv_routing_enabled():
             return []
 
         def snapshot_for(r: int) -> Callable[[], Optional[Metrics]]:
