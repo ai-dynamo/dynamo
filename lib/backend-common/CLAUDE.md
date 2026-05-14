@@ -12,34 +12,55 @@ Python-shaped request/response wrappers.
 ## Engine Lifecycle
 
 ```
-construct (e.g. from_args)  ->  start()  ->  generate() / abort()  ->  cleanup()
-         |                        |                |                        |
-    parse args,            start engine,     serve requests           shutdown,
-    return engine          return metadata   (concurrent)             release resources
+construct  ->  start(worker_id)  ->  generate() / abort()  ->  drain()  ->  cleanup()
+    |                |                       |                    |            |
+parse args,    start engine,           serve requests       pre-cleanup    shutdown,
+return engine  return metadata         (concurrent)         drain          release
 ```
 
-The trait has four methods. `from_args` is NOT on the trait — each
+The trait has five methods. `from_args` is NOT on the trait — each
 backend exposes a backend-specific constructor (typically a sync
 `from_args(argv) -> Result<(Self, WorkerConfig)>` inherent method).
 This keeps the trait fully object-safe without a `where Self: Sized`
 opt-out and lets `run.rs` stay non-generic.
 
-- `start(&self) -> Result<EngineConfig, DynamoError>` — interior mutability
-  over `&self` so `Arc<dyn LLMEngine>` can drive the lifecycle.
-- `generate(&self, request, ctx) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError>`
-  — streaming inference. Author returns a plain stream; the framework wraps
-  it in `Annotated` and plumbs cancellation.
-- `abort(&self, ctx)` — optional, default no-op. Called by the framework
-  ONLY when `ctx.stopped()` or `ctx.killed()` fires during an active
-  request — NOT on silent stream drops (TCP reset, consumer-side
-  timeout, etc.). For per-request cleanup that must run on ANY drop
-  path (releasing a scheduler slot, freeing an engine handle), put the
-  release logic inside the `generate` stream body using RAII; use
-  `abort` only for out-of-band notifications (e.g. telling a remote
-  scheduler to cancel compute early).
-- `cleanup(&self) -> Result<(), DynamoError>` — called once on shutdown.
-  Guaranteed to run if `start()` succeeded, even if later registration or
-  serve fails.
+- `start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError>` —
+  interior mutability over `&self` so `Arc<dyn LLMEngine>` can drive
+  the lifecycle. `worker_id` is an opaque runtime-allocated identifier;
+  most engines ignore it. Backends needing a stable cluster-wide key
+  (e.g. TRT-LLM's `disagg_machine_id` snowflake) derive from it.
+- `generate(&self, request, ctx: GenerateContext) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError>`
+  — streaming inference. `GenerateContext` derefs to
+  `dyn AsyncEngineContext` (`ctx.stopped()`, `ctx.is_stopped()`,
+  `ctx.id()` work transparently); it additionally exposes
+  `notify_first_token()` for decode-mode requests. Author returns a
+  plain stream; the framework wraps it in `Annotated` and plumbs
+  cancellation.
+- `abort(&self, ctx: Arc<dyn AsyncEngineContext>)` — optional, default
+  no-op. Note the type asymmetry: `generate` takes `GenerateContext`,
+  `abort` takes the unwrapped `Arc<dyn AsyncEngineContext>`. Called by
+  the framework ONLY when `ctx.stopped()` or `ctx.killed()` fires
+  during an active request — NOT on silent stream drops (TCP reset,
+  consumer-side timeout, etc.). For per-request cleanup that must run
+  on ANY drop path (releasing a scheduler slot, freeing an engine
+  handle), put the release logic inside the `generate` stream body
+  using RAII; use `abort` only for out-of-band notifications (e.g.
+  telling a remote scheduler to cancel compute early).
+- `drain(&self) -> Result<(), DynamoError>` — optional, default no-op.
+  Called once during graceful shutdown after the discovery unregister
+  + grace-period sleep, but BEFORE `cleanup`. Use it for backend-side
+  draining that must complete while NATS / etcd are still alive — e.g.
+  prefill workers polling-until-idle so in-flight NIXL KV transfers
+  finish before GPU memory is released (issue #7319). Failures are
+  logged and swallowed; shutdown proceeds regardless.
+- `cleanup(&self) -> Result<(), DynamoError>` — called exactly once.
+  Runs after `start()` returns Ok on shutdown (even if registration /
+  serve fails), **and** after `start()` raises — so implementations
+  must be null-safe against partial state (inner LLM, sockets,
+  background tasks). Must also be idempotent: a second call after a
+  successful first returns `Ok(())` without re-entering teardown. The
+  conformance kit pins both — `CleanupWithoutStartFailed` and
+  `SecondCleanupFailed`.
 
 ## Contract for `generate`
 
@@ -130,15 +151,49 @@ aggregates it when present. `usage(prompt, completion)` computes
   take `&self`. Constructors are backend-specific, not on the trait.
 
 - **Non-generic `Worker`, `EngineAdapter`, and `run()`.** All hold
-  `Arc<dyn LLMEngine>`. This is load-bearing for phase 2 (PyO3
-  bindings): a Python engine will plug in through a `PyLLMEngine`
-  adapter that implements the same trait.
+  `Arc<dyn LLMEngine>`. This is load-bearing for the PyO3 path:
+  `components/src/dynamo/common/backend/worker.py` is a thin shim
+  over `dynamo._core.backend.Worker` (this crate), so Python engines
+  plug in through the same `Arc<dyn LLMEngine>` slot via a
+  `PyLLMEngine` adapter.
 
 - **Reuse `DynamoError`.** Trait methods return `DynamoError`
   (`dynamo_runtime::error`), the workspace-wide standardized error.
   Engine-originated failures use `ErrorType::Backend(BackendError::X)`
   where `BackendError` is the runtime's nested category enum. No custom
   error types inside backend-common.
+
+## Disaggregated Serving
+
+`DisaggregationMode` (`disagg.rs`) is metadata carried on `WorkerConfig`.
+`Aggregated` is the default and keeps existing callers unchanged.
+`CommonArgs` exposes the `--disaggregation-mode` flag (env
+`DYN_DISAGGREGATION_MODE`) so engines that flatten `CommonArgs` get the
+flag automatically.
+
+What the **`Worker`** does with the mode at registration time:
+
+- `Prefill` → register with `ModelType::Prefill` regardless of
+  `endpoint_types`, so the frontend's `PrefillRouter` targets it.
+- `Decode` → keep `endpoint_types`, but force-disable
+  `enable_local_indexer` (decode workers don't host the indexer
+  endpoint, so they must not advertise it).
+- `Aggregated` → register with the parsed `endpoint_types`.
+
+What an **`LLMEngine`** does with the mode (engine-side dispatch in
+`generate` and `drain`): see `examples/mocker` for a worked reference.
+The mocker stamps a synthetic `disaggregated_params` payload on the
+prefill terminal and rejects decode requests that arrive without
+`PrefillResult`. Real engines run an analogous protocol with their
+own KV transfer transport.
+
+`drain` is the prefill shutdown hook: poll-until-idle so in-flight
+NIXL/KV transfers finish before GPU memory is released. Aggregated and
+decode engines leave the default no-op.
+
+`PrefillResult` and `BootstrapInfo` are re-exported from
+`dynamo-backend-common` so engines don't need a separate `dynamo-llm`
+dep just to read these fields off `PreprocessedRequest`.
 
 ## Adding a New Engine
 
@@ -234,10 +289,15 @@ use dynamo_backend_common::testing;
 
 #[tokio::test]
 async fn my_engine_satisfies_contract() {
-    let engine = MyEngine::new_for_test();
-    testing::run_conformance(engine).await.expect("conformance");
+    testing::run_conformance(MyEngine::new_for_test)
+        .await
+        .expect("conformance");
 }
 ```
+
+`run_conformance` takes a factory rather than a built engine — it
+constructs one engine for the main lifecycle test and a second
+pristine engine for the "cleanup before start" check.
 
 The kit asserts:
 
@@ -252,6 +312,9 @@ The kit asserts:
   other terminal reason, or no terminal at all — the check raises
   `ConformanceFailure::CancellationIgnored`.
 - `cleanup()` succeeds and is idempotent (two calls in a row both Ok).
+- `cleanup()` is safe on a never-started engine — mirrors `Worker`'s
+  post-start-failure path. Failures here surface as
+  `CleanupWithoutStartFailed`.
 
 Also available: `testing::mock_context()` and
 `testing::cancelling_context(after)` for hand-written tests.
@@ -260,18 +323,22 @@ Also available: `testing::mock_context()` and
 
 | File | What it does |
 |------|-------------|
-| `engine.rs` | `LLMEngine` trait, `EngineConfig`, `chunk::token`, `LLMEngineOutputExt` setters, `usage()` helper. Re-exports `PreprocessedRequest` / `LLMEngineOutput` / `FinishReason` / etc. |
-| `worker.rs` | `Worker` — runtime lifecycle: create `DistributedRuntime`, register model, serve endpoint, cleanup. `WorkerConfig` lives here. |
+| `engine.rs` | `LLMEngine` trait, `EngineConfig`, `GenerateContext`, `chunk::token`, `LLMEngineOutputExt` setters, `usage()` helper. Re-exports `PreprocessedRequest` / `LLMEngineOutput` / `FinishReason` / `PrefillResult` / `BootstrapInfo` / etc. |
+| `worker.rs` | `Worker` — runtime lifecycle: create `DistributedRuntime`, register model (with `disaggregation_mode` adjustments), serve endpoint, orchestrate drain + cleanup. `WorkerConfig` lives here. |
 | `adapter.rs` | `EngineAdapter` — bridges `LLMEngine` to `AsyncEngine`. Cancellation monitor + debug-build validator wrapping. |
 | `run.rs` | `pub fn run(engine, config)` — entry point used by all per-backend `main.rs`. Non-generic. |
-| `args.rs` | `CommonArgs` — shared CLI flags (`--namespace`, `--component`, etc.) that every engine's `Args` flattens in. |
+| `args.rs` | `CommonArgs` — shared CLI flags (`--namespace`, `--component`, `--disaggregation-mode`, etc.) that every engine's `Args` flattens in. |
+| `disagg.rs` | `DisaggregationMode` enum (`Aggregated` / `Prefill` / `Decode`) with `clap::ValueEnum` derive. |
 | `error.rs` | Re-exports `DynamoError`, `ErrorType`, `BackendError` from `dynamo-runtime`. No custom error types. |
 | `validate.rs` | Debug-build stream validator. Compiled out in release. |
 | `testing.rs` | Conformance test kit. Gated behind the `testing` feature. |
 
-## Phase 2
+## PyO3 binding
 
-PyO3 bindings are planned that let the Python backend runtime become
-a thin wrapper over this crate. The trait and data types are designed
-to support that without restructuring — do not pre-build phase-2
-scaffolding here.
+Shipped: `dynamo._core.backend.Worker` is a PyO3 binding that hands a
+`PyLLMEngine` (Python-implemented) into the same `Arc<dyn LLMEngine>`
+slot the Rust path uses. The Python-side
+`dynamo.common.backend.Worker` (`components/src/dynamo/common/backend/worker.py`)
+is a thin wrapper that drives this. The lifecycle state machine,
+signal handling, and graceful-shutdown orchestrator live entirely in
+this crate — Python adds no lifecycle logic.

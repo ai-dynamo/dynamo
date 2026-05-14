@@ -7,7 +7,7 @@ package dynamo
 
 import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controller_common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
@@ -65,7 +65,7 @@ type ComponentContext struct {
 	ParentGraphDeploymentName      string
 	ParentGraphDeploymentNamespace string
 	Discovery                      DiscoveryContext
-	EPPConfig                      *v1alpha1.EPPConfig
+	EPPConfig                      *v1beta1.EPPConfig
 	WorkerHashSuffix               string
 }
 

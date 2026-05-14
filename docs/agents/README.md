@@ -16,9 +16,8 @@ telemetry, routing hints, and backend-specific cache behavior.
 |---------|---------|
 | [Agent Tracing](agent-tracing.md) | Passive `session_id`/`trajectory_id` metadata plus Dynamo-owned request timing, token, cache, worker-placement, and harness tool-event traces. |
 | [Agent Hints](agent-hints.md) | Optional per-request hints such as priority, expected output length, and speculative prefill. |
-| [Tool Calling](tool-calling.md) | Supported tool-call parsers and parser names. |
-| [Reasoning](reasoning.md) | Supported reasoning parsers for chain-of-thought models. |
-| [Chat Processors](chat-processor-options.md) | Dynamo, vLLM, and SGLang preprocessing options. |
+| [Tool Calling](../tool-calling/README.md) | Supported tool-call parsers and parser names, plus engine-fallback configurations. |
+| [Reasoning](../reasoning/README.md) | Supported reasoning parsers for chain-of-thought models, plus engine-fallback configurations. |
 
 ## Backend-Specific Guides
 

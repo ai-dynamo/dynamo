@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: deepseek_v3_1
+mode: batch
+cases:
+  PARSER.batch.4.a:
+    description: Garbage between calls fences (no tool_sep / args)
+    ref: dynamo
+    model_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      calls: []
+      normal_text: <｜tool▁calls▁begin｜>nonsense<｜tool▁calls▁end｜>
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: None
+  PARSER.batch.4.b:
+    description: Unterminated JSON string in args
+    ref: dynamo
+    model_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: [{'name': 'get_weather', 'arguments': '{"location":"NYC'}]
+    #   normal_text: None
+  PARSER.batch.4.c:
+    description: Missing function name (no token before tool_sep)
+    ref: dynamo
+    model_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜><｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜><｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: [{'name': '', 'arguments': {'location': 'NYC'}}]
+    #   normal_text: None
+  PARSER.batch.4.d:
+    description: Mismatched fences (calls_end without call_end)
+    ref: dynamo
+    model_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁calls▁end｜>
+    tools:
+    - *id001
+    expected:
+      calls: []
+      normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{"location":"NYC"}<｜tool▁calls▁end｜>
+    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
+    # vllm produces:
+    #   calls: []
+    #   normal_text: None

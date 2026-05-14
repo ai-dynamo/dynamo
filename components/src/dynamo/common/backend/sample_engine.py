@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import uuid
 from collections.abc import AsyncGenerator
 
 from dynamo._core import Context
+from dynamo.common.constants import DisaggregationMode
 
+from .disagg import enforce_prefill_max_tokens, require_prefill_result
 from .engine import EngineConfig, GenerateChunk, GenerateRequest, LLMEngine
 from .worker import WorkerConfig
 
@@ -17,8 +20,18 @@ class SampleLLMEngine(LLMEngine):
     """Reference LLMEngine implementation.
 
     Generates rotating token IDs with configurable per-token latency.
-    Useful for testing the Worker lifecycle end-to-end
-    and as a template for engine leads implementing real backends.
+    Useful for testing the Worker lifecycle end-to-end and as a template
+    for engine leads implementing real backends.
+
+    Disaggregation:
+        ``--disaggregation-mode {agg,prefill,decode}`` selects the role.
+        AGGREGATED is the default and produces ``max_tokens`` rotating
+        tokens. PREFILL caps generation at one token and stamps a
+        synthetic ``disaggregated_params`` payload on the terminal so
+        the frontend's PrefillRouter has something to forward. DECODE
+        requires the request to carry ``prefill_result`` (otherwise the
+        frontend forgot to route through the prefill peer); on success
+        it generates normally.
     """
 
     def __init__(
@@ -26,10 +39,12 @@ class SampleLLMEngine(LLMEngine):
         model_name: str = "sample-model",
         max_tokens: int = 16,
         delay: float = 0.01,
+        disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
     ):
         self.model_name = model_name
         self.max_tokens = max_tokens
         self.delay = delay
+        self.disaggregation_mode = disaggregation_mode
 
     @classmethod
     async def from_args(
@@ -46,12 +61,22 @@ class SampleLLMEngine(LLMEngine):
         parser.add_argument("--discovery-backend", default="etcd")
         parser.add_argument("--request-plane", default="tcp")
         parser.add_argument("--event-plane", default=None)
+        parser.add_argument(
+            "--disaggregation-mode",
+            choices=[
+                m.value for m in DisaggregationMode if m != DisaggregationMode.ENCODE
+            ],
+            default=DisaggregationMode.AGGREGATED.value,
+            help="Disaggregation role: 'agg' (default), 'prefill', or 'decode'.",
+        )
         args = parser.parse_args(argv)
 
+        mode = DisaggregationMode(args.disaggregation_mode)
         engine = cls(
             model_name=args.model_name,
             max_tokens=args.max_tokens,
             delay=args.delay,
+            disaggregation_mode=mode,
         )
         worker_config = WorkerConfig(
             namespace=args.namespace,
@@ -63,10 +88,12 @@ class SampleLLMEngine(LLMEngine):
             discovery_backend=args.discovery_backend,
             request_plane=args.request_plane,
             event_plane=args.event_plane,
+            disaggregation_mode=mode,
         )
         return engine, worker_config
 
-    async def start(self) -> EngineConfig:
+    async def start(self, worker_id: int) -> EngineConfig:
+        del worker_id  # sample engine has no cluster-wide ID needs
         return EngineConfig(
             model=self.model_name,
             served_model_name=self.model_name,
@@ -80,6 +107,21 @@ class SampleLLMEngine(LLMEngine):
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
+        # Decode pre-condition: prefill peer must have populated KV cache.
+        # We don't inspect the payload — the sample engine has no real KV
+        # cache — but the frontend's prefill router is responsible for
+        # forwarding it, and a missing payload is the most common
+        # misconfiguration we want to catch loudly.
+        if self.disaggregation_mode == DisaggregationMode.DECODE:
+            require_prefill_result(request, self.disaggregation_mode)
+
+        # Prefill workers cap generation at one token regardless of what
+        # the client asked for; the response's job is to ferry the
+        # disaggregated_params handle to the decode peer, not to produce
+        # output text.
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            enforce_prefill_max_tokens(request)
+
         token_ids = request.get("token_ids", [])
         prompt_len = len(token_ids)
         stop_conditions = request.get("stop_conditions", {})
@@ -108,6 +150,16 @@ class SampleLLMEngine(LLMEngine):
                     "completion_tokens": max_new,
                     "total_tokens": prompt_len + max_new,
                 }
+                # Prefill stamps a synthetic handoff payload on the
+                # terminal so the frontend's PrefillRouter has something
+                # to forward to the decode peer. The handle is opaque —
+                # the sample backend has no real KV transfer — but its
+                # presence exercises the wire format end-to-end.
+                if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                    out["disaggregated_params"] = {
+                        "sample_handle": uuid.uuid4().hex,
+                        "completed_tokens": [token_id],
+                    }
             yield out
 
     async def cleanup(self) -> None:
