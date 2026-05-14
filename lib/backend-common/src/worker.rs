@@ -384,6 +384,9 @@ impl Worker {
         self.setup_kv_aware_publishers(&component, &engine_config)
             .await?;
 
+        self.setup_prometheus_registration(&endpoint, &engine_config)
+            .await?;
+
         // Mid-start signal: engine.start() ran to completion but a signal
         // arrived during it. Skip the serve loop and run the orchestrator
         // directly so `engine.cleanup()` still runs while the runtime is
@@ -396,6 +399,18 @@ impl Worker {
 
         self.serve_with_orchestrator(&engine_config, endpoint, shutdown.clone())
             .await
+    }
+
+    /// Invoke `LLMEngine::register_prometheus` with a hierarchy-scoped
+    /// `EngineMetrics`. See the trait method for failure semantics.
+    async fn setup_prometheus_registration(
+        &self,
+        endpoint: &dynamo_runtime::component::Endpoint,
+        engine_config: &EngineConfig,
+    ) -> Result<(), DynamoError> {
+        let metrics =
+            crate::metrics::EngineMetrics::with_engine_config(endpoint.clone(), engine_config);
+        self.engine.register_prometheus(&metrics).await
     }
 
     /// Build KV-event and worker-metric publishers from the engine's source

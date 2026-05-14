@@ -265,6 +265,18 @@ pub trait LLMEngine: Send + Sync + 'static {
     async fn metrics_sources(&self) -> Result<Vec<MetricsSource>, DynamoError> {
         Ok(Vec::new())
     }
+
+    /// Register Prometheus instruments or scrape callbacks. Called once
+    /// by `Worker` after [`start`](LLMEngine::start) succeeds; default
+    /// no-op. See [`EngineMetrics`](crate::metrics::EngineMetrics) for
+    /// the handle's surface. Do not retain `metrics` past return.
+    /// Errors abort startup; `cleanup` runs on the partial state.
+    async fn register_prometheus(
+        &self,
+        _metrics: &crate::metrics::EngineMetrics,
+    ) -> Result<(), DynamoError> {
+        Ok(())
+    }
 }
 
 /// Invoked once with a freshly-built publisher; engine drives `publish`

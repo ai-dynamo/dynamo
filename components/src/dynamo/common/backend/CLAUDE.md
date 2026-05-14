@@ -6,22 +6,29 @@ Two-class abstraction: `Worker` (runtime integration) and
 ## Engine Lifecycle
 
 ```
-from_args(argv) -> start() -> generate()/abort() -> drain() -> cleanup()
-     |                |              |                  |          |
-  parse args,    start engine,   serve requests    drain in-flight, shutdown,
-  return config  return metadata (concurrent)      then cleanup    release resources
+from_args -> start -> register_prometheus -> generate/abort -> drain -> cleanup
+     |          |              |                    |             |        |
+  parse args, start engine, wire Prometheus    serve requests  drain in-flight,
+  return     return        (optional, default  (concurrent)    then cleanup,
+  config     metadata      no-op)                              release resources
 ```
 
 1. `from_args(argv)` -- classmethod factory. Parses CLI args, returns
    `(engine, WorkerConfig)`. Engine is NOT started yet.
 2. `start()` -- starts the engine, returns `EngineConfig`. After this returns
    `generate()` MUST be ready to accept calls.
-3. `generate(request, context)` -- streaming inference, called concurrently.
-4. `abort(context)` -- cancel an in-flight request (optional, default no-op).
-5. `drain()` -- backend-side drain before cleanup (optional, default no-op).
+3. `register_prometheus(metrics)` -- wire Prometheus exposition callbacks
+   onto the runtime's `/metrics` endpoint (optional, default no-op).
+   Engine receives a slim `EngineMetrics` capability handle — never the
+   full endpoint. See `metrics.py` helpers (`gather_with_labels`,
+   `make_component_metrics`, `register_engine_registry`,
+   `register_global_registry`).
+4. `generate(request, context)` -- streaming inference, called concurrently.
+5. `abort(context)` -- cancel an in-flight request (optional, default no-op).
+6. `drain()` -- backend-side drain before cleanup (optional, default no-op).
    Called after the discovery unregister + grace period; use it for in-flight
    NIXL transfers (issue #7319) that must complete while the runtime is alive.
-6. `cleanup()` -- called exactly once. Runs after `start()` succeeded
+7. `cleanup()` -- called exactly once. Runs after `start()` succeeded
    on shutdown, **and** after `start()` raised — so implementations
    must be null-safe against partial state (inner engine handle,
    sockets, background tasks). All current engines guard each
@@ -165,6 +172,7 @@ Standardize on:
 | File | What it does |
 |------|-------------|
 | `engine.py` | `LLMEngine` ABC -- the only interface engines must implement |
+| `metrics.py` | Prometheus integration helpers used inside `register_prometheus`: `gather_with_labels`, `make_component_metrics`, `register_engine_registry`, `register_global_registry`, `ensure_prometheus_multiproc_dir` |
 | `worker.py` | `Worker` -- thin shim over `dynamo._core.backend.Worker`; lifecycle state machine and signal handling live in Rust (`lib/backend-common`) |
 | `run.py` | Common entry point -- `run(engine_cls)` used by all `unified_main.py` files |
 | `sample_engine.py` | Reference engine -- use as template and for testing |

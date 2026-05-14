@@ -13,6 +13,8 @@ from dynamo._core import Context
 from .publisher import KvEventSource, SnapshotSource
 
 if TYPE_CHECKING:
+    from dynamo._core.backend import EngineMetrics
+
     from .worker import WorkerConfig
 
 
@@ -216,3 +218,7 @@ class LLMEngine(ABC):
         opts out of metrics publishing. ``Worker`` calls once after
         :meth:`start`."""
         return []
+
+    async def register_prometheus(self, metrics: "EngineMetrics") -> None:
+        """Default no-op. See :mod:`dynamo.common.backend.metrics` for
+        helpers. Do not retain ``metrics`` past return."""

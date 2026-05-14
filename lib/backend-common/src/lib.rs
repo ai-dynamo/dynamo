@@ -17,6 +17,7 @@ pub mod args;
 pub mod disagg;
 pub mod engine;
 pub mod error;
+pub mod metrics;
 mod publisher;
 pub mod run;
 #[cfg(any(test, feature = "testing"))]
@@ -34,5 +35,6 @@ pub use engine::{
     PreprocessedRequest, SamplingOptions, SnapshotFn, StopConditions, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
+pub use metrics::EngineMetrics;
 pub use run::run;
 pub use worker::{RuntimeConfig, Worker, WorkerConfig};

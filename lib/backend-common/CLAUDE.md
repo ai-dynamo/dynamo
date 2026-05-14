@@ -12,13 +12,13 @@ Python-shaped request/response wrappers.
 ## Engine Lifecycle
 
 ```
-construct  ->  start(worker_id)  ->  generate() / abort()  ->  drain()  ->  cleanup()
-    |                |                       |                    |            |
-parse args,    start engine,           serve requests       pre-cleanup    shutdown,
-return engine  return metadata         (concurrent)         drain          release
+construct -> start(worker_id) -> register_prometheus() -> generate/abort -> drain -> cleanup
+    |               |                     |                      |             |        |
+parse args,    start engine,        wire Prometheus         serve requests pre-cleanup shutdown,
+return engine  return metadata      (optional, no-op)       (concurrent)   drain       release
 ```
 
-The trait has five methods. `from_args` is NOT on the trait — each
+The trait has six methods. `from_args` is NOT on the trait — each
 backend exposes a backend-specific constructor (typically a sync
 `from_args(argv) -> Result<(Self, WorkerConfig)>` inherent method).
 This keeps the trait fully object-safe without a `where Self: Sized`
@@ -29,6 +29,13 @@ opt-out and lets `run.rs` stay non-generic.
   the lifecycle. `worker_id` is an opaque runtime-allocated identifier;
   most engines ignore it. Backends needing a stable cluster-wide key
   (e.g. TRT-LLM's `disagg_machine_id` snowflake) derive from it.
+- `register_prometheus(&self, &EngineMetrics) -> Result<(), DynamoError>` —
+  optional, default no-op. Engine creates Prometheus instruments (via
+  `metrics.create_*` — auto-labels baked in at construction time) or
+  registers a foreign-registry scrape callback via
+  `metrics.add_expfmt_callback`. Failures abort startup; `cleanup`
+  runs on the partial engine state. The handle must not be retained
+  past this method's return.
 - `generate(&self, request, ctx: GenerateContext) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError>`
   — streaming inference. `GenerateContext` derefs to
   `dyn AsyncEngineContext` (`ctx.stopped()`, `ctx.is_stopped()`,
@@ -378,6 +385,7 @@ Also available: `testing::mock_context()` and
 | File | What it does |
 |------|-------------|
 | `engine.rs` | `LLMEngine` trait, `EngineConfig`, `GenerateContext`, `chunk::token`, `LLMEngineOutputExt` setters, `usage()` helper. Re-exports `PreprocessedRequest` / `LLMEngineOutput` / `FinishReason` / `PrefillResult` / `BootstrapInfo` / etc. |
+| `metrics.rs` | `EngineMetrics` — slim metrics-only capability handle passed to `register_prometheus`. Proxies `create_*` methods through to the runtime's `MetricsHierarchy::create_metric` (auto-labels at construction) plus `add_expfmt_callback` for foreign registries. |
 | `worker.rs` | `Worker` — runtime lifecycle: create `DistributedRuntime`, register model (with `disaggregation_mode` adjustments), serve endpoint, orchestrate drain + cleanup. `WorkerConfig` lives here. |
 | `adapter.rs` | `EngineAdapter` — bridges `LLMEngine` to `AsyncEngine`. Cancellation monitor + debug-build validator wrapping. |
 | `run.rs` | `pub fn run(engine, config)` — entry point used by all per-backend `main.rs`. Non-generic. |

@@ -72,3 +72,8 @@ async def test_abc_source_methods_default_to_empty_list():
     engine = _MinimalEngine()
     assert await engine.kv_event_sources() == []
     assert await engine.metrics_sources() == []
+
+
+@pytest.mark.asyncio
+async def test_register_prometheus_default_is_noop():
+    assert await _MinimalEngine().register_prometheus(metrics=object()) is None

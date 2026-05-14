@@ -296,6 +296,81 @@ directly: `enforce_prefill_max_tokens(request)`,
 are free to inline the logic when their generate path is shaped
 differently.
 
+## Metrics
+
+Engines expose Prometheus metrics by overriding the optional
+`register_prometheus(metrics)` hook on `LLMEngine`. `Worker` calls it
+once after `start()` succeeds and before serving begins; the engine
+receives an `EngineMetrics` capability handle (it never sees the full
+`Endpoint`, `worker_id`, or hierarchy labels — the framework owns
+those).
+
+The handle exposes:
+
+* `register_prometheus_expfmt_callback(callback)` — register a
+  `Callable[[], str]` returning Prometheus text exposition format on
+  each `/metrics` scrape. Bridges a `prometheus_client.CollectorRegistry`
+  (e.g. vLLM's `REGISTRY`) into the runtime's combined output.
+* `auto_labels` — a precomputed `dict[str, str]` of hierarchy + model
+  labels (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`,
+  `worker_id`, `model`, `model_name`). Pass into the
+  `dynamo.common.backend.metrics.gather_with_labels` helper so foreign
+  registries are labelled consistently with runtime-native metrics.
+
+The `metrics.py` helper module wraps the common patterns:
+
+```python
+from dynamo.common.backend.metrics import (
+    ensure_prometheus_multiproc_dir,
+    gather_with_labels,
+    make_component_metrics,
+    register_engine_registry,
+    register_global_registry,
+)
+
+class MyEngine(LLMEngine):
+    def __init__(self):
+        self._gauges = None
+        self._comp_reg = None
+
+    async def start(self, worker_id):
+        # Set PROMETHEUS_MULTIPROC_DIR before the engine init that
+        # populates the global prometheus_client.REGISTRY. The returned
+        # TemporaryDirectory (if any) needs to be cleaned up by us.
+        self._prom_tmpdir = ensure_prometheus_multiproc_dir("my_prom_")
+
+        # dynamo_component_* gauges live on a dedicated registry that
+        # the engine feeds from its own stat-logger callbacks.
+        self._gauges, self._comp_reg = make_component_metrics(
+            self.served_model_name, self.component
+        )
+
+        t0 = time.monotonic()
+        self.engine = build_engine(...)
+        self._gauges.set_model_load_time(time.monotonic() - t0)
+        return EngineConfig(...)
+
+    async def register_prometheus(self, metrics):
+        # 1. The dedicated dynamo_component_* registry — single callback.
+        register_engine_registry(metrics, self._comp_reg)
+        # 2. The global prometheus_client.REGISTRY for vllm:/lmcache: or
+        #    trtllm_ prefixed metrics. Handles the K8s MultiProcessCollector
+        #    conflict case where the env var was pre-set.
+        register_global_registry(
+            metrics,
+            engine_prefix="vllm:",
+            multiproc_only_prefixes=["lmcache:"],
+        )
+```
+
+The handle must not be retained past `register_prometheus`'s return —
+stash the dict returned by `auto_labels` or the instruments returned by
+the engine's metric library, not the handle itself.
+
+Errors raised inside `register_prometheus` propagate as a startup
+failure: `Worker` aborts initialisation and runs `cleanup()` on the
+partial engine state.
+
 ## File Index
 
 ```text
@@ -308,6 +383,8 @@ common/backend/
     worker.py            # Worker + WorkerConfig (incl. disaggregation_mode)
     disagg.py            # Disagg request helpers (prefill clamp,
                          #   prefill_result extraction)
+    metrics.py           # Prometheus helpers (gather_with_labels,
+                         #   make_component_metrics, registration)
     run.py               # Common entry point: run(engine_cls)
     sample_engine.py     # SampleLLMEngine (reference impl)
     sample_main.py       # Entry point for sample engine
@@ -340,12 +417,16 @@ that the unified path does not yet support.
 - Finish reason normalization handled by Rust layer
 - **Disaggregated serving** (`agg`/`prefill`/`decode`) — see
   [Disaggregated Serving](#disaggregated-serving) below
+- **Metrics & Prometheus** — engine-native metrics passthrough
+  (`vllm:`, `sglang:`, `trtllm_`), `dynamo_component_*` gauges
+  (total_blocks, gpu_cache_usage, model_load_time), TRT-LLM
+  `AdditionalMetricsCollector` (abort, KV transfer, request types).
+  See [Metrics](#metrics) below.
 
 ### Common gaps (all engines)
 
 | Feature | Description |
 |---------|-------------|
-| Metrics & Prometheus | Engine-level metrics, KV cache utilization gauges, Prometheus multiprocess registry |
 | KV event publishing | Prefix cache events (BlockStored/Removed) to router via ZMQ or NATS |
 | Health check payloads | Per-engine custom health check payloads (BOS token probe, etc.) |
 | Logprobs | Selected token + top-k log probability extraction and streaming |

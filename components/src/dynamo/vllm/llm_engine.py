@@ -12,8 +12,9 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import time
 from collections.abc import AsyncGenerator, Callable
-from typing import Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
@@ -32,6 +33,12 @@ from dynamo.common.backend.engine import (
     GenerateRequest,
     LLMEngine,
 )
+from dynamo.common.backend.metrics import (
+    ensure_prometheus_multiproc_dir,
+    make_component_metrics,
+    register_engine_registry,
+    register_global_registry,
+)
 from dynamo.common.backend.publisher import (
     KvEventSource,
     Metrics,
@@ -40,6 +47,7 @@ from dynamo.common.backend.publisher import (
 )
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.llm import ModelInput
 from dynamo.vllm.args import parse_args
 from dynamo.vllm.cache_info import (
@@ -48,6 +56,11 @@ from dynamo.vllm.cache_info import (
 )
 
 from .handlers import build_sampling_params, get_dp_range_for_worker
+
+if TYPE_CHECKING:
+    from prometheus_client import CollectorRegistry
+
+    from dynamo._core.backend import EngineMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +81,15 @@ class _DpRankMetricsCache:
         self._num_gpu_blocks = max(1, num_gpu_blocks)
         self._by_rank: dict[int, Metrics] = {}
 
-    def set_num_gpu_blocks(self, num_gpu_blocks: int) -> None:
+    @property
+    def num_gpu_blocks(self) -> int:
+        return self._num_gpu_blocks
+
+    @num_gpu_blocks.setter
+    def num_gpu_blocks(self, num_gpu_blocks: int) -> None:
+        # Patched after AsyncLLM finishes KV profiling — vLLM only populates
+        # `cache_config.num_gpu_blocks` then, so the cache is constructed
+        # before init and updated once the real value is known.
         self._num_gpu_blocks = max(1, num_gpu_blocks)
 
     def update(self, dp_rank: int, scheduler_stats: SchedulerStats) -> None:
@@ -80,17 +101,15 @@ class _DpRankMetricsCache:
 
 
 class _UnifiedStatLogger(StatLoggerBase):
-    """vLLM-side hook that just refreshes the per-rank metrics cache.
+    """vLLM stat-logger feeding the router-input cache and the
+    ``dynamo_component_*`` gauges. Replaces legacy
+    ``DynamoStatLoggerPublisher`` — under unified the Rust Worker owns
+    publishers, so this class only updates in-memory state."""
 
-    Replaces the legacy ``DynamoStatLoggerPublisher`` (which owned its own
-    ``WorkerMetricsPublisher`` and NATS endpoint). Under the unified path
-    the Rust ``Worker`` owns publishers, so this class only needs to
-    update an in-memory snapshot that ``metrics_sources()`` reads.
-    """
-
-    def __init__(self, cache: _DpRankMetricsCache, dp_rank: int) -> None:
-        self._cache = cache
+    def __init__(self, factory: _UnifiedStatLoggerFactory, dp_rank: int) -> None:
+        self._factory = factory
         self.dp_rank = dp_rank
+        self._dp_rank_str = str(dp_rank)
 
     def record(
         self,
@@ -103,35 +122,57 @@ class _UnifiedStatLogger(StatLoggerBase):
     ) -> None:
         if scheduler_stats is None:
             return
-        self._cache.update(self.dp_rank, scheduler_stats)
+        cache = self._factory.cache
+        cache.update(self.dp_rank, scheduler_stats)
+
+        gauges = self._factory.gauges
+        gauges.set_total_blocks(self._dp_rank_str, cache.num_gpu_blocks)
+        gauges.set_gpu_cache_usage(self._dp_rank_str, scheduler_stats.kv_cache_usage)
 
     def log_engine_initialized(self) -> None:
         pass
 
 
 class _UnifiedStatLoggerFactory:
-    """vLLM calls this once per dp_rank during engine initialization."""
+    """Shared state for all per-rank stat loggers. Both fields are
+    assigned in ``start()`` before ``AsyncLLM.from_vllm_config`` runs,
+    so loggers always see populated references."""
 
-    def __init__(self, cache: _DpRankMetricsCache) -> None:
-        self._cache = cache
+    def __init__(
+        self, cache: _DpRankMetricsCache, gauges: LLMBackendMetrics
+    ) -> None:
+        self.cache = cache
+        self.gauges = gauges
 
     def __call__(self, vllm_config: VllmConfig, dp_rank: int) -> StatLoggerBase:
-        return _UnifiedStatLogger(self._cache, dp_rank)
+        return _UnifiedStatLogger(self, dp_rank)
 
 
 class VllmLLMEngine(LLMEngine):
-    def __init__(self, engine_args, disaggregation_mode: DisaggregationMode):
+    def __init__(
+        self,
+        engine_args,
+        disaggregation_mode: DisaggregationMode,
+        served_model_name: str,
+        component: str,
+    ):
         self.engine_args = engine_args
         self.disaggregation_mode = disaggregation_mode
+        self._served_model_name = served_model_name
+        self._component = component
         self.engine_client: AsyncLLM | None = None
         self._vllm_config: Any = None
         self._default_sampling_params: Any = None
         self._prometheus_temp_dir: tempfile.TemporaryDirectory[str] | None = None
         self._model_max_len: int | None = None
-        # Resolved in `start()`; the cache is patched once vLLM finishes
-        # KV profiling and reports `num_gpu_blocks`.
+        # Cache is built before AsyncLLM.from_vllm_config so the stat-logger
+        # factory binds to it, then patched with the real `num_gpu_blocks`
+        # once vLLM finishes KV profiling.
         self._dp_range: Optional[tuple[int, int]] = None
         self._metrics_cache: Optional[_DpRankMetricsCache] = None
+        self._stat_logger_factory: Optional[_UnifiedStatLoggerFactory] = None
+        self._component_gauges: Optional[LLMBackendMetrics] = None
+        self._component_registry: Optional["CollectorRegistry"] = None
 
     @classmethod
     async def from_args(
@@ -155,7 +196,12 @@ class VllmLLMEngine(LLMEngine):
         # is still the input union, so narrow it here for mypy (cast
         # rather than assert so `-O` builds don't drop the narrowing).
         mode = cast(DisaggregationMode, config.disaggregation_mode)
-        engine = cls(config.engine_args, mode)
+        engine = cls(
+            config.engine_args,
+            mode,
+            served_model_name=config.served_model_name or config.model,
+            component=config.component,
+        )
         worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
@@ -169,11 +215,13 @@ class VllmLLMEngine(LLMEngine):
         os.environ.setdefault("VLLM_NO_USAGE_STATS", "1")
         os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
-        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
-            self._prometheus_temp_dir = tempfile.TemporaryDirectory(
-                prefix="vllm_prometheus_"
-            )
-            os.environ["PROMETHEUS_MULTIPROC_DIR"] = self._prometheus_temp_dir.name
+        self._prometheus_temp_dir = ensure_prometheus_multiproc_dir("vllm_prometheus_")
+
+        # Build before engine init so the stat-logger factory has both
+        # refs before vLLM creates the first stat logger.
+        self._component_gauges, self._component_registry = make_component_metrics(
+            self._served_model_name, self._component
+        )
 
         self._default_sampling_params = (
             self.engine_args.create_model_config().get_diff_sampling_param()
@@ -188,14 +236,20 @@ class VllmLLMEngine(LLMEngine):
         # Constructed before init so the stat-logger factory can bind to
         # it; `num_gpu_blocks` is patched below once KV profiling finishes.
         self._metrics_cache = _DpRankMetricsCache(num_gpu_blocks=0)
+        self._stat_logger_factory = _UnifiedStatLoggerFactory(
+            self._metrics_cache, self._component_gauges
+        )
 
+        t0 = time.monotonic()
         self.engine_client = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
             usage_context=UsageContext.OPENAI_API_SERVER,
-            stat_loggers=[_UnifiedStatLoggerFactory(self._metrics_cache)],
+            stat_loggers=[self._stat_logger_factory],
         )
+        self._component_gauges.set_model_load_time(time.monotonic() - t0)
+
         num_gpu_blocks = self.engine_client.vllm_config.cache_config.num_gpu_blocks or 0
-        self._metrics_cache.set_num_gpu_blocks(num_gpu_blocks)
+        self._metrics_cache.num_gpu_blocks = num_gpu_blocks
         self._model_max_len = getattr(
             getattr(vllm_config, "model_config", None), "max_model_len", None
         )
@@ -383,6 +437,18 @@ class VllmLLMEngine(LLMEngine):
             SnapshotSource(snapshot=snapshot_for(rank), dp_rank=rank)
             for rank in range(dp_start, dp_start + dp_size)
         ]
+
+    async def register_prometheus(self, metrics: "EngineMetrics") -> None:
+        # Component registry (dynamo_component_*) is engine-owned;
+        # global REGISTRY carries vLLM-native + LMCache metrics with the
+        # K8s MultiProcessCollector fallback handled by the helper.
+        register_engine_registry(metrics, self._component_registry)
+        if not self.engine_args.disable_log_stats:
+            register_global_registry(
+                metrics,
+                engine_prefix="vllm:",
+                multiproc_only_prefixes=["lmcache:"],
+            )
 
     async def abort(self, context: Context) -> None:
         request_id = context.id()

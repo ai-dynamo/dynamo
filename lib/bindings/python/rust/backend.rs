@@ -49,6 +49,7 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RuntimeConfig>()?;
     m.add_class::<WorkerConfig>()?;
     m.add_class::<Worker>()?;
+    m.add_class::<crate::prometheus_metrics::EngineMetrics>()?;
     parent.add_submodule(&m)?;
     py.import("sys")?
         .getattr("modules")?
@@ -727,6 +728,36 @@ impl LLMEngine for PyLLMEngine {
             Ok(sources)
         })
         .map_err(py_err_to_dynamo)
+    }
+
+    async fn register_prometheus(
+        &self,
+        metrics: &dynamo_backend_common::EngineMetrics,
+    ) -> Result<(), DynamoError> {
+        let engine = self.engine.clone();
+        let event_loop = self.event_loop.clone();
+        let py_metrics_state = crate::prometheus_metrics::EngineMetrics::from_rust(metrics);
+
+        let py_future = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<_> {
+                let bound = engine.bind(py);
+                let py_metrics = Py::new(py, py_metrics_state)?;
+                let coroutine = bound.call_method1("register_prometheus", (py_metrics,))?;
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("register_prometheus offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)?;
+
+        py_future.await.map_err(py_err_to_dynamo)?;
+        Ok(())
     }
 }
 

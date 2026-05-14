@@ -15,8 +15,9 @@ import logging
 import os
 import random
 import sys
+import time
 from collections.abc import AsyncGenerator, Callable
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import sglang as sgl
 import zmq
@@ -32,6 +33,10 @@ from dynamo.common.backend.engine import (
     GenerateRequest,
     LLMEngine,
 )
+from dynamo.common.backend.metrics import (
+    make_component_metrics,
+    register_engine_registry,
+)
 from dynamo.common.backend.publisher import (
     KvEventSource,
     Metrics,
@@ -41,11 +46,17 @@ from dynamo.common.backend.publisher import (
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.llm import ModelInput
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import compute_bootstrap_address, warmup_prefill_engine
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.publisher import format_zmq_endpoint
+
+if TYPE_CHECKING:
+    from prometheus_client import CollectorRegistry
+
+    from dynamo._core.backend import EngineMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +115,10 @@ class SglangLLMEngine(LLMEngine):
         # `dp_rank` against this node's range before forwarding to SGLang.
         self._dp_start: int = 0
         self._dp_size: int = 1
+        # Prometheus state, populated in `start()` and registered with
+        # the runtime in `register_prometheus`.
+        self._component_gauges: Optional[LLMBackendMetrics] = None
+        self._component_registry: Optional["CollectorRegistry"] = None
 
     @classmethod
     async def from_args(
@@ -129,7 +144,21 @@ class SglangLLMEngine(LLMEngine):
 
     async def start(self, worker_id: int) -> EngineConfig:
         del worker_id  # SGLang bootstrap uses host/port/room triples
+
+        # MUST construct gauges AFTER sgl.Engine() — SGLang calls
+        # set_prometheus_multiproc_dir() during its init, and any
+        # prometheus_client import before that point locks the library
+        # into single-process mode for the whole worker, suppressing
+        # SGLang's TokenizerMetricsCollector .db writes.
+        t0 = time.monotonic()
         self.engine = sgl.Engine(server_args=self.server_args)
+        load_time_s = time.monotonic() - t0
+
+        served_name = self.server_args.served_model_name or self.server_args.model_path
+        self._component_gauges, self._component_registry = make_component_metrics(
+            served_name, self.dynamo_args.component
+        )
+        self._component_gauges.set_model_load_time(load_time_s)
 
         tokenizer = (
             self.engine.tokenizer_manager.tokenizer
@@ -232,6 +261,15 @@ class SglangLLMEngine(LLMEngine):
             )
             self._latest_metrics[dp_rank] = Metrics(
                 kv_used_blocks=kv_metrics.kv_active_blocks,
+            )
+            # Same KvMetrics object feeds the dynamo_component_* gauges so
+            # the router-input cache and Prometheus stay in sync.
+            dp_rank_str = str(dp_rank)
+            self._component_gauges.set_total_blocks(
+                dp_rank_str, kv_metrics.kv_total_blocks
+            )
+            self._component_gauges.set_gpu_cache_usage(
+                dp_rank_str, kv_metrics.gpu_cache_usage_perc
             )
 
     async def generate(
@@ -571,6 +609,29 @@ class SglangLLMEngine(LLMEngine):
             SnapshotSource(snapshot=snapshot_for(rank), dp_rank=rank)
             for rank in range(start, end)
         ]
+
+    async def register_prometheus(self, metrics: "EngineMetrics") -> None:
+        # Component registry (gauges fed by `_metrics_pull_loop`), seeded
+        # with zero per rank so the gauges show up in the first scrape
+        # before the pull loop receives its first scheduler message.
+        register_engine_registry(metrics, self._component_registry)
+        start, end = _local_dp_rank_range(self.server_args)
+        for rank in range(start, end):
+            rank_str = str(rank)
+            self._component_gauges.set_total_blocks(rank_str, 0)
+            self._component_gauges.set_gpu_cache_usage(rank_str, 0.0)
+
+        # SGLang multiprocess registry — only when --enable-metrics is
+        # set (otherwise SGLang doesn't call set_prometheus_multiproc_dir
+        # and MultiProcessCollector would have no .db files to read).
+        if self.server_args.enable_metrics:
+            from prometheus_client import CollectorRegistry, multiprocess
+
+            sgl_registry = CollectorRegistry()
+            multiprocess.MultiProcessCollector(sgl_registry)
+            register_engine_registry(
+                metrics, sgl_registry, prefix_filters=["sglang:"]
+            )
 
     def _build_sampling_params(self, request: GenerateRequest) -> dict:
         if not self._use_sglang_tokenizer:

@@ -32,6 +32,7 @@ use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::StreamExt;
 
 use crate::engine::{GenerateContext, LLMEngine};
+use crate::metrics::{EngineMetrics, TestHierarchy};
 use ConformanceFailure::*;
 
 const DEFAULT_CANCEL_DEADLINE: Duration = Duration::from_secs(2);
@@ -75,6 +76,7 @@ pub enum ConformanceFailure {
     MetricsSourcesFailed(String),
     MetricsSourcesNotIdempotent,
     MetricsSnapshotTooSlow { took: Duration },
+    RegisterPrometheusFailed(String),
 }
 
 impl std::fmt::Display for ConformanceFailure {
@@ -126,6 +128,7 @@ impl std::fmt::Display for ConformanceFailure {
                 "SnapshotSource.snapshot took {took:?} (must be a cheap field read, \
                  < 1 ms; an engine-internal call would land in the 10s of ms)"
             ),
+            RegisterPrometheusFailed(m) => write!(f, "register_prometheus() failed: {m}"),
         }
     }
 }
@@ -152,25 +155,35 @@ where
         return Err(EmptyModelInConfig);
     }
 
-    // 2. A plain generate() yields a well-formed stream ending in a terminal chunk.
+    // 2. KV-aware-routing source descriptors satisfy their contracts:
+    //    - kv_event_sources / metrics_sources don't error
+    //    - rank sets are stable across repeated calls
+    //    - SnapshotSource.snapshot is a cheap field read (< 1 ms)
+    //
+    //    Run before generate() to match Worker's actual call order
+    //    (setup_kv_aware_publishers happens between start() and serve).
+    check_kv_event_sources(&engine).await?;
+    check_metrics_sources(&engine).await?;
+
+    // 3. register_prometheus runs without error against a synthetic
+    //    EngineMetrics handle. Same ordering rationale as above — Worker
+    //    invokes this between setup_kv_aware_publishers and serve, so
+    //    engines that wire metric handles consumed by generate() rely on
+    //    register_prometheus having already run.
+    check_register_prometheus(&engine).await?;
+
+    // 4. A plain generate() yields a well-formed stream ending in a terminal chunk.
     check_single_generate(&engine, &config.model).await?;
 
-    // 3. Interleaved generate() calls both complete — catches shared-state bugs.
+    // 5. Interleaved generate() calls both complete — catches shared-state bugs.
     //    Uses tokio::join! under the test runtime (single-threaded by default),
     //    so this is interleaving rather than true parallelism.
     check_concurrent_generates(&engine, &config.model).await?;
 
-    // 4. Cancellation is observed within a bounded deadline.
+    // 6. Cancellation is observed within a bounded deadline.
     check_cancellation(&engine, &config.model, DEFAULT_CANCEL_DEADLINE).await?;
 
-    // 5. KV-aware-routing source descriptors satisfy their contracts:
-    //    - kv_event_sources / metrics_sources don't error
-    //    - rank sets are stable across repeated calls
-    //    - SnapshotSource.snapshot is a cheap field read (< 1 ms)
-    check_kv_event_sources(&engine).await?;
-    check_metrics_sources(&engine).await?;
-
-    // 6. cleanup() succeeds and is idempotent.
+    // 7. cleanup() succeeds and is idempotent.
     engine
         .cleanup()
         .await
@@ -180,7 +193,7 @@ where
         .await
         .map_err(|e| SecondCleanupFailed(e.to_string()))?;
 
-    // 6. cleanup() is safe on a never-started engine — mirrors the path
+    // 8. cleanup() is safe on a never-started engine — mirrors the path
     //    `Worker` takes after `start()` raises. Engines must guard each
     //    allocated resource with a null-check.
     let fresh = factory();
@@ -327,6 +340,15 @@ async fn check_metrics_sources<E: LLMEngine>(engine: &E) -> Result<(), Conforman
             return Err(MetricsSnapshotTooSlow { took });
         }
     }
+    Ok(())
+}
+
+async fn check_register_prometheus<E: LLMEngine>(engine: &E) -> Result<(), ConformanceFailure> {
+    let metrics = EngineMetrics::from_hierarchy(TestHierarchy::new());
+    engine
+        .register_prometheus(&metrics)
+        .await
+        .map_err(|e| RegisterPrometheusFailed(e.to_string()))?;
     Ok(())
 }
 
