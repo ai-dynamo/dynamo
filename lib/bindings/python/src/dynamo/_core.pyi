@@ -479,6 +479,17 @@ class Context:
         """
         ...
 
+    def trace_headers(self) -> Optional[dict[str, str]]:
+        """
+        Build W3C trace headers for propagating to downstream inference engines.
+
+        Returns:
+            ``{"traceparent": "00-<trace_id>-<span_id>-01"}`` when this request
+            carries trace context, ``None`` otherwise. Forward the value
+            unchanged to the inference engine's ``trace_headers`` kwarg.
+        """
+        ...
+
 class WorkerMetricsPublisher:
     """
     A metrics publisher will provide metrics to the router for load monitoring.

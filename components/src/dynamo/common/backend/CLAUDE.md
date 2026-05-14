@@ -164,18 +164,17 @@ Standardize on:
 
 Engines must forward W3C trace headers to their underlying inference engine so
 that vLLM / TRT-LLM / SGLang's internal OTel spans (scheduler, forward pass,
-KV transfer) join the Dynamo trace tree. Build the header dict once at the top
-of `generate()` and pass it to every inference-engine call site:
+KV transfer) join the Dynamo trace tree. Call `context.trace_headers()` (a
+method on the Rust-bound `Context`) once at the top of `generate()` and pass
+the result to every inference-engine call site:
 
 ```python
-from dynamo.common.utils.otel_tracing import build_trace_headers
-...
-trace_headers = build_trace_headers(context)
+trace_headers = context.trace_headers()
 gen = self.engine_client.generate(prompt, sampling_params, request_id,
                                   trace_headers=trace_headers)
 ```
 
-`build_trace_headers(context)` returns `None` when the request arrived without a
+`context.trace_headers()` returns `None` when the request arrived without a
 `traceparent` — pass it through unchanged; inference engines treat `None` as
 "no upstream trace." The kwarg name varies per backend:
 

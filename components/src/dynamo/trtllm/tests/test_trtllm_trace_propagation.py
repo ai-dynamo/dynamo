@@ -31,11 +31,16 @@ pytestmark = [
 
 class _FakeContext:
     def __init__(self, trace_id: str | None = None, span_id: str | None = None):
-        self.trace_id = trace_id
-        self.span_id = span_id
+        self._trace_id = trace_id
+        self._span_id = span_id
 
     def id(self) -> str:
         return "trace-test-req"
+
+    def trace_headers(self) -> dict[str, str] | None:
+        if not self._trace_id or not self._span_id:
+            return None
+        return {"traceparent": f"00-{self._trace_id}-{self._span_id}-01"}
 
 
 async def _empty_async_iter():

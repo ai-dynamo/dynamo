@@ -40,7 +40,6 @@ from dynamo.common.backend.publisher import (
 )
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
-from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.llm import ModelInput
 from dynamo.vllm.args import parse_args
 from dynamo.vllm.cache_info import (
@@ -147,9 +146,9 @@ class VllmLLMEngine(LLMEngine):
             )
 
         if not config.served_model_name:
-            config.served_model_name = (
-                config.engine_args.served_model_name
-            ) = config.model
+            config.served_model_name = config.engine_args.served_model_name = (
+                config.model
+            )
 
         # _resolve_disaggregation_mode() in DynamoVllmConfig has already
         # promoted the field to a DisaggregationMode enum; the field type
@@ -287,7 +286,7 @@ class VllmLLMEngine(LLMEngine):
             )
             local_dp_rank = None if rank is None else rank - dp_start
 
-        trace_headers = build_trace_headers(context)
+        trace_headers = context.trace_headers()
         gen = self.engine_client.generate(
             prompt,
             sampling_params,

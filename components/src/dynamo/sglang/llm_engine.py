@@ -41,7 +41,6 @@ from dynamo.common.backend.publisher import (
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
-from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.llm import ModelInput
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import (
@@ -279,7 +278,7 @@ class SglangLLMEngine(LLMEngine):
             "SGLang",
         )
 
-        trace_header = build_trace_headers(context) if self.enable_trace else None
+        trace_header = context.trace_headers() if self.enable_trace else None
 
         stream = await self.engine.async_generate(
             **input_param,

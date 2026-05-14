@@ -8,7 +8,7 @@ pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::context::Controller;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::watch;
 
@@ -251,6 +251,24 @@ impl Context {
         self.trace_context
             .as_ref()
             .and_then(|ctx| ctx.parent_id.clone())
+    }
+
+    /// Build W3C trace headers for propagating to downstream inference engines.
+    /// Returns `None` when no upstream trace context is present, in which case
+    /// callers should forward the value as-is — inference engines treat `None`
+    /// as "no upstream trace."
+    fn trace_headers(&self) -> Option<HashMap<String, String>> {
+        let tc = self.trace_context.as_ref()?;
+        if tc.trace_id.is_empty() || tc.span_id.is_empty() {
+            return None;
+        }
+        // TODO: propagate trace-flags from the current span instead of hard-coding `01`.
+        let mut headers = HashMap::new();
+        headers.insert(
+            "traceparent".to_string(),
+            format!("00-{}-{}-01", tc.trace_id, tc.span_id),
+        );
+        Some(headers)
     }
 }
 

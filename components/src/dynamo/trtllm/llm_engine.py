@@ -48,7 +48,6 @@ from dynamo.common.backend.publisher import (
 )
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
-from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.llm import KvEventPublisher, ModelInput
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
@@ -521,7 +520,7 @@ class TrtllmLLMEngine(LLMEngine):
         # Prefill returns one non-streaming chunk carrying the handoff —
         # matches the legacy disagg wire format.
         streaming = not is_prefill
-        trace_headers = build_trace_headers(context)
+        trace_headers = context.trace_headers()
         generation_result = self._engine.llm.generate_async(
             inputs=token_ids,
             sampling_params=sampling_params,

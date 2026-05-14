@@ -34,7 +34,6 @@ from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
-from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
@@ -152,8 +151,7 @@ class _Abortable(Protocol):
     """Structural type for objects that support abort(). Satisfied by both
     GenerationResult and _DeferredAbort."""
 
-    def abort(self) -> None:
-        ...
+    def abort(self) -> None: ...
 
 
 class _DeferredAbort:
@@ -206,13 +204,13 @@ class RequestHandlerConfig:
     publisher: Optional[Publisher]
     disaggregation_mode: DisaggregationMode
     encode_client: Optional[Client] = None
-    multimodal_processor: Optional[
-        MultimodalRequestProcessor
-    ] = None  # for multimodal support
+    multimodal_processor: Optional[MultimodalRequestProcessor] = (
+        None  # for multimodal support
+    )
     connector: Optional[Connector] = None
-    runtime: Optional[
-        DistributedRuntime
-    ] = None  # DistributedRuntime reference for graceful shutdown
+    runtime: Optional[DistributedRuntime] = (
+        None  # DistributedRuntime reference for graceful shutdown
+    )
     metrics_collector: Optional["MetricsCollector"] = None
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
@@ -1083,7 +1081,7 @@ class HandlerBase(BaseGenerativeHandler):
         )
 
         # Build trace headers for distributed tracing
-        trace_headers = build_trace_headers(context)
+        trace_headers = context.trace_headers()
 
         # Extract dp_rank from request's routing hints for attention DP routing
         routing = request.get("routing", {})
