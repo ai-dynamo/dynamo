@@ -108,8 +108,8 @@ vllm_configs = {
                     "include_stop_str_in_output": True,
                 },
             ),
-            # TODO: re-enable once examples/backends/vllm/launch/agg.sh passes
-            # `--reasoning-parser qwen3` to the worker. Without it, vLLM raises
+            # TODO: enable once examples/backends/vllm/launch/agg.sh passes
+            # `--reasoning-parser` to the worker. Without it, vLLM raises
             # `ValueError: thinking_token_budget is set but reasoning_config is
             # not configured` before this payload can be served.
             # chat_payload(
