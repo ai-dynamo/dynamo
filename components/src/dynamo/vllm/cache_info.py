@@ -13,7 +13,6 @@ DYNAMO_KV_EVENT_BLOCK_SIZE_KEY = "dynamo_kv_event_block_size"
 MAIN_ATTENTION_KV_CACHE_KINDS = {
     "full_attention",
     "mla_attention",
-    "sink_full_attention",
 }
 
 # Known Mamba architecture identifiers present in vLLM's HF config.

@@ -4,6 +4,8 @@
 
 """Unit tests for dynamo.vllm.cache_info."""
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from dynamo.vllm.cache_info import (
@@ -22,23 +24,40 @@ pytestmark = [
 ]
 
 
+def _make_vllm_config(
+    architectures=None,
+    speculative_config=None,
+    block_size=16,
+    additional_config=None,
+    hf_config=True,
+):
+    """Build a minimal VllmConfig-like namespace without GPU device detection."""
+    cfg = MagicMock()
+    cfg.speculative_config = speculative_config
+    cfg.cache_config.block_size = block_size
+    cfg.additional_config = additional_config if additional_config is not None else {}
+    if hf_config:
+        cfg.model_config.hf_config.architectures = (
+            architectures if architectures is not None else []
+        )
+    else:
+        del cfg.model_config.hf_config
+    return cfg
+
+
 class TestDetectMambaHybridModel:
     """Test detect_mamba_hybrid_model helper."""
 
     def test_pure_attention_model_returns_false(self):
         """Non-Mamba, non-speculative model is not detected as hybrid."""
-        vllm_config = pytest.importorskip("vllm.config").VllmConfig()
-        vllm_config.speculative_config = None
-        vllm_config.model_config.hf_config.architectures = [
-            "QWenLMHeadModel",
-            "Qwen2ForCausalLM",
-        ]
+        vllm_config = _make_vllm_config(
+            architectures=["QWenLMHeadModel", "Qwen2ForCausalLM"],
+            speculative_config=None,
+        )
         assert detect_mamba_hybrid_model(vllm_config) is False
 
     def test_mamba_architecture_returns_true(self):
         """Mamba architecture strings are correctly identified."""
-        vllm_config = pytest.importorskip("vllm.config").VllmConfig()
-        vllm_config.speculative_config = None
         for arch in [
             "MambaLMHeadModel",
             "MambaDecodeModel",
@@ -47,31 +66,30 @@ class TestDetectMambaHybridModel:
             "Mamba2ForCausalLM",
             "JambaForCausalLM",
         ]:
-            vllm_config.model_config.hf_config.architectures = [arch]
+            vllm_config = _make_vllm_config(
+                architectures=[arch],
+                speculative_config=None,
+            )
             assert (
                 detect_mamba_hybrid_model(vllm_config) is True
             ), f"{arch} not detected"
 
     def test_speculative_config_returns_true(self):
         """Non-None speculative_config marks the model as hybrid."""
-        vllm_config = pytest.importorskip("vllm.config").VllmConfig()
-        # Set a simple object as speculative config (None-check only)
-        vllm_config.speculative_config = object()
-        vllm_config.model_config.hf_config.architectures = ["Qwen2ForCausalLM"]
+        vllm_config = _make_vllm_config(
+            architectures=["Qwen2ForCausalLM"],
+            speculative_config=object(),
+        )
         assert detect_mamba_hybrid_model(vllm_config) is True
 
     def test_missing_hf_config_returns_false(self):
         """Model without hf_config is not flagged as Mamba/hybrid."""
-        vllm_config = pytest.importorskip("vllm.config").VllmConfig()
-        vllm_config.speculative_config = None
-        del vllm_config.model_config.hf_config
+        vllm_config = _make_vllm_config(speculative_config=None, hf_config=False)
         assert detect_mamba_hybrid_model(vllm_config) is False
 
     def test_empty_architectures_returns_false(self):
         """Empty architectures list is not flagged as Mamba/hybrid."""
-        vllm_config = pytest.importorskip("vllm.config").VllmConfig()
-        vllm_config.speculative_config = None
-        vllm_config.model_config.hf_config.architectures = []
+        vllm_config = _make_vllm_config(architectures=[], speculative_config=None)
         assert detect_mamba_hybrid_model(vllm_config) is False
 
 
@@ -131,16 +149,11 @@ class TestConfigureKvEventBlockSizeSuccess:
     @pytest.mark.asyncio
     async def test_success_stores_block_size_in_additional_config(self):
         """On success the block size is stored in vllm_config.additional_config."""
-        VllmConfig = pytest.importorskip("vllm.config").VllmConfig
-        vllm_config = VllmConfig()
-        vllm_config.additional_config = {}
-        vllm_config.cache_config.block_size = 16
+        vllm_config = _make_vllm_config(block_size=16)
 
         group_metadata = [
             {"kind": "full_attention", "block_size": 2096},
         ]
-
-        from unittest.mock import AsyncMock, MagicMock
 
         mock_engine = MagicMock()
         mock_engine.engine_core = MagicMock()
@@ -160,14 +173,11 @@ class TestConfigureKvEventBlockSizeFallback:
     @pytest.mark.asyncio
     async def test_pure_attention_model_falls_back_silently(self):
         """Non-Mamba/non-hybrid models fall back to cache_config.block_size."""
-        VllmConfig = pytest.importorskip("vllm.config").VllmConfig
-        vllm_config = VllmConfig()
-        vllm_config.additional_config = {}
-        vllm_config.cache_config.block_size = 16
-        vllm_config.speculative_config = None
-        vllm_config.model_config.hf_config.architectures = ["Qwen2ForCausalLM"]
-
-        from unittest.mock import AsyncMock, MagicMock
+        vllm_config = _make_vllm_config(
+            architectures=["Qwen2ForCausalLM"],
+            speculative_config=None,
+            block_size=16,
+        )
 
         mock_engine = MagicMock()
         mock_engine.engine_core = MagicMock()
@@ -183,14 +193,11 @@ class TestConfigureKvEventBlockSizeFallback:
     @pytest.mark.asyncio
     async def test_mamba_model_raises_value_error(self):
         """Mamba models raise ValueError when the utility call fails."""
-        VllmConfig = pytest.importorskip("vllm.config").VllmConfig
-        vllm_config = VllmConfig()
-        vllm_config.additional_config = {}
-        vllm_config.cache_config.block_size = 16
-        vllm_config.speculative_config = None
-        vllm_config.model_config.hf_config.architectures = ["MambaLMHeadModel"]
-
-        from unittest.mock import AsyncMock, MagicMock
+        vllm_config = _make_vllm_config(
+            architectures=["MambaLMHeadModel"],
+            speculative_config=None,
+            block_size=16,
+        )
 
         mock_engine = MagicMock()
         mock_engine.engine_core = MagicMock()
@@ -206,14 +213,11 @@ class TestConfigureKvEventBlockSizeFallback:
     @pytest.mark.asyncio
     async def test_speculative_hybrid_model_raises_value_error(self):
         """Speculative/hybrid models raise ValueError when the utility fails."""
-        VllmConfig = pytest.importorskip("vllm.config").VllmConfig
-        vllm_config = VllmConfig()
-        vllm_config.additional_config = {}
-        vllm_config.cache_config.block_size = 16
-        vllm_config.speculative_config = object()  # non-None = hybrid
-        vllm_config.model_config.hf_config.architectures = ["Qwen2ForCausalLM"]
-
-        from unittest.mock import AsyncMock, MagicMock
+        vllm_config = _make_vllm_config(
+            architectures=["Qwen2ForCausalLM"],
+            speculative_config=object(),
+            block_size=16,
+        )
 
         mock_engine = MagicMock()
         mock_engine.engine_core = MagicMock()
@@ -227,15 +231,11 @@ class TestConfigureKvEventBlockSizeFallback:
     @pytest.mark.asyncio
     async def test_speculative_model_without_hf_config_raises_value_error(self):
         """Speculative models without hf_config raise ValueError, not AttributeError."""
-        VllmConfig = pytest.importorskip("vllm.config").VllmConfig
-        vllm_config = VllmConfig()
-        vllm_config.additional_config = {}
-        vllm_config.cache_config.block_size = 16
-        vllm_config.speculative_config = object()  # non-None = hybrid
-        # Simulate missing hf_config (speculative configs may not have it)
-        del vllm_config.model_config.hf_config
-
-        from unittest.mock import AsyncMock, MagicMock
+        vllm_config = _make_vllm_config(
+            speculative_config=object(),
+            block_size=16,
+            hf_config=False,
+        )
 
         mock_engine = MagicMock()
         mock_engine.engine_core = MagicMock()
@@ -253,20 +253,15 @@ class TestGetConfiguredKvEventBlockSize:
 
     def test_returns_cached_value_when_present(self):
         """If DYNAMO_KV_EVENT_BLOCK_SIZE_KEY is set, return it."""
-        VllmConfig = pytest.importorskip("vllm.config").VllmConfig
-        vllm_config = VllmConfig()
-        vllm_config.additional_config = {DYNAMO_KV_EVENT_BLOCK_SIZE_KEY: 2096}
-        vllm_config.cache_config.block_size = 16
-
+        vllm_config = _make_vllm_config(
+            additional_config={DYNAMO_KV_EVENT_BLOCK_SIZE_KEY: 2096},
+            block_size=16,
+        )
         result = get_configured_kv_event_block_size(vllm_config)
         assert result == 2096
 
     def test_returns_cache_block_size_when_not_cached(self):
         """If the key is absent, fall back to cache_config.block_size."""
-        VllmConfig = pytest.importorskip("vllm.config").VllmConfig
-        vllm_config = VllmConfig()
-        vllm_config.additional_config = {}
-        vllm_config.cache_config.block_size = 16
-
+        vllm_config = _make_vllm_config(additional_config={}, block_size=16)
         result = get_configured_kv_event_block_size(vllm_config)
         assert result == 16
