@@ -160,12 +160,8 @@ class FrontendProcess(ManagedProcess):
                 "kv",
                 "--kv-cache-block-size",
                 str(BLOCK_SIZE),
-                # Intentionally no --model-name: forces the frontend to
-                # discover the model from the worker's MDC publication. The
-                # alternative (passing --model-name <slug>) routes resolution
-                # through the frontend self-host MDC verify-and-cache pipeline,
-                # which doesn't stage preprocessor_config.json (gh-8749) and
-                # silently disables MM-aware routing.
+                "--model-name",
+                VLLM_MM_MODEL,
             ],
             env=_make_process_env(),
             health_check_urls=[
