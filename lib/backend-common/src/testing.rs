@@ -8,12 +8,17 @@
 //! ```ignore
 //! #[tokio::test]
 //! async fn my_engine_satisfies_contract() {
-//!     let engine = MyEngine::new_for_test();
-//!     dynamo_backend_common::testing::run_conformance(engine)
+//!     dynamo_backend_common::testing::run_conformance(MyEngine::new_for_test)
 //!         .await
 //!         .expect("conformance");
 //! }
 //! ```
+//!
+//! The kit takes a factory rather than a pre-built engine so it can
+//! construct one engine for the main lifecycle test and a second,
+//! pristine engine for the "cleanup before start" check — the latter
+//! mirrors `Worker`'s post-start-failure cleanup path and would not
+//! work on an already-started engine.
 //!
 //! Gated behind the `testing` cargo feature; intended for `[dev-dependencies]`.
 
@@ -26,7 +31,7 @@ use dynamo_runtime::engine::AsyncEngineContext;
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::StreamExt;
 
-use crate::engine::LLMEngine;
+use crate::engine::{GenerateContext, LLMEngine};
 use ConformanceFailure::*;
 
 const DEFAULT_CANCEL_DEADLINE: Duration = Duration::from_secs(2);
@@ -64,6 +69,7 @@ pub enum ConformanceFailure {
     CancellationIgnored,
     CleanupFailed(String),
     SecondCleanupFailed(String),
+    CleanupWithoutStartFailed(String),
 }
 
 impl std::fmt::Display for ConformanceFailure {
@@ -92,6 +98,12 @@ impl std::fmt::Display for ConformanceFailure {
             SecondCleanupFailed(m) => {
                 write!(f, "second cleanup() call failed (must be idempotent): {m}")
             }
+            CleanupWithoutStartFailed(m) => write!(
+                f,
+                "cleanup() failed on a never-started engine: {m} \
+                 (Worker calls cleanup() after start() raises, so engines must \
+                 be null-safe against partial / no allocation)"
+            ),
         }
     }
 }
@@ -99,10 +111,19 @@ impl std::fmt::Display for ConformanceFailure {
 impl std::error::Error for ConformanceFailure {}
 
 /// Run the full conformance suite against an engine.
-pub async fn run_conformance<E: LLMEngine>(engine: E) -> Result<(), ConformanceFailure> {
+///
+/// Takes a factory rather than a built engine so the kit can construct
+/// a second, pristine engine for the "cleanup before start" check.
+pub async fn run_conformance<E, F>(mut factory: F) -> Result<(), ConformanceFailure>
+where
+    E: LLMEngine,
+    F: FnMut() -> E,
+{
+    let engine = factory();
+
     // 1. start() returns non-empty model.
     let config = engine
-        .start()
+        .start(0)
         .await
         .map_err(|e| StartFailed(e.to_string()))?;
     if config.model.is_empty() {
@@ -129,6 +150,15 @@ pub async fn run_conformance<E: LLMEngine>(engine: E) -> Result<(), ConformanceF
         .cleanup()
         .await
         .map_err(|e| SecondCleanupFailed(e.to_string()))?;
+
+    // 6. cleanup() is safe on a never-started engine — mirrors the path
+    //    `Worker` takes after `start()` raises. Engines must guard each
+    //    allocated resource with a null-check.
+    let fresh = factory();
+    fresh
+        .cleanup()
+        .await
+        .map_err(|e| CleanupWithoutStartFailed(e.to_string()))?;
 
     Ok(())
 }
@@ -157,7 +187,7 @@ async fn check_single_generate<E: LLMEngine>(
 ) -> Result<(), ConformanceFailure> {
     let ctx = mock_context();
     let stream = engine
-        .generate(request(model), ctx)
+        .generate(request(model), GenerateContext::new(ctx, None))
         .await
         .map_err(|e| GenerateFailed(e.to_string()))?;
     let items: Vec<_> = stream.collect().await;
@@ -199,7 +229,7 @@ async fn check_concurrent_generates<E: LLMEngine>(
     let futs = (0..CONCURRENT).map(|_| async {
         let ctx = mock_context();
         let stream = engine
-            .generate(request(model), ctx)
+            .generate(request(model), GenerateContext::new(ctx, None))
             .await
             .map_err(|e| ConcurrentGenerateFailed(e.to_string()))?;
         let n = stream.count().await;
@@ -228,7 +258,7 @@ async fn check_cancellation<E: LLMEngine>(
     let stream = engine
         .generate(
             request_with_max_tokens(model, Some(LONG_MAX_TOKENS)),
-            ctx.clone(),
+            GenerateContext::new(ctx.clone(), None),
         )
         .await
         .map_err(|e| GenerateFailed(e.to_string()))?;

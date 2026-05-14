@@ -13,7 +13,7 @@ from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import chat_payload
-from tests.utils.payloads import BasePayload, ChatPayload
+from tests.utils.payloads import BasePayload, CachedTokensChatPayload, ChatPayload
 
 LOCAL_VIDEO_TEST_PATH = Path(
     WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
@@ -59,6 +59,49 @@ def make_image_payload(
         temperature=0.0,
         max_tokens=100,
         max_attempts=max_attempts,
+    )
+
+
+def make_image_payload_cached_tokens(
+    expected_response: list[str],
+    *,
+    repeat_count: int = 2,
+    min_cached_tokens: int = 1,
+) -> CachedTokensChatPayload:
+    """Image payload that also asserts MM-aware KV cache reuse on repeats.
+
+    Same body shape as :func:`make_image_payload`, but wrapped in a
+    :class:`CachedTokensChatPayload` so the 2nd+ request validates that
+    ``usage.prompt_tokens_details.cached_tokens >= min_cached_tokens``.
+    Two identical MM requests through an MM-routing-aware frontend must
+    land on the same warm worker and reuse the prefix cache; if routing
+    silently regresses to text-only the second request will report 0
+    cached tokens and this payload fails.
+
+    Used to harden the ``agg_router`` pre_merge smoke against silent
+    regressions in the Rust+lightseek routing path.
+    """
+    return CachedTokensChatPayload(
+        body={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": _MULTIMODAL_COLOR_PROMPT},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": MULTIMODAL_IMG_URL},
+                        },
+                    ],
+                }
+            ],
+            "max_tokens": 100,
+            "temperature": 0.0,
+            "stream": False,
+        },
+        repeat_count=repeat_count,
+        expected_response=expected_response,
+        min_cached_tokens=min_cached_tokens,
     )
 
 

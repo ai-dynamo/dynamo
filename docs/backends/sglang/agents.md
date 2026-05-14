@@ -175,7 +175,7 @@ Session control is request-driven. The router's `AgentController` (session lifec
 > Session control is currently supported only on the SGLang backend. vLLM and TensorRT-LLM do not yet expose the streaming session API.
 
 > [!IMPORTANT]
-> Streaming sessions require SGLang changes from [sgl-project/sglang#21875](https://github.com/sgl-project/sglang/pull/21875) (session-aware cache, race condition fixes, session metrics). This is merged to SGLang main but not yet in a release. Until a version after `0.5.10.post1` is published, build SGLang from source (`pip install -e "python"` from the SGLang repo).
+> Streaming sessions require SGLang `0.5.11` or later, which includes changes from [sgl-project/sglang#21875](https://github.com/sgl-project/sglang/pull/21875) (session-aware cache, race condition fixes, session metrics).
 
 **SGLang worker:**
 
@@ -335,4 +335,4 @@ Model and endpoint are configured in `.opencode/opencode.jsonc`:
 
 - **[NVIDIA Request Extensions (nvext)](../../components/frontend/nvext.md)**: Full `nvext` field reference including agent hints
 - **[Configuration and Tuning](../../components/router/router-configuration.md)**: Router configuration and CLI arguments
-- **[SGLang HiCache](sglang-hicache.md)**: Enabling hierarchical KV cache
+- **[SGLang HiCache](../../integrations/sglang-hicache.md)**: Enabling hierarchical KV cache

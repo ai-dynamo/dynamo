@@ -123,7 +123,6 @@ fn create_choice_stream(
     content: &str,
     tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
     finish_reason: Option<FinishReason>,
-    stop_reason: Option<dynamo_protocols::types::StopReason>,
     logprobs: Option<ChatChoiceLogprobs>,
 ) -> ChatChoiceStream {
     #[allow(deprecated)]
@@ -140,7 +139,6 @@ fn create_choice_stream(
             reasoning_content: None,
         },
         finish_reason,
-        stop_reason,
         logprobs,
     }
 }
@@ -228,7 +226,6 @@ impl ChoiceJailState {
                             &prefix,
                             None,
                             choice.finish_reason,
-                            None,
                             choice.logprobs.clone(),
                         );
                         emissions.push(ChoiceEmission::PassThrough(prefix_choice));
@@ -279,7 +276,6 @@ impl ChoiceJailState {
                                     trailing_part,
                                     None,
                                     choice.finish_reason,
-                                    None,
                                     choice.logprobs.clone(),
                                 );
                                 emissions.push(ChoiceEmission::Trailing(trailing_choice));
@@ -310,7 +306,6 @@ impl ChoiceJailState {
                             &prefix,
                             None,
                             choice.finish_reason,
-                            None,
                             choice.logprobs.clone(),
                         );
                         emissions.push(ChoiceEmission::PassThrough(prefix_choice));
@@ -352,7 +347,6 @@ impl ChoiceJailState {
                                 &content,
                                 None,
                                 choice.finish_reason,
-                                None,
                                 choice.logprobs.clone(),
                             );
                             emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
@@ -415,7 +409,6 @@ impl ChoiceJailState {
                             &trailing_owned,
                             None,
                             choice.finish_reason,
-                            None,
                             choice.logprobs.clone(),
                         );
                         emissions.push(ChoiceEmission::Trailing(trailing_choice));
@@ -438,7 +431,6 @@ impl ChoiceJailState {
                 &self.accumulated_content,
                 None,
                 self.stream_finish_reason, // For the accumulated content, assign the original stream finish reason, otherwise it will get lost
-                None,
                 self.accumulated_logprobs.clone(),
             );
 
@@ -666,7 +658,6 @@ impl JailedStream {
                                     index: choice.index,
                                     delta: choice.delta.clone(),
                                     finish_reason: choice.finish_reason,
-                                    stop_reason: choice.stop_reason.clone(),
                                     logprobs: choice.logprobs.clone(),
                                 };
                                 all_emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
@@ -980,7 +971,6 @@ impl JailedStream {
                                 normal_text.as_deref().unwrap_or(""),
                                 None,
                                 base_choice.finish_reason,
-                                base_choice.stop_reason.clone(),
                                 base_choice.logprobs.clone(),
                             );
                         }
@@ -1004,7 +994,6 @@ impl JailedStream {
                             Some(Role::Assistant),
                             normal_text.as_deref().unwrap_or(""),
                             Some(tool_call_chunks),
-                            None,
                             None,
                             base_choice.logprobs.clone(),
                         )
@@ -1033,7 +1022,6 @@ impl JailedStream {
                             content,
                             None,
                             base_choice.finish_reason,
-                            base_choice.stop_reason.clone(),
                             base_choice.logprobs.clone(),
                         )
                     }
@@ -1052,7 +1040,6 @@ impl JailedStream {
                             "",
                             None,
                             base_choice.finish_reason,
-                            base_choice.stop_reason.clone(),
                             base_choice.logprobs.clone(),
                         )
                     }
@@ -1171,7 +1158,6 @@ impl JailedStream {
                         "",
                         Some(tool_call_chunks),
                         base_choice.finish_reason,
-                        None,
                         base_choice.logprobs.clone(),
                     )
                 } else if filter_dropped_all {
@@ -1183,7 +1169,6 @@ impl JailedStream {
                         "",
                         None,
                         base_choice.finish_reason,
-                        base_choice.stop_reason.clone(),
                         base_choice.logprobs.clone(),
                     )
                 } else {
@@ -1194,7 +1179,6 @@ impl JailedStream {
                         accumulated_content,
                         None,
                         base_choice.finish_reason,
-                        base_choice.stop_reason.clone(),
                         base_choice.logprobs.clone(),
                     )
                 }
@@ -1568,7 +1552,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 
@@ -1637,6 +1620,7 @@ mod tests {
     }
 
     /// Helper: build a single-choice stream chunk with text content and logprobs
+    #[allow(deprecated)]
     fn text_chunk_with_logprobs(text: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
         let logprobs = ChatChoiceLogprobs {
             content: Some(
@@ -1668,7 +1652,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: Some(logprobs),
         };
 

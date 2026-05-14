@@ -321,54 +321,19 @@ jobs:
     with:
       test_suite_name: vllm
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0 and not unified'
-      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1 and not unified'
+      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
+      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
       gpu_test_timeout_minutes: 120
       # Profiled tests (those carrying @pytest.mark.profiled_vram_gib(N)) run concurrently in
       # the parallel stage; the rest fall through to the sequential stage. 24 GiB admits all
       # currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
-    secrets: inherit
-
-  vllm-unified-test:
-    name: vllm-runtime # Share UI group with other vllm jobs
-    needs: [vllm-build]
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: vllm
-      test_type: Unified Test
-      amd_runner: prod-tester-amd-gpu-v1
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64"]' # Unified tests are GPU-only
-      run_sanity_check: false
-      run_cpu_only_tests: false
-      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1 and unified'
-      gpu_test_timeout_minutes: 45
-    secrets: inherit
-
-  sample-unified-test:
-    name: sample-runtime # New UI group for sample-backend jobs
-    needs: [vllm-build]
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: sample
-      test_type: Unified Test
-      amd_runner: prod-tester-amd-gpu-v1 # TODO: CPU-only DinD runner when available
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]' # Sample is image-agnostic; one entry is enough
-      platform: '["amd64"]'
-      run_sanity_check: false
-      run_cpu_only_tests: true
-      cpu_only_test_markers: '(pre_merge or post_merge) and gpu_0 and unified'
-      cpu_only_test_timeout_minutes: 30
-      run_gpu_tests: false
     secrets: inherit
 
   vllm-multi-gpu-test:
@@ -378,12 +343,12 @@ jobs:
     with:
       test_suite_name: vllm
       test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v1
+      amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4) and not unified'
+      gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -394,7 +359,7 @@ jobs:
     with:
       test_suite_name: vllm-efa
       test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-4-v1
+      amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
       cuda_version: '["12.9"]'
       platform: '["amd64", "arm64"]'
@@ -410,36 +375,19 @@ jobs:
     with:
       test_suite_name: sglang
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0 and not unified'
-      gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1 and not unified'
+      cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
+      gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
       gpu_test_timeout_minutes: 120
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
-    secrets: inherit
-
-  sglang-unified-test:
-    name: sglang-runtime # Share UI group with other sglang jobs
-    needs: [sglang-build]
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: sglang
-      test_type: Unified Test
-      amd_runner: prod-tester-amd-gpu-v1
-      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64"]' # Unified tests are GPU-only
-      run_sanity_check: false
-      run_cpu_only_tests: false
-      gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1 and unified'
-      gpu_test_timeout_minutes: 45
     secrets: inherit
 
   sglang-multi-gpu-test:
@@ -449,12 +397,12 @@ jobs:
     with:
       test_suite_name: sglang
       test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v1
+      amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4) and not unified'
+      gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -465,36 +413,19 @@ jobs:
     with:
       test_suite_name: trtllm
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0 and not unified'
-      gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1 and not unified'
+      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
+      gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
       gpu_test_timeout_minutes: 120
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
-    secrets: inherit
-
-  trtllm-unified-test:
-    name: trtllm-runtime # Share UI group with other trtllm jobs
-    needs: [trtllm-build]
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: trtllm
-      test_type: Unified Test
-      amd_runner: prod-tester-amd-gpu-v1
-      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
-      platform: '["amd64"]' # Unified tests are GPU-only
-      run_sanity_check: false
-      run_cpu_only_tests: false
-      gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1 and unified'
-      gpu_test_timeout_minutes: 45
     secrets: inherit
 
   trtllm-multi-gpu-test:
@@ -504,12 +435,12 @@ jobs:
     with:
       test_suite_name: trtllm
       test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v1
+      amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4) and not unified'
+      gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -520,7 +451,7 @@ jobs:
     with:
       test_suite_name: trtllm-efa
       test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-4-v1
+      amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.trtllm-efa-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]'
@@ -536,10 +467,10 @@ jobs:
     with:
       test_suite_name: planner
       test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-v1 # TODO: CPU only DinD runner for dynamo repo
+      amd_runner: prod-tester-amd-v2
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_parallel_mode: none
@@ -618,26 +549,17 @@ jobs:
 
   vllm-copy-to-acr:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-build, vllm-test, vllm-unified-test]
-    if: |
-      always() &&
-      needs.vllm-build.result == 'success' &&
-      (needs.vllm-test.result == 'success' || needs.vllm-test.result == 'skipped') &&
-      (needs.vllm-unified-test.result == 'success' || needs.vllm-unified-test.result == 'skipped')
+    needs: [vllm-build]
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]' # Deploy tests only use CUDA 12
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
       copy_timeout_minutes: 20
     secrets: inherit
 
   vllm-dev-copy-to-acr:
     name: vllm-dev # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-dev-build]
-    if: |
-      always() &&
-      needs.vllm-dev-build.result == 'success'
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-dev-build.outputs.target_tag_plain }}
@@ -648,17 +570,11 @@ jobs:
 
   sglang-copy-to-acr:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [sglang-build, sglang-test, sglang-unified-test]
-    if: |
-      always() &&
-      needs.sglang-build.result == 'success' &&
-      (needs.sglang-test.result == 'success' || needs.sglang-test.result == 'skipped') &&
-      (needs.sglang-unified-test.result == 'success' || needs.sglang-unified-test.result == 'skipped')
+    needs: [sglang-build]
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]' # Deploy tests only use CUDA 12
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
       copy_timeout_minutes: 20
     secrets: inherit
 
@@ -678,17 +594,11 @@ jobs:
 
   trtllm-copy-to-acr:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [trtllm-build, trtllm-test, trtllm-unified-test]
-    if: |
-      always() &&
-      needs.trtllm-build.result == 'success' &&
-      (needs.trtllm-test.result == 'success' || needs.trtllm-test.result == 'skipped') &&
-      (needs.trtllm-unified-test.result == 'success' || needs.trtllm-unified-test.result == 'skipped')
+    needs: [trtllm-build]
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 20
     secrets: inherit
 
@@ -708,11 +618,7 @@ jobs:
 
   frontend-copy-to-acr:
     name: frontend # This name overlaps with other frontend jobs to group them in the UI
-    needs: [frontend-build, frontend-compliance]
-    if: |
-      always() &&
-      needs.frontend-build.result == 'success' &&
-      (needs.frontend-compliance.result == 'success' || needs.frontend-compliance.result == 'skipped')
+    needs: [frontend-build]
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
@@ -752,7 +658,7 @@ jobs:
     with:
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
-      image_suffix: vllm-runtime-cuda12
+      image_suffix: vllm-runtime-cuda13
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -764,7 +670,7 @@ jobs:
     with:
       framework: sglang
       profiles: '["agg", "agg_router"]'
-      image_suffix: sglang-runtime-cuda12
+      image_suffix: sglang-runtime-cuda13
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}

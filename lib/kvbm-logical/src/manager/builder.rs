@@ -6,17 +6,14 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use parking_lot::Mutex;
-
 use crate::metrics::{BlockPoolMetrics, MetricsAggregator, short_type_name};
-use crate::{BlockId, pools::backends::LineageBackend, tinylfu::TinyLFUTracker};
+use crate::{pools::backends::LineageBackend, tinylfu::TinyLFUTracker};
 
 use crate::{
-    blocks::{Block, BlockMetadata, state::Reset},
+    blocks::BlockMetadata,
     pools::{
-        ActivePool, BlockDuplicationPolicy, InactivePool, InactivePoolBackend, ResetPool,
-        ReusePolicy, SequenceHash,
-        backends::{HashMapBackend, LruBackend, MultiLruBackend},
+        BlockDuplicationPolicy, BlockStore, InactiveIndex,
+        backends::{FifoReusePolicy, HashMapBackend, LruBackend, MultiLruBackend},
     },
     registry::BlockRegistry,
 };
@@ -54,17 +51,17 @@ impl FrequencyTrackingCapacity {
 
 /// Configuration for the inactive pool backend.
 pub enum InactiveBackendConfig {
-    /// HashMap with configurable reuse policy
-    HashMap { reuse_policy: Box<dyn ReusePolicy> },
-    /// Simple LRU - capacity automatically set to block_count
+    /// HashMap with FIFO reuse order.
+    HashMap,
+    /// Simple LRU — capacity automatically set to block_count.
     Lru,
-    /// Multi-level LRU with 4 fixed levels - capacity automatically set to block_count
+    /// Multi-level LRU with 4 fixed levels — capacity automatically set to block_count.
     MultiLru {
-        /// Frequency thresholds: [cold->warm, warm->hot, hot->very_hot]
-        /// Default: [3, 8, 15]
+        /// Frequency thresholds: [cold->warm, warm->hot, hot->very_hot].
+        /// Default: [3, 8, 15].
         frequency_thresholds: [u8; 3],
     },
-    /// Lineage backend
+    /// Lineage backend.
     Lineage,
 }
 
@@ -111,6 +108,13 @@ pub struct BlockManagerConfigBuilder<T: BlockMetadata> {
     /// Optional metrics aggregator for prometheus export
     aggregator: Option<MetricsAggregator>,
 
+    /// Default value of the per-block `reset_on_release` flag. When
+    /// `Some(true)`, every `ImmutableBlock` constructed by this manager
+    /// starts with the flag set, so its last drop bypasses the inactive
+    /// pool and resets the slot directly. Individual blocks can still
+    /// override via [`ImmutableBlock::set_evict_on_reset`].
+    default_reset_on_release: Option<bool>,
+
     /// Phantom data for type parameter
     _phantom: std::marker::PhantomData<T>,
 }
@@ -124,6 +128,7 @@ impl<T: BlockMetadata> Default for BlockManagerConfigBuilder<T> {
             inactive_backend: None,
             duplication_policy: None,
             aggregator: None,
+            default_reset_on_release: None,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -241,9 +246,9 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         self
     }
 
-    /// Use HashMap backend with custom reuse policy.
-    pub fn with_hashmap_backend(mut self, reuse_policy: Box<dyn ReusePolicy>) -> Self {
-        self.inactive_backend = Some(InactiveBackendConfig::HashMap { reuse_policy });
+    /// Use HashMap backend with FIFO reuse order.
+    pub fn with_hashmap_backend(mut self) -> Self {
+        self.inactive_backend = Some(InactiveBackendConfig::HashMap);
         self
     }
 
@@ -258,6 +263,22 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
     /// The aggregator will automatically receive this manager's metrics source.
     pub fn aggregator(mut self, aggregator: MetricsAggregator) -> Self {
         self.aggregator = Some(aggregator);
+        self
+    }
+
+    /// Set the default value of the per-block `reset_on_release` flag.
+    ///
+    /// When `true`, every `ImmutableBlock` constructed by this manager
+    /// starts with the flag set. On its last drop, the slot bypasses
+    /// the inactive pool and is reset back to the free list directly
+    /// (matching `release_duplicate` semantics for primary releases).
+    ///
+    /// Individual blocks can still override via
+    /// [`crate::blocks::ImmutableBlock::set_evict_on_reset`].
+    ///
+    /// Default: `false`.
+    pub fn with_default_reset_on_release(mut self, value: bool) -> Self {
+        self.default_reset_on_release = Some(value);
         self
     }
 
@@ -329,18 +350,13 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         // Create metrics
         let metrics = Arc::new(BlockPoolMetrics::new(short_type_name::<T>()));
 
-        // Create reset pool
-        let blocks: Vec<Block<T, Reset>> = (0..block_count as BlockId)
-            .map(|id| Block::new(id, block_size))
-            .collect();
-        let reset_pool = ResetPool::new(blocks, block_size, Some(metrics.clone()));
         metrics.set_reset_pool_size(block_count as i64);
 
         // Create backend based on configuration
-        let backend: Box<dyn InactivePoolBackend<T>> = match self.inactive_backend.take() {
-            Some(InactiveBackendConfig::HashMap { reuse_policy }) => {
+        let backend: Box<dyn InactiveIndex> = match self.inactive_backend.take() {
+            Some(InactiveBackendConfig::HashMap) => {
                 tracing::info!("Using HashMap for inactive pool");
-                Box::new(HashMapBackend::new(reuse_policy))
+                Box::new(HashMapBackend::new(Box::new(FifoReusePolicy::new())))
             }
             Some(InactiveBackendConfig::Lru) => {
                 // Capacity automatically set to block_count
@@ -386,32 +402,13 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
             }
         };
 
-        // Create pools
-        let inactive_pool = InactivePool::new(backend, &reset_pool, Some(metrics.clone()));
-        let active_pool = ActivePool::new(registry.clone(), inactive_pool.return_fn());
-
-        // Create upgrade function that captures the necessary components
-        let registry_clone = registry.clone();
-        let inactive_pool_clone = inactive_pool.clone();
-        let return_fn_clone = inactive_pool.return_fn();
-        let upgrade_fn = Arc::new(
-            move |seq_hash: SequenceHash| -> Option<Arc<dyn crate::blocks::RegisteredBlock<T>>> {
-                // Try active pool first with touch=false (using registry directly)
-                if let Some(handle) = registry_clone.match_sequence_hash(seq_hash, false)
-                    && let Some(block) = handle.try_get_block::<T>(return_fn_clone.clone())
-                {
-                    return Some(block);
-                }
-                // Then try inactive pool with touch=false
-                if let Some(block) = inactive_pool_clone
-                    .find_blocks(&[seq_hash], false)
-                    .into_iter()
-                    .next()
-                {
-                    return Some(block);
-                }
-                None
-            },
+        // Construct unified store
+        let store = BlockStore::new(
+            block_count,
+            block_size,
+            backend,
+            metrics.clone(),
+            self.default_reset_on_release.unwrap_or(false),
         );
 
         // Register with aggregator if provided
@@ -420,15 +417,11 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
         }
 
         Ok(BlockManager {
-            reset_pool,
-            active_pool,
-            inactive_pool,
+            store,
             block_registry: registry,
             duplication_policy: self
                 .duplication_policy
                 .unwrap_or(BlockDuplicationPolicy::Allow),
-            upgrade_fn,
-            allocate_mutex: Mutex::new(()),
             total_blocks: block_count,
             block_size,
             metrics,

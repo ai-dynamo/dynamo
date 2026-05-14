@@ -20,7 +20,7 @@ Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-awa
 
 - If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
-- Currently, these setups are only tested with the kGateway Inference Gateway.
+- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation.
 
 ## Prerequisites
 
@@ -36,23 +36,23 @@ If you are installing from the source tree rather than a release chart, follow [
 
 ### 2. Deploy Inference Gateway ###
 
-First, deploy an inference gateway service. In this example, we'll install `kgateway` based gateway implementation.
+First, deploy an inference gateway service. In this example, we'll install agentgateway with the inference extension enabled.
 
 ```bash
 cd deploy/inference-gateway
 export NAMESPACE=my-model # You can put the inference gateway into another namespace and then adjust your http-route.yaml
-./scripts/install_gaie_crd_kgateway.sh
+./scripts/install_gaie_crd_agentgateway.sh
 ```
-**Note**: The manifest at `config/manifests/gateway/kgateway/gateway.yaml` uses `gatewayClassName: agentgateway`, but kGateway's helm chart creates a GatewayClass named `kgateway`. The patch command in the script fixes this mismatch.
+This script installs the Gateway API CRDs, the GAIE CRDs, agentgateway into `agentgateway-system`, and a `Gateway` named `inference-gateway` into `${NAMESPACE}`.
 
 #### f. Verify the Gateway is running
 
 ```bash
-kubectl get gateway inference-gateway
+kubectl get gateway inference-gateway -n ${NAMESPACE}
 
 # Sample output
 # NAME                CLASS      ADDRESS   PROGRAMMED   AGE
-# inference-gateway   kgateway             True         1m
+# inference-gateway   agentgateway   <none>   True         1m
 ```
 
 
@@ -114,8 +114,8 @@ Note that when deploying Dynamo with the Inference Gateway Extension each worker
 #### 5.a. Deploy as a DGD component (recommended)
 
 We provide an example for the Qwen vLLM below.
-You have to deploy the Dynamo Graph and the HttpRoute service.
-For the HttpRoute service make sure to specify the namespace where your gateway (i.e. kGateway was deployed) as shown below.
+You have to deploy the Dynamo Graph and the `HTTPRoute`.
+For the `HTTPRoute`, make sure `parentRefs.namespace` matches the namespace where your `Gateway` is deployed as shown below.
 ```bash
   parentRefs:
     - group: gateway.networking.k8s.io
@@ -126,7 +126,7 @@ For the HttpRoute service make sure to specify the namespace where your gateway 
 
 ```bash
 cd <dynamo-source-root>
-# kubectl get httproutes -n my-model # Make sure you do not have an incompatible HttpRoute running, delete if so.
+# kubectl get httproutes -n my-model # Make sure you do not have an incompatible HTTPRoute running, delete if so.
 # Choose disagg or agg example
 kubectl apply -f examples/backends/vllm/deploy/gaie/disagg.yaml -n my-model
 # or
@@ -155,7 +155,7 @@ Use the proper folder in commands below.
 
 # agg
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml -n ${NAMESPACE}
-# Deploy the GAIE http-route CR. Adjust parentRefs.namespace in this file first to point where your gateway is.
+# Deploy the GAIE http-route CR. Adjust parentRefs.namespace in this file first to point to the namespace where your Gateway is deployed.
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/http-route.yaml -n ${NAMESPACE}
 
 # or disagg
@@ -169,7 +169,7 @@ kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/http-route.yam
 
 ```yaml
 frontendSidecar:
-  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
+  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
   args:
     - --router-mode
     - direct
@@ -191,9 +191,8 @@ extraPodSpec:
 ```
 
 **Gateway Namespace**
-Note that this assumes your gateway is installed into `NAMESPACE=my-model` (examples' default)
-If you installed it into a different namespace, you need to adjust the HttpRoute entry in `http-route.yaml`.
-
+Note that this assumes your `Gateway` is installed into `NAMESPACE=my-model`. If you installed it into a
+different namespace, update your `http-route.yaml`.
 
 #### 5.b. Deploy as a standalone pod
 
@@ -252,15 +251,15 @@ To disable the EPP from listening for KV events (e.g., when prefix caching is of
 
 1. **EPP:** Set `DYN_USE_KV_EVENTS=false`. The router falls back to approximate mode (routing decisions are tracked locally with TTL decay instead of live KV events from workers).
 2. **Workers:** Pass `--no-enable-prefix-caching` to disable prefix caching entirely. Without prefix caching, no KV events are generated regardless of other flags.
-3. **Optionally** set `DYN_OVERLAP_SCORE_WEIGHT=0` on the EPP to skip prefix-overlap scoring altogether, making the router select workers based on load only.
+3. **Optionally** set `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT=0` on the EPP to skip prefix-overlap scoring altogether, making the router select workers based on load only.
 
 - Set `DYN_BUSY_THRESHOLD` to configure the upper bound on how "full" a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
 - Set `DYN_ENFORCE_DISAGG=true` (default: `false`) to control per-request behavior when prefill workers are unavailable:
   - **`true` (recommended for disaggregated serving):** Requests fail with an error if prefill workers are not available. Use this when disaggregated serving is required and aggregated fallback is not acceptable.
   - **`false` (default):** Requests gracefully fall back to aggregated mode (skip prefill, route directly to decode) when prefill workers are not available. When prefill workers appear later, subsequent requests automatically use disaggregated routing.
-- Set `DYN_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes. (default: 1)
-- Set `DYN_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
-- `DYN_ROUTER_TEMPERATURE` — Temperature for worker sampling via softmax (default: 0.0)
+- Set `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` to control the device-local prefix-overlap credit multiplier, from 0.0 to 1.0. Higher values bias toward reusing workers with similar cached prefixes. (default: 1)
+- Set `DYN_ROUTER_PREFILL_LOAD_SCALE` to scale adjusted prompt-side prefill load before decode blocks are added. (default: 1)
+- Set `DYN_ROUTER_TEMPERATURE` (default: `0.0`) to soften or sharpen normalized worker sampling. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
 - `DYN_ROUTER_REPLICA_SYNC` — Enable replica synchronization (default: false)
 - `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` — Track active blocks (default: true)
 - `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` — Track output blocks during generation (default: false)
@@ -326,10 +325,10 @@ If you are **not** using the Dynamo operator's Helm chart, you must create this 
 Check that all resources are properly deployed:
 
 ```bash
-kubectl get inferencepool
-kubectl get httproute
-kubectl get service
-kubectl get gateway
+kubectl get inferencepool -n ${NAMESPACE}
+kubectl get httproute -n ${NAMESPACE}
+kubectl get service -n ${NAMESPACE}
+kubectl get gateway -n ${NAMESPACE}
 ```
 
 Sample output:
@@ -368,7 +367,7 @@ use port-forward to expose the gateway to the host
 
 ```bash
 # in first terminal
-kubectl port-forward svc/inference-gateway 8000:80 -n ${NAMESPACE} # for NAMESPACE put wherever you installed the gateway i.e. kgateway-system or my-model
+kubectl port-forward svc/inference-gateway 8000:80 -n ${NAMESPACE} # for NAMESPACE use the namespace where the Gateway service was created, for example my-model
 
 # in second terminal where you want to send inference requests
 GATEWAY_URL=http://localhost:8000
@@ -475,8 +474,8 @@ Sample inference output:
 }
 ```
 
-***If you have more than one HttpRoute running on the cluster***
-Add the host to your HttpRoute.yaml and add the header
+***If you have more than one HTTPRoute running on the cluster***
+Add the host to your `http-route.yaml` and add the header
 `curl -H "Host: llama3-70b-agg.example.com" ...` or `curl -H "Host: llama3-70b-disagg.example.com" http://localhost:8000/v1/models`
 
 ```bash
@@ -497,20 +496,19 @@ helm uninstall dynamo-gaie -n my-model
 # 1. Delete the inference-gateway
 kubectl delete gateway inference-gateway --ignore-not-found
 
-# 2. Uninstall kgateway helm releases
-helm uninstall kgateway -n kgateway-system
-helm uninstall kgateway-crds -n kgateway-system
+# 2. Uninstall agentgateway helm releases
+helm uninstall agentgateway -n agentgateway-system
+helm uninstall agentgateway-crds -n agentgateway-system
 
-# 3. Delete the kgateway-system namespace (optional, cleans up everything in it)
-helm uninstall kgateway --namespace kgateway-system
-kubectl delete namespace kgateway-system --ignore-not-found
+# 3. Delete the agentgateway-system namespace (optional, cleans up everything in it)
+kubectl delete namespace agentgateway-system --ignore-not-found
 
 # 4. Delete the Inference Extension CRDs
 IGW_LATEST_RELEASE=v1.5.0-rc.2
 kubectl delete -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml --ignore-not-found
 
 # 5. Delete the Gateway API CRDs
-GATEWAY_API_VERSION=v1.4.1
+GATEWAY_API_VERSION=v1.5.1
 kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml --ignore-not-found
 ```
 
