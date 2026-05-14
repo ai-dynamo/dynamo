@@ -373,6 +373,15 @@ class VllmProcessor:
             v = getattr(request_for_sampling, k, None)
             if v is not None:
                 setattr(sampling_params, k, v)
+        # nvext.max_thinking_tokens is not on vllm.ChatCompletionRequest, so the
+        # loop above can't pick it up. Apply it here; vLLM's builtin thinking-
+        # budget logits processor enforces it, and the value also flows into
+        # dynamo_preproc.stop_conditions below.
+        nvext_max_thinking = (request.get("nvext") or {}).get("max_thinking_tokens")
+        if nvext_max_thinking is not None and hasattr(
+            sampling_params, "thinking_token_budget"
+        ):
+            sampling_params.thinking_token_budget = nvext_max_thinking
         logprobs = request_for_sampling.logprobs
         top_logprobs = request_for_sampling.top_logprobs
         if logprobs is True:

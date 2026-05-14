@@ -279,18 +279,18 @@ def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
 
 
 @pytest.mark.timeout(120)
-def test_vllm_chat_processor_forwards_thinking_token_budget(
+def test_vllm_chat_processor_forwards_max_thinking_tokens(
     start_services: tuple[int, Path],
 ) -> None:
-    """vLLM-native `thinking_token_budget` reaches the worker as
-    `stop_conditions.max_thinking_tokens` after the Python frontend processes it."""
+    """nvext.max_thinking_tokens reaches the worker as
+    stop_conditions.max_thinking_tokens after the Python frontend processes it."""
     frontend_port, capture_path = start_services
 
     payload = {
         "model": TEST_MODEL,
         "messages": [{"role": "user", "content": "Solve: 1+1."}],
         "max_tokens": 32,
-        "thinking_token_budget": 16,
+        "nvext": {"max_thinking_tokens": 16},
     }
 
     response = requests.post(
