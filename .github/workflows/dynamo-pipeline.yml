@@ -107,34 +107,11 @@ jobs:
         USER: dynamo
         CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_rust_dynamo
     timeout-minutes: 30
-    # env:
-    #   CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_rust_dynamo
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
-      # - name: Calculate runtime image tag
-      #   id: image
-      #   shell: bash
-      #   env:
-      #     ECR_REPOSITORY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
-      #   run: |
-      #     CUDA_VERSION="${{ inputs.cuda_version }}"
-      #     CUDA_MAJOR=${CUDA_VERSION%%.*}
-      #     SOURCE_SHA=${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
-      #     # IMAGE_TAG=${SOURCE_SHA}-${{ needs.image.outputs.target_tag_plain }}-cuda${CUDA_MAJOR}
-      #     IMAGE_TAG=5ce55e4f7cbdb5f6719237e9f4976f3b699a2571-dynamo-runtime-cuda12-test
-      #     echo "runtime_image=${ECR_REPOSITORY}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
-      # - name: Docker Login
-      #   uses: ./.github/actions/docker-login
-      #   with:
-      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      # - name: Pull runtime image
-      #   run: |
-      #     source ./.github/scripts/retry_docker.sh
-      #     retry_pull ${{ steps.image.outputs.runtime_image }}
       - name: Select cargo target dir (prefer NVMe scratch)
         shell: bash
         run: |
@@ -147,6 +124,35 @@ jobs:
           mkdir -p "${CARGO_TARGET_DIR}"
           echo "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}" >> "$GITHUB_ENV"
 
+      - name: Diagnose cargo environment
+        shell: bash
+        run: |
+          echo "=== runner identity ==="
+          id
+          echo "HOME=$HOME  USER=$USER"
+
+          echo "=== /scratch + /tmp filesystem ==="
+          df -hT /scratch /tmp /__w 2>/dev/null || true
+          mount | grep -E '/scratch|/tmp' || true
+
+          echo "=== CARGO_HOME resolution ==="
+          echo "CARGO_HOME env: ${CARGO_HOME:-<unset>}"
+          ls -la /opt/dynamo/.cargo 2>/dev/null || echo "no /opt/dynamo/.cargo"
+          ls -la "$HOME/.cargo"     2>/dev/null || echo "no $HOME/.cargo"
+          if [[ -d /opt/dynamo/.cargo ]]; then
+            test -w /opt/dynamo/.cargo \
+              && echo "/opt/dynamo/.cargo writable by $(id -un)" \
+              || echo "/opt/dynamo/.cargo NOT writable by $(id -un)"
+          fi
+
+          echo "=== rustup state ==="
+          which rustup cargo rustc || true
+          rustup show 2>/dev/null | head -40 || true
+          rustup component list --installed 2>/dev/null | head || true
+
+          echo "=== /opt/dynamo/target ownership (sanity) ==="
+          ls -ld /opt/dynamo/target /opt/dynamo/target/debug /opt/dynamo/target/release 2>/dev/null || true
+
       - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
         working-directory: /workspace/lib/llm
         env:
@@ -156,12 +162,18 @@ jobs:
         run: |
           /workspace/container/use-sccache.sh install
           eval $(/workspace/container/use-sccache.sh setup-env)
-          rustup component add rustfmt clippy
-          cargo fmt -- --check
-          cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings
-          cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture
-          cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
-          cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
+          /workspace/container/use-sccache.sh show-stats "before checks"
+
+          time rustup component add rustfmt clippy
+          time cargo fmt -- --check
+          time cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings
+          /workspace/container/use-sccache.sh show-stats "after clippy llm"
+
+          time cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture
+          /workspace/container/use-sccache.sh show-stats "after test llm"
+
+          time cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
+          time cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
 
   # mypy:
