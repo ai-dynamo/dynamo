@@ -106,8 +106,16 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
             //     the closing '}' of each complete object.
             let mut remaining = s.trim_start();
             while !remaining.is_empty() {
-                match serde_json::from_str::<Box<RawValue>>(remaining) {
-                    Ok(rv) => {
+                // Use StreamDeserializer (.into_iter().next()) rather than
+                // from_str so the parse succeeds even when there is trailing
+                // non-JSON text after the closing '}' — e.g.
+                //   {"name":"q","arguments":{}} Let me know if you need more
+                // from_str would Err on the trailing text; StreamDeserializer
+                // reads one value and stops.
+                let mut stream = serde_json::Deserializer::from_str(remaining)
+                    .into_iter::<Box<RawValue>>();
+                match stream.next() {
+                    Some(Ok(rv)) => {
                         let raw = rv.get();
                         if raw.is_empty() {
                             break; // defensive: zero-advance guard
@@ -125,7 +133,7 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
                             break; // no separator → only one object or done
                         }
                     }
-                    Err(_) => break, // malformed remainder — stop
+                    _ => break, // None (end of input) or Some(Err(_)) (malformed)
                 }
             }
         } else if s.starts_with('[') {
