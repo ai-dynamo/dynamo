@@ -573,6 +573,52 @@ def _compute_pareto_and_save(
     return raw_path, pareto_path, len(raw_df), len(pareto_df)
 
 
+def compute_top_n(
+    rows: list[dict], *, ttft: float, tpot: float, top_n: int
+) -> pd.DataFrame:
+    """Top-N deployable recommendations: STRICT SLA-pass, sorted by tok/s/gpu.
+
+    Always enforces both TTFT and TPOT (unlike the Pareto front, which can
+    optionally relax TPOT via --strict-sla). The top-N is the practitioner's
+    answer to "if I had to pick N configs to deploy, which?".
+    """
+    df = pd.DataFrame(rows)
+    cand = df.dropna(subset=["tokens/s/user", "tokens/s/gpu"])
+    cand = cand[(cand["ttft_ms"] <= ttft) & (cand["tpot_ms"] <= tpot)]
+    return cand.sort_values("tokens/s/gpu", ascending=False).head(top_n)
+
+
+def _format_top_n(top: pd.DataFrame, *, label: str, is_disagg: bool) -> str:
+    if top.empty:
+        return (
+            f"\n=== Top recommendations ({label}) ===\n  (no SLA-compliant configs)\n"
+        )
+    lines = [f"\n=== Top {len(top)} recommendations ({label}) ==="]
+    for rank, (_, r) in enumerate(top.iterrows(), start=1):
+        if is_disagg:
+            lines.append(
+                f"  #{rank}: "
+                f"P[tp={int(r['p_tp'])} dp={int(r['p_dp'])} "
+                f"moe_tp={int(r['p_moe_tp'])} moe_ep={int(r['p_moe_ep'])} "
+                f"bs={int(r['p_bs'])} w={int(r['p_workers'])}] "
+                f"D[tp={int(r['d_tp'])} dp={int(r['d_dp'])} "
+                f"moe_tp={int(r['d_moe_tp'])} moe_ep={int(r['d_moe_ep'])} "
+                f"bs={int(r['d_bs'])} w={int(r['d_workers'])}] "
+                f"gpus={int(r['total_gpus'])} | "
+                f"TTFT={r['ttft_ms']:.0f}ms TPOT={r['tpot_ms']:.1f}ms | "
+                f"tok/s/user={r['tokens/s/user']:.2f} tok/s/gpu={r['tokens/s/gpu']:.1f}"
+            )
+        else:
+            lines.append(
+                f"  #{rank}: tp={int(r['tp'])} dp={int(r['dp'])} "
+                f"moe_tp={int(r['moe_tp'])} moe_ep={int(r['moe_ep'])} bs={int(r['bs'])} "
+                f"gpus={int(r['num_gpus'])} | "
+                f"TTFT={r['ttft_ms']:.0f}ms TPOT={r['tpot_ms']:.1f}ms | "
+                f"tok/s/user={r['tokens/s/user']:.2f} tok/s/gpu={r['tokens/s/gpu']:.1f}"
+            )
+    return "\n".join(lines) + "\n"
+
+
 def sweep_pareto(args: argparse.Namespace) -> dict[str, Path]:
     """Run the mocker sweep(s) per ``args.mode`` and write CSVs."""
     save_dir = Path(args.save_dir)
@@ -623,6 +669,13 @@ def sweep_pareto(args: argparse.Namespace) -> dict[str, Path]:
         print(f"\nWrote {n_raw} agg raw points to {raw_p}")
         print(f"Wrote {n_pareto} agg pareto points to {pareto_p}")
 
+        top = compute_top_n(agg_rows, ttft=args.ttft, tpot=args.tpot, top_n=args.top_n)
+        top_path = save_dir / "best_topn_mocker.csv"
+        top.to_csv(top_path, index=False)
+        outputs["top_n"] = top_path
+        print(_format_top_n(top, label="mocker agg", is_disagg=False))
+        print(f"Wrote top-{args.top_n} mocker agg recommendations to {top_path}")
+
     if args.mode in ("disagg", "both"):
         print("\n=== DISAGG SWEEP ===")
         disagg_points = _derive_disagg_grid(grid, args.total_gpus)
@@ -648,6 +701,15 @@ def sweep_pareto(args: argparse.Namespace) -> dict[str, Path]:
         outputs["pareto_disagg"] = pareto_p
         print(f"\nWrote {n_raw} disagg raw points to {raw_p}")
         print(f"Wrote {n_pareto} disagg pareto points to {pareto_p}")
+
+        top = compute_top_n(
+            disagg_rows, ttft=args.ttft, tpot=args.tpot, top_n=args.top_n
+        )
+        top_path = save_dir / "best_topn_mocker_disagg.csv"
+        top.to_csv(top_path, index=False)
+        outputs["top_n_disagg"] = top_path
+        print(_format_top_n(top, label="mocker disagg", is_disagg=True))
+        print(f"Wrote top-{args.top_n} mocker disagg recommendations to {top_path}")
 
     return outputs
 
@@ -715,6 +777,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=max(1, (os.cpu_count() or 2) // 2),
         help="Number of worker processes for the mocker sweep "
         "(default: half of os.cpu_count). Use 1 for serial.",
+    )
+    p.add_argument(
+        "--top-n",
+        type=int,
+        default=5,
+        help="Write top-N STRICT-SLA-passing configs (sorted by tok/s/gpu) "
+        "to best_topn_mocker[_disagg].csv and echo to stdout (default: 5). "
+        "Matches AIC's `aiconfigurator cli default --top-n` semantics.",
     )
     return p
 

@@ -31,17 +31,37 @@ this tool don't have to relearn anything.
 ## Outputs (in `--save-dir`)
 
 ```
-raw_mocker.csv      every mocker-evaluated (parallelism, bs) point
-pareto_mocker.csv   mocker's Pareto-front subset (under TTFT/TPOT SLA)
-raw_aic.csv         every AIC-evaluated (parallelism, bs) point
-pareto_aic.csv      AIC's Pareto-front subset
-pareto_plot.png     dual-curve plot (AIC blue / mocker orange)
-sweep_meta.json     invocation args + AIC + mocker version pins
+raw_mocker.csv             every mocker-evaluated (parallelism, bs) point
+pareto_mocker.csv          mocker's Pareto-front subset (under TTFT/TPOT SLA)
+best_topn_mocker.csv       top-N STRICT-SLA configs by tok/s/gpu (mocker)
+raw_aic.csv                every AIC-evaluated point
+pareto_aic.csv             AIC's Pareto-front subset
+best_topn_aic.csv          top-N STRICT-SLA configs by tok/s/gpu (AIC)
+pareto_plot.png            dual-curve plot (AIC blue / mocker orange)
+sweep_meta.json            invocation args + AIC + mocker version pins
 ```
 
+When `--mode {disagg, both}`, the same set is also written with a
+`_disagg` suffix (`raw_mocker_disagg.csv`, etc.).
+
 Axes are `tokens/s/user` (X) vs `tokens/s/gpu` (Y), matching AIC's own
-`pareto_frontier.png` convention. SLA filtering: TTFT is always enforced;
-pass `--strict-sla` to also enforce TPOT.
+`pareto_frontier.png` convention. SLA filtering: TTFT is always enforced
+for the Pareto; pass `--strict-sla` to also enforce TPOT on the Pareto.
+The **top-N CSVs always enforce both TTFT and TPOT strictly** — the top-N is
+the practitioner's "which configs would I actually deploy?" answer.
+
+## Top-N recommendations
+
+By default both scripts also emit a top-`N` list of the SLA-compliant
+configurations ranked by `tokens/s/gpu`, matching the semantics of
+`aiconfigurator cli default --top-n`. Configure with `--top-n N` (default
+`5`). Echoed to stdout as e.g.
+
+```
+=== Top 5 recommendations (mocker agg) ===
+  #1: tp=8 dp=1 moe_tp=8 moe_ep=1 bs=32 gpus=8 | TTFT=739ms TPOT=45.6ms | tok/s/user=22.62 tok/s/gpu=86.4
+  ...
+```
 
 ## Current limitations (v1)
 

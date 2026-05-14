@@ -63,6 +63,8 @@ from dynamo.replay.pareto import (
     _derive_disagg_grid,
     _derive_parallel_grid,
     _detect_is_moe,
+    _format_top_n,
+    compute_top_n,
     sweep_pareto,
 )
 
@@ -482,6 +484,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=max(1, (os.cpu_count() or 2) // 2),
         help="Worker processes for the mocker sweep (default: half of cpu_count).",
     )
+    p.add_argument(
+        "--top-n",
+        type=int,
+        default=5,
+        help="Write top-N STRICT-SLA-passing configs (sorted by tok/s/gpu) "
+        "to best_topn_{mocker,aic}[_disagg].csv and echo to stdout (default: 5).",
+    )
     return p
 
 
@@ -544,6 +553,14 @@ def main(argv: list[str] | None = None) -> int:
             aic_raw_agg=len(aic_raw),
             aic_pareto_agg=len(aic_pareto),
         )
+        aic_top = compute_top_n(
+            aic_raw.to_dict(orient="records"),
+            ttft=args.ttft,
+            tpot=args.tpot,
+            top_n=args.top_n,
+        )
+        aic_top.to_csv(save_dir / "best_topn_aic.csv", index=False)
+        print(_format_top_n(aic_top, label="AIC agg", is_disagg=False))
 
     if args.mode in ("disagg", "both"):
         mocker_raw_d = pd.read_csv(save_dir / "raw_mocker_disagg.csv")
@@ -557,6 +574,14 @@ def main(argv: list[str] | None = None) -> int:
             aic_raw_disagg=len(aic_raw_d),
             aic_pareto_disagg=len(aic_pareto_d),
         )
+        aic_top_d = compute_top_n(
+            aic_raw_d.to_dict(orient="records"),
+            ttft=args.ttft,
+            tpot=args.tpot,
+            top_n=args.top_n,
+        )
+        aic_top_d.to_csv(save_dir / "best_topn_aic_disagg.csv", index=False)
+        print(_format_top_n(aic_top_d, label="AIC disagg", is_disagg=True))
 
     plot_path = save_dir / "pareto_plot.png"
     title = (
