@@ -388,7 +388,7 @@ When resources become constrained, the mocker simulates the engine's real recove
 
 ### KV Block Manager
 
-The mocker's KV block manager is now built on [`kvbm-logical::BlockManager<G1>`](../../lib/kvbm-logical/), the same logical block manager the real Dynamo runtime uses. The mocker wraps it in [`lib/mocker/src/kv_manager/kvbm_backend.rs`](../../lib/mocker/src/kv_manager/kvbm_backend.rs) and translates its own `MoveBlock` protocol onto kvbm-logical's RAII lifecycle (`allocate → stage → register → drop`).
+The mocker's KV block manager is now built on [`kvbm-logical::BlockManager<G1>`](https://github.com/ai-dynamo/dynamo/tree/main/lib/kvbm-logical), the same logical block manager the real Dynamo runtime uses. The mocker wraps it in [`lib/mocker/src/kv_manager/kvbm_backend.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/mocker/src/kv_manager/kvbm_backend.rs) and translates its own `MoveBlock` protocol onto kvbm-logical's RAII lifecycle (`allocate → stage → register → drop`).
 
 Blocks still conceptually live in one of two pools:
 

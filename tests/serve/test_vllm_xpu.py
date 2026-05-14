@@ -21,6 +21,7 @@ from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_b
 from tests.serve.lora_utils import MinioLoraConfig
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.multimodal import IMAGE_COLOR_PROMPT
 from tests.utils.payload_builder import (
     cached_tokens_chat_payload,
     chat_payload,
@@ -30,7 +31,6 @@ from tests.utils.payload_builder import (
     completion_payload_with_logprobs,
     metric_payload_default,
 )
-from tests.utils.multimodal import IMAGE_COLOR_PROMPT
 from tests.utils.payloads import LoraTestChatPayload, ToolCallingChatPayload
 
 logger = logging.getLogger(__name__)
