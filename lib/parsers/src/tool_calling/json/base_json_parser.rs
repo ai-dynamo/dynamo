@@ -99,12 +99,19 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
         }
         // Only consider segments that start like JSON (objects or arrays)
         if s.starts_with('{') {
-            // Trim trailing non-JSON by cutting at the last closing brace
-            if let Some(pos) = s.rfind('}') {
-                let candidate = &s[..=pos].trim();
-                // Keep only valid JSON candidates
-                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
-                    items.push(candidate.to_string());
+            // Llama 3.x emits parallel calls as semicolon-separated JSON objects:
+            // {"name":"fn1","arguments":{}};{"name":"fn2","arguments":{}}
+            // Split on ';' to isolate each individual call before JSON parsing.
+            for chunk in s.split(';') {
+                let trimmed_chunk = chunk.trim();
+                if trimmed_chunk.is_empty() {
+                    continue;
+                }
+                if let Some(pos) = trimmed_chunk.rfind('}') {
+                    let candidate = &trimmed_chunk[..=pos].trim();
+                    if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                        items.push(candidate.to_string());
+                    }
                 }
             }
         } else if s.starts_with('[') {
