@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use dynamo_kv_router::protocols::Taints as RsTaints;
 use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
-use llm_rs::protocols::Taints as RsTaints;
 
 #[pyclass]
 #[derive(Clone, Debug, Default)]
