@@ -9,11 +9,17 @@ use utoipa::ToSchema;
 use validator::{Validate, ValidationError};
 
 pub use crate::agents::context::AgentContext;
+use crate::protocols::TokenIdType;
+pub use crate::protocols::common::llm_backend::PromptLogprobs;
 pub use crate::protocols::common::timing::TimingInfo;
 
 pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
 pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
 pub const HEADER_DP_RANK: &str = "x-dp-rank";
+/// rl-sdk-2 TITO parity: prime-rl's HTTP client sends data-parallel rank as
+/// `X-data-parallel-rank` (verifiers ClientConfig). Accepted as an alias of
+/// `x-dp-rank` so existing prime-rl clients work unchanged.
+pub const HEADER_DP_RANK_ALIAS: &str = "x-data-parallel-rank";
 pub const HEADER_PREFILL_DP_RANK: &str = "x-prefill-dp-rank";
 const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 
@@ -38,8 +44,13 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
+    // rl-sdk-2 TITO parity (Step A6): accept `X-data-parallel-rank` as an
+    // alias for `x-dp-rank`. Verifiers' ClientConfig sets the alias header
+    // when prime-rl targets a specific DP rank; without this fallback the
+    // routing hint silently drops on rl-sdk-2.
     let dp_rank = headers
         .get(HEADER_DP_RANK)
+        .or_else(|| headers.get(HEADER_DP_RANK_ALIAS))
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
 
@@ -129,6 +140,28 @@ pub struct NvExtResponse {
     /// If `n > 1` is supported here, this needs an indexed/per-choice shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<serde_json::Value>,
+
+    /// rl-sdk-2 TITO parity: engine-emitted output token IDs (top-level shape).
+    ///
+    /// Populated when the request set `nvext.extra_fields = ["completion_token_ids"]`.
+    /// For streaming, each chunk carries the **delta** token IDs for that chunk
+    /// only (not cumulative) — invariant documented on
+    /// `NvExtResponseFieldSelection::completion_token_ids`. For non-streaming,
+    /// this is the concatenation of all chunk deltas.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_token_ids: Option<Vec<TokenIdType>>,
+
+    /// rl-sdk-2 TITO parity: per-prompt-token top-k logprobs.
+    ///
+    /// Populated on the **final** chunk only (chunks with
+    /// `finish_reason.is_some()`) when the request set
+    /// `nvext.extra_fields = ["prompt_logprobs"]` AND the engine adapter
+    /// populated `LLMEngineOutput.prompt_logprobs`. The shape mirrors vLLM's
+    /// `RequestOutput.prompt_logprobs`: `[None, {tok_id: {logprob, ...}}, ...]`.
+    /// Prime-rl's parser at `orchestrator/utils.py:compute_teacher_logprobs`
+    /// reads `.logprob` of each entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_logprobs: Option<PromptLogprobs>,
 }
 
 pub(crate) fn merge_response_nvext(
@@ -141,7 +174,35 @@ pub(crate) fn merge_response_nvext(
 
     match (target.as_mut(), incoming) {
         (Some(serde_json::Value::Object(target_obj)), serde_json::Value::Object(incoming_obj)) => {
-            target_obj.extend(incoming_obj);
+            // rl-sdk-2 TITO parity (Step A9 — aggregator side): per-chunk
+            // streaming response carries DELTA token IDs; the SSE-to-single
+            // response aggregator must CONCATENATE rather than overwrite for
+            // `completion_token_ids`. Same for `prompt_logprobs` (though that
+            // one is emitted on the final chunk only, so concatenation is a
+            // no-op in the steady state — defensive anyway). All other keys
+            // keep "later wins" semantics.
+            for (key, value) in incoming_obj {
+                match key.as_str() {
+                    "completion_token_ids" => {
+                        let entry = target_obj
+                            .entry(&key)
+                            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+                        if let (serde_json::Value::Array(acc), serde_json::Value::Array(new)) =
+                            (entry, value)
+                        {
+                            acc.extend(new);
+                        }
+                    }
+                    "prompt_logprobs" => {
+                        // Final-chunk-only on the producer side, so on collision
+                        // we keep the latest (which is the one with finish_reason).
+                        target_obj.insert(key, value);
+                    }
+                    _ => {
+                        target_obj.insert(key, value);
+                    }
+                }
+            }
         }
         (_, incoming) => {
             *target = Some(incoming);
@@ -165,6 +226,15 @@ pub struct NvExtResponseFieldSelection {
     pub routed_experts: bool,
     pub engine_data: bool,
     pub stop_reason: bool,
+    /// rl-sdk-2 TITO parity: emit per-chunk delta `completion_token_ids` and
+    /// the final concatenated list on the aggregated response. Wire-level
+    /// invariant for streaming: each chunk carries the **delta** tokens for
+    /// that chunk only (matches vLLM `RequestOutputKind::DELTA`).
+    pub completion_token_ids: bool,
+    /// rl-sdk-2 TITO parity: emit `nvext.prompt_logprobs` on the final chunk
+    /// only. Inert unless the engine adapter actually populated
+    /// `LLMEngineOutput.prompt_logprobs`.
+    pub prompt_logprobs: bool,
 }
 
 impl NvExtResponseFieldSelection {
@@ -182,6 +252,8 @@ impl NvExtResponseFieldSelection {
                     "routed_experts" => selection.routed_experts = true,
                     "engine_data" => selection.engine_data = true,
                     "stop_reason" => selection.stop_reason = true,
+                    "completion_token_ids" => selection.completion_token_ids = true,
+                    "prompt_logprobs" => selection.prompt_logprobs = true,
                     _ => {}
                 }
             }
@@ -222,6 +294,9 @@ impl NvExtResponseFieldSelection {
         finish_reason_present: bool,
         engine_data_from_backend: Option<serde_json::Value>,
         stop_reason_from_backend: Option<StopReason>,
+        // rl-sdk-2 TITO parity additions:
+        completion_token_ids_from_backend: Option<&[TokenIdType]>,
+        prompt_logprobs_from_backend: Option<PromptLogprobs>,
     ) -> Option<NvExtResponse> {
         let worker_id = if self.worker_id {
             tracker.and_then(|t| t.get_worker_info())
@@ -263,12 +338,34 @@ impl NvExtResponseFieldSelection {
             None
         };
 
+        // rl-sdk-2 TITO parity: emit `completion_token_ids` on every chunk
+        // when the client asked for it. Streaming: per-chunk deltas only —
+        // the caller passes the chunk's `BackendOutput.token_ids` slice.
+        // Aggregator: passes the concatenated list. Either way, this helper
+        // is a pure pass-through (no accumulation done here).
+        let completion_token_ids = if self.completion_token_ids {
+            completion_token_ids_from_backend.map(<[u32]>::to_vec)
+        } else {
+            None
+        };
+
+        // rl-sdk-2 TITO parity: emit `prompt_logprobs` on the **final** chunk
+        // only. Prompt logprobs are produced once for the whole prompt by the
+        // engine and we don't want to repeat them on every streaming chunk.
+        let prompt_logprobs = if self.prompt_logprobs && finish_reason_present {
+            prompt_logprobs_from_backend
+        } else {
+            None
+        };
+
         if worker_id.is_none()
             && token_ids.is_none()
             && routed_experts.is_none()
             && timing.is_none()
             && engine_data.is_none()
             && stop_reason.is_none()
+            && completion_token_ids.is_none()
+            && prompt_logprobs.is_none()
         {
             return None;
         }
@@ -280,6 +377,8 @@ impl NvExtResponseFieldSelection {
             routed_experts,
             engine_data,
             stop_reason,
+            completion_token_ids,
+            prompt_logprobs,
         })
     }
 }
@@ -807,12 +906,12 @@ mod tests {
     fn test_build_response_nvext_all_false_returns_none() {
         let sel = sel_all_false();
         assert!(
-            sel.build_response_nvext(None, None, false, None, None)
+            sel.build_response_nvext(None, None, false, None, None, None, None)
                 .is_none(),
             "no fields selected → None"
         );
         assert!(
-            sel.build_response_nvext(None, None, true, None, None)
+            sel.build_response_nvext(None, None, true, None, None, None, None)
                 .is_none(),
             "finish_reason alone does not force emission"
         );
@@ -828,7 +927,7 @@ mod tests {
 
         // finish_reason=false: worker_id still emitted (only timing is finish-gated).
         let out = sel
-            .build_response_nvext(Some(&tracker), None, false, None, None)
+            .build_response_nvext(Some(&tracker), None, false, None, None, None, None)
             .expect("worker_id should emit regardless of finish_reason");
 
         assert!(out.worker_id.is_some());
@@ -847,7 +946,7 @@ mod tests {
 
         // timing alone + finish_reason=false → nothing to emit, returns None.
         assert!(
-            sel.build_response_nvext(Some(&tracker), None, false, None, None)
+            sel.build_response_nvext(Some(&tracker), None, false, None, None, None, None)
                 .is_none(),
             "timing is gated on finish_reason_present"
         );
@@ -862,7 +961,7 @@ mod tests {
         let tracker = tracker_with_prefill_worker();
 
         let out = sel
-            .build_response_nvext(Some(&tracker), None, true, None, None)
+            .build_response_nvext(Some(&tracker), None, true, None, None, None, None)
             .expect("timing should emit on finish");
 
         assert!(out.timing.is_some());
@@ -879,7 +978,7 @@ mod tests {
         };
         // finish=true but no tracker → timing not populated → None.
         assert!(
-            sel.build_response_nvext(None, None, true, None, None)
+            sel.build_response_nvext(None, None, true, None, None, None, None)
                 .is_none()
         );
     }
@@ -893,7 +992,7 @@ mod tests {
         let params = disagg_params_full();
 
         let out = sel
-            .build_response_nvext(None, Some(&params), false, None, None)
+            .build_response_nvext(None, Some(&params), false, None, None, None, None)
             .expect("token_ids should emit when present");
 
         assert_eq!(out.token_ids, Some(vec![11u32, 22, 33]));
@@ -912,7 +1011,7 @@ mod tests {
         let params = serde_json::json!({ "token_ids": "not-an-array" });
 
         assert!(
-            sel.build_response_nvext(None, Some(&params), false, None, None)
+            sel.build_response_nvext(None, Some(&params), false, None, None, None, None)
                 .is_none(),
             "malformed token_ids silently suppressed; nothing else selected → None"
         );
@@ -927,7 +1026,7 @@ mod tests {
         let params = disagg_params_full();
 
         let out = sel
-            .build_response_nvext(None, Some(&params), false, None, None)
+            .build_response_nvext(None, Some(&params), false, None, None, None, None)
             .expect("routed_experts should emit when present");
 
         assert_eq!(
@@ -950,6 +1049,8 @@ mod tests {
                 true,
                 None,
                 Some(StopReason::String("END".to_string())),
+                None,
+                None,
             )
             .expect("stop_reason should emit when requested and present");
 
@@ -968,7 +1069,7 @@ mod tests {
         };
 
         assert!(
-            sel.build_response_nvext(None, None, true, None, None)
+            sel.build_response_nvext(None, None, true, None, None, None, None)
                 .is_none()
         );
     }
@@ -982,12 +1083,14 @@ mod tests {
             routed_experts: true,
             engine_data: false,
             stop_reason: false,
+            completion_token_ids: false,
+            prompt_logprobs: false,
         };
         let tracker = tracker_with_prefill_worker();
         let params = disagg_params_full();
 
         let out = sel
-            .build_response_nvext(Some(&tracker), Some(&params), true, None, None)
+            .build_response_nvext(Some(&tracker), Some(&params), true, None, None, None, None)
             .expect("all fields selected and available → Some");
 
         assert!(out.worker_id.is_some());
@@ -1019,7 +1122,106 @@ mod tests {
                 routed_experts: true,
                 engine_data: false,
                 stop_reason: false,
+                completion_token_ids: false,
+                prompt_logprobs: false,
             }
         );
+    }
+
+    // ---------- rl-sdk-2 TITO parity coverage (Steps A3/A4/A9) ----------
+
+    #[test]
+    fn tito_parity_completion_token_ids_pass_through() {
+        // Step A4: per-chunk delta tokens land verbatim on
+        // `nvext.completion_token_ids` when the client opted in.
+        let sel = NvExtResponseFieldSelection {
+            completion_token_ids: true,
+            ..Default::default()
+        };
+        let chunk_tokens: &[u32] = &[101, 102, 103];
+        let out = sel
+            .build_response_nvext(None, None, false, None, None, Some(chunk_tokens), None)
+            .expect("completion_token_ids must be present when requested + provided");
+        assert_eq!(out.completion_token_ids, Some(vec![101u32, 102, 103]));
+        // Strict-delta invariant doc: the helper is a pure pass-through.
+        // No accumulation here; that's the aggregator's job (verified by
+        // merge_response_nvext concat semantics).
+        assert!(out.prompt_logprobs.is_none());
+        assert!(out.engine_data.is_none());
+    }
+
+    #[test]
+    fn tito_parity_prompt_logprobs_final_chunk_only() {
+        // Step A3: prompt_logprobs payload must NOT leak onto intermediate
+        // chunks; only emitted when finish_reason.is_some(). This guarantees
+        // prime-rl's teacher-logprobs parser sees one logprobs blob per
+        // request, not duplicates across chunks.
+        let sel = NvExtResponseFieldSelection {
+            prompt_logprobs: true,
+            ..Default::default()
+        };
+        let mut entry = std::collections::HashMap::new();
+        entry.insert(
+            42u32,
+            crate::protocols::common::llm_backend::PromptLogprobEntry {
+                logprob: -1.234,
+                rank: Some(1),
+                decoded_token: None,
+            },
+        );
+        let payload: crate::protocols::common::llm_backend::PromptLogprobs =
+            vec![None, Some(entry)];
+
+        // Intermediate chunk (no finish): suppressed.
+        assert!(
+            sel.build_response_nvext(None, None, false, None, None, None, Some(payload.clone()))
+                .is_none(),
+            "prompt_logprobs must be suppressed on intermediate chunks"
+        );
+
+        // Final chunk: surfaced.
+        let out = sel
+            .build_response_nvext(None, None, true, None, None, None, Some(payload.clone()))
+            .expect("prompt_logprobs must emit on the final chunk");
+        let got = out.prompt_logprobs.expect("prompt_logprobs payload");
+        assert_eq!(got.len(), 2);
+        assert!(got[0].is_none());
+        assert_eq!(
+            got[1].as_ref().unwrap().get(&42u32).unwrap().logprob,
+            -1.234
+        );
+    }
+
+    #[test]
+    fn tito_parity_aggregator_concatenates_completion_token_ids() {
+        // Step A9: SSE aggregator must concatenate per-chunk completion_token_ids,
+        // not overwrite (which would lose all but the final chunk's tokens).
+        let mut target: Option<serde_json::Value> = None;
+        // Chunk 1: tokens [10, 11, 12]
+        merge_response_nvext(
+            &mut target,
+            Some(serde_json::json!({ "completion_token_ids": [10, 11, 12] })),
+        );
+        // Chunk 2: tokens [13, 14] — must append, not replace.
+        merge_response_nvext(
+            &mut target,
+            Some(serde_json::json!({ "completion_token_ids": [13, 14] })),
+        );
+        // Chunk 3 (final): one more token + non-token field that should overwrite.
+        merge_response_nvext(
+            &mut target,
+            Some(serde_json::json!({
+                "completion_token_ids": [15],
+                "worker_id": { "decode_worker_id": 7 }
+            })),
+        );
+
+        let aggregated = target.expect("aggregator state");
+        assert_eq!(
+            aggregated["completion_token_ids"],
+            serde_json::json!([10, 11, 12, 13, 14, 15]),
+            "completion_token_ids must concatenate across chunks"
+        );
+        assert_eq!(aggregated["worker_id"]["decode_worker_id"], 7);
     }
 }
