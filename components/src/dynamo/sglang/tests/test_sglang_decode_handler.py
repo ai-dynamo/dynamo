@@ -9,6 +9,7 @@ import pytest
 
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
+    _build_completion_usage,
     _extract_media_urls,
     _extract_sglang_stop_reason,
     _openai_stop_sampling_params,
@@ -110,6 +111,62 @@ def test_openai_stop_sampling_params_preserves_string_stops():
     assert _openai_stop_sampling_params({"stop": ["token_id:576"]}) == {
         "stop": ["token_id:576"]
     }
+
+
+def test_build_completion_usage_full_payload():
+    assert _build_completion_usage(
+        {
+            "prompt_tokens": 12,
+            "completion_tokens": 7,
+            "cached_tokens": 3,
+            "finish_reason": {"type": "stop"},
+        }
+    ) == {
+        "prompt_tokens": 12,
+        "completion_tokens": 7,
+        "total_tokens": 19,
+        "prompt_tokens_details": {"cached_tokens": 3},
+    }
+
+
+@pytest.mark.parametrize("cached_tokens", [None, 0])
+def test_build_completion_usage_omits_details_when_no_cache(cached_tokens):
+    assert _build_completion_usage(
+        {
+            "prompt_tokens": 5,
+            "completion_tokens": 2,
+            "cached_tokens": cached_tokens,
+        }
+    ) == {
+        "prompt_tokens": 5,
+        "completion_tokens": 2,
+        "total_tokens": 7,
+        "prompt_tokens_details": None,
+    }
+
+
+@pytest.mark.parametrize(
+    "meta_info",
+    [
+        {"completion_tokens": 7, "cached_tokens": 0},
+        {"prompt_tokens": 12, "cached_tokens": 0},
+        {"prompt_tokens": None, "completion_tokens": 7},
+        {"prompt_tokens": 12, "completion_tokens": None},
+        {},
+    ],
+    ids=[
+        "no_prompt_tokens",
+        "no_completion_tokens",
+        "prompt_tokens_is_none",
+        "completion_tokens_is_none",
+        "empty_meta_info",
+    ],
+)
+def test_build_completion_usage_returns_none_when_required_field_missing(meta_info):
+    """Regression for #8550: SGLang's final/error chunks may omit usage fields
+    under larger generation load. Returning None lets the caller skip emitting
+    completion_usage rather than KeyError or propagate a partial record."""
+    assert _build_completion_usage(meta_info) is None
 
 
 def test_openai_stop_sampling_params_maps_token_id_stop_array():

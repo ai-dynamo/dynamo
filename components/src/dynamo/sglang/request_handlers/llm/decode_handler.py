@@ -147,6 +147,30 @@ def _extract_sglang_stop_reason(
     return None
 
 
+def _build_completion_usage(meta_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Build a completion_usage payload from SGLang meta_info, treating fields as optional.
+
+    Under larger generation load SGLang may omit ``prompt_tokens`` /
+    ``completion_tokens`` on final or error chunks (see #8550). Returning
+    ``None`` when either is missing lets the caller skip emitting
+    ``completion_usage`` rather than propagate a partial record.
+    """
+    prompt_tokens = meta_info.get("prompt_tokens")
+    completion_tokens = meta_info.get("completion_tokens")
+    if prompt_tokens is None or completion_tokens is None:
+        return None
+    cached_tokens = meta_info.get("cached_tokens")
+    prefill_prompt_tokens_details = None
+    if cached_tokens is not None and cached_tokens > 0:
+        prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+        "prompt_tokens_details": prefill_prompt_tokens_details,
+    }
+
+
 class DecodeWorkerHandler(BaseWorkerHandler):
     """Handler for decode workers in both aggregated and disaggregated serving modes."""
 
@@ -184,9 +208,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Engine.async_generate does not declare it (notably the deepseek_v4
         # branch). Doing this at init keeps the per-request hot path free of
         # signature inspection.
-        self._routed_experts_kwargs: Dict[
-            str, Any
-        ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
+        self._routed_experts_kwargs: Dict[str, Any] = (
+            self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
+        )
         self._enable_frontend_decoding = enable_frontend_decoding
         self._image_loader: Optional[ImageLoader] = None
         if self._enable_frontend_decoding:
@@ -651,18 +675,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     # Internal transport field consumed by frontend nvext mapping.
                     out["disaggregated_params"] = {"routed_experts": routed_experts}
                 if finish_reason:
-                    input_tokens = res["meta_info"]["prompt_tokens"]
-                    completion_tokens = res["meta_info"]["completion_tokens"]
-                    cached_tokens = res["meta_info"]["cached_tokens"]
-                    prefill_prompt_tokens_details = None
-                    if cached_tokens is not None and cached_tokens > 0:
-                        prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
-                    out["completion_usage"] = {
-                        "prompt_tokens": input_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": input_tokens + completion_tokens,
-                        "prompt_tokens_details": prefill_prompt_tokens_details,
-                    }
+                    completion_usage = _build_completion_usage(res["meta_info"])
+                    if completion_usage is not None:
+                        out["completion_usage"] = completion_usage
                 if not context.is_stopped():
                     yield out
 
