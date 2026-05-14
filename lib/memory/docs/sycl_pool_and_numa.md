@@ -65,11 +65,14 @@ Two things to note:
   the new ptr is short and race-free because nobody else can see the
   ptr yet.
 
-### `free(ptr, size_hint)` path
+### `free(ptr, size)` path
+
+The `size` parameter (here used as a hint — see note below) names the
+caller's best guess at the original allocation size.
 
 ```mermaid
 flowchart TD
-    START["free ptr, size_hint"] --> NULL{ptr == 0?}
+    START["free ptr, size"] --> NULL{ptr == 0?}
     NULL -- yes --> OK[return Ok]
     NULL -- no --> LOCK[lock inner]
     LOCK --> LOOKUP{active_allocs.remove ptr?}
@@ -93,10 +96,13 @@ flowchart TD
     style DA fill:#ffca28,stroke:#f57f17
 ```
 
-The `size_hint` argument is preserved for API compatibility but is
-**not** used on the happy path. It acts only as a fallback if the
+The `size` argument (signature: `free(ptr: u64, size: usize)`) is
+preserved for API compatibility but acts as a hint — it is **not**
+used on the happy path. It takes effect only as a fallback when the
 caller passes a ptr the pool never issued, which in debug builds is a
-`debug_assert!` failure.
+`debug_assert!` failure. The unit test
+[`test_pool_free_ignores_size_hint`](../src/pool/sycl.rs) pins this
+behavior.
 
 ### Why real-size tracking matters
 

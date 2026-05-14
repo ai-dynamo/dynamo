@@ -31,12 +31,12 @@ specific framework.
 
 | Crate | Responsibility | XPU/SYCL in scope? |
 |---|---|---|
-| `kvbm-common` | Shared primitives: `BlockId`, `SequenceHash`, `LogicalLayoutHandle` (G1/G2/G3/G4 tier enum). No device deps. | No — device-neutral by design. |
+| `kvbm-common` | Shared primitives: `BlockId`, `SequenceHash`, `LogicalLayoutHandle` (G1/G2/G3/G4 tier enum), and the `DeviceBackend { Cuda, Sycl }` tag enum. No device deps. | Tag only — the `DeviceBackend` enum was promoted here so `dynamo-memory` and `kvbm-physical` share a single canonical type. Device-neutral: no FFI, no feature gates; runtime probes live on `DeviceBackendExt` in `kvbm-physical`. |
 | `kvbm-config` | Static configuration for caches, discovery, NIXL, object storage, offload, onboard policies, tokio/rayon runtimes, messengers. Pure config structs. | No. |
 | `kvbm-logical` | Logical block lifecycle: registries, pools, sequence tracking, metrics, TinyLFU cache, pub/sub adapters, framework integrations. Works on logical handles; never touches devices directly. | No. |
 | `dynamo-memory` (`lib/memory`) | `MemoryDescriptor`, `DeviceAllocator` / `PinnedAllocator` traits, `DeviceStorage` / `PinnedStorage`, `NumaWorkerPool`, `SyclMemPool`, `CudaMemPool`. Backend-agnostic storage layer — no device-SDK types in the public API. | **Yes** — houses `SyclMemPool`, SYCL-aware NUMA discovery, and the allocator traits that downstream device wrappers implement. |
 | `kvbm-kernels` | CUDA and SYCL kernel launchers: `vectorized_copy`, `memcpy_batch`, `sycl_vectorized_copy`, `sycl_*_from_block`. Built from `.cu` via nvcc and `.cpp` via `icpx -fsycl`. | **Yes** — SYCL kernel sources and FFI wrappers live here. |
-| `kvbm-physical` | Device abstraction traits (`DeviceContextOps`, `DeviceStreamOps`, `DeviceEventOps`, `DeviceMemPoolOps`), the `DeviceBackend` enum, CUDA and SYCL implementations, and `TransferManager` / `TransferContext` on top of them. | **Yes** — the core of the multi-backend layer; CUDA and SYCL both implement the trait surface here. |
+| `kvbm-physical` | Device abstraction traits (`DeviceContextOps`, `DeviceStreamOps`, `DeviceEventOps`, `DeviceMemPoolOps`), the `DeviceBackendExt` extension trait (runtime `is_available` / `detect_backend` / `list_available` probes on the `kvbm-common` enum), CUDA and SYCL implementations, and `TransferManager` / `TransferContext` on top of them. | **Yes** — the core of the multi-backend layer; CUDA and SYCL both implement the trait surface here. |
 | `kvbm-engine` | Orchestrator: `InstanceLeader`, `PhysicalWorker`, `ReplicatedDataWorker`, sessions, offload pipeline, object tier (G4), `CollectiveOps` with NCCL and **oneCCL** implementations, `OneCclBootstrap`. | **Yes** — adds the `oneccl` feature and the XPU-aware layer-wise onboard path. |
 | `kvbm-py3` (`lib/bindings/kvbm`) | Python/FFI bindings consumed by external frameworks. Owns the vLLM connector and its backend-specific `event_sync_blocking` (CUDA / SYCL / fallback). | **Yes** — SYCL variant added alongside CUDA, mutually exclusive by feature. |
 
@@ -62,7 +62,7 @@ graph TB
 
     subgraph v2["KVBM v2 (lib/)"]
         subgraph topLayer["Framework-agnostic layer"]
-            Common["kvbm-common<br/>BlockId, SequenceHash<br/>LogicalLayoutHandle (G1..G4)"]
+            Common["kvbm-common<br/>BlockId, SequenceHash<br/>LogicalLayoutHandle (G1..G4)<br/>DeviceBackend (Cuda / Sycl)"]
             Config["kvbm-config<br/>cache / offload / onboard<br/>discovery / messenger"]
             Logical["kvbm-logical<br/>registries, pools, sequences<br/>TinyLFU, metrics, pubsub"]
         end
@@ -72,7 +72,7 @@ graph TB
         end
 
         subgraph physLayer["Device abstraction layer"]
-            Physical["kvbm-physical<br/>DeviceBackend enum<br/>Device{Context,Stream,Event,MemPool}Ops<br/>TransferManager, TransferContext"]
+            Physical["kvbm-physical<br/>DeviceBackendExt probes<br/>Device{Context,Stream,Event,MemPool}Ops<br/>TransferManager, TransferContext"]
             Kernels["kvbm-kernels<br/>CUDA: vectorized_copy, memcpy_batch<br/>SYCL: sycl_vectorized_copy, sycl_*_from_block"]
         end
 
@@ -114,6 +114,7 @@ graph TB
     Physical --> Memory
     Physical --> Common
     Physical --> Kernels
+    Memory --> Common
     Kernels -. optional .-> CUDA
     Kernels -. optional .-> SYCL
 
@@ -185,7 +186,7 @@ after XPU/SYCL enablement.
 
 | Area | Before (CUDA-only) | After (CUDA + XPU/SYCL) |
 |---|---|---|
-| **Backend selector** | Implicit — everything was CUDA. | `DeviceBackend::{Cuda, Sycl}` enum in `kvbm-physical`, with runtime `is_available()` probes guarded by `catch_unwind` so a missing `libcuda.so` / `libsycl.so` doesn't abort the process. `DeviceContext::new(backend, id)` dispatches to `CudaDeviceContext` or `SyclDeviceContext` behind `#[cfg(feature = "cuda")]` / `#[cfg(feature = "xpu-sycl")]`. |
+| **Backend selector** | Implicit — everything was CUDA. | `DeviceBackend::{Cuda, Sycl}` tag enum in `kvbm-common` (device-neutral, shared by `dynamo-memory` and `kvbm-physical`); runtime probes live on the `DeviceBackendExt` extension trait in `kvbm-physical` (`is_available` / `detect_backend` / `list_available`), guarded by `catch_unwind` so a missing `libcuda.so` / `libsycl.so` doesn't abort the process. `DeviceContext::new(backend, id)` dispatches to `CudaDeviceContext` or `SyclDeviceContext` behind `#[cfg(feature = "cuda")]` / `#[cfg(feature = "xpu-sycl")]`. |
 | **Device context / stream / event** | Direct use of `cudarc::driver::{CudaContext, CudaStream, CudaEvent}`. | New traits `DeviceContextOps`, `DeviceStreamOps`, `DeviceEventOps`, `DeviceMemPoolOps` in `lib/kvbm-physical/src/device/traits.rs`. `CudaDeviceContext` and `SyclDeviceContext` both implement them (named to avoid shadowing `cudarc::driver::CudaContext` and `oneapi_rs::safe::SyclContext`); the transfer executor, notification loop, and pool wrappers talk to trait objects only. |
 | **Copy API on streams** | Direction-named CUDA calls (`cudaMemcpyAsync` with explicit H2D/D2H kinds). | Pattern-based primitives on `DeviceStreamOps`: `batch_copy` (N DMAs, direction auto-detected), `memcpy_htod` / `memcpy_dtoh` (scalar uploads/downloads), `vectorized_copy` (kernel over pointer arrays). The executor picks between them based on op type, not direction. |
 | **`TransferStrategy` enum** | `CudaAsyncH2D`, `CudaAsyncD2H`, `CudaAsyncD2D`; `panic!` on `System ↔ Device`. | Two changes — (1) **rename** `CudaAsync*` → `Async*` since the backend-agnostic executor dispatches to either `CudaStreamWrapper` or `SyclStreamWrapper`; (2) **add** `BlockingH2D`, `BlockingD2H` that replace the upstream panic with an async copy + inline `device_stream.synchronize()`. Blocking variants apply on **both** backends because the motivating case (unpinned `System` memory degrading async copies to staged blocking behavior) affects CUDA and SYCL identically. See [`device_executor_flow.md`](./device_executor_flow.md#transferstrategy-vs-upstream--rename-and-additions) for the full before/after mapping. |
@@ -198,27 +199,30 @@ after XPU/SYCL enablement.
 | **Collectives (`kvbm-engine`)** | NCCL only (`feature = "nccl"`, `cudarc::nccl`). | `CollectiveOps` trait is now implemented by `NcclCollectives` **and** `OneCclCollectives` (`feature = "oneccl"`, `oneapi-rs::ccl`). oneCCL supports both a from-scratch bootstrap (`OneCclBootstrap` — 8 B world_size + 256 B KVS address rendezvous) and borrowed handles from PyTorch / vLLM. Broadcasts use `ccl_rs_group_start/end` with a single `event_wait` on the last submitted op. |
 | **vLLM connector event sync (`kvbm-py3`)** | `event_sync_blocking(u64)` called `cuEventSynchronize` and asserted on failure. | Three cfg-gated implementations of the same `pub fn event_sync_blocking(u64) -> anyhow::Result<()>`: CUDA (`cuEventSynchronize`), SYCL (`oneapi_rs::sys::sycl_rs_event_wait`), and a "no backend" stub that `bail!`s. The call site now `?`-propagates the error instead of swallowing it. |
 | **Test helpers (`kvbm-physical`)** | Direct `cudaMemcpy` with explicit D2H/H2D kinds in `fill.rs` / `checksum.rs`. | Backend-agnostic `sync_memcpy_dtoh` / `sync_memcpy_htod` helpers on `DeviceContext` that construct a throwaway stream and synchronize. Tests pick a backend via `test_device_backend()` which prefers SYCL when compiled in and available, falling back to CUDA. |
-| **Benchmark tooling** | `bench_engine` and `bench_transfer` hard-coded `cuda_device_id`; no kernel-layer XPU baseline. | Three tools, one per layer of the stack (kernel → TransferManager → Leader/Worker). See [Benchmarks](#benchmarks) below for the comparison. |
+| **Benchmark tooling** | `bench_engine` and `bench_transfer` hard-coded `cuda_device_id`; `kvbench` was CUDA-only (no kernel-layer XPU baseline); no multi-rank collective bench. | Four tools, one per layer of the stack — kernel (`kvbench` / `kvbench_xpu_sycl`), TransferManager (`bench_transfer`), Leader/Worker (`bench_engine`), and a parallel cross-rank track for collective broadcast (`bench_collectives`, NCCL / oneCCL). See [Benchmarks](#benchmarks) below for the comparison. |
 
 The rest of the document shows the resulting trait surface, the full
 cross-crate graph, and the memory layer in detail.
 
 ## Benchmarks
 
-KVBM v2 ships three benchmarks, each targeting a different layer of the
+KVBM v2 ships four benchmarks, each targeting a different layer of the
 stack. Running the progression bottom-up (kernel → transfer-manager →
-leader/worker) is the intended way to localize a performance regression:
-if the lower layer is clean but the higher layer regresses, the overhead
-lives in the layer between them.
+leader/worker, with collectives as a parallel cross-rank track) is the
+intended way to localize a performance regression: if the lower layer
+is clean but the higher layer regresses, the overhead lives in the
+layer between them.
 
 | Tool | Path | Layer | What it measures |
 |---|---|---|---|
 | `kvbench` / `kvbench_xpu_sycl` | [`lib/kvbm-kernels/examples/kvbench.rs`](../../kvbm-kernels/examples/kvbench.rs), [`lib/kvbm-kernels/examples/kvbench_xpu_sycl.rs`](../../kvbm-kernels/examples/kvbench_xpu_sycl.rs) | **Kernel layer** | Raw kernel vs. bare `memcpy` baseline. No `TransferManager`, no NIXL, no leader/worker. Compares `sycl_vectorized_copy` (FFI) against `sycl::queue::memcpy` (or `kvbm_kernels_launch_vectorized_copy` against `cudaMemcpyAsync` on CUDA) across `fc_to_fc` / `lw_to_fc` / `fc_to_lw` patterns and `d2d` / `h2d` / `d2h` directions. Llama 3.1 70B KV-cache dimensions, CSV output. |
 | `bench_transfer` | [`lib/kvbm-physical/examples/bench_transfer.rs`](../examples/bench_transfer.rs) | **TransferManager layer** | Same transfer matrix, but routed through `kvbm-physical::TransferManager` — the API the real offload path uses. Adds: stream-pool scheduling, executor dispatch (whole-block batch copy vs. FC↔LW vectorized kernel), NIXL registration. Backend selected via `--backend {auto,cuda,sycl}`. Still single-process. The delta vs. `kvbench` is the `TransferManager` overhead. |
 | `bench_engine` | [`lib/kvbm-engine/bin/bench_engine.rs`](../../kvbm-engine/bin/bench_engine.rs) | **Leader/Worker layer** | Production-fidelity end-to-end: `InstanceLeader` + `VeloWorkerService`/`Client` + `SpmdParallelWorkers`, NUMA-pinned worker threads (each with its own tokio runtime and `NixlAgent`), multi-GPU, optional full offload pipeline. `--backend {auto,cuda,sycl}`. NUMA affinity resolved via PCI BDF for both backends through the shared `get_device_cpu_set(backend_kind, bdf)` API. The delta vs. `bench_transfer` is leader/worker / offload-pipeline overhead. |
+| `bench_collectives` | [`lib/kvbm-engine/bin/bench_collectives.rs`](../../kvbm-engine/bin/bench_collectives.rs) | **Collectives layer** | Multi-process broadcast bandwidth for the cross-rank replication path. Rank 0 spawns one child per rank, distributes the bootstrap token, and collects JSONL. Reports decimal `alg_bw_gbps` / `bus_bw_gbps`. `--backend {nccl, oneccl}` selects NCCL (CUDA, raw `ncclBcast` on a `CudaStream`) or oneCCL (XPU, raw `ccl_rs_broadcast` on a `sycl::queue` via `OneCclBootstrap`). Sweeps `--sizes`, `--num-regions` (mirrors the production `broadcast_regions` group_start/group_end batch — `N = num_blocks × num_layers × outer_dim`), and `--no-wait-for-completion` to isolate stream-wait / `event::wait()` overhead. Complements `bench_engine` with replication-path numbers that the engine bench doesn't isolate. |
 
-All three produce CSV output, so you can join runs and compare layers
-directly. See each tool's module-level docs for the exact flag matrix.
+All four produce CSV / JSONL output, so you can join runs and compare
+layers directly. See each tool's module-level docs for the exact flag
+matrix.
 
 ## System overview — all crates and their abstractions
 
@@ -374,13 +378,20 @@ classDiagram
     direction TB
 
     class DeviceBackend {
-        <<enum>>
+        <<enum, in kvbm-common>>
         Cuda
         Sycl
+        +name() &'static str
+    }
+
+    class DeviceBackendExt {
+        <<trait, in kvbm-physical>>
         +detect_backend() Result~Self~
         +list_available() Vec~Self~
         +is_available() bool
     }
+
+    DeviceBackendExt ..|> DeviceBackend : impl for
 
     class DeviceContext {
         -backend: DeviceBackend
@@ -671,7 +682,7 @@ classDiagram
         -inner: Mutex~PoolInner~
         -release_threshold: u64
         +alloc(size) Result~u64~
-        +free(ptr, size_hint) Result
+        +free(ptr, size) Result
     }
 
     class PoolInner {
@@ -761,17 +772,26 @@ Key points:
 
 ### Backend selection
 
-`DeviceBackend` is a plain enum over the compiled-in backends. Availability is
-probed at runtime with `catch_unwind` so a missing `libcuda.so` or
-`libsycl.so` does not abort the process.
+`DeviceBackend` is a plain enum in `kvbm-common` (shared by `dynamo-memory`
+and `kvbm-physical`). Runtime availability probes live on the
+`DeviceBackendExt` extension trait in `kvbm-physical`, guarded by
+`catch_unwind` so a missing `libcuda.so` or `libsycl.so` does not abort the
+process.
 
 ```rust
+// kvbm-common
 pub enum DeviceBackend { Cuda, Sycl }
 impl DeviceBackend {
-    pub fn detect_backend() -> Result<Self>;  // Cuda-first, then Sycl
-    pub fn list_available() -> Vec<Self>;
-    pub fn is_available(&self) -> bool;
+    pub fn name(&self) -> &'static str;       // "CUDA" / "SYCL (XPU)"
 }
+
+// kvbm-physical
+pub trait DeviceBackendExt: Sized {
+    fn is_available(&self) -> bool;
+    fn detect_backend() -> Result<Self>;      // Cuda-first, then Sycl
+    fn list_available() -> Vec<Self>;
+}
+impl DeviceBackendExt for DeviceBackend { /* catch_unwind probes */ }
 ```
 
 `DeviceContext::new(backend, device_id)` dispatches to `CudaDeviceContext::new` or
