@@ -25,11 +25,10 @@ cases:
         normal_text: ''
       vllm:
         calls: []
-        normal_text: '<｜DSML｜tool_calls>
-
+        normal_text: |-
+          <｜DSML｜tool_calls>
           not a valid invoke
-
-          </｜DSML｜tool_calls>'
+          </｜DSML｜tool_calls>
         reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
@@ -51,15 +50,12 @@ cases:
         normal_text: ''
       vllm:
         calls: []
-        normal_text: '<｜DSML｜tool_calls>
-
+        normal_text: |-
+          <｜DSML｜tool_calls>
           <｜DSML｜invoke>
-
           <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
-
           </｜DSML｜invoke>
-
-          </｜DSML｜tool_calls>'
+          </｜DSML｜tool_calls>
         reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'

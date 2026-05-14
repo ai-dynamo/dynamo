@@ -58,14 +58,13 @@ cases:
         normal_text: 'Both:'
       vllm:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_time
+          arguments:
             timezone: EST
-          name: get_time
         normal_text: 'Both: '
-        reason: drops trailing normal_text after tool-call wrapper end
       sglang:
         calls: []
         normal_text: 'Both:'

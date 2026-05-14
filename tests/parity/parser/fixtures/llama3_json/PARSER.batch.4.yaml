@@ -23,7 +23,6 @@ cases:
       vllm:
         calls: []
         normal_text: <|python_tag|>not even json
-        reason: impl-defined recovery contract (see PARSER_CASES.md)
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
   PARSER.batch.4.b:
@@ -39,7 +38,6 @@ cases:
       vllm:
         calls: []
         normal_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"'
-        reason: impl-defined recovery contract (see PARSER_CASES.md)
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
   PARSER.batch.4.c:
@@ -55,6 +53,5 @@ cases:
       vllm:
         calls: []
         normal_text: '<|python_tag|>{"arguments": {"location": "NYC"}}'
-        reason: impl-defined recovery contract (see PARSER_CASES.md)
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'

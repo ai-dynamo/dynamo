@@ -25,11 +25,10 @@ cases:
         normal_text: I will check the weather.
       vllm:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
         normal_text: 'I will check the weather. '
-        reason: drops trailing normal_text after tool-call wrapper end
       sglang:
         calls: []
         normal_text: I will check the weather.
@@ -67,11 +66,10 @@ cases:
         normal_text: I will check the weather.
       vllm:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
         normal_text: 'I will check the weather. '
-        reason: drops trailing normal_text after tool-call wrapper end
       sglang:
         calls: []
         normal_text: I will check the weather.

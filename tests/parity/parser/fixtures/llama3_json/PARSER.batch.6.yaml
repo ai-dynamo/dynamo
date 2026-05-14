@@ -51,6 +51,5 @@ cases:
       vllm:
         calls: []
         normal_text: '<|python_tag|>{"name": "get_time"}'
-        reason: both return calls=[]; vLLM preserves raw input as normal_text on this recovery path, Dynamo emits empty
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'

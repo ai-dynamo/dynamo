@@ -52,8 +52,7 @@ cases:
         normal_text: ''
       vllm:
         calls:
-        - arguments: {}
-          name: get_time
+        - name: get_time
+          arguments: {}
         normal_text: ''
-        reason: vLLM accepts call with missing arguments key as having empty args; Dynamo returns calls=[]
       sglang: *id004

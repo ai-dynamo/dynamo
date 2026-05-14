@@ -81,9 +81,8 @@ cases:
         - name: get_time
           arguments:
             timezone: EST
-        normal_text: |2+
-
-        reason: "preserves inter-fence newline between back-to-back tool_calls wrappers"
+        normal_text: ''
+        reason: "vLLM drops the inter-fence newline between back-to-back tool_calls wrappers"
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.2.c:
@@ -113,14 +112,13 @@ cases:
         normal_text: 'Both: '
       vllm:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_time
+          arguments:
             timezone: EST
-          name: get_time
         normal_text: 'Both: '
-        reason: drops trailing normal_text after tool-call wrapper end
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.2.d:

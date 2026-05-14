@@ -25,9 +25,9 @@ cases:
         normal_text: I will check the weather.
       vllm:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
         normal_text: ''
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
@@ -63,9 +63,9 @@ cases:
         normal_text: I will check the weather.
       vllm:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
         normal_text: ''
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
@@ -88,12 +88,12 @@ cases:
         normal_text: I will check the weather.
       vllm:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_weather
+          arguments:
             location: LA
-          name: get_weather
         normal_text: ''
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
