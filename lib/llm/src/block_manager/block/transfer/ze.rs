@@ -84,6 +84,7 @@ impl TransferBackend for TransferBackendZe {
     }
 
     fn device_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
+        let start = std::time::Instant::now();
         let event_pool = self.queue.event_pool().clone();
         let event = event_pool
             .create_event(0, ZE_EVENT_SCOPE_FLAG_HOST, ZE_EVENT_SCOPE_FLAG_HOST)
@@ -107,7 +108,7 @@ impl TransferBackend for TransferBackendZe {
         })?;
 
         self.ze_event_tx
-            .send((event_pool, event, tx, std::time::Instant::now()))
+            .send((event_pool, event, tx, start))
             .map_err(|_| TransferError::ExecutionError("Ze event worker exited.".into()))?;
         Ok(())
     }

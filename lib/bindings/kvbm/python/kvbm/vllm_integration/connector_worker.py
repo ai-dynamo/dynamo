@@ -195,8 +195,6 @@ class KvConnectorWorker:
             self.events[layer_name].record(torch.cuda.current_stream(self.device_id))
         elif self.device_type == "xpu":
             self.events[layer_name].record(torch.xpu.current_stream(self.device_id))
-            # Host wait for XPU path until Rust-side XPU event wait is available.
-            self.events[layer_name].synchronize()
         else:
             raise NotImplementedError(f"Unsupported KV cache device type: {self.device_type}")
         self._connector.save_kv_layer(layer_name, kv_layer)
