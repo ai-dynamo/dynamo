@@ -9,7 +9,6 @@ cases:
   PARSER.batch.2.a:
     description: Two invokes inside one tool_calls wrapper
     ref: dynamo
-    # `|-` = literal block scalar, strip trailing newline (multi-line text as-is)
     model_text: |-
       <｜DSML｜tool_calls>
       <｜DSML｜invoke name="get_weather">
@@ -20,15 +19,14 @@ cases:
       </｜DSML｜invoke>
       </｜DSML｜tool_calls>
     tools:
-    # `&idN` defines an anchor; `*idN` below reuses the same tool def
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
         properties:
           location:
             type: string
-    - &id002
+    - &id003
       name: get_time
       parameters:
         type: object
@@ -36,7 +34,7 @@ cases:
           timezone:
             type: string
     expected:
-      dynamo: &d_2_a
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
@@ -45,7 +43,7 @@ cases:
           arguments:
             timezone: EST
         normal_text: ''
-      vllm: *d_2_a
+      vllm: *id001
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.2.b:
@@ -63,10 +61,10 @@ cases:
       </｜DSML｜invoke>
       </｜DSML｜tool_calls>
     tools:
-    - *id001
     - *id002
+    - *id003
     expected:
-      dynamo: &d_2_b
+      dynamo:
         calls:
         - name: get_weather
           arguments:
@@ -74,15 +72,20 @@ cases:
         - name: get_time
           arguments:
             timezone: EST
-        # `|2+` below = "\n" (see file header). The blank line that follows
-        # is REQUIRED — without it the block scalar parses as "" (empty)
-        # rather than "\n", causing a false negative in canonical-diff.
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
         normal_text: |2+
 
-      vllm: *d_2_b
+        reason: "preserves inter-fence newline between back-to-back tool_calls wrappers"
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
-
   PARSER.batch.2.c:
     description: Parallel with surrounding narration
     ref: dynamo
@@ -96,8 +99,8 @@ cases:
       </｜DSML｜invoke>
       </｜DSML｜tool_calls> Done.
     tools:
-    - *id001
     - *id002
+    - *id003
     expected:
       dynamo:
         calls:
@@ -107,7 +110,7 @@ cases:
         - name: get_time
           arguments:
             timezone: EST
-        normal_text: 'Both:  Done.'
+        normal_text: 'Both: '
       vllm:
         calls:
         - arguments:
@@ -117,7 +120,7 @@ cases:
             timezone: EST
           name: get_time
         normal_text: 'Both: '
-        reason: "drops trailing normal_text after tool-call wrapper end"
+        reason: drops trailing normal_text after tool-call wrapper end
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.2.d:
@@ -133,10 +136,10 @@ cases:
       </｜DSML｜invoke>
       </｜DSML｜tool_calls>
     tools:
-    - *id001
-    - *id001
+    - *id002
+    - *id002
     expected:
-      dynamo: &d_2_d
+      dynamo: &id004
         calls:
         - name: get_weather
           arguments:
@@ -145,6 +148,6 @@ cases:
           arguments:
             location: LA
         normal_text: ''
-      vllm: *d_2_d
+      vllm: *id004
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'

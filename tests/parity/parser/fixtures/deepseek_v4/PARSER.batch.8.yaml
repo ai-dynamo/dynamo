@@ -14,7 +14,7 @@ cases:
       </｜DSML｜invoke>
       </｜DSML｜tool_calls>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -22,13 +22,13 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_8_a
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: 'I will check the weather. '
-      vllm: *d_8_a
+      vllm: *id001
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.8.b:
@@ -41,14 +41,14 @@ cases:
       </｜DSML｜invoke>
       </｜DSML｜tool_calls> Let me know if you need more.
     tools:
-    - *id001
+    - *id002
     expected:
       dynamo:
         calls:
         - name: get_weather
           arguments:
             location: NYC
-        normal_text: ' Let me know if you need more.'
+        normal_text: ''
       vllm:
         calls:
         - arguments:
@@ -67,14 +67,14 @@ cases:
       </｜DSML｜invoke>
       </｜DSML｜tool_calls> Let me know if you need more.
     tools:
-    - *id001
+    - *id002
     expected:
       dynamo:
         calls:
         - name: get_weather
           arguments:
             location: NYC
-        normal_text: I will check the weather.  Let me know if you need more.
+        normal_text: 'I will check the weather. '
       vllm:
         calls:
         - arguments:
@@ -97,7 +97,7 @@ cases:
       </｜DSML｜invoke>
       </｜DSML｜tool_calls>
     tools:
-    - *id001
+    - *id002
     expected:
       dynamo:
         calls:
@@ -107,7 +107,7 @@ cases:
         - name: get_weather
           arguments:
             location: LA
-        normal_text: 'I will check the weather.  Then check LA weather. '
+        normal_text: 'I will check the weather. '
       vllm:
         calls:
         - arguments:

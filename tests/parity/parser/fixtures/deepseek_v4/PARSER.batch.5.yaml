@@ -33,7 +33,7 @@ cases:
           <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
 
           </｜DSML｜invoke>'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.5.b:
@@ -77,6 +77,6 @@ cases:
           <｜DSML｜invoke name="get_weather">
 
           <｜DSML｜parameter name="location" string="true">NY'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'

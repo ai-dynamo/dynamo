@@ -30,7 +30,7 @@ cases:
           not a valid invoke
 
           </｜DSML｜tool_calls>'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   # PARSER.batch.4.b (invalid JSON args) n/a: DSML uses attribute-encoded args, not JSON.
@@ -60,7 +60,7 @@ cases:
           </｜DSML｜invoke>
 
           </｜DSML｜tool_calls>'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.4.d:
