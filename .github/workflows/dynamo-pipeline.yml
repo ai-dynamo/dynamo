@@ -8,9 +8,6 @@
 name: Dynamo Pipeline
 
 on:
-  push:
-    branches:
-      - rrubin/remove-dind-runners
   workflow_call:
     inputs:
       builder_name:
@@ -73,30 +70,29 @@ on:
 
 
 jobs:
-  # image:
-  #   uses: ./.github/workflows/shared-build-image.yml
-  #   with:
-  #     framework: dynamo
-  #     target: runtime
-  #     cuda_version:  '["12.9"]'  # '["${{ inputs.cuda_version }}"]' # TODO: restore
-  #     platform: 'linux/amd64,linux/arm64'
-  #     builder_name: b-${{ github.run_id }}-${{ github.run_attempt }} # ${{ inputs.builder_name }}
-  #     fresh_builder: false # ${{ inputs.fresh_builder }} # TODO: restore
-  #     no_cache: false # ${{ inputs.no_cache }} # TODO: restore
-  #     build_timeout_minutes: 30 # ${{ inputs.build_timeout_minutes }} # TODO: restore
-  #     dev_version_suffix: ${{ inputs.dev_version_suffix }}
-  #     source_ref: ${{ inputs.source_ref }}
-  #   secrets: inherit
+  image:
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: runtime
+      cuda_version: '["${{ inputs.cuda_version }}"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ inputs.builder_name }}
+      fresh_builder: ${{ inputs.fresh_builder }}
+      no_cache: ${{ inputs.no_cache }}
+      build_timeout_minutes: ${{ inputs.build_timeout_minutes }}
+      dev_version_suffix: ${{ inputs.dev_version_suffix }}
+      source_ref: ${{ inputs.source_ref }}
+    secrets: inherit
 
   # rust-gpu-checks + mypy run inside the built images because they depend on
   # native libs (NIXL, ffmpeg, CUDA) and pinned Python package versions that
   # aren't reproducible on plain ubuntu-latest runners.
   rust-gpu:
-    # needs: image
+    needs: image
     runs-on: prod-tester-amd-gpu-v2
     container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:bbe34bfc5f926839e7300297dad895cff3d98419-dynamo-runtime-cuda12-test
-      # image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}-${{ matrix.cuda_version != '' && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || startsWith(matrix.cuda_version, '13.') && '13' || matrix.cuda_version) || '' }}-test
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}-${{ matrix.cuda_version != '' && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || startsWith(matrix.cuda_version, '13.') && '13' || matrix.cuda_version) || '' }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
@@ -124,35 +120,6 @@ jobs:
           mkdir -p "${CARGO_TARGET_DIR}"
           echo "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}" >> "$GITHUB_ENV"
 
-      - name: Diagnose cargo environment
-        shell: bash
-        run: |
-          echo "=== runner identity ==="
-          id
-          echo "HOME=$HOME  USER=$USER"
-
-          echo "=== /scratch + /tmp filesystem ==="
-          df -hT /scratch /tmp /__w 2>/dev/null || true
-          mount | grep -E '/scratch|/tmp' || true
-
-          echo "=== CARGO_HOME resolution ==="
-          echo "CARGO_HOME env: ${CARGO_HOME:-<unset>}"
-          ls -la /opt/dynamo/.cargo 2>/dev/null || echo "no /opt/dynamo/.cargo"
-          ls -la "$HOME/.cargo"     2>/dev/null || echo "no $HOME/.cargo"
-          if [[ -d /opt/dynamo/.cargo ]]; then
-            test -w /opt/dynamo/.cargo \
-              && echo "/opt/dynamo/.cargo writable by $(id -un)" \
-              || echo "/opt/dynamo/.cargo NOT writable by $(id -un)"
-          fi
-
-          echo "=== rustup state ==="
-          which rustup cargo rustc || true
-          rustup show 2>/dev/null | head -40 || true
-          rustup component list --installed 2>/dev/null | head || true
-
-          echo "=== /opt/dynamo/target ownership (sanity) ==="
-          ls -ld /opt/dynamo/target /opt/dynamo/target/debug /opt/dynamo/target/release 2>/dev/null || true
-
       - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
         working-directory: /workspace/lib/llm
         env:
@@ -162,109 +129,103 @@ jobs:
         run: |
           /workspace/container/use-sccache.sh install
           eval $(/workspace/container/use-sccache.sh setup-env)
-          /workspace/container/use-sccache.sh show-stats "before checks"
-
-          time rustup component add rustfmt clippy
-          time cargo fmt -- --check
-          time cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings
-          /workspace/container/use-sccache.sh show-stats "after clippy llm"
-
-          time cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture
-          /workspace/container/use-sccache.sh show-stats "after test llm"
-
-          time cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
-          time cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
+          rustup component add rustfmt clippy
+          cargo fmt -- --check
+          cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings
+          cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture
+          cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
+          cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
 
-  # mypy:
-  #   needs: image
-  #   runs-on: prod-tester-amd-v2
-  #   container:
-  #     image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:5ce55e4f7cbdb5f6719237e9f4976f3b699a2571-dynamo-runtime-cuda12-test
-  #     env:
-  #       # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
-  #       # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
-  #       # USER here sidesteps two symptoms of that mismatch:
-  #       #   * actions/checkout probing $HOME/.gitconfig (owned by 1000, unreadable by 1001)
-  #       #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
-  #       HOME: /__w/dynamo/dynamo
-  #       USER: dynamo
-  #   timeout-minutes: 15
-  #   steps:
-  #     - name: Checkout repository
-  #       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-  #       with:
-  #         ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
-  #     - name: Run mypy (components)
-  #       working-directory: /workspace
-  #       shell: bash
-  #       run: |
-  #         MYPYPATH=components/src:lib/bindings/python/src
-  #         TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d | sort | tr "\n" " ")
-  #         MYPYPATH=$MYPYPATH mypy --explicit-package-bases $TARGETS
-  #     - name: Run mypy (bindings)
-  #       working-directory: /workspace
-  #       shell: bash
-  #       run: |
-  #         MYPYPATH=lib/bindings/python/src mypy -p dynamo
+  mypy:
+    needs: image
+    runs-on: prod-tester-amd-v2
+    container:
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:5ce55e4f7cbdb5f6719237e9f4976f3b699a2571-dynamo-runtime-cuda12-test
+      env:
+        # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
+        # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
+        # USER here sidesteps two symptoms of that mismatch:
+        #   * actions/checkout probing $HOME/.gitconfig (owned by 1000, unreadable by 1001)
+        #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+      - name: Run mypy (components)
+        working-directory: /workspace
+        shell: bash
+        run: |
+          MYPYPATH=components/src:lib/bindings/python/src
+          TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d | sort | tr "\n" " ")
+          MYPYPATH=$MYPYPATH mypy --explicit-package-bases $TARGETS
+      - name: Run mypy (bindings)
+        working-directory: /workspace
+        shell: bash
+        run: |
+          MYPYPATH=lib/bindings/python/src mypy -p dynamo
 
-  # # TODO: real xdist parallelism port conflicts. cpu_parallel_mode='none'
-  # # below runs -n 0, so this job is NOT actually parallel right now.
-  # parallel:
-  #   name: test
-  #   needs: image
-  #   uses: ./.github/workflows/shared-test.yml
-  #   with:
-  #     test_suite_name: dynamo
-  #     test_type: parallel
-  #     amd_runner: prod-tester-amd-v2
-  #     target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
-  #     cuda_version: '["${{ inputs.cuda_version }}"]'
-  #     platform: '["amd64", "arm64"]'
-  #     run_sanity_check: false
-  #     run_cpu_only_tests: true
-  #     cpu_only_test_markers: ${{ inputs.cpu_parallel_test_markers }}
-  #     cpu_only_test_timeout_minutes: 30
-  #     cpu_parallel_mode: 'none'
-  #     run_gpu_tests: false
-  #     source_ref: ${{ inputs.source_ref }}
-  #   secrets: inherit
+  # TODO: real xdist parallelism port conflicts. cpu_parallel_mode='none'
+  # below runs -n 0, so this job is NOT actually parallel right now.
+  parallel:
+    name: test
+    needs: image
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: dynamo
+      test_type: parallel
+      amd_runner: prod-tester-amd-v2
+      target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
+      cuda_version: '["${{ inputs.cuda_version }}"]'
+      platform: '["amd64", "arm64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: true
+      cpu_only_test_markers: ${{ inputs.cpu_parallel_test_markers }}
+      cpu_only_test_timeout_minutes: 30
+      cpu_parallel_mode: 'none'
+      run_gpu_tests: false
+      source_ref: ${{ inputs.source_ref }}
+    secrets: inherit
 
-  # sequential:
-  #   name: test
-  #   needs: image
-  #   uses: ./.github/workflows/shared-test.yml
-  #   with:
-  #     test_suite_name: dynamo
-  #     test_type: sequential
-  #     amd_runner: prod-tester-amd-v2
-  #     target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
-  #     cuda_version: '["${{ inputs.cuda_version }}"]'
-  #     platform: '["amd64", "arm64"]'
-  #     run_sanity_check: false
-  #     run_cpu_only_tests: true
-  #     cpu_only_test_markers: ${{ inputs.cpu_sequential_test_markers }}
-  #     cpu_only_test_timeout_minutes: 30
-  #     cpu_parallel_mode: 'none'
-  #     run_gpu_tests: false
-  #     source_ref: ${{ inputs.source_ref }}
-  #   secrets: inherit
+  sequential:
+    name: test
+    needs: image
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: dynamo
+      test_type: sequential
+      amd_runner: prod-tester-amd-v2
+      target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
+      cuda_version: '["${{ inputs.cuda_version }}"]'
+      platform: '["amd64", "arm64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: true
+      cpu_only_test_markers: ${{ inputs.cpu_sequential_test_markers }}
+      cpu_only_test_timeout_minutes: 30
+      cpu_parallel_mode: 'none'
+      run_gpu_tests: false
+      source_ref: ${{ inputs.source_ref }}
+    secrets: inherit
 
-  # gpu:
-  #   name: test
-  #   needs: image
-  #   uses: ./.github/workflows/shared-test.yml
-  #   with:
-  #     test_suite_name: dynamo
-  #     test_type: gpu
-  #     amd_runner: prod-tester-amd-gpu-v2
-  #     target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
-  #     cuda_version: '["${{ inputs.cuda_version }}"]'
-  #     platform: '["amd64"]'
-  #     run_sanity_check: false
-  #     run_cpu_only_tests: false
-  #     run_gpu_tests: true
-  #     gpu_test_markers: ${{ inputs.gpu_test_markers }}
-  #     gpu_test_timeout_minutes: 30
-  #     source_ref: ${{ inputs.source_ref }}
-  #   secrets: inherit
+  gpu:
+    name: test
+    needs: image
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: dynamo
+      test_type: gpu
+      amd_runner: prod-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
+      cuda_version: '["${{ inputs.cuda_version }}"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: false
+      run_gpu_tests: true
+      gpu_test_markers: ${{ inputs.gpu_test_markers }}
+      gpu_test_timeout_minutes: 30
+      source_ref: ${{ inputs.source_ref }}
+    secrets: inherit
