@@ -2051,6 +2051,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-data-gen"
+version = "1.2.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "dynamo-tokens",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dynamo-kv-router"
 version = "1.2.0"
 dependencies = [
@@ -2197,6 +2209,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
  "futures",
