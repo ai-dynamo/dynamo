@@ -127,9 +127,7 @@ async def _try_endpoint(
 
     try:
         endpoint_name = f"{namespace}.{worker_info.component_name}.get_perf_metrics"
-        endpoint = runtime.endpoint(  # type: ignore[attr-defined]
-            endpoint_name
-        )
+        endpoint = runtime.endpoint(endpoint_name)  # type: ignore[attr-defined]
         client = await endpoint.client()
         if not await _wait_for_endpoint_instances(client, endpoint_name):
             return []
@@ -181,7 +179,7 @@ async def _wait_for_endpoint_instances(
         instance_ids = await asyncio.wait_for(
             client.wait_for_instances(), timeout=timeout_s  # type: ignore[attr-defined]
         )
-    except TimeoutError:
+    except asyncio.TimeoutError:
         logger.info(
             "Timed out after %.1fs waiting for get_perf_metrics endpoint instances: %s",
             timeout_s,
