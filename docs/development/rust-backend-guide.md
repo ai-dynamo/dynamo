@@ -285,11 +285,6 @@ Every backend's CLI shares a common base (`--namespace`, `--component`,
 `--endpoint`, etc.) provided by `CommonArgs`. Flatten that into your
 engine's `Args` struct and add your engine-specific flags.
 
-`option_env!` here (instead of `env!`) is intentional: `CARGO_BIN_NAME` is
-only defined when the file is built as part of a bin target, but the Step 7
-conformance test compiles `engine.rs` as part of an integration test where
-the variable is absent — `env!` would refuse to compile.
-
 ```rust
 #[derive(clap::Parser, Debug)]
 #[command(
@@ -311,6 +306,9 @@ struct Args {
     // ... engine-specific flags here.
 }
 ```
+
+`option_env!` (not `env!`) so the same snippet compiles both as a bin
+and as a `#[path]`-included module from an integration test.
 
 Define an inherent `from_args` constructor that parses the args and
 returns both the engine and a `WorkerConfig`. **`from_args` is not on
@@ -551,14 +549,12 @@ Ok(Box::pin(async_stream::stream! {
 }))
 ```
 
-The two-branch split is load-bearing: `tokio::select!` with the sleep
-arm disabled by a `if !delay.is_zero()` guard would leave `ctx.stopped()`
-as the only enabled branch and hang forever in tests that drive
-`generate` from a context that never fires `stop_generating` (e.g. the
-conformance kit's `mock_context()`).
+A single `tokio::select!` with the sleep arm gated by `if !delay.is_zero()`
+would deadlock under a context that never fires `stop_generating` (e.g.
+the conformance kit's `mock_context()`).
 
 No channel-close race to worry about; `biased` is still cheap and
-recommended for consistency in the non-zero-delay path.
+recommended for consistency.
 
 **Cancellation rules**:
 
