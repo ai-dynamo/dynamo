@@ -256,8 +256,7 @@ pub struct StopConditions {
     pub ignore_eos: Option<bool>,
 
     /// Maximum number of thinking tokens allowed.
-    /// vLLM worker maps this to `SamplingParams.thinking_token_budget` (vLLM >= 0.20),
-    /// enforced by vLLM's builtin thinking-budget logits processor.
+    /// vLLM maps this to `SamplingParams.thinking_token_budget` (vLLM >= 0.20)
     pub max_thinking_tokens: Option<u32>,
 }
 
