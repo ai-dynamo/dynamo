@@ -33,6 +33,7 @@ from torch.cuda import device_count
 
 from dynamo._core import Context
 from dynamo.common.backend.disagg import require_prefill_result
+from dynamo.common.backend.dp_rank import validate_global_dp_rank
 from dynamo.common.backend.engine import (
     EngineConfig,
     GenerateChunk,
@@ -392,16 +393,10 @@ class TrtllmLLMEngine(LLMEngine):
     def _scheduling_params_for(
         self, dp_rank: int | None
     ) -> Optional[SchedulingParams]:
-        if dp_rank is None or self._attention_dp_size <= 1:
-            return None
-        rank = int(dp_rank)
-        if not 0 <= rank < self._attention_dp_size:
-            logger.warning(
-                "Received DP rank %d outside [0, %d); falling back to "
-                "TRT-LLM internal DP selection",
-                rank,
-                self._attention_dp_size,
-            )
+        rank = validate_global_dp_rank(
+            dp_rank, 0, self._attention_dp_size, "TRT-LLM"
+        )
+        if rank is None:
             return None
         return SchedulingParams(attention_dp_rank=rank, attention_dp_relax=False)
 

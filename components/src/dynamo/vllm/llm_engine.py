@@ -25,6 +25,7 @@ from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo._core import Context
 from dynamo.common.backend.disagg import require_prefill_result
+from dynamo.common.backend.dp_rank import validate_global_dp_rank
 from dynamo.common.backend.engine import (
     EngineConfig,
     GenerateChunk,
@@ -333,19 +334,11 @@ class VllmLLMEngine(LLMEngine):
     def _to_local_dp_rank(self, dp_rank: int | None) -> int | None:
         """Map a global DP rank into this worker's local rank, or ``None``
         if out of range (vLLM then falls back to internal LB)."""
-        if dp_rank is None or self._dp_range is None:
+        if self._dp_range is None:
             return None
         dp_start, dp_size = self._dp_range
-        if dp_rank < dp_start or dp_rank >= dp_start + dp_size:
-            logger.warning(
-                "Received DP rank %d outside [%d, %d); falling back to "
-                "vLLM internal DP selection",
-                dp_rank,
-                dp_start,
-                dp_start + dp_size,
-            )
-            return None
-        return dp_rank - dp_start
+        rank = validate_global_dp_rank(dp_rank, dp_start, dp_size, "vLLM")
+        return None if rank is None else rank - dp_start
 
     def _kv_routing_enabled(self) -> bool:
         # vLLM's KV-event publisher is gated on prefix caching being on, on

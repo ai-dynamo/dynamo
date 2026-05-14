@@ -25,6 +25,7 @@ from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
 from sglang.srt.utils.network import get_local_ip_auto, get_zmq_socket
 
 from dynamo._core import Context
+from dynamo.common.backend.dp_rank import validate_global_dp_rank
 from dynamo.common.backend.engine import (
     EngineConfig,
     GenerateChunk,
@@ -256,8 +257,11 @@ class SglangLLMEngine(LLMEngine):
 
         # Honour the router's DP rank decision; without it SGLang picks
         # its own rank and KV events land on the wrong publisher.
-        forced_dp_rank = self._validate_forced_dp_rank(
-            (request.get("routing") or {}).get("dp_rank")
+        forced_dp_rank = validate_global_dp_rank(
+            (request.get("routing") or {}).get("dp_rank"),
+            self._dp_start,
+            self._dp_size,
+            "SGLang",
         )
 
         stream = await self.engine.async_generate(
@@ -410,24 +414,6 @@ class SglangLLMEngine(LLMEngine):
         if self.engine is not None:
             self.engine.shutdown()
             logger.info("SGLang engine shutdown")
-
-    def _validate_forced_dp_rank(self, dp_rank: int | None) -> int | None:
-        """Validate router-supplied global DP rank against this worker's
-        local slice. Out-of-range ranks fall back to SGLang's internal
-        load balancer."""
-        if dp_rank is None or self._dp_size <= 1:
-            return None
-        rank = int(dp_rank)
-        if not self._dp_start <= rank < self._dp_start + self._dp_size:
-            logger.warning(
-                "Received DP rank %d outside [%d, %d); falling back to "
-                "SGLang internal DP selection",
-                rank,
-                self._dp_start,
-                self._dp_start + self._dp_size,
-            )
-            return None
-        return rank
 
     def _resolve_prefill_bootstrap(self, request: GenerateRequest) -> dict[str, Any]:
         """Pick the (host, port, room) triple this prefill request will use.
