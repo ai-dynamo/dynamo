@@ -14,7 +14,7 @@ use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{SchedulingRequest, SchedulingResponse, pinned_worker_config};
-use crate::protocols::{PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{PrefillLoadHint, Taints, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
@@ -165,6 +165,7 @@ impl<
             threshold,
             request.allowed_worker_ids.as_ref(),
             request.pinned_worker,
+            &request.taints,
             decay_now,
         ) {
             tracing::debug!("all workers busy, queueing request");
@@ -217,6 +218,7 @@ impl<
                 threshold,
                 front.request.allowed_worker_ids.as_ref(),
                 front.request.pinned_worker,
+                &front.request.taints,
                 decay_now,
             ) {
                 break;
@@ -352,6 +354,7 @@ impl<
         threshold: f64,
         allowed: Option<&HashSet<WorkerId>>,
         pinned_worker: Option<WorkerWithDpRank>,
+        taints: &Taints,
         decay_now: Instant,
     ) -> bool {
         let active_tokens = self.slots.active_tokens(decay_now);
@@ -361,6 +364,9 @@ impl<
             let Ok(config) = pinned_worker_config::<C>(&*configs, worker) else {
                 return false;
             };
+            if !taints.is_empty() && !taints.is_compatible_with_worker_taints(config.taints()) {
+                return false;
+            }
 
             let max_batched = config
                 .max_num_batched_tokens()
@@ -374,6 +380,9 @@ impl<
             if let Some(ids) = allowed
                 && !ids.contains(&worker_id)
             {
+                continue;
+            }
+            if !taints.is_empty() && !taints.is_compatible_with_worker_taints(config.taints()) {
                 continue;
             }
             let dp_size = config.data_parallel_size();

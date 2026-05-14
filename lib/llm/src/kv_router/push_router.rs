@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank};
 use dynamo_runtime::{
     dynamo_nvtx_range,
     metrics::frontend_perf::{STAGE_DISPATCH, STAGE_ROUTE, StageGuard},
@@ -406,6 +406,34 @@ impl KvPushRouter {
             ?phase,
             "Routing to specified worker"
         );
+
+        if !taints.is_empty() {
+            let configs = self.chooser.workers_with_configs.borrow();
+            match configs.get(&pinned_worker_id) {
+                Some(config) if !taints.is_compatible_with_worker_taints(config.taints()) => {
+                    tracing::warn!(
+                        request_id = %context_id,
+                        worker_id = pinned_worker_id,
+                        dp_rank = ?resolved_dp_rank,
+                        requested_taints = ?taints.required,
+                        worker_taints = ?config.taints(),
+                        ?phase,
+                        "Pinned worker fallback bypassed incompatible required taints"
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        request_id = %context_id,
+                        worker_id = pinned_worker_id,
+                        dp_rank = ?resolved_dp_rank,
+                        requested_taints = ?taints.required,
+                        ?phase,
+                        "Pinned worker fallback could not validate required taints because worker config was unavailable"
+                    );
+                }
+                _ => {}
+            }
+        }
 
         // Build a WorkerWithDpRank; use 0 as a fallback dp_rank when it
         // couldn't be resolved -- this is only used for the cache-hit
