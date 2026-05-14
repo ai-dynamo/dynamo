@@ -95,34 +95,31 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
             continue;
         }
         if s.starts_with('{') {
-            // Try the segment as a single JSON object first. This is the common
-            // case and correctly handles argument strings that contain ';' —
-            // e.g. {"name":"query","arguments":{"sql":"SELECT a; SELECT b"}} — which
-            // would be incorrectly split if we went straight to the ';' fallback.
-            let mut parsed_single = false;
-            if let Some(pos) = s.rfind('}') {
-                let candidate = s[..=pos].trim();
-                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
-                    items.push(candidate.to_string());
-                    parsed_single = true;
-                }
-            }
-            if !parsed_single {
-                // Whole-segment parse failed. Llama 3.x emits parallel calls as
-                // semicolon-separated objects within one segment:
-                //   <|python_tag|>{"name":"get_weather","arguments":{"location":"NYC"}};{"name":"get_time","arguments":{"timezone":"EST"}}
-                // Split on ';' and validate each chunk independently.
-                for chunk in s.split(';') {
-                    let trimmed_chunk = chunk.trim();
-                    if trimmed_chunk.is_empty() {
-                        continue;
-                    }
-                    if let Some(pos) = trimmed_chunk.rfind('}') {
-                        let candidate = trimmed_chunk[..=pos].trim();
-                        if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
-                            items.push(candidate.to_string());
+            // Stream consecutive JSON objects from the segment, skipping ';'
+            // separators between them.  This correctly handles both:
+            //   • a single call whose argument contains ';' — the streaming
+            //     deserializer parses the whole object in one shot without
+            //     ever looking at the internal semicolon.
+            //   • parallel calls separated by ';' where one argument also
+            //     contains a ';' inside a string — the deserializer tracks
+            //     string/depth context so byte_offset() lands exactly after
+            //     the closing '}' of each complete object.
+            let mut remaining = s.trim_start();
+            while !remaining.is_empty() {
+                let mut de = serde_json::Deserializer::from_str(remaining);
+                match <Box<RawValue> as serde::Deserialize>::deserialize(&mut de) {
+                    Ok(rv) => {
+                        items.push(rv.get().to_string());
+                        let consumed = de.byte_offset();
+                        remaining = remaining[consumed..].trim_start();
+                        // Skip the ';' separator between parallel calls (if any).
+                        if let Some(rest) = remaining.strip_prefix(';') {
+                            remaining = rest.trim_start();
+                        } else {
+                            break; // no separator → only one object or done
                         }
                     }
+                    Err(_) => break, // malformed remainder — stop
                 }
             }
         } else if s.starts_with('[') {
