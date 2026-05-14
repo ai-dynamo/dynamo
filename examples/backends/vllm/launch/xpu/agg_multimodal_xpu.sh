@@ -81,8 +81,11 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
-    --block-size "${BLOCK_SIZE:-64}" --gpu-memory-utilization 0.75 \
-    $GPU_MEM_ARGS $MODEL_EXTRA_ARGS "${EXTRA_ARGS[@]}" &
+    # Non-profiled XPU fallback: cap at 0.75 to leave headroom for the Level Zero
+    # driver/runtime, whose allocations vLLM's accounting doesn't track. The profiler
+    # path supplies its own --gpu-memory-utilization 0.01 via $GPU_MEM_ARGS.
+    --block-size "${BLOCK_SIZE:-64}" \
+    ${GPU_MEM_ARGS:---gpu-memory-utilization 0.75} $MODEL_EXTRA_ARGS "${EXTRA_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit
