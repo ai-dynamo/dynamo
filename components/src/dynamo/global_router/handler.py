@@ -14,11 +14,11 @@ Both modes support priority-based pool overrides from agent hints.
 """
 
 import logging
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from dynamo.runtime import Client, DistributedRuntime
 
-from .pool_selection import load_config
+from .pool_selection import get_priority_retry_order, load_config
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,70 @@ class GlobalRouterHandler:
             self.agg_namespace_to_idx: Dict[str, int] = {
                 ns: idx for idx, ns in enumerate(self.config.agg_pool_dynamo_namespaces)
             }
+
+    async def _forward_with_priority_retry(
+        self,
+        request: Dict[str, Any],
+        request_type: str,
+        initial_pool_idx: int,
+        namespaces: List[str],
+        clients: Dict[str, Client],
+        pool_priorities: List[int],
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Forward a request to the selected pool and retry faster pools on failure.
+
+        Retry order is controlled by pool priorities: lower priority numbers are
+        faster, so retries walk from the selected pool toward faster pools.
+        """
+        pool_order = get_priority_retry_order(
+            selected_pool=initial_pool_idx,
+            pool_priorities=pool_priorities,
+            enable_priority_retry=self.config.enable_priority_retry,
+        )
+
+        for attempt_idx, pool_idx in enumerate(pool_order):
+            namespace = namespaces[pool_idx]
+            client = clients[namespace]
+            yielded_output = False
+
+            try:
+                stream = await client.generate(request)
+                async for output in stream:
+                    yielded_output = True
+                    data = output.data() if hasattr(output, "data") else output
+                    yield data
+                return
+            except Exception as e:
+                is_last_attempt = attempt_idx == len(pool_order) - 1
+                if yielded_output:
+                    logger.error(
+                        f"Error forwarding {request_type} request to {namespace} "
+                        f"after streaming started; cannot safely retry: {e}"
+                    )
+                    raise
+
+                if is_last_attempt:
+                    logger.error(
+                        f"Error forwarding {request_type} request to {namespace}; "
+                        f"no priority retry pools remain: {e}"
+                    )
+                    raise
+
+                next_pool_idx = pool_order[attempt_idx + 1]
+                next_namespace = namespaces[next_pool_idx]
+                if request_type == "decode":
+                    # A failed decode attempt may already have caused the prefill
+                    # engine to retire or drop its KV cache for this request. That
+                    # is acceptable: the retry is a fresh decode request to another
+                    # pool. The backend should handle any cache miss normally, but
+                    # current Dynamo backends do not support this yet.
+                    logger.debug("Retrying decode request after pool failure")
+                logger.warning(
+                    f"Error forwarding {request_type} request to pool {pool_idx} "
+                    f"({namespace}): {e}; retrying faster pool {next_pool_idx} "
+                    f"({next_namespace})"
+                )
 
     async def initialize(self) -> None:
         """
@@ -171,23 +235,29 @@ class GlobalRouterHandler:
             isl=isl, ttft_target_ms=ttft_target_ms, priority=priority
         )
         namespace = self.config.prefill_pool_dynamo_namespaces[pool_idx]
-        client = self.prefill_clients[namespace]
+        assert self.config.prefill_pool_priorities is not None
+        pool_order = get_priority_retry_order(
+            selected_pool=pool_idx,
+            pool_priorities=self.config.prefill_pool_priorities,
+            enable_priority_retry=self.config.enable_priority_retry,
+        )
 
         logger.info(
             f"Routing prefill request: ISL={isl}, TTFT_target={ttft_target_ms}ms, "
-            f"priority={priority} -> pool {pool_idx} ({namespace})"
+            f"priority={priority} -> pool {pool_idx} ({namespace}); "
+            f"retry_order={pool_order}"
         )
 
         # Forward request to local router and stream back responses
-        try:
-            stream = await client.generate(request)
-            async for output in stream:
-                # Extract data from stream response object
-                data = output.data() if hasattr(output, "data") else output
-                yield data
-        except Exception as e:
-            logger.error(f"Error forwarding prefill request to {namespace}: {e}")
-            raise
+        async for data in self._forward_with_priority_retry(
+            request=request,
+            request_type="prefill",
+            initial_pool_idx=pool_idx,
+            namespaces=self.config.prefill_pool_dynamo_namespaces,
+            clients=self.prefill_clients,
+            pool_priorities=self.config.prefill_pool_priorities,
+        ):
+            yield data
 
     async def handle_decode(
         self, request: Dict[str, Any]
@@ -223,24 +293,29 @@ class GlobalRouterHandler:
             priority=priority,
         )
         namespace = self.config.decode_pool_dynamo_namespaces[pool_idx]
-        client = self.decode_clients[namespace]
+        assert self.config.decode_pool_priorities is not None
+        pool_order = get_priority_retry_order(
+            selected_pool=pool_idx,
+            pool_priorities=self.config.decode_pool_priorities,
+            enable_priority_retry=self.config.enable_priority_retry,
+        )
 
         logger.info(
             f"Routing decode request: context_length={context_length}, "
             f"ITL_target={itl_target_ms}ms, priority={priority} -> "
-            f"pool {pool_idx} ({namespace})"
+            f"pool {pool_idx} ({namespace}); retry_order={pool_order}"
         )
 
         # Forward request to local router and stream back responses
-        try:
-            stream = await client.generate(request)
-            async for output in stream:
-                # Extract data from stream response object
-                data = output.data() if hasattr(output, "data") else output
-                yield data
-        except Exception as e:
-            logger.error(f"Error forwarding decode request to {namespace}: {e}")
-            raise
+        async for data in self._forward_with_priority_retry(
+            request=request,
+            request_type="decode",
+            initial_pool_idx=pool_idx,
+            namespaces=self.config.decode_pool_dynamo_namespaces,
+            clients=self.decode_clients,
+            pool_priorities=self.config.decode_pool_priorities,
+        ):
+            yield data
 
     async def handle_generate(
         self, request: Dict[str, Any]
@@ -276,23 +351,29 @@ class GlobalRouterHandler:
             priority=priority,
         )
         namespace = self.config.agg_pool_dynamo_namespaces[pool_idx]
-        client = self.agg_clients[namespace]
+        assert self.config.agg_pool_priorities is not None
+        pool_order = get_priority_retry_order(
+            selected_pool=pool_idx,
+            pool_priorities=self.config.agg_pool_priorities,
+            enable_priority_retry=self.config.enable_priority_retry,
+        )
 
         logger.info(
             f"Routing agg request: TTFT_target={ttft_target_ms}ms, "
             f"ITL_target={itl_target_ms}ms, priority={priority} -> "
-            f"pool {pool_idx} ({namespace})"
+            f"pool {pool_idx} ({namespace}); retry_order={pool_order}"
         )
 
         # Forward request to local router and stream back responses
-        try:
-            stream = await client.generate(request)
-            async for output in stream:
-                data = output.data() if hasattr(output, "data") else output
-                yield data
-        except Exception as e:
-            logger.error(f"Error forwarding agg request to {namespace}: {e}")
-            raise
+        async for data in self._forward_with_priority_retry(
+            request=request,
+            request_type="agg",
+            initial_pool_idx=pool_idx,
+            namespaces=self.config.agg_pool_dynamo_namespaces,
+            clients=self.agg_clients,
+            pool_priorities=self.config.agg_pool_priorities,
+        ):
+            yield data
 
     def get_pool_info(self) -> Dict[str, Any]:
         """Get information about connected pools for debugging/monitoring."""
@@ -307,6 +388,9 @@ class GlobalRouterHandler:
                     "num_decode_pools": self.config.num_decode_pools,
                     "prefill_pools": self.config.prefill_pool_dynamo_namespaces,
                     "decode_pools": self.config.decode_pool_dynamo_namespaces,
+                    "prefill_pool_priorities": self.config.prefill_pool_priorities,
+                    "decode_pool_priorities": self.config.decode_pool_priorities,
+                    "enable_priority_retry": self.config.enable_priority_retry,
                     "prefill_connected": list(self.prefill_clients.keys()),
                     "decode_connected": list(self.decode_clients.keys()),
                 }
@@ -316,6 +400,8 @@ class GlobalRouterHandler:
                 {
                     "num_agg_pools": self.config.num_agg_pools,
                     "agg_pools": self.config.agg_pool_dynamo_namespaces,
+                    "agg_pool_priorities": self.config.agg_pool_priorities,
+                    "enable_priority_retry": self.config.enable_priority_retry,
                     "agg_connected": list(self.agg_clients.keys()),
                 }
             )

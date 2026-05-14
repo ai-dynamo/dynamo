@@ -653,6 +653,7 @@ impl KvManager {
     ///
     /// For `Deref` / `Promote`, returns 1 on success and panics on
     /// invalid state (consistent with the old `vllm_backend` semantics).
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn process(&mut self, event: &MoveBlock) -> usize {
         match event {
             MoveBlock::Use(blocks, local_hashes, plhs, token_ids, parent) => self.process_use(
