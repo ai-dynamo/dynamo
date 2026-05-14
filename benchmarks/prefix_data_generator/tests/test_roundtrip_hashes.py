@@ -21,10 +21,15 @@ import tempfile
 import urllib.request
 
 import pytest
-from aiperf.common.config import PromptConfig
-from aiperf.common.tokenizer import Tokenizer
-from aiperf.dataset.generator import PromptGenerator
-from aiperf.dataset.synthesis.rolling_hasher import RollingHasher
+
+try:
+    from aiperf.common.config import PromptConfig
+    from aiperf.common.exceptions import ConfigurationError
+    from aiperf.common.tokenizer import Tokenizer
+    from aiperf.dataset.generator import PromptGenerator
+    from aiperf.dataset.synthesis.rolling_hasher import RollingHasher
+except ImportError:
+    pytest.skip("aiperf not installed; skipping tests", allow_module_level=True)
 
 # Mooncake trace URL
 MOONCAKE_TRACE_URL = "https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/arxiv-trace/mooncake_trace.jsonl"
@@ -47,6 +52,7 @@ def download_mooncake_trace(output_path: str, num_lines: int = 100) -> None:
 class TestRoundtripHashes:
     """Test hash consistency through aiperf's PromptGenerator."""
 
+    @pytest.mark.timeout(120)
     def test_hash_roundtrip_direct(self):
         """
         Direct test using PromptGenerator:
@@ -112,7 +118,7 @@ class TestRoundtripHashes:
                     generated_text = prompt_generator.generate(
                         mean=input_length, hash_ids=original_hash_ids
                     )
-                except Exception as e:
+                except ConfigurationError as e:
                     print(f"  Trace {i}: Generation failed - {e}")
                     generation_failures.append((i, str(e)))
                     continue
