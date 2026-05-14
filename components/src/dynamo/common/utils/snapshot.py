@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
+from gpu_memory_service.common.utils import get_checkpoint_save_complete_path
+
 from dynamo.common.utils.namespace import get_worker_namespace
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,7 @@ class CheckpointConfig:
     ) -> bool:
         logger.info("Quiescing model")
         await quiesce_controller.quiesce(*quiesce_args)
+        await self._wait_for_gms_checkpoint_save()
 
         try:
             with open(self.ready_file, "w", encoding="utf-8") as ready_file:
@@ -106,6 +109,15 @@ class CheckpointConfig:
                 pass
             except OSError:
                 logger.exception("Failed to clean up %s at %s", name, path)
+
+    async def _wait_for_gms_checkpoint_save(self) -> None:
+        ready_path = get_checkpoint_save_complete_path()
+        if ready_path is None or os.path.exists(ready_path):
+            return
+
+        logger.info("Waiting for GMS checkpoint save to complete: %s", ready_path)
+        while not os.path.exists(ready_path):
+            await asyncio.sleep(0.1)
 
 
 def configure_checkpoint_transport_env() -> None:
