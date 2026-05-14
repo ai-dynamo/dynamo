@@ -45,7 +45,7 @@ Below is a summary of the general file structure for the framework Dockerfile st
 |  /usr/local/bin/etcd/ | COPY from dynamo_base |
 |  /opt/dynamo/wheelhouse/ | COPY from wheel_builder |
 |  upstream Python/site-packages | inherited from upstream `vllm/vllm-openai` (multi-arch tag selected by CUDA family) |
-|  /workspace/{tests,examples,components/src/dynamo/{common,vllm},lib,deploy/sanity_check.py} | COPY from build context |
+|  /workspace/{tests,examples,dev,components/src/dynamo/{common,frontend,vllm},lib} | COPY from build context |
 | **STAGE: dev** | **FROM runtime (via dev/Dockerfile.dev)** |
 |  /usr/bin/, /usr/lib/, etc. | COPY from dynamo_tools (dev utilities, git, sudo, etc.) |
 |  /usr/local/rustup/ | COPY from dynamo_tools |
