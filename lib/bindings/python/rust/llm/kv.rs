@@ -9,8 +9,8 @@ use std::sync::atomic::AtomicU32;
 use std::sync::mpsc;
 use tokio_stream::StreamExt;
 
-use super::*;
 use super::local_model::Taints;
+use super::*;
 use crate::Endpoint;
 #[cfg(feature = "kv-indexer")]
 use clap::Parser;
