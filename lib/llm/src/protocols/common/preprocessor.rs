@@ -372,6 +372,7 @@ mod tests {
             source_dp_rank: 0,
             source_tier: StorageTier::HostPinned,
             block_hashes: vec![LocalBlockHash(11), LocalBlockHash(22)],
+            start_block_index: 0,
             planned_prefix_blocks: 2,
             block_size_tokens: 16,
             created_at_ms: 1000,

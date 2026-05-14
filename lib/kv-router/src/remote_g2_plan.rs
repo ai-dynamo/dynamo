@@ -21,6 +21,11 @@ pub struct RemoteKvReusePlan {
     pub source_dp_rank: DpRank,
     pub source_tier: StorageTier,
     pub block_hashes: Vec<LocalBlockHash>,
+    /// Position in the request's prefix where `block_hashes[0]` lives.
+    /// Equals the source worker's device-tier match count at plan time.
+    /// The target's connector uses this to verify alignment with its own
+    /// `num_computed_tokens` before attaching descriptors.
+    pub start_block_index: u32,
     pub planned_prefix_blocks: u32,
     pub block_size_tokens: u32,
     pub created_at_ms: u64,
@@ -140,13 +145,34 @@ pub fn select_remote_g2_reuse_plan(
         };
     };
 
-    let planned_prefix_blocks = hits.min(input.block_hashes.len()) as u32;
+    // The indexer returns `hits` as a chained continuation count: the
+    // HostPinned chain for this source extends from the position where its
+    // Device chain ended, not from position 0. Without offsetting, the plan
+    // would reference request.block_hashes[..hits] (positions 0..hits), but
+    // the actual HostPinned matches on the source cover positions
+    // [device_match, device_match + hits). The wrong hashes would land in
+    // the plan, the source's resolve_for_request would fail to find them,
+    // and the plan would be silently useless.
+    let device_match = input
+        .tiered_matches
+        .device
+        .overlap_scores
+        .scores
+        .get(&source)
+        .copied()
+        .unwrap_or(0) as usize;
+
+    let request_blocks = input.block_hashes.len();
+    let start = device_match.min(request_blocks);
+    let available_after_device = request_blocks.saturating_sub(start);
+    let planned_prefix_blocks = (hits as usize).min(available_after_device) as u32;
     if planned_prefix_blocks == 0 {
         return RemoteKvReuseDecision::NoPlan {
             reason: RemoteKvReuseNoPlanReason::NoContiguousPrefix,
             stats,
         };
     }
+    let end = start + planned_prefix_blocks as usize;
 
     RemoteKvReuseDecision::Plan {
         plan: RemoteKvReusePlan {
@@ -160,7 +186,8 @@ pub fn select_remote_g2_reuse_plan(
             source_worker_id: source.worker_id,
             source_dp_rank: source.dp_rank,
             source_tier: StorageTier::HostPinned,
-            block_hashes: input.block_hashes[..planned_prefix_blocks as usize].to_vec(),
+            block_hashes: input.block_hashes[start..end].to_vec(),
+            start_block_index: start as u32,
             planned_prefix_blocks,
             block_size_tokens: input.block_size_tokens,
             created_at_ms: input.created_at_ms,
@@ -190,6 +217,7 @@ mod tests {
             source_dp_rank: 1,
             source_tier: StorageTier::HostPinned,
             block_hashes: vec![LocalBlockHash(11), LocalBlockHash(22)],
+            start_block_index: 0,
             planned_prefix_blocks: 2,
             block_size_tokens: 16,
             created_at_ms: 1000,
@@ -385,6 +413,49 @@ mod tests {
                 assert_eq!(reason, RemoteKvReuseNoPlanReason::NoContiguousPrefix);
             }
             other => panic!("expected no plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_start_block_index_is_zero_when_source_has_no_device_match() {
+        // Source A has 0 device-tier matches and 3 HostPinned hits → plan
+        // covers request positions [0, 3) and start_block_index == 0.
+        let hashes = block_hashes(5);
+        let target = WorkerWithDpRank::new(9, 0);
+        let source = WorkerWithDpRank::new(7, 0);
+        let matches = tiered_matches(&[], &[(source, 3)]);
+
+        let decision = select_remote_g2_reuse_plan(selection_input(target, &hashes, &matches));
+
+        match decision {
+            RemoteKvReuseDecision::Plan { plan, .. } => {
+                assert_eq!(plan.start_block_index, 0);
+                assert_eq!(plan.planned_prefix_blocks, 3);
+                assert_eq!(plan.block_hashes, hashes[..3].to_vec());
+            }
+            other => panic!("expected plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_start_block_index_equals_source_device_match() {
+        // Source A has 2 device-tier matches and 2 HostPinned hits chained
+        // past them → plan covers request positions [2, 4) and
+        // start_block_index == 2 (skip past A's device chain).
+        let hashes = block_hashes(6);
+        let target = WorkerWithDpRank::new(9, 0);
+        let source = WorkerWithDpRank::new(7, 0);
+        let matches = tiered_matches(&[(source, 2)], &[(source, 2)]);
+
+        let decision = select_remote_g2_reuse_plan(selection_input(target, &hashes, &matches));
+
+        match decision {
+            RemoteKvReuseDecision::Plan { plan, .. } => {
+                assert_eq!(plan.start_block_index, 2);
+                assert_eq!(plan.planned_prefix_blocks, 2);
+                assert_eq!(plan.block_hashes, hashes[2..4].to_vec());
+            }
+            other => panic!("expected plan, got {other:?}"),
         }
     }
 }
