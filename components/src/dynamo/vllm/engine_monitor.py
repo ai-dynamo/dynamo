@@ -4,7 +4,6 @@
 import asyncio
 import logging
 import os
-import signal
 import traceback
 
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -58,20 +57,16 @@ class VllmEngineMonitor:
         """
         Shutdown the vLLM engine on crash scenarios to free resources.
         """
-
-        # Has timeout protection via SIGALRM
-        def timeout_handler(signum, frame):
-            raise TimeoutError("Engine shutdown timed out")
-
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(ENGINE_SHUTDOWN_TIMEOUT)
-
         try:
-            await self.engine_client.shutdown()
+            await asyncio.wait_for(
+                self.engine_client.shutdown(), timeout=ENGINE_SHUTDOWN_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "vLLM engine shutdown timed out after %ds", ENGINE_SHUTDOWN_TIMEOUT
+            )
         except Exception as e:
-            logger.warning(f"vLLM engine shutdown failed: {e}")
-        finally:
-            signal.alarm(0)
+            logger.warning("vLLM engine shutdown failed: %s", e)
 
     async def _check_engine_health(self):
         """
