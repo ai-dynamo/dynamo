@@ -51,6 +51,12 @@ type checkpointLocations struct {
 	ContainerPath string
 }
 
+const (
+	restoreContainerResolveInterval  = 50 * time.Millisecond
+	restoreContainerResolveTimeout   = 30 * time.Second
+	restoreContainerResolveKeySuffix = "resolve"
+)
+
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
 func NewNodeController(
 	cfg *types.AgentConfig,
@@ -297,19 +303,79 @@ func (w *NodeController) maybeStartRestoreForContainer(
 	checkpointID string,
 	podKey string,
 ) {
-	containerID := ""
-	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.Name != containerName || cs.ContainerID == "" {
-			continue
-		}
-		containerID = snapshotruntime.StripCRIScheme(cs.ContainerID)
-		break
-	}
+	containerID := restoreContainerIDFromStatus(pod, containerName)
 	if containerID == "" {
-		w.log.V(1).Info("Restore pod has no running container yet", "pod", podKey, "container", containerName)
+		w.maybeStartRestoreContainerResolver(ctx, pod.DeepCopy(), containerName, checkpointID, podKey)
 		return
 	}
 
+	w.startRestoreForContainer(ctx, pod, containerName, containerID, checkpointID, podKey)
+}
+
+func restoreContainerIDFromStatus(pod *corev1.Pod, containerName string) string {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == containerName && cs.ContainerID != "" {
+			return snapshotruntime.StripCRIScheme(cs.ContainerID)
+		}
+	}
+	return ""
+}
+
+func (w *NodeController) maybeStartRestoreContainerResolver(
+	ctx context.Context,
+	pod *corev1.Pod,
+	containerName string,
+	checkpointID string,
+	podKey string,
+) {
+	resolveKey := fmt.Sprintf("%s/%s/%s", podKey, containerName, restoreContainerResolveKeySuffix)
+	if !w.tryAcquire(resolveKey) {
+		return
+	}
+
+	w.log.V(1).Info("Restore pod has no running container in Kubernetes status yet; resolving via node runtime",
+		"pod", podKey,
+		"container", containerName,
+	)
+
+	go func() {
+		defer w.release(resolveKey)
+
+		resolveCtx, cancel := context.WithTimeout(ctx, restoreContainerResolveTimeout)
+		defer cancel()
+
+		ticker := time.NewTicker(restoreContainerResolveInterval)
+		defer ticker.Stop()
+
+		for {
+			containerID, err := w.runtime.ResolveContainerIDByPod(resolveCtx, pod.Name, pod.Namespace, containerName)
+			if err == nil && containerID != "" {
+				w.startRestoreForContainer(ctx, pod, containerName, containerID, checkpointID, podKey)
+				return
+			}
+
+			select {
+			case <-resolveCtx.Done():
+				w.log.V(1).Info("Timed out resolving restore container via node runtime",
+					"pod", podKey,
+					"container", containerName,
+					"err", err,
+				)
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+}
+
+func (w *NodeController) startRestoreForContainer(
+	ctx context.Context,
+	pod *corev1.Pod,
+	containerName string,
+	containerID string,
+	checkpointID string,
+	podKey string,
+) {
 	annotationKeys, err := snapshotprotocol.RestoreStatusAnnotationKeysFor(containerName)
 	if err != nil {
 		w.log.Error(err, "Restore target container name cannot be used in restore status annotation key", "pod", podKey, "container", containerName)
@@ -376,7 +442,7 @@ func (w *NodeController) maybeStartRestoreForContainer(
 //  2. Resolve the container ID and host PID
 //  3. Call executor.Checkpoint (inspect → configure → CUDA lock/checkpoint → CRIU dump → rootfs diff)
 //  4. Write a snapshot-complete sentinel into the pod's snapshot-control
-//     volume on success (observed by the workload via inotify), or SIGKILL
+//     volume on success (observed by the workload via polling), or SIGKILL
 //     on failure (unrecoverable CUDA-locked process)
 //  5. Mark job as completed or failed
 func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job *batchv1.Job, checkpointID, containerName, podKey string, startedAt time.Time) error {
@@ -505,7 +571,6 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 		}
 		return nil
 	}
-
 	// Step 2: Sentinel on success. Workload observes via polling on the
 	// snapshot-control volume; containerPID is a PID inside the container's
 	// mount namespace, which is all the /host/proc/<pid>/root write path
@@ -528,8 +593,17 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 	return nil
 }
 
-// runRestore restores one target container. Kubernetes readiness is gated by
-// the shaped startup probe, not by the snapshot-agent worker.
+// runRestore runs the full restore workflow for a pod:
+//  1. Mark the current container instance as in_progress
+//  2. Call executor.Restore (inspect placeholder → nsrestore inside namespace)
+//  3. Write a restore-complete sentinel into the pod's snapshot-control
+//     volume to wake the workload (observed via polling)
+//  4. Mark the container instance as completed
+//
+// Kubernetes readiness is gated separately: each restore-target container's
+// startup probe waits on the restore-complete sentinel, then its normal
+// readiness probe (if any) decides when the container is ready. The pod only
+// becomes Ready once every restored and cold-started container is ready.
 func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, containerName, containerID, checkpointID string, checkpointLocation checkpointLocations, restoreAttemptKey string, startedAt time.Time) error {
 	releaseOnExit := true
 	defer func() {
@@ -605,7 +679,6 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		}
 		return nil
 	}
-
 	// Any PID inside the container mount namespace reaches the control
 	// volume through /host/proc/<pid>/root.
 	if err := snapshotruntime.WriteControlSentinel(placeholderHostPID, snapshotprotocol.RestoreCompleteFile); err != nil {
