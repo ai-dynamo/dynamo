@@ -258,6 +258,31 @@ Key implementation files:
 
 Both flags are required for end-to-end tracing through the SGLang engine. Without `--enable-trace`, the Dynamo handler still creates spans, but SGLang's internal engine spans will not be linked.
 
+### Controlling SGLang Trace Verbosity
+
+When `--enable-trace` is set, SGLang emits spans at four verbosity levels. Dynamo defaults to level 2, which keeps all useful per-request spans while suppressing high-volume scheduler noise:
+
+| Level | Spans included | Volume |
+|-------|---------------|--------|
+| 1 | `tokenize`, `prefill_forward`, `decode_forward` | Low |
+| 2 | Level 1 + `request_process`, `api_server_dispatch` | Low |
+| 3 (SGLang default) | Level 2 + `decode_loop`, `chunked_prefill`, `fake_output` | Very high (~1.6M spans/hr per model) |
+| 4 | Level 3 + `run_batch_cpu` | Extremely high |
+
+Use the `SGLANG_TRACE_LEVEL` environment variable to override the default:
+
+| Variable | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `SGLANG_TRACE_LEVEL` | SGLang internal span verbosity level (1–4); only active when `--enable-trace` is set | `2` | `1` |
+
+```bash
+# Keep only the most essential per-request spans
+SGLANG_TRACE_LEVEL=1 python -m dynamo.sglang --model Qwen/Qwen3-0.6B --enable-trace --otlp-traces-endpoint localhost:4317
+
+# Restore SGLang's default level (includes decode_loop — high volume)
+SGLANG_TRACE_LEVEL=3 python -m dynamo.sglang --model Qwen/Qwen3-0.6B --enable-trace --otlp-traces-endpoint localhost:4317
+```
+
 ### Launch with Tracing
 
 The disaggregated launch script supports `--enable-otel` to enable tracing across all components:

@@ -647,7 +647,13 @@ impl MockEngine {
                             ) {
                                 tracing::warn!("Failed to publish metrics for DP rank {}: {e}", metrics.dp_rank);
                             } else {
-                                tracing::trace!("Published metrics for DP rank {}", metrics.dp_rank);
+                                tracing::debug!(
+                                    dp_rank = metrics.dp_rank,
+                                    active_decode_blocks = metrics.active_decode_blocks,
+                                    total_blocks = metrics.total_blocks,
+                                    gpu_cache_usage_perc = metrics.gpu_cache_usage_perc,
+                                    "published mocker load metrics"
+                                );
                             }
                         }
                         _ = cancel_token.cancelled() => {

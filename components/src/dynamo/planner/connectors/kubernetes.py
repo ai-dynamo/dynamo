@@ -47,6 +47,10 @@ from dynamo.runtime.logging import configure_dynamo_logging
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+CURRENT_WORKER_HASH_ANNOTATION = "nvidia.com/current-worker-hash"
+CURRENT_WORKER_HASH_V2_ANNOTATION = "nvidia.com/current-worker-hash-v2"
+LEGACY_WORKER_HASH = "legacy"
+
 
 class KubernetesConnector(PlannerConnector):
     def __init__(
@@ -77,6 +81,23 @@ class KubernetesConnector(PlannerConnector):
 
         # For backwards compatibility
         self.graph_deployment_name = self.parent_dgd_name
+
+    def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
+        """Return the Dynamo namespace used by the current worker generation.
+
+        Managed DGD rolling updates run worker components in
+        ``<base_namespace>-<worker_hash>`` while non-worker components, including
+        the frontend metrics labels, stay on ``base_namespace``.  The active hash
+        is stored on the parent DGD so planners can discover it dynamically.
+        """
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        annotations = deployment.get("metadata", {}).get("annotations", {}) or {}
+        worker_hash = annotations.get(CURRENT_WORKER_HASH_ANNOTATION)
+        if not worker_hash or worker_hash == LEGACY_WORKER_HASH:
+            worker_hash = annotations.get(CURRENT_WORKER_HASH_V2_ANNOTATION)
+        if not worker_hash or worker_hash == LEGACY_WORKER_HASH:
+            return base_dynamo_namespace
+        return f"{base_dynamo_namespace}-{worker_hash}"
 
     async def add_component(
         self, sub_component_type: SubComponentType, blocking: bool = True

@@ -17,15 +17,21 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: I will check the weather.
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
-    #   normal_text: 'I will check the weather. '
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check the weather.
+      vllm:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: 'I will check the weather. '
+        reason: "drops trailing normal_text after tool-call wrapper end"
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
   PARSER.batch.8.b:
     description: Narration after tool call only
     ref: dynamo
@@ -34,11 +40,15 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo: &d_8_b
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *d_8_b
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
   PARSER.batch.8.c:
     description: Narration both before and after (sandwich)
     ref: dynamo
@@ -47,15 +57,21 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: I will check the weather.
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
-    #   normal_text: 'I will check the weather. '
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: I will check the weather.
+      vllm:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: 'I will check the weather. '
+        reason: "drops trailing normal_text after tool-call wrapper end"
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
   PARSER.batch.8.d:
     description: Narration between multiple tool calls
     ref: dynamo
@@ -64,9 +80,15 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: I will check the weather.
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
-    #   normal_text: 'I will check the weather. '
+      dynamo:
+        calls: []
+        normal_text: I will check the weather.
+      vllm:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: 'I will check the weather. '
+        reason: "drops trailing normal_text after tool-call wrapper end"
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'

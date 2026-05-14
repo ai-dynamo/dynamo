@@ -250,6 +250,56 @@ if [ "$DEVICE" = "cpu" ]; then
     python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
     uv pip install dist/*.whl
 fi
+
+# Apply vendored vLLM patches for this ref. Used to carry upstream fixes
+# that are missing from the pinned release wheel (e.g. PR backports
+# dropped between rc and final tags). Skipped when:
+#   - VLLM_VER is >= 0.21.0  (upstream fix expected to be merged by then)
+#   - no patches/<VLLM_REF>/ subdir exists, or it has no *.patch files
+#
+# rc/post/dev/+ suffixes are stripped before comparison (so v0.21.0rc0
+# also trips the skip). Non-semver refs (commit SHA, branch name) fall
+# through to the directory-existence check.
+VLLM_VER_BASE=$(echo "$VLLM_VER" | sed -E 's/(rc|\.post|\.dev|\+).*//')
+PATCH_DIR="/tmp/deps/vllm/patches/${VLLM_REF}"
+if [[ "$VLLM_VER_BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && \
+   printf '%s\n%s\n' "0.21.0" "$VLLM_VER_BASE" | sort -V | head -n1 | grep -qx "0.21.0"; then
+    echo "vLLM $VLLM_VER >= 0.21 — skipping vendored patches (assumed merged upstream)"
+elif [ -d "$PATCH_DIR" ] && compgen -G "$PATCH_DIR/*.patch" > /dev/null; then
+    echo "\n=== Applying vendored vLLM patches from $PATCH_DIR ==="
+    # Run from / so cwd isn't ahead of the venv on sys.path. The build
+    # script is still inside the $INSTALLATION_DIR/vllm source clone here
+    # (from the earlier `cd vllm`), and that clone contains a `vllm/`
+    # package directory. Without the cd, `import vllm` resolves the
+    # source clone, vllm.__file__ points at /opt/vllm/vllm/__init__.py,
+    # and the patch lands on the build-only source tree — not on the
+    # installed wheel that the runtime actually imports. Same pattern as
+    # the post-install verification block above.
+    VLLM_SITE_PACKAGES=$(cd / && python3 -c "import vllm, os; print(os.path.dirname(os.path.dirname(vllm.__file__)))")
+    for p in "$PATCH_DIR"/*.patch; do
+        echo "  $(basename "$p")"
+        # --batch: suppress interactive prompts. Without it, an unmatched
+        #          file path in a hunk produces `File to patch:` on stdin
+        #          and hangs `docker build`.
+        # --forward: skip patches that already appear applied or reversed —
+        #          benign for re-runs and for wheels that already carry
+        #          the fix (e.g. a v0.20.1.post1 hotfix).
+        #
+        # GNU patch exit codes: 0 = clean apply, 1 = hunks rejected or
+        # skipped via --forward, >=2 = fatal. Accept rc=1 (so the patches
+        # block doesn't become a brittle build gate); propagate >=2.
+        rc=0
+        patch -p1 --batch --forward -d "$VLLM_SITE_PACKAGES" < "$p" || rc=$?
+        if [ "$rc" -ge 2 ]; then
+            echo "    fatal: patch exited $rc"
+            exit "$rc"
+        elif [ "$rc" -eq 1 ]; then
+            echo "    (already applied or partial; continuing)"
+        fi
+    done
+    echo "✓ vLLM patches applied"
+fi
+
 echo "✓ vLLM installation completed"
 
 echo "\n=== Installing LMCache from source ==="

@@ -14,6 +14,7 @@ from dynamo.global_router.pool_selection import (
     PrefillPoolSelectionStrategy,
     PriorityPoolOverride,
     _apply_priority_overrides,
+    get_priority_retry_order,
     load_config,
 )
 
@@ -60,6 +61,27 @@ class TestApplyPriorityOverrides:
 
     def test_empty_priority_and_empty_rules(self):
         assert _apply_priority_overrides(3, None, []) == 3
+
+
+# --- Priority retry order tests ---
+
+
+class TestPriorityRetryOrder:
+    def test_disabled_only_returns_selected_pool(self):
+        assert get_priority_retry_order(2, [0, 1, 2], False) == [2]
+
+    def test_default_priorities_retry_from_slow_to_fast(self):
+        assert get_priority_retry_order(2, [0, 1, 2], True) == [2, 1, 0]
+
+    def test_fastest_pool_has_no_faster_retry(self):
+        assert get_priority_retry_order(0, [0, 1, 2], True) == [0]
+
+    def test_custom_priorities_retry_by_next_faster_priority(self):
+        # Pool 0 is slowest, pool 2 is middle, pool 1 is fastest.
+        assert get_priority_retry_order(0, [10, 0, 5], True) == [0, 2, 1]
+
+    def test_same_priority_pools_preserve_pool_order(self):
+        assert get_priority_retry_order(3, [0, 1, 1, 2], True) == [3, 1, 2, 0]
 
 
 # --- PrefillPoolSelectionStrategy with priority ---
@@ -224,6 +246,30 @@ class TestLoadConfigWithPriorityOverrides:
         assert config.decode_pool_selection_strategy.priority_overrides == []
 
 
+class TestLoadConfigWithPriorityRetry:
+    def test_defaults_pool_priorities_from_pool_order(self, tmp_path):
+        config_data = _base_config()
+        config_path = _write_config(tmp_path, config_data)
+        config = load_config(config_path)
+
+        assert config.enable_priority_retry is False
+        assert config.prefill_pool_priorities == [0, 1]
+        assert config.decode_pool_priorities == [0, 1]
+
+    def test_loads_explicit_pool_priorities_and_retry_flag(self, tmp_path):
+        config_data = _base_config(
+            enable_priority_retry=True,
+            prefill_pool_priorities=[10, 0],
+            decode_pool_priorities=[5, 1],
+        )
+        config_path = _write_config(tmp_path, config_data)
+        config = load_config(config_path)
+
+        assert config.enable_priority_retry is True
+        assert config.prefill_pool_priorities == [10, 0]
+        assert config.decode_pool_priorities == [5, 1]
+
+
 # --- Validation tests ---
 
 
@@ -306,3 +352,47 @@ class TestValidatePriorityOverrides:
         config_path = _write_config(tmp_path, config_data)
         config = load_config(config_path)
         assert config.mode == "disagg"
+
+
+class TestValidatePriorityRetry:
+    def test_invalid_prefill_pool_priorities_length(self):
+        config = GlobalRouterConfig(
+            mode="disagg",
+            num_prefill_pools=2,
+            num_decode_pools=2,
+            prefill_pool_dynamo_namespaces=["a", "b"],
+            decode_pool_dynamo_namespaces=["c", "d"],
+            prefill_pool_priorities=[0],
+            prefill_pool_selection_strategy=_make_prefill_strategy(),
+            decode_pool_selection_strategy=_make_decode_strategy(),
+        )
+        with pytest.raises(ValueError, match="prefill_pool_priorities length"):
+            config.validate()
+
+    def test_invalid_decode_pool_priority_type(self):
+        config = GlobalRouterConfig(
+            mode="disagg",
+            num_prefill_pools=2,
+            num_decode_pools=2,
+            prefill_pool_dynamo_namespaces=["a", "b"],
+            decode_pool_dynamo_namespaces=["c", "d"],
+            decode_pool_priorities=[0, "1"],
+            prefill_pool_selection_strategy=_make_prefill_strategy(),
+            decode_pool_selection_strategy=_make_decode_strategy(),
+        )
+        with pytest.raises(ValueError, match="decode_pool_priorities\\[1\\]"):
+            config.validate()
+
+    def test_enable_priority_retry_must_be_bool(self):
+        config = GlobalRouterConfig(
+            mode="disagg",
+            enable_priority_retry="yes",
+            num_prefill_pools=2,
+            num_decode_pools=2,
+            prefill_pool_dynamo_namespaces=["a", "b"],
+            decode_pool_dynamo_namespaces=["c", "d"],
+            prefill_pool_selection_strategy=_make_prefill_strategy(),
+            decode_pool_selection_strategy=_make_decode_strategy(),
+        )
+        with pytest.raises(ValueError, match="enable_priority_retry"):
+            config.validate()
