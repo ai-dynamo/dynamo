@@ -9,6 +9,7 @@ and feature gap details.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import tempfile
@@ -230,12 +231,12 @@ class VllmLLMEngine(LLMEngine):
     async def cleanup(self) -> None:
         try:
             if self.engine_client is not None:
-                # AsyncLLM.shutdown() is an async method that must be awaited so
-                # that it drives the EngineCore subprocess to exit before we
-                # return.  Without await, the synchronous call returns
-                # immediately and the subprocess stays alive, causing the
-                # Python process to hang after Worker.run() completes.
-                await self.engine_client.shutdown()
+                # AsyncLLM.shutdown() may be sync or async depending on vLLM
+                # version.  Always await when it returns a coroutine; otherwise
+                # call it synchronously so the engine still shuts down.
+                result = self.engine_client.shutdown()
+                if inspect.isawaitable(result):
+                    await result
         finally:
             self.engine_client = None
             if self._prometheus_temp_dir is not None:
