@@ -24,32 +24,51 @@ This leads to:
 
 ## Solution Architecture
 
+Each GPU hosts **two GMS daemons**, one per tag — `weights` and `kv_cache`.
+Each daemon owns one `(GPU UUID, tag)` pair, listens on its own Unix socket,
+and is fronted by clients (writers and readers) that map its memory into
+their own address spaces.
+
 ```
-┌──────────────────────────────────────────────────────────────────────────────────────┐
-│                                                                                      │
-│  ┌────────────────────┐                  ┌─────────────────────────────────────────┐ │
-│  │        GMS         │                  │    GMSClientMemoryManager (Writer)      │ │
-│  │                    │                  │                                         │ │
-│  │ ┌────────────────┐ │                  │  ┌─────────────────────────────────┐    │ │
-│  │ │ Memory Manager │ │ ◄── Unix ───────►│  │         GMS Session             │    │ │
-│  │ └────────────────┘ │    Socket        │  └─────────────────────────────────┘    │ │
-│  │                    │       +          │                                         │ │
-│  │ ┌────────────────┐ │      FD          │  Writer-only: create_mapping, commit    │ │
-│  │ │ Session / FSM  │ │  (SCM_RIGHTS)    └─────────────────────────────────────────┘ │
-│  │ └────────────────┘ │                                                              │
-│  │                    │                  ┌─────────────────────────────────────────┐ │
-│  │ ┌────────────────┐ │                  │    GMSClientMemoryManager (Reader)      │ │
-│  │ │ Metadata Store │ │                  │                                         │ │
-│  │ └────────────────┘ │ ◄── Unix ───────►│  ┌─────────────────────────────────┐    │ │
-│  │                    │    Socket        │  │         GMS Session             │    │ │
-│  └────────────────────┘       +          │  └─────────────────────────────────┘    │ │
-│                              FD          │                                         │ │
-│                          (SCM_RIGHTS)    │  Reader-only: create_mapping (import),   │ │
-│                                          │               unmap_all_vas, remap      │ │
-│                                          └─────────────────────────────────────────┘ │
-│                                                                                      │
-└──────────────────────────────────────────────────────────────────────────────────────┘
+                          ┌──────────────────────────────────────────┐
+                          │  GPU (one UUID)                          │
+                          │                                          │
+    ┌─────────────────┐   │   ┌────────────────────────┐             │
+    │  Writer client  │◄──┼──►│  GMS daemon (weights)  │             │
+    │  (RW_OR_RO)     │   │   │  gms_<UUID>_weights    │             │
+    └─────────────────┘   │   │       .sock            │             │
+    ┌─────────────────┐   │   └────────────────────────┘             │
+    │  Reader client  │◄──┤                                          │
+    │  (RO)           │   │   ┌────────────────────────┐             │
+    └─────────────────┘   │   │  GMS daemon (kv_cache) │             │
+    ┌─────────────────┐   │   │  gms_<UUID>_kv_cache   │             │
+    │  Writer client  │◄──┼──►│       .sock            │             │
+    │  (RW)           │   │   └────────────────────────┘             │
+    └─────────────────┘   │                                          │
+                          └──────────────────────────────────────────┘
+
+         Unix sockets carry msgpack-framed RPCs + FDs via SCM_RIGHTS.
 ```
+
+### Deployment Topology
+
+- **One daemon per `(GPU UUID, tag)` pair.** `lib/gpu_memory_service/cli/server.py`
+  forks one `python -m gpu_memory_service --device <i> --tag <tag>` process per
+  visible CUDA device and per tag, and writes a `gms-ready` marker file once
+  all expected sockets exist.
+- **Two tags today**, defined in `integrations/common/utils.py` as
+  `GMS_TAGS = ("weights", "kv_cache")`.
+  - `weights`: publish/import flow (`RW_OR_RO`, then `RO` after commit).
+  - `kv_cache`: RW-only, recreated fresh on every wake.
+  - Other tags (e.g. SGLang's `cuda_graph`) are intentionally **rejected** in
+    GMS mode: there is no LD_PRELOAD torch-memory-saver fallback.
+- **Socket paths** are derived from the GPU UUID via
+  `common/utils.py::get_socket_path` and follow
+  `<GMS_SOCKET_DIR or /tmp>/gms_<UUID>_<tag>.sock`. UUIDs are stable across
+  `CUDA_VISIBLE_DEVICES` changes.
+- **Split-brain startup protection.** On bind, each daemon probes its socket
+  and refuses to start if another live daemon is already serving the same
+  `(device, tag)` path (`server/rpc.py::_prepare_socket_path`).
 
 ## Core Components
 
@@ -71,7 +90,7 @@ The server consists of three main components:
 
 3. **Metadata Store / Layout State** - `GMS` owns the metadata table and committed layout hash. Allocations and metadata live in one flat store that is cleared on each new writer connect or writer abort.
 
-Each GMS server is responsible for managing memory of only 1 GPU, and does not interact with GMS servers corresponding to other GPUs.
+Each GMS daemon is responsible for one `(GPU UUID, tag)` pair and does not coordinate with GMS daemons for other GPUs or other tags.
 
 ### Client
 
@@ -83,7 +102,7 @@ Clients connect to the server to acquire locks and access GPU memory. The suppor
    - Sets appropriate access permissions (RW for writers, RO for readers)
    - Supports **unmap/remap** for VA-stable memory release under memory pressure
 
-> **Note**: Always use `GMSClientMemoryManager` to interact with GMS from client code. The low-level RPC client is an implementation detail and should not be used directly.
+> **Note**: Always use `GMSClientMemoryManager` to interact with GMS from client code. The underlying `_GMSClientSession` and `_GMSRPCTransport` (in `client/session.py` and `client/rpc.py`) are package-private and may change without notice.
 
 ### Memory Allocation and Import Flow
 
@@ -162,7 +181,7 @@ stateDiagram-v2
 
 | Event | Trigger | Description |
 |-------|---------|-------------|
-| `RW_CONNECT` | Writer connects | Acquires exclusive write lock, clears the previous committed layout immediately, and starts a fresh RW layout build |
+| `RW_CONNECT` | Writer connects | Acquires exclusive write lock, clears the previous committed layout **eagerly on connect**, and starts a fresh RW layout build |
 | `RW_COMMIT` | Writer calls `commit()` | Publishes the current RW layout as the committed layout and releases the lock |
 | `RW_ABORT` | Writer disconnects without commit | Drops the active RW layout and returns to `EMPTY` |
 | `RO_CONNECT` | Reader connects | Acquires shared read lock |
@@ -176,7 +195,20 @@ A handshaken socket connection **is** the lock:
 - **No explicit unlock**: Eliminates forgotten locks and deadlocks
 - **Atomic transitions**: State changes happen atomically with socket operations
 
-The only exception is the runtime inspection probes (`GetRuntimeState`, `GetEventHistory`): they connect, fetch diagnostics, and close without entering the lock FSM.
+**Read-only diagnostic probes** are served outside the handshake FSM: the
+client connects, sends one request, reads the response, and closes without
+ever acquiring RW or RO. These message types live in
+`common/protocol/messages.py`:
+
+- `GetRuntimeState` — FSM state, committed flag, `allocation_count`,
+  current layout hash.
+- `GetEventHistory` — ordered list of `GMSRuntimeEvent`s (e.g.
+  `rw_connected`, `rw_aborted`, `allocations_cleared`).
+- `GetLockState` — session counts and `waiting_writers`.
+- `GetAllocationState` — just `allocation_count`.
+
+Test harnesses use these to wait for state transitions without taking the
+lock.
 
 ### Layout Lifecycle
 
@@ -464,16 +496,19 @@ Weight values can be modified in-place (e.g., RL training updates) as long as th
 
 ### FD Passing
 
-File descriptors are passed out-of-band using Unix socket `SCM_RIGHTS`:
+File descriptors are passed out-of-band using Unix socket `SCM_RIGHTS`. The
+synchronous client path in `common/protocol/wire.py` is:
 
 ```python
-# Server side (send FD)
+# Client (sync): send a request and receive a response + optional FD
 socket.send_fds(sock, [message_bytes], [fd])
-
-# Client side (receive FD)
 data, fds, _, _ = socket.recv_fds(sock, bufsize, maxfds=1)
 fd = fds[0] if fds else -1
 ```
+
+The server uses the same `socket.send_fds` / `socket.recv_fds` kernel
+primitives but wraps them in an asyncio executor so a blocking FD send
+does not stall the event loop.
 
 ---
 
@@ -524,7 +559,7 @@ class GMSClientMemoryManager:
     def unmap_all_vas() -> None          # Sync + unmap all, preserve VA reservations
     def remap_all_vas() -> None          # Re-import at preserved VAs (checks layout hash)
     def reallocate_all_handles(tag="default") -> None  # Fresh server handles for preserved VAs
-    def close() -> None
+    def close(*, best_effort: bool = False) -> None    # best_effort=True skips sync/swallows errors for post-CRIU teardown
 ```
 
 ---
@@ -537,11 +572,20 @@ GMS provides pre-built integrations for vLLM and SGLang. Enable GMS by passing `
 
 When `--load-format gms` is set:
 
-1. **A GMS server must already be running** for the target GPU device. The engine connects to it via a Unix socket derived from the GPU UUID.
-2. The engine uses `RW_OR_RO` mode by default: if no committed layout exists and no writer holds the lock, the first process gets RW and loads weights from disk. If another writer is already active, later clients wait until that writer either commits or aborts; after a commit they get RO to import published weights, and after an abort one of them can become the new RW writer.
-3. Both weights and KV cache are managed by GMS, but they use separate tags:
-   - `weights`: publish/import flow (`RW_OR_RO`, then `RO` after commit)
-   - `kv_cache`: separate RW-only tag for mutable KV-cache memory
+1. **Two GMS daemons must already be running** for the target GPU — one for
+   `weights` and one for `kv_cache`. Each backend opens its own client
+   against the per-tag Unix socket derived from the GPU UUID
+   (`gms_<UUID>_weights.sock` and `gms_<UUID>_kv_cache.sock`).
+2. The `weights` client uses `RW_OR_RO` mode by default: if no committed
+   layout exists and no writer holds the lock, the first process gets RW and
+   loads weights from disk. If another writer is already active, later
+   clients wait until that writer either commits or aborts; after a commit
+   they get RO to import published weights, and after an abort one of them
+   can become the new RW writer.
+3. The `kv_cache` client is always RW and the layout is rebuilt fresh on
+   every wake — KV cache state is not meant to survive a quiesce.
+4. Both backends also patch `torch.cuda.empty_cache()` so it cannot free
+   GMS-managed memory.
 
 #### vLLM
 
@@ -549,19 +593,27 @@ When `--load-format gms` is set:
 python -m dynamo.vllm \
   --model <model> \
   --load-format gms \
-  --worker-cls gpu_memory_service.integrations.vllm.worker:GMSWorker \
-  --enable-sleep-mode \
-  --gpu-memory-utilization 0.9
+  --enable-sleep-mode
 ```
 
+The Dynamo vLLM entry point (`components/src/dynamo/vllm/main.py`)
+auto-injects `--worker-cls gpu_memory_service.integrations.vllm.worker.GMSWorker`
+whenever `--load-format gms` is set; you do **not** need to pass it
+yourself. Pass `--gms-shadow-mode` on top if this engine is a shadow
+replica in a failover deployment (see *Shadow Engine Failover* below).
+
 The integration uses a custom worker class (`GMSWorker`) that:
-- Establishes the GMS connection early in `init_device()` so vLLM's `MemorySnapshot` can account for committed weights
+- Establishes the `weights` GMS connection early in `init_device()` so
+  vLLM's `MemorySnapshot` can account for committed weights
 - Registers a custom model loader (`GMSModelLoader`) for the `gms` load format
 - Patches `torch.cuda.empty_cache` to avoid releasing GMS-managed memory
-- Uses two GMS tags on the GPU:
-  - `weights`: normal publish/import flow (`RW_OR_RO`, then `RO` after commit)
-  - `kv_cache`: separate RW-only tag for mutable KV-cache memory
-- Routes both weight and KV-cache allocation through a `CUDAPluggableAllocator` backed by the appropriate GMS tag
+- Owns two independent clients on the GPU, one per daemon:
+  - `weights`: `RW_OR_RO` then `RO` after commit
+  - `kv_cache`: RW-only; in shadow mode the `kv_cache` client is deferred
+    to the first `wake_up()` call to avoid cross-engine RW contention
+- Routes `kv_cache` allocations through a `CUDAPluggableAllocator` mempool
+  backed by the `kv_cache` GMS daemon. Weight tensors are allocated
+  directly by `GMSModelLoader`, not through the vLLM tagged-allocator hook.
 
 #### SGLang
 
@@ -569,31 +621,62 @@ The integration uses a custom worker class (`GMSWorker`) that:
 python -m dynamo.sglang \
   --model-path <model> \
   --load-format gms \
-  --enable-memory-saver \
-  --mem-fraction-static 0.9
+  --enable-memory-saver
 ```
 
-The integration patches `torch_memory_saver` to route both weight and KV-cache operations through GMS:
-- Weights (`"weights"`) use the `weights` GMS tag
-- KV cache (`"kv_cache"`) uses a separate RW-only `kv_cache` GMS tag
-- Other tags are not supported in GMS mode
-- The `--enable-memory-saver` flag is required to activate the memory saver pathway
+The integration patches `torch_memory_saver` to route both weight and
+KV-cache operations through their respective GMS daemons:
+- Weights (`"weights"`) connect to the `weights` daemon.
+- KV cache (`"kv_cache"`) connects to the separate RW-only `kv_cache` daemon
+  and rebuilds its layout on every resume.
+- The `cuda_graph` tag is rejected with a hard error; the LD_PRELOAD
+  torch-memory-saver path is intentionally not available in GMS mode.
+  Other unsupported region/pause tags become no-ops with a warning.
+- `--enable-memory-saver` is required to activate the memory-saver
+  pathway. Tune `--mem-fraction-static` for the target GPU (values
+  around `0.8` have been needed on smaller-memory devices like L4 to
+  leave room for the shadow-failover flow).
 
 ### Shadow Engine Failover (Sleep / Wake)
 
-Both integrations support releasing and reclaiming GPU memory for shadow engine patterns. The API names differ by framework:
+Both integrations support releasing and reclaiming GPU memory for
+shadow-engine deployments. The user-visible quiesce/resume API names
+differ by framework:
 
-- **vLLM**: `sleep` / `wake_up` (via `/engine/sleep` and `/engine/wake_up` HTTP endpoints)
-- **SGLang**: `release_memory_occupation` / `resume_memory_occupation` (via the corresponding HTTP endpoints)
+- **vLLM**: `sleep` / `wake_up` (via `/engine/sleep` and `/engine/wake_up` HTTP endpoints).
+- **SGLang**: `release_memory_occupation` / `resume_memory_occupation` (via the corresponding HTTP endpoints).
 
-Under the hood, sleeping calls `unmap_all_vas()` + `abort()` to release GPU memory while preserving VA reservations. Waking is tag-specific:
+Because each backend holds a separate client per daemon, sleep and wake run
+**independently for `weights` and `kv_cache`**.
 
-- **weights**: `connect(RO)` + `remap_all_vas()`
-- **kv_cache**: `connect(RW)` + `reallocate_all_handles("kv_cache")` + `remap_all_vas()`
+- **Sleep (both tags)**: `unmap_all_vas()` + `abort()` — physical memory is
+  released (`cuMemUnmap` + `cuMemRelease`) but the VA reservations are
+  preserved so tensor pointers stay valid.
+- **Wake, `weights`**: `connect(RO)` + `remap_all_vas()`. Published weights
+  come back read-only at the same VAs; the layout hash is cross-checked.
+- **Wake, `kv_cache`**: `connect(RW)` + `reallocate_all_handles("kv_cache")`
+  + `remap_all_vas()`. KV cache always resumes in a fresh RW epoch, so the
+  server-side handles are re-created before the VA range is mapped again.
 
-Tensor pointers remain valid because the original virtual addresses are preserved.
+**Enabling shadow mode.** vLLM exposes `--gms-shadow-mode` on
+`python -m dynamo.vllm`, which requires `--load-format gms`. The flag sets
+`DYN_GMS_SHADOW_MODE=1` in the worker environment; the `GMSWorker` reads
+that to adjust startup behavior:
 
-This enables a shadow engine to release its GPU memory, let a primary engine use the GPU, and then reclaim the memory after the primary is killed. The mutable KV cache always moves through a fresh RW layout in its own GMS tag before it is reallocated.
+- The `kv_cache` client is **not** created in `initialize_from_config()`.
+  It is created lazily on the first `wake_up()` so concurrent shadow
+  engines do not fight over the single RW lock on the `kv_cache` daemon.
+- CUDA-graph capture mode is constrained to `PIECEWISE` or `NONE`.
+- Shadow engines must stay **cold** before the first quiesce: they must
+  not serve any request in between startup and `sleep` / quiesce.
+  Warmup traffic against a shadow engine can trip SGLang's
+  "release_memory_occupation should be called only when no ongoing request"
+  guard and, on vLLM, interact badly with the deferred `kv_cache` client.
+
+This enables a shadow engine to release its GPU memory, let a primary
+engine use the GPU, and then reclaim the memory after the primary is
+killed. The mutable KV cache always moves through a fresh RW layout on its
+own daemon before it is reallocated.
 
 ### Configuration via `model_loader_extra_config`
 
@@ -604,3 +687,11 @@ To force read-only mode (import only, never load from disk), pass `gms_read_only
 ```
 
 This forces `RO` lock mode instead of the default `RW_OR_RO` auto-detection. The engine will only import existing committed weights and fail if none are available.
+
+**Shadow mode with TP>1 (vLLM).** When `--gms-shadow-mode` is set, the
+Dynamo vLLM entry point auto-configures `gms_read_only` per rank via
+`configure_gms_lock_mode()` in `integrations/vllm/utils.py`: only
+`ENGINE_ID="0"` is allowed to be the primary writer (`RW_OR_RO`), and all
+other ranks are forced to `gms_read_only=true`. You do not need to set
+`gms_read_only` manually for non-primary ranks; an explicit value that
+conflicts with `ENGINE_ID` raises.
