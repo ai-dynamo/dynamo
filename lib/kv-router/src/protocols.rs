@@ -181,8 +181,8 @@ pub trait WorkerConfigLike {
     fn data_parallel_size(&self) -> u32;
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
-    fn taints(&self) -> &Taints {
-        &EMPTY_TAINTS
+    fn taints(&self) -> &[String] {
+        &EMPTY_WORKER_TAINTS
     }
 }
 
@@ -199,19 +199,15 @@ impl Taints {
         self.required.is_empty() && self.preferred.is_empty()
     }
 
-    pub fn is_compatible_with(&self, request: &Taints) -> bool {
-        request
+    pub fn is_compatible_with_worker_taints(&self, worker_taints: &[String]) -> bool {
+        self
             .required
             .iter()
-            .all(|taint| self.required.iter().any(|worker_taint| worker_taint == taint))
-            && self
-                .required
-                .iter()
-                .all(|taint| request.required.iter().any(|request_taint| request_taint == taint))
+            .all(|taint| worker_taints.iter().any(|worker_taint| worker_taint == taint))
     }
 }
 
-static EMPTY_TAINTS: LazyLock<Taints> = LazyLock::new(Taints::default);
+static EMPTY_WORKER_TAINTS: LazyLock<Vec<String>> = LazyLock::new(Vec::new);
 
 /// Transport abstraction for publishing batched router-visible KV cache events.
 pub trait RouterEventSink: Send + Sync {

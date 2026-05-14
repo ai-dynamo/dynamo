@@ -115,8 +115,8 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
-    fn set_taints(&mut self, taints: &Taints) {
-        self.inner.taints = taints.inner.clone();
+    fn set_taints(&mut self, taints: Vec<String>) {
+        self.inner.taints = taints;
     }
 
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
@@ -230,9 +230,7 @@ impl ModelRuntimeConfig {
     }
 
     #[getter]
-    fn taints(&self) -> Taints {
-        Taints {
-            inner: self.inner.taints.clone(),
-        }
+    fn taints(&self) -> Vec<String> {
+        self.inner.taints.clone()
     }
 }

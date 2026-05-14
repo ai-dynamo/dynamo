@@ -514,7 +514,7 @@ class ModelRuntimeConfig:
     data_parallel_size: int
     enable_local_indexer: bool
     enable_eagle: bool
-    taints: Taints
+    taints: List[str]
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
     bootstrap_host: str | None

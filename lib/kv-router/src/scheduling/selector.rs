@@ -220,7 +220,11 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             && workers
                 .iter()
                 .filter(|(worker_id, _)| request.is_worker_allowed(**worker_id))
-                .all(|(_, config)| !config.taints().is_compatible_with(&request.taints))
+                .all(|(_, config)| {
+                    !request
+                        .taints
+                        .is_compatible_with_worker_taints(config.taints())
+                })
         {
             return Err(KvSchedulerError::NoEndpoints);
         }
@@ -249,7 +253,11 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             pinned_worker_config(workers, worker)?;
             if workers
                 .get(&worker.worker_id)
-                .is_some_and(|config| !config.taints().is_compatible_with(&request.taints))
+                .is_some_and(|config| {
+                    !request
+                        .taints
+                        .is_compatible_with_worker_taints(config.taints())
+                })
             {
                 return Err(KvSchedulerError::NoEndpoints);
             }
@@ -289,7 +297,10 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .iter()
             .filter(move |(worker_id, _)| request.is_worker_allowed(**worker_id))
             .filter(move |(_, config)| {
-                request.taints.is_empty() || config.taints().is_compatible_with(&request.taints)
+                request.taints.is_empty()
+                    || request
+                        .taints
+                        .is_compatible_with_worker_taints(config.taints())
             })
             .flat_map(|(worker_id, config)| {
                 let data_parallel_size = config.data_parallel_size();

@@ -6,8 +6,6 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::protocols::tensor;
-use dynamo_kv_router::protocols::Taints;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct DisaggregatedEndpoint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,8 +64,8 @@ pub struct ModelRuntimeConfig {
     #[serde(default = "default_eagle")]
     pub enable_eagle: bool,
 
-    #[serde(default, skip_serializing_if = "Taints::is_empty")]
-    pub taints: Taints,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taints: Vec<String>,
 }
 
 const fn default_data_parallel_start_rank() -> u32 {
@@ -106,7 +104,7 @@ impl Default for ModelRuntimeConfig {
             tensor_model_config: None,
             disaggregated_endpoint: None,
             enable_eagle: false,
-            taints: Taints::default(),
+            taints: Vec::new(),
         }
     }
 }
@@ -128,7 +126,7 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
         self.total_kv_blocks
     }
 
-    fn taints(&self) -> &Taints {
+    fn taints(&self) -> &[String] {
         &self.taints
     }
 }
