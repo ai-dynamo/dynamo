@@ -277,7 +277,12 @@ class SglangLLMEngine(LLMEngine):
                     scheduler = getattr(
                         self.engine.tokenizer_manager, "scheduler", None
                     )
-                    if scheduler is not None and scheduler.is_idle():
+                    if scheduler is None:
+                        logger.debug(
+                            "SGLang scheduler not yet available; skipping drain poll"
+                        )
+                        break
+                    if scheduler.is_idle():
                         logger.info("All in-flight SGLang requests drained")
                         break
                     total = getattr(scheduler, "get_total_usage", lambda: None)() or 0
