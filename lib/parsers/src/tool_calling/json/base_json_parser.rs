@@ -106,12 +106,15 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
             //     the closing '}' of each complete object.
             let mut remaining = s.trim_start();
             while !remaining.is_empty() {
-                let mut de = serde_json::Deserializer::from_str(remaining);
-                match <Box<RawValue> as serde::Deserialize>::deserialize(&mut de) {
+                match serde_json::from_str::<Box<RawValue>>(remaining) {
                     Ok(rv) => {
-                        items.push(rv.get().to_string());
-                        let consumed = de.byte_offset();
-                        remaining = remaining[consumed..].trim_start();
+                        let raw = rv.get();
+                        items.push(raw.to_string());
+                        // Advance past the consumed bytes.  `RawValue` captures
+                        // exactly the JSON token bytes (no surrounding whitespace),
+                        // and `remaining` starts at a non-whitespace byte because
+                        // we called `trim_start()` at every step.
+                        remaining = remaining[raw.len()..].trim_start();
                         // Skip the ';' separator between parallel calls (if any).
                         if let Some(rest) = remaining.strip_prefix(';') {
                             remaining = rest.trim_start();
