@@ -12,7 +12,7 @@ the extract-and-validate pattern so the same logic doesn't drift.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional, cast
 
 from dynamo.common.backend.engine import GenerateRequest
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 def forced_dp_rank(request: GenerateRequest) -> Optional[int]:
     """Pull the router-forced ``dp_rank`` out of a request's ``routing``."""
-    routing = request.get("routing") or {}
+    routing = cast("dict[str, Any]", request.get("routing") or {})
     rank = routing.get("dp_rank")
     return None if rank is None else int(rank)
 

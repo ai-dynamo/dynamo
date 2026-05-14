@@ -7,10 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from dynamo.common.backend.dp_rank import (
-    forced_dp_rank,
-    validate_global_dp_rank,
-)
+from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
