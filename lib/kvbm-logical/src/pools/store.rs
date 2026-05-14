@@ -1047,24 +1047,21 @@ mod tests {
         map.insert(keys[0], 999);
         assert_eq!(map.get(&keys[0]).copied(), Some(999));
         assert_eq!(map.remove(&keys[1]), Some(1));
-        assert!(map.get(&keys[1]).is_none());
+        assert!(!map.contains_key(&keys[1]));
     }
 
     /// `IdHasher` must produce distinct digests for distinct keys (no
     /// catastrophic folding collision among realistic values) and must
-    /// run through `write_u128` — never the `write` byte-slice path.
+    /// run through `write_u128` — never the `write` byte-slice path
+    /// (`hash_one` would panic in `IdHasher::write` if a key did not).
     #[test]
     fn id_hasher_distinguishes_distinct_keys() {
         use std::collections::HashSet;
-        use std::hash::{BuildHasher, Hash, Hasher};
+        use std::hash::BuildHasher;
 
         let digests: HashSet<u64> = sample_keys()
             .iter()
-            .map(|k| {
-                let mut h = IdBuildHasher.build_hasher();
-                k.hash(&mut h); // panics in IdHasher::write if not write_u128
-                h.finish()
-            })
+            .map(|k| IdBuildHasher.hash_one(k))
             .collect();
         assert_eq!(
             digests.len(),
