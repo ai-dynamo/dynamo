@@ -285,9 +285,25 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .as_ref()
             .and_then(|cfg| cfg.router_temperature)
             .unwrap_or(self.kv_router_config.router_temperature);
+        let preferred_taint_bias_pct = self.kv_router_config.preferred_taint_bias_pct;
 
         let get_score = |worker: WorkerWithDpRank| -> f64 {
-            self.worker_logit(request, worker, block_size, weights, "Formula")
+            let base_score = self.worker_logit(request, worker, block_size, weights, "Formula");
+            if preferred_taint_bias_pct == 0.0 {
+                return base_score;
+            }
+            let Some(config) = workers.get(&worker.worker_id) else {
+                return base_score;
+            };
+            let preferred_matches = request
+                .routing_constraints
+                .preferred_taint_matches(config.taints());
+            if preferred_matches == 0 {
+                return base_score;
+            }
+            let preferred_multiplier =
+                (1.0 - preferred_taint_bias_pct).powi(preferred_matches as i32);
+            base_score * preferred_multiplier
         };
 
         let worker_iter = workers
@@ -749,6 +765,63 @@ mod tests {
                 "required taint {required_taint} should route only within its compatible worker set"
             );
         }
+    }
+
+    #[test]
+    fn test_preferred_taint_bias_pct_prefers_matching_worker() {
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                router_temperature: 0.0,
+                preferred_taint_bias_pct: 0.25,
+                ..Default::default()
+            }),
+            "test",
+        );
+        let workers = HashMap::from([
+            (
+                10,
+                TaintedWorkerConfig {
+                    taints: HashSet::from(["mdc-a".to_string()]),
+                },
+            ),
+            (
+                20,
+                TaintedWorkerConfig {
+                    taints: HashSet::from(["mdc-b".to_string()]),
+                },
+            ),
+        ]);
+        let mut decode_blocks = FxHashMap::default();
+        decode_blocks.insert(WorkerWithDpRank::from_worker_id(10), 100);
+        decode_blocks.insert(WorkerWithDpRank::from_worker_id(20), 90);
+
+        let request = SchedulingRequest {
+            maybe_request_id: Some("test".into()),
+            token_seq: None,
+            isl_tokens: 16,
+            tier_overlap_blocks: Default::default(),
+            effective_overlap_blocks: HashMap::default(),
+            effective_cached_tokens: HashMap::default(),
+            decode_blocks,
+            prefill_tokens: FxHashMap::default(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            update_states: false,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints {
+                required_taints: HashSet::new(),
+                preferred_taints: HashSet::from(["mdc-a".to_string()]),
+            },
+            shared_cache_hits: None,
+            resp_tx: None,
+        };
+
+        let result = selector.select_worker(&workers, &request, 16).unwrap();
+        assert_eq!(result.worker.worker_id, 10);
     }
 
     /// Test the scoring formula with shared cache hits.

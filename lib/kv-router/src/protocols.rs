@@ -189,6 +189,13 @@ impl RoutingConstraints {
             .iter()
             .all(|taint| worker_taints.contains(taint))
     }
+
+    pub fn preferred_taint_matches(&self, worker_taints: &HashSet<String>) -> usize {
+        self.preferred_taints
+            .iter()
+            .filter(|taint| worker_taints.contains(*taint))
+            .count()
+    }
 }
 
 static EMPTY_WORKER_TAINTS: LazyLock<HashSet<String>> = LazyLock::new(HashSet::new);
