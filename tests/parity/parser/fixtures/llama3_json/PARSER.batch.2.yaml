@@ -54,7 +54,7 @@ cases:
         - name: get_time
           arguments:
             timezone: EST
-        normal_text: ''
+        normal_text: 'Both:'
       vllm: *d_2c
       sglang:
         unavailable: SGLang has no detector for family='llama3_json'
