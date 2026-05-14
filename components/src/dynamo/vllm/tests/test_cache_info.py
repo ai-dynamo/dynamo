@@ -75,7 +75,9 @@ class TestConfigureKvEventBlockSize:
         vllm_config = _make_vllm_config(
             additional_config={DYNAMO_KV_EVENT_BLOCK_SIZE_KEY: 2048}
         )
-        engine = _make_engine(return_value=[{"kind": "full_attention", "block_size": 32}])
+        engine = _make_engine(
+            return_value=[{"kind": "full_attention", "block_size": 32}]
+        )
 
         result = await configure_kv_event_block_size(engine, vllm_config)
 
@@ -86,7 +88,9 @@ class TestConfigureKvEventBlockSize:
     async def test_uses_env_override(self, monkeypatch):
         monkeypatch.setenv("DYN_VLLM_KV_EVENT_BLOCK_SIZE", "4096")
         vllm_config = _make_vllm_config()
-        engine = _make_engine(return_value=[{"kind": "full_attention", "block_size": 32}])
+        engine = _make_engine(
+            return_value=[{"kind": "full_attention", "block_size": 32}]
+        )
 
         result = await configure_kv_event_block_size(engine, vllm_config)
 
@@ -107,7 +111,9 @@ class TestConfigureKvEventBlockSize:
             )
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("group_metadata", [[], [{"kind": "mamba_state", "block_size": 32}]])
+    @pytest.mark.parametrize(
+        "group_metadata", [[], [{"kind": "mamba_state", "block_size": 32}]]
+    )
     async def test_raises_when_exact_match_required_and_main_attention_metadata_missing(
         self,
         group_metadata,
