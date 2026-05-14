@@ -1646,18 +1646,20 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
     def test_stop_reason_emits_in_nvext_when_requested(self, tokenizer):
         """Frontend emits backend stop_reason under nvext when requested."""
 
-        class FakeRouter:
-            async def generate(self, *args, **kwargs):
-                yield {
-                    "token_ids": [],
-                    "finish_reason": "stop",
-                    "stop_reason": "END",
-                }
+        from _routed_engine_fakes import FakeRoutedEngine
 
         async def collect():
             processor = SglangProcessor(
                 tokenizer=tokenizer,
-                router=FakeRouter(),
+                routed_engine=FakeRoutedEngine(
+                    items=[
+                        {
+                            "token_ids": [],
+                            "finish_reason": "stop",
+                            "stop_reason": "END",
+                        }
+                    ]
+                ),
                 tool_call_parser_name=None,
                 reasoning_parser_name=None,
                 eos_token_id=None,
