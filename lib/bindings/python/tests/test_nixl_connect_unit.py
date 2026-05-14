@@ -84,8 +84,8 @@ def testable_active_op(nixl_mocks):
             self._local_desc_list = MagicMock()
             self._local_desc_tlist = []
             self._remote_desc_tlist = []
-            self._local_device_kind = MagicMock()
-            self._remote_device_kind = MagicMock()
+            self._local_mem_type = MagicMock()
+            self._remote_mem_type = MagicMock()
             self._notification_key = "test-key"
             self._operation_kind = MagicMock()
 
