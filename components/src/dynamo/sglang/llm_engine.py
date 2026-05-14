@@ -40,6 +40,7 @@ from dynamo.common.backend.publisher import (
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.llm import ModelInput
 from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import compute_bootstrap_address, warmup_prefill_engine
@@ -84,6 +85,7 @@ class SglangLLMEngine(LLMEngine):
         self.dynamo_args = dynamo_args
         # SGLang's local name for disaggregation_mode. Same enum.
         self.serving_mode = serving_mode
+        self.enable_trace = getattr(server_args, "enable_trace", False)
         self.engine: Any = None
         self._bootstrap_host: str | None = None
         self._bootstrap_port: int | None = None
@@ -131,6 +133,11 @@ class SglangLLMEngine(LLMEngine):
             else None
         )
         self._input_param_manager = InputParamManager(tokenizer)
+
+        logger.info(
+            "Trace header forwarding: %s",
+            "enabled" if self.enable_trace else "disabled (--enable-trace=False)",
+        )
 
         if self.serving_mode == DisaggregationMode.PREFILL:
             self._bootstrap_host, self._bootstrap_port = compute_bootstrap_address(
@@ -231,11 +238,14 @@ class SglangLLMEngine(LLMEngine):
         elif self.serving_mode == DisaggregationMode.DECODE:
             bootstrap_kwargs = self._resolve_decode_bootstrap(request)
 
+        trace_header = build_trace_headers(context) if self.enable_trace else None
+
         stream = await self.engine.async_generate(
             **input_param,
             sampling_params=sampling_params,
             stream=True,
             rid=context.trace_id,
+            external_trace_header=trace_header,
             **bootstrap_kwargs,
         )
 

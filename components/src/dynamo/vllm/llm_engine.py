@@ -39,6 +39,7 @@ from dynamo.common.backend.publisher import (
 )
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.llm import ModelInput
 from dynamo.vllm.args import parse_args
 from dynamo.vllm.cache_info import (
@@ -277,7 +278,10 @@ class VllmLLMEngine(LLMEngine):
                 sampling_params.extra_args = {}
             sampling_params.extra_args["kv_transfer_params"] = kv_params
 
-        gen = self.engine_client.generate(prompt, sampling_params, request_id)
+        trace_headers = build_trace_headers(context)
+        gen = self.engine_client.generate(
+            prompt, sampling_params, request_id, trace_headers=trace_headers
+        )
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
 
