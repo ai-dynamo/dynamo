@@ -47,3 +47,4 @@ cases:
       vllm: *d_6_b
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
+  # PARSER.batch.6.c (arguments-key absent) n/a: DSML has no 'arguments' key — params are <｜DSML｜parameter> children of <｜DSML｜invoke>. Zero-args is already case 6.a.

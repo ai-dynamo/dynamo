@@ -45,3 +45,4 @@ cases:
         normal_text: ''
       vllm: *d_6_b
       sglang: *d_6_b
+  # PARSER.batch.6.c (arguments-key absent) n/a: DSML has no 'arguments' key — params are <｜DSML｜parameter> children of <｜DSML｜invoke>. Zero-args is already case 6.a.
