@@ -394,10 +394,58 @@ async def test_gaie_deployment(
                 max_attempts=30,
                 headers=headers,
             )
-            assert model_ready, (
-                f"Model '{GAIE_MODEL_NAME}' did not become available "
-                f"within the timeout period"
-            )
+            if not model_ready:
+                # Diagnostic probe: send the SAME logical request but with
+                # ``content`` in OpenAI multi-part array form instead of the
+                # bare-string form the helper uses. If the bare-string body
+                # was being rejected by the worker's Rust frontend with a
+                # serde "expected newtype variant" error (the regression
+                # observed in CI run 25832141080), this probe will succeed
+                # while the bare-string form fails -- pinning the bug to a
+                # JSON content-shape mismatch in the Gateway/EPP/sidecar
+                # pipeline rather than infrastructure flakes.
+                #
+                # On any other failure mode (sidecar crashed, EPP no longer
+                # routes to prefill, etc.) this probe will reproduce the
+                # same error and rule the content-shape hypothesis out.
+                diag_url = f"{gateway_url}{endpoint}"
+                diag_payload = {
+                    "model": GAIE_MODEL_NAME,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "test"},
+                            ],
+                        }
+                    ],
+                    "max_tokens": 1,
+                    "stream": False,
+                }
+                logger.warning(
+                    "Model availability probe (bare-string content) failed; "
+                    "sending diagnostic probe with array-form content to "
+                    "differentiate JSON-shape mismatch from other failures"
+                )
+                try:
+                    diag_resp = requests.post(
+                        diag_url,
+                        json=diag_payload,
+                        headers=headers,
+                        timeout=30,
+                    )
+                    logger.warning(
+                        f"Array-form diagnostic probe → status={diag_resp.status_code} "
+                        f"body={diag_resp.text[:500]!r}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Array-form diagnostic probe raised: {type(e).__name__}: {e}"
+                    )
+                assert model_ready, (
+                    f"Model '{GAIE_MODEL_NAME}' did not become available "
+                    f"within the timeout period"
+                )
 
             url = f"{gateway_url}{endpoint}"
             payload = {

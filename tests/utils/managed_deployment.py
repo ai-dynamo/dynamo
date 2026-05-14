@@ -535,6 +535,13 @@ class ManagedDeployment:
     _deployment_name: str = field(default="")
     _apps_v1: Optional[Any] = None
     _active_port_forwards: List[Any] = field(default_factory=list)
+    # Snapshot of container restart counts (per ``pod_name/container_name``)
+    # captured immediately when the deployment first reports Ready. Compared
+    # against the live values during cleanup so a sidecar/main crash that
+    # happened *after* Ready (e.g. the GAIE serde-failure-then-connection-
+    # refused pattern in CI) shows up as an actionable warning instead of a
+    # silent regression. Empty until ``_wait_for_ready`` succeeds.
+    _ready_restart_baseline: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
         self._deployment_name = self.deployment_spec.name
@@ -702,6 +709,14 @@ class ManagedDeployment:
                     self._logger.info(
                         f"Deployment {self._deployment_name} has Ready condition {desired_ready_condition_val} and state {desired_state_val}"
                     )
+                    # Capture restart-count baseline only on positive Ready
+                    # transitions so the cleanup-time check can attribute any
+                    # restart to events *after* the deployment was healthy.
+                    if (
+                        desired_ready_condition_val is True
+                        and desired_state_val == "successful"
+                    ):
+                        await self._snapshot_restart_baseline()
                     return True
                 else:
                     if attempt % log_interval == 0:
@@ -866,6 +881,80 @@ class ManagedDeployment:
 
         except exceptions.ApiException as e:
             self._logger.debug(f"Failed to collect pod status details: {e}")
+            return []
+
+    async def _snapshot_restart_baseline(self) -> None:
+        """Record per-container restart counts at the moment Ready is reached.
+
+        The cleanup path compares live counts against this snapshot to surface
+        crashes that happened *after* the deployment reported healthy. Empty
+        snapshot is fine -- ``_check_post_ready_restarts`` no-ops in that case.
+        """
+        try:
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            label = f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name}"
+            pods = await self._core_api.list_namespaced_pod(
+                self.namespace, label_selector=label
+            )
+            baseline: dict[str, int] = {}
+            for pod in pods.items:
+                pod_name = pod.metadata.name if pod.metadata else "?"
+                statuses = (pod.status.container_statuses if pod.status else None) or []
+                for cs in statuses:
+                    baseline[f"{pod_name}/{cs.name}"] = cs.restart_count or 0
+            self._ready_restart_baseline = baseline
+            self._logger.info(
+                f"Snapshotted restart baseline for {len(baseline)} containers at Ready"
+            )
+        except Exception as e:
+            self._logger.debug(f"Failed to snapshot restart baseline: {e}")
+
+    async def _check_post_ready_restarts(self) -> List[str]:
+        """Return a list of human-readable warnings for any container whose
+        restart count increased since the Ready baseline was captured.
+
+        This is the signal that distinguishes "test sent a bad request and the
+        sidecar crashed" from "the sidecar refused to handle the request":
+        the former increments restart_count, the latter does not.
+        """
+        if not self._ready_restart_baseline:
+            return []
+        try:
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            label = f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name}"
+            pods = await self._core_api.list_namespaced_pod(
+                self.namespace, label_selector=label
+            )
+            warnings: List[str] = []
+            for pod in pods.items:
+                pod_name = pod.metadata.name if pod.metadata else "?"
+                statuses = (pod.status.container_statuses if pod.status else None) or []
+                for cs in statuses:
+                    key = f"{pod_name}/{cs.name}"
+                    before = self._ready_restart_baseline.get(key, 0)
+                    after = cs.restart_count or 0
+                    if after > before:
+                        # Capture last-terminated reason if available; this is
+                        # what tells us *why* the container crashed (OOM,
+                        # signal, exit code) without needing to open the logs.
+                        last_reason = ""
+                        last_exit: Optional[int] = None
+                        if cs.last_state and cs.last_state.terminated:
+                            last_reason = cs.last_state.terminated.reason or ""
+                            last_exit = cs.last_state.terminated.exit_code
+                        warning = (
+                            f"{key}: restarted "
+                            f"{after - before} time(s) since Ready "
+                            f"(baseline={before}, now={after})"
+                        )
+                        if last_reason:
+                            warning += f" lastReason={last_reason}"
+                        if last_exit is not None:
+                            warning += f" lastExitCode={last_exit}"
+                        warnings.append(warning)
+            return warnings
+        except Exception as e:
+            self._logger.debug(f"Failed to check post-Ready restart counts: {e}")
             return []
 
     async def _get_pod_names(self) -> List[str]:
@@ -1140,19 +1229,63 @@ class ManagedDeployment:
                 f.write(pod.to_yaml())
         except Exception as e:
             self._logger.error(e)
+
+        # Resolve the container list from the pod manifest. Multi-container pods
+        # (e.g. workers with a frontendSidecar, or pods running under vCluster
+        # with the rewrite-hosts init container) reject ``pod.logs()`` calls
+        # that omit ``container=`` with a "container name must be specified"
+        # error -- exactly the case that masked the GAIE sidecar logs in CI.
+        # Iterate every container (including init containers) and write one
+        # log file per container.
+        container_names: List[str] = []
         try:
-            with open(os.path.join(directory, f"{pod.name}{suffix}.log"), "w") as f:
-                f.write("\n".join(pod.logs()))
+            spec = pod.raw.get("spec", {}) if hasattr(pod, "raw") else {}
+            for c in spec.get("initContainers", []) or []:
+                if c.get("name"):
+                    container_names.append(c["name"])
+            for c in spec.get("containers", []) or []:
+                if c.get("name"):
+                    container_names.append(c["name"])
         except Exception as e:
-            self._logger.error(e)
-        try:
-            previous_logs = pod.logs(previous=True)
-            with open(
-                os.path.join(directory, f"{pod.name}{suffix}.previous.log"), "w"
-            ) as f:
-                f.write("\n".join(previous_logs))
-        except Exception as e:
-            self._logger.debug(e)
+            self._logger.debug(f"Failed to resolve containers for {pod.name}: {e}")
+
+        if not container_names:
+            container_names = [""]
+
+        for container in container_names:
+            file_suffix = f".{container}" if container else ""
+            try:
+                logs = pod.logs(container=container) if container else pod.logs()
+                with open(
+                    os.path.join(directory, f"{pod.name}{file_suffix}{suffix}.log"),
+                    "w",
+                ) as f:
+                    f.write("\n".join(logs))
+            except Exception as e:
+                self._logger.error(
+                    f"Failed to fetch logs for {pod.name} container={container or '<default>'}: {e}"
+                )
+            try:
+                previous_logs = (
+                    pod.logs(container=container, previous=True)
+                    if container
+                    else pod.logs(previous=True)
+                )
+                with open(
+                    os.path.join(
+                        directory,
+                        f"{pod.name}{file_suffix}{suffix}.previous.log",
+                    ),
+                    "w",
+                ) as f:
+                    f.write("\n".join(previous_logs))
+            except Exception as e:
+                # Previous-instance logs are absent unless the container has
+                # restarted. Common case is "no previous terminated container"
+                # -- log at debug so we don't spam the test output.
+                self._logger.debug(
+                    f"No previous logs for {pod.name} container={container or '<default>'}: {e}"
+                )
 
         self._get_pod_metrics(pod, service_name, suffix)
 
@@ -1297,6 +1430,23 @@ class ManagedDeployment:
 
     async def _cleanup(self):
         try:
+            # Surface any container that crashed *after* Ready before we delete
+            # the DGD -- once the CR is gone, the pods follow and we lose the
+            # restart_count evidence. The check no-ops if Ready was never
+            # reached (baseline is empty).
+            try:
+                restart_warnings = await self._check_post_ready_restarts()
+                if restart_warnings:
+                    self._logger.warning(
+                        "Detected container restarts AFTER deployment reached Ready:"
+                    )
+                    for line in restart_warnings:
+                        self._logger.warning(f"  {line}")
+                else:
+                    self._logger.debug("No container restarts detected after Ready")
+            except Exception as e:
+                self._logger.debug(f"Post-Ready restart check failed: {e}")
+
             # Collect logs/metrics first; any PFs opened here will be tracked and stopped below.
             self._get_service_logs()
             self._logger.info(
