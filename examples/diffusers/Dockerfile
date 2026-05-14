@@ -43,12 +43,14 @@ RUN export FLASH_ATTN_CUDA_ARCHS=$(echo "${TORCH_CUDA_ARCH_LIST}" | sed 's/ /;/g
 # Install Dynamo with /v1/videos support.
 RUN uv pip install ai-dynamo==1.2.1
 
-# Install FastVideo directly from the public upstream repository.
-# Checkout with --recurse-submodules to get the required submodules as well.
+# Install a FastVideo revision that provides the typed fastvideo.api surface.
+ARG FASTVIDEO_REF=17f07bc313d77adaf1d60aa344d92f8145e54cfb
 RUN echo "Building FastVideo for TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}" \
  && . /opt/dynamo/venv/bin/activate \
  && uv pip install setuptools_scm scikit-build-core cmake ninja \
  && git clone --recurse-submodules https://github.com/hao-ai-lab/FastVideo.git /tmp/FastVideo \
+ && git -C /tmp/FastVideo checkout "${FASTVIDEO_REF}" \
+ && git -C /tmp/FastVideo submodule update --init --recursive \
  && uv pip install --no-build-isolation /tmp/FastVideo
 
 ENV FASTVIDEO_VIDEO_CODEC=libx264
