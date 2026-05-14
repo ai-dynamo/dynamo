@@ -64,8 +64,8 @@ cases:
         - name: get_weather
           arguments:
             location: Boston
-        normal_text: ''
-        reason: vLLM drops the raw 2nd block from normal_text
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+        reason: vLLM preserves leading narration but drops the incomplete tool_call block
       sglang: *d_5_d
   PARSER.batch.5.e:
     description: Multi-call, last call truncated mid-arg-value
@@ -85,6 +85,6 @@ cases:
         - name: get_weather
           arguments:
             location: Boston
-        normal_text: ''
-        reason: vLLM drops the raw 2nd block from normal_text
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+        reason: vLLM preserves leading narration but drops the incomplete tool_call block
       sglang: *d_5_e
