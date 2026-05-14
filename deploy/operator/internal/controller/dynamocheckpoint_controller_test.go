@@ -369,7 +369,7 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 
 	main := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, consts.MainContainerName)
 	weightsServer := requireCheckpointContainer(t, job.Spec.Template.Spec.InitContainers, gms.ServerContainerName)
-	saver := requireCheckpointContainer(t, job.Spec.Template.Spec.InitContainers, checkpoint.GMSSaverContainer)
+	saver := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, checkpoint.GMSSaverContainer)
 
 	volNames := map[string]bool{}
 	for _, v := range job.Spec.Template.Spec.Volumes {
@@ -384,11 +384,14 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 		mainMounts[m.Name] = m.MountPath
 	}
 	assert.Equal(t, gms.SharedMountPath, mainMounts[gms.SharedVolumeName])
+	assert.Contains(t, main.Args, "--load-format")
+	assert.Contains(t, main.Args, "gms")
 
 	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, weightsServer.Command)
 	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *weightsServer.RestartPolicy)
-	require.NotNil(t, weightsServer.StartupProbe)
+	assert.Nil(t, weightsServer.StartupProbe)
 	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.saver"}, saver.Command)
+	assert.Nil(t, saver.RestartPolicy)
 
 	saverMounts := map[string]string{}
 	for _, m := range saver.VolumeMounts {

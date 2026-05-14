@@ -30,13 +30,14 @@ func TestNewRestorePod(t *testing.T) {
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyAlways,
 			Containers: []corev1.Container{{
-				Name:           "main",
-				Image:          "test:latest",
-				Command:        []string{"python3", "-m", "dynamo.vllm"},
-				Args:           []string{"--model", "Qwen"},
-				ReadinessProbe: readinessProbe.DeepCopy(),
-				LivenessProbe:  livenessProbe.DeepCopy(),
-				StartupProbe:   startupProbe.DeepCopy(),
+				Name:            "main",
+				Image:           "test:latest",
+				ImagePullPolicy: corev1.PullAlways,
+				Command:         []string{"python3", "-m", "dynamo.vllm"},
+				Args:            []string{"--model", "Qwen"},
+				ReadinessProbe:  readinessProbe.DeepCopy(),
+				LivenessProbe:   livenessProbe.DeepCopy(),
+				StartupProbe:    startupProbe.DeepCopy(),
 			}},
 		},
 	}, PodOptions{
@@ -78,6 +79,9 @@ func TestNewRestorePod(t *testing.T) {
 	}
 	if main.Args != nil {
 		t.Fatalf("expected restore args to be cleared: %#v", main.Args)
+	}
+	if main.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Fatalf("expected restore image pull policy %q, got %q", corev1.PullIfNotPresent, main.ImagePullPolicy)
 	}
 	if main.ReadinessProbe == nil {
 		t.Fatalf("expected readiness probe to be preserved")
@@ -137,9 +141,9 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
-				{Name: "engine-0", Image: "test:latest", Command: []string{"python3"}, Args: []string{"--serve"}},
-				{Name: "engine-1", Image: "test:latest", Command: []string{"python3"}, Args: []string{"--serve"}},
-				{Name: "sidecar", Image: "sidecar:latest", Command: []string{"sidecar"}, Args: []string{"run"}},
+				{Name: "engine-0", Image: "test:latest", ImagePullPolicy: corev1.PullAlways, Command: []string{"python3"}, Args: []string{"--serve"}},
+				{Name: "engine-1", Image: "test:latest", ImagePullPolicy: corev1.PullAlways, Command: []string{"python3"}, Args: []string{"--serve"}},
+				{Name: "sidecar", Image: "sidecar:latest", ImagePullPolicy: corev1.PullAlways, Command: []string{"sidecar"}, Args: []string{"run"}},
 			},
 		},
 	}, PodOptions{
@@ -165,6 +169,9 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 		if c.Args != nil {
 			t.Fatalf("expected args cleared on %s, got %#v", name, c.Args)
 		}
+		if c.ImagePullPolicy != corev1.PullIfNotPresent {
+			t.Fatalf("expected restore image pull policy %q on %s, got %q", corev1.PullIfNotPresent, name, c.ImagePullPolicy)
+		}
 		assertRestoreStartupGate(t, c.StartupProbe)
 		found := false
 		for _, m := range c.VolumeMounts {
@@ -183,6 +190,9 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 	sidecar := findRestoreContainer(t, restorePod.Spec.Containers, "sidecar")
 	if len(sidecar.Command) != 1 || sidecar.Command[0] != "sidecar" {
 		t.Fatalf("sidecar command must not be rewritten, got %#v", sidecar.Command)
+	}
+	if sidecar.ImagePullPolicy != corev1.PullAlways {
+		t.Fatalf("sidecar image pull policy must not be rewritten, got %q", sidecar.ImagePullPolicy)
 	}
 	for _, m := range sidecar.VolumeMounts {
 		if m.Name == SnapshotControlVolumeName {
@@ -241,12 +251,13 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	livenessProbe := &corev1.Probe{TimeoutSeconds: 5}
 	startupProbe := &corev1.Probe{FailureThreshold: 60}
 	podSpec.Containers = []corev1.Container{{
-		Name:           "main",
-		Command:        []string{"python3", "-m", "dynamo.vllm"},
-		Args:           []string{"--model", "Qwen"},
-		ReadinessProbe: readinessProbe.DeepCopy(),
-		LivenessProbe:  livenessProbe.DeepCopy(),
-		StartupProbe:   startupProbe.DeepCopy(),
+		Name:            "main",
+		ImagePullPolicy: corev1.PullAlways,
+		Command:         []string{"python3", "-m", "dynamo.vllm"},
+		Args:            []string{"--model", "Qwen"},
+		ReadinessProbe:  readinessProbe.DeepCopy(),
+		LivenessProbe:   livenessProbe.DeepCopy(),
+		StartupProbe:    startupProbe.DeepCopy(),
 	}}
 
 	storage := Storage{
@@ -305,6 +316,9 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	if container.Args != nil {
 		t.Fatalf("expected restore args to be cleared: %#v", container.Args)
 	}
+	if container.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Fatalf("expected restore image pull policy %q, got %q", corev1.PullIfNotPresent, container.ImagePullPolicy)
+	}
 	if container.ReadinessProbe == nil {
 		t.Fatalf("expected readiness probe to be preserved")
 	}
@@ -328,9 +342,10 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) 
 		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{Path: "/livez"},
 		},
-		PeriodSeconds:    5,
-		TimeoutSeconds:   4,
-		FailureThreshold: 2,
+		InitialDelaySeconds: 9,
+		PeriodSeconds:       5,
+		TimeoutSeconds:      4,
+		FailureThreshold:    2,
 	}
 	podSpec := corev1.PodSpec{
 		Containers: []corev1.Container{{
@@ -355,12 +370,6 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) 
 	assertRestoreStartupGate(t, container.StartupProbe)
 	if container.StartupProbe.HTTPGet == nil || container.StartupProbe.HTTPGet.Path != "/livez" {
 		t.Fatalf("expected synthesized startup probe to inherit liveness HTTPGet handler, got %#v", container.StartupProbe)
-	}
-	if got := container.StartupProbe.PeriodSeconds; got != livenessProbe.PeriodSeconds {
-		t.Fatalf("expected startup PeriodSeconds %d (from liveness), got %d", livenessProbe.PeriodSeconds, got)
-	}
-	if got := container.StartupProbe.TimeoutSeconds; got != livenessProbe.TimeoutSeconds {
-		t.Fatalf("expected startup TimeoutSeconds %d (from liveness), got %d", livenessProbe.TimeoutSeconds, got)
 	}
 }
 
@@ -401,9 +410,6 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromReadiness(t *testing.T)
 		container.StartupProbe.Exec.Command[0] != "cat" || container.StartupProbe.Exec.Command[1] != "/tmp/ready" {
 		t.Fatalf("expected synthesized startup probe to inherit readiness Exec command, got %#v", container.StartupProbe)
 	}
-	if got := container.StartupProbe.PeriodSeconds; got != readinessProbe.PeriodSeconds {
-		t.Fatalf("expected startup PeriodSeconds %d (from readiness), got %d", readinessProbe.PeriodSeconds, got)
-	}
 }
 
 func TestPrepareRestorePodSpecFallsBackToSentinelWhenNoProbe(t *testing.T) {
@@ -436,22 +442,28 @@ func TestPrepareRestorePodSpecFallsBackToSentinelWhenNoProbe(t *testing.T) {
 			t.Fatalf("fallback startup probe command = %#v, want %#v", container.StartupProbe.Exec.Command, want)
 		}
 	}
-	if got := container.StartupProbe.PeriodSeconds; got != 1 {
-		t.Fatalf("expected fallback startup PeriodSeconds=1, got %d", got)
-	}
 }
 
-// assertRestoreStartupGate verifies the threshold invariants every restore
-// StartupProbe must satisfy: FailureThreshold=MaxInt32 (effectively infinite
-// retries during CRIU restore) and SuccessThreshold=1. The handler shape is
-// not checked here because ensureRestoreStartupProbe synthesizes the probe
-// from whatever Startup/Liveness/Readiness handler the workload defined; only
-// when no user probe is present does it fall back to the sentinel-cat exec
-// probe (covered by assertSentinelRestoreStartupGate).
+// assertRestoreStartupGate verifies the invariants every restore StartupProbe
+// must satisfy: no initial delay, the minimum kubelet probe cadence, effectively
+// infinite retries during CRIU restore, and SuccessThreshold=1. The handler
+// shape is not checked here because ensureRestoreStartupProbe synthesizes the
+// probe from whatever Startup/Liveness/Readiness handler the workload defined;
+// only when no user probe is present does it fall back to the sentinel-cat exec
+// probe.
 func assertRestoreStartupGate(t *testing.T, probe *corev1.Probe) {
 	t.Helper()
 	if probe == nil {
 		t.Fatalf("expected non-nil startup probe")
+	}
+	if got := probe.InitialDelaySeconds; got != 0 {
+		t.Fatalf("expected startup initial delay 0, got %d", got)
+	}
+	if got := probe.PeriodSeconds; got != 1 {
+		t.Fatalf("expected startup period 1, got %d", got)
+	}
+	if got := probe.TimeoutSeconds; got != 1 {
+		t.Fatalf("expected startup timeout 1, got %d", got)
 	}
 	if got := probe.FailureThreshold; got != math.MaxInt32 {
 		t.Fatalf("expected startup failure threshold %d, got %d", math.MaxInt32, got)

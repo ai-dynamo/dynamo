@@ -99,6 +99,12 @@ func buildCheckpointJob(
 	)
 	dynamo.AddStandardEnvVars(mainContainer, config)
 
+	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
+		if backendFramework, err := dynamo.ParseBackendFramework(ckpt.Spec.Identity.BackendFramework); err == nil && backendFramework == dynamo.BackendFrameworkVLLM {
+			dynamo.EnsureVLLMGMSLoadFormat(mainContainer)
+		}
+	}
+
 	checkpoint.EnsurePodInfoMount(mainContainer)
 	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, dynamo.ToBetaSharedMemorySize(ckpt.Spec.Job.SharedMemory))
 	// NewCheckpointJob handles control volume + readiness probe from the

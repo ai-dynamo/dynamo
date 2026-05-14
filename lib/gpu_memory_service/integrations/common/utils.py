@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 GMS_TAGS = ("weights", "kv_cache")
+DEFAULT_GMS_RO_CONNECT_TIMEOUT_MS = None
 
 
 def get_gms_lock_mode(extra_config: dict):
@@ -29,6 +30,35 @@ def get_gms_lock_mode(extra_config: dict):
         logger.info("[GMS] gms_read_only=True, forcing RO mode")
         return RequestedLockType.RO
     return RequestedLockType.RW_OR_RO
+
+
+def get_gms_ro_connect_timeout_ms(extra_config: dict) -> int | None:
+    """Resolve the weight RO reconnect timeout from model_loader_extra_config."""
+    raw_timeout = extra_config.get(
+        "gms_ro_connect_timeout_ms", DEFAULT_GMS_RO_CONNECT_TIMEOUT_MS
+    )
+    if raw_timeout is None:
+        return None
+    if isinstance(raw_timeout, bool):
+        raise ValueError("gms_ro_connect_timeout_ms must be an integer or null")
+    if isinstance(raw_timeout, str):
+        value = raw_timeout.strip()
+        if value.lower() in {"none", "null"}:
+            return None
+        try:
+            timeout_ms = int(value)
+        except ValueError as exc:
+            raise ValueError(
+                "gms_ro_connect_timeout_ms must be an integer or null"
+            ) from exc
+    elif isinstance(raw_timeout, int):
+        timeout_ms = raw_timeout
+    else:
+        raise ValueError("gms_ro_connect_timeout_ms must be an integer or null")
+
+    if timeout_ms < 0:
+        raise ValueError("gms_ro_connect_timeout_ms must be non-negative")
+    return timeout_ms
 
 
 def strip_gms_model_loader_config(load_config, load_format: str):

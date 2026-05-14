@@ -32,6 +32,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
@@ -7532,7 +7533,15 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 	}).Build()
 
 	infoByService := map[string]*checkpoint.CheckpointInfo{
-		"decode": {Enabled: true, Ready: true, Hash: "abc123def4567890"},
+		"decode": {
+			Enabled: true,
+			Ready:   true,
+			Hash:    "abc123def4567890",
+			GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+				Enabled: true,
+				Mode:    v1alpha1.GMSModeInterPod,
+			},
+		},
 	}
 
 	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{DRAEnabled: true}, kubeClient, nil, nil, nil, infoByService)
@@ -7547,10 +7556,27 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 
 		if strings.Contains(clique.Name, "gms") {
 			sawGMS = true
+			loader := findContainerInClique(t, clique, checkpoint.GMSLoaderContainer)
 			assert.Empty(t, targetAnnotation, "GMS clique %q must not carry snapshot-target-containers annotation", clique.Name)
 			assert.Empty(t, checkpointID, "GMS clique %q must not carry checkpoint-id label (would make it look like a restore target)", clique.Name)
 			assert.NotEqual(t, []string{"sleep", "infinity"}, mainContainer.Command,
 				"GMS clique %q main container command must not be rewritten to sleep infinity (should remain the gms wrapper)", clique.Name)
+			assert.Equal(t, []string{"python3", "-m", checkpoint.GMSCheckpointLoaderModule}, loader.Command,
+				"GMS clique %q should run the inter-pod GMS loader as a regular sidecar", clique.Name)
+			mainMountsByPath := map[string]corev1.VolumeMount{}
+			for _, mount := range mainContainer.VolumeMounts {
+				mainMountsByPath[mount.MountPath] = mount
+			}
+			loaderMountsByPath := map[string]corev1.VolumeMount{}
+			for _, mount := range loader.VolumeMounts {
+				loaderMountsByPath[mount.MountPath] = mount
+			}
+			require.Contains(t, mainMountsByPath, gmsSharedMountPath,
+				"GMS clique %q main container must mount the rank-scoped GMS socket path", clique.Name)
+			require.Contains(t, loaderMountsByPath, gmsSharedMountPath,
+				"GMS clique %q loader must mount the same rank-scoped GMS socket path", clique.Name)
+			assert.Equal(t, mainMountsByPath[gmsSharedMountPath].SubPathExpr, loaderMountsByPath[gmsSharedMountPath].SubPathExpr,
+				"GMS clique %q loader must see the same socket directory as the GMS server", clique.Name)
 		} else {
 			sawEngine = true
 			assert.Equal(t, commonconsts.MainContainerName, targetAnnotation,
@@ -7559,6 +7585,14 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 				"engine clique %q must carry checkpoint-id label (selected by snapshot-agent restore informer)", clique.Name)
 			assert.Equal(t, []string{"sleep", "infinity"}, mainContainer.Command,
 				"engine clique %q main container must be shaped as a snapshot restore target", clique.Name)
+			mountsByPath := map[string]corev1.VolumeMount{}
+			for _, mount := range mainContainer.VolumeMounts {
+				mountsByPath[mount.MountPath] = mount
+			}
+			assert.Contains(t, mountsByPath, gmsSharedMountPath,
+				"engine clique %q must mount the inter-pod GMS socket path", clique.Name)
+			assert.Contains(t, mountsByPath, gms.SharedMountPath,
+				"engine clique %q must preserve the checkpoint source GMS socket path", clique.Name)
 		}
 	}
 	assert.True(t, sawGMS, "test setup should produce at least one GMS clique")

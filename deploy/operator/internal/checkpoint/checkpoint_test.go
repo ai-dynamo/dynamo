@@ -610,29 +610,18 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
-		gmsServer := findContainer(podSpec, gms.ServerContainerName)
+		gmsServer := findInitContainer(podSpec, gms.ServerContainerName)
 		require.NotNil(t, gmsServer)
 		loader := findContainer(podSpec, GMSLoaderContainer)
 		require.NotNil(t, loader)
-		serverCount := 0
-		loaderCount := 0
-		for _, container := range podSpec.InitContainers {
-			switch container.Name {
-			case gms.ServerContainerName:
-				serverCount++
-			case GMSLoaderContainer:
-				loaderCount++
-			}
-		}
-		assert.Equal(t, 1, serverCount)
-		assert.Equal(t, 1, loaderCount)
 
-		// Restore: server and loader are init sidecars (restartPolicy=Always)
-		assert.NotNil(t, gmsServer.RestartPolicy, "restore gms-server should have RestartPolicy")
+		require.Len(t, podSpec.Containers, 2)
+		assert.Equal(t, GMSLoaderContainer, podSpec.Containers[1].Name)
+		assert.Nil(t, findInitContainer(podSpec, GMSLoaderContainer))
+		require.NotNil(t, gmsServer.RestartPolicy)
 		assert.Equal(t, corev1.ContainerRestartPolicyAlways, *gmsServer.RestartPolicy)
-		assert.Nil(t, gmsServer.StartupProbe, "restore gms-server should not have StartupProbe")
-		assert.NotNil(t, loader.RestartPolicy, "restore gms-loader should have RestartPolicy")
-		assert.Equal(t, corev1.ContainerRestartPolicyAlways, *loader.RestartPolicy)
+		assert.Nil(t, gmsServer.StartupProbe)
+		assert.Nil(t, loader.RestartPolicy, "restore gms-loader should be a regular container")
 
 		mounts := map[string]string{}
 		for _, mount := range loader.VolumeMounts {
@@ -646,6 +635,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			env[item.Name] = item.Value
 		}
 		assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", env["GMS_CHECKPOINT_DIR"])
+		assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", info.GMSArtifactDir)
 		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, gmsServer.Command)
 		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.loader"}, loader.Command)
 	})
@@ -897,6 +887,15 @@ func findContainer(podSpec *corev1.PodSpec, name string) *corev1.Container {
 			return &podSpec.Containers[i]
 		}
 	}
+	for i := range podSpec.InitContainers {
+		if podSpec.InitContainers[i].Name == name {
+			return &podSpec.InitContainers[i]
+		}
+	}
+	return nil
+}
+
+func findInitContainer(podSpec *corev1.PodSpec, name string) *corev1.Container {
 	for i := range podSpec.InitContainers {
 		if podSpec.InitContainers[i].Name == name {
 			return &podSpec.InitContainers[i]

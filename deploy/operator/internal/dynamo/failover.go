@@ -24,9 +24,11 @@ import (
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
@@ -141,6 +143,44 @@ func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount in
 	return podSpec
 }
 
+func injectInterPodGMSRestoreLoader(podSpec *corev1.PodSpec, storage snapshotprotocol.Storage) {
+	if podSpec == nil || len(podSpec.Containers) == 0 {
+		return
+	}
+	mainContainer := &podSpec.Containers[0]
+	snapshotprotocol.InjectCheckpointVolume(podSpec, storage.PVCName)
+
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == checkpoint.GMSLoaderContainer {
+			return
+		}
+	}
+
+	gmsSharedMount := corev1.VolumeMount{Name: gmsSharedVolumeName, MountPath: gmsSharedMountPath}
+	for _, mount := range mainContainer.VolumeMounts {
+		if mount.Name == gmsSharedVolumeName && mount.MountPath == gmsSharedMountPath {
+			gmsSharedMount = *mount.DeepCopy()
+			break
+		}
+	}
+
+	loader := corev1.Container{
+		Name:    checkpoint.GMSLoaderContainer,
+		Image:   mainContainer.Image,
+		Command: []string{"python3", "-m", checkpoint.GMSCheckpointLoaderModule},
+		Env: []corev1.EnvVar{
+			{Name: gmsruntime.EnvSocketDir, Value: gmsSharedMountPath},
+			{Name: checkpoint.EnvCheckpointDir, Value: checkpoint.ResolveGMSArtifactDir(storage)},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			gmsSharedMount,
+			{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath},
+		},
+		Resources: *mainContainer.Resources.DeepCopy(),
+	}
+	podSpec.Containers = append(podSpec.Containers, loader)
+}
+
 // gmsEngineEnvVars returns the backend-agnostic environment variables injected
 // into engine pods when GMS failover is enabled. Backend-specific switches
 // (e.g. the vLLM DYN_VLLM_GMS_SHADOW_MODE flag) are injected by the backend's
@@ -201,6 +241,11 @@ func augmentEngineForGMS(podSpec *corev1.PodSpec, rank int32, isInterPodFailover
 	removeEnvVar(c, "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS")
 
 	applyGMSSharedResources(podSpec, c, rank)
+	// CRIU restores a process that was checkpointed with the intra-pod GMS
+	// socket path in its mount table and environment.
+	_, checkpointCompatMount := gmsSharedVolume(rank)
+	checkpointCompatMount.MountPath = gmsruntime.SharedMountPath
+	c.VolumeMounts = append(c.VolumeMounts, checkpointCompatMount)
 	if isInterPodFailover {
 		podSpec.RestartPolicy = corev1.RestartPolicyNever
 	}

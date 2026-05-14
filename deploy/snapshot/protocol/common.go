@@ -19,7 +19,18 @@ const (
 
 	CheckpointArtifactVersionAnnotation = "nvidia.com/snapshot-artifact-version"
 
-	// Required comma-separated checkpoint/restore target container list.
+	// TargetContainersAnnotation names the container(s) a checkpoint or
+	// restore operation should act on. It is required — snapshotprotocol /
+	// snapshotctl / snapshot-agent all error out when the annotation is
+	// missing. Comma-separated list of container names in a single pod:
+	//
+	//   nvidia.com/snapshot-target-containers = "engine-0,engine-1"
+	//
+	// Checkpoint Jobs must carry exactly one target container (the snapshot
+	// contract captures one workload container per checkpoint). Restore pods
+	// may carry one or more target containers; the agent replays the same
+	// checkpoint into each of them. The operator stamps the annotation for
+	// both user-facing paths (DynamoCheckpoint Jobs and DGD restore pods).
 	TargetContainersAnnotation = "nvidia.com/snapshot-target-containers"
 
 	CheckpointStatusAnnotation = "nvidia.com/snapshot-checkpoint-status"

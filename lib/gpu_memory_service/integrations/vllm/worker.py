@@ -31,7 +31,12 @@ from gpu_memory_service.client.torch.allocator import (
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path, is_scratch_kv_enabled
 from gpu_memory_service.integrations.common import patch_empty_cache
-from gpu_memory_service.integrations.common.utils import GMS_TAGS, get_gms_lock_mode
+from gpu_memory_service.integrations.common.utils import (
+    DEFAULT_GMS_RO_CONNECT_TIMEOUT_MS,
+    GMS_TAGS,
+    get_gms_lock_mode,
+    get_gms_ro_connect_timeout_ms,
+)
 from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
 from gpu_memory_service.integrations.vllm.patches import (
     apply_scratch_kv_patches,
@@ -78,6 +83,7 @@ class GMSWorker(Worker):
             getattr(self.vllm_config.load_config, "model_loader_extra_config", {}) or {}
         )
         mode = get_gms_lock_mode(extra)
+        self.gms_ro_connect_timeout_ms = get_gms_ro_connect_timeout_ms(extra)
         get_or_create_gms_client_memory_manager(
             get_socket_path(device, "weights"),
             device,
@@ -238,12 +244,23 @@ class GMSWorker(Worker):
             # the worker cannot serve requests without weights. sys.exit(1)
             # ensures clean termination so the orchestrator (K8s) can restart.
             try:
-                weights_manager.connect(RequestedLockType.RO, timeout_ms=30_000)
+                timeout_ms = getattr(
+                    self,
+                    "gms_ro_connect_timeout_ms",
+                    DEFAULT_GMS_RO_CONNECT_TIMEOUT_MS,
+                )
+                weights_manager.connect(RequestedLockType.RO, timeout_ms=timeout_ms)
                 weights_manager.remap_all_vas()
             except TimeoutError:
+                timeout_desc = (
+                    "without a timeout"
+                    if timeout_ms is None
+                    else f"after {timeout_ms} ms"
+                )
                 logger.error(
-                    "Fatal: timed out waiting for GMS RO lock during remap "
-                    "(GMS may be down or RW lock held indefinitely)"
+                    "Fatal: timed out waiting for GMS RO lock during remap %s "
+                    "(GMS may be down or RW lock held indefinitely)",
+                    timeout_desc,
                 )
                 sys.exit(1)
             except StaleMemoryLayoutError as e:

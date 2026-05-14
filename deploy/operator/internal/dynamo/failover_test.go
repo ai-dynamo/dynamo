@@ -159,6 +159,12 @@ func TestAugmentEngineForGMS(t *testing.T) {
 	assert.NotContains(t, c.Resources.Limits, corev1.ResourceName("nvidia.com/gpu"))
 	assert.True(t, hasToleration(podSpec, "nvidia.com/gpu"))
 	assert.True(t, hasVolume(podSpec, gmsSharedVolumeName))
+	sharedMount := findVolumeMount(c, gmsSharedMountPath)
+	require.NotNil(t, sharedMount, "engine should mount the inter-pod GMS socket path")
+	assert.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-1", sharedMount.SubPathExpr)
+	compatMount := findVolumeMount(c, gms.SharedMountPath)
+	require.NotNil(t, compatMount, "engine should mount the checkpoint source GMS socket path")
+	assert.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-1", compatMount.SubPathExpr)
 
 	require.Len(t, podSpec.InitContainers, 1, "should have perm-fix init container")
 	initC := podSpec.InitContainers[0]
@@ -206,6 +212,8 @@ func TestAugmentEngineForGMS_StandaloneDoesNotForceRestartNever(t *testing.T) {
 		"standalone engine still needs the shared hostPath for UDS sockets")
 	assert.True(t, hasEnvVar(podSpec.Containers[0], gms.EnvSocketDir, gmsSharedMountPath),
 		"standalone engine still needs the socket-dir env var to reach the GMS server")
+	assert.NotNil(t, findVolumeMount(podSpec.Containers[0], gms.SharedMountPath),
+		"standalone engine still needs the checkpoint source socket mount for snapshot restore")
 }
 
 func TestAugmentEngineForGMS_EmptyContainers(t *testing.T) {

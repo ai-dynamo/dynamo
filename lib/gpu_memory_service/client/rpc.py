@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import time
 from typing import Optional, Tuple, Type, TypeVar
 
 from gpu_memory_service.common.locks import RequestedLockType
@@ -26,6 +27,9 @@ T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_CONNECT_TIMEOUT_MS = 300_000
+_CONNECT_RETRY_INTERVAL_SECONDS = 0.05
+
 
 class _GMSRPCTransport:
     """Raw GMS Unix socket transport."""
@@ -39,20 +43,40 @@ class _GMSRPCTransport:
     def is_connected(self) -> bool:
         return self._socket is not None
 
-    def connect(self) -> None:
-        self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            self._socket.connect(self.socket_path)
-        except FileNotFoundError:
-            self._socket.close()
-            self._socket = None
-            raise ConnectionError(
-                f"GMS server not running at {self.socket_path}"
-            ) from None
-        except Exception as exc:
-            self._socket.close()
-            self._socket = None
-            raise ConnectionError(f"Failed to connect to GMS: {exc}") from exc
+    def connect(self, timeout_ms: int = 0) -> None:
+        deadline = time.monotonic() + timeout_ms / 1000
+        logged_wait = False
+        last_error: Optional[BaseException] = None
+
+        while True:
+            self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                self._socket.connect(self.socket_path)
+                if logged_wait:
+                    logger.info("Connected to GMS server at %s", self.socket_path)
+                return
+            except (FileNotFoundError, ConnectionRefusedError) as exc:
+                last_error = exc
+                self._socket.close()
+                self._socket = None
+                if timeout_ms <= 0 or time.monotonic() >= deadline:
+                    raise ConnectionError(
+                        f"GMS server not running at {self.socket_path}"
+                    ) from None
+                if not logged_wait:
+                    logger.info("Waiting for GMS server at %s", self.socket_path)
+                    logged_wait = True
+                remaining = max(0.0, deadline - time.monotonic())
+                time.sleep(min(_CONNECT_RETRY_INTERVAL_SECONDS, remaining))
+            except Exception as exc:
+                self._socket.close()
+                self._socket = None
+                raise ConnectionError(f"Failed to connect to GMS: {exc}") from exc
+
+            if time.monotonic() >= deadline:
+                raise ConnectionError(
+                    f"Timed out waiting for GMS server at {self.socket_path}: {last_error}"
+                ) from None
 
     def handshake(
         self,

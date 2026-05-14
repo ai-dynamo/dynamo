@@ -30,9 +30,9 @@ SNAPSHOT_COMPLETE_FILE = "snapshot-complete"
 RESTORE_COMPLETE_FILE = "restore-complete"
 READY_FOR_CHECKPOINT_FILE = "ready-for-checkpoint"
 
-# Poll interval for the snapshot-control directory. Checkpoint and restore
-# latencies are seconds, so 100ms is negligible overhead.
-_SENTINEL_POLL_INTERVAL_SEC = 0.1
+# Poll interval for the snapshot-control directory. Restore can now be
+# GMS-bound at sub-second scale, so keep the handoff poll short.
+_SENTINEL_POLL_INTERVAL_SEC = 0.05
 
 
 class CheckpointConfig:

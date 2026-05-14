@@ -167,15 +167,13 @@ const (
 	GMSModeIntraPod GPUMemoryServiceMode = "intraPod"
 	// GMSModeInterPod runs GMS as a separate weight server pod and one or more
 	// engine pods per rank, sharing GPUs via DRA ResourceClaims and a shared
-	// hostPath volume for UDS sockets. Only valid on FailoverSpec; the
-	// GPUMemoryServiceSpec sidecar always runs in intraPod mode.
+	// hostPath volume for UDS sockets.
 	GMSModeInterPod GPUMemoryServiceMode = "interPod"
 )
 
-// GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a worker component.
-// When enabled, the operator injects a GMS sidecar that provides shared GPU memory access
-// via DRA (Dynamic Resource Allocation). The sidecar runs two GMS processes per GPU
-// (weights + kv_cache) and communicates with the main container over UDS sockets.
+// GPUMemoryServiceSpec configures GPU Memory Service (GMS) for a worker component.
+// In intraPod mode, the operator injects a GMS server sidecar in the workload pod.
+// In interPod mode, the operator creates a dedicated GMS weight-server pod per rank.
 type GPUMemoryServiceSpec struct {
 	// Enabled activates the GMS sidecar. GPU resources on the main container
 	// are replaced with a DRA ResourceClaim for shared GPU access.
