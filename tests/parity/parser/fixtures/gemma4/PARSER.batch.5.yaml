@@ -17,10 +17,13 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_5_a
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
         calls: []
         normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
-      vllm: *d_5_a
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
       sglang:
         unavailable: SGLang has no detector for family='gemma4'
   PARSER.batch.5.b:
@@ -30,10 +33,13 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_5_b
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
         calls: []
         normal_text: call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>
-      vllm: *d_5_b
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
       sglang:
         unavailable: SGLang has no detector for family='gemma4'
   PARSER.batch.5.c:
@@ -43,9 +49,12 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_5_c
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
         calls: []
         normal_text: <|tool_call>call:get_weather{location:<|"|>N
-      vllm: *d_5_c
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
       sglang:
         unavailable: SGLang has no detector for family='gemma4'

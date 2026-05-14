@@ -132,20 +132,61 @@ pub fn try_tool_call_parse_gemma4(
         });
     }
 
-    const START_MARKER: &str = "<|tool_call>";
+    // No-leak contract for `normal_text`:
+    //   - Success path (≥1 call extracted): prefix BEFORE the first
+    //     `<|tool_call>` start marker — mirrors vLLM's
+    //     `content = model_output[:content_end].strip()`. Inter-call,
+    //     trailing, and truncation tails after a successful call are dropped.
+    //   - Recovery path (zero calls extracted): if the message contains ANY
+    //     gemma4 markup token (`<|tool_call>`, `<tool_call|>`, `<|"|>`),
+    //     return empty — Dynamo intentionally diverges from vLLM's
+    //     exception-fallback (which echoes raw bytes) so tool-call markup
+    //     never leaks into normal_text on malformed / truncated / orphan-
+    //     close / no-body inputs. Cases flagged by the parity chart's `↯`:
+    //     PARSER.batch.{4.a, 4.b, 4.c, 4.d, 5.a, 5.b, 5.c, 6.c}.
+    //   - Plain-text path (zero calls AND no markup): return the message
+    //     as-is.
+    let has_markup = message.contains(TOOL_CALL_START)
+        || message.contains(TOOL_CALL_END)
+        || message.contains(STRING_DELIM);
     let normal_text = if calls.is_empty() {
-        // No tool calls extracted — return the entire message. Matches vLLM's
-        // exception fallback (`content = model_output`) for malformed/truncated
-        // inputs where the parser bails, AND the plain-text no-tool-call path.
-        message.trim().to_string()
+        if has_markup {
+            // Recovery: malformed/truncated/orphan-close/no-body shapes.
+            // Suppress the whole message so tool-call markup doesn't leak.
+            let preview: String = message.chars().take(120).collect();
+            tracing::warn!(
+                why = "no_calls_with_markup",
+                stripped_bytes = message.len(),
+                has_start = message.contains(TOOL_CALL_START),
+                has_end = message.contains(TOOL_CALL_END),
+                has_string_delim = message.contains(STRING_DELIM),
+                "gemma4 strip (recovery): zero calls extracted but gemma4 markup present (<|tool_call>, <tool_call|>, <|\"|>); suppressing entire message to prevent leak into normal_text. preview={:?}",
+                preview
+            );
+            String::new()
+        } else {
+            // No markup at all → plain text passes through unchanged. No strip.
+            message.trim().to_string()
+        }
     } else {
-        // At least one call extracted — return text BEFORE the first
-        // `<|tool_call>` start marker (mirrors vLLM's success path
-        // `content = model_output[:content_end].strip()`). Inter-call text,
-        // trailing text, and truncation tails after a successful call are
-        // dropped.
-        match message.find(START_MARKER) {
-            Some(idx) => message[..idx].trim().to_string(),
+        // Success: prefix-only contract — drop everything from the first
+        // `<|tool_call>` onward (inter-call text, trailing narration,
+        // truncation tails). Mirrors vLLM's
+        // `content = model_output[:content_end].strip()`.
+        match message.find(TOOL_CALL_START) {
+            Some(idx) => {
+                let stripped = &message[idx..];
+                let preview: String = stripped.chars().take(120).collect();
+                tracing::debug!(
+                    why = "prefix_only_contract",
+                    n_calls = calls.len(),
+                    kept_prefix_bytes = idx,
+                    stripped_bytes = stripped.len(),
+                    "gemma4 strip (success): kept prefix before first <|tool_call>; dropped parsed-call(s) + any inter-call / trailing narration. preview={:?}",
+                    preview
+                );
+                message[..idx].trim().to_string()
+            }
             None => String::new(),
         }
     };
@@ -691,18 +732,16 @@ mod tests {
         let _ = parse_args_object("x:nullable").unwrap_err();
     }
 
-    #[test] // PARSER.batch.5 — missing end-marker, raw bytes echoed (upstream test_incomplete_tool_call)
-    fn incomplete_tool_call_echoes_raw_bytes() {
+    #[test] // PARSER.batch.5 — missing end-marker, markup suppressed (no-leak contract)
+    fn incomplete_tool_call_suppresses_markup() {
         let input = "<|tool_call>call:foo{x:1";
         let (calls, normal) = try_tool_call_parse_gemma4(input, None).unwrap();
         assert_eq!(calls.len(), 0);
-        // No calls extracted → match vLLM's exception fallback path which
-        // returns the entire input as content. Truncated bytes are visible.
-        let normal = normal.unwrap();
-        assert!(
-            normal.contains("<|tool_call>call:foo"),
-            "expected raw bytes echoed; got: {normal:?}"
-        );
+        // No calls extracted → return the prefix BEFORE the first `<|tool_call>`
+        // start marker (here: empty). Dynamo intentionally diverges from vLLM's
+        // exception fallback (which echoes the raw bytes) so tool-call markup
+        // never leaks into normal_text on the recovery path.
+        assert_eq!(normal, Some(String::new()));
     }
 
     #[test] // PARSER.batch.7 — `<tool_call|>` literal inside a string-typed argument

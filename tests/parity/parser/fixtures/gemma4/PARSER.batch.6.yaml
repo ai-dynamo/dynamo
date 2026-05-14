@@ -9,18 +9,18 @@ cases:
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L560
     model_text: <|tool_call>call:get_time{}<tool_call|>
     tools:
-    - &id001
+    - &id002
       name: get_time
       parameters:
         type: object
         properties: {}
     expected:
-      dynamo: &d_6_a
+      dynamo: &id001
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
-      vllm: *d_6_a
+      vllm: *id001
       sglang:
         unavailable: SGLang has no detector for family='gemma4'
   PARSER.batch.6.b:
@@ -28,14 +28,14 @@ cases:
     ref: dynamo
     model_text: <|tool_call>call:get_time{ }<tool_call|>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_6_b
+      dynamo: &id003
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
-      vllm: *d_6_b
+      vllm: *id003
       sglang:
         unavailable: SGLang has no detector for family='gemma4'
   PARSER.batch.6.c:
@@ -43,11 +43,14 @@ cases:
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L280
     model_text: <|tool_call>call:get_time<tool_call|>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_6_c
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
         calls: []
         normal_text: <|tool_call>call:get_time<tool_call|>
-      vllm: *d_6_c
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
       sglang:
         unavailable: SGLang has no detector for family='gemma4'
