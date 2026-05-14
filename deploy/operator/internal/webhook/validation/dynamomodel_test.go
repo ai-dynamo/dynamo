@@ -167,7 +167,7 @@ func TestDynamoModelValidator_Validate(t *testing.T) {
 				},
 			},
 			wantErr: true,
-			errMsg:  "source URI must start with 's3://' or 'hf://', got: http://example.com/model",
+			errMsg:  "source URI must start with 's3://', 'hf://', or 'file://', got: http://example.com/model",
 		},
 		{
 			name: "lora with file:// URI scheme",
@@ -185,8 +185,7 @@ func TestDynamoModelValidator_Validate(t *testing.T) {
 					},
 				},
 			},
-			wantErr: true,
-			errMsg:  "source URI must start with 's3://' or 'hf://', got: file:///local/path",
+			wantErr: false,
 		},
 	}
 
