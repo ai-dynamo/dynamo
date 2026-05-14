@@ -315,16 +315,24 @@ def _serialize_prompt_logprobs(
     vLLM shape: ``list[dict[int, Logprob] | None]`` where ``Logprob`` has
     ``.logprob``, ``.rank``, ``.decoded_token`` attributes.
 
-    Output shape: ``list[dict[int, {"logprob": float, ...}] | None]`` —
+    Output shape: ``list[dict[str, {"logprob": float, ...}] | None]`` —
     matches ``LLMEngineOutput.prompt_logprobs`` so the Rust postprocessor
     can surface it on ``NvExtResponse.prompt_logprobs``.
+
+    NOTE: token_id keys are emitted as **strings** (not ints) so that
+    pythonize → serde → JSON survives the worker→frontend transport. JSON
+    object keys are required to be strings; ``HashMap<u32, _>`` on the Rust
+    side deserializes string keys via ``u32::from_str``. Emitting int keys
+    here causes the chunk to be silently dropped on pythonize → JSON, which
+    surfaces as ``"Stream ended before generation completed"`` on the
+    frontend (worker emits cleanly, frontend never sees ``complete_final``).
     """
     result: list = []
     for entry in raw_prompt_logprobs:
         if entry is None:
             result.append(None)
         else:
-            converted: Dict[int, Dict[str, Any]] = {}
+            converted: Dict[str, Dict[str, Any]] = {}
             for token_id, logprob_obj in entry.items():
                 lp_dict: Dict[str, Any] = {
                     "logprob": float(logprob_obj.logprob),
@@ -335,7 +343,7 @@ def _serialize_prompt_logprobs(
                 decoded = getattr(logprob_obj, "decoded_token", None)
                 if decoded is not None:
                     lp_dict["decoded_token"] = decoded
-                converted[int(token_id)] = lp_dict
+                converted[str(int(token_id))] = lp_dict
             result.append(converted)
     return result
 
@@ -448,12 +456,41 @@ def build_sampling_params(
     Args:
         request: The PreprocessedRequest dict with 'sampling_options', 'stop_conditions',
                  and 'output_options'
-        default_sampling_params: Default sampling parameters to initialize with
+        default_sampling_params: Default sampling parameters from the model's
+            ``generation_config.json`` (vLLM ``ModelConfig.get_diff_sampling_param``).
+            Used for non-RL/chat clients that want the model's recommended
+            sampling defaults applied transparently.
 
     Returns:
         SamplingParams configured from the request
+
+    RL/TITO parity note (rl-sdk-2): when the client opted into pre-tokenized
+    prompts via ``nvext.token_data``, this function **bypasses the
+    ``generation_config.json`` defaults** for sampling-distribution params
+    (top_p, top_k, min_p, temperature, repetition_penalty). RL clients want
+    vLLM's vanilla defaults so the request is bit-equivalent to a vLLM-native
+    ``/inference/v1/generate`` call. Stop-token defaults are still honored so
+    the model still terminates on EOS. Without this gate, Qwen3's
+    ``top_p=0.95, top_k=20`` ride along for every request and produce a ~16×
+    Mismatch-KL gap vs vLLM-native at non-greedy temperatures (see
+    plans/may-13/parity_test.md attribution probes).
     """
-    sampling_params = SamplingParams(**default_sampling_params)
+    nvext_args = (request.get("extra_args") or {}).get("nvext") or {}
+    is_tito_request = bool(request.get("nvext") and request["nvext"].get("token_data"))
+    # The preprocessor strips nvext when it produces a PreprocessedRequest;
+    # tito mode is detectable from the presence of pre-set ``token_ids`` and
+    # absence of any prompt text. Use the explicit nvext.extra_fields signal
+    # from the Rust preprocessor pass-through (PASSTHROUGH_EXTRA_FIELDS path)
+    # — RL clients always include at least one of ``engine_data``,
+    # ``completion_token_ids``, ``prompt_logprobs`` in ``extra_fields``.
+    if not is_tito_request and isinstance(nvext_args.get("extra_fields"), list):
+        is_tito_request = bool(nvext_args["extra_fields"])
+
+    if is_tito_request:
+        # Strict vLLM defaults — no generation_config overlay.
+        sampling_params = SamplingParams()
+    else:
+        sampling_params = SamplingParams(**default_sampling_params)
     sampling_params.detokenize = False
 
     # Handle guided_decoding - convert to StructuredOutputsParams
