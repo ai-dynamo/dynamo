@@ -87,21 +87,18 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
         return None;
     }
 
-    // Split on the start token and keep only JSON-looking segments
+    // Split on the start token and collect valid JSON objects/arrays.
     let mut items: Vec<String> = Vec::new();
-    // Track the first non-empty, non-JSON-looking segment for template passthrough.
-    // We want the raw (untrimmed) content so we preserve the original formatting.
-    let mut template_segment: Option<String> = None;
     for seg in input.split(start_token) {
         let s = seg.trim();
         if s.is_empty() {
             continue;
         }
-        // Only consider segments that start like JSON (objects or arrays)
         if s.starts_with('{') {
-            // Try the segment as a single JSON object first. This handles the common
-            // case and preserves argument strings that legitimately contain ';'
-            // (e.g. {"name":"query","arguments":{"sql":"SELECT a; SELECT b"}}).
+            // Try the segment as a single JSON object first. This is the common
+            // case and correctly handles argument strings that contain ';' —
+            // e.g. {"name":"query","arguments":{"sql":"SELECT a; SELECT b"}} — which
+            // would be incorrectly split if we went straight to the ';' fallback.
             let mut parsed_single = false;
             if let Some(pos) = s.rfind('}') {
                 let candidate = s[..=pos].trim();
@@ -111,9 +108,10 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
                 }
             }
             if !parsed_single {
-                // Single-object parse failed. Fall back to semicolon splitting to
-                // handle Llama 3.x parallel calls:
-                // {"name":"fn1","arguments":{}};{"name":"fn2","arguments":{}}
+                // Whole-segment parse failed. Llama 3.x emits parallel calls as
+                // semicolon-separated objects within one segment:
+                //   <|python_tag|>{"name":"get_weather","arguments":{"location":"NYC"}};{"name":"get_time","arguments":{"timezone":"EST"}}
+                // Split on ';' and validate each chunk independently.
                 for chunk in s.split(';') {
                     let trimmed_chunk = chunk.trim();
                     if trimmed_chunk.is_empty() {
@@ -128,137 +126,34 @@ fn handle_single_token_tool_calls(input: &str, start_token: &str) -> Option<Stri
                 }
             }
         } else if s.starts_with('[') {
-            // Handle array format (like phi4: functools[{...}])
+            // Array format used by phi4 (functools[{...}]) and similar models.
+            // Parse as Vec<Box<RawValue>> to preserve each element's original byte
+            // span — serde_json::Value + to_string would reorder keys and strip
+            // whitespace, breaking append-only KV-cache prefix matching.
             if let Some(pos) = s.rfind(']') {
                 let candidate = &s[..=pos].trim();
-                // Parse as `Vec<Box<RawValue>>` so each element retains its
-                // original byte span. Going through `serde_json::Value` +
-                // `to_string` here would strip whitespace and reorder keys
-                // inside each tool call's `arguments`, breaking byte-level
-                // append-only across multi-step tool use for parsers that
-                // route through this single-token path (functools, [TOOL_CALLS],
-                // <|python_tag|>).
                 if let Ok(arr) = serde_json::from_str::<Vec<Box<RawValue>>>(candidate) {
                     for item in arr {
                         items.push(item.get().to_string());
                     }
                 }
             }
-        } else if template_segment.is_none() {
-            // Segment doesn't start with { or [ — it may be whitespace + template text.
-            // Pass through as a template placeholder (e.g. "WinRM: [status]") instead of
-            // silently dropping it as empty string.
-            let raw = seg; // untrimmed, preserves original content
-            if is_template_placeholder(raw) {
-                template_segment = Some(raw.to_string());
-            }
         }
+        // Segments that start with neither '{' nor '[' are silently dropped.
+        // Note: a separate symptom of issue #8732 is that the model occasionally
+        // echoes back unfilled response-template text (e.g. "WinRM: [status]")
+        // after the start token instead of a tool call. That is a model-side
+        // behaviour (likely caused by an incorrect system prompt) and is tracked
+        // separately; it is not addressed by this parser change.
     }
     if items.is_empty() {
-        if let Some(segment) = template_segment {
-            // Found template-placeholder content (e.g. "[status]") after start token.
-            // Return it as normal text passthrough instead of empty string so it is
-            // not silently dropped.
-            tracing::debug!(
-                "handle_single_token_tool_calls: template placeholder detected, \
-                 passing through as normal text: {}",
-                segment
-            );
-            return Some(segment);
-        }
-        // If we found the start token but no valid JSON after it, return empty string
-        // to avoid leaking the invalid content (important for phi4 and similar models)
+        // Start token was found but no valid JSON followed it — return empty to
+        // avoid leaking the start token or invalid content into normal_text.
         return Some(String::new());
     }
     Some(format!("[{}]", items.join(",")))
 }
 
-/// Returns true if `text` contains a template-placeholder pattern.
-///
-/// Template placeholders are literal bracketed words that appear in response
-/// templates and are NOT valid JSON: `[status]`, `[count]`, `[none]`,
-/// `['status']`, `["status"]`, `[running]`, `[completed]`, etc.
-/// These appear when a model emits unfilled template text instead of a tool call.
-fn is_template_placeholder(text: &str) -> bool {
-    // Look for [...] content that contains word characters but is not valid JSON.
-    // Pattern: literal opening [, then word chars or quotes or spaces, then literal ].
-    // Must NOT be inside a valid JSON string (e.g. {"key": "[status]"}) — but
-    // because the input at this point is the raw segment after split() on the start
-    // token, we don't have well-formed JSON wrapping context here, so we accept on
-    // the basis that the whole segment was not valid JSON.
-    //
-    // Common placeholder keywords used in response templates:
-    const TEMPLATE_KEYWORDS: &[&str] = &[
-        "status",
-        "count",
-        "none",
-        "result",
-        "response",
-        "running",
-        "completed",
-        "pending",
-        "success",
-        "error",
-        "output",
-        "data",
-        "message",
-        "info",
-        "id",
-        "name",
-        "action",
-        "value",
-    ];
-
-    // Quick scan: does text contain a [...] pattern at all?
-    let has_bracket_pattern = text.contains('[') && text.contains(']');
-    if !has_bracket_pattern {
-        return false;
-    }
-
-    // Check for a [...] span containing word characters.
-    // Scan each byte index as a possible [.
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'[' {
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j] != b']' {
-                j += 1;
-            }
-            if j < bytes.len() && j > i + 1 {
-                let inner = &text[i + 1..j];
-                // Valid JSON bracket content is either a string ("...") or num.
-                // Template placeholders contain word characters.
-                let has_word_chars = inner.chars().any(|c| c.is_alphabetic());
-                if has_word_chars && !inner.starts_with('"') {
-                    // Check if it looks like a template keyword or general [...]
-                    // Skip if it looks like JSON (e.g. `[1, 2, 3]` array of numbers).
-                    let looks_like_json_array = inner
-                        .chars()
-                        .all(|c| c.is_numeric() || c == ',' || c.is_whitespace());
-                    if !looks_like_json_array {
-                        // One final check: none of the template keywords present?
-                        // If yes, it's almost certainly a template placeholder.
-                        let lower = inner.to_lowercase();
-                        if TEMPLATE_KEYWORDS.iter().any(|kw| lower.contains(*kw)) {
-                            return true;
-                        }
-                        // Heuristic: [...word...] with 1-3 word chars is template-style.
-                        let word_len = inner.chars().filter(|c| c.is_alphabetic()).count();
-                        if (1..=20).contains(&word_len)
-                            && !inner.contains(':')
-                            && !inner.contains('\\')
-                        {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    false
-}
 
 /// Attempt to repair JSON truncated by max_tokens / EOS. Walks the input
 /// tracking string state and brace/bracket nesting; on EOF closes any
@@ -420,12 +315,13 @@ pub fn try_tool_call_parse_basic_json(
                         // Single token case
                         let result = handle_single_token_tool_calls(&json, start_token);
                         if let Some(content) = result {
-                            // Mark "start token seen but no valid JSON" when content is either
-                            // empty (start token present, nothing parseable after it) OR
-                            // non-array (template passthrough text like "WinRM: [status]").
-                            // Valid tool call extraction always wraps items in "[...]".
-                            // Without this flag, the caller falls through to returning the
-                            // original full input as normal_text, leaking the start token.
+                            // handle_single_token_tool_calls returns either:
+                            //   Some("[{...}, ...]") — one or more extracted calls
+                            //   Some("")             — start token found, no valid JSON followed
+                            // Only the "[..." form means extraction succeeded. Anything else
+                            // means the start token was present but produced no calls; set the
+                            // flag so the caller returns "" rather than leaking the start token
+                            // or the raw invalid content into normal_text.
                             if !content.starts_with('[') {
                                 found_start_token_with_no_valid_json = true;
                             }
