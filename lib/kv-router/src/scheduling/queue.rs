@@ -1076,6 +1076,46 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_disallowed_worker_ids_fail_without_queueing() {
+        let (queue, _slots) = make_queue(1, 16, 256, Some(0.0));
+        let (mut req, rx) = make_request("disallowed", 256);
+        req.allowed_worker_ids = Some(HashSet::from([999]));
+
+        queue.enqueue(req).await;
+
+        let resp = rx.await.expect("oneshot dropped");
+        assert!(matches!(resp, Err(KvSchedulerError::NoEndpoints)));
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_incompatible_required_taints_fail_without_queueing() {
+        let (queue, _slots, cfg_tx) = make_queue_with_sender(1, 16, 256, Some(0.0), None);
+        let mut configs = HashMap::new();
+        configs.insert(
+            0_u64,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(256),
+                taints: vec!["mdc-a".to_string()],
+                ..Default::default()
+            },
+        );
+        cfg_tx.send(configs).unwrap();
+
+        let (mut req, rx) = make_request("tainted", 256);
+        req.taints = crate::protocols::Taints {
+            required: vec!["mdc-b".to_string()],
+            preferred: Vec::new(),
+        };
+
+        queue.enqueue(req).await;
+
+        let resp = rx.await.expect("oneshot dropped");
+        assert!(matches!(resp, Err(KvSchedulerError::NoEndpoints)));
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_pinned_request_head_of_line_blocks_other_worker_capacity() {
         let (queue, slots) = make_queue(2, 16, 256, Some(0.0));
 
