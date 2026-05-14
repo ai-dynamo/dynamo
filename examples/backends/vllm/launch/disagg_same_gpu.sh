@@ -52,6 +52,9 @@ FRONTEND_ARGS=()
 if [[ -n "${DYN_CHAT_PROCESSOR:-}" ]]; then
     FRONTEND_ARGS+=(--dyn-chat-processor "$DYN_CHAT_PROCESSOR")
 fi
+if [[ -n "${DYN_ROUTER_MODE:-}" ]]; then
+    FRONTEND_ARGS+=(--router-mode "$DYN_ROUTER_MODE")
+fi
 python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
 
 # run decode worker with metrics on port 8081

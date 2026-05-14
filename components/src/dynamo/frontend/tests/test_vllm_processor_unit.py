@@ -285,11 +285,9 @@ def vllm_processor_module(monkeypatch):
     return module
 
 
-def _make_processor(module, routed_engine, router, *, is_kv_router):
+def _make_processor(module, routed_engine):
     processor = module.VllmProcessor.__new__(module.VllmProcessor)
     processor.routed_engine = routed_engine
-    processor.router = router
-    processor.is_kv_router = is_kv_router
     processor.output_processor = _FakeOutputProcessor()
     return processor
 
@@ -334,12 +332,7 @@ class TestRoutedEnginePath:
     @pytest.mark.asyncio
     async def test_routed_engine_gets_extra_args_metadata(self, vllm_processor_module):
         routed_engine = _FakeRoutedEngine()
-        processor = _make_processor(
-            vllm_processor_module,
-            routed_engine,
-            None,
-            is_kv_router=True,
-        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
         preproc = _base_preproc()
         preproc["extra_args"] = {"mm_hashes": [123]}
         preproc["reasoning_ended"] = False
@@ -364,12 +357,7 @@ class TestRoutedEnginePath:
         routed_engine = _FakeRoutedEngine(
             [{"token_ids": [101], "index": 0, "finish_reason": None}]
         )
-        processor = _make_processor(
-            vllm_processor_module,
-            routed_engine,
-            None,
-            is_kv_router=False,
-        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
 
         chunks = await _run_generate(processor, _base_preproc())
 
