@@ -1,45 +1,16 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""
-FastVideo Worker for Dynamo (non-streaming)
+"""FastVideo example worker for Dynamo's /v1/videos endpoint.
 
-Registers a VideoGenerator as a Dynamo backend endpoint compatible with the
-/v1/videos frontend endpoint.  The endpoint generates a full video
-clip from the request parameters and returns it as a single response containing
-the complete MP4 file base64-encoded in data[0].b64_json.
+This custom worker intentionally stays under examples/diffusers rather than
+becoming a native Dynamo backend. It uses FastVideo's typed API only:
 
-Generation parameters (size, fps, num_frames, etc.) are taken from the
-request body's nvext field, so the same worker instance can serve requests
-with different resolutions and quality settings without restarting.
+* VideoGenerator.from_config(GeneratorConfig(...))
+* generator.generate(GenerationRequest(...))
 
-One request at a time (asyncio.Lock — VideoGenerator is not re-entrant).
-
-Usage:
-  python worker.py [--model MODEL] [--num-gpus N] [--enable-optimizations]
-                   [--attention-backend ATTENTION_BACKEND]
-
-Options:
-  --model          HuggingFace model path
-                   (default: FastVideo/LTX2-Distilled-Diffusers)
-  --num-gpus       Number of GPUs (default: 1)
-  --enable-optimizations
-                   Enable FP4 quantization (if available) and torch.compile
-  --attention-backend
-                   Attention backend (default: TORCH_SDPA)
-
-Request format (sent to /v1/videos):
-  prompt:   text description of the desired video
-  model:    HuggingFace model path (must match what the worker registered)
-  size:     "WxH" string, e.g. "1920x1088" (default: "1920x1088")
-  seconds:  clip duration when nvext.num_frames is not set (default: 5)
-  nvext:
-    fps:                frames per second (default: 24)
-    num_frames:         total frames; overrides fps * seconds when set (default: 121)
-    num_inference_steps diffusion steps (default: 5)
-    guidance_scale:     CFG scale (default: 1.0)
-    seed:               RNG seed (default: 10)
-    negative_prompt:    text to avoid (optional)
+One request is processed at a time because FastVideo generators are not
+re-entrant.
 """
 
 import argparse
@@ -47,15 +18,24 @@ import asyncio
 import base64
 import logging
 import os
-import tempfile
 import time
 import uuid
+from pathlib import Path
+from typing import Any, Literal
 
-import torch
 import uvloop
 from fastvideo import VideoGenerator
-from fastvideo.configs.pipelines.base import PipelineConfig
-from fastvideo.platforms.interface import AttentionBackendEnum
+from fastvideo.api import (
+    CompileConfig,
+    EngineConfig,
+    GenerationRequest,
+    GeneratorConfig,
+    OffloadConfig,
+    OutputConfig,
+    PipelineSelection,
+    QuantizationConfig,
+    SamplingConfig,
+)
 from pydantic import BaseModel, Field
 
 from dynamo.llm import (  # type: ignore[attr-defined]
@@ -68,14 +48,38 @@ from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "FastVideo/LTX2-Distilled-Diffusers"
-DEFAULT_ATTENTION_BACKEND = "TORCH_SDPA"
-# FastVideo exposes NO_ATTENTION in the enum, but it is not a selectable
-# inference backend for this worker's FASTVIDEO_ATTENTION_BACKEND override.
-ATTENTION_BACKEND_CHOICES = tuple(
-    backend_name
-    for backend_name in AttentionBackendEnum.__members__
-    if backend_name != "NO_ATTENTION"
+DEFAULT_MODEL = "FastVideo/FastWan2.1-T2V-1.3B-Diffusers"
+DEFAULT_ATTENTION_BACKEND = "VIDEO_SPARSE_ATTN"
+DEFAULT_TORCH_COMPILE_BACKEND = "inductor"
+DEFAULT_TORCH_COMPILE_MODE = "max-autotune-no-cudagraphs"
+DEFAULT_SIZE = "1280x720"
+DEFAULT_SECONDS = 5
+DEFAULT_FPS = 24
+DEFAULT_NUM_FRAMES = 125
+DEFAULT_NUM_INFERENCE_STEPS = 50
+DEFAULT_GUIDANCE_SCALE = 1.0
+DEFAULT_SEED = 1024
+DEFAULT_MAX_VIDEO_WIDTH = 4096
+DEFAULT_MAX_VIDEO_HEIGHT = 4096
+DEFAULT_RESPONSE_FORMAT = "b64_json"
+DEFAULT_OUTPUT_FORMAT = "mp4"
+DEFAULT_OUTPUT_DIR = "/tmp/dynamo-fastvideo-outputs"
+DEFAULT_VSA_SPARSITY = 0.8
+ATTENTION_BACKEND_CHOICES = (
+    "FLASH_ATTN",
+    "TORCH_SDPA",
+    "SAGE_ATTN",
+    "SAGE_ATTN_THREE",
+    "VIDEO_SPARSE_ATTN",
+    "VMOBA_ATTN",
+    "SLA_ATTN",
+    "SAGE_SLA_ATTN",
+)
+TORCH_COMPILE_MODE_CHOICES = (
+    "default",
+    "reduce-overhead",
+    "max-autotune",
+    "max-autotune-no-cudagraphs",
 )
 
 # ── Request / Response models ─────────────────────────────────────────────────
@@ -96,15 +100,23 @@ def _get_worker_namespace() -> str:
 
 
 class NvExtVideoCreateRequest(BaseModel):
-    fps: int = Field(default=24, description="Frames per second")
+    fps: int | None = Field(default=None, description="Frames per second")
     num_frames: int | None = Field(
-        default=121, description="Total frames; overrides fps * seconds"
+        default=None, description="Total frames; overrides fps * seconds"
     )
-    num_inference_steps: int = Field(default=5, description="Diffusion inference steps")
-    guidance_scale: float = Field(
-        default=1.0, description="Classifier-free guidance scale"
+    num_inference_steps: int | None = Field(
+        default=None, description="Diffusion inference steps"
     )
-    seed: int | None = Field(default=10, description="RNG seed for reproducibility")
+    guidance_scale: float | None = Field(
+        default=None, description="Classifier-free guidance scale"
+    )
+    guidance_scale_2: float | None = Field(
+        default=None, description="Secondary classifier-free guidance scale"
+    )
+    boundary_ratio: float | None = Field(
+        default=None, description="Expert switching boundary ratio"
+    )
+    seed: int | None = Field(default=None, description="RNG seed")
     negative_prompt: str | None = Field(
         default=None, description="Text to avoid in generation"
     )
@@ -113,26 +125,32 @@ class NvExtVideoCreateRequest(BaseModel):
 class VideoCreateRequest(BaseModel):
     prompt: str = Field(description="Text description of the desired video")
     model: str = Field(description="HuggingFace model path")
-    size: str = Field(default="1920x1088", description="Frame dimensions as 'WxH'")
-    seconds: int = Field(
-        default=5, description="Clip duration; used when nvext.num_frames is unset"
-    )
+    input_reference: str | None = Field(default=None)
+    size: str | None = Field(default=None, description="Frame dimensions as 'WxH'")
+    seconds: int | None = Field(default=None)
     user: str | None = Field(default=None)
-    nvext: NvExtVideoCreateRequest = Field(default_factory=NvExtVideoCreateRequest)
+    response_format: Literal["url", "b64_json"] | None = Field(default=None)
+    output_format: str | None = Field(default=None)
+    stream: bool | None = Field(default=None)
+    nvext: NvExtVideoCreateRequest | None = Field(default=None)
 
 
 class VideoData(BaseModel):
-    b64_json: str | None = Field(default=None, description="Base64-encoded MP4 video")
-    mime_type: str = Field(default="video/mp4")
+    output_format: str
+    url: str | None = None
+    b64_json: str | None = None
 
 
 class VideoCreateResponse(BaseModel):
     id: str
     object: str = "video"
-    created: int
     model: str
-    status: str = "complete"
-    data: list[VideoData]
+    status: str = "completed"
+    progress: int = 100
+    created: int
+    data: list[VideoData] = Field(default_factory=list)
+    error: str | None = None
+    inference_time_s: float | None = None
 
 
 # ── Backend ───────────────────────────────────────────────────────────────────
@@ -140,7 +158,7 @@ class VideoCreateResponse(BaseModel):
 
 def _coerce_optional_float(value: object) -> float | None:
     """Best-effort conversion for optional numeric metrics from backend results."""
-    if value is None:
+    if value is None or not isinstance(value, (int, float, str)):
         return None
     try:
         return float(value)
@@ -148,86 +166,199 @@ def _coerce_optional_float(value: object) -> float | None:
         return None
 
 
+def _add_negatable_bool_argument(
+    parser: argparse.ArgumentParser,
+    flag_name: str,
+    *,
+    dest: str,
+    default: bool,
+    help_text: str,
+) -> None:
+    parser.add_argument(
+        flag_name,
+        dest=dest,
+        action="store_true",
+        default=default,
+        help=help_text,
+    )
+    parser.add_argument(
+        f"--no-{flag_name.removeprefix('--')}",
+        dest=dest,
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+
+
 class FastVideoBackend:
     def __init__(self, args: argparse.Namespace) -> None:
+        self.args = args
         self.model_name: str = args.model
-        self.num_gpus: int = args.num_gpus
-        self.enable_optimizations: bool = args.enable_optimizations
-        self.attention_backend: str = args.attention_backend
+        self.output_dir = Path(args.output_dir)
 
         # One request at a time — VideoGenerator is not re-entrant
         self._generate_lock = asyncio.Lock()
         self.generator: VideoGenerator | None = None
 
-        os.environ["FASTVIDEO_ATTENTION_BACKEND"] = self.attention_backend
+        os.environ["FASTVIDEO_ATTENTION_BACKEND"] = args.attention_backend
         os.environ["FASTVIDEO_STAGE_LOGGING"] = "1"
         os.environ["FASTVIDEO_ENABLE_RMSNORM_FP4_PREQUANT"] = "0"
 
     async def initialize_model(self) -> None:
         logger.info("Loading VideoGenerator model=%s", self.model_name)
-        loop = asyncio.get_running_loop()
-
-        def _load():
-            pipeline_config = PipelineConfig.from_pretrained(self.model_name)
-            optimization_kwargs = {}
-            if self.enable_optimizations:
-                major, minor = torch.cuda.get_device_capability()
-                if major < 10:
-                    logger.warning(
-                        "FP4 quantization is only supported on NVIDIA Blackwell GPUs (compute capability 10.0+). Detected compute capability: %d.%d. Continuing without FP4 optimizations.",
-                        major,
-                        minor,
-                    )
-                else:
-                    logger.info(
-                        "Using FP4 quantization for VideoGenerator model=%s",
-                        self.model_name,
-                    )
-                    try:
-                        from fastvideo.layers.quantization.fp4_config import FP4Config
-                    except ImportError as exc:
-                        raise RuntimeError(
-                            "FastVideo optimizations require "
-                            "fastvideo.layers.quantization.fp4_config, but this "
-                            "FastVideo build does not provide it. Re-run "
-                            "worker.py without --enable-optimizations or install a "
-                            "FastVideo version that includes fp4_config."
-                        ) from exc
-                    pipeline_config.dit_config.quant_config = FP4Config()
-
-                optimization_kwargs = {
-                    "ltx2_refine_enabled": True,
-                    "ltx2_refine_lora_path": "",  # disable refine lora for distilled model
-                    "ltx2_refine_num_inference_steps": 2,
-                    "ltx2_refine_guidance_scale": 1.0,
-                    "ltx2_refine_add_noise": True,
-                    "enable_torch_compile": True,
-                    "enable_torch_compile_text_encoder": True,
-                    "torch_compile_kwargs": {
-                        "backend": "inductor",
-                        "fullgraph": True,
-                        "mode": "max-autotune-no-cudagraphs",
-                    },
-                    "dit_cpu_offload": False,
-                    "vae_cpu_offload": False,
-                    "text_encoder_cpu_offload": False,
-                    "ltx2_vae_tiling": False,
-                }
-
-            return VideoGenerator.from_pretrained(
-                self.model_name,
-                num_gpus=self.num_gpus,
-                pipeline_config=pipeline_config,
-                **optimization_kwargs,
-            )
-
-        self.generator = await loop.run_in_executor(None, _load)
+        self.generator = await asyncio.to_thread(
+            VideoGenerator.from_config,
+            self._build_generator_config(),
+        )
         logger.info("VideoGenerator ready")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _generate_mp4(
+    def _build_generator_config(self) -> GeneratorConfig:
+        enable_torch_compile = self.args.torch_compile or self.args.enable_optimizations
+        enable_fp4_quantization = (
+            self.args.fp4_quantization or self.args.enable_optimizations
+        )
+
+        compile_config = CompileConfig(enabled=enable_torch_compile)
+        if enable_torch_compile:
+            compile_config.backend = self.args.torch_compile_backend
+            compile_config.fullgraph = self.args.torch_compile_fullgraph
+            compile_config.mode = self.args.torch_compile_mode
+            compile_config.dynamic = self.args.torch_compile_dynamic
+
+        quantization = None
+        experimental: dict[str, object] = {}
+        if self.args.vsa_sparsity is not None:
+            experimental["VSA_sparsity"] = self.args.vsa_sparsity
+        if enable_fp4_quantization:
+            quantization = QuantizationConfig(transformer_quant="FP4")
+            experimental["fp4_quantization"] = True
+
+        return GeneratorConfig(
+            model_path=self.model_name,
+            engine=EngineConfig(
+                num_gpus=self.args.num_gpus,
+                use_fsdp_inference=self.args.use_fsdp_inference,
+                disable_autocast=self.args.disable_autocast,
+                offload=OffloadConfig(
+                    dit=self.args.dit_cpu_offload,
+                    dit_layerwise=self.args.dit_layerwise_offload,
+                    text_encoder=self.args.text_encoder_cpu_offload,
+                    image_encoder=self.args.image_encoder_cpu_offload,
+                    vae=self.args.vae_cpu_offload,
+                    pin_cpu_memory=self.args.pin_cpu_memory,
+                ),
+                compile=compile_config,
+                quantization=quantization,
+            ),
+            pipeline=PipelineSelection(experimental=experimental),
+        )
+
+    def _parse_size(self, size: str | None) -> tuple[int, int]:
+        size_value = size or self.args.default_size
+        try:
+            width_str, height_str = size_value.lower().split("x", 1)
+            width, height = int(width_str), int(height_str)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid size format '{size_value}', expected 'WxH'"
+            ) from exc
+
+        if width <= 0 or height <= 0:
+            raise ValueError(
+                f"Invalid size '{size_value}', width and height must be positive"
+            )
+        if width > self.args.max_video_width or height > self.args.max_video_height:
+            raise ValueError(
+                f"Invalid size '{size_value}', exceeds maximum "
+                f"{self.args.max_video_width}x{self.args.max_video_height}"
+            )
+        return width, height
+
+    def _compute_num_frames(
         self,
+        request: VideoCreateRequest,
+        nvext: NvExtVideoCreateRequest,
+    ) -> int:
+        if nvext.num_frames is not None:
+            num_frames = nvext.num_frames
+        elif request.seconds is None and nvext.fps is None:
+            num_frames = self.args.default_num_frames
+        else:
+            seconds = (
+                request.seconds
+                if request.seconds is not None
+                else self.args.default_seconds
+            )
+            fps = nvext.fps if nvext.fps is not None else self.args.default_fps
+            num_frames = seconds * fps
+
+        if num_frames <= 0:
+            raise ValueError("num_frames must be positive")
+        return num_frames
+
+    def _resolve_response_format(self, response_format: str | None) -> str:
+        resolved = response_format or DEFAULT_RESPONSE_FORMAT
+        if resolved not in {"b64_json", "url"}:
+            raise ValueError("response_format must be one of: b64_json, url")
+        return resolved
+
+    def _resolve_output_format(self, output_format: str | None) -> str:
+        resolved = (output_format or DEFAULT_OUTPUT_FORMAT).lower()
+        if resolved != DEFAULT_OUTPUT_FORMAT:
+            raise ValueError("FastVideo worker only supports mp4 output_format")
+        return resolved
+
+    def _build_generation_request(
+        self,
+        *,
+        prompt: str,
+        output_path: Path,
+        width: int,
+        height: int,
+        num_frames: int,
+        fps: int,
+        num_inference_steps: int,
+        guidance_scale: float,
+        seed: int | None,
+        nvext: NvExtVideoCreateRequest,
+    ) -> GenerationRequest:
+        sampling_kwargs: dict[str, Any] = {
+            "height": height,
+            "width": width,
+            "num_frames": num_frames,
+            "fps": fps,
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+        }
+        if seed is not None:
+            sampling_kwargs["seed"] = seed
+        if nvext.boundary_ratio is not None:
+            sampling_kwargs["boundary_ratio"] = nvext.boundary_ratio
+        if nvext.guidance_scale_2 is not None:
+            sampling_kwargs["guidance_scale_2"] = nvext.guidance_scale_2
+
+        return GenerationRequest(
+            prompt=prompt,
+            negative_prompt=nvext.negative_prompt,
+            sampling=SamplingConfig(**sampling_kwargs),
+            output=OutputConfig(
+                output_path=str(output_path),
+                save_video=True,
+                return_frames=False,
+            ),
+        )
+
+    def _coerce_single_result(self, result: Any) -> Any:
+        if isinstance(result, list):
+            if len(result) != 1:
+                raise RuntimeError(f"Expected one FastVideo result, got {len(result)}")
+            return result[0]
+        return result
+
+    def _generate_video(
+        self,
+        *,
         prompt: str,
         video_id: str,
         width: int,
@@ -237,157 +368,158 @@ class FastVideoBackend:
         num_inference_steps: int,
         guidance_scale: float,
         seed: int | None,
-        negative_prompt: str | None,
-    ) -> bytes:
-        """Generate a video clip and return it as MP4 bytes."""
-        assert self.generator is not None
+        nvext: NvExtVideoCreateRequest,
+    ) -> tuple[Path, float | None]:
+        if self.generator is None:
+            raise RuntimeError("Generator is not initialized")
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_path = os.path.join(tmpdir, "output.mp4")
-            kwargs: dict = dict(
-                save_video=True,
-                return_frames=False,
-                output_path=output_path,
-                height=height,
-                width=width,
-                num_frames=num_frames,
-                fps=fps,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-            )
-            if seed is not None:
-                kwargs["seed"] = seed
-            if negative_prompt is not None:
-                kwargs["negative_prompt"] = negative_prompt
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = self.output_dir / f"{video_id}.mp4"
+        generation_request = self._build_generation_request(
+            prompt=prompt,
+            output_path=output_path,
+            width=width,
+            height=height,
+            num_frames=num_frames,
+            fps=fps,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            seed=seed,
+            nvext=nvext,
+        )
+        result = self.generator.generate(generation_request)
+        result = self._coerce_single_result(result)
+        video_path = Path(getattr(result, "video_path", None) or output_path)
+        generation_time = _coerce_optional_float(
+            getattr(result, "generation_time", None)
+        )
 
-            result = self.generator.generate_video(prompt=prompt, **kwargs)
-            result_dict = result if isinstance(result, dict) else {}
-            generation_time = _coerce_optional_float(result_dict.get("generation_time"))
-            e2e_latency = _coerce_optional_float(result_dict.get("e2e_latency"))
-            logger.info("[%s] MP4 written to %s", video_id, output_path)
-            if generation_time is not None:
-                logger.info(
-                    "[%s] Generation time: %.2f seconds", video_id, generation_time
-                )
-            else:
-                logger.info("[%s] Generation time: unavailable", video_id)
+        if not video_path.is_file():
+            raise FileNotFoundError(f"FastVideo output video not found: {video_path}")
+        return video_path, generation_time
 
-            if e2e_latency is not None:
-                logger.info("[%s] E2E latency: %.2f seconds", video_id, e2e_latency)
-            else:
-                logger.info("[%s] E2E latency: unavailable", video_id)
+    async def _make_video_data(
+        self,
+        *,
+        output_format: str,
+        response_format: str,
+        video_path: Path,
+    ) -> VideoData:
+        if response_format == "url":
+            return VideoData(output_format=output_format, url=str(video_path))
 
-            time_start = time.perf_counter()
-            with open(output_path, "rb") as f:
-                data = f.read()
-            time_end = time.perf_counter()
-            logger.info(
-                "[%s] File read time: %.2f seconds", video_id, time_end - time_start
-            )
-
-            return data
+        video_bytes = await asyncio.to_thread(video_path.read_bytes)
+        return VideoData(
+            output_format=output_format,
+            b64_json=base64.b64encode(video_bytes).decode("utf-8"),
+        )
 
     # ── Dynamo endpoint ───────────────────────────────────────────────────────
 
     @dynamo_endpoint(VideoCreateRequest, VideoCreateResponse)
     async def create_video(self, request: VideoCreateRequest):
-        """
-        Non-streaming endpoint.
-
-        Generates one video clip using the parameters from the request's nvext
-        field, then yields a single VideoCreateResponse with data[0].b64_json
-        containing the complete MP4 file encoded in base64.
-        """
-        if self.generator is None:
-            raise RuntimeError("Generator is not initialized")
-
-        nvext = request.nvext
-        try:
-            width_str, height_str = request.size.lower().split("x", 1)
-            width, height = int(width_str), int(height_str)
-        except (ValueError, TypeError) as exc:
-            raise ValueError(
-                f"Invalid size format '{request.size}', expected 'WxH'"
-            ) from exc
-
-        if width <= 0 or height <= 0:
-            raise ValueError(
-                f"Invalid size '{request.size}', width and height must be positive"
-            )
-
-        num_frames = (
-            nvext.num_frames
-            if nvext.num_frames is not None
-            else nvext.fps * request.seconds
-        )
-        if num_frames <= 0:
-            raise ValueError("num_frames must be positive")
-
-        fps = nvext.fps
-        if fps <= 0:
-            raise ValueError("fps must be positive")
-
+        """Generate one video clip and yield a single /v1/videos response."""
+        started_at = time.time()
         video_id = f"video_{uuid.uuid4().hex}"
-        created_ts = int(time.time())
+        created_ts = int(started_at)
 
-        logger.info(
-            "[%s] create_video: prompt='%s...' size=%s frames=%d steps=%d",
-            video_id,
-            request.prompt[:60],
-            request.size,
-            num_frames,
-            nvext.num_inference_steps,
-        )
-        logger.info(
-            "[%s] Waiting for generate lock (locked=%s)",
-            video_id,
-            self._generate_lock.locked(),
-        )
-        async with self._generate_lock:
-            t = time.perf_counter()
+        try:
+            if self.generator is None:
+                raise RuntimeError("Generator is not initialized")
+            if request.input_reference is not None:
+                raise ValueError(
+                    "FastVideo example worker does not support input_reference "
+                    "(image-to-video) requests"
+                )
+
+            nvext = request.nvext or NvExtVideoCreateRequest()
+            width, height = self._parse_size(request.size)
+            fps = nvext.fps if nvext.fps is not None else self.args.default_fps
+            if fps <= 0:
+                raise ValueError("fps must be positive")
+
+            num_frames = self._compute_num_frames(request, nvext)
+            num_inference_steps = (
+                nvext.num_inference_steps
+                if nvext.num_inference_steps is not None
+                else self.args.default_num_inference_steps
+            )
+            if num_inference_steps <= 0:
+                raise ValueError("num_inference_steps must be positive")
+
+            guidance_scale = (
+                nvext.guidance_scale
+                if nvext.guidance_scale is not None
+                else self.args.default_guidance_scale
+            )
+            seed = nvext.seed if nvext.seed is not None else self.args.default_seed
+            response_format = self._resolve_response_format(request.response_format)
+            output_format = self._resolve_output_format(request.output_format)
+
             logger.info(
-                "[%s] Generating video (%dx%d, %d frames, %d steps) ...",
+                "[%s] create_video size=%dx%d frames=%d fps=%d steps=%d",
                 video_id,
                 width,
                 height,
                 num_frames,
-                nvext.num_inference_steps,
+                fps,
+                num_inference_steps,
             )
-            try:
-                mp4_bytes = await asyncio.to_thread(
-                    self._generate_mp4,
+            logger.info(
+                "[%s] Waiting for generate lock (locked=%s)",
+                video_id,
+                self._generate_lock.locked(),
+            )
+            async with self._generate_lock:
+                time_start = time.perf_counter()
+                video_path, generation_time = await asyncio.to_thread(
+                    self._generate_video,
                     prompt=request.prompt,
                     video_id=video_id,
                     width=width,
                     height=height,
                     num_frames=num_frames,
                     fps=fps,
-                    num_inference_steps=nvext.num_inference_steps,
-                    guidance_scale=nvext.guidance_scale,
-                    seed=nvext.seed,
-                    negative_prompt=nvext.negative_prompt,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
+                    seed=seed,
+                    nvext=nvext,
                 )
-            except Exception as exc:
-                logger.exception("[%s] Generation failed", video_id)
-                raise RuntimeError(
-                    f"Video generation failed for request {video_id}"
-                ) from exc
+                elapsed = time.perf_counter() - time_start
 
-            elapsed = time.perf_counter() - t
-            logger.info(
-                "[%s] Generation done in %.1fs — encoding %.2f MB MP4",
-                video_id,
-                elapsed,
-                len(mp4_bytes) / 1_048_576,
-            )
+            if generation_time is not None:
+                logger.info(
+                    "[%s] FastVideo generation time: %.2fs",
+                    video_id,
+                    generation_time,
+                )
+            logger.info("[%s] Request finished in %.2fs", video_id, elapsed)
 
             yield VideoCreateResponse(
                 id=video_id,
                 created=created_ts,
                 model=request.model,
-                data=[VideoData(b64_json=base64.b64encode(mp4_bytes).decode())],
+                data=[
+                    await self._make_video_data(
+                        output_format=output_format,
+                        response_format=response_format,
+                        video_path=video_path,
+                    )
+                ],
+                inference_time_s=time.time() - started_at,
             ).model_dump()
-        logger.info("[%s] Generation request finished", video_id)
+        except Exception as exc:
+            logger.exception("[%s] Generation failed", video_id)
+            yield VideoCreateResponse(
+                id=video_id,
+                created=created_ts,
+                model=request.model,
+                status="failed",
+                progress=0,
+                data=[],
+                error=str(exc),
+                inference_time_s=time.time() - started_at,
+            ).model_dump()
 
 
 # ── Dynamo wiring ─────────────────────────────────────────────────────────────
@@ -434,40 +566,178 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
+        "--model-path",
+        dest="model",
         default=DEFAULT_MODEL,
         help=f"HuggingFace model path (default: {DEFAULT_MODEL})",
     )
+    parser.add_argument("--num-gpus", type=int, default=1, dest="num_gpus")
     parser.add_argument(
-        "--num-gpus",
-        type=int,
-        default=1,
-        dest="num_gpus",
-        help="Number of GPUs (default: 1)",
-    )
-    parser.add_argument(
-        "--enable-optimizations",
-        action="store_true",
-        dest="enable_optimizations",
-        help="Enable FP4 quantization (if available) and torch.compile",
+        "--discovery-backend",
+        choices=("etcd", "file", "mem", "kubernetes"),
+        default=None,
+        help="Dynamo discovery backend. Defaults to env, then kubernetes/file.",
     )
     parser.add_argument(
         "--attention-backend",
         choices=ATTENTION_BACKEND_CHOICES,
         default=DEFAULT_ATTENTION_BACKEND,
         dest="attention_backend",
-        help=(
-            "Attention backend to set via FASTVIDEO_ATTENTION_BACKEND "
-            f"(choices: {', '.join(ATTENTION_BACKEND_CHOICES)}; "
-            f"default: {DEFAULT_ATTENTION_BACKEND})"
-        ),
+        help="Attention backend to set via FASTVIDEO_ATTENTION_BACKEND.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--vsa-sparsity",
+        type=float,
+        default=DEFAULT_VSA_SPARSITY,
+        help="VSA_sparsity value routed through PipelineSelection.experimental.",
+    )
+    parser.add_argument(
+        "--enable-optimizations",
+        action="store_true",
+        dest="enable_optimizations",
+        help="Backward-compatible shortcut for --torch-compile --fp4-quantization.",
+    )
+    parser.add_argument(
+        "--torch-compile",
+        action="store_true",
+        dest="torch_compile",
+        help="Enable torch.compile through FastVideo CompileConfig.",
+    )
+    parser.add_argument(
+        "--torch-compile-backend",
+        default=DEFAULT_TORCH_COMPILE_BACKEND,
+        help="torch.compile backend when --torch-compile is enabled.",
+    )
+    parser.add_argument(
+        "--torch-compile-mode",
+        choices=TORCH_COMPILE_MODE_CHOICES,
+        default=DEFAULT_TORCH_COMPILE_MODE,
+        help="torch.compile mode when --torch-compile is enabled.",
+    )
+    _add_negatable_bool_argument(
+        parser,
+        "--torch-compile-fullgraph",
+        dest="torch_compile_fullgraph",
+        default=True,
+        help_text="Enable torch.compile fullgraph mode.",
+    )
+    _add_negatable_bool_argument(
+        parser,
+        "--torch-compile-dynamic",
+        dest="torch_compile_dynamic",
+        default=False,
+        help_text="Enable dynamic shapes for torch.compile.",
+    )
+    parser.add_argument(
+        "--fp4-quantization",
+        action="store_true",
+        dest="fp4_quantization",
+        help="Request FP4 transformer quantization through QuantizationConfig.",
+    )
+    _add_negatable_bool_argument(
+        parser,
+        "--use-fsdp-inference",
+        dest="use_fsdp_inference",
+        default=False,
+        help_text="Enable FastVideo FSDP inference.",
+    )
+    _add_negatable_bool_argument(
+        parser,
+        "--dit-cpu-offload",
+        dest="dit_cpu_offload",
+        default=True,
+        help_text="Enable DiT CPU offload.",
+    )
+    _add_negatable_bool_argument(
+        parser,
+        "--dit-layerwise-offload",
+        dest="dit_layerwise_offload",
+        default=True,
+        help_text="Enable DiT layerwise CPU offload.",
+    )
+    _add_negatable_bool_argument(
+        parser,
+        "--vae-cpu-offload",
+        dest="vae_cpu_offload",
+        default=True,
+        help_text="Enable VAE CPU offload.",
+    )
+    _add_negatable_bool_argument(
+        parser,
+        "--image-encoder-cpu-offload",
+        dest="image_encoder_cpu_offload",
+        default=True,
+        help_text="Enable image encoder CPU offload.",
+    )
+    _add_negatable_bool_argument(
+        parser,
+        "--text-encoder-cpu-offload",
+        dest="text_encoder_cpu_offload",
+        default=True,
+        help_text="Enable text encoder CPU offload.",
+    )
+    _add_negatable_bool_argument(
+        parser,
+        "--pin-cpu-memory",
+        dest="pin_cpu_memory",
+        default=True,
+        help_text="Pin host memory for CPU offload transfers.",
+    )
+    _add_negatable_bool_argument(
+        parser,
+        "--disable-autocast",
+        dest="disable_autocast",
+        default=False,
+        help_text="Disable autocast in FastVideo denoising/decoding paths.",
+    )
+    parser.add_argument("--default-size", default=DEFAULT_SIZE)
+    parser.add_argument("--default-seconds", type=int, default=DEFAULT_SECONDS)
+    parser.add_argument("--default-fps", type=int, default=DEFAULT_FPS)
+    parser.add_argument("--default-num-frames", type=int, default=DEFAULT_NUM_FRAMES)
+    parser.add_argument(
+        "--default-num-inference-steps",
+        type=int,
+        default=DEFAULT_NUM_INFERENCE_STEPS,
+    )
+    parser.add_argument(
+        "--default-guidance-scale",
+        type=float,
+        default=DEFAULT_GUIDANCE_SCALE,
+    )
+    parser.add_argument("--default-seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument(
+        "--max-video-width",
+        type=int,
+        default=DEFAULT_MAX_VIDEO_WIDTH,
+        help="Maximum request video width accepted by the worker.",
+    )
+    parser.add_argument(
+        "--max-video-height",
+        type=int,
+        default=DEFAULT_MAX_VIDEO_HEIGHT,
+        help="Maximum request video height accepted by the worker.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=DEFAULT_OUTPUT_DIR,
+        help="Directory for generated MP4 files and url responses.",
+    )
+
+    args = parser.parse_args()
+    if args.num_gpus <= 0:
+        parser.error("--num-gpus must be > 0")
+    if args.max_video_width <= 0:
+        parser.error("--max-video-width must be > 0")
+    if args.max_video_height <= 0:
+        parser.error("--max-video-height must be > 0")
+    return args
 
 
 async def main(args: argparse.Namespace) -> None:
     loop = asyncio.get_running_loop()
-    # Use Kubernetes discovery in-cluster and file discovery for local compose by default.
-    discovery_backend = os.environ.get("DYN_DISCOVERY_BACKEND")
+    discovery_backend = args.discovery_backend or os.environ.get(
+        "DYN_DISCOVERY_BACKEND"
+    )
     if not discovery_backend:
         discovery_backend = (
             "kubernetes" if os.environ.get("KUBERNETES_SERVICE_HOST") else "file"
