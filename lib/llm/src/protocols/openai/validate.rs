@@ -97,15 +97,21 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 // Shared Fields
 //
 
+/// Root-level fields accepted for compatibility with token-in clients even
+/// though Dynamo has not modeled them as first-class OpenAI fields.
+pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &["cache_salt"];
+
 /// Validates that no unsupported fields are present in the request
 pub fn validate_no_unsupported_fields(
     unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), anyhow::Error> {
-    if !unsupported_fields.is_empty() {
-        let fields: Vec<_> = unsupported_fields
-            .keys()
-            .map(|s| format!("`{}`", s))
-            .collect();
+    let fields: Vec<_> = unsupported_fields
+        .keys()
+        .filter(|field| !PASSTHROUGH_EXTRA_FIELDS.contains(&field.as_str()))
+        .map(|s| format!("`{}`", s))
+        .collect();
+
+    if !fields.is_empty() {
         anyhow::bail!("Unsupported parameter(s): {}", fields.join(", "));
     }
     Ok(())

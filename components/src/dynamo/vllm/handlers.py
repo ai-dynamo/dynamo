@@ -1925,6 +1925,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             prompt_token_ids=request["token_ids"],
             multi_modal_data=multi_modal_data,
         )
+        nvext_args = extra_args.get("nvext") if isinstance(extra_args, dict) else None
+        if isinstance(nvext_args, dict):
+            cache_salt = nvext_args.get("cache_salt")
+            if cache_salt is not None:
+                prompt_kwargs["cache_salt"] = cache_salt
         if mm_uuids is not None:
             prompt_kwargs["multi_modal_uuids"] = mm_uuids
         if mm_processor_kwargs is not None:

@@ -556,10 +556,34 @@ impl OpenAIPreprocessor {
             }));
         }
 
+        if let Some(extra_args) = Self::nvext_passthrough_extra_args(request) {
+            builder.extra_args(Some(extra_args));
+        }
+
         // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
         builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
 
         Ok(builder)
+    }
+
+    fn nvext_passthrough_extra_args<R: NvExtProvider>(request: &R) -> Option<serde_json::Value> {
+        let mut nvext_args = serde_json::Map::new();
+
+        if let Some(fields) = request.nvext_extra_fields()
+            && !fields.is_empty()
+        {
+            nvext_args.insert("extra_fields".to_string(), serde_json::json!(fields));
+        }
+
+        if let Some(cache_salt) = request.cache_salt() {
+            nvext_args.insert("cache_salt".to_string(), serde_json::json!(cache_salt));
+        }
+
+        if nvext_args.is_empty() {
+            None
+        } else {
+            Some(serde_json::json!({ "nvext": serde_json::Value::Object(nvext_args) }))
+        }
     }
 
     pub fn apply_template<
@@ -623,7 +647,7 @@ impl OpenAIPreprocessor {
         }
     }
 
-    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest>(
+    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest + NvExtProvider>(
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
@@ -847,6 +871,11 @@ impl OpenAIPreprocessor {
             let mut extra_args = serde_json::json!({
                 "messages": messages_json
             });
+            if let Some(nvext_passthrough) = Self::nvext_passthrough_extra_args(request)
+                && let Some(nvext) = nvext_passthrough.get("nvext")
+            {
+                extra_args["nvext"] = nvext.clone();
+            }
 
             // Strip redundant inline data: URLs only when frontend decoding is active
             // (media_loader decoded the images into RDMA descriptors). TRT-LLM and

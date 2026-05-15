@@ -35,6 +35,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `backend_instance_id` | `u64` | `None` | Router | Routes the request to a specific backend instance. |
 | `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When provided, tokenization is skipped. `backend_instance_id` remains an independent routing hint. |
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
+| `cache_salt` | `string` | `None` | Backend | Prefix-cache isolation hint for token-in clients. The top-level `cache_salt` request field is also accepted for renderer compatibility. |
 | `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`, `"completion_token_ids"`. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |

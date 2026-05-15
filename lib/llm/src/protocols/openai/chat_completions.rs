@@ -101,6 +101,17 @@ impl NvExtProvider for NvCreateChatCompletionRequest {
     fn raw_prompt(&self) -> Option<String> {
         None
     }
+
+    fn cache_salt(&self) -> Option<&str> {
+        self.nvext
+            .as_ref()
+            .and_then(|nvext| nvext.cache_salt.as_deref())
+            .or_else(|| {
+                self.unsupported_fields
+                    .get("cache_salt")
+                    .and_then(|value| value.as_str())
+            })
+    }
 }
 
 /// Implements `AnnotationsProvider` for `NvCreateChatCompletionRequest`,
@@ -513,5 +524,45 @@ mod tests {
             serde_json::from_value(unsupported_stop_token_ids)
                 .expect("Failed to deserialize request");
         assert!(ValidateRequest::validate(&request).is_err());
+    }
+
+    #[test]
+    fn test_cache_salt_accepts_renderer_top_level_shape() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "(token-in mode)"}],
+            "nvext": {
+                "token_data": [1, 2, 3],
+                "extra_fields": ["completion_token_ids"]
+            },
+            "cache_salt": "ckpt-42"
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        ValidateRequest::validate(&request).expect("cache_salt should be accepted");
+        assert_eq!(
+            <NvCreateChatCompletionRequest as NvExtProvider>::cache_salt(&request),
+            Some("ckpt-42")
+        );
+    }
+
+    #[test]
+    fn test_nvext_cache_salt_takes_precedence() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "(token-in mode)"}],
+            "cache_salt": "top-level",
+            "nvext": {
+                "cache_salt": "nvext-level"
+            }
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        assert_eq!(
+            <NvCreateChatCompletionRequest as NvExtProvider>::cache_salt(&request),
+            Some("nvext-level")
+        );
     }
 }

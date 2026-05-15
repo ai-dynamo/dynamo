@@ -74,6 +74,14 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
 pub trait NvExtProvider {
     fn nvext(&self) -> Option<&NvExt>;
     fn raw_prompt(&self) -> Option<String>;
+
+    fn nvext_extra_fields(&self) -> Option<&[String]> {
+        self.nvext().and_then(|nvext| nvext.extra_fields.as_deref())
+    }
+
+    fn cache_salt(&self) -> Option<&str> {
+        self.nvext().and_then(|nvext| nvext.cache_salt.as_deref())
+    }
 }
 
 /// Worker ID information for disaggregated serving
@@ -338,6 +346,14 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     pub max_thinking_tokens: Option<u32>,
 
+    /// KV prefix-cache isolation hint from token-in clients.
+    ///
+    /// A changed salt lets backends isolate prompt cache entries for identical
+    /// token sequences generated under different checkpoint or rollout state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub cache_salt: Option<String>,
+
     /// Extra fields to be included in the response's nvext
     /// This is a list of field names that should be populated in the response
     /// Supported fields include "worker_id", "timing", "routed_experts", "engine_data",
@@ -517,6 +533,7 @@ mod tests {
         assert_eq!(nv_ext.backend_instance_id, None);
         assert_eq!(nv_ext.token_data, None);
         assert_eq!(nv_ext.max_thinking_tokens, None);
+        assert_eq!(nv_ext.cache_salt, None);
         assert_eq!(nv_ext.extra_fields, None);
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);
@@ -535,6 +552,7 @@ mod tests {
             .backend_instance_id(42)
             .token_data(vec![1, 2, 3, 4])
             .max_thinking_tokens(1024)
+            .cache_salt("ckpt-42".to_string())
             .extra_fields(vec!["worker_id".to_string()])
             .build()
             .unwrap();
@@ -544,6 +562,7 @@ mod tests {
         assert_eq!(nv_ext.backend_instance_id, Some(42));
         assert_eq!(nv_ext.token_data, Some(vec![1, 2, 3, 4]));
         assert_eq!(nv_ext.max_thinking_tokens, Some(1024));
+        assert_eq!(nv_ext.cache_salt, Some("ckpt-42".to_string()));
         assert_eq!(nv_ext.extra_fields, Some(vec!["worker_id".to_string()]));
         // Validate the built struct
         assert!(nv_ext.validate().is_ok());
