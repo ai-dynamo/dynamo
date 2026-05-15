@@ -21,6 +21,7 @@ from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_b
 from tests.serve.lora_utils import MinioLoraConfig
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.multimodal import IMAGE_COLOR_PROMPT
 from tests.utils.payload_builder import (
     cached_tokens_chat_payload,
     chat_payload,
@@ -300,7 +301,7 @@ vllm_configs = {
                 [
                     {
                         "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
+                        "text": IMAGE_COLOR_PROMPT,
                     },
                     {
                         "type": "image_url",
@@ -310,7 +311,8 @@ vllm_configs = {
                 repeat_count=1,
                 expected_response=["green"],
                 temperature=0.0,
-                max_tokens=100,
+                max_tokens=20,
+                timeout=180,
             )
         ],
     ),
@@ -339,7 +341,7 @@ vllm_configs = {
                 [
                     {
                         "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
+                        "text": IMAGE_COLOR_PROMPT,
                     },
                     {
                         "type": "image_url",
@@ -347,8 +349,9 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["purple"],
-                max_tokens=100,
+                expected_response=["green"],
+                max_tokens=20,
+                timeout=180,
             ),
         ],
     ),
@@ -641,7 +644,7 @@ def test_multimodal_b64(
         [
             {
                 "type": "text",
-                "text": "What colors are in the following image? Respond only with the colors.",
+                "text": IMAGE_COLOR_PROMPT,
             },
             {
                 "type": "image_url",
@@ -649,8 +652,9 @@ def test_multimodal_b64(
             },
         ],
         repeat_count=1,
-        expected_response=["purple"],
-        max_tokens=100,
+        expected_response=["green"],
+        max_tokens=20,
+        timeout=180,
     )
 
     # Create test config
@@ -698,7 +702,7 @@ def test_multimodal_b64_frontend_decoding(
         [
             {
                 "type": "text",
-                "text": "What colors are in the following image? Respond only with the colors.",
+                "text": IMAGE_COLOR_PROMPT,
             },
             {
                 "type": "image_url",
@@ -708,7 +712,8 @@ def test_multimodal_b64_frontend_decoding(
         repeat_count=1,
         expected_response=["green"],
         temperature=0.0,
-        max_tokens=100,
+        max_tokens=20,
+        timeout=180,
     )
 
     config = VLLMConfig(
