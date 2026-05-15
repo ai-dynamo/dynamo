@@ -353,10 +353,7 @@ impl Context {
         let mut otel_attrs = Vec::new();
         if let Some(d) = attrs {
             for (k, v) in d.iter() {
-                otel_attrs.push(KeyValue::new(
-                    k.extract::<String>()?,
-                    py_to_otel_value(&v)?,
-                ));
+                otel_attrs.push(KeyValue::new(k.extract::<String>()?, py_to_otel_value(&v)?));
             }
         }
         let mut builder = tracer.span_builder(name.to_string());
@@ -451,10 +448,7 @@ impl SpanProxy {
             let mut out = Vec::new();
             if let Some(d) = d {
                 for (k, v) in d.iter() {
-                    out.push(KeyValue::new(
-                        k.extract::<String>()?,
-                        py_to_otel_value(&v)?,
-                    ));
+                    out.push(KeyValue::new(k.extract::<String>()?, py_to_otel_value(&v)?));
                 }
             }
             Ok(out)
