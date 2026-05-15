@@ -2085,7 +2085,8 @@ mod tests {
         let slug = tempfile::tempdir()?;
         let typed = snap.path().join("config.json");
         std::fs::write(&typed, b"cfg")?;
-        std::os::unix::fs::symlink(&typed, slug.path().join("config.json"))?;
+        // Use the production helper so the test works on non-Unix too.
+        super::symlink_force(&typed, &slug.path().join("config.json"))?;
         // Drop a different file in snap so the harvest does something.
         std::fs::write(snap.path().join("special_tokens_map.json"), b"st")?;
         super::harvest_siblings(snap.path(), slug.path())?;
