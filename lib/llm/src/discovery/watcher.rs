@@ -853,8 +853,13 @@ impl ModelWatcher {
                 })?;
                 let chat_engine = if let Some(ref factory) = self.chat_engine_factory {
                     let routed_engine = routing
-                        .build_prefill_pipeline()
-                        .context("PreprocessedRouting::build_prefill_pipeline")?;
+                        .build_preprocessed_pipeline(
+                            card,
+                            self.migration_limit,
+                            self.migration_max_seq_len,
+                            self.metrics.clone(),
+                        )
+                        .context("PreprocessedRouting::build_preprocessed_pipeline")?;
                     factory(mcid.clone(), card.clone(), routed_engine)
                         .await
                         .context("python chat_engine_factory")?

@@ -52,8 +52,9 @@ cases:
         - name: get_time
           arguments:
             timezone: EST
-        normal_text: 'Checking:  Done.'
-      vllm:
+        normal_text: 'Checking: '
+      vllm: *id004
+      sglang:
         calls:
         - name: get_weather
           arguments:
@@ -61,9 +62,8 @@ cases:
         - name: get_time
           arguments:
             timezone: EST
-        normal_text: 'Checking: '
-        reason: vLLM glm47 only emits the prefix before the first <tool_call> as normal_text — trailing prose after the last </tool_call> is dropped; Dynamo and SGLang preserve it
-      sglang: *id004
+        normal_text: 'Checking:  Done.'
+        reason: SGLang glm47 preserves trailing prose after the last </tool_call>; Dynamo and vLLM drop it
   PARSER.batch.2.d:
     description: Same-name twice (id distinctness)
     ref: dynamo

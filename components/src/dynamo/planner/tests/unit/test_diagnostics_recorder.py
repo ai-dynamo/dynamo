@@ -3,6 +3,8 @@
 
 """Tests for DiagnosticsRecorder and HTML report generation."""
 
+import gzip
+import json
 import os
 import tempfile
 
@@ -63,6 +65,7 @@ def _make_config(tmp_dir: str, **overrides) -> PlannerConfig:
         metric_reporting_prometheus_port=0,
         report_interval_hours=0.5,
         report_output_dir=tmp_dir,
+        report_write_gzip_log=True,
         live_dashboard_port=0,
     )
     defaults.update(overrides)
@@ -274,6 +277,104 @@ class TestDiagnosticsRecorder:
             assert "Load Scaling Decisions" in content
             assert "Throughput Scaling Decisions" in content
             assert "Planner Diagnostics Report" in content
+
+    def test_generate_report_creates_gzip_snapshot_log(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = _make_config(tmp_dir)
+            recorder = DiagnosticsRecorder(config=cfg)
+
+            data = _synthetic_ticks(num_ticks=5)
+            for ti, eff, obs, gpu in data:
+                recorder.record(ti, eff, obs, gpu)
+
+            filepath = recorder.generate_report()
+            assert filepath is not None
+            log_path = os.path.splitext(filepath)[0] + ".log.jsonl.gz"
+            assert os.path.exists(log_path)
+
+            with gzip.open(log_path, "rt", encoding="utf-8") as f:
+                records = [json.loads(line) for line in f]
+
+            assert records[0]["kind"] == "metadata"
+            assert records[0]["schema"] == "planner_diagnostics_snapshot_log_v1"
+            assert records[0]["num_snapshots"] == 5
+
+            first_snapshot = records[1]
+            assert first_snapshot["kind"] == "snapshot"
+            assert first_snapshot["schema"] == "planner_diagnostics_snapshot_log_v1"
+            assert first_snapshot["observed_requests_per_second"] == 2.0
+            assert first_snapshot["num_prefill_replicas"] == 1
+            assert first_snapshot["num_decode_replicas"] == 1
+            assert len(first_snapshot["prefill_engines"]) == 1
+            assert len(first_snapshot["decode_engines"]) == 1
+
+    def test_generate_report_gzip_snapshot_log_uses_fixed_filename(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = _make_config(tmp_dir, report_filename="run.v1")
+            recorder = DiagnosticsRecorder(config=cfg)
+
+            data = _synthetic_ticks(num_ticks=1)
+            for ti, eff, obs, gpu in data:
+                recorder.record(ti, eff, obs, gpu)
+
+            filepath = recorder.generate_report()
+            assert filepath == os.path.join(tmp_dir, "run.v1")
+            assert os.path.exists(os.path.join(tmp_dir, "run.v1.log.jsonl.gz"))
+            assert not os.path.exists(os.path.join(tmp_dir, "run.log.jsonl.gz"))
+
+    def test_generate_report_gzip_snapshot_log_sanitizes_non_finite_values(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = _make_config(tmp_dir)
+            recorder = DiagnosticsRecorder(config=cfg)
+
+            data = _synthetic_ticks(num_ticks=1)
+            for ti, eff, obs, gpu in data:
+                recorder.record(ti, eff, obs, gpu)
+            recorder._snapshots[0].observed_ttft_ms = float("nan")
+            recorder._snapshots[0].observed_itl_ms = float("inf")
+
+            filepath = recorder.generate_report()
+            assert filepath is not None
+            log_path = os.path.splitext(filepath)[0] + ".log.jsonl.gz"
+            with gzip.open(log_path, "rt", encoding="utf-8") as f:
+                content = f.read()
+            assert "NaN" not in content
+            assert "Infinity" not in content
+
+            records = [json.loads(line) for line in content.splitlines()]
+            assert records[1]["observed_ttft_ms"] is None
+            assert records[1]["observed_itl_ms"] is None
+
+    def test_generate_report_gzip_snapshot_log_failure_is_nonfatal(self, caplog):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = _make_config(tmp_dir, report_filename="report.html")
+            recorder = DiagnosticsRecorder(config=cfg)
+            os.mkdir(os.path.join(tmp_dir, "report.log.jsonl.gz"))
+
+            data = _synthetic_ticks(num_ticks=1)
+            for ti, eff, obs, gpu in data:
+                recorder.record(ti, eff, obs, gpu)
+
+            caplog.set_level("WARNING")
+            filepath = recorder.generate_report()
+            assert filepath == os.path.join(tmp_dir, "report.html")
+            assert os.path.exists(filepath)
+            assert len(recorder._snapshots) == 0
+            assert "Failed to write planner diagnostics gzip log" in caplog.text
+
+    def test_generate_report_can_skip_gzip_snapshot_log(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = _make_config(tmp_dir, report_write_gzip_log=False)
+            recorder = DiagnosticsRecorder(config=cfg)
+
+            data = _synthetic_ticks(num_ticks=5)
+            for ti, eff, obs, gpu in data:
+                recorder.record(ti, eff, obs, gpu)
+
+            filepath = recorder.generate_report()
+            assert filepath is not None
+            log_path = os.path.splitext(filepath)[0] + ".log.jsonl.gz"
+            assert not os.path.exists(log_path)
 
     def test_generate_report_clears_snapshots(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -130,8 +130,13 @@ fn extract_tool_calls(
         if let Some(start_pos) = text[cursor..].find(start_token.as_str()) {
             let abs_start = cursor + start_pos;
 
-            // Add text before tool call to normal parts
-            normal_parts.push(&text[cursor..abs_start]);
+            // Only surface normal text that precedes the first parsed call.
+            // Text after any </tool_call> is not response content; matches the
+            // convention ported into the generic XML parser by PR #9350 and
+            // vLLM's glm47_moe_tool_parser.
+            if calls.is_empty() {
+                normal_parts.push(&text[cursor..abs_start]);
+            }
 
             // Find the corresponding end token
             if let Some(end_pos) = text[abs_start..].find(end_token.as_str()) {
@@ -211,12 +216,19 @@ fn extract_tool_calls(
             }
         } else {
             // No more tool calls
-            normal_parts.push(&text[cursor..]);
+            if calls.is_empty() {
+                normal_parts.push(&text[cursor..]);
+            }
             break;
         }
     }
 
-    let normal_text = normal_parts.join("").trim().to_string();
+    let normal_text = normal_parts.join("");
+    let normal_text = if calls.is_empty() {
+        normal_text.trim().to_string()
+    } else {
+        normal_text
+    };
     Ok((normal_text, calls))
 }
 
@@ -486,7 +498,7 @@ mod tests {
         assert_eq!(calls[0].function.name, "get_weather");
         assert_eq!(
             normal_text,
-            Some("I'll check the weather for you.".to_string())
+            Some("I'll check the weather for you. ".to_string())
         );
     }
 

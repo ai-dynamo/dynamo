@@ -93,3 +93,38 @@ cases:
         unavailable: vLLM has no parser for family='nemotron_nano'
       sglang:
         unavailable: SGLang has no detector for family='nemotron_nano'
+  PARSER.batch.11:
+    description: Separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 targets delimiter-separated parser formats. nemotron_nano is a qwen3_coder-style alias with XML-ish function/parameter tags and no vLLM/SGLang peer parser, so this separator-state parity case is n/a for this family.
+  PARSER.batch.12:
+    description: Multi-call separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 targets delimiter-separated parser formats. nemotron_nano is a qwen3_coder-style alias with XML-ish function/parameter tags and no vLLM/SGLang peer parser, so this separator-state parity case is n/a for this family. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: dynamo
+    model_text: |-
+      <tool_call>
+      <function=unknown_tool>
+      <parameter=location>NYC</parameter>
+      </function>
+      </tool_call>
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'
