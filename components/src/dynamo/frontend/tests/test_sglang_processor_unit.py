@@ -16,6 +16,7 @@ import sys
 import types
 
 import pytest
+from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
@@ -1646,18 +1647,18 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
     def test_stop_reason_emits_in_nvext_when_requested(self, tokenizer):
         """Frontend emits backend stop_reason under nvext when requested."""
 
-        class FakeRouter:
-            async def generate(self, *args, **kwargs):
-                yield {
-                    "token_ids": [],
-                    "finish_reason": "stop",
-                    "stop_reason": "END",
-                }
-
         async def collect():
             processor = SglangProcessor(
                 tokenizer=tokenizer,
-                router=FakeRouter(),
+                routed_engine=FakeRoutedEngine(
+                    items=[
+                        {
+                            "token_ids": [],
+                            "finish_reason": "stop",
+                            "stop_reason": "END",
+                        }
+                    ]
+                ),
                 tool_call_parser_name=None,
                 reasoning_parser_name=None,
                 eos_token_id=None,
@@ -1681,6 +1682,61 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert len(items) == 1
         assert items[0]["nvext"]["stop_reason"] == "END"
         assert "stop_reason" not in items[0]["choices"][0]
+
+    def _run_stream(self, tokenizer, items):
+        processor = SglangProcessor(
+            tokenizer=tokenizer,
+            routed_engine=FakeRoutedEngine(items=items),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_id=None,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+        )
+
+        async def collect():
+            return [
+                item
+                async for item in processor._generate_and_stream(
+                    "req-err", {"model": "test-model"}, {}, [], post
+                )
+            ]
+
+        return asyncio.run(collect())
+
+    def test_routed_engine_is_error_yields_internal_error(self, tokenizer):
+        """is_error() True yields a single internal_error chunk with the comment text."""
+        items = self._run_stream(
+            tokenizer,
+            [FakeRoutedItem(None, is_error=True, comments=["backend disconnected"])],
+        )
+        assert len(items) == 1
+        err = items[0]["error"]
+        assert err["type"] == "internal_error"
+        assert "backend disconnected" in err["message"]
+
+    def test_routed_engine_none_data_is_skipped(self, tokenizer):
+        """data() is None (e.g. comment-only event) is skipped, not yielded as error."""
+        items = self._run_stream(
+            tokenizer,
+            [
+                FakeRoutedItem(None),
+                {"token_ids": [], "finish_reason": "stop"},
+            ],
+        )
+        # Only the real chunk is yielded; the None-data item is dropped silently.
+        assert len(items) == 1
+        assert items[0]["choices"][0]["finish_reason"] == "stop"
+
+    def test_malformed_engine_response_yields_engine_error(self, tokenizer):
+        """A response dict missing token_ids goes through handle_engine_error."""
+        items = self._run_stream(
+            tokenizer,
+            [{"status": "error", "message": "kv cache exhausted"}],
+        )
+        assert len(items) == 1
+        assert "error" in items[0]
 
     def test_lookback_trimming(self, tokenizer):
         """Verify _all_token_ids doesn't grow unbounded."""

@@ -313,6 +313,19 @@ Impl tag is `#vllm` or `#sglang`.
   an upstream bug at `vllm-project/vllm` or `sgl-project/sglang`, link
   it from the divergence reason.
 - **Both wrong / spec-ambiguous** → discuss before touching code.
+- **A customer is blocked on a specific divergence** → align Dynamo to
+  *that customer's* engine (vLLM or SGLang) and ship the unblock. Don't
+  litigate "who's correct per spec" while a customer is waiting. Always
+  add a `reason:` to the chosen peer block (or a case-level note for
+  Dynamo-side rationale) explaining why we picked that engine — future
+  readers should see "aligned to vLLM on 2026-MM-DD per <customer/ticket>"
+  rather than guess.
+- **Two customers want different behavior on the same case** → add a
+  runtime parameter or environment variable so operators can toggle which
+  engine's behavior Dynamo emulates per-deployment. This is the sad
+  reality of supporting multiple engines while keeping everyone happy. If
+  the param doesn't exist yet, file a follow-up issue and link it from
+  the divergence reason.
 
 ### 5. Fix the parser
 

@@ -74,6 +74,10 @@ vllm_configs = {
         name="aggregated",
         directory=vllm_dir,
         script_name="agg.sh",
+        # Forwarded through agg.sh -> dynamo.vllm. Required for the
+        # max_thinking_tokens payload below: vLLM only enables the thinking-
+        # budget logits processor when reasoning_config is populated.
+        script_args=["--reasoning-parser", "qwen3"],
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
@@ -107,6 +111,17 @@ vllm_configs = {
                     "stop": ["song"],
                     "include_stop_str_in_output": True,
                 },
+            ),
+            # Smoke: nvext.max_thinking_tokens reaches vLLM's
+            # SamplingParams.thinking_token_budget without erroring. Requires
+            # the worker to be started with `--reasoning-parser qwen3`
+            # (see script_args above).
+            chat_payload(
+                "Solve: 1+1.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=64,
+                extra_body={"nvext": {"max_thinking_tokens": 16}},
             ),
             metric_payload_default(min_num_requests=6, backend="vllm"),
         ],
