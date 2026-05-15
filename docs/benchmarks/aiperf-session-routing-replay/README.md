@@ -11,13 +11,17 @@ subtitle: Reproduce round-robin, sticky-session, KV-router, and sticky-proxy rep
 
 | Mode | Completed | Mean TTFT | P95 TTFT | P99 TTFT | Max TTFT | Mean E2E | Output tok/s | Req/s | Prefix reuse |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `round_robin` | 44,000 | 603 ms | 1.05 s | 13.52 s | 52.21 s | 15.09 s | 7,491.6 | 32.38 | 0.433 |
-| `sticky_session` | 44,000 | 1,305 ms | 3.19 s | 13.52 s | 52.21 s | 15.35 s | 7,387.4 | 31.93 | 0.433 |
-| `kv_router` | 44,000 | 584 ms | 815 ms | 14.58 s | 48.78 s | 14.89 s | 7,534.1 | 32.56 | 0.435 |
-| `kv_router_sticky_session_proxy` | 44,000 | 592 ms | 821 ms | 14.75 s | 48.78 s | 14.91 s | 7,514.9 | 32.48 | 0.433 |
+| `round_robin` | 44,000 | 1.78 s | 1.85 s | 53.40 s | 93.24 s | 24.94 s | 8,397.4 | 36.29 | 0.433 |
+| `sticky_session` | 44,000 | 5.05 s | 13.05 s | 53.40 s | 93.24 s | 27.37 s | 7,801.5 | 33.72 | 0.433 |
+| `kv_router` | 44,000 | 1.75 s | 1.15 s | 54.81 s | 86.35 s | 24.52 s | 8,541.9 | 36.92 | 0.434 |
+| `kv_router_sticky_session_proxy` | 44,000 | 1.81 s | 1.32 s | 54.69 s | 86.14 s | 24.50 s | 8,514.2 | 36.80 | 0.433 |
 
 Interpretation for this trace:
 
+- At closed-loop concurrency `1024`, non-sticky policies still have p95 TTFT near 1-2 seconds, but
+  p99/max TTFT show hard tail queueing.
+- In the KV rows, mean TTFT is higher than p95 because the top 1% tail is large enough to pull up
+  the average.
 - Plain sticky session is worse on mean and p95 TTFT than round-robin or KV-aware routing, even
   though the trace has strong session structure.
 - Exact KV routing and the sticky-session proxy are close under this 16k-block setup.
@@ -106,7 +110,7 @@ All four modes use the same workload and engine settings:
 
 - replay mode: `offline`
 - workers: `8`
-- closed-loop concurrency: `512`
+- closed-loop concurrency: `1024`
 - trace block size: `64`
 - engine block size: `64`
 - GPU KV blocks per worker: `16,384`
@@ -123,16 +127,16 @@ ENGINE_ARGS='{"block_size":64,"num_gpu_blocks":16384,"enable_prefix_caching":tru
 ## Commands
 
 ```bash
-mkdir -p /tmp/dynamo_replay_aiperf_session_compare_16k
+mkdir -p /tmp/dynamo_replay_aiperf_session_compare_16k_cc1024
 
 DYN_LOG=warn \
   .venv/bin/python -m dynamo.replay /Users/peabrane/Downloads/dataset_aiperf.jsonl \
   --replay-mode offline \
   --router-mode round_robin \
   --num-workers 8 \
-  --replay-concurrency 512 \
+  --replay-concurrency 1024 \
   --trace-block-size 64 \
-  --report-json /tmp/dynamo_replay_aiperf_session_compare_16k/round_robin.json \
+  --report-json /tmp/dynamo_replay_aiperf_session_compare_16k_cc1024/round_robin.json \
   --extra-engine-args "$ENGINE_ARGS"
 
 DYN_LOG=warn \
@@ -140,9 +144,9 @@ DYN_LOG=warn \
   --replay-mode offline \
   --router-mode sticky_session \
   --num-workers 8 \
-  --replay-concurrency 512 \
+  --replay-concurrency 1024 \
   --trace-block-size 64 \
-  --report-json /tmp/dynamo_replay_aiperf_session_compare_16k/sticky_session.json \
+  --report-json /tmp/dynamo_replay_aiperf_session_compare_16k_cc1024/sticky_session.json \
   --extra-engine-args "$ENGINE_ARGS"
 
 DYN_LOG='warn,dynamo_kv_router::scheduling::selector=warn' \
@@ -150,9 +154,9 @@ DYN_LOG='warn,dynamo_kv_router::scheduling::selector=warn' \
   --replay-mode offline \
   --router-mode kv_router \
   --num-workers 8 \
-  --replay-concurrency 512 \
+  --replay-concurrency 1024 \
   --trace-block-size 64 \
-  --report-json /tmp/dynamo_replay_aiperf_session_compare_16k/kv_router.json \
+  --report-json /tmp/dynamo_replay_aiperf_session_compare_16k_cc1024/kv_router.json \
   --extra-engine-args "$ENGINE_ARGS"
 
 DYN_LOG='warn,dynamo_kv_router::scheduling::selector=warn' \
@@ -160,9 +164,9 @@ DYN_LOG='warn,dynamo_kv_router::scheduling::selector=warn' \
   --replay-mode offline \
   --router-mode kv_router_sticky_session_proxy \
   --num-workers 8 \
-  --replay-concurrency 512 \
+  --replay-concurrency 1024 \
   --trace-block-size 64 \
-  --report-json /tmp/dynamo_replay_aiperf_session_compare_16k/kv_router_sticky_session_proxy.json \
+  --report-json /tmp/dynamo_replay_aiperf_session_compare_16k_cc1024/kv_router_sticky_session_proxy.json \
   --extra-engine-args "$ENGINE_ARGS"
 ```
 
@@ -170,7 +174,7 @@ Summarize reports:
 
 ```bash
 for mode in round_robin sticky_session kv_router kv_router_sticky_session_proxy; do
-  f=/tmp/dynamo_replay_aiperf_session_compare_16k/${mode}.json
+  f=/tmp/dynamo_replay_aiperf_session_compare_16k_cc1024/${mode}.json
   printf '%s\t' "$mode"
   jq -r '[.completed_requests,.mean_ttft_ms,.p95_ttft_ms,.p99_ttft_ms,.max_ttft_ms,.mean_e2e_latency_ms,.output_throughput_tok_s,.request_throughput_rps,.prefix_cache_reused_ratio] | @tsv' "$f"
 done
