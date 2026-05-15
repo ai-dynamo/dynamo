@@ -24,6 +24,7 @@ import pytest
 # CPU-only runners.  Catches both ImportError and any other error raised
 # during vllm initialisation (e.g. NotImplementedError from vllm._C).
 try:
+    from dynamo.common.constants import DisaggregationMode
     from dynamo.vllm.llm_engine import VllmLLMEngine
 except Exception:
     pytest.skip(
@@ -57,7 +58,10 @@ async def test_cleanup_awaits_engine_client_shutdown():
     This test verifies that ``AsyncLLM.shutdown()`` is actually awaited,
     which is the minimal behaviour change required to fix issue #9343.
     """
-    engine = VllmLLMEngine(engine_args=SimpleNamespace(model="test-model"))
+    engine = VllmLLMEngine(
+        engine_args=SimpleNamespace(model="test-model"),
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+    )
 
     shutdown_called = asyncio.Event()
 
@@ -101,7 +105,10 @@ async def test_cleanup_on_hanging_shutdown_clears_reference():
     interpreter hangs because something in the subprocess/connector chain
     refuses to exit even after cleanup() returns.
     """
-    engine = VllmLLMEngine(engine_args=SimpleNamespace(model="test-model"))
+    engine = VllmLLMEngine(
+        engine_args=SimpleNamespace(model="test-model"),
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+    )
 
     # Slow shutdown: the artificial 60s sleep represents the real bug where
     # EngineCore subprocess cleanup blocks forever on a pipe/socket.
@@ -136,7 +143,10 @@ async def test_cleanup_idempotent():
     This matches the contract that Worker may call cleanup() on any failure
     path, including double-call.
     """
-    engine = VllmLLMEngine(engine_args=SimpleNamespace(model="test-model"))
+    engine = VllmLLMEngine(
+        engine_args=SimpleNamespace(model="test-model"),
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+    )
 
     mock_client = MagicMock()
     mock_client.shutdown = AsyncMock()
@@ -160,7 +170,10 @@ async def test_cleanup_always_clears_engine_client_on_error():
     """``cleanup()`` must null out ``engine_client`` even if
     ``shutdown()`` raises — it must NOT silently swallow the error and
     leave the reference dangling."""
-    engine = VllmLLMEngine(engine_args=SimpleNamespace(model="test-model"))
+    engine = VllmLLMEngine(
+        engine_args=SimpleNamespace(model="test-model"),
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+    )
 
     mock_client = MagicMock()
     mock_client.shutdown = AsyncMock(

@@ -234,9 +234,12 @@ class VllmLLMEngine(LLMEngine):
                 # AsyncLLM.shutdown() may be sync or async depending on vLLM
                 # version.  Always await when it returns a coroutine; otherwise
                 # call it synchronously so the engine still shuts down.
-                result = self.engine_client.shutdown()
-                if inspect.isawaitable(result):
-                    await result
+                try:
+                    result = self.engine_client.shutdown()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:
+                    logger.exception("engine_client.shutdown() raised during cleanup")
         finally:
             self.engine_client = None
             if self._prometheus_temp_dir is not None:
