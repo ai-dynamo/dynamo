@@ -290,6 +290,7 @@ TOP_N_FAMILIES = [
     "harmony",
     "kimi_k2",
     "minimax_m2",
+    "nemotron_deci",
     "qwen3_coder",
 ]
 
