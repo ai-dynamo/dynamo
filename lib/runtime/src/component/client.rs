@@ -289,8 +289,8 @@ impl Client {
         tracing::debug!("inhibiting instance {instance_id}");
     }
 
-    /// Update the set of free instances based on busy instance IDs
-    pub fn update_free_instances(&self, busy_instance_ids: &[u64]) {
+    /// Replace the set of busy instances reported by the worker monitor.
+    pub fn set_busy_instances(&self, busy_instance_ids: &[u64]) {
         self.instance_busy.store(Arc::new(
             busy_instance_ids.iter().copied().collect::<HashSet<_>>(),
         ));
@@ -556,7 +556,7 @@ mod tests {
             "worker should be free after initial discovery reconciliation"
         );
 
-        client.update_free_instances(&[worker_id]);
+        client.set_busy_instances(&[worker_id]);
         assert!(
             client.instance_ids_free().is_empty(),
             "worker should be busy before periodic reconciliation"
@@ -590,7 +590,7 @@ mod tests {
         let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
             .await
             .unwrap();
-        client.update_free_instances(&[worker_id]);
+        client.set_busy_instances(&[worker_id]);
 
         endpoint.register_endpoint_instance().await.unwrap();
         let instances = client.wait_for_instances().await.unwrap();

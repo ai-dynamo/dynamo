@@ -107,7 +107,7 @@ impl Drop for OccupancyPermit {
 #[async_trait]
 pub trait WorkerLoadMonitor: Send + Sync {
     /// Start background monitoring of worker load.
-    /// This should spawn background tasks that update the client's free instances.
+    /// This should spawn background tasks that update the client's busy instances.
     async fn start_monitoring(&self) -> anyhow::Result<()>;
 }
 
@@ -446,7 +446,7 @@ where
     /// Create a new PushRouter with an optional worker load monitor.
     ///
     /// The rejection path is gated by `fault_detection_enabled` (true here);
-    /// busy detection itself is driven by the monitor via `client.update_free_instances(...)`.
+    /// busy detection itself is driven by the monitor via `client.set_busy_instances(...)`.
     /// If no thresholds are configured on the monitor (or no monitor is provided),
     /// `client.instance_ids_free()` returns all instances and the gate never rejects.
     pub async fn from_client_with_monitor(
