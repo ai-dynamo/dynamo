@@ -27,7 +27,7 @@ shift the bottleneck somewhere else, and for larger models even one realistic
 experiment can require many GPUs or nodes before we learn whether the idea was
 worth testing.
 
-That is the motivation for a Dynamo digital twin.
+That is the motivation for DynoSim: a Dynamo digital twin.
 
 [placeholder: confirm exact public wording for "digital twin"]
 
