@@ -30,9 +30,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures::future::BoxFuture;
 use kvbm_protocols::control::{
-    ControlError, DescribeInstanceRequest, InstanceDescription, LeaderControlClient,
-    MetricsSnapshotRequest, ModuleId, RegisterLeaderRequest, RegisterTestBlocksRequest,
-    ResetRequest, SearchRequest,
+    CloseTransferSessionRequest, ControlError, DescribeInstanceRequest, InstanceDescription,
+    LeaderControlClient, MetricsSnapshotRequest, ModuleId, OpenTransferSessionRequest,
+    PullFromSessionRequest, RegisterLeaderRequest, RegisterTestBlocksRequest, ResetRequest,
+    SearchRequest,
 };
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
@@ -383,6 +384,12 @@ fn routes(manager: Arc<ControlPlaneManager>) -> Router {
             CONTROL_TRANSFER_SEARCH_SCATTER,
             post(transfer_search_scatter),
         )
+        .route(CONTROL_TRANSFER_OPEN_SESSION, post(transfer_open_session))
+        .route(
+            CONTROL_TRANSFER_PULL_FROM_SESSION,
+            post(transfer_pull_from_session),
+        )
+        .route(CONTROL_TRANSFER_CLOSE_SESSION, post(transfer_close_session))
         .route(CONTROL_METRICS_SNAPSHOT, post(metrics_snapshot))
         .route(METRICS_FANOUT, get(metrics_fanout))
         .with_state(manager)
@@ -508,6 +515,57 @@ async fn transfer_search_scatter(
     match client.transfer().search_scatter(req).await {
         Ok(resp) => ok_response(&resp),
         Err(err) => control_error_response(instance_id, "search_scatter", err),
+    }
+}
+
+/// `POST /control/transfer/open_session` — always-on. Dispatched at the
+/// holder. Returns the attach triple in
+/// [`kvbm_protocols::control::OpenTransferSessionResponse`].
+async fn transfer_open_session(
+    State(mgr): State<Arc<ControlPlaneManager>>,
+    Path(instance_id): Path<InstanceId>,
+    Json(req): Json<OpenTransferSessionRequest>,
+) -> Response {
+    let client = match leader_client(&mgr, instance_id) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match client.transfer().open_session(req).await {
+        Ok(resp) => ok_response(&resp),
+        Err(err) => control_error_response(instance_id, "open_session", err),
+    }
+}
+
+/// `POST /control/transfer/pull_from_session` — always-on. Dispatched at
+/// the puller. Long-poll: returns when the pull is complete.
+async fn transfer_pull_from_session(
+    State(mgr): State<Arc<ControlPlaneManager>>,
+    Path(instance_id): Path<InstanceId>,
+    Json(req): Json<PullFromSessionRequest>,
+) -> Response {
+    let client = match leader_client(&mgr, instance_id) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match client.transfer().pull_from_session(req).await {
+        Ok(resp) => ok_response(&resp),
+        Err(err) => control_error_response(instance_id, "pull_from_session", err),
+    }
+}
+
+/// `POST /control/transfer/close_session` — always-on. Idempotent.
+async fn transfer_close_session(
+    State(mgr): State<Arc<ControlPlaneManager>>,
+    Path(instance_id): Path<InstanceId>,
+    Json(req): Json<CloseTransferSessionRequest>,
+) -> Response {
+    let client = match leader_client(&mgr, instance_id) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match client.transfer().close_session(req).await {
+        Ok(resp) => ok_response(&resp),
+        Err(err) => control_error_response(instance_id, "close_session", err),
     }
 }
 

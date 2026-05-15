@@ -51,7 +51,11 @@ pub use modules::test::{
     REGISTER_TEST_BLOCKS_HANDLER, RegisterTestBlocksRequest, RegisterTestBlocksResponse,
 };
 pub use modules::transfer::{
-    SEARCH_PREFIX_HANDLER, SEARCH_SCATTER_HANDLER, SearchRequest, SearchResponse,
+    CLOSE_SESSION_HANDLER, CloseTransferSessionRequest, CloseTransferSessionResponse, FindMode,
+    MatchBreakdown, OPEN_SESSION_HANDLER, OpenTransferSessionRequest, OpenTransferSessionResponse,
+    PULL_FROM_SESSION_HANDLER, PullFromSessionRequest, PullFromSessionResponse,
+    SEARCH_PREFIX_HANDLER, SEARCH_SCATTER_HANDLER, SearchMode, SearchRequest, SearchResponse,
+    TierSelection, TransferSessionCapability,
 };
 
 // ---------------------------------------------------------------------------

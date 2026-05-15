@@ -26,7 +26,7 @@ mod blocks;
 mod endpoint;
 mod handle;
 mod server_session;
-mod staging;
+pub(crate) mod staging;
 mod state;
 
 // Session implementations

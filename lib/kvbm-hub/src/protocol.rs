@@ -115,6 +115,26 @@ pub mod paths {
     pub const CONTROL_TRANSFER_SEARCH_SCATTER: &str =
         "/v1/instances/{instance_id}/control/transfer/search_scatter";
 
+    /// `POST` open a transfer session on the targeted (holder) leader.
+    /// Always-on. Body: [`kvbm_protocols::control::OpenTransferSessionRequest`].
+    /// Returns [`kvbm_protocols::control::OpenTransferSessionResponse`].
+    pub const CONTROL_TRANSFER_OPEN_SESSION: &str =
+        "/v1/instances/{instance_id}/control/transfer/open_session";
+
+    /// `POST` drive a pull on the targeted (puller) leader against a session
+    /// living on `request.source_instance_id`. Long-poll: returns when the
+    /// pull is complete. Body:
+    /// [`kvbm_protocols::control::PullFromSessionRequest`]. Returns
+    /// [`kvbm_protocols::control::PullFromSessionResponse`].
+    pub const CONTROL_TRANSFER_PULL_FROM_SESSION: &str =
+        "/v1/instances/{instance_id}/control/transfer/pull_from_session";
+
+    /// `POST` close a transfer session on the targeted (holder) leader.
+    /// Idempotent. Body:
+    /// [`kvbm_protocols::control::CloseTransferSessionRequest`].
+    pub const CONTROL_TRANSFER_CLOSE_SESSION: &str =
+        "/v1/instances/{instance_id}/control/transfer/close_session";
+
     /// `POST` on-demand runtime snapshot of the leader. Module-gated on
     /// [`kvbm_protocols::control::ModuleId::Metrics`]. Empty body is
     /// equivalent to [`kvbm_protocols::control::MetricsSnapshotRequest::default`].

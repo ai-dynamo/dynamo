@@ -534,6 +534,57 @@ impl InstanceLeader {
     }
 
     // ========================================================================
+    // Transfer control-plane methods
+    //
+    // Substantive logic lives in `leader/control/modules/transfer.rs`; these
+    // methods are the public entry points used by both the velo handler
+    // shims and any in-process caller. See the plan at
+    // ~/.claude/plans/control-transfer-v1.md for the full design.
+    // ========================================================================
+
+    /// HOLDER-SIDE. Open a transfer session populated by a multi-tier
+    /// search. v1 implements G2 only; G3/G4 are wired in subsequent
+    /// phases via the populator's stage phase.
+    ///
+    /// `find_mode = Sync` awaits the find phase; the response carries
+    /// the matched hashes inline. `find_mode = Async` returns as soon
+    /// as the session is opened.
+    pub async fn open_transfer_session(
+        self: &Arc<Self>,
+        req: kvbm_protocols::control::modules::transfer::OpenTransferSessionRequest,
+    ) -> Result<
+        kvbm_protocols::control::modules::transfer::OpenTransferSessionResponse,
+        kvbm_protocols::control::ControlError,
+    > {
+        crate::leader::control::modules::transfer::open_transfer_session(self, req).await
+    }
+
+    /// HOLDER-SIDE. Close a parked transfer session by id. Idempotent.
+    pub async fn close_transfer_session(
+        self: &Arc<Self>,
+        req: kvbm_protocols::control::modules::transfer::CloseTransferSessionRequest,
+    ) -> Result<
+        kvbm_protocols::control::modules::transfer::CloseTransferSessionResponse,
+        kvbm_protocols::control::ControlError,
+    > {
+        crate::leader::control::modules::transfer::close_transfer_session(self, req).await
+    }
+
+    /// PULLER-SIDE. Attach to a transfer session living on
+    /// `req.source_instance_id`, drain commits/availability, and pull
+    /// the (optionally selected) blocks into this instance's local G2
+    /// pool. Long-poll — returns when the pull is complete.
+    pub async fn pull_from_session(
+        self: &Arc<Self>,
+        req: kvbm_protocols::control::modules::transfer::PullFromSessionRequest,
+    ) -> Result<
+        kvbm_protocols::control::modules::transfer::PullFromSessionResponse,
+        kvbm_protocols::control::ControlError,
+    > {
+        crate::leader::control::modules::transfer::pull_from_session(self, req).await
+    }
+
+    // ========================================================================
     // Describe (Phase C)
     // ========================================================================
 
@@ -925,11 +976,7 @@ impl InstanceLeader {
         let mut builder =
             ControlPlane::builder(self.messenger.clone(), self.messenger.instance_id())
                 .with_module(CoreModule::new(Arc::clone(self)))
-                .with_module(TransferModule::new(
-                    self.g2_manager.clone(),
-                    self.session_factory_cell(),
-                    self.session_manager.clone(),
-                ));
+                .with_module(TransferModule::new(Arc::clone(self)));
 
         if dev {
             builder = builder.with_module(DevModule::new(Arc::clone(self)));
