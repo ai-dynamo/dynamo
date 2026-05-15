@@ -38,6 +38,7 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: "drops malformed JSON args instead of surfacing raw-string recovery; invalid-JSON recovery is implementation-defined"
   PARSER.batch.4.c:
     description: Missing function name (call_begin without functions.X:N)
     ref: dynamo
