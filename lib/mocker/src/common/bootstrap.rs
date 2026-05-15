@@ -534,10 +534,20 @@ mod tests {
             .expect("decode timed out")
             .expect("decode panicked");
 
-        // At least one prefill must succeed (the one whose sender survived the overwrite).
-        assert!(
-            r1.is_ok() || r2.is_ok(),
-            "At least one prefill should see decode metadata: r1={r1:?} r2={r2:?}"
+        // Exactly one prefill must succeed (the one whose sender survived the overwrite)
+        // and exactly one must fail (the one whose sender was dropped).
+        // This pins the single-slot overwrite behavior: if the implementation were changed
+        // to support concurrent waiters, both would succeed and this assertion would
+        // catch the behavioral change.
+        let ok_count = [r1.is_ok(), r2.is_ok()].iter().filter(|&&ok| ok).count();
+        assert_eq!(
+            ok_count, 1,
+            "Exactly one prefill should succeed (surviving sender); r1={r1:?} r2={r2:?}"
+        );
+        let err_count = [r1.is_err(), r2.is_err()].iter().filter(|&&e| e).count();
+        assert_eq!(
+            err_count, 1,
+            "Exactly one prefill should fail (dropped sender); r1={r1:?} r2={r2:?}"
         );
         // Decode always succeeds once prefill calls complete_room.
         assert!(rd.is_ok(), "Decode should succeed: {rd:?}");
