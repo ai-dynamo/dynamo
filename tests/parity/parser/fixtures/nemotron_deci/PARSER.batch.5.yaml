@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: nemotron_deci
+mode: batch
+cases:
+  PARSER.batch.5.a:
+    description: Missing </TOOLCALL> end marker
+    ref: dynamo
+    model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'
+  PARSER.batch.5.b:
+    description: Closing </TOOLCALL> without matching <TOOLCALL> open
+    ref: dynamo
+    model_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL>'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL>'
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'
+  PARSER.batch.5.c:
+    description: Truncation mid-arguments JSON
+    ref: dynamo
+    model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"loc'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"loc'
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'

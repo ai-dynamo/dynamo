@@ -538,10 +538,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             scheduler_tracked,
         } = selection;
 
-        // In approximate mode (use_kv_events=false), record the routing decision
-        // so the indexer can track cache state based on routing decisions.
-        // This covers both pre-selected workers and find_best_match selections.
-        if !is_query_only && !self.chooser.kv_router_config().use_kv_events {
+        // Record the routing decision into the indexer when:
+        //   - approximate mode (use_kv_events=false): primary indexer is the
+        //     only cache-state signal, so record there, or
+        //   - predict-on-route: Indexer dispatches the write to a side
+        //     approximate indexer whose entries expire after a short TTL.
+        // In event-only mode with no predicted TTL we
+        // skip recording — the engine's KV events are the source of truth.
+        let cfg = self.chooser.kv_router_config();
+        let should_record =
+            !is_query_only && (!cfg.use_kv_events || cfg.predict_on_route_enabled());
+        if should_record {
             let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
             let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
             let worker = WorkerWithDpRank::new(instance_id, dp_rank);
@@ -564,7 +571,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     worker_id = instance_id,
                     dp_rank = dp_rank,
                     error = %e,
-                    "Failed to record routing decision in approximate mode"
+                    "Failed to record routing decision"
                 );
             }
         }

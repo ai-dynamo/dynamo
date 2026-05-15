@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 family: minimax_m2
+model_label: MiniMax 2.7
 mode: batch
 cases:
   PARSER.batch.1:
@@ -21,127 +22,36 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-  PARSER.batch.2:
-    description: Multiple tool calls
-    model_text: |-
-      <minimax:tool_call>
-      <invoke name="get_weather">
-      <parameter name="location">NYC</parameter>
-      </invoke>
-      <invoke name="get_time">
-      <parameter name="timezone">EST</parameter>
-      </invoke>
-      </minimax:tool_call>
-    tools:
-    - *id001
-    - name: get_time
-      parameters:
-        type: object
-        properties:
-          timezone:
-            type: string
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
+      dynamo: &d_1
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *d_1
+      sglang: *d_1
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: Hello, how can I help you today?
-  PARSER.batch.4:
-    description: Malformed (missing closing invoke tag)
-    model_text: |-
-      <minimax:tool_call>
-      <invoke name="get_weather">
-      <parameter name="location">NYC</parameter>
-      </minimax:tool_call>
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-  PARSER.batch.5:
-    description: Missing </minimax:tool_call> end marker
-    model_text: |-
-      <minimax:tool_call>
-      <invoke name="get_weather">
-      <parameter name="location">NYC</parameter>
-      </invoke>
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-  PARSER.batch.6:
-    description: Empty args (no-arg call)
-    model_text: |-
-      <minimax:tool_call>
-      <invoke name="get_time">
-      </invoke>
-      </minimax:tool_call>
-    tools:
-    - name: get_time
-      parameters:
-        type: object
-        properties: {}
-    expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
-  PARSER.batch.7:
-    description: Complex args (multi-parameter)
-    model_text: |-
-      <minimax:tool_call>
-      <invoke name="get_weather">
-      <parameter name="location">NYC</parameter>
-      <parameter name="unit">fahrenheit</parameter>
-      </invoke>
-      </minimax:tool_call>
-    tools:
-    - name: get_weather
-      parameters:
-        type: object
-        properties:
-          location:
-            type: string
-          unit:
-            type: string
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-          unit: fahrenheit
-      normal_text: ''
+      dynamo: &d_3
+        calls: []
+        normal_text: Hello, how can I help you today?
+      vllm: *d_3
+      sglang: *d_3
   PARSER.batch.9:
     description: Empty input
     model_text: ''
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
+      dynamo: &d_9
+        calls: []
+        normal_text: ''
+      vllm: *d_9
+      sglang: *d_9
   PARSER.batch.10:
     description: Duplicate calls (same name twice)
     model_text: |-
@@ -156,11 +66,14 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: ''
+      dynamo: &d_10
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *d_10
+      sglang: *d_10

@@ -59,7 +59,7 @@ vllm = [
     "blake3>=1.0.0,<2.0.0",
     "soundfile>=0.13.1",
     "librosa>=0.10.0",
-    "ray==2.55.0",
+    "ray>=2.55.0",
 ]
 
 sglang = [
@@ -234,6 +234,8 @@ filterwarnings = [
     # pandas 2.3 emits this from pd.concat on empty/all-NA frames; aiconfigurator hits it
     # during disagg pareto search and re-raises as RuntimeError, breaking planner tests.
     "ignore:The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.*:FutureWarning",
+    # pandas 2.3 emits this from aiconfigurator pareto filtering under filterwarnings=error.
+    "ignore:Downcasting behavior in `replace` is deprecated.*:FutureWarning",
 ]
 
 

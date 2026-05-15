@@ -809,6 +809,16 @@ where
         // Check if all workers are busy (when fault detection is enabled).
         if self.fault_detection_enabled {
             let free_instances = self.client.instance_ids_free();
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                tracing::debug!(
+                    request_id = %request_id,
+                    instance_id,
+                    router_mode = ?self.router_mode,
+                    free_workers = free_instances.len(),
+                    total_workers = self.client.instance_ids().len(),
+                    "checked worker busy state"
+                );
+            }
             if free_instances.is_empty() {
                 // Check if we actually have any instances at all
                 let all_instances = self.client.instance_ids();
