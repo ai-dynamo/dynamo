@@ -45,7 +45,7 @@ many design candidates before spending hardware time. Because the simulator is
 implemented in Rust, it is also practical to simulate thousands of workers on a
 developer laptop.
 
-That fidelity has to be earned. The twin combines measured engine timing with
+That fidelity has to be earned. DynoSim combines measured engine timing with
 real Dynamo component cores, swapping live async and runtime bridges for
 deterministic replay bridges: Router simulation uses KV router primitives and
 configuration, Planner replay drives the Planner state machine, and worker
@@ -60,7 +60,7 @@ assembled for a workload.
 The real power of simulation is not just prediction. It is decision-making.
 
 The resulting loop is useful because it prices decisions before they hit the
-cluster. The twin can ask whether a different topology, transfer path, batching
+cluster. DynoSim can ask whether a different topology, transfer path, batching
 policy, or backend configuration changes the best Router, Planner, or KVBM
 choice, then send only the strongest candidates to real-cluster validation.
 
@@ -77,7 +77,7 @@ customer-facing sizing.
 - **Research:** Test routing, autoscaling, prefill/decode, KV/cache, and
   topology ideas, and generate KV cache traces before spending cluster time.
 - **Engineering:** Turn opportunity costs into thresholds. If specializing one
-  decode worker into N prefill workers takes X seconds, the twin can show when X
+  decode worker into N prefill workers takes X seconds, DynoSim can show when X
   breaks the service-level agreement (SLA) and what target makes the work worth
   prioritizing.
 - **Customer-facing sizing:** Compare GPU counts, worker layouts, backends, and
@@ -329,9 +329,9 @@ complex, dynamic part of the serving system. This section frames why it belongs
 in the event model; we defer a deeper discussion of Planner simulation results
 to the next major section.
 
-## 3. Optimization And Discovery With The Twin
+## 3. Optimization And Discovery With DynoSim
 
-Once the twin can run a workload through composed components, replay becomes a
+Once DynoSim can run a workload through composed components, replay becomes a
 scoring function for both optimization and discovery: propose a layout or policy,
 run the workload, collect metrics, and compare the result against the objective
 or hypothesis.
@@ -386,7 +386,7 @@ search rounds and eight parallel optimizer evaluations.
 | Router | `kv_router`, `overlap_score_weight=1.0` |
 | Key metrics | `output_throughput_tok_s=3574.86`, `prefix_cache_reused_ratio=0.5127`, `mean_ttft_ms=1695.40`, `mean_tpot_ms=44.68`, `mean_e2e_latency_ms=9683.02` |
 
-The takeaway is not that one configuration is always best. It is that the twin
+The takeaway is not that one configuration is always best. It is that DynoSim
 can turn a large configuration space into a workload-specific deployment
 shortlist. In this run, the highest-throughput infeasible state was close:
 `prefill_tp=1`, `decode_tp=1`, `prefill_workers=8`, and `decode_workers=8`
@@ -409,13 +409,13 @@ Router discovery examples:
   account for downstream decode pressure.
 
 Here we focus the in-depth discovery example on the Planner, a core, novel, and
-under-exposed Dynamo component. Autoscaling is a natural twin use case for two
-reasons. First, the interesting behavior is *macro*: it emerges from minutes of
+under-exposed Dynamo component. Autoscaling fits DynoSim for two reasons. First,
+the interesting behavior is *macro*: it emerges from minutes of
 traffic, delayed worker startup, capacity churn, and feedback between scale
 decisions, queues, and routing — none of which a small unit test can exercise
 faithfully. Second, evaluating it the other way — in a full Kubernetes setup —
-is expensive per policy change, both in GPU-hours and in engineer time. The
-twin lets us aggressively sweep those effects before standing up the full
+is expensive per policy change, both in GPU-hours and in engineer time. DynoSim
+lets us aggressively sweep those effects before standing up the full
 environment: compare static vs dynamic setups, tune Planner parameters, and
 quantify how much worker startup time matters before deciding whether faster
 startup, predictive scaling, or pre-warmed capacity is worth the engineering.
@@ -488,7 +488,7 @@ how it can be explored cheaply. Other natural questions for the same loop:
 - Couple planner and router policies — e.g. shrink the worker pool when
   the router predicts a cache-affine traffic drop.
 
-These are natural twin questions: hold the workload fixed, change one component
+These are natural questions for DynoSim: hold the workload fixed, change one component
 policy, and measure the system-level effect before going to a real cluster.
 
 ### 3.3 Simulation In The Production Routing Loop
@@ -532,7 +532,7 @@ would give the system a place to send latency-sensitive decode work.
 
 A useful closing-the-loop result came out of the development process itself.
 While an agentic code-change, compile, and replay cycle searched for better
-routing algorithms, it proposed this router-side timing model: the twin found
+routing algorithms, it proposed this router-side timing model: DynoSim found
 that a small amount of simulation inside the live Router could improve serving
 behavior. That is more than configuration scoring; it is policy discovery
 feeding back into Dynamo itself.
@@ -548,19 +548,19 @@ algorithms as a system: scheduler behavior, routing policy, Planner control,
 KV/cache movement, workload shape, and measured engine timing.
 
 The payoff is not just a faster benchmark. Simulation turns infrastructure
-planning from guesswork into an engineering discipline: use the twin to decide
+planning from guesswork into an engineering discipline: use DynoSim to decide
 what to build, where to optimize, how to size customer deployments, and which
 live experiments are most likely to matter.
 
 Looking forward, we plan to close this loop in production as well. A smart
-sweeping algorithm built on top of the digital twin would run periodically
+sweeping algorithm built on top of DynoSim would run periodically
 against recently-recorded production traffic, search the configuration space
 under the current workload distribution, and recommend (or directly apply) a
 reconfiguration when a materially better deployment is found. Because traffic
 shape drifts over hours and days — different prompt mixes, ISL/OSL
 distributions, or burst patterns — what was the right TP shape, prefill/decode
 split, router policy, and Planner setting last week may no longer be optimal
-today. A continuous twin-driven sweep keeps the live deployment tracking the
+today. A continuous DynoSim-driven sweep keeps the live deployment tracking the
 current optimum instead of relying on a one-shot launch decision.
 
 ## Related Guides
