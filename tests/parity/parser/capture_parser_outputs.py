@@ -151,6 +151,14 @@ def normalize_output(d: dict) -> dict:
     }
 
 
+def is_na_stub(case: dict[str, Any]) -> bool:
+    """Explicit chart-only n/a stub: no parser input, no expected block."""
+    return set(case) == {"description", "reason"} and all(
+        isinstance(case[key], str) and case[key].strip()
+        for key in ("description", "reason")
+    )
+
+
 def run_parser(family: str, case: dict) -> dict:
     """Run the parser wrapper. Returns {calls, normal_text, error}."""
     try:
@@ -326,6 +334,8 @@ def merge_into_fixtures(
         changed = False
         for case_id, case in cases.items():
             key = f"{family}/{case_id}"
+            if is_na_stub(case):
+                continue
             got = all_outputs.get(key)
             if got is None:
                 continue
@@ -369,7 +379,7 @@ def merge_into_fixtures(
 
 def main() -> int:
     all_outputs: dict[str, dict] = {}
-    n_total = n_clean = n_err = n_python_exc = 0
+    n_total = n_clean = n_err = n_python_exc = n_skipped_na = 0
     drift: list[tuple[str, str]] = []
 
     for fp in sorted(FIXTURES.glob("*/PARSER.*.yaml")):
@@ -378,8 +388,11 @@ def main() -> int:
         if FAMILY_FILTER and family not in FAMILY_FILTER:
             continue
         for case_id, case in doc["cases"].items():
-            n_total += 1
             key = f"{family}/{case_id}"
+            if is_na_stub(case):
+                n_skipped_na += 1
+                continue
+            n_total += 1
             got = run_parser(family, case)
             all_outputs[key] = got
             if got["error"]:
@@ -404,7 +417,7 @@ def main() -> int:
     mode = "MERGE" if MERGE_MODE else "CHECK"
     print(
         f"IMPL={IMPL} mode={mode} total={n_total} clean={n_clean} "
-        f"wrapper_error={n_err} python_exc={n_python_exc}"
+        f"wrapper_error={n_err} python_exc={n_python_exc} skipped_na={n_skipped_na}"
     )
 
     if _args.dump:
