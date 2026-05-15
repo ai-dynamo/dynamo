@@ -512,7 +512,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Decode connects, which sets decode_ready and fires prefill_waiting (whichever survives).
-        let decode = tokio::spawn(async move { connect_to_prefill("127.0.0.1", port, room_id).await });
+        let decode =
+            tokio::spawn(async move { connect_to_prefill("127.0.0.1", port, room_id).await });
 
         // Allow handle_connection to fire prefill_waiting and set decode_waiting.
         tokio::time::sleep(Duration::from_millis(50)).await;
