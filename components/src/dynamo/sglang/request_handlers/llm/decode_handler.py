@@ -114,12 +114,31 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self._routed_experts_kwargs: Dict[
             str, Any
         ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
+        # When --enable-rl is set AND we are running in aggregated mode (no
+        # prefill/decode disaggregation), RL training workloads never need
+        # token-by-token streaming — they batch many samples and wait for
+        # all to complete before training. We can avoid the worker→frontend
+        # chunked transport entirely by calling the engine with stream=False
+        # and yielding a single coalesced response.
+        #
+        # This removes the bulk of the per-token CPU overhead that
+        # streaming + coalescing imposes (~70% of the wall-clock overhead in
+        # Miles' measurements for 0.5B + GSM8K rollouts).
+        self._rl_nonstream_fast_path = (
+            self.serving_mode == DisaggregationMode.AGGREGATED
+            and getattr(
+                getattr(self.config, "dynamo_args", None),
+                "enable_rl",
+                False,
+            )
+        )
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
             )
         else:
-            logging.info("Decode worker handler initialized (aggregated mode)")
+            extra = " [RL non-stream fast path enabled]" if self._rl_nonstream_fast_path else ""
+            logging.info("Decode worker handler initialized (aggregated mode)%s", extra)
 
     @staticmethod
     def _resolve_routed_experts_kwargs(engine: Any, server_args: Any) -> Dict[str, Any]:
@@ -425,6 +444,33 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
 
+            # RL non-stream fast path: call engine with stream=False to avoid
+            # the per-token worker→frontend chunked transport. SGLang's
+            # tokenizer_manager still coalesces tokens internally, but the
+            # result stays in worker memory until generation completes — no
+            # Dynamo TCP plane round-trip per chunk.
+            if self._rl_nonstream_fast_path and not self.use_sglang_tokenizer:
+                agg_result = await self.engine.async_generate(
+                    **input_param,
+                    image_data=image_data,
+                    video_data=video_data,
+                    sampling_params=sampling_params,
+                    stream=False,
+                    **self._routed_experts_kwargs,
+                    external_trace_header=trace_header,
+                    rid=trace_id,
+                    data_parallel_rank=dp_rank,
+                    **self._session_kwargs(request),
+                    lora_path=lora_path,
+                    **logprob_kwargs,
+                    **self._priority_kwargs(priority),
+                )
+                async for out in self._process_aggregated_result(
+                    agg_result, context, return_tokens_as_token_ids
+                ):
+                    yield out
+                return
+
             agg = await self.engine.async_generate(
                 **input_param,
                 image_data=image_data,
@@ -552,6 +598,89 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     }
                 if not context.is_stopped():
                     yield out
+
+    async def _process_aggregated_result(
+        self,
+        result: Dict[str, Any] | list[Dict[str, Any]],
+        context: Context,
+        return_tokens_as_token_ids: bool = False,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Process a non-streaming aggregated engine result.
+
+        Used by the RL non-stream fast path. SGLang's async_generate(stream=False)
+        returns a single coalesced result (or a list of results for n>1
+        sampling). We yield each one as a complete single chunk in the same
+        shape `_process_token_stream` produces for finish_reason chunks, so
+        downstream consumers see no difference except they receive exactly
+        one chunk per choice.
+        """
+        # Normalize: SGLang returns list[dict] when n>1, dict when n==1
+        if isinstance(result, dict):
+            results = [result]
+        else:
+            results = list(result)
+
+        for idx, res in enumerate(results):
+            if context.is_stopped():
+                break
+
+            meta_info = res.get("meta_info", {}) or {}
+            output_idx = res.get("index", idx) or idx
+
+            finish_reason_obj = meta_info.get("finish_reason")
+            finish_reason = (
+                normalize_finish_reason(finish_reason_obj["type"])
+                if finish_reason_obj
+                else "stop"
+            )
+
+            out: Dict[str, Any] = {
+                "index": output_idx,
+                "finish_reason": finish_reason,
+            }
+
+            stop_reason = _extract_sglang_stop_reason(finish_reason_obj)
+            if stop_reason is not None:
+                out["stop_reason"] = stop_reason
+
+            # Full token sequence (already concatenated by SGLang)
+            output_ids = res.get("output_ids") or []
+            out["token_ids"] = output_ids
+
+            # Logprobs: meta_info.output_token_logprobs is the cumulative
+            # complete list for non-streaming results.
+            log_probs, top_logprobs, _ = self._extract_logprobs(
+                meta_info,
+                0,
+                return_tokens_as_token_ids=return_tokens_as_token_ids,
+            )
+            if log_probs is not None:
+                out["log_probs"] = log_probs
+            if top_logprobs is not None:
+                out["top_logprobs"] = top_logprobs
+
+            routed_experts = meta_info.get("routed_experts")
+            if routed_experts is not None:
+                routed_experts = pybase64.b64encode(
+                    routed_experts.numpy().tobytes()
+                ).decode("utf-8")
+                out["disaggregated_params"] = {"routed_experts": routed_experts}
+
+            input_tokens = meta_info.get("prompt_tokens", 0)
+            completion_tokens = meta_info.get("completion_tokens", len(output_ids))
+            cached_tokens = meta_info.get("cached_tokens")
+            prefill_prompt_tokens_details = None
+            if cached_tokens is not None and cached_tokens > 0:
+                prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
+            out["completion_usage"] = {
+                "prompt_tokens": input_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": input_tokens + completion_tokens,
+                "prompt_tokens_details": prefill_prompt_tokens_details,
+            }
+
+            if not context.is_stopped():
+                yield out
 
     async def _process_text_stream(
         self,
