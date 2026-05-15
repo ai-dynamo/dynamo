@@ -487,8 +487,14 @@ mod tests {
     /// prefill's `(tx, rx)` overwrites the first's in `prefill_waiting`, causing the first
     /// prefill's receiver to get `Err(_)` ("sender dropped") and bail immediately.
     ///
-    /// This test documents the current behaviour and ensures neither prefill hangs indefinitely
-    /// (both resolve within the 5 s safety timeout).
+    /// Explicit oneshot signals (not sleeps) enforce ordering: each task fires its signal
+    /// before entering `wait_for_decode_ready`. Because `#[tokio::test]` uses the
+    /// `current_thread` executor (cooperative, no preemption), by the time the test receives
+    /// a signal the sending task has already run synchronously through the DashMap write
+    /// inside `wait_for_decode_ready` and suspended on its internal `rx.await`. Decode is
+    /// only spawned after both signals are in, so both prefills always encounter a room with
+    /// `decode_ready=false`, making the overwrite deterministic and `assert_eq!(ok_count, 1)`
+    /// exact rather than probabilistic.
     #[tokio::test]
     async fn test_two_concurrent_prefills_same_room() {
         let cancel_token = CancellationToken::new();
@@ -499,26 +505,37 @@ mod tests {
         let port = server.port();
         let room_id = 7001u64;
 
-        // Spawn two prefill tasks that both call wait_for_decode_ready() for the same room.
-        // The second to enter Entry::Occupied will overwrite prefill_waiting, dropping the
-        // first task's oneshot sender. The first task therefore gets Err(_) and bails fast.
+        // Each task signals just before calling wait_for_decode_ready. The cooperative
+        // executor guarantees the DashMap write has completed before the test resumes:
+        // there is no yield point between send() and the DashMap entry write, so the
+        // task runs through both atomically before suspending on its internal rx.await.
+        let (reg1_tx, reg1_rx) = oneshot::channel::<()>();
         let server1 = server.clone();
-        let prefill1 = tokio::spawn(async move { server1.wait_for_decode_ready(room_id).await });
+        let prefill1 = tokio::spawn(async move {
+            let _ = reg1_tx.send(());
+            server1.wait_for_decode_ready(room_id).await
+        });
 
+        let (reg2_tx, reg2_rx) = oneshot::channel::<()>();
         let server2 = server.clone();
-        let prefill2 = tokio::spawn(async move { server2.wait_for_decode_ready(room_id).await });
+        let prefill2 = tokio::spawn(async move {
+            let _ = reg2_tx.send(());
+            server2.wait_for_decode_ready(room_id).await
+        });
 
-        // Allow both tasks to enter wait_for_decode_ready() and register.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Wait for both DashMap writes to complete before spawning decode.
+        // Prefill1 always takes the Vacant path (creates the room); prefill2 always
+        // finds it Occupied with decode_ready=false (decode has not yet connected)
+        // and overwrites prefill_waiting, dropping prefill1's sender.
+        reg1_rx.await.expect("prefill1 signal lost");
+        reg2_rx.await.expect("prefill2 signal lost");
 
-        // Decode connects, which sets decode_ready and fires prefill_waiting (whichever survives).
+        // Now decode connects. handle_connection fires the surviving prefill_waiting
+        // sender (prefill2's) and registers decode_waiting.
         let decode =
             tokio::spawn(async move { connect_to_prefill("127.0.0.1", port, room_id).await });
 
-        // Allow handle_connection to fire prefill_waiting and set decode_waiting.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // complete_room() unblocks the surviving decode waiter.
+        // Unblock decode.
         server.complete_room(room_id);
 
         let r1 = tokio::time::timeout(Duration::from_secs(5), prefill1)
@@ -534,22 +551,22 @@ mod tests {
             .expect("decode timed out")
             .expect("decode panicked");
 
-        // Exactly one prefill must succeed (the one whose sender survived the overwrite)
-        // and exactly one must fail (the one whose sender was dropped).
-        // This pins the single-slot overwrite behavior: if the implementation were changed
-        // to support concurrent waiters, both would succeed and this assertion would
-        // catch the behavioral change.
+        // Prefill1's sender was dropped by the overwrite → Err immediately.
+        // Prefill2's sender survived → Ok when decode connected.
+        // If prefill_waiting is ever upgraded from Option to Vec (supporting concurrent
+        // waiters), both would return Ok and these assertions catch the change.
         let ok_count = [r1.is_ok(), r2.is_ok()].iter().filter(|&&ok| ok).count();
         assert_eq!(
-            ok_count, 1,
+            ok_count,
+            1,
             "Exactly one prefill should succeed (surviving sender); r1={r1:?} r2={r2:?}"
         );
         let err_count = [r1.is_err(), r2.is_err()].iter().filter(|&&e| e).count();
         assert_eq!(
-            err_count, 1,
+            err_count,
+            1,
             "Exactly one prefill should fail (dropped sender); r1={r1:?} r2={r2:?}"
         );
-        // Decode always succeeds once prefill calls complete_room.
         assert!(rd.is_ok(), "Decode should succeed: {rd:?}");
 
         cancel_token.cancel();
