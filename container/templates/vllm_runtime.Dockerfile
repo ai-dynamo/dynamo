@@ -98,6 +98,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eu; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     NIXL_VERSION="${NIXL_REF#v}"; \
+    uv pip uninstall --system -y nixl nixl-cu12 nixl-cu13 || true; \
     uv pip install --system --force-reinstall --no-deps \
         "nixl==${NIXL_VERSION}" \
         "nixl-cu${CUDA_MAJOR}==${NIXL_VERSION}"
