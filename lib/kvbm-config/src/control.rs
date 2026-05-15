@@ -4,8 +4,8 @@
 //! Configuration for the leader control plane's optional (togglable) modules.
 //!
 //! The leader control plane is served over velo by the engine. `core` and
-//! `transfer` are always on; `dev` and `test` are opt-in via this config.
-//! When omitted, both default to `false`.
+//! `transfer` are always on; `dev`, `test`, and `metrics` are opt-in via
+//! this config. When omitted, all default to `false`.
 
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -16,7 +16,8 @@ use validator::Validate;
 /// ```json
 /// {
 ///   "dev": true,
-///   "test": false
+///   "test": false,
+///   "metrics": true
 /// }
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Validate)]
@@ -31,6 +32,14 @@ pub struct ControlConfig {
     /// its handlers are not intended for production use.
     #[serde(default)]
     pub test: bool,
+
+    /// Enable the `metrics` control module (`snapshot`). Off by default. A
+    /// small dev/test affordance: lets the hub pull per-pool block populations
+    /// and the in-flight session count on demand from the same Prometheus
+    /// registry that `kvbm_observability::start_metrics_server` exposes in
+    /// production. Read-only.
+    #[serde(default)]
+    pub metrics: bool,
 }
 
 #[cfg(test)]
@@ -42,13 +51,16 @@ mod tests {
         let cfg = ControlConfig::default();
         assert!(!cfg.dev);
         assert!(!cfg.test);
+        assert!(!cfg.metrics);
     }
 
     #[test]
     fn deserialize_explicit() {
-        let cfg: ControlConfig = serde_json::from_str(r#"{"dev": true, "test": true}"#).unwrap();
+        let cfg: ControlConfig =
+            serde_json::from_str(r#"{"dev": true, "test": true, "metrics": true}"#).unwrap();
         assert!(cfg.dev);
         assert!(cfg.test);
+        assert!(cfg.metrics);
     }
 
     #[test]
@@ -56,6 +68,7 @@ mod tests {
         let cfg: ControlConfig = serde_json::from_str(r#"{"dev": true}"#).unwrap();
         assert!(cfg.dev);
         assert!(!cfg.test);
+        assert!(!cfg.metrics);
     }
 
     #[test]
@@ -63,6 +76,7 @@ mod tests {
         let cfg: ControlConfig = serde_json::from_str("{}").unwrap();
         assert!(!cfg.dev);
         assert!(!cfg.test);
+        assert!(!cfg.metrics);
     }
 
     #[test]

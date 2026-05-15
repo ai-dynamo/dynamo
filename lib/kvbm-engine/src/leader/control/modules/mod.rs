@@ -7,8 +7,10 @@
 //! slice. The always-on `core` and opt-in `dev` modules live one level up
 //! in [`super::core`] / [`super::dev`].
 //!
+//! - `metrics` — on-demand runtime snapshot (opt-in via `control.metrics`).
 //! - `test` — test-only G2 block helpers (opt-in via `control.test`).
 //! - `transfer` — G2 search → disagg-session creation (always-on).
 
+pub mod metrics;
 pub mod test;
 pub mod transfer;

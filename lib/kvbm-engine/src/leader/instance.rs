@@ -30,6 +30,7 @@ use kvbm_logical::{
     blocks::{BlockRegistry, ImmutableBlock},
     manager::BlockManager,
 };
+use kvbm_observability::SharedKvbmObservability;
 use kvbm_physical::transfer::{TransferCompleteNotification, TransferOptions};
 
 use kvbm_physical::manager::{LayoutHandle, SerializedLayout};
@@ -184,6 +185,13 @@ pub struct InstanceLeader {
     /// built after `InstanceLeader` and isn't held inside it. Empty until
     /// set; surfaced via [`Self::describe`].
     modules: Arc<OnceLock<Vec<ModuleId>>>,
+
+    /// Shared Prometheus registry + metric handles for this leader, as
+    /// owned by [`crate::KvbmRuntime`]. Optional because some test paths
+    /// (e.g. `testing/distributed.rs`) build a bare leader without a
+    /// runtime. The `metrics` control module reads this; when `None`,
+    /// the module is not registered.
+    observability: Option<SharedKvbmObservability>,
 }
 
 /// Builder for InstanceLeader.
@@ -200,6 +208,7 @@ pub struct InstanceLeaderBuilder {
     object_client: Option<Arc<dyn ObjectBlockOps>>,
     parallelism_template: Option<ParallelismTemplate>,
     role: Option<DisaggregationRole>,
+    observability: Option<SharedKvbmObservability>,
 }
 
 impl InstanceLeaderBuilder {
@@ -219,6 +228,7 @@ impl InstanceLeaderBuilder {
     /// ```
     pub fn with_runtime(self, runtime: &crate::KvbmRuntime) -> Self {
         self.messenger(runtime.messenger().clone())
+            .observability(runtime.observability().clone())
     }
 
     pub fn messenger(mut self, messenger: Arc<Messenger>) -> Self {
@@ -305,6 +315,16 @@ impl InstanceLeaderBuilder {
         self
     }
 
+    /// Set the shared KVBM observability handle (Prometheus registry +
+    /// metric collectors) for this leader. Sourced from
+    /// [`crate::KvbmRuntime::observability`]; populated by
+    /// [`Self::with_runtime`]. The `metrics` control module reads this;
+    /// callers that don't need that module can leave it unset.
+    pub fn observability(mut self, observability: SharedKvbmObservability) -> Self {
+        self.observability = Some(observability);
+        self
+    }
+
     pub fn build(self) -> Result<InstanceLeader> {
         let messenger = self
             .messenger
@@ -368,6 +388,7 @@ impl InstanceLeaderBuilder {
             hub_instance_id: Arc::new(OnceLock::new()),
             config_blob: Arc::new(OnceLock::new()),
             modules: Arc::new(OnceLock::new()),
+            observability: self.observability,
         })
     }
 }
@@ -481,6 +502,16 @@ impl InstanceLeader {
     /// alive until their lifecycle ends.
     pub fn session_manager(&self) -> &Arc<SessionManager> {
         &self.session_manager
+    }
+
+    /// Shared KVBM observability handle (Prometheus registry + collectors).
+    ///
+    /// `Some` when the leader was built via [`InstanceLeaderBuilder::with_runtime`]
+    /// (or [`InstanceLeaderBuilder::observability`] directly). `None` for bare
+    /// test leaders that bypass the runtime. The control plane's `metrics`
+    /// module reads this; when `None`, the module is not registered.
+    pub fn observability(&self) -> Option<&SharedKvbmObservability> {
+        self.observability.as_ref()
     }
 
     /// A clonable handle to the disagg `SessionFactory` cell.
@@ -885,9 +916,10 @@ impl InstanceLeader {
         self: &Arc<Self>,
         dev: bool,
         test: bool,
+        metrics: bool,
     ) -> Result<Arc<crate::leader::ControlPlane>> {
         use crate::leader::control::{
-            ControlPlane, CoreModule, DevModule, TestModule, TransferModule,
+            ControlPlane, CoreModule, DevModule, MetricsModule, TestModule, TransferModule,
         };
 
         let mut builder =
@@ -908,6 +940,20 @@ impl InstanceLeader {
                  not intended for production"
             );
             builder = builder.with_module(TestModule::new(self.g2_manager.clone()));
+        }
+        if metrics {
+            match self.observability.as_ref() {
+                Some(obs) => {
+                    builder =
+                        builder.with_module(MetricsModule::new(Arc::clone(self), Arc::clone(obs)));
+                }
+                None => {
+                    tracing::warn!(
+                        "control plane `metrics` module requested but no observability \
+                         handle was provided to InstanceLeaderBuilder; module not registered"
+                    );
+                }
+            }
         }
 
         builder.register()

@@ -416,6 +416,12 @@ impl ConnectorLeader {
         let num_workers = worker_clients.len();
         let mut leader_builder = InstanceLeader::builder()
             .messenger(self.runtime.messenger().clone())
+            // Plumb the runtime's Prometheus registry through so the `metrics`
+            // control module can answer `snapshot` from the same source the
+            // production `start_metrics_server` exposes. Without this, a
+            // leader built with `control.metrics = true` would silently log
+            // a warning at register time and the module would never appear.
+            .observability(self.runtime.observability().clone())
             .registry(registry)
             .g2_manager(g2_manager)
             .workers(
@@ -480,11 +486,12 @@ impl ConnectorLeader {
         // cell populated further below, once CD wiring builds the factory.
         let control_cfg = &self.runtime.config().control;
         let control_plane = leader
-            .register_control_plane(control_cfg.dev, control_cfg.test)
+            .register_control_plane(control_cfg.dev, control_cfg.test, control_cfg.metrics)
             .context("registering leader control plane")?;
         tracing::debug!(
             dev = control_cfg.dev,
             test = control_cfg.test,
+            metrics = control_cfg.metrics,
             "Leader control plane registered"
         );
 
@@ -898,11 +905,9 @@ impl ConnectorLeader {
                     // Bound `describe()` so an unresponsive worker doesn't
                     // hang the push task forever. The hub's fallback pull
                     // path covers any leader that loses this race.
-                    let describe = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        leader.describe(),
-                    )
-                    .await;
+                    let describe =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), leader.describe())
+                            .await;
                     match describe {
                         Ok(Ok(payload)) => {
                             if let Err(e) = hub.push_describe(instance_id, &payload).await {

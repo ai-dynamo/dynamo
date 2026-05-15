@@ -54,6 +54,7 @@ pub mod handlers;
 pub mod protocol;
 pub mod registry;
 pub mod server;
+pub mod web;
 
 pub use client::{HubClient, HubClientBuilder, HubClientConfig, HubRegistrationGuard};
 pub use config::HubConfig;

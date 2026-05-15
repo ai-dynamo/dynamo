@@ -18,7 +18,7 @@
 //! [`LeaderControlClient`]: kvbm_protocols::control::LeaderControlClient
 //! [`ControlError::http_status`]: kvbm_protocols::control::ControlError::http_status
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -27,11 +27,12 @@ use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::routing::{get, post};
 use futures::future::BoxFuture;
 use kvbm_protocols::control::{
-    ControlError, InstanceDescription, LeaderControlClient, ModuleId, RegisterLeaderRequest,
-    ResetRequest,
+    ControlError, DescribeInstanceRequest, InstanceDescription, LeaderControlClient,
+    MetricsSnapshotRequest, ModuleId, RegisterLeaderRequest, RegisterTestBlocksRequest,
+    ResetRequest, SearchRequest,
 };
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
@@ -41,7 +42,7 @@ use velo_ext::{InstanceId, PeerInfo};
 
 use crate::features::{FeatureError, FeatureManager, HubContext};
 use crate::handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
-use crate::protocol::{self, Feature, FeatureKey};
+use crate::protocol::{self, Feature, FeatureKey, MetricsFanoutResponse, MetricsInstanceEntry};
 use crate::registry::PeerRegistry;
 
 /// Periodic refresh interval for the modules cache. Picks up module-set
@@ -57,6 +58,12 @@ const FETCH_BACKOFF: &[Duration] = &[
     Duration::from_secs(2),
     Duration::from_secs(5),
 ];
+
+/// Per-leader budget for the `/v1/metrics` fanout. A leader that doesn't
+/// answer within this window becomes a per-instance `error: "timeout..."`
+/// entry; the rest of the fanout still completes. Kept short on purpose —
+/// the UI polls this and a sluggish leader shouldn't drag the whole tab.
+const METRICS_FANOUT_PER_LEADER: Duration = Duration::from_secs(2);
 
 /// Cached `list_modules` result for one instance.
 #[derive(Clone, Debug)]
@@ -358,46 +365,40 @@ impl FeatureManager for ControlPlaneManager {
 }
 
 fn routes(manager: Arc<ControlPlaneManager>) -> Router {
+    use protocol::paths::*;
     Router::new()
-        .route(protocol::paths::CONNECTOR_RESET, put(reset))
+        .route(CONNECTOR_HEALTH, get(health_probe))
+        .route(INSTANCE_MODULES, get(get_modules))
+        .route(INSTANCE_DESCRIBE, get(get_describe).post(post_describe))
+        // ---------- Typed control namespace ----------
+        .route(CONTROL_CORE_REGISTER_LEADER, post(core_register_leader))
+        .route(CONTROL_CORE_DESCRIBE_INSTANCE, post(core_describe_instance))
+        .route(CONTROL_DEV_RESET, post(dev_reset))
         .route(
-            protocol::paths::CONNECTOR_REGISTER_LEADER,
-            put(register_leader),
+            CONTROL_TEST_REGISTER_TEST_BLOCKS,
+            post(test_register_test_blocks),
         )
-        .route(protocol::paths::CONNECTOR_HEALTH, get(health))
-        .route(protocol::paths::INSTANCE_MODULES, get(get_modules))
+        .route(CONTROL_TRANSFER_SEARCH_PREFIX, post(transfer_search_prefix))
         .route(
-            protocol::paths::INSTANCE_DESCRIBE,
-            get(get_describe).post(post_describe),
+            CONTROL_TRANSFER_SEARCH_SCATTER,
+            post(transfer_search_scatter),
         )
+        .route(CONTROL_METRICS_SNAPSHOT, post(metrics_snapshot))
+        .route(METRICS_FANOUT, get(metrics_fanout))
         .with_state(manager)
 }
 
 // ---------------------------------------------------------------------------
-// Handlers
+// Handlers — typed namespace
 // ---------------------------------------------------------------------------
 
-async fn reset(
+/// `POST /control/core/register_leader` — typed RPC to the leader.
+///
+/// `RegisterLeaderRequest` has no `Default` derive (the `instance_id` field
+/// is required), so the body cannot be elided.
+async fn core_register_leader(
     State(mgr): State<Arc<ControlPlaneManager>>,
     Path(instance_id): Path<InstanceId>,
-    body: Option<Json<ResetRequest>>,
-) -> Response {
-    let client = match leader_client(&mgr, instance_id) {
-        Ok(c) => c,
-        Err(resp) => return resp,
-    };
-    let req = body.map(|Json(r)| r).unwrap_or_default();
-    match client.dev().reset(req).await {
-        Ok(resp) => ok_response(&resp),
-        Err(err) => control_error_response(instance_id, "reset", err),
-    }
-}
-
-async fn register_leader(
-    State(mgr): State<Arc<ControlPlaneManager>>,
-    Path(instance_id): Path<InstanceId>,
-    // `RegisterLeaderRequest` has no `Default` derive (`instance_id` is
-    // required), so the body cannot be elided.
     Json(req): Json<RegisterLeaderRequest>,
 ) -> Response {
     let client = match leader_client(&mgr, instance_id) {
@@ -410,11 +411,237 @@ async fn register_leader(
     }
 }
 
+/// `POST /control/core/describe_instance` — pull a fresh
+/// [`InstanceDescription`] from the leader via velo. Hub also updates the
+/// describe cache as a side effect, so this shares the same code path as
+/// `GET /describe?force=true` — operators can rely on either to refresh.
+async fn core_describe_instance(
+    State(mgr): State<Arc<ControlPlaneManager>>,
+    Path(instance_id): Path<InstanceId>,
+    _body: Option<Json<DescribeInstanceRequest>>,
+) -> Response {
+    let client = match leader_client(&mgr, instance_id) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match client.core().describe().await {
+        Ok(payload) => {
+            commit_describe_if_registered(
+                &mgr.describe_cache,
+                mgr.registry.get(),
+                instance_id,
+                payload.clone(),
+                DescribeSource::PullFallback,
+            );
+            ok_response(&payload)
+        }
+        Err(err) => control_error_response(instance_id, "describe_instance", err),
+    }
+}
+
+/// `POST /control/dev/reset` — gated on [`ModuleId::Dev`]. Empty body is
+/// equivalent to `ResetRequest::default()` (reset every configured tier).
+async fn dev_reset(
+    State(mgr): State<Arc<ControlPlaneManager>>,
+    Path(instance_id): Path<InstanceId>,
+    body: Option<Json<ResetRequest>>,
+) -> Response {
+    if let Some(resp) = gate(&mgr, instance_id, ModuleId::Dev) {
+        return resp;
+    }
+    let client = match leader_client(&mgr, instance_id) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    match client.dev().reset(req).await {
+        Ok(resp) => ok_response(&resp),
+        Err(err) => control_error_response(instance_id, "reset", err),
+    }
+}
+
+/// `POST /control/test/register_test_blocks` — gated on [`ModuleId::Test`].
+async fn test_register_test_blocks(
+    State(mgr): State<Arc<ControlPlaneManager>>,
+    Path(instance_id): Path<InstanceId>,
+    Json(req): Json<RegisterTestBlocksRequest>,
+) -> Response {
+    if let Some(resp) = gate(&mgr, instance_id, ModuleId::Test) {
+        return resp;
+    }
+    let client = match leader_client(&mgr, instance_id) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match client.test().register_test_blocks(req).await {
+        Ok(resp) => ok_response(&resp),
+        Err(err) => control_error_response(instance_id, "register_test_blocks", err),
+    }
+}
+
+/// `POST /control/transfer/search_prefix` — always-on.
+async fn transfer_search_prefix(
+    State(mgr): State<Arc<ControlPlaneManager>>,
+    Path(instance_id): Path<InstanceId>,
+    Json(req): Json<SearchRequest>,
+) -> Response {
+    let client = match leader_client(&mgr, instance_id) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match client.transfer().search_prefix(req).await {
+        Ok(resp) => ok_response(&resp),
+        Err(err) => control_error_response(instance_id, "search_prefix", err),
+    }
+}
+
+/// `POST /control/transfer/search_scatter` — always-on.
+async fn transfer_search_scatter(
+    State(mgr): State<Arc<ControlPlaneManager>>,
+    Path(instance_id): Path<InstanceId>,
+    Json(req): Json<SearchRequest>,
+) -> Response {
+    let client = match leader_client(&mgr, instance_id) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    match client.transfer().search_scatter(req).await {
+        Ok(resp) => ok_response(&resp),
+        Err(err) => control_error_response(instance_id, "search_scatter", err),
+    }
+}
+
+/// `POST /control/metrics/snapshot` — gated on [`ModuleId::Metrics`].
+/// Empty body is equivalent to [`MetricsSnapshotRequest::default`].
+async fn metrics_snapshot(
+    State(mgr): State<Arc<ControlPlaneManager>>,
+    Path(instance_id): Path<InstanceId>,
+    body: Option<Json<MetricsSnapshotRequest>>,
+) -> Response {
+    if let Some(resp) = gate(&mgr, instance_id, ModuleId::Metrics) {
+        return resp;
+    }
+    let client = match leader_client(&mgr, instance_id) {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let _req = body.map(|Json(r)| r).unwrap_or_default();
+    match client.metrics().snapshot().await {
+        Ok(resp) => ok_response(&resp),
+        Err(err) => control_error_response(instance_id, "metrics_snapshot", err),
+    }
+}
+
+/// `GET /v1/metrics` — fanout across every registered leader that has the
+/// `metrics` module enabled. Per-leader failures surface as `{ "error": ... }`
+/// entries in the response map rather than failing the whole request.
+///
+/// Leaders whose cached module set is `Some` but missing `ModuleId::Metrics`
+/// are filtered out before the velo call so the request stays cheap with many
+/// leaders. Leaders with `None` (cache miss) are queried — they will respond
+/// with a `module_not_enabled` `ControlError` if the module is actually
+/// absent, which the handler records as the per-instance `error`.
+async fn metrics_fanout(State(mgr): State<Arc<ControlPlaneManager>>) -> Response {
+    let Some(velo) = mgr.velo.get().cloned() else {
+        return service_unavailable("hub has no velo transport configured");
+    };
+    let Some(registry) = mgr.registry.get().cloned() else {
+        return service_unavailable("registry not attached");
+    };
+    let self_id = velo.instance_id();
+
+    // Collect candidate ids: registered, not the hub, and not known-without-
+    // the-metrics-module. Cache misses (`None`) are kept — velo will tell us.
+    let candidates: Vec<InstanceId> = registry
+        .list()
+        .into_iter()
+        .map(|p| p.instance_id())
+        .filter(|id| *id != self_id)
+        .filter(|id| !matches!(mgr.has_module(*id, ModuleId::Metrics), Some(false)))
+        .collect();
+
+    let messenger = velo.messenger().clone();
+    // Each per-leader call is wrapped in `tokio::time::timeout` so a single
+    // slow or hung leader can't stall the whole response. `join_all` only
+    // waits for the slowest future — without this, the worst-case latency is
+    // the worst-case leader latency, which the UI polls into every 5s.
+    let calls = candidates.into_iter().map(|id| {
+        let messenger = messenger.clone();
+        async move {
+            let client = LeaderControlClient::new(messenger, id);
+            let outcome =
+                tokio::time::timeout(METRICS_FANOUT_PER_LEADER, client.metrics().snapshot()).await;
+            (id, outcome)
+        }
+    });
+    let results = futures::future::join_all(calls).await;
+
+    let mut instances: BTreeMap<String, MetricsInstanceEntry> = BTreeMap::new();
+    for (id, outcome) in results {
+        let entry = match outcome {
+            Ok(Ok(snapshot)) => MetricsInstanceEntry {
+                snapshot: Some(snapshot),
+                error: None,
+            },
+            Ok(Err(err)) => {
+                tracing::debug!(
+                    instance = %id, kind = err.kind(), error = %err,
+                    "metrics_fanout: leader returned error"
+                );
+                MetricsInstanceEntry {
+                    snapshot: None,
+                    error: Some(err.to_string()),
+                }
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    instance = %id, budget = ?METRICS_FANOUT_PER_LEADER,
+                    "metrics_fanout: leader did not respond within budget"
+                );
+                MetricsInstanceEntry {
+                    snapshot: None,
+                    error: Some(format!(
+                        "timeout after {}s",
+                        METRICS_FANOUT_PER_LEADER.as_secs()
+                    )),
+                }
+            }
+        };
+        instances.insert(id.to_string(), entry);
+    }
+
+    let gathered_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    ok_response(&MetricsFanoutResponse {
+        gathered_at_unix_ms,
+        instances,
+    })
+}
+
+/// Module-gating guard for the route handlers.
+///
+/// Returns `Some(404 module_not_enabled)` only when the modules cache has a
+/// confirmed-absent entry for `module` on `instance_id`. Cache misses (i.e.
+/// `has_module == None` — pre-discovery or never-populated) pass through
+/// (Lesson #3) so an empty cache never short-circuits a legitimate call.
+fn gate(mgr: &ControlPlaneManager, instance_id: InstanceId, module: ModuleId) -> Option<Response> {
+    match mgr.has_module(instance_id, module) {
+        Some(false) => Some(control_error_response(
+            instance_id,
+            "module_gate",
+            ControlError::ModuleNotEnabled(module),
+        )),
+        _ => None,
+    }
+}
+
 /// Health probe — not a `LeaderControlClient` call. Sends the hub's own
 /// `_kvbm_hub_heartbeat` handler via velo to confirm the leader is reachable
 /// at the active-messaging layer. Stays separate from the typed control
 /// plane because heartbeat is hub↔peer infrastructure, not a control module.
-async fn health(
+async fn health_probe(
     State(mgr): State<Arc<ControlPlaneManager>>,
     Path(instance_id): Path<InstanceId>,
 ) -> Response {

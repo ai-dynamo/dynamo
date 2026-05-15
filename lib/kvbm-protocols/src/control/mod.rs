@@ -44,6 +44,15 @@ pub use modules::core::{
     StorageKindDescription, TierCapacity, TierKind, WorkerInfo,
 };
 pub use modules::dev::{RESET_HANDLER, ResetRequest, ResetResponse, Tier, TierError, plan_reset};
+pub use modules::metrics::{
+    MetricsSnapshotRequest, MetricsSnapshotResponse, PoolBreakdown, SNAPSHOT_HANDLER,
+};
+pub use modules::test::{
+    REGISTER_TEST_BLOCKS_HANDLER, RegisterTestBlocksRequest, RegisterTestBlocksResponse,
+};
+pub use modules::transfer::{
+    SEARCH_PREFIX_HANDLER, SEARCH_SCATTER_HANDLER, SearchRequest, SearchResponse,
+};
 
 // ---------------------------------------------------------------------------
 // ModuleId — the plugin registry
@@ -70,6 +79,11 @@ pub enum ModuleId {
     /// Always-on: G2 search → disagg-session creation (and, later,
     /// `transfer_to` / `transfer_from`).
     Transfer,
+    /// Opt-in: on-demand runtime snapshot (`snapshot`) — per-pool block
+    /// populations + in-flight session count, sourced from the leader's
+    /// Prometheus registry. Registered when the leader was built with
+    /// observability available; for dev/test eyeballing.
+    Metrics,
 }
 
 impl ModuleId {
@@ -80,6 +94,7 @@ impl ModuleId {
             ModuleId::Dev => "dev",
             ModuleId::Test => "test",
             ModuleId::Transfer => "transfer",
+            ModuleId::Metrics => "metrics",
         }
     }
 }
@@ -277,6 +292,7 @@ mod tests {
             ModuleId::Dev,
             ModuleId::Test,
             ModuleId::Transfer,
+            ModuleId::Metrics,
         ] {
             let s = serde_json::to_string(&id).unwrap();
             assert!(s.contains(id.as_str()));

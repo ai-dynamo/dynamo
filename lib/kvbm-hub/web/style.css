@@ -1,0 +1,224 @@
+/* SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+   SPDX-License-Identifier: Apache-2.0 */
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0;
+  height: 100%;
+  background: var(--bg); color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+h1, h2, h3 { font-family: var(--font-serif); font-weight: 600; margin: 0; }
+h1 { font-size: 22px; letter-spacing: -0.01em; }
+h2 { font-size: 17px; margin-bottom: 8px; }
+h3 { font-size: 14px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; }
+
+code, .mono { font-family: var(--font-mono); font-size: 12.5px; }
+
+a { color: var(--accent-hi); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ---------- Layout ---------- */
+
+#app {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  height: 100vh;
+}
+
+.sidebar {
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: 18px 16px;
+  overflow-y: auto;
+}
+
+.sidebar header {
+  display: flex; align-items: baseline; gap: 8px;
+  margin-bottom: 16px;
+}
+.sidebar header .sub {
+  color: var(--fg-subtle); font-size: 12px;
+}
+
+.main {
+  padding: 24px 28px;
+  overflow-y: auto;
+}
+
+.main .panel + .panel { margin-top: 22px; }
+
+/* ---------- Instances list ---------- */
+
+.instance-list { list-style: none; padding: 0; margin: 0; }
+.instance-list li {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-muted);
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px;
+}
+.instance-list li:hover { background: var(--surface-2); color: var(--fg); }
+.instance-list li.selected {
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 500;
+}
+.instance-list li.selected .role-chip {
+  background: rgba(255, 255, 255, 0.18);
+  color: var(--accent-fg);
+}
+.instance-list .id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.instance-list .meta { display: flex; gap: 6px; flex-shrink: 0; }
+
+.role-chip, .chip {
+  font-family: var(--font-sans); font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--fg-muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* ---------- Module chips ---------- */
+
+.module-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.module-chips .chip.on {
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 500;
+}
+
+/* ---------- Topology grid ---------- */
+
+.topo-summary {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.topo-summary .stat {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+.topo-summary .stat .label { font-size: 11px; color: var(--fg-subtle); text-transform: uppercase; letter-spacing: 0.08em; }
+.topo-summary .stat .value { font-family: var(--font-mono); font-size: 16px; margin-top: 4px; color: var(--fg); }
+
+table.topo {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+table.topo th, table.topo td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+table.topo th {
+  background: var(--surface);
+  color: var(--fg-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+table.topo td.mono, table.topo td .mono { font-family: var(--font-mono); }
+table.topo tr:nth-child(even) td { background: rgba(0, 0, 0, 0.015); }
+@media (prefers-color-scheme: dark) {
+  table.topo tr:nth-child(even) td { background: rgba(255, 255, 255, 0.025); }
+}
+/* Derived totals (pinned, available, total in the metrics view) — visually
+   distinguished from the raw values they sum so the reader knows which
+   numbers are independent. */
+table.topo td.derived { color: var(--fg-muted); font-weight: 600; }
+.tier-tag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.tier-g1 { background: rgba(204, 120, 92, 0.14); color: var(--accent-hi); }
+.tier-g2 { background: rgba(90, 125, 168, 0.14); color: var(--info); }
+.tier-g3 { background: rgba(176, 125, 42, 0.14); color: var(--warn); }
+.tier-g4 { background: rgba(79, 125, 74, 0.14); color: var(--ok); }
+
+/* ---------- Pending state ---------- */
+
+.pending {
+  background: var(--surface);
+  border: 1px dashed var(--border-hi);
+  border-radius: var(--radius);
+  padding: 20px;
+  color: var(--fg-muted);
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px;
+}
+.pending .msg .hint { font-size: 12px; margin-top: 4px; color: var(--fg-subtle); }
+
+/* ---------- Config tree ---------- */
+
+.config-tree { font-family: var(--font-mono); font-size: 12px; }
+.config-tree details { margin: 1px 0; }
+.config-tree summary { cursor: pointer; color: var(--fg-muted); }
+.config-tree summary:hover { color: var(--fg); }
+.config-tree .k { color: var(--fg-muted); }
+.config-tree .v { color: var(--fg); }
+.config-tree .v.num { color: var(--accent-hi); }
+.config-tree .v.bool { color: var(--info); }
+.config-tree .v.nil { color: var(--fg-subtle); font-style: italic; }
+.config-tree ul { list-style: none; padding-left: 16px; margin: 0; }
+
+/* ---------- Buttons + forms ---------- */
+
+button, .btn {
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-hi);
+  background: var(--surface-2);
+  color: var(--fg);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+button.primary, .btn.primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+}
+button:hover { background: var(--surface); }
+button.primary:hover { background: var(--accent-hi); }
+
+input, textarea, select {
+  font-family: var(--font-sans); font-size: 13px;
+  background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 6px 9px;
+}
+input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* ---------- Empty / loading ---------- */
+
+.empty {
+  color: var(--fg-subtle);
+  font-style: italic;
+  padding: 40px 0;
+  text-align: center;
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--surface) 25%, var(--surface-2) 50%, var(--surface) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+  border-radius: var(--radius-sm);
+}
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }

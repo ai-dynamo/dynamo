@@ -4560,6 +4560,7 @@ dependencies = [
  "nvtx",
  "oneshot",
  "parking_lot",
+ "prometheus",
  "rayon",
  "rmp-serde",
  "serde",

@@ -381,6 +381,9 @@ impl HubServerBuilder {
             discovery_router = discovery_router.merge(Arc::clone(mgr).public_router());
             control_router = control_router.merge(Arc::clone(mgr).control_router());
         }
+        // Phase E — embedded operator UI mounted on the control listener.
+        // Same-origin so the SPA's fetches need no CORS.
+        control_router = control_router.merge(crate::web::ui_router());
 
         let discovery_task = spawn_server(discovery_listener, discovery_router, cancel.clone());
         let control_task = spawn_server(control_listener, control_router, cancel.clone());

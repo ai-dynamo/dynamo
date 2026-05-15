@@ -10,12 +10,14 @@
 //!
 //! All request/response bodies are JSON.
 
+use kvbm_protocols::control::MetricsSnapshotResponse;
 /// Remote-prefill request payload carried by the hub's CD queue.
 ///
 /// The payload shape is owned by `kvbm-protocols (disagg)`; the hub owns only
 /// the queue transport, queue name, and feature registration surface.
 pub use kvbm_protocols::disagg::{DISAGG_PROTOCOL_VERSION, RemotePrefillRequest as PrefillRequest};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use velo_ext::{InstanceId, PeerInfo, WorkerId};
 
 /// Default HTTP port for peer-discovery lookups (the `PeerDiscovery` surface).
@@ -68,16 +70,64 @@ pub mod paths {
     /// → [`super::ConditionalDisaggInstancesResponse`]
     pub const CD_INSTANCES: &str = "/v1/features/conditional-disagg/instances";
 
-    /// `PUT` connector-leader reset (proxied to the connector via velo).
-    /// Body: `kvbm_connector::connector::leader::control_api::ResetRequest`.
-    pub const CONNECTOR_RESET: &str = "/v1/instances/{instance_id}/reset";
-
-    /// `PUT` connector-leader register-leader (proxied via velo). Body:
-    /// `kvbm_connector::connector::leader::control_api::RegisterLeaderRequest`.
-    pub const CONNECTOR_REGISTER_LEADER: &str = "/v1/instances/{instance_id}/register_leader";
-
     /// `GET` connector health (one-shot velo probe + last-heartbeat info).
     pub const CONNECTOR_HEALTH: &str = "/v1/instances/{instance_id}/health";
+
+    // -----------------------------------------------------------------------
+    // Typed control-plane routes (Phase D)
+    //
+    // Canonical `/control/<module>/<handler>` namespace, one POST per velo
+    // handler exposed by the leader. The hub acts as a typed client of the
+    // leader; HTTP status comes from `ControlError::http_status`. Module-
+    // gated routes return `404 module_not_enabled` for `has_module ==
+    // Some(false)` *without* dispatching to velo.
+    // -----------------------------------------------------------------------
+
+    /// `POST` register a remote leader by instance id (typed). Always-on.
+    /// Body: [`kvbm_protocols::control::RegisterLeaderRequest`].
+    pub const CONTROL_CORE_REGISTER_LEADER: &str =
+        "/v1/instances/{instance_id}/control/core/register_leader";
+
+    /// `POST` pull a fresh [`InstanceDescription`] from the leader's velo
+    /// handler. Always-on. Updates the hub's describe cache as a side effect
+    /// — shares the same code path as `GET /describe?force=true`.
+    pub const CONTROL_CORE_DESCRIBE_INSTANCE: &str =
+        "/v1/instances/{instance_id}/control/core/describe_instance";
+
+    /// `POST` reset the inactive pools of the requested tiers. Module-gated
+    /// on [`kvbm_protocols::control::ModuleId::Dev`]. Body: optional
+    /// [`kvbm_protocols::control::ResetRequest`] (defaults to "all tiers").
+    pub const CONTROL_DEV_RESET: &str = "/v1/instances/{instance_id}/control/dev/reset";
+
+    /// `POST` allocate-and-register one G2 block per requested hash. Module-
+    /// gated on [`kvbm_protocols::control::ModuleId::Test`]. Body:
+    /// [`kvbm_protocols::control::RegisterTestBlocksRequest`].
+    pub const CONTROL_TEST_REGISTER_TEST_BLOCKS: &str =
+        "/v1/instances/{instance_id}/control/test/register_test_blocks";
+
+    /// `POST` contiguous-prefix search of the leader's G2 block manager.
+    /// Always-on. Body: [`kvbm_protocols::control::SearchRequest`].
+    pub const CONTROL_TRANSFER_SEARCH_PREFIX: &str =
+        "/v1/instances/{instance_id}/control/transfer/search_prefix";
+
+    /// `POST` scatter (gather-all) search of the leader's G2 block manager.
+    /// Always-on. Body: [`kvbm_protocols::control::SearchRequest`].
+    pub const CONTROL_TRANSFER_SEARCH_SCATTER: &str =
+        "/v1/instances/{instance_id}/control/transfer/search_scatter";
+
+    /// `POST` on-demand runtime snapshot of the leader. Module-gated on
+    /// [`kvbm_protocols::control::ModuleId::Metrics`]. Empty body is
+    /// equivalent to [`kvbm_protocols::control::MetricsSnapshotRequest::default`].
+    /// Returns [`kvbm_protocols::control::MetricsSnapshotResponse`] as JSON.
+    pub const CONTROL_METRICS_SNAPSHOT: &str =
+        "/v1/instances/{instance_id}/control/metrics/snapshot";
+
+    /// `GET` fanout helper: collect a snapshot from every registered leader
+    /// that has the metrics module enabled, in parallel, and return per-
+    /// instance entries keyed by stringified `instance_id`. Slow / failing
+    /// leaders surface as `{ "error": "<msg>" }` for their entry rather than
+    /// failing the whole response. See [`super::MetricsFanoutResponse`].
+    pub const METRICS_FANOUT: &str = "/v1/metrics";
 
     /// `GET` the set of control-plane modules enabled on this instance.
     /// Body: `{ "modules": [..], "cached": bool, "age_secs": u64 }`. Cache is
@@ -217,6 +267,36 @@ pub struct ProbeResponse {
 pub struct ListInstancesResponse {
     /// All currently registered instances.
     pub instances: Vec<PeerInfo>,
+}
+
+/// Response body for `GET /v1/metrics` — fanout across every leader that has
+/// the `metrics` module enabled.
+///
+/// Entries are always present for every leader the hub queried; a slow or
+/// failing leader surfaces as an entry with `snapshot = None` and a non-empty
+/// `error` string rather than failing the whole response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsFanoutResponse {
+    /// Hub-side wall-clock at the moment the fanout was initiated, in
+    /// milliseconds since the Unix epoch. Per-leader timestamps live on each
+    /// [`MetricsSnapshotResponse`] under [`MetricsInstanceEntry::snapshot`].
+    pub gathered_at_unix_ms: u64,
+    /// Per-instance entries keyed by stringified [`InstanceId`]. `BTreeMap`
+    /// rather than `HashMap` so the JSON ordering is deterministic — handy
+    /// for tests and for the UI's "diff vs last refresh" view.
+    pub instances: BTreeMap<String, MetricsInstanceEntry>,
+}
+
+/// One leader's contribution to [`MetricsFanoutResponse`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsInstanceEntry {
+    /// The leader's snapshot, `Some` on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<MetricsSnapshotResponse>,
+    /// Error string from the velo call or module-gate check. `Some` iff
+    /// `snapshot` is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Typed error body returned by the hub on non-2xx responses.

@@ -10,5 +10,6 @@
 
 pub mod core;
 pub mod dev;
+pub mod metrics;
 pub mod test;
 pub mod transfer;

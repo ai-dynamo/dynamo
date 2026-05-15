@@ -30,6 +30,7 @@ use kvbm_protocols::control::{
 pub use core::CoreModule;
 pub use dev::DevModule;
 pub use module::ControlModule;
+pub use modules::metrics::MetricsModule;
 pub use modules::test::TestModule;
 pub use modules::transfer::TransferModule;
 

@@ -22,10 +22,13 @@ use kvbm_engine::disagg::session::{
     LifecycleEvent, MockSessionFactory, SessionFactory, SessionManager,
 };
 use kvbm_engine::leader::ControlPlane;
+use kvbm_engine::leader::InstanceLeader;
 use kvbm_engine::leader::control::TestModule;
 use kvbm_engine::leader::control::TransferModule;
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
+use kvbm_logical::blocks::BlockRegistry;
 use kvbm_logical::manager::BlockManager;
+use kvbm_observability::KvbmObservability;
 use kvbm_protocols::control::ModuleId;
 use kvbm_protocols::control::client::LeaderControlClient;
 use kvbm_protocols::control::modules::test::RegisterTestBlocksRequest;
@@ -252,4 +255,101 @@ async fn session_manager_evicts_on_watchdog_timeout() {
     assert_eq!(manager.len(), 1);
 
     wait_until(|| manager.is_empty()).await;
+}
+
+// ---- metrics module --------------------------------------------------------
+
+/// End-to-end: a leader built with observability + `register_control_plane(
+/// dev=false, test=false, metrics=true)` exposes the `Metrics` module via
+/// `list_modules`, and `client.metrics().snapshot()` returns a well-formed
+/// response. Guards the silent-failure mode where forgetting to plumb
+/// observability into the builder would log a warning and skip registration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn register_control_plane_enables_metrics_when_observability_present() {
+    let fx = fixture().await;
+
+    // Build an InstanceLeader on the server side. The G2 manager from the
+    // fixture is owned by us, so we build a fresh one here to avoid the
+    // double-ownership that `InstanceLeader::g2_manager(Arc<_>)` would
+    // imply. (The fixture's `fx.g2` is unused by this test.)
+    let registry = BlockRegistry::builder().build();
+    let g2 = Arc::new(
+        TestManagerBuilder::<G2>::new()
+            .block_count(G2_BLOCK_COUNT)
+            .block_size(BLOCK_SIZE)
+            .registry(registry.clone())
+            .build(),
+    );
+    let observability = Arc::new(KvbmObservability::new().expect("observability"));
+    let leader = Arc::new(
+        InstanceLeader::builder()
+            .messenger(fx.server.messenger().clone())
+            .observability(observability)
+            .registry(registry)
+            .g2_manager(g2)
+            .workers(vec![])
+            .build()
+            .expect("build leader"),
+    );
+
+    let _plane = leader
+        .register_control_plane(false, false, true)
+        .expect("register control plane");
+
+    let control = LeaderControlClient::new(fx.client.messenger().clone(), fx.server.instance_id());
+
+    let modules = control.list_modules().await.expect("list_modules");
+    assert!(
+        modules.contains(&ModuleId::Metrics),
+        "metrics module should be registered when observability is wired; got {modules:?}"
+    );
+
+    let snapshot = control.metrics().snapshot().await.expect("snapshot");
+    // Sessions count starts at 0; pools may be empty (no allocations happened
+    // yet on this leader's registry), but the response shape must be valid.
+    assert_eq!(snapshot.sessions_inflight, 0);
+    assert!(snapshot.gathered_at_unix_ms > 0);
+    // Filtering invariant: G1 must never appear in the response.
+    assert!(
+        snapshot.pools.iter().all(|p| p.pool != "G1"),
+        "G1 must be filtered out, got {:?}",
+        snapshot.pools
+    );
+}
+
+/// Counterpart: `metrics=true` with no observability plumbed in logs a warning
+/// and silently skips the module. `list_modules` must NOT report `Metrics`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn register_control_plane_skips_metrics_without_observability() {
+    let fx = fixture().await;
+
+    let registry = BlockRegistry::builder().build();
+    let g2 = Arc::new(
+        TestManagerBuilder::<G2>::new()
+            .block_count(G2_BLOCK_COUNT)
+            .block_size(BLOCK_SIZE)
+            .registry(registry.clone())
+            .build(),
+    );
+    let leader = Arc::new(
+        InstanceLeader::builder()
+            // No `.observability(...)` call.
+            .messenger(fx.server.messenger().clone())
+            .registry(registry)
+            .g2_manager(g2)
+            .workers(vec![])
+            .build()
+            .expect("build leader"),
+    );
+
+    let _plane = leader
+        .register_control_plane(false, false, true)
+        .expect("register control plane");
+
+    let control = LeaderControlClient::new(fx.client.messenger().clone(), fx.server.instance_id());
+    let modules = control.list_modules().await.expect("list_modules");
+    assert!(
+        !modules.contains(&ModuleId::Metrics),
+        "metrics must NOT be registered without observability; got {modules:?}"
+    );
 }

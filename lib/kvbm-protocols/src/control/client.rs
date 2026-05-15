@@ -16,6 +16,7 @@ use serde::de::DeserializeOwned;
 use velo::Messenger;
 use velo_ext::InstanceId;
 
+use super::modules::metrics::MetricsClient;
 use super::modules::test::TestClient;
 use super::modules::transfer::TransferClient;
 use super::{
@@ -107,6 +108,11 @@ impl LeaderControlClient {
     /// `search_scatter`).
     pub fn transfer(&self) -> TransferClient {
         TransferClient::new(self.chan.clone())
+    }
+
+    /// Sub-client for the opt-in `metrics` module (`snapshot`).
+    pub fn metrics(&self) -> MetricsClient {
+        MetricsClient::new(self.chan.clone())
     }
 
     /// Ask the leader which control modules are enabled on this instance.
