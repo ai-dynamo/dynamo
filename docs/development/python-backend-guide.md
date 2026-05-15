@@ -8,7 +8,7 @@ title: Writing a Python Unified Backend
 
 > **New — Dynamo's unified backend.** This guide covers the new
 > **unified backend** infrastructure in
-> [`dynamo.common.backend`](../../components/src/dynamo/common/backend/):
+> [`dynamo.common.backend`](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/common/backend):
 > a shared `LLMEngine` ABC that vLLM, SGLang, TRT-LLM, and a sample
 > engine already implement, and that any custom Python engine can plug
 > into the same way. For the Rust version of the same contract see
