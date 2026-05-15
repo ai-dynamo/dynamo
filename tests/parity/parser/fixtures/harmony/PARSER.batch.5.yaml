@@ -56,6 +56,7 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
   PARSER.batch.5.d:
     description: Multi-call, last call missing only end marker (body complete)
     ref: dynamo

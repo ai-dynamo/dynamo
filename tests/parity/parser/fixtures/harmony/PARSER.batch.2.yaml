@@ -66,6 +66,7 @@ cases:
           arguments:
             timezone: EST
         normal_text: I need both.   Done.
+        reason: "Dynamo drops surrounding-prose commentary blocks; SGLang extracts them and emits the wrapping prose as normal_text"
   PARSER.batch.2.d:
     description: Same-name twice
     ref: dynamo
@@ -91,6 +92,7 @@ cases:
           arguments:
             location: LA
         normal_text: ''
+        reason: "Dynamo drops back-to-back commentary blocks; SGLang extracts them"
   PARSER.batch.2.b:
     description: Two back-to-back fence pairs — not applicable to this family
     reason: |-

@@ -43,6 +43,7 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
   PARSER.batch.4.c:
     description: No to=functions.X recipient
     ref: dynamo
