@@ -65,6 +65,10 @@ const (
 	KubeAnnotationDeploymentStrategy                    = "nvidia.com/deployment-strategy"
 	KubeAnnotationDeploymentRollingUpdateMaxSurge       = "nvidia.com/deployment-rolling-update-max-surge"
 	KubeAnnotationDeploymentRollingUpdateMaxUnavailable = "nvidia.com/deployment-rolling-update-max-unavailable"
+	// legacyLWSInstanceIDLabel was used by the pre-native-scaling LWS path,
+	// which created one LeaderWorkerSet per DCD replica: <dcd-name>-0,
+	// <dcd-name>-1, etc. New native-scaling LWS objects must not carry it.
+	legacyLWSInstanceIDLabel = "instance-id"
 )
 
 // DynamoComponentDeploymentReconciler reconciles a DynamoComponentDeployment object
@@ -316,12 +320,25 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 		anyModified = true
 	}
 
+	// During a v1.1.0 -> native-scaling upgrade, the desired LWS name
+	// deliberately matches the old first indexed object (<dcd-name>-0).
+	// SyncResource updates that object's spec but does not rewrite metadata, so
+	// remove the old instance-id label before the legacy cleanup below runs.
+	if _, ok := lwsObj.Labels[legacyLWSInstanceIDLabel]; ok {
+		original := lwsObj.DeepCopy()
+		delete(lwsObj.Labels, legacyLWSInstanceIDLabel)
+		if err := r.Patch(ctx, lwsObj, client.MergeFrom(original)); err != nil {
+			return ComponentReconcileResult{}, fmt.Errorf("remove legacy instance-id label from LeaderWorkerSet %q: %w", lwsObj.Name, err)
+		}
+		anyModified = true
+	}
+
 	// Clean up legacy per-replica LeaderWorkerSets and PodGroups created
 	// before the move to native LWS scaling. The legacy code path stamped an
 	// "instance-id" label on each per-replica resource; the single-LWS path
 	// no longer sets it, so its presence reliably identifies legacy objects.
 	// We list once per resource type and prune anything we still own.
-	hasInstanceID, err := labels.NewRequirement("instance-id", selection.Exists, nil)
+	hasInstanceID, err := labels.NewRequirement(legacyLWSInstanceIDLabel, selection.Exists, nil)
 	if err != nil {
 		return ComponentReconcileResult{}, fmt.Errorf("build legacy label selector: %w", err)
 	}
@@ -337,6 +354,11 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 	for i := range legacyLWSList.Items {
 		legacy := &legacyLWSList.Items[i]
 		if !metav1.IsControlledBy(legacy, dynamoComponentDeployment) {
+			continue
+		}
+		// The active native-scaling LWS reuses the old "-0" name. If it was
+		// listed with stale metadata, never delete it as a legacy excess object.
+		if legacy.Name == lwsObj.Name {
 			continue
 		}
 		logger.Info("Deleting legacy indexed LeaderWorkerSet", "name", legacy.Name)
@@ -540,7 +562,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	logs := log.FromContext(ctx)
 	logs.Info("Generating LeaderWorkerSet")
 
-	kubeName := opt.dynamoComponentDeployment.Name
+	kubeName := leaderWorkerSetName(opt.dynamoComponentDeployment)
 	kubeNs := opt.dynamoComponentDeployment.Namespace
 	labels := dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment)
 
@@ -591,6 +613,18 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	}
 
 	return leaderWorkerSet, false, nil
+}
+
+// leaderWorkerSetName returns the single native-scaling LWS name.
+//
+// Before native LWS scaling, the operator created one LWS per DCD replica,
+// named <dcd-name>-0, <dcd-name>-1, and so on. Native scaling creates exactly
+// one LWS and stores the replica count in LeaderWorkerSet.Spec.Replicas, but we
+// keep the <dcd-name>-0 resource name so an existing v1.1.0 first replica can
+// be adopted and so the LWS-owned headless service does not collide with the
+// operator's ClusterIP component service at <dcd-name>.
+func leaderWorkerSetName(dcd *nvidiacomv1beta1.DynamoComponentDeployment) string {
+	return fmt.Sprintf("%s-0", dcd.Name)
 }
 
 func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) error {
@@ -1111,8 +1145,12 @@ func (r *DynamoComponentDeploymentReconciler) hasExistingLegacyWorkerSelector(
 	}
 
 	if r.RuntimeConfig != nil && r.RuntimeConfig.LWSEnabled {
+		// Check the restored native LWS name for legacy worker selectors. This
+		// keeps alpha-era worker labels stable while an existing "-0" LWS is
+		// being adopted during upgrade.
+		lwsName := leaderWorkerSetName(dcd)
 		leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{}
-		if err := r.Get(ctx, types.NamespacedName{Name: dcd.Name, Namespace: dcd.Namespace}, leaderWorkerSet); err == nil {
+		if err := r.Get(ctx, types.NamespacedName{Name: lwsName, Namespace: dcd.Namespace}, leaderWorkerSet); err == nil {
 			template := leaderWorkerSet.Spec.LeaderWorkerTemplate
 			if template.LeaderTemplate != nil && hasLegacyWorkerSelector(template.LeaderTemplate.Labels, componentType) {
 				return true, nil
@@ -1121,7 +1159,7 @@ func (r *DynamoComponentDeploymentReconciler) hasExistingLegacyWorkerSelector(
 				return true, nil
 			}
 		} else if !k8serrors.IsNotFound(err) {
-			return false, fmt.Errorf("failed to get leaderworkerset %s/%s: %w", dcd.Namespace, dcd.Name, err)
+			return false, fmt.Errorf("failed to get leaderworkerset %s/%s: %w", dcd.Namespace, lwsName, err)
 		}
 	}
 
