@@ -1,0 +1,29 @@
+---
+source: lib/kvbm-consolidator/tests/e2e.rs
+assertion_line: 233
+expression: collected
+---
+- - 0
+  - - type: BlockStored
+      block_hashes:
+        - 3114443937531979
+      token_ids:
+        - 10
+        - 20
+        - 30
+        - 40
+      block_size: 4
+    - type: BlockStored
+      block_hashes:
+        - 5370979798324801
+      parent_block_hash: 3114443937531979
+      token_ids:
+        - 50
+        - 60
+        - 70
+        - 80
+      block_size: 4
+    - type: BlockRemoved
+      block_hashes:
+        - 3114443937531979
+  - 0

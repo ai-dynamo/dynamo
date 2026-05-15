@@ -70,6 +70,11 @@ pub enum ConformanceFailure {
     CleanupFailed(String),
     SecondCleanupFailed(String),
     CleanupWithoutStartFailed(String),
+    KvEventSourcesFailed(String),
+    KvEventSourcesNotIdempotent,
+    MetricsSourcesFailed(String),
+    MetricsSourcesNotIdempotent,
+    MetricsSnapshotTooSlow { took: Duration },
 }
 
 impl std::fmt::Display for ConformanceFailure {
@@ -103,6 +108,23 @@ impl std::fmt::Display for ConformanceFailure {
                 "cleanup() failed on a never-started engine: {m} \
                  (Worker calls cleanup() after start() raises, so engines must \
                  be null-safe against partial / no allocation)"
+            ),
+            KvEventSourcesFailed(m) => write!(f, "kv_event_sources() failed: {m}"),
+            KvEventSourcesNotIdempotent => write!(
+                f,
+                "kv_event_sources() returned different dp_rank set on a second call \
+                 (the descriptor list must be stable for the engine's lifetime)"
+            ),
+            MetricsSourcesFailed(m) => write!(f, "metrics_sources() failed: {m}"),
+            MetricsSourcesNotIdempotent => write!(
+                f,
+                "metrics_sources() returned different dp_rank set on a second call \
+                 (the descriptor list must be stable for the engine's lifetime)"
+            ),
+            MetricsSnapshotTooSlow { took } => write!(
+                f,
+                "SnapshotSource.snapshot took {took:?} (must be a cheap field read, \
+                 < 1 ms; an engine-internal call would land in the 10s of ms)"
             ),
         }
     }
@@ -141,7 +163,14 @@ where
     // 4. Cancellation is observed within a bounded deadline.
     check_cancellation(&engine, &config.model, DEFAULT_CANCEL_DEADLINE).await?;
 
-    // 5. cleanup() succeeds and is idempotent.
+    // 5. KV-aware-routing source descriptors satisfy their contracts:
+    //    - kv_event_sources / metrics_sources don't error
+    //    - rank sets are stable across repeated calls
+    //    - SnapshotSource.snapshot is a cheap field read (< 1 ms)
+    check_kv_event_sources(&engine).await?;
+    check_metrics_sources(&engine).await?;
+
+    // 6. cleanup() succeeds and is idempotent.
     engine
         .cleanup()
         .await
@@ -241,6 +270,62 @@ async fn check_concurrent_generates<E: LLMEngine>(
     });
     for result in futures::future::join_all(futs).await {
         result?;
+    }
+    Ok(())
+}
+
+/// Ceiling for a snapshot read. An engine that accidentally calls into its
+/// underlying inference engine here lands in the 10s of ms and stalls the
+/// publish loop.
+const SNAPSHOT_MAX_LATENCY: Duration = Duration::from_millis(1);
+
+async fn check_kv_event_sources<E: LLMEngine>(engine: &E) -> Result<(), ConformanceFailure> {
+    let first = engine
+        .kv_event_sources()
+        .await
+        .map_err(|e| KvEventSourcesFailed(e.to_string()))?;
+    let second = engine
+        .kv_event_sources()
+        .await
+        .map_err(|e| KvEventSourcesFailed(e.to_string()))?;
+    let ranks_a: Vec<u32> = first.iter().map(|s| s.dp_rank()).collect();
+    let ranks_b: Vec<u32> = second.iter().map(|s| s.dp_rank()).collect();
+    if ranks_a != ranks_b {
+        return Err(KvEventSourcesNotIdempotent);
+    }
+    Ok(())
+}
+
+async fn check_metrics_sources<E: LLMEngine>(engine: &E) -> Result<(), ConformanceFailure> {
+    let first = engine
+        .metrics_sources()
+        .await
+        .map_err(|e| MetricsSourcesFailed(e.to_string()))?;
+    let second = engine
+        .metrics_sources()
+        .await
+        .map_err(|e| MetricsSourcesFailed(e.to_string()))?;
+    let ranks_a: Vec<u32> = first.iter().map(|s| s.dp_rank).collect();
+    let ranks_b: Vec<u32> = second.iter().map(|s| s.dp_rank).collect();
+    if ranks_a != ranks_b {
+        return Err(MetricsSourcesNotIdempotent);
+    }
+    // Probe snapshot latency on every returned source. The closure is what
+    // `Worker` invokes under the GIL on a tokio interval; if it's slow
+    // here it'll stall the publish loop in production. Take min-of-3 so
+    // a contended CI runner doesn't flake on a single-sample outlier.
+    for src in &first {
+        let took = (0..3)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let _ = (src.snapshot)();
+                started.elapsed()
+            })
+            .min()
+            .unwrap_or_default();
+        if took > SNAPSHOT_MAX_LATENCY {
+            return Err(MetricsSnapshotTooSlow { took });
+        }
     }
     Ok(())
 }

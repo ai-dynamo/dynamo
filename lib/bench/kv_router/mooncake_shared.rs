@@ -32,7 +32,6 @@ pub enum MooncakeIndexerKind {
     ConcurrentRadixTree,
     ConcurrentRadixTreeCompressed,
     BranchShardedCrtc,
-    AnchorAwareBranchShardedCrtc,
 }
 
 #[derive(Clone, Debug)]
@@ -97,20 +96,6 @@ impl MooncakeIndexerConfig {
         }
     }
 
-    pub fn anchor_aware_branch_sharded_crtc(
-        num_shards: usize,
-        num_event_workers_per_shard: usize,
-        prefix_depth: usize,
-    ) -> Self {
-        Self {
-            kind: MooncakeIndexerKind::AnchorAwareBranchShardedCrtc,
-            num_shards,
-            num_event_workers_per_shard,
-            prefix_depth,
-            ..Self::radix_tree()
-        }
-    }
-
     pub fn short_name(&self) -> &'static str {
         match self.kind {
             MooncakeIndexerKind::RadixTree => "radix-tree",
@@ -120,7 +105,6 @@ impl MooncakeIndexerConfig {
                 "concurrent-radix-tree-compressed"
             }
             MooncakeIndexerKind::BranchShardedCrtc => "branch-sharded-crtc",
-            MooncakeIndexerKind::AnchorAwareBranchShardedCrtc => "anchor-aware-branch-sharded-crtc",
         }
     }
 
@@ -131,7 +115,6 @@ impl MooncakeIndexerConfig {
                 | MooncakeIndexerKind::ConcurrentRadixTree
                 | MooncakeIndexerKind::ConcurrentRadixTreeCompressed
                 | MooncakeIndexerKind::BranchShardedCrtc
-                | MooncakeIndexerKind::AnchorAwareBranchShardedCrtc
         )
     }
 
@@ -140,11 +123,7 @@ impl MooncakeIndexerConfig {
     }
 
     pub fn supports_approximate(&self) -> bool {
-        !matches!(
-            self.kind,
-            MooncakeIndexerKind::BranchShardedCrtc
-                | MooncakeIndexerKind::AnchorAwareBranchShardedCrtc
-        )
+        !matches!(self.kind, MooncakeIndexerKind::BranchShardedCrtc)
     }
 
     pub fn from_short_name(name: &str, num_event_workers: usize) -> anyhow::Result<Self> {
@@ -156,11 +135,8 @@ impl MooncakeIndexerConfig {
                 Self::concurrent_radix_tree_compressed(num_event_workers)
             }
             "branch-sharded-crtc" => Self::branch_sharded_crtc(2, num_event_workers, 2),
-            "anchor-aware-branch-sharded-crtc" => {
-                Self::anchor_aware_branch_sharded_crtc(2, num_event_workers, 2)
-            }
             _ => anyhow::bail!(
-                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, branch-sharded-crtc, anchor-aware-branch-sharded-crtc",
+                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, branch-sharded-crtc",
                 name
             ),
         };
@@ -201,23 +177,6 @@ impl MooncakeIndexerConfig {
                 ))
             }
             MooncakeIndexerKind::BranchShardedCrtc => {
-                let shards = (0..self.num_shards)
-                    .map(|_| {
-                        ThreadPoolIndexer::new_with_metrics(
-                            ConcurrentRadixTreeCompressed::new(),
-                            self.num_event_workers_per_shard,
-                            block_size,
-                            Some(Arc::clone(&metrics)),
-                        )
-                    })
-                    .collect();
-                Arc::new(BranchShardedIndexer::new_with_options(
-                    shards,
-                    self.prefix_depth,
-                    block_size,
-                ))
-            }
-            MooncakeIndexerKind::AnchorAwareBranchShardedCrtc => {
                 let shards = (0..self.num_shards)
                     .map(|_| {
                         ThreadPoolIndexer::new_with_metrics(
@@ -288,11 +247,6 @@ impl MooncakeIndexerConfig {
             }
             MooncakeIndexerKind::BranchShardedCrtc => {
                 anyhow::bail!("branch-sharded-crtc does not support approximate pruning")
-            }
-            MooncakeIndexerKind::AnchorAwareBranchShardedCrtc => {
-                anyhow::bail!(
-                    "anchor-aware-branch-sharded-crtc does not support approximate pruning"
-                )
             }
         };
         Ok(indexer)

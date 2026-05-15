@@ -15,7 +15,8 @@ use crate::telemetry::bus::TelemetryBus;
 
 pub use config::{AgentTracePolicy, is_enabled, policy};
 pub(crate) use integration::{
-    record_llm_metric_tokens, request_metrics, start_tool_event_ingest_from_policy,
+    build_agent_trace_request_end_state, record_llm_metric_tokens, request_metrics,
+    start_tool_event_ingest_from_policy, wrap_agent_trace_request_end_stream,
 };
 pub(crate) use record::validate_tool_record;
 pub use record::{emit_request_end, publish_tool_record};
