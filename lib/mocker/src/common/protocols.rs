@@ -927,8 +927,12 @@ impl MockEngineArgs {
 
     pub fn from_json_str(content: &str) -> anyhow::Result<Self> {
         let mut deserializer = serde_json::Deserializer::from_str(content);
-        serde_path_to_error::deserialize(&mut deserializer)
-            .map_err(|error| anyhow::anyhow!("{error}"))
+        let args = serde_path_to_error::deserialize(&mut deserializer)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        deserializer
+            .end()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        Ok(args)
     }
 }
 
@@ -1004,6 +1008,13 @@ mod tests {
         assert!(
             invalid.to_string().contains("gpu_memory_utilization"),
             "unexpected error: {invalid}",
+        );
+
+        let trailing = MockEngineArgs::from_json_str(r#"{"block_size": 16} true"#)
+            .expect_err("trailing JSON should be rejected");
+        assert!(
+            trailing.to_string().contains("trailing characters"),
+            "unexpected error: {trailing}",
         );
     }
 
