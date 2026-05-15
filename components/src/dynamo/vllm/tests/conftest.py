@@ -16,6 +16,26 @@ import pytest
 # `None` = not yet attempted, `True` = succeeded, `False` = raised.
 _omni_importable: bool | None = None
 _multimodal_utils_importable: bool | None = None
+_vllm_internals_importable: bool | None = None
+
+
+def _can_import_vllm_internals() -> bool:
+    """Try to import a vllm internal submodule once and cache the result.
+
+    ``find_spec("vllm")`` returns non-None even when vllm is only partially
+    installed (e.g. the top-level package exists but vllm.v1, vllm.config,
+    vllm.inputs etc. are absent).  An actual import attempt is the only
+    reliable way to detect this — used to gate all test_vllm_* files and
+    any other tests that import vllm internals.
+    """
+    global _vllm_internals_importable
+    if _vllm_internals_importable is None:
+        try:
+            importlib.import_module("vllm.v1.engine.async_llm")
+            _vllm_internals_importable = True
+        except Exception:
+            _vllm_internals_importable = False
+    return _vllm_internals_importable
 
 
 def _can_import_multimodal_utils() -> bool:
@@ -57,28 +77,47 @@ def _can_import_omni() -> bool:
 
 
 def pytest_ignore_collect(collection_path, config):
-    """Skip collecting vllm test files if vllm module isn't installed.
-    Checks test file naming pattern: test_vllm_*.py
+    """Skip collecting test files that need vllm internals or optional deps.
+
+    Uses real import attempts (not find_spec) because vllm can be partially
+    installed: the top-level package resolves under find_spec but submodules
+    such as vllm.v1, vllm.config, and vllm.inputs are absent in the
+    dynamo-runtime image, causing collection errors at import time.
     """
     filename = collection_path.name
-    if filename.startswith("test_vllm_"):
-        if importlib.util.find_spec("vllm") is None:
-            return True  # vllm not available, skip this file
-    # Omni tests import dynamo.vllm.omni.* which transitively imports
-    # vllm_omni at module load. On CPU-only sample-runtime runners the
-    # import chain reaches vllm._C and raises (NotImplementedError when
-    # libcuda.so.1 is missing). Each file's local try/except ImportError
-    # doesn't catch this, so skip collection up-front if the canonical
-    # omni module isn't importable.
     parts = collection_path.parts
+
+    # test_vllm_*.py files import vllm internals (vllm.v1, vllm.config, …).
+    # Replace the find_spec guard with a real import check.
+    if filename.startswith("test_vllm_") and not _can_import_vllm_internals():
+        return True
+
+    # tests/frontend/test_prepost*.py import vllm.entrypoints.openai which
+    # also requires full vllm internals absent in dynamo-runtime.
+    if filename.startswith("test_prepost") and "frontend" in parts:
+        if not _can_import_vllm_internals():
+            return True
+
+    # examples/backends/sglang/test_sglang_expert_info.py requires pybase64
+    # which is not installed in all CI images.
+    if filename == "test_sglang_expert_info.py":
+        if importlib.util.find_spec("pybase64") is None:
+            return True
+
     # multimodal_utils tests import dynamo.vllm.multimodal_utils which
     # transitively imports vllm internals not present in dynamo-runtime.
     if "multimodal_utils" in parts and filename.startswith("test_"):
         if not _can_import_multimodal_utils():
             return True
+
+    # Omni tests import dynamo.vllm.omni.* which transitively imports
+    # vllm_omni at module load. On CPU-only sample-runtime runners the
+    # import chain reaches vllm._C and raises (NotImplementedError when
+    # libcuda.so.1 is missing).
     if "omni" in parts and filename.startswith("test_"):
         if not _can_import_omni():
             return True
+
     return None
 
 
