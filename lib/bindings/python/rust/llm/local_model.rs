@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::*;
 use dynamo_kv_router::protocols::RoutingConstraints as RsRoutingConstraints;
@@ -14,7 +14,7 @@ pub struct RoutingConstraints {
     #[pyo3(get, set)]
     pub required_taints: HashSet<String>,
     #[pyo3(get, set)]
-    pub preferred_taints: HashSet<String>,
+    pub preferred_taints: HashMap<String, f32>,
 }
 
 impl From<RoutingConstraints> for RsRoutingConstraints {

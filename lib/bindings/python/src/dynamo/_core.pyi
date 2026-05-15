@@ -548,13 +548,21 @@ class ModelRuntimeConfig:
         ...
 
 class RoutingConstraints:
+    """
+    Request-side routing constraints.
+
+    ``required_taints`` is a hard eligibility filter.
+    ``preferred_taints`` maps taint -> weight in ``(-1.0, 1.0)``.
+    Positive weights prefer matching workers, negative weights avoid them,
+    and ``0.0`` is neutral.
+    """
     required_taints: Set[str]
-    preferred_taints: Set[str]
+    preferred_taints: Dict[str, float]
 
     def __init__(
         self,
         required_taints: Optional[Set[str]] = None,
-        preferred_taints: Optional[Set[str]] = None,
+        preferred_taints: Optional[Dict[str, float]] = None,
     ) -> None: ...
 
 class OverlapScores:

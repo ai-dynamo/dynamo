@@ -290,15 +290,17 @@ impl NvExtResponseFieldSelection {
 /// Runtime serialization still uses `dynamo_kv_router::protocols::RoutingConstraints`;
 /// this mirror exists so `NvExt` can expose the concrete field shape without
 /// making the kv-router crate depend on utoipa.
-#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct RoutingConstraintsSchema {
     /// Worker taints that must be matched for the request to be eligible.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_taints: Vec<String>,
 
-    /// Reserved for future soft-preference routing. Currently not used by routing.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub preferred_taints: Vec<String>,
+    /// Soft preference weights keyed by worker taint.
+    /// Positive weights prefer matching workers; negative weights avoid them.
+    /// A weight of 0.0 is neutral and has no effect.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub preferred_taints: std::collections::HashMap<String, f32>,
 }
 
 /// NVIDIA LLM extensions to the OpenAI API
@@ -499,7 +501,18 @@ impl NvExt {
     }
 }
 
-fn validate_nv_ext(_nv_ext: &NvExt) -> Result<(), ValidationError> {
+fn validate_nv_ext(nv_ext: &NvExt) -> Result<(), ValidationError> {
+    if let Some(routing_constraints) = nv_ext.routing_constraints.as_ref()
+        && routing_constraints
+            .preferred_taints
+            .values()
+            .any(|weight| !(-1.0..1.0).contains(weight))
+    {
+        let mut error = ValidationError::new("preferred_taint_weight_out_of_range");
+        error.message = Some("preferred taint weights must be in the range (-1.0, 1.0)".into());
+        return Err(error);
+    }
+
     Ok(())
 }
 

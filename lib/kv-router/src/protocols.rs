@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::Range;
 use std::sync::LazyLock;
@@ -171,12 +171,12 @@ pub trait WorkerConfigLike {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct RoutingConstraints {
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub required_taints: HashSet<String>,
-    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
-    pub preferred_taints: HashSet<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub preferred_taints: HashMap<String, f32>,
 }
 
 impl RoutingConstraints {
@@ -192,9 +192,19 @@ impl RoutingConstraints {
 
     pub fn preferred_taint_matches(&self, worker_taints: &HashSet<String>) -> usize {
         self.preferred_taints
-            .iter()
+            .keys()
             .filter(|taint| worker_taints.contains(*taint))
             .count()
+    }
+
+    pub fn preferred_taint_multiplier(&self, worker_taints: &HashSet<String>) -> f64 {
+        self.preferred_taints
+            .iter()
+            .filter(|(taint, _)| worker_taints.contains(*taint))
+            .fold(1.0, |multiplier, (_, weight)| {
+                let weight = f64::from(*weight).clamp(-0.999_999, 0.999_999);
+                multiplier * (1.0 - weight)
+            })
     }
 }
 

@@ -47,10 +47,6 @@ const fn default_prefill_load_scale() -> f64 {
     1.0
 }
 
-const fn default_preferred_taint_bias_pct() -> f64 {
-    0.0
-}
-
 pub const OVERLAP_SCORE_CREDIT_RANGE_ERROR: &str =
     "overlap_score_credit must be between 0.0 and 1.0";
 pub const OVERLAP_SCORE_CREDIT_MIGRATION_ERROR: &str = concat!(
@@ -296,7 +292,6 @@ struct KvRouterConfigSerde {
     host_cache_hit_weight: f64,
     disk_cache_hit_weight: f64,
     router_temperature: f64,
-    preferred_taint_bias_pct: f64,
     use_kv_events: bool,
     durable_kv_events: bool,
     router_replica_sync: bool,
@@ -329,7 +324,6 @@ impl Default for KvRouterConfigSerde {
             host_cache_hit_weight: config.host_cache_hit_weight,
             disk_cache_hit_weight: config.disk_cache_hit_weight,
             router_temperature: config.router_temperature,
-            preferred_taint_bias_pct: config.preferred_taint_bias_pct,
             use_kv_events: config.use_kv_events,
             durable_kv_events: config.durable_kv_events,
             router_replica_sync: config.router_replica_sync,
@@ -379,13 +373,6 @@ pub struct KvRouterConfig {
 
     #[validate(range(min = 0.0))]
     pub router_temperature: f64,
-
-    /// Fractional score reduction applied once per preferred taint match.
-    /// Higher routing scores are worse, so matching preferred taints lowers
-    /// the score multiplicatively. Default: 0.0 (disabled).
-    #[serde(default = "default_preferred_taint_bias_pct")]
-    #[validate(range(min = 0.0, max = 1.0))]
-    pub preferred_taint_bias_pct: f64,
 
     pub use_kv_events: bool,
 
@@ -489,7 +476,6 @@ impl Default for KvRouterConfig {
             host_cache_hit_weight: default_host_cache_hit_weight(),
             disk_cache_hit_weight: default_disk_cache_hit_weight(),
             router_temperature: 0.0,
-            preferred_taint_bias_pct: default_preferred_taint_bias_pct(),
             use_kv_events: true,
             durable_kv_events: false, // default to NATS Core (local indexer mode)
             router_replica_sync: false,
@@ -535,7 +521,6 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             host_cache_hit_weight: compat.host_cache_hit_weight,
             disk_cache_hit_weight: compat.disk_cache_hit_weight,
             router_temperature: compat.router_temperature,
-            preferred_taint_bias_pct: compat.preferred_taint_bias_pct,
             use_kv_events: compat.use_kv_events,
             durable_kv_events: compat.durable_kv_events,
             router_replica_sync: compat.router_replica_sync,
