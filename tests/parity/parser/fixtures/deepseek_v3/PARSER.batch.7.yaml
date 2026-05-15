@@ -113,11 +113,3 @@ cases:
         normal_text: ''
       vllm: *id004
       sglang: *id004
-  PARSER.batch.7.e:
-    description: Argument value contains family separator (single call) — n/a for this family
-    reason: |-
-      Argument-content vs. separator-character hazard is specific to llama3_json's choice of semicolon as a delimiter; deepseek_v3 uses a delimiter-based syntax where arbitrary characters in argument strings can't collide with the separator.
-  PARSER.batch.7.f:
-    description: Argument value contains family separator (parallel calls) — n/a for this family
-    reason: |-
-      Parallel-call streaming-split safety for separator-in-argument is specific to llama3_json's semicolon delimiter; deepseek_v3's parser doesn't face this hazard.

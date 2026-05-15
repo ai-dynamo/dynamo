@@ -106,11 +106,3 @@ cases:
         unavailable: vLLM has no parser for family='nemotron_deci'
       sglang:
         unavailable: SGLang has no detector for family='nemotron_deci'
-  PARSER.batch.7.e:
-    description: Argument value contains family separator (single call) — n/a for this family
-    reason: |-
-      Argument-content vs. separator-character hazard is specific to llama3_json's choice of semicolon as a delimiter; nemotron_deci uses a delimiter-based syntax where arbitrary characters in argument strings can't collide with the separator.
-  PARSER.batch.7.f:
-    description: Argument value contains family separator (parallel calls) — n/a for this family
-    reason: |-
-      Parallel-call streaming-split safety for separator-in-argument is specific to llama3_json's semicolon delimiter; nemotron_deci's parser doesn't face this hazard.
