@@ -92,18 +92,6 @@ def pytest_ignore_collect(collection_path, config):
     if filename.startswith("test_vllm_") and not _can_import_vllm_internals():
         return True
 
-    # tests/frontend/test_prepost*.py import vllm.entrypoints.openai which
-    # also requires full vllm internals absent in dynamo-runtime.
-    if filename.startswith("test_prepost") and "frontend" in parts:
-        if not _can_import_vllm_internals():
-            return True
-
-    # examples/backends/sglang/test_sglang_expert_info.py requires pybase64
-    # which is not installed in all CI images.
-    if filename == "test_sglang_expert_info.py":
-        if importlib.util.find_spec("pybase64") is None:
-            return True
-
     # multimodal_utils tests import dynamo.vllm.multimodal_utils which
     # transitively imports vllm internals not present in dynamo-runtime.
     if "multimodal_utils" in parts and filename.startswith("test_"):
