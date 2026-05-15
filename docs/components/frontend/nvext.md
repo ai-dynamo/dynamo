@@ -43,11 +43,13 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
 | `session_control` | object | `None` | Router | Session lifecycle and sticky routing for subagent KV isolation. See [Session Control](#session-control). |
 
-Related root-level Dynamo output option:
+Related root-level Dynamo compatibility fields:
 
 | Field | Type | Default | Consumed By | Description |
 |-------|------|---------|-------------|-------------|
 | `return_tokens_as_token_ids` | `bool` | `false` | Response builder | Formats logprob token strings as `token_id:<id>` instead of decoded text. |
+| `cache_salt` | `string` | `None` | Backend | Compatibility alias for `nvext.cache_salt`; `nvext.cache_salt` takes precedence when both are present. |
+| `stop_token_ids` | `u32[]` | `None` | Preprocessor | Compatibility alias for integer token stop IDs, equivalent to passing token IDs in the normal `stop` array. |
 
 `return_tokens_as_token_ids` only changes returned logprob token display. To stop on
 token IDs, pass integer IDs in the normal `stop` array, for example
@@ -207,7 +209,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 | `worker_id` | `extra_fields: ["worker_id"]` | Prefill/decode worker IDs and data parallel ranks that processed the request. |
 | `timing` | `extra_fields: ["timing"]` | Per-request timing information (TTFT, ITL, queue time, etc.). |
 | `routed_experts` | `extra_fields: ["routed_experts"]` | Routed expert capture payload returned by SGLang-backed requests. |
-| `engine_data` | `extra_fields: ["engine_data"]` | Opaque backend-provided engine metadata. |
+| `engine_data` | `extra_fields: ["engine_data"]` | Opaque backend-provided engine metadata. For chat token-in requests, Dynamo also includes generated `completion_token_ids` and, when available, `completion_logprobs` under this object for compatibility with rl-sdk token clients. |
 | `stop_reason` | `extra_fields: ["stop_reason"]` | Backend-specific matched stop condition, returned under `nvext` because it is not part of the OpenAI completions schema. Dynamo currently serves this as a response-level field for single-choice requests; supporting `n > 1` will require an indexed per-choice shape. |
 | `completion_token_ids` | `extra_fields: ["completion_token_ids"]` | Generated token IDs accumulated across the chat-completions response and emitted on the final chunk. Supported only for single-choice requests (`n <= 1`). |
 | `token_ids` | Automatic (GAIE Stage 1) | Tokenized prompt for reuse in Stage 2 query-only mode. |

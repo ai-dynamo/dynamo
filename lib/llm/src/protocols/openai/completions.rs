@@ -252,7 +252,14 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
     }
 
     fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
-        self.inner.stop.as_ref().and_then(|stop| stop.token_ids())
+        if let Some(ids) = self.inner.stop.as_ref().and_then(|stop| stop.token_ids()) {
+            return Some(ids);
+        }
+        self.unsupported_fields
+            .get("stop_token_ids")
+            .and_then(|value| {
+                serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone()).ok()
+            })
     }
 
     fn nvext(&self) -> Option<&NvExt> {
@@ -733,13 +740,20 @@ mod tests {
         assert_eq!(request.get_stop(), Some(vec!["token_id:576".to_string()]));
         assert_eq!(request.get_stop_token_ids(), None);
 
-        let unsupported_stop_token_ids = json!({
+        let passthrough_stop_token_ids = json!({
             "model": "test-model",
             "prompt": [1, 2, 3],
             "stop_token_ids": [576]
         });
-        let request: NvCreateCompletionRequest = serde_json::from_value(unsupported_stop_token_ids)
+        let request: NvCreateCompletionRequest = serde_json::from_value(passthrough_stop_token_ids)
             .expect("Failed to deserialize request");
-        assert!(ValidateRequest::validate(&request).is_err());
+        ValidateRequest::validate(&request).expect("stop_token_ids should be accepted");
+        assert_eq!(request.get_stop_token_ids(), Some(vec![576]));
+
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("extract stop conditions");
+        assert_eq!(stop_conditions.stop, None);
+        assert_eq!(stop_conditions.stop_token_ids, Some(vec![576]));
     }
 }

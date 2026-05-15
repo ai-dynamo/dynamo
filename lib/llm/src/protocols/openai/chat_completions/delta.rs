@@ -60,8 +60,11 @@ pub struct DeltaGenerator {
     /// Request tracker for per-request metrics (shared with PreprocessedRequest).
     tracker: Arc<RequestTracker>,
     /// Accumulated output token IDs across chunks, emitted on the final chunk
-    /// when `nvext.extra_fields` includes `completion_token_ids`.
+    /// when `nvext.extra_fields` includes `completion_token_ids` or `engine_data`.
     accumulated_completion_token_ids: Vec<TokenIdType>,
+    /// Accumulated per-token logprobs across chunks, emitted under
+    /// `nvext.engine_data.completion_logprobs` on the final chunk.
+    accumulated_completion_logprobs: Vec<f64>,
 }
 
 impl DeltaGenerator {
@@ -79,6 +82,7 @@ impl DeltaGenerator {
             options,
             tracker,
             accumulated_completion_token_ids: Vec::new(),
+            accumulated_completion_logprobs: Vec::new(),
         }
     }
 
@@ -261,9 +265,18 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         self.usage.completion_tokens += token_length;
 
-        if self.options.response_fields.completion_token_ids && !delta.token_ids.is_empty() {
+        if (self.options.response_fields.completion_token_ids
+            || self.options.response_fields.engine_data)
+            && !delta.token_ids.is_empty()
+        {
             self.accumulated_completion_token_ids
                 .extend_from_slice(&delta.token_ids);
+        }
+        if self.options.response_fields.engine_data
+            && let Some(log_probs) = delta.log_probs.as_ref()
+        {
+            self.accumulated_completion_logprobs
+                .extend_from_slice(log_probs);
         }
 
         // If backend provides completion_usage, use it to update usage stats
@@ -331,7 +344,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
                 stop_reason,
             )
             .or_else(|| {
-                if self.options.response_fields.completion_token_ids && finish_reason.is_some() {
+                if (self.options.response_fields.completion_token_ids
+                    || self.options.response_fields.engine_data)
+                    && finish_reason.is_some()
+                {
                     Some(NvExtResponse {
                         worker_id: None,
                         timing: None,
@@ -349,6 +365,28 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             if self.options.response_fields.completion_token_ids && finish_reason.is_some() {
                 nvext_response.completion_token_ids =
                     Some(self.accumulated_completion_token_ids.clone());
+            }
+            if self.options.response_fields.engine_data && finish_reason.is_some() {
+                let mut engine_data = match nvext_response.engine_data.take() {
+                    Some(serde_json::Value::Object(map)) => map,
+                    Some(value) => {
+                        let mut map = serde_json::Map::new();
+                        map.insert("backend".to_string(), value);
+                        map
+                    }
+                    None => serde_json::Map::new(),
+                };
+                engine_data.insert(
+                    "completion_token_ids".to_string(),
+                    serde_json::json!(self.accumulated_completion_token_ids.clone()),
+                );
+                if !self.accumulated_completion_logprobs.is_empty() {
+                    engine_data.insert(
+                        "completion_logprobs".to_string(),
+                        serde_json::json!(self.accumulated_completion_logprobs.clone()),
+                    );
+                }
+                nvext_response.engine_data = Some(serde_json::Value::Object(engine_data));
             }
 
             if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
@@ -739,6 +777,7 @@ mod tests {
             .expect("engine_data should be present");
         assert_eq!(engine_data["kv_transfer_time_ms"], 12.3);
         assert_eq!(engine_data["prefill_compute_time_ms"], 45.6);
+        assert_eq!(engine_data["completion_token_ids"], serde_json::json!([42]));
     }
 
     #[test]
@@ -803,12 +842,60 @@ mod tests {
             .choice_from_postprocessor(backend_output)
             .expect("should produce a response");
 
-        // engine_data is None from backend, so nvext.engine_data should be absent
-        if let Some(nvext) = &response.nvext {
-            assert!(
-                nvext.get("engine_data").is_none() || nvext.get("engine_data").unwrap().is_null(),
-                "engine_data should not appear when backend provides None"
-            );
-        }
+        let nvext = response
+            .nvext
+            .expect("nvext present for engine_data request with generated tokens");
+        let engine_data = nvext
+            .get("engine_data")
+            .expect("engine_data should include generated token IDs");
+        assert_eq!(engine_data["completion_token_ids"], serde_json::json!([42]));
+        assert!(engine_data.get("completion_logprobs").is_none());
+    }
+
+    #[test]
+    fn test_engine_data_accumulates_completion_token_ids_and_logprobs() {
+        let request = create_test_request_with_extra_fields(vec!["engine_data".to_string()]);
+        let mut generator = request.response_generator("req-engine-5".to_string());
+
+        let mut first_output = final_backend_output();
+        first_output.token_ids = vec![7];
+        first_output.tokens = vec![Some("A".to_string())];
+        first_output.text = Some("A".to_string());
+        first_output.log_probs = Some(vec![-0.1]);
+        first_output.finish_reason = None;
+        first_output.disaggregated_params = None;
+
+        let first_response = generator
+            .choice_from_postprocessor(first_output)
+            .expect("first choice generation");
+        assert!(
+            first_response.nvext.is_none(),
+            "engine_data token IDs should be emitted only on the final chunk"
+        );
+
+        let mut final_output = final_backend_output();
+        final_output.token_ids = vec![8, 9];
+        final_output.tokens = vec![Some("B".to_string()), Some("C".to_string())];
+        final_output.text = Some("BC".to_string());
+        final_output.log_probs = Some(vec![-0.2, -0.3]);
+        final_output.disaggregated_params = None;
+
+        let final_response = generator
+            .choice_from_postprocessor(final_output)
+            .expect("final choice generation");
+        let nvext = final_response
+            .nvext
+            .expect("nvext present for engine_data request");
+        let engine_data = nvext
+            .get("engine_data")
+            .expect("engine_data should include generated token metadata");
+        assert_eq!(
+            engine_data["completion_token_ids"],
+            serde_json::json!([7, 8, 9])
+        );
+        assert_eq!(
+            engine_data["completion_logprobs"],
+            serde_json::json!([-0.1, -0.2, -0.3])
+        );
     }
 }

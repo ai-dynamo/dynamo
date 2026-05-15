@@ -99,7 +99,7 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 
 /// Root-level fields accepted for compatibility with token-in clients even
 /// though Dynamo has not modeled them as first-class OpenAI fields.
-pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &["cache_salt"];
+pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &["cache_salt", "stop_token_ids"];
 
 /// Validates that no unsupported fields are present in the request
 pub fn validate_no_unsupported_fields(
