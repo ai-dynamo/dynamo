@@ -62,6 +62,39 @@ def test_load_engine_args_estimates_aic_blocks(monkeypatch):
     ]
 
 
+def test_resolve_aic_blocks_preserves_explicit_zero_inputs(monkeypatch):
+    calls = []
+
+    def fake_estimate_num_gpu_blocks(**kwargs):
+        calls.append(kwargs)
+        return 46000
+
+    monkeypatch.setattr(
+        replay_main, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks
+    )
+
+    raw = {
+        "engine_type": "sglang",
+        "aic_backend": "sglang",
+        "aic_model_path": "/models/mock",
+        "aic_tp_size": 0,
+        "block_size": 0,
+        "max_num_batched_tokens": 0,
+        "gpu_memory_utilization": 0.0,
+        "mem_fraction_static": 0.0,
+        "sglang": {"page_size": 0},
+    }
+
+    replay_main._resolve_aic_num_gpu_blocks(raw)
+
+    assert raw["num_gpu_blocks"] == 46000
+    assert calls[0]["tp_size"] == 0
+    assert calls[0]["block_size"] == 0
+    assert calls[0]["max_num_batched_tokens"] == 0
+    assert calls[0]["gpu_memory_utilization"] == 0.0
+    assert calls[0]["mem_fraction_static"] == 0.0
+
+
 def test_programmatic_replay_estimates_unset_aic_blocks(monkeypatch):
     calls = []
 
@@ -140,3 +173,43 @@ def test_programmatic_aic_dump_preserves_unset_blocks():
 
     assert restored.num_gpu_blocks == 16384
     assert restored_payload["num_gpu_blocks"] is None
+
+
+def test_invalid_json_num_gpu_blocks_type_is_rejected():
+    with pytest.raises(Exception, match="num_gpu_blocks"):
+        MockEngineArgs.from_json(
+            json.dumps(
+                {
+                    "aic_backend": "vllm",
+                    "aic_system": "h200_sxm",
+                    "aic_model_path": "/models/mock",
+                    "num_gpu_blocks": "bad",
+                }
+            )
+        )
+
+
+def test_memory_fraction_setters_validate_range():
+    engine_args = MockEngineArgs(gpu_memory_utilization=0.8, mem_fraction_static=0.7)
+
+    with pytest.raises(ValueError, match="gpu_memory_utilization"):
+        engine_args.gpu_memory_utilization = 1.1
+    assert engine_args.gpu_memory_utilization == 0.8
+
+    with pytest.raises(ValueError, match="mem_fraction_static"):
+        engine_args.mem_fraction_static = -0.1
+    assert engine_args.mem_fraction_static == 0.7
+
+    engine_args.gpu_memory_utilization = None
+    engine_args.mem_fraction_static = None
+
+    assert engine_args.gpu_memory_utilization is None
+    assert engine_args.mem_fraction_static is None
+
+
+def test_json_rejects_invalid_memory_fraction_types():
+    with pytest.raises(Exception, match="gpu_memory_utilization"):
+        MockEngineArgs.from_json(json.dumps({"gpu_memory_utilization": "bad"}))
+
+    with pytest.raises(Exception, match="mem_fraction_static"):
+        MockEngineArgs.from_json(json.dumps({"mem_fraction_static": {}}))

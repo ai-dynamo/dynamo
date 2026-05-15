@@ -54,10 +54,12 @@ def _resolve_block_size_for_capacity(
     block_size: int | None,
     sglang_page_size: int | None,
 ) -> int:
-    if block_size:
+    if block_size is not None:
         return block_size
     if engine_type == "sglang":
-        return sglang_page_size or _DEFAULT_SGLANG_BLOCK_SIZE
+        if sglang_page_size is not None:
+            return sglang_page_size
+        return _DEFAULT_SGLANG_BLOCK_SIZE
     return _DEFAULT_VLLM_BLOCK_SIZE
 
 
@@ -90,12 +92,23 @@ def _estimate_aic_num_gpu_blocks(
         backend_name=aic_backend,
         system=aic_system or _DEFAULT_AIC_SYSTEM,
         model_path=aic_model_path,
-        tp_size=aic_tp_size or 1,
+        tp_size=aic_tp_size if aic_tp_size is not None else 1,
         block_size=resolved_block_size,
-        max_num_batched_tokens=max_num_batched_tokens
-        or _DEFAULT_MAX_NUM_BATCHED_TOKENS,
-        gpu_memory_utilization=gpu_memory_utilization or DEFAULT_GPU_MEMORY_UTILIZATION,
-        mem_fraction_static=mem_fraction_static or DEFAULT_MEM_FRACTION_STATIC,
+        max_num_batched_tokens=(
+            max_num_batched_tokens
+            if max_num_batched_tokens is not None
+            else _DEFAULT_MAX_NUM_BATCHED_TOKENS
+        ),
+        gpu_memory_utilization=(
+            gpu_memory_utilization
+            if gpu_memory_utilization is not None
+            else DEFAULT_GPU_MEMORY_UTILIZATION
+        ),
+        mem_fraction_static=(
+            mem_fraction_static
+            if mem_fraction_static is not None
+            else DEFAULT_MEM_FRACTION_STATIC
+        ),
         backend_version=aic_backend_version,
         moe_tp_size=aic_moe_tp_size,
         moe_ep_size=aic_moe_ep_size,

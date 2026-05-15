@@ -14,7 +14,10 @@ use dynamo_mocker::loadgen::{
     ArrivalSpec, DelaySpec, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
 };
 use dynamo_mocker::replay::ReplayArgsMode;
-use pyo3::{exceptions::PyException, prelude::*};
+use pyo3::{
+    exceptions::{PyException, PyValueError},
+    prelude::*,
+};
 use pythonize::pythonize;
 use serde_json::json;
 use uuid::Uuid;
@@ -258,9 +261,12 @@ impl MockEngineArgs {
         let num_gpu_blocks_explicit = serde_json::from_str::<serde_json::Value>(config_json)
             .ok()
             .and_then(|value| {
-                value
-                    .as_object()
-                    .map(|object| object.get("num_gpu_blocks").is_some_and(|v| !v.is_null()))
+                value.as_object().map(|object| {
+                    object
+                        .get("num_gpu_blocks")
+                        .and_then(|value| value.as_u64())
+                        .is_some()
+                })
             })
             .unwrap_or(false);
         RsMockEngineArgs::from_json_str(config_json)
@@ -467,8 +473,16 @@ impl MockEngineArgs {
     }
 
     #[setter]
-    fn set_gpu_memory_utilization(&mut self, value: Option<f64>) {
+    fn set_gpu_memory_utilization(&mut self, value: Option<f64>) -> PyResult<()> {
+        if let Some(value) = value
+            && !(0.0..=1.0).contains(&value)
+        {
+            return Err(PyValueError::new_err(format!(
+                "gpu_memory_utilization must be in [0, 1], got {value}"
+            )));
+        }
         self.inner.gpu_memory_utilization = value;
+        Ok(())
     }
 
     #[getter]
@@ -477,8 +491,16 @@ impl MockEngineArgs {
     }
 
     #[setter]
-    fn set_mem_fraction_static(&mut self, value: Option<f64>) {
+    fn set_mem_fraction_static(&mut self, value: Option<f64>) -> PyResult<()> {
+        if let Some(value) = value
+            && !(0.0..=1.0).contains(&value)
+        {
+            return Err(PyValueError::new_err(format!(
+                "mem_fraction_static must be in [0, 1], got {value}"
+            )));
+        }
         self.inner.mem_fraction_static = value;
+        Ok(())
     }
 
     #[getter]

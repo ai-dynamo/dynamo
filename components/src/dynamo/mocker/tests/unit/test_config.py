@@ -302,6 +302,40 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
     ]
 
 
+def test_aic_capacity_estimation_preserves_explicit_zero_inputs(monkeypatch):
+    calls = []
+
+    def fake_estimate_num_gpu_blocks(**kwargs):
+        calls.append(kwargs)
+        return 46000
+
+    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks)
+
+    blocks = CONFIG._estimate_aic_num_gpu_blocks(
+        engine_type="sglang",
+        block_size=0,
+        max_num_batched_tokens=0,
+        aic_backend="sglang",
+        aic_system=None,
+        aic_backend_version=None,
+        aic_tp_size=0,
+        aic_model_path="/models/mock",
+        aic_moe_tp_size=None,
+        aic_moe_ep_size=None,
+        aic_attention_dp_size=None,
+        gpu_memory_utilization=0.0,
+        mem_fraction_static=0.0,
+        sglang_page_size=0,
+    )
+
+    assert blocks == 46000
+    assert calls[0]["tp_size"] == 0
+    assert calls[0]["block_size"] == 0
+    assert calls[0]["max_num_batched_tokens"] == 0
+    assert calls[0]["gpu_memory_utilization"] == 0.0
+    assert calls[0]["mem_fraction_static"] == 0.0
+
+
 def test_build_mocker_engine_args_estimates_sglang_blocks_with_static_fraction(
     monkeypatch,
 ):

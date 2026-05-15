@@ -62,11 +62,11 @@ def resolve_planner_profile_data(
 
 def _resolve_block_size_for_capacity(raw: dict) -> int:
     block_size = raw.get("block_size")
-    if block_size:
+    if block_size is not None:
         return block_size
     if raw.get("engine_type") == "sglang":
         sglang = raw.get("sglang")
-        if isinstance(sglang, dict) and sglang.get("page_size"):
+        if isinstance(sglang, dict) and sglang.get("page_size") is not None:
             return sglang["page_size"]
         return _DEFAULT_SGLANG_BLOCK_SIZE
     return _DEFAULT_VLLM_BLOCK_SIZE
@@ -90,14 +90,23 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
         backend_name=aic_backend,
         system=raw.get("aic_system") or _DEFAULT_AIC_SYSTEM,
         model_path=aic_model_path,
-        tp_size=raw.get("aic_tp_size") or 1,
+        tp_size=raw.get("aic_tp_size") if raw.get("aic_tp_size") is not None else 1,
         block_size=_resolve_block_size_for_capacity(raw),
-        max_num_batched_tokens=raw.get("max_num_batched_tokens")
-        or _DEFAULT_MAX_NUM_BATCHED_TOKENS,
-        gpu_memory_utilization=raw.get("gpu_memory_utilization")
-        or DEFAULT_GPU_MEMORY_UTILIZATION,
-        mem_fraction_static=raw.get("mem_fraction_static")
-        or DEFAULT_MEM_FRACTION_STATIC,
+        max_num_batched_tokens=(
+            raw.get("max_num_batched_tokens")
+            if raw.get("max_num_batched_tokens") is not None
+            else _DEFAULT_MAX_NUM_BATCHED_TOKENS
+        ),
+        gpu_memory_utilization=(
+            raw.get("gpu_memory_utilization")
+            if raw.get("gpu_memory_utilization") is not None
+            else DEFAULT_GPU_MEMORY_UTILIZATION
+        ),
+        mem_fraction_static=(
+            raw.get("mem_fraction_static")
+            if raw.get("mem_fraction_static") is not None
+            else DEFAULT_MEM_FRACTION_STATIC
+        ),
         backend_version=raw.get("aic_backend_version"),
         moe_tp_size=raw.get("aic_moe_tp_size"),
         moe_ep_size=raw.get("aic_moe_ep_size"),

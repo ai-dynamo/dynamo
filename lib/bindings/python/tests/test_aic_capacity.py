@@ -30,7 +30,8 @@ class FakeModel:
 
 
 class FakeDatabase:
-    system_spec = {"gpu": {"mem_capacity": 1000 * _GIB}}
+    def __init__(self):
+        self.system_spec = {"gpu": {"mem_capacity": 1000 * _GIB}}
 
 
 def make_session(backend_name, memory):
