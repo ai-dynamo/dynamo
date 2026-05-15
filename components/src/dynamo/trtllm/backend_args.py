@@ -160,16 +160,10 @@ class DynamoTrtllmArgGroup(ArgGroup):
                 "emit unconditionally regardless of this flag."
             ),
             dest="publish_events_and_metrics",
+            # `obsolete_flag` accepts the old `--publish-events-and-metrics`
+            # / `--no-publish-events-and-metrics` aliases automatically.
+            # DeprecationWarning fires in args.py:parse_args.
             obsolete_flag="--publish-events-and-metrics",
-        )
-        # Backcompat alias for one release. Maps to --publish-kv-events.
-        # The DeprecationWarning fires at args-parse time in args.py.
-        g.add_argument(
-            "--publish-events-and-metrics",
-            action=argparse.BooleanOptionalAction,
-            dest="publish_events_and_metrics",
-            default=argparse.SUPPRESS,
-            help=argparse.SUPPRESS,
         )
         add_argument(
             g,
