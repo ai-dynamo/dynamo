@@ -585,7 +585,9 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 // runRestore runs the full restore workflow for one target container:
 //  1. Annotate the pod with restore in_progress
 //  2. Call executor.Restore (inspect placeholder → nsrestore inside namespace)
-//  3. Write a restore-complete sentinel to wake the workload (polled)
+//  3. Write a restore-complete sentinel: the CRIU-restored process resumes
+//     inside the polling loop that waits on this file, exits quiescence,
+//     and resumes the engine
 //  4. Annotate the pod with restore completed
 func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, containerName, containerID, checkpointID string, checkpointLocation checkpointLocations, restoreAttemptKey string, startedAt time.Time) error {
 	releaseOnExit := true
