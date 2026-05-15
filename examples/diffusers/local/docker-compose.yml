@@ -15,6 +15,9 @@ x-backend-base: &backend-base
   restart: on-failure
   command: python worker.py
   cap_add:
+    # SYS_PTRACE lets PyTorch's torch.compile profiler/autotuner
+    # (max-autotune-no-cudagraphs in the FastVideo worker) ptrace-profile
+    # during compilation and inference.
     - SYS_PTRACE
   environment:
     - DYN_DISCOVERY_BACKEND=file

@@ -16,7 +16,7 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 - **Default model:** `FastVideo/FastWan2.1-T2V-1.3B-Diffusers`.
 - **Typed API:** The worker builds `GeneratorConfig` once at startup and creates a `GenerationRequest` for each `/v1/videos` request.
 - **Optimized inference:** `torch.compile` and FP4 quantization are available through `--torch-compile` and `--fp4-quantization`; the legacy `--enable-optimizations` flag remains as a shortcut for both.
-- **Response format:** Returns one complete MP4 payload per request as either `data[0].b64_json` or `data[0].url` (non-streaming).
+- **Response format:** Returns one complete MP4 payload per request as `data[0].b64_json` (non-streaming).
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.
 
 > [!IMPORTANT]
@@ -244,7 +244,7 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 | `--enable-optimizations` | off | Backward-compatible shortcut for `--torch-compile --fp4-quantization` |
 | `--dit-cpu-offload`, `--vae-cpu-offload`, `--text-encoder-cpu-offload`, `--image-encoder-cpu-offload`, `--pin-cpu-memory` | on | CPU offload controls; each has a `--no-*` variant |
 | `--max-video-width`, `--max-video-height` | `4096`, `4096` | Reject request dimensions above these caps before calling FastVideo |
-| `--output-dir` | `/tmp/dynamo-fastvideo-outputs` | Directory for generated MP4 files and `url` responses |
+| `--output-dir` | `$XDG_RUNTIME_DIR/dynamo-fastvideo/outputs` or `~/.cache/dynamo/fastvideo/outputs` | Directory for generated MP4 staging files |
 
 ### Request Parameters (`nvext`)
 
