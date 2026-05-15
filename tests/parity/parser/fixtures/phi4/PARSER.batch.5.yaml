@@ -17,12 +17,15 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.5.b:
     description: Closing `]` without matching `functools[` open
     ref: dynamo
@@ -30,15 +33,18 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: 'functools{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: 'functools{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.5.c:
     description: Truncation mid-arguments JSON
     ref: dynamo
@@ -46,9 +52,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: 'functools[{"name": "get_weather", "arguments": {"loc'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: 'functools[{"name": "get_weather", "arguments": {"loc'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'

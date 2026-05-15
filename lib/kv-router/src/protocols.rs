@@ -5,7 +5,7 @@ use std::future::Future;
 use std::ops::Range;
 use std::time::Duration;
 
-use dynamo_tokens::{SequenceHash, Token, compute_hash_v2};
+use dynamo_tokens::{SequenceHash, Token, compute_hash_v2, compute_next_sequence_hash};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
@@ -125,31 +125,15 @@ pub fn compute_block_hash_for_seq(
 }
 
 /// Compute the next rolling sequence hash from a parent sequence hash and the
-/// current block hash.
+/// current block hash. Delegates to [`dynamo_tokens::compute_next_sequence_hash`] — the
+/// single source of truth for the chain recurrence shared across kv-router,
+/// kvbm-logical, and the universal hashing crate.
+#[inline]
 pub fn compute_next_seq_hash(
     parent_seq_hash: SequenceHash,
     current_block_hash: LocalBlockHash,
 ) -> SequenceHash {
-    let combined = [parent_seq_hash, current_block_hash.0];
-    #[cfg(target_endian = "little")]
-    {
-        // SAFETY: `u64` is plain-old-data, and on little-endian targets its in-memory
-        // representation matches the `to_le_bytes()` sequence used by the portable path.
-        let bytes = unsafe {
-            std::slice::from_raw_parts(
-                combined.as_ptr().cast::<u8>(),
-                std::mem::size_of_val(&combined),
-            )
-        };
-        compute_hash_v2(bytes, XXH3_SEED)
-    }
-    #[cfg(not(target_endian = "little"))]
-    {
-        let mut bytes = [0_u8; std::mem::size_of::<u64>() * 2];
-        bytes[..8].copy_from_slice(&parent_seq_hash.to_le_bytes());
-        bytes[8..].copy_from_slice(&current_block_hash.0.to_le_bytes());
-        compute_hash_v2(&bytes, XXH3_SEED)
-    }
+    compute_next_sequence_hash(parent_seq_hash, current_block_hash.0)
 }
 
 /// Compute rolling sequence hashes for a vector of block hashes.

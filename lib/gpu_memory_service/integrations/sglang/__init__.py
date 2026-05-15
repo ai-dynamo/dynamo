@@ -20,9 +20,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Module-level GMS lock mode, set by setup_gms() before loader is instantiated.
-# Read by patches.py when creating GMSMemorySaverImpl.
+# Module-level GMS lock mode + RO reconnect timeout, set by setup_gms() before
+# loader is instantiated. Read by patches.py when creating GMSMemorySaverImpl.
 _gms_lock_mode = None
+_gms_ro_connect_timeout_ms = None
 _gms_initialized = False
 
 
@@ -56,8 +57,10 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
             "Cannot use --enable-draft-weights-cpu-backup with --load-format gms."
         )
 
-    # Resolve lock mode from model_loader_extra_config before patches fire
+    # Resolve lock mode and RO reconnect timeout from model_loader_extra_config
+    # before patches fire.
     global _gms_lock_mode
+    global _gms_ro_connect_timeout_ms
     extra = getattr(server_args, "model_loader_extra_config", None)
     if isinstance(extra, str):
         import json
@@ -65,9 +68,13 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
         extra = json.loads(extra) if extra else {}
     extra = extra or {}
 
-    from gpu_memory_service.integrations.common.utils import get_gms_lock_mode
+    from gpu_memory_service.integrations.common.utils import (
+        get_gms_lock_mode,
+        get_gms_ro_connect_timeout_ms,
+    )
 
     _gms_lock_mode = get_gms_lock_mode(extra)
+    _gms_ro_connect_timeout_ms = get_gms_ro_connect_timeout_ms(extra)
 
     # Import triggers patches at module level
     from gpu_memory_service.integrations.sglang.model_loader import GMSModelLoader

@@ -149,6 +149,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 raise ValueError(
                     "--serve-indexer and --use-remote-indexer are mutually exclusive"
                 )
+        self.apply_no_admission_control()
 
 
 @register_encoder(FrontendConfig)

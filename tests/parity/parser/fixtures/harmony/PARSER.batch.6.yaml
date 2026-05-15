@@ -15,10 +15,17 @@ cases:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang:
+        calls: []
+        normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{}
+        reason: "SGLang's GptOssDetector bot_token requires '<|start|>assistant<|channel|>commentary' envelope; Dynamo accepts the bare '<|channel|>commentary' variant"
   PARSER.batch.6.b:
     description: Whitespace inside empty {}
     ref: dynamo
@@ -26,10 +33,17 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang:
+        calls: []
+        normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{ }
+        reason: "SGLang's GptOssDetector bot_token requires '<|start|>assistant<|channel|>commentary' envelope; Dynamo accepts the bare '<|channel|>commentary' variant"
   PARSER.batch.6.c:
     description: No <|message|> body
     ref: dynamo
@@ -37,5 +51,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json
+      dynamo: &d_6_c
+        calls: []
+        normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang: *d_6_c
