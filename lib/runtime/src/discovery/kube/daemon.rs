@@ -395,9 +395,7 @@ fn cached_metadata_for_invalid_cr<'a>(
 }
 
 fn managed_fields_summary(cr: &DynamoWorkerMetadata) -> Option<String> {
-    let Some(managed_fields) = cr.metadata.managed_fields.as_ref() else {
-        return None;
-    };
+    let managed_fields = cr.metadata.managed_fields.as_ref()?;
 
     if managed_fields.is_empty() {
         return None;
