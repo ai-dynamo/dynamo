@@ -868,6 +868,15 @@ impl DistributedRuntime {
 
 #[pymethods]
 impl Endpoint {
+    /// Return the endpoint's name (e.g. "generate").
+    ///
+    /// This is the same key used by serve_endpoint when it registers the
+    /// endpoint with SystemHealth, so it can be passed directly to
+    /// DistributedRuntime.register_activity_notifier / fire_activity_notifier.
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
     #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
     fn serve_endpoint<'p>(
         &self,

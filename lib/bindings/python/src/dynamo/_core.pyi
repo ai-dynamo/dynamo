@@ -168,6 +168,15 @@ class Endpoint:
 
     ...
 
+    def name(self) -> str:
+        """Return the endpoint name (e.g. ``"generate"``).
+
+        This is the same key used by serve_endpoint when registering with
+        SystemHealth — pass it to DistributedRuntime.register_activity_notifier
+        and fire_activity_notifier so the health check can observe the signal.
+        """
+        ...
+
     async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
