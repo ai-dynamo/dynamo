@@ -59,12 +59,12 @@ vllm = [
     "blake3>=1.0.0,<2.0.0",
     "soundfile>=0.13.1",
     "librosa>=0.10.0",
-    "ray==2.55.0",
+    "ray>=2.55.0",
 ]
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.10.post1",
+    "sglang[diffusion]==0.5.11",
     "nixl[cu12]>=1.0.0,<1.1.0",
     "cupy-cuda12x>=13.0.0",
 ]
@@ -234,6 +234,8 @@ filterwarnings = [
     # pandas 2.3 emits this from pd.concat on empty/all-NA frames; aiconfigurator hits it
     # during disagg pareto search and re-raises as RuntimeError, breaking planner tests.
     "ignore:The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.*:FutureWarning",
+    # pandas 2.3 emits this from aiconfigurator pareto filtering under filterwarnings=error.
+    "ignore:Downcasting behavior in `replace` is deprecated.*:FutureWarning",
 ]
 
 
@@ -269,6 +271,7 @@ markers = [
     "performance: marks tests as performance tests",
     "benchmark: marks tests as benchmark tests",
     "none: marks tests that do not require a framework-specific runtime",
+    "core: marks tests that exercise core/runtime functionality (residual bucket — disjoint from multimodal/router/kvbm)",
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",

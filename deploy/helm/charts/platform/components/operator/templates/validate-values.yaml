@@ -84,16 +84,6 @@ The 'dynamo-operator.dynamo.mpiRun.secretName' field is still supported.
 ` }}
 {{- end }}
 
-{{/* ---- Checkpoint storage config (removed, moved to snapshot chart) ---- */}}
-
-{{- if and (hasKey .Values "checkpoint") (hasKey .Values.checkpoint "storage") }}
-  {{- fail `
-BREAKING CHANGE: 'dynamo-operator.checkpoint.storage' has been removed.
-Checkpoint storage is now configured via the snapshot Helm chart, not the operator.
-Remove 'dynamo-operator.checkpoint.storage' from your values.yaml.
-` }}
-{{- end }}
-
 {{- if and (hasKey .Values "checkpoint") (hasKey .Values.checkpoint "readyForCheckpointFilePath") }}
   {{- fail `
 BREAKING CHANGE: 'dynamo-operator.checkpoint.readyForCheckpointFilePath' has been removed.

@@ -304,11 +304,15 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
       /opt/dynamo/wheelhouse/nixl/nixl*.whl \
       {% endif -%}
       && \
-    {% if "nixl_ref" in context[framework] -%}
-    if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
-        uv pip uninstall -y nixl-cu12 || true; \
-    fi && \
-    {% endif -%}
+{% if device == "xpu" %}
+    # XPU: remove all CUDA nixl variants that LMCache or other deps may pull in
+    (uv pip freeze 2>/dev/null | awk -F= '/^nixl-cu/{print $1}' | xargs -r uv pip uninstall -y 2>/dev/null || true) && \
+{% elif device == "cuda" %}
+    # LMCache >=0.4.4 depends on nixl>=1.1.0 which pulls both nixl-cu12 and
+    # nixl-cu13; their coexistence breaks `import nixl` at runtime.
+    CUDA_MAJOR="${CUDA_VERSION%%.*}" && \
+    (uv pip freeze 2>/dev/null | awk -F= '/^nixl-cu/{print $1}' | grep -v "^nixl-cu${CUDA_MAJOR}" | xargs -r uv pip uninstall -y 2>/dev/null || true) && \
+{% endif %}
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \
@@ -380,6 +384,21 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
         --requirement /tmp/requirements.vllm.txt \
         --requirement /tmp/requirements.benchmark.txt
 
+{% if device == "cuda" %}
+# Install cupy matching the CUDA major version; remove any pre-existing variant
+# (the framework base may install cupy-cuda12x, pyproject.toml also pins
+# cupy-cuda12x). cupy's `_detect_duplicate_installation` ERRORS at import
+# if both cu12 and cu13 variants are present, so we install exactly one
+# variant matching the build target's CUDA major version. Discover the
+# installed variants instead of hardcoding so future cupy versions
+# (cupy-cuda14x, etc.) are covered without further edits.
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
+    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} && \
+    (uv pip freeze 2>/dev/null | awk -F= '/^cupy-/{print $1}' | xargs -r uv pip uninstall 2>/dev/null || true) && \
+    uv pip install cupy-cuda${CUDA_VERSION_MAJOR}x
+{% endif %}
+
 # Copy tests, deploy, lib, and the vllm/common/mocker component subtrees for CI.
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
@@ -387,6 +406,7 @@ COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/frontend /workspace/components/src/dynamo/frontend
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/vllm /workspace/components/src/dynamo/vllm
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
 COPY --chmod=775 --chown=dynamo:0 lib/ /workspace/lib/

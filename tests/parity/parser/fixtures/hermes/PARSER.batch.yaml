@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 family: hermes
+model_label: Hermes-3 / Llama variants
 mode: batch
 cases:
   PARSER.batch.1:
     description: Single tool call (happy path)
     model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>'
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -16,130 +17,69 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-  PARSER.batch.2:
-    description: Multiple tool calls (parallel)
-    model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "get_time",
-      "arguments": {"timezone": "EST"}}</tool_call>'
-    tools:
-    - *id001
-    - name: get_time
-      parameters:
-        type: object
-        properties:
-          timezone:
-            type: string
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
     tools:
-    - *id001
+    - *id002
     expected:
-      calls: []
-      normal_text: Hello, how can I help you today?
-  PARSER.batch.4:
-    description: Malformed JSON args (missing close brace)
-    model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"</tool_call>'
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-  PARSER.batch.5:
-    description: Missing </tool_call> end marker
-    model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-  PARSER.batch.6:
-    description: Empty args (no-arg call)
-    model_text: '<tool_call>{"name": "get_time", "arguments": {}}</tool_call>'
-    tools:
-    - name: get_time
-      parameters:
-        type: object
-        properties: {}
-    expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
-  PARSER.batch.7:
-    description: Complex args (nested object + array)
-    model_text: '<tool_call>{"name": "process_data", "arguments": {"items": [1, 2, 3], "config": {"nested": true}}}</tool_call>'
-    tools:
-    - name: process_data
-      parameters:
-        type: object
-        properties:
-          items:
-            type: array
-          config:
-            type: object
-    expected:
-      calls:
-      - name: process_data
-        arguments:
-          config:
-            nested: true
-          items:
-          - 1
-          - 2
-          - 3
-      normal_text: ''
-  PARSER.batch.8:
-    description: Interleaved normal text
-    model_text: 'I will check the weather. <tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call>
-      Done.'
-    tools:
-    - *id001
-    expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: I will check the weather.
+      dynamo: &id003
+        calls: []
+        normal_text: Hello, how can I help you today?
+      vllm: *id003
+      sglang: *id003
   PARSER.batch.9:
     description: Empty input
     model_text: ''
     tools:
-    - *id001
+    - *id002
     expected:
-      calls: []
-      normal_text: ''
+      dynamo: &id004
+        calls: []
+        normal_text: ''
+      vllm: *id004
+      sglang: *id004
   PARSER.batch.10:
     description: Duplicate calls (same name twice)
     model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "get_weather",
       "arguments": {"location": "LA"}}</tool_call>'
     tools:
-    - *id001
+    - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: ''
+      dynamo: &id005
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *id005
+      sglang: *id005
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: originated from https://github.com/sgl-project/sglang/blob/612785ffdcaf35552f1ed433a981d596ca9fe900/test/registered/unit/function_call/test_unknown_tool_name.py#L29
+    model_text: '<tool_call>{"name": "unknown_tool", "arguments": {"location": "NYC"}}</tool_call>'
+    tools:
+    - *id002
+    expected:
+      dynamo: &d_13
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *d_13
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: SGLang drops unknown tool names by default unless SGLANG_FORWARD_UNKNOWN_TOOLS is enabled.

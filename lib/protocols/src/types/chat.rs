@@ -77,8 +77,72 @@ pub use async_openai::types::chat::{
     WebSearchUserLocationType,
 };
 
-// Upstream renamed Stop -> StopConfiguration; re-export under old name for compat
-pub use async_openai::types::chat::StopConfiguration as Stop;
+/// OpenAI stop configuration, with Dynamo's token-id stop extension.
+///
+/// The standard OpenAI shape accepts a string or string array. Dynamo also
+/// accepts an integer array, e.g. `"stop": [576]`, to express token-id stop
+/// conditions for tokenized in/out workflows. Strings like `"token_id:576"`
+/// remain ordinary string stops; the `token_id:<id>` format is only an output
+/// display format for logprobs.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum Stop {
+    String(String),
+    StringArray(Vec<String>),
+    TokenIdArray(Vec<u32>),
+}
+
+impl Stop {
+    pub fn strings(&self) -> Option<Vec<String>> {
+        match self {
+            Stop::String(s) => Some(vec![s.clone()]),
+            Stop::StringArray(arr) => Some(arr.clone()),
+            Stop::TokenIdArray(_) => None,
+        }
+    }
+
+    pub fn token_ids(&self) -> Option<Vec<u32>> {
+        match self {
+            Stop::TokenIdArray(arr) => Some(arr.clone()),
+            Stop::String(_) | Stop::StringArray(_) => None,
+        }
+    }
+}
+
+impl From<String> for Stop {
+    fn from(value: String) -> Self {
+        Stop::String(value)
+    }
+}
+
+impl From<&str> for Stop {
+    fn from(value: &str) -> Self {
+        Stop::String(value.to_string())
+    }
+}
+
+impl From<Vec<String>> for Stop {
+    fn from(value: Vec<String>) -> Self {
+        Stop::StringArray(value)
+    }
+}
+
+impl From<Vec<u32>> for Stop {
+    fn from(value: Vec<u32>) -> Self {
+        Stop::TokenIdArray(value)
+    }
+}
+
+impl From<async_openai::types::chat::StopConfiguration> for Stop {
+    fn from(value: async_openai::types::chat::StopConfiguration) -> Self {
+        match value {
+            async_openai::types::chat::StopConfiguration::String(value) => Stop::String(value),
+            async_openai::types::chat::StopConfiguration::StringArray(value) => {
+                Stop::StringArray(value)
+            }
+        }
+    }
+}
 
 // Upstream renamed FinishReason (streaming) -- re-export
 pub use async_openai::types::chat::FinishReason;
@@ -281,11 +345,13 @@ pub struct ChatCompletionTool {
 /// Inference backends (vLLM, SGLang) report which stop condition triggered:
 /// - `String`: a matched user-provided stop sequence
 /// - `Int`: a matched stop token ID
+/// - `IntArray`: matched stop token IDs reported as a sequence
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum StopReason {
     String(String),
     Int(i64),
+    IntArray(Vec<i64>),
 }
 
 /// Reasoning content from a previous assistant turn.
@@ -694,9 +760,6 @@ pub struct ChatChoice {
     pub index: u32,
     pub message: ChatCompletionResponseMessage,
     pub finish_reason: Option<FinishReason>,
-    /// Matched stop condition from the backend.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<StopReason>,
     pub logprobs: Option<ChatChoiceLogprobs>,
 }
 
@@ -745,19 +808,12 @@ pub struct ChatCompletionStreamResponseDeltaFunctionCall {
     pub arguments: Option<String>,
 }
 
-/// Streaming chat choice with stop reason support.
-///
-/// Extends upstream `ChatChoiceStream` with:
-/// - `stop_reason`: the matched stop sequence (string) or stop token ID (integer)
-///   reported by inference backends
+/// Streaming chat choice.
 #[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
 pub struct ChatChoiceStream {
     pub index: u32,
     pub delta: ChatCompletionStreamResponseDelta,
     pub finish_reason: Option<FinishReason>,
-    /// Matched stop condition from the backend.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stop_reason: Option<StopReason>,
     pub logprobs: Option<ChatChoiceLogprobs>,
 }
 
@@ -777,6 +833,56 @@ pub struct CreateChatCompletionStreamResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stop_accepts_token_id_array() {
+        let stop: Stop = serde_json::from_value(serde_json::json!([32, 34])).unwrap();
+
+        assert_eq!(stop, Stop::TokenIdArray(vec![32, 34]));
+    }
+
+    #[test]
+    fn stop_accepts_string_and_string_array() {
+        let stop: Stop = serde_json::from_value(serde_json::json!(" The")).unwrap();
+
+        assert_eq!(stop, Stop::String(" The".to_string()));
+
+        let stop: Stop = serde_json::from_value(serde_json::json!(["A", "B"])).unwrap();
+
+        assert_eq!(
+            stop,
+            Stop::StringArray(vec!["A".to_string(), "B".to_string()])
+        );
+    }
+
+    #[test]
+    fn stop_token_id_display_string_remains_string_stop() {
+        let stop: Stop = serde_json::from_value(serde_json::json!("token_id:576")).unwrap();
+
+        assert_eq!(stop, Stop::String("token_id:576".to_string()));
+
+        let stop: Stop = serde_json::from_value(serde_json::json!(["token_id:576"])).unwrap();
+
+        assert_eq!(stop, Stop::StringArray(vec!["token_id:576".to_string()]));
+    }
+
+    #[test]
+    fn stop_rejects_single_token_id() {
+        let result = serde_json::from_value::<Stop>(serde_json::json!(576));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn stop_converts_from_upstream_stop_configuration() {
+        let upstream =
+            async_openai::types::chat::StopConfiguration::StringArray(vec!["END".to_string()]);
+
+        assert_eq!(
+            Stop::from(upstream),
+            Stop::StringArray(vec!["END".to_string()])
+        );
+    }
 
     #[test]
     fn tool_call_defaults_type_on_deserialize() {

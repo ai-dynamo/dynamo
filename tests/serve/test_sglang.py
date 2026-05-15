@@ -18,6 +18,7 @@ from tests.serve.common import (
 from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.multimodal import make_image_payload_b64
 from tests.utils.payload_builder import (
     anthropic_messages_payload_default,
     anthropic_messages_stream_payload_default,
@@ -78,8 +79,11 @@ sglang_configs = {
                 3.7
             ),  # actual peak at recommended token count
             pytest.mark.requested_sglang_kv_tokens(
-                96
-            ),  # KV cache cap (2x safety over min=48)
+                2048
+            ),  # >= prompt(~16) + max_tokens(1000) + scheduler reserve;
+            # SGLang 0.5.11 silently hangs (no scheduler activity, no error)
+            # when prompt+max_tokens nears max_total_tokens. Bisected hang
+            # threshold ~1040 for these payloads; 2048 leaves headroom.
             pytest.mark.timeout(195),  # profiled 33s on RTX 6000 Ada
             pytest.mark.pre_merge,
         ],
@@ -111,7 +115,7 @@ sglang_configs = {
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.7),
-            pytest.mark.requested_sglang_kv_tokens(96),
+            pytest.mark.requested_sglang_kv_tokens(2048),  # see "aggregated" above
             pytest.mark.timeout(195),
             pytest.mark.pre_merge,
             pytest.mark.unified,
@@ -183,6 +187,65 @@ sglang_configs = {
                 backend="sglang_disagg",
                 port=DefaultPort.SYSTEM2.value,
             ),
+        ],
+    ),
+    "disaggregated_same_gpu_chat_processor": SGLangConfig(
+        # Same as disaggregated_same_gpu but routes chat through the Python
+        # sglang_processor (DYN_CHAT_PROCESSOR=sglang) instead of the default
+        # Rust pre/post processor.
+        name="disaggregated_same_gpu_chat_processor",
+        directory=sglang_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(9.9),
+            pytest.mark.requested_sglang_kv_tokens(37472),
+            pytest.mark.timeout(420),
+            pytest.mark.post_merge,
+            pytest.mark.skipif(
+                _is_cuda13(),
+                reason="torch-memory-saver preload .so links libcudart.so.12, missing in cuda13 images",
+            ),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=10,
+        health_check_workers=True,
+        env={"DYN_CHAT_PROCESSOR": "sglang"},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
+    "disaggregated_same_gpu_chat_processor_kv_router": SGLangConfig(
+        # sglang Python chat processor + KV router.
+        name="disaggregated_same_gpu_chat_processor_kv_router",
+        directory=sglang_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(9.9),
+            pytest.mark.requested_sglang_kv_tokens(37472),
+            pytest.mark.timeout(420),
+            pytest.mark.post_merge,
+            pytest.mark.skipif(
+                _is_cuda13(),
+                reason="torch-memory-saver preload .so links libcudart.so.12, missing in cuda13 images",
+            ),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=10,
+        health_check_workers=True,
+        env={
+            "DYN_CHAT_PROCESSOR": "sglang",
+            "DYN_ROUTER_MODE": "kv",
+            # Deterministic hash for KV event IDs.
+            "PYTHONHASHSEED": "0",
+        },
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
         ],
     ),
     "kv_events": SGLangConfig(
@@ -315,6 +378,50 @@ sglang_configs = {
             )
         ],
     ),
+    "multimodal_agg_fd_qwen": SGLangConfig(
+        # Aggregated multimodal with --frontend-decoding: the Rust frontend
+        # decodes the image and ships pre-decoded pixels via NIXL RDMA;
+        # the SGLang worker consumes Decoded items through ImageLoader and
+        # hands PIL Images to sgl.Engine.async_generate(image_data=...).
+        # Mirrors the vLLM FD pattern at
+        # tests/serve/multimodal_profiles/vllm.py (Qwen3.5-0.8B "b64_frontend_decoding").
+        name="multimodal_agg_fd_qwen",
+        directory=sglang_dir,
+        script_name="agg_vision.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(4.7),  # parity with vLLM Qwen3.5-0.8B
+            # 4096 covers the b64 PNG image-token expansion (~2198 tokens
+            # for our 1999x1125 LFS test asset under Qwen3.5-0.8B's vision
+            # processor) + 100-token max response + headroom.
+            # TODO: bisect via tests/utils/profile_pytest.py for a tighter bound.
+            pytest.mark.requested_sglang_kv_tokens(4096),
+            pytest.mark.timeout(300),
+            # post_merge: NIXL stubs outside docker can lack the Decoded
+            # transport path. Same gating as vLLM's FD case
+            # (tests/serve/multimodal_profiles/vllm.py:67-70).
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3.5-0.8B",
+        script_args=[
+            "--model-path",
+            "Qwen/Qwen3.5-0.8B",
+            # Hybrid Mamba/full-attention VL: SGLang's MambaRadixCache v1
+            # asserts page_size == 1. The launch script defaults to 16.
+            "--page-size",
+            "1",
+            "--frontend-decoding",
+        ],
+        delayed_start=0,
+        timeout=360,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            # Inline-base64 PNG: exercises strip_inline_data_urls in the
+            # Rust frontend + NIXL RDMA transfer of decoded pixels — the
+            # path that distinguishes FD from the plain URL path.
+            make_image_payload_b64(["green"]),
+        ],
+    ),
     "multimodal_agg_qwen": SGLangConfig(
         # Tests single-process aggregated multimodal inference using DecodeWorkerHandler
         # with in-process vision encoding (no separate encode worker)
@@ -420,11 +527,6 @@ sglang_configs = {
             pytest.mark.gpu_1,
             # No profiled_vram_gib: multimodal_epd.sh uses explicit
             # --mem-fraction-static via DYN_ENCODE_GPU_MEM / DYN_WORKER_GPU_MEM.
-            # Expected to fail until SGLang release includes the upstream fix:
-            # https://github.com/sgl-project/sglang/pull/22431
-            pytest.mark.xfail(
-                reason="Known upstream SGLang issue for video_e_pd_qwen E/PD path; expected failure until next SGLang version bump includes sglang#22431."
-            ),
             pytest.mark.timeout(360),
             pytest.mark.pre_merge,
         ],

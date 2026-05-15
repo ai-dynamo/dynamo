@@ -371,7 +371,7 @@ async def run_thorough(
 
     # --- Stage 1: Enumeration ---
     model_cache = dgdr.modelCache or ModelCacheSpec()
-    prefill_candidates, decode_candidates = enumerate_profiling_configs(
+    enumerated = enumerate_profiling_configs(
         model_path=model,
         system=system,
         backend=backend,
@@ -384,6 +384,7 @@ async def run_thorough(
         k8s_pvc_mount_path=model_cache.pvcMountPath,
         k8s_model_path_in_pvc=model_cache.pvcModelPath,
     )
+    prefill_candidates, decode_candidates = enumerated[:2]
 
     logger.info(
         "Enumerated %d prefill candidates, %d decode candidates",

@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-disagg
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --http-port
+          - "8000"
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          image: my-registry/vllm-runtime:my-tag
+          name: main
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 1
+    type: frontend
+  - multinode:
+      nodeCount: 2
+    name: decode
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --tensor-parallel-size
+          - "2"
+          - --is-decode-worker
+          - --kv-transfer-config
+          - '{"kv_connector": "NixlConnector", "kv_role": "kv_both", "engine_id":
+            "vllm-disagg-decode-engine-0abc123"}'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: my-registry/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 1
+    type: worker
+  - multinode:
+      nodeCount: 2
+    name: prefill
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --tensor-parallel-size
+          - "2"
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector": "NixlConnector", "kv_role": "kv_both", "engine_id":
+            "vllm-disagg-prefill-engine-0abc123"}'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: my-registry/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 1
+    type: worker

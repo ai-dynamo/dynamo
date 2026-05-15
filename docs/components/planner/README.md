@@ -25,7 +25,7 @@ The planner offers three `optimization_target` settings that control how scaling
 |--------|-------------|:-------------:|:-------------------:|
 | **`throughput`** (default) | Maximizes throughput by scaling based on queue depth and KV cache utilization. Scales up when engines are saturated, scales down when utilization drops. | No | No |
 | **`latency`** | Minimizes latency by scaling aggressively to keep queues short. Scales up at lower utilization thresholds. | No | No |
-| **`sla`** | Targets specific TTFT/ITL SLA values using regression-based performance models. Most precise, but requires configuration. | Yes (`ttft`, `itl`) | Recommended |
+| **`sla`** | Targets specific TTFT/ITL SLA values using regression-based performance models. Most precise, but requires configuration. | Yes (`ttft_ms`, `itl_ms`) | Recommended |
 
 **We recommend starting with the default `throughput` target** — it works out of the box with zero configuration. Switch to `latency` if your workload is latency-sensitive, or to `sla` when you need precise SLA targeting with pre-deployment profiling.
 
@@ -107,8 +107,8 @@ features:
     optimization_target: sla
     enable_throughput_scaling: true
     enable_load_scaling: true
-    ttft: 500.0
-    itl: 50.0
+    ttft_ms: 500.0
+    itl_ms: 50.0
     pre_deployment_sweeping_mode: rapid
 ```
 
@@ -153,8 +153,8 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 | `--mode` | `disagg` | Planner mode (`disagg`, `prefill`, `decode`, `agg`) |
 | `--optimization-target` | `throughput` | Scaling target: `throughput` (queue/util thresholds), `latency` (aggressive low-latency), `sla` (regression-based SLA targeting) |
 | `--environment` | `kubernetes` | Deployment environment |
-| `--ttft` | `500.0` | Target Time To First Token (ms) |
-| `--itl` | `50.0` | Target Inter-Token Latency (ms) |
+| `ttft_ms` | `500.0` | Target Time To First Token (ms) |
+| `itl_ms` | `50.0` | Target Inter-Token Latency (ms) |
 | `--max-gpu-budget` | `8` | Maximum GPUs across all workers |
 | `--min-endpoint` | `1` | Minimum replicas per worker type |
 | `--decode-engine-num-gpu` | `1` | GPUs per decode engine |
@@ -208,10 +208,26 @@ When `PLANNER_PROMETHEUS_PORT` is set, the planner serves its own metrics endpoi
 - TTFT and ITL distributions
 - Input/output sequence lengths
 
+Planner can read these traffic signals from either the public `Frontend` or a pool-local `LocalRouter`. Use `throughput_metrics_source: "frontend"` for a single-DGD deployment. Use `throughput_metrics_source: "router"` for GlobalPlanner / multi-pool deployments so each pool Planner reads its own router traffic instead of the shared public endpoint.
+
+| Planner input | Frontend source | Router source |
+|---|---|---|
+| Request count | `dynamo_frontend_requests_total` | `dynamo_component_router_requests_total` |
+| TTFT | `dynamo_frontend_time_to_first_token_seconds` | `dynamo_component_router_time_to_first_token_seconds` |
+| ITL | `dynamo_frontend_inter_token_latency_seconds` | `dynamo_component_router_inter_token_latency_seconds` |
+| Request duration | `dynamo_frontend_request_duration_seconds` | `dynamo_component_request_duration_seconds` until router-specific duration metrics are available |
+| Input sequence length / ISL | `dynamo_frontend_input_sequence_tokens` | `dynamo_component_router_input_sequence_tokens` |
+| Output sequence length / OSL | `dynamo_frontend_output_sequence_tokens` | `dynamo_component_router_output_sequence_tokens` |
+| KV hit rate | Not available from frontend source | `dynamo_component_router_kv_hit_rate` |
+
+The throughput planner uses request count, ISL, OSL, and optional KV hit rate as the core traffic forecast inputs. TTFT, ITL, and request duration are also scraped and exported as observed diagnostics.
+
 **Load-based scaling** uses ForwardPassMetrics (FPM) from the Dynamo event plane:
 - Per-iteration wall time, scheduled prefill/decode tokens, and queued request status
 - Delivered via `FpmEventSubscriber` with automatic engine discovery and lifecycle tracking
 - No router `/metrics` scraping required
+
+FPM observes engine-side scheduled and queued work. It does not include requests still queued in the `LocalRouter` before engine assignment.
 
 Core gauges on the planner port include replica counts (`dynamo_planner_num_prefill_replicas`, `dynamo_planner_num_decode_replicas`), observed traffic (`dynamo_planner_observed_*`), replica decisions (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), and cumulative `dynamo_planner_gpu_hours`.
 

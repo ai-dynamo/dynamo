@@ -15,6 +15,29 @@ use super::super::ToolDefinition;
 use super::super::config::Glm47ParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
+/// Render a tool_call block snippet for logs. Bounded so a huge truncated
+/// argument body doesn't blow up the log line; control chars are escaped
+/// because raw newlines/tabs make the warning unreadable in grep/jq.
+fn truncate_for_log(s: &str) -> String {
+    const MAX: usize = 200;
+    let mut out = String::with_capacity(MAX.min(s.len()) + 16);
+    let mut bytes = 0usize;
+    for ch in s.chars() {
+        if bytes >= MAX {
+            out.push('…');
+            break;
+        }
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+        bytes += ch.len_utf8();
+    }
+    out
+}
+
 /// Check if a chunk contains the start of a GLM-4.7 tool call.
 /// Format: <tool_call>function_name<arg_key>...</arg_key><arg_value>...</arg_value></tool_call>
 pub fn detect_tool_call_start_glm47(chunk: &str, config: &Glm47ParserConfig) -> bool {
@@ -35,16 +58,39 @@ pub fn detect_tool_call_start_glm47(chunk: &str, config: &Glm47ParserConfig) -> 
     false
 }
 
-/// Find the end position of a GLM-4.7 tool call.
-/// Returns the position after </tool_call> or the length of the chunk if not found.
+/// Find the end position of all consecutive GLM-4.7 tool calls.
+/// When a model emits multiple parallel tool calls in one chunk
+/// (e.g. `<tool_call>A</tool_call><tool_call>B</tool_call>`), this
+/// function advances past every consecutive start→end pair so the
+/// entire group is captured as a single jailed region.  Returns the
+/// position after the last `</tool_call>` found, or the length of the
+/// chunk when no end token is present.
 pub fn find_tool_call_end_position_glm47(chunk: &str, config: &Glm47ParserConfig) -> usize {
+    let start_token = &config.tool_call_start;
     let end_token = &config.tool_call_end;
 
-    if let Some(pos) = chunk.find(end_token.as_str()) {
-        pos + end_token.len()
-    } else {
-        chunk.len()
+    let Some(first_end) = chunk.find(end_token.as_str()) else {
+        return chunk.len();
+    };
+
+    let mut cursor = first_end + end_token.len();
+
+    loop {
+        let rest = &chunk[cursor..];
+        let trimmed = rest.trim_start();
+        if !trimmed.starts_with(start_token.as_str()) {
+            break;
+        }
+        let trim_offset = rest.len() - trimmed.len();
+        let search_from = cursor + trim_offset + start_token.len();
+        if let Some(end_pos) = chunk[search_from..].find(end_token.as_str()) {
+            cursor = search_from + end_pos + end_token.len();
+        } else {
+            break;
+        }
     }
+
+    cursor
 }
 
 /// Try to parse GLM-4.7 formatted tool calls from a message.
@@ -92,13 +138,23 @@ fn extract_tool_calls(
                 let abs_end = abs_start + end_pos + end_token.len();
                 let block = &text[abs_start..abs_end];
 
-                // Parse this tool call block; preserve unparseable blocks as
-                // normal text so model output is never silently dropped.
+                // Parse this tool call block. Unparseable blocks (malformed
+                // <tool_call>...</tool_call> markup the parser can't extract)
+                // are dropped — emitting the raw markup as normal_text leaks
+                // wire tags downstream. vLLM and SGLang both drop on this
+                // path; aligning Dynamo to that contract.
                 match parse_tool_call_block(block, config, tools) {
                     Ok(parsed_call) => calls.push(parsed_call),
                     Err(e) => {
-                        warn!("Failed to parse GLM-4.7 tool call block: {e}");
-                        normal_parts.push(block);
+                        warn!(
+                            reason = %e,
+                            why = "block has open + close fence but content failed to parse \
+                                   as a GLM-4.7 tool call (e.g. empty function name, \
+                                   missing <arg_key>, malformed args); dropping to avoid \
+                                   leaking wire tags through normal_text",
+                            dropped_block = %truncate_for_log(block),
+                            "GLM-4.7 parser dropping unparseable tool_call block"
+                        );
                     }
                 }
 
@@ -119,11 +175,38 @@ fn extract_tool_calls(
                             continue;
                         }
                         Err(e) => {
-                            warn!("Failed to parse GLM-4.7 tool call block (no end token): {e}");
+                            warn!(
+                                reason = %e,
+                                why = "EOF recovery enabled and <arg_key> opener present, \
+                                       but parse_tool_call_block failed on the truncated \
+                                       tail; dropping to avoid leaking wire tags through \
+                                       normal_text",
+                                dropped_block = %truncate_for_log(block),
+                                "GLM-4.7 parser dropping truncated tool_call block (recovery attempt failed)"
+                            );
                         }
                     }
+                } else {
+                    // Either recovery disabled (production default for GLM-4.7)
+                    // or no <arg_key> in the tail (so this is plausibly not a
+                    // real tool call at all, just a stray <tool_call> token).
+                    let reason = if !config.allow_eof_recovery {
+                        "allow_eof_recovery=false (production default for GLM-4.7 to match \
+                         vLLM/SGLang on truncated tool calls)"
+                    } else {
+                        "no <arg_key> in the tail after the <tool_call> start fence, so the \
+                         block does not look like a structurally-real GLM-4.7 tool call"
+                    };
+                    warn!(
+                        why = %reason,
+                        dropped_block = %truncate_for_log(block),
+                        "GLM-4.7 parser dropping truncated tool_call block (no end fence)"
+                    );
                 }
-                normal_parts.push(&text[abs_start..]);
+                // Drop the truncated/unrecoverable tail. Emitting the raw
+                // <tool_call>...<arg_key>...<arg_value>... prefix as
+                // normal_text would leak wire tags into message.content; vLLM
+                // strips the same way on truncation.
                 break;
             }
         } else {
@@ -435,6 +518,73 @@ mod tests {
         );
     }
 
+    #[test] // helper — parallel calls: end position must advance past ALL blocks
+    fn test_find_tool_call_end_position_parallel() {
+        let config = get_test_config();
+        let chunk = "<tool_call>get_weather<arg_key>location</arg_key><arg_value>SF</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>trailing";
+
+        let end_pos = find_tool_call_end_position_glm47(chunk, &config);
+        assert_eq!(
+            &chunk[..end_pos],
+            "<tool_call>get_weather<arg_key>location</arg_key><arg_value>SF</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>NYC</arg_value></tool_call>",
+            "Must advance past ALL consecutive tool call blocks"
+        );
+    }
+
+    #[test] // helper — parallel calls with whitespace between blocks
+    fn test_find_tool_call_end_position_parallel_with_whitespace() {
+        let config = get_test_config();
+        let chunk = "<tool_call>a<arg_key>k</arg_key><arg_value>1</arg_value></tool_call>\n<tool_call>b<arg_key>k</arg_key><arg_value>2</arg_value></tool_call>";
+
+        let end_pos = find_tool_call_end_position_glm47(chunk, &config);
+        assert_eq!(
+            end_pos,
+            chunk.len(),
+            "Must handle whitespace/newlines between consecutive blocks"
+        );
+    }
+
+    #[test] // helper — parallel calls: second block incomplete (streaming)
+    fn test_find_tool_call_end_position_parallel_second_incomplete() {
+        let config = get_test_config();
+        let chunk = "<tool_call>a<arg_key>k</arg_key><arg_value>1</arg_value></tool_call><tool_call>b<arg_key>k</arg_key><arg_value>2</arg_value>";
+
+        let end_pos = find_tool_call_end_position_glm47(chunk, &config);
+        assert_eq!(
+            &chunk[..end_pos],
+            "<tool_call>a<arg_key>k</arg_key><arg_value>1</arg_value></tool_call>",
+            "Must stop at first complete block when second is incomplete"
+        );
+    }
+
+    #[test] // PARSER.batch.2 + PARSER.batch.8 — bug report repro: text + parallel calls
+    fn test_parse_text_then_parallel_calls() {
+        let config = get_test_config();
+        let message = "I'll check the weather for both cities at the same time!<tool_call>get_weather<arg_key>location</arg_key><arg_value>San Francisco</arg_value></tool_call><tool_call>get_weather<arg_key>location</arg_key><arg_value>New York</arg_value></tool_call>";
+
+        let (calls, normal_text) = try_tool_call_parse_glm47(message, &config, None).unwrap();
+
+        assert_eq!(calls.len(), 2, "Both parallel calls must be extracted");
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_weather");
+
+        let args0: HashMap<String, Value> =
+            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let args1: HashMap<String, Value> =
+            serde_json::from_str(&calls[1].function.arguments).unwrap();
+        assert_eq!(
+            args0.get("location").unwrap().as_str().unwrap(),
+            "San Francisco"
+        );
+        assert_eq!(args1.get("location").unwrap().as_str().unwrap(), "New York");
+
+        let text = normal_text.unwrap();
+        assert_eq!(
+            text,
+            "I'll check the weather for both cities at the same time!"
+        );
+    }
+
     #[test] // PARSER.batch.7, PARSER.fmt.2
     fn test_parse_multiline_arg_value() {
         let config = get_test_config();
@@ -505,24 +655,33 @@ mod tests {
     }
 
     #[test] // PARSER.batch.4, PARSER.batch.8
-    fn test_unparseable_block_preserved_as_normal_text() {
+    fn test_unparseable_block_dropped_no_tag_leak() {
         let config = get_test_config();
         let tools = vec![ToolDefinition {
             name: "get_weather".to_string(),
             parameters: None,
         }];
 
-        // Tool call block references a function not in the tools list
+        // Tool call block references a function not in the tools list — the
+        // whole block (including <tool_call>...<arg_key>...<arg_value>... wire
+        // markup) must be dropped, not leaked through normal_text.
         let message = "Here is the result: <tool_call>unknown_func<arg_key>x</arg_key><arg_value>1</arg_value></tool_call> done";
         let (calls, normal_text) =
             try_tool_call_parse_glm47(message, &config, Some(&tools)).unwrap();
 
         assert_eq!(calls.len(), 0);
-        // The unparseable block should be preserved in normal text, not dropped
         let text = normal_text.unwrap();
         assert!(
-            text.contains("unknown_func"),
-            "Unparseable block should be in normal text, got: {text}"
+            !text.contains("unknown_func"),
+            "Unparseable block must be dropped to avoid tag leakage, got: {text}"
+        );
+        assert!(
+            !text.contains("<tool_call>") && !text.contains("<arg_key>"),
+            "Wire-format tags must not leak into normal_text, got: {text}"
+        );
+        assert!(
+            text.contains("Here is the result:") && text.contains("done"),
+            "Surrounding prose must be preserved, got: {text}"
         );
     }
 
