@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 set -e
-trap 'echo Cleaning up...; kill 0' EXIT
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+# Cleanup: see common/launch_utils.sh::dynamo_reap_and_exit
+trap 'echo Cleaning up...; dynamo_reap_and_exit $?' EXIT
 
 # Default model
 MODEL="Qwen/Qwen3-0.6B"

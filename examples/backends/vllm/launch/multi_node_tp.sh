@@ -20,7 +20,10 @@
 #   - Worker: head node must be started first
 
 set -e
-trap 'echo "Cleaning up..."; kill 0' EXIT
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+# Cleanup: see common/launch_utils.sh::dynamo_reap_and_exit
+trap 'echo "Cleaning up..."; dynamo_reap_and_exit $?' EXIT
 
 MODEL="${MODEL:-meta-llama/Llama-3.1-8B-Instruct}"
 TP="${TENSOR_PARALLEL_SIZE:-16}"

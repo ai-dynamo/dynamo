@@ -55,40 +55,47 @@ EXAMPLE_PROMPT_VISUAL="A golden retriever riding a skateboard through a neon-lit
 #   failures are detected immediately regardless of which process it was.
 #
 # Signal handling:
-#   SIGTERM/SIGINT are trapped to exit 0 (clean shutdown).  Without this,
-#   external cleanup (e.g. a test harness sending SIGTERM to the process
-#   group) interrupts wait -n, which returns 143 (128+15).  Combined with
-#   set -e, that non-zero code looks like a test failure.  Trapping TERM/INT
-#   makes external teardown exit cleanly while still propagating real errors
-#   (OOM, Python exceptions, etc.) from child processes.
-#
-# The EXIT trap (set at the top of each script) still fires when this function
-# calls exit, tearing down the remaining processes via kill 0.
+#   SIGTERM/SIGINT exit 0 (clean shutdown).  External cleanup (e.g. a test
+#   harness signalling the process group) otherwise interrupts wait -n and
+#   returns 143, which under set -e looks like a test failure.  Real errors
+#   from child processes (OOM, Python exceptions, etc.) still propagate.
 #
 # Usage:
 #   python -m dynamo.frontend &
 #   python -m dynamo.vllm --model "$MODEL" &
 #   wait_any_exit
+
+# Reaps tracked background jobs before exit so children don't reparent as
+# zombies under a non-reaping subreaper (pytest in CI containers). The test
+# harness's pgid liveness check otherwise burns 8s on those zombies — see
+# _terminate_process_group in tests/utils/managed_process.py.
+dynamo_reap_and_exit() {
+    local _rc=${1:-0}
+    local _pids
+    _pids=$(jobs -p)
+    if [[ -n "$_pids" ]]; then
+        # Signal tracked PIDs directly; `kill 0` would TERM bash itself.
+        # shellcheck disable=SC2086  # word-split for multiple PIDs
+        kill -TERM $_pids 2>/dev/null || true
+    fi
+    wait 2>/dev/null || true
+    exit "$_rc"
+}
+
 wait_any_exit() {
-    trap 'exit 0' TERM INT
+    trap 'dynamo_reap_and_exit 0' TERM INT
     if ! jobs -p | grep -q .; then
         echo "wait_any_exit: no background processes found (script bug: did you forget '&'?)" >&2
         exit 1
     fi
-    # Problem: a failing background child should propagate its non-zero
-    # exit code, but the script always exited 0. Two bash interactions
-    # colluded — `set -e` killed the script before `_rc` was captured,
-    # and the EXIT trap's `kill 0` looped SIGTERM back through the
-    # `trap 'exit 0' TERM INT` set above, zeroing the captured code.
-    #
-    # Fix: `wait -n || _rc=$?` quiets `set -e` for that one line, and
-    # re-arming the TERM/INT trap to `exit $_rc` after capture means the
-    # boomerang SIGTERM still ends with the right code.
+    # `|| _rc=$?` keeps set -e from swallowing the child's exit code.
     local _rc=0
     wait -n || _rc=$?
     echo "A background process exited with code $_rc"
-    trap "exit $_rc" TERM INT
-    exit "$_rc"
+    # Re-arm the signal trap as a backstop for signals arriving while
+    # the synchronous call below is reaping.
+    trap "dynamo_reap_and_exit $_rc" TERM INT
+    dynamo_reap_and_exit "$_rc"
 }
 
 # print_launch_banner [flags] <title> <model> <port> [extra_info_lines...]
