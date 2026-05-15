@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Working title: DynoSim: A Dynamo Digital Twin
 
-[placeholder: final author list and publication date]
+Tentative author list: Yongming Ding, Rudy Pei, Hongkuan Zhou, Ryan Olson, Dan Gil, Vikram Sharma Mailthody
 
 [placeholder: final hero/lead image if needed]
 
