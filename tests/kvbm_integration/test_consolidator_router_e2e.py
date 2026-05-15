@@ -294,8 +294,7 @@ def frontend_server(test_directory, runtime_services):
     env.update(
         {
             "RUST_BACKTRACE": "1",
-            "NATS_SERVER": "nats://localhost:4222",
-            "ETCD_ENDPOINTS": "http://localhost:2379",
+            # NATS_SERVER and ETCD_ENDPOINTS inherited from runtime_services fixture env
             "DYN_LOG": "debug",  # Enable debug logs for consolidator visibility
         }
     )
@@ -383,8 +382,7 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
     env.update(
         {
             "RUST_BACKTRACE": "1",
-            "NATS_SERVER": "nats://localhost:4222",
-            "ETCD_ENDPOINTS": "http://localhost:2379",
+            # NATS_SERVER and ETCD_ENDPOINTS inherited from runtime_services fixture env
             "DYN_KVBM_CPU_CACHE_GB": "5",
             "DYN_KVBM_DISK_CACHE_GB": "5",
             # Disable O_DIRECT on the KVBM G3 disk cache so the test runs on
@@ -740,8 +738,7 @@ class TestConsolidatorRouterE2E:
         frontend_env.update(
             {
                 "RUST_BACKTRACE": "1",
-                "NATS_SERVER": "nats://localhost:4222",
-                "ETCD_ENDPOINTS": "http://localhost:2379",
+                # NATS_SERVER and ETCD_ENDPOINTS inherited from runtime_services fixture env
                 "DYN_LOG": "debug",
             }
         )
@@ -820,8 +817,7 @@ class TestConsolidatorRouterE2E:
             worker_env.update(
                 {
                     "RUST_BACKTRACE": "1",
-                    "NATS_SERVER": "nats://localhost:4222",
-                    "ETCD_ENDPOINTS": "http://localhost:2379",
+                    # NATS_SERVER and ETCD_ENDPOINTS inherited from runtime_services fixture env
                     "DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS": str(g2_cpu_blocks),
                     "DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS": str(g3_disk_blocks),
                     # Disable O_DIRECT on the KVBM G3 disk cache so the test runs

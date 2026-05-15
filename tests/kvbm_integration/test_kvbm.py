@@ -5,6 +5,11 @@
 """
 KVBM (KV Block Manager) integration tests for vLLM.
 
+Each test runs twice — once for KVBM v1 (``kvbm.vllm_integration.connector``)
+and once for KVBM v2 (``kvbm.v2.vllm.connector`` with the NIXL UCX backend),
+selected via the indirect ``llm_server_kvbm`` fixture parametrize. If v1 and
+v2 diverge in expected behavior, split these back into separate files.
+
 These tests validate core KVBM functionality:
 1. Offload/Onboard: Request offloads to CPU, cache reset, re-request triggers onboarding
 2. Eviction: GPU cache fills, blocks evicted, later retrieved without corruption
@@ -12,29 +17,21 @@ These tests validate core KVBM functionality:
 """
 
 import pytest
-import requests
 
 from .common import llm_server_kvbm  # noqa: F401
-from .common import DeterminismTester, assert_deterministic, fetch_kvbm_metrics
+from .common import (
+    AELDORA_STORY,
+    DeterminismTester,
+    assert_deterministic,
+    check_kvbm_metrics,
+    print_phase,
+    print_test_header,
+    reset_cache,
+)
 
 # Test configuration
 MIN_OFFLOAD_BLOCKS = 12  # Minimum blocks expected for Qwen3-0.6B with test prompts
 MAX_TOKENS = 15  # Max tokens to generate in test responses
-
-# Shared test prompt (Aeldora story)
-AELDORA_STORY = (
-    "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, "
-    "lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria "
-    "was buried beneath the shifting sands of time, lost to the world for centuries. You are "
-    "an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled "
-    "upon an ancient map hinting at secrets that Aeloria holds a secret so profound that it has "
-    "the potential to reshape the very fabric of reality. Your journey will take you through "
-    "treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: "
-    "Character Background: Develop a detailed background for your character. Describe their "
-    "motivations for seeking out Aeloria, their skills and weaknesses, and any personal "
-    "connections to the ancient city or its legends. Are they driven by a quest for knowledge, "
-    "a search for lost familt clue is hidden."
-)
 
 # Test markers
 pytestmark = [
@@ -44,57 +41,6 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.pre_merge,
 ]
-
-
-# Helper functions
-def print_test_header(title: str) -> None:
-    """Print a formatted test header."""
-    print(f"\n{'=' * 70}")
-    print(title)
-    print("=" * 70)
-
-
-def print_phase(phase_num: int, description: str) -> None:
-    """Print a formatted phase header."""
-    print(f"\n=== Phase {phase_num}: {description} ===")
-
-
-def check_kvbm_metrics(phase_name: str, metrics_port: int) -> dict[str, int]:
-    """Fetch and display KVBM metrics.
-
-    Args:
-        phase_name: Name of the test phase for logging
-        metrics_port: Port number for the KVBM metrics endpoint
-
-    Returns:
-        Dictionary containing KVBM metrics with keys:
-        - kvbm_offload_blocks_d2h: Blocks offloaded from GPU to CPU
-        - kvbm_onboard_blocks_h2d: Blocks onboarded from CPU to GPU
-    """
-    print(f"\n--- Checking KVBM metrics after {phase_name} ---")
-    metrics = fetch_kvbm_metrics(port=metrics_port)
-
-    offload_d2h = metrics.get("kvbm_offload_blocks_d2h", 0)
-    onboard_h2d = metrics.get("kvbm_onboard_blocks_h2d", 0)
-
-    print(f"  kvbm_offload_blocks_d2h: {offload_d2h}")
-    print(f"  kvbm_onboard_blocks_h2d: {onboard_h2d}")
-
-    return {
-        "kvbm_offload_blocks_d2h": offload_d2h,
-        "kvbm_onboard_blocks_h2d": onboard_h2d,
-    }
-
-
-def reset_cache(base_url: str) -> None:
-    """Reset the GPU prefix cache."""
-    print("Resetting prefix cache...")
-    try:
-        response = requests.post(f"{base_url}/reset_prefix_cache", timeout=30)
-        response.raise_for_status()
-        print("Cache reset successful")
-    except Exception as e:
-        print(f"Warning: Cache reset failed: {e}")
 
 
 # Model used for test_kvbm tests (smaller model for faster CI)
@@ -113,7 +59,14 @@ def tester(llm_server_kvbm):  # noqa: F811
 
 
 # Tests
-@pytest.mark.parametrize("llm_server_kvbm", [{"model": KVBM_TEST_MODEL}], indirect=True)
+@pytest.mark.parametrize(
+    "llm_server_kvbm",
+    [
+        pytest.param({"model": KVBM_TEST_MODEL}, id="v1"),
+        pytest.param({"model": KVBM_TEST_MODEL, "v2": True}, id="v2"),
+    ],
+    indirect=True,
+)
 @pytest.mark.timeout(170)  # 4x measured (~41s), rounded up
 def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     """
@@ -178,7 +131,15 @@ def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
 
 @pytest.mark.parametrize(
     "llm_server_kvbm",
-    [{"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL}],
+    [
+        pytest.param(
+            {"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL}, id="v1"
+        ),
+        pytest.param(
+            {"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL, "v2": True},
+            id="v2",
+        ),
+    ],
     indirect=True,
 )
 @pytest.mark.timeout(170)  # 4x measured (~42s), rounded up
@@ -253,7 +214,15 @@ def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
 
 @pytest.mark.parametrize(
     "llm_server_kvbm",
-    [{"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL}],
+    [
+        pytest.param(
+            {"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL}, id="v1"
+        ),
+        pytest.param(
+            {"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL, "v2": True},
+            id="v2",
+        ),
+    ],
     indirect=True,
 )
 @pytest.mark.timeout(160)  # 4x measured (~39s), rounded up

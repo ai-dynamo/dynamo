@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Nova-based RPC implementation for distributed worker communication.
+//! Velo-based RPC implementation for distributed worker communication.
 //!
 //! # RPC Pattern Guidelines
 //!
-//! This module uses only two Nova RPC patterns:
+//! This module uses only two Velo RPC patterns:
 //!
 //! 1. **`am_send` (fire-and-forget)**: Use when no response is needed.
 //!    - Client sends message and returns immediately
@@ -41,6 +41,7 @@ pub use service::{VeloWorkerService, VeloWorkerServiceBuilder};
 
 use super::DirectWorker;
 use super::*;
+use kvbm_common::KvbmTransferRoute;
 use kvbm_physical::layout::LayoutConfig;
 use kvbm_physical::transfer::TransferOptions;
 
@@ -55,6 +56,7 @@ struct SerializableTransferOptions {
     nixl_write_notification: Option<u64>,
     bounce_buffer_handle: Option<LayoutHandle>,
     bounce_buffer_block_ids: Option<Vec<BlockId>>,
+    metric_route: Option<KvbmTransferRoute>,
 }
 
 impl From<SerializableTransferOptions> for TransferOptions {
@@ -68,6 +70,7 @@ impl From<SerializableTransferOptions> for TransferOptions {
             // KV layout overrides are not serialized; they must be set locally
             src_kv_layout: None,
             dst_kv_layout: None,
+            metric_route: opts.metric_route,
         }
     }
 }
@@ -98,6 +101,7 @@ impl From<TransferOptions> for SerializableTransferOptions {
             nixl_write_notification: opts.nixl_write_notification,
             bounce_buffer_handle,
             bounce_buffer_block_ids,
+            metric_route: opts.metric_route,
         }
     }
 }

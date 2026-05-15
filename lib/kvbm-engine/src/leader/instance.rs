@@ -65,7 +65,7 @@ use super::{
 ///   leaders can initiate sessions and exchange metadata.
 #[derive(Clone)]
 pub struct InstanceLeader {
-    /// Nova instance for distributed communication.
+    /// Velo instance for distributed communication.
     messenger: Arc<Messenger>,
 
     /// Block registry for deduplication.
@@ -114,6 +114,11 @@ pub struct InstanceLeader {
     /// Object storage client for G4 search and load operations.
     /// Leader calls has_blocks on S3 directly, coordinates workers for get_blocks.
     object_client: Option<Arc<dyn ObjectBlockOps>>,
+
+    /// When true, host (G2) is bypassed: disk hits are returned directly as
+    /// G3 blocks for G3→G1 transfer instead of staging through G2. Driven by
+    /// `kvbm_config::CacheConfig::bypass_host_cache()` at init time.
+    pub(crate) bypass_host: bool,
 }
 
 /// Builder for InstanceLeader.
@@ -128,14 +133,15 @@ pub struct InstanceLeaderBuilder {
     remote_leaders: Option<Vec<InstanceId>>,
     cached_worker_metadata: Option<Vec<SerializedLayout>>,
     object_client: Option<Arc<dyn ObjectBlockOps>>,
+    bypass_host: bool,
 }
 
 impl InstanceLeaderBuilder {
     /// Initialize builder with components from KvbmRuntime.
     ///
-    /// This extracts Nova from the runtime. Use this when the runtime
+    /// This extracts Velo from the runtime. Use this when the runtime
     /// has already been constructed and you want the leader to share
-    /// the same Nova instance for distributed communication.
+    /// the same Velo instance for distributed communication.
     ///
     /// # Example
     /// ```ignore
@@ -210,6 +216,15 @@ impl InstanceLeaderBuilder {
     /// The leader uses this client to:
     /// - Query S3 for block presence via `has_blocks`
     /// - Coordinate workers to load blocks from S3 via `get_blocks`
+    /// Mark this leader as running in host-bypass mode. When set, disk hits
+    /// are returned as G3 blocks for direct G3→G1 onboarding instead of being
+    /// staged through G2. Set this when the cache config has
+    /// `bypass_host_cache() == true`.
+    pub fn bypass_host(mut self, bypass: bool) -> Self {
+        self.bypass_host = bypass;
+        self
+    }
+
     pub fn object_client(mut self, client: Arc<dyn ObjectBlockOps>) -> Self {
         self.object_client = Some(client);
         self
@@ -218,7 +233,7 @@ impl InstanceLeaderBuilder {
     pub fn build(self) -> Result<InstanceLeader> {
         let messenger = self
             .messenger
-            .ok_or_else(|| anyhow::anyhow!("Nova instance required"))?;
+            .ok_or_else(|| anyhow::anyhow!("Velo instance required"))?;
         let transport = Arc::new(MessageTransport::velo(messenger.clone()));
 
         // Create event system for notification aggregation
@@ -266,6 +281,7 @@ impl InstanceLeaderBuilder {
             transport,
             session_sessions: Arc::new(DashMap::new()),
             object_client: self.object_client,
+            bypass_host: self.bypass_host,
         })
     }
 }
@@ -311,15 +327,15 @@ impl InstanceLeader {
         &self.registry
     }
 
-    /// Get a reference to the Nova instance.
+    /// Get a reference to the Velo instance.
     ///
-    /// This provides access to the Nova distributed system for features
+    /// This provides access to the Velo distributed system for features
     /// like event coordination and cross-instance communication.
     pub fn messenger(&self) -> &Arc<Messenger> {
         &self.messenger
     }
 
-    /// Get the tokio runtime handle from Nova.
+    /// Get the tokio runtime handle from Velo.
     ///
     /// This handle should be used for spawning background tasks that need to
     /// run on the KVBM runtime's executor (e.g., offload engine pipelines).
@@ -508,7 +524,7 @@ impl InstanceLeader {
         InstanceLeaderBuilder::default()
     }
 
-    /// Register Nova handlers for leader-to-leader communication.
+    /// Register Velo handlers for leader-to-leader communication.
     ///
     /// This must be called after construction to enable distributed onboarding.
     pub fn register_handlers(&self) -> Result<()> {
@@ -605,6 +621,24 @@ impl InstanceLeader {
         self.session_states.remove(&session_id);
         self.sessions.remove(&session_id);
         self.session_sessions.remove(&session_id);
+    }
+
+    /// Test-only: is `session_id` registered in any of the three session maps?
+    #[cfg(any(test, feature = "testing"))]
+    pub fn has_session(&self, session_id: SessionId) -> bool {
+        self.sessions.contains_key(&session_id)
+            || self.session_states.contains_key(&session_id)
+            || self.session_sessions.contains_key(&session_id)
+    }
+
+    /// Test-only: insert a sentinel entry into `sessions` so a test can verify
+    /// that `release_session` removes it. The channel has capacity 1 and its
+    /// receiver is dropped immediately; the map entry alone is what the test
+    /// observes.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn insert_test_session_marker(&self, session_id: SessionId) {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        self.sessions.insert(session_id, tx);
     }
 
     // ========================================================================
@@ -947,7 +981,7 @@ impl InstanceLeader {
         }
     }
 
-    /// Get the session sessions map (for Nova handler registration).
+    /// Get the session sessions map (for Velo handler registration).
     #[expect(dead_code)]
     pub(crate) fn session_sessions(&self) -> Arc<DashMap<SessionId, SessionMessageTx>> {
         self.session_sessions.clone()
@@ -1158,23 +1192,56 @@ impl Leader for InstanceLeader {
         let has_object_client = self.object_client.is_some();
         let needs_remote_search =
             options.search_remote && (has_remote_leaders || has_object_client);
+        let local_g2_count = matched_g2_blocks.len();
+        let local_g3_count = matched_g3_blocks.len();
+
+        // Host-bypass short-circuit: when G2 is intentionally unconfigured we
+        // never want to take the AsyncSession + stage_g3_to_g2 path. Return
+        // immediately with both G2 (typically empty) and G3 blocks attached
+        // so the caller can issue G3→G1 directly via GDS.
+        //
+        // Bypass mode does not currently support remote search — the staging
+        // protocol owns that path and assumes G2 destinations. If a caller
+        // requests remote search under bypass, fall through to the normal
+        // AsyncSession path which will surface the missing-G2-destination
+        // error loudly rather than silently dropping disk traffic.
+        if self.bypass_host && !needs_remote_search {
+            return Ok(FindMatchesResult::Ready(ReadyResult::new_with_g3(
+                matched_g2_blocks,
+                matched_g3_blocks,
+                super::MatchBreakdown {
+                    host_blocks: local_g2_count,
+                    disk_blocks: local_g3_count,
+                    object_blocks: 0,
+                },
+            )));
+        }
+
         let is_ready = matched_g3_blocks.is_empty() && !needs_remote_search;
 
         if is_ready {
             // No session needed - blocks owned directly by ReadyResult (RAII)
             return Ok(FindMatchesResult::Ready(ReadyResult::new(
                 matched_g2_blocks,
+                super::MatchBreakdown {
+                    host_blocks: local_g2_count,
+                    disk_blocks: 0,
+                    object_blocks: 0,
+                },
             )));
         }
 
         // AsyncSession path: G3 blocks found or remote search enabled
         let session_id = SessionId::from(Uuid::new_v4());
-        let local_g2_count = matched_g2_blocks.len();
-        let local_g3_count = matched_g3_blocks.len();
 
         // AsyncSession: staging locally and/or remote searching
         let (status_tx, status_rx) = watch::channel(OnboardingStatus::Searching);
         let all_g2_blocks = Arc::new(Mutex::new(None));
+        let match_breakdown = Arc::new(Mutex::new(super::MatchBreakdown {
+            host_blocks: local_g2_count,
+            disk_blocks: local_g3_count,
+            object_blocks: 0,
+        }));
 
         // Store session state to keep blocks alive
         let state = SessionState {
@@ -1200,6 +1267,7 @@ impl Leader for InstanceLeader {
                 session_id,
                 status_rx,
                 all_g2_blocks,
+                match_breakdown,
                 None, // No session handle for local-only staging (yet)
             )));
         }
@@ -1230,6 +1298,7 @@ impl Leader for InstanceLeader {
             self.transport.clone(),
             status_tx.clone(),
             all_g2_blocks.clone(),
+            match_breakdown.clone(),
             control_rx.unwrap_or_else(|| {
                 let (_, rx) = mpsc::channel(1);
                 rx
@@ -1256,6 +1325,7 @@ impl Leader for InstanceLeader {
             session_id,
             status_rx,
             all_g2_blocks,
+            match_breakdown,
             session_handle,
         )))
     }

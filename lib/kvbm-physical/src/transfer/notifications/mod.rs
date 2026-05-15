@@ -136,7 +136,7 @@ pub async fn process_polling_notifications<C: CompletionChecker>(
                 // Remove completed transfers and signal completion
                 for (uuid, result) in completed {
                     if let Some(transfer) = outstanding.remove(&uuid) {
-                        // Signal completion via Nova event system
+                        // Signal completion via Velo event system
                         match result {
                             Ok(()) => {
                                 if let Err(e) = system.trigger(transfer.event_handle) {

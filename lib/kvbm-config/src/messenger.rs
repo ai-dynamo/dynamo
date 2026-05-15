@@ -11,8 +11,12 @@ use validator::Validate;
 
 use crate::discovery::DiscoveryConfig;
 
+fn default_init_timeout_secs() -> u64 {
+    1800
+}
+
 /// Messenger configuration combining backend and discovery settings.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct MessengerConfig {
     #[validate(nested)]
     pub backend: MessengerBackendConfig,
@@ -20,6 +24,26 @@ pub struct MessengerConfig {
     /// Discovery configuration. None = discovery disabled.
     #[serde(default)]
     pub discovery: Option<DiscoveryConfig>,
+
+    /// Leader-worker initialization timeout in seconds.
+    ///
+    /// How long the leader waits for all workers to connect before giving up.
+    /// Default: 1800 (30 minutes).
+    ///
+    /// V1 compat: `DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS`
+    #[serde(default = "default_init_timeout_secs")]
+    #[validate(range(min = 1))]
+    pub init_timeout_secs: u64,
+}
+
+impl Default for MessengerConfig {
+    fn default() -> Self {
+        Self {
+            backend: MessengerBackendConfig::default(),
+            discovery: None,
+            init_timeout_secs: default_init_timeout_secs(),
+        }
+    }
 }
 
 impl MessengerConfig {
@@ -34,7 +58,7 @@ impl MessengerConfig {
         use std::sync::Arc;
 
         use velo::Messenger;
-        use velo::backend::tcp::TcpTransportBuilder;
+        use velo::transports::tcp::TcpTransportBuilder;
 
         // 1. Build TCP transport
         // Pre-bind listener to get OS-assigned port (if port is 0)

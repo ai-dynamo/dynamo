@@ -8,7 +8,7 @@ use tokio::sync::{Mutex, watch};
 
 use std::sync::Arc;
 
-use crate::G2;
+use crate::{G2, G3};
 use kvbm_logical::blocks::ImmutableBlock;
 
 use super::onboarding::{OnboardingStatus, SessionHandle};
@@ -71,16 +71,48 @@ pub enum FindMatchesResult {
 ///
 /// No session is created - blocks are owned directly by this struct (RAII).
 /// Dropping this struct will release the block references.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MatchBreakdown {
+    pub host_blocks: usize,
+    pub disk_blocks: usize,
+    pub object_blocks: usize,
+}
+
 #[derive(Debug)]
 pub struct ReadyResult {
     /// G2 blocks held directly via RAII
     blocks: Vec<ImmutableBlock<G2>>,
+    /// G3 blocks held directly via RAII (host-bypass mode).
+    ///
+    /// In standard mode this is always empty — disk hits become G2 blocks
+    /// after `stage_g3_to_g2` runs in the AsyncSession path. Populated only
+    /// when host-bypass is in effect and disk hits are returned for direct
+    /// G3→G1 onboarding.
+    g3_blocks: Vec<ImmutableBlock<G3>>,
+    breakdown: MatchBreakdown,
 }
 
 impl ReadyResult {
-    /// Create a new ready result with G2 blocks.
-    pub fn new(blocks: Vec<ImmutableBlock<G2>>) -> Self {
-        Self { blocks }
+    /// Create a new ready result with G2 blocks (standard mode).
+    pub fn new(blocks: Vec<ImmutableBlock<G2>>, breakdown: MatchBreakdown) -> Self {
+        Self {
+            blocks,
+            g3_blocks: Vec::new(),
+            breakdown,
+        }
+    }
+
+    /// Create a new ready result with G2 + G3 blocks (host-bypass mode).
+    pub fn new_with_g3(
+        g2_blocks: Vec<ImmutableBlock<G2>>,
+        g3_blocks: Vec<ImmutableBlock<G3>>,
+        breakdown: MatchBreakdown,
+    ) -> Self {
+        Self {
+            blocks: g2_blocks,
+            g3_blocks,
+            breakdown,
+        }
     }
 
     /// Number of G2 blocks held.
@@ -88,16 +120,42 @@ impl ReadyResult {
         self.blocks.len()
     }
 
+    /// Number of G3 blocks held (host-bypass mode).
+    pub fn g3_count(&self) -> usize {
+        self.g3_blocks.len()
+    }
+
+    /// Total matched blocks across all tiers (G2 + G3).
+    pub fn total_count(&self) -> usize {
+        self.g2_count() + self.g3_count()
+    }
+
     /// Take ownership of the G2 blocks.
     ///
-    /// After calling this, the ReadyResult will be empty.
+    /// After calling this, the ReadyResult's G2 list will be empty.
     pub fn take_g2_blocks(&mut self) -> Vec<ImmutableBlock<G2>> {
         std::mem::take(&mut self.blocks)
+    }
+
+    /// Take ownership of the G3 blocks (host-bypass mode).
+    ///
+    /// After calling this, the ReadyResult's G3 list will be empty.
+    pub fn take_g3_blocks(&mut self) -> Vec<ImmutableBlock<G3>> {
+        std::mem::take(&mut self.g3_blocks)
     }
 
     /// Get a reference to the G2 blocks.
     pub fn blocks(&self) -> &[ImmutableBlock<G2>] {
         &self.blocks
+    }
+
+    /// Get a reference to the G3 blocks (host-bypass mode).
+    pub fn g3_blocks(&self) -> &[ImmutableBlock<G3>] {
+        &self.g3_blocks
+    }
+
+    pub fn match_breakdown(&self) -> MatchBreakdown {
+        self.breakdown
     }
 }
 
@@ -107,6 +165,7 @@ pub struct AsyncSessionResult {
     session_id: SessionId,
     status_rx: watch::Receiver<OnboardingStatus>,
     blocks: Arc<Mutex<Option<Vec<ImmutableBlock<G2>>>>>,
+    match_breakdown: Arc<Mutex<MatchBreakdown>>,
     session_handle: Option<SessionHandle>,
 }
 
@@ -116,12 +175,14 @@ impl AsyncSessionResult {
         session_id: SessionId,
         status_rx: watch::Receiver<OnboardingStatus>,
         blocks: Arc<Mutex<Option<Vec<ImmutableBlock<G2>>>>>,
+        match_breakdown: Arc<Mutex<MatchBreakdown>>,
         session_handle: Option<SessionHandle>,
     ) -> Self {
         Self {
             session_id,
             status_rx,
             blocks,
+            match_breakdown,
             session_handle,
         }
     }
@@ -175,6 +236,13 @@ impl AsyncSessionResult {
 
             Ok(())
         })
+    }
+
+    pub fn match_breakdown(&self) -> MatchBreakdown {
+        self.match_breakdown
+            .try_lock()
+            .map(|v| *v)
+            .unwrap_or_default()
     }
 }
 
@@ -240,6 +308,24 @@ impl FindMatchesResult {
         match self {
             FindMatchesResult::Ready(r) => Some(r.take_g2_blocks()),
             FindMatchesResult::AsyncSession(a) => a.blocks.try_lock().ok()?.take(),
+        }
+    }
+
+    /// Take ownership of G3 blocks if available (host-bypass mode).
+    ///
+    /// Only Ready results carry G3 blocks; AsyncSession returns `None` because
+    /// remote-search / staging paths don't currently populate the G3 holder.
+    pub fn take_g3_blocks(&mut self) -> Option<Vec<ImmutableBlock<G3>>> {
+        match self {
+            FindMatchesResult::Ready(r) => Some(r.take_g3_blocks()),
+            FindMatchesResult::AsyncSession(_) => None,
+        }
+    }
+
+    pub fn match_breakdown(&self) -> MatchBreakdown {
+        match self {
+            FindMatchesResult::Ready(r) => r.match_breakdown(),
+            FindMatchesResult::AsyncSession(a) => a.match_breakdown(),
         }
     }
 

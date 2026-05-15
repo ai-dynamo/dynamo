@@ -28,7 +28,7 @@
 //!     },
 //!     "g2_to_g3": {
 //!       "policies": ["presence_lfu"],
-//!       "presence_lfu": { "min_lfu_count": 8 }
+//!       "presence_lfu": { "min_lfu_count": 1 }
 //!     }
 //!   }
 //! }
@@ -59,8 +59,18 @@ pub enum PolicyType {
 pub struct PresenceFilterConfig {}
 
 /// Default LFU count threshold.
+///
+/// The filter passes when `count > min_lfu_count`. The TinyLFU sketch counts
+/// every register and prefix re-match, so:
+/// - `0` → first registration triggers offload (effectively no LFU gating)
+/// - `1` → second hit triggers offload (matches KVBM v1's `FrequencyFilter`
+///   default of `min_offload_frequency = 2`)
+/// - higher values → require more re-matches before promoting
+///
+/// Default `1` matches v1 UX: a block crosses to the next tier the moment a
+/// second request prefix-matches it.
 fn default_min_lfu_count() -> u32 {
-    8
+    1
 }
 
 /// Configuration for presence + LFU filter.
@@ -71,12 +81,12 @@ fn default_min_lfu_count() -> u32 {
 pub struct PresenceLfuFilterConfig {
     /// Minimum LFU count threshold for offload.
     ///
-    /// Blocks must have been accessed more than this many times to be
-    /// considered for offload. This prevents offloading rarely-used blocks.
+    /// A block is offloaded when its access count is **strictly greater** than
+    /// this value. The TinyLFU sketch counts each register and prefix re-match.
     ///
-    /// Default: 8
+    /// Default: 1 (block crosses on the second hit, matching KVBM v1).
     #[serde(default = "default_min_lfu_count")]
-    #[validate(range(min = 1))]
+    #[validate(range(min = 0))]
     pub min_lfu_count: u32,
 }
 
@@ -115,6 +125,31 @@ pub struct TierOffloadConfig {
     #[serde(default)]
     #[validate(nested)]
     pub presence_lfu: PresenceLfuFilterConfig,
+
+    /// Minimum priority threshold for prefix-contiguous offload filtering.
+    ///
+    /// Offloading stops at the first block below this threshold.
+    /// 0 means no priority filtering (default).
+    ///
+    /// V1 compat: `DYN_KVBM_HOST_OFFLOAD_PREFIX_MIN_PRIORITY`
+    #[serde(default)]
+    pub min_priority: i32,
+
+    /// Maximum number of concurrent transfers for this tier transition.
+    ///
+    /// If None, the engine uses its own default (typically 4).
+    ///
+    /// V1 compat: `DYN_KVBM_MAX_CONCURRENT_TRANSFERS`
+    #[serde(default)]
+    pub max_concurrent_transfers: Option<usize>,
+
+    /// Maximum batch size for transfers.
+    ///
+    /// If None, the engine uses its own default (typically 16).
+    ///
+    /// V1 compat: `DYN_KVBM_MAX_TRANSFER_BATCH_SIZE` or `DYN_KVBM_TRANSFER_BATCH_SIZE`
+    #[serde(default)]
+    pub max_batch_size: Option<usize>,
 }
 
 /// Top-level offload configuration.
@@ -131,6 +166,16 @@ pub struct OffloadConfig {
     #[serde(default)]
     #[validate(nested)]
     pub g2_to_g3: TierOffloadConfig,
+
+    /// G1 (GPU) → G3 (Disk) direct offload policies (host-bypass mode).
+    ///
+    /// Only consulted when the cache config has `bypass_host_cache() == true`
+    /// (disk configured, host not). In that mode the G1→G2 + G2→G3 chain is
+    /// replaced by a single G1→G3 pipeline that uses GDS for direct GPU→disk
+    /// transfers.
+    #[serde(default)]
+    #[validate(nested)]
+    pub g1_to_g3: TierOffloadConfig,
 }
 
 #[cfg(test)]
@@ -143,7 +188,7 @@ mod tests {
         // Empty policies - engine applies tier-specific defaults
         assert!(config.g1_to_g2.policies.is_empty());
         assert!(config.g2_to_g3.policies.is_empty());
-        assert_eq!(config.g2_to_g3.presence_lfu.min_lfu_count, 8);
+        assert_eq!(config.g2_to_g3.presence_lfu.min_lfu_count, 1);
     }
 
     #[test]
@@ -196,8 +241,8 @@ mod tests {
     fn test_default_lfu_threshold() {
         let json = r#"{"policies": ["presence_lfu"]}"#;
         let config: TierOffloadConfig = serde_json::from_str(json).unwrap();
-        // Should use default of 8
-        assert_eq!(config.presence_lfu.min_lfu_count, 8);
+        // Should use default of 1 (offload on second hit, matching KVBM v1)
+        assert_eq!(config.presence_lfu.min_lfu_count, 1);
     }
 
     #[test]

@@ -161,12 +161,16 @@ fn cuda_setup() -> Option<(Arc<CudaStream>, cuda_runtime::cudaStream_t)> {
 // GPU allocation helpers
 // ---------------------------------------------------------------------------
 
+/// Device-side block table: owned per-batch CUDA slices plus a flat
+/// `CudaSlice<usize>` of device pointers into them.
+type DeviceBlockTable<T> = (Vec<Vec<CudaSlice<T>>>, CudaSlice<usize>);
+
 /// Upload block chunks to GPU, returning the slices (kept alive) and a device
 /// pointer table suitable for the kernel FFI.
 fn upload_blocks<T: TestDtype>(
     stream: &Arc<CudaStream>,
     ref_blocks: &[Vec<Vec<T>>],
-) -> Result<(Vec<Vec<CudaSlice<T>>>, CudaSlice<usize>), DriverError> {
+) -> Result<DeviceBlockTable<T>, DriverError> {
     let nb = ref_blocks.len();
     let chunks_per_batch = ref_blocks.first().map_or(0, |b| b.len());
     let mut all_slices: Vec<Vec<CudaSlice<T>>> = Vec::with_capacity(nb);
@@ -367,8 +371,8 @@ fn empty_batch_noop() -> Result<(), DriverError> {
         None => return Ok(()),
     };
 
-    let null_mut = std::ptr::null() as *const *mut c_void;
-    let null_const = std::ptr::null() as *const *const c_void;
+    let null_mut: *const *mut c_void = std::ptr::null();
+    let null_const: *const *const c_void = std::ptr::null();
 
     // universal_from_block
     let status = unsafe {

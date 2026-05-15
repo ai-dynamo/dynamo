@@ -424,7 +424,9 @@ fn build_lw_ptrs(
 // Run one benchmark configuration
 // ---------------------------------------------------------------------------
 
-fn run_benchmark(
+/// Parameters for a single benchmark run.
+#[derive(Clone, Copy)]
+struct BenchmarkParams {
     stream_raw: cuda_runtime::cudaStream_t,
     pattern: Pattern,
     direction: Direction,
@@ -433,7 +435,19 @@ fn run_benchmark(
     num_blocks: usize,
     warmup_iters: usize,
     timed_iters: usize,
-) -> Option<(f64, f64)> {
+}
+
+fn run_benchmark(params: BenchmarkParams) -> Option<(f64, f64)> {
+    let BenchmarkParams {
+        stream_raw,
+        pattern,
+        direction,
+        backend,
+        tokens_per_block,
+        num_blocks,
+        warmup_iters,
+        timed_iters,
+    } = params;
     let inner = tokens_per_block * NUM_KV_HEADS * HEAD_DIM * ELEM_SIZE;
     let full_block_size = inner * OUTER_DIM * NUM_LAYERS;
     let total_bytes = full_block_size * num_blocks;
@@ -521,8 +535,8 @@ fn run_benchmark(
             Backend::Batched => {
                 let status = unsafe {
                     memcpy_batch(
-                        src_ptrs.as_ptr() as *const *const c_void,
-                        dst_ptrs.as_ptr() as *const *mut c_void,
+                        src_ptrs.as_ptr(),
+                        dst_ptrs.as_ptr(),
                         copy_size,
                         num_copies,
                         MemcpyBatchMode::BatchedWithFallback,
@@ -538,8 +552,8 @@ fn run_benchmark(
             Backend::MemcpyAsync => {
                 let status = unsafe {
                     memcpy_batch(
-                        src_ptrs.as_ptr() as *const *const c_void,
-                        dst_ptrs.as_ptr() as *const *mut c_void,
+                        src_ptrs.as_ptr(),
+                        dst_ptrs.as_ptr(),
                         copy_size,
                         num_copies,
                         MemcpyBatchMode::FallbackOnly,
@@ -722,16 +736,16 @@ fn main() {
                             backend.label(),
                         );
 
-                        match run_benchmark(
+                        match run_benchmark(BenchmarkParams {
                             stream_raw,
                             pattern,
                             direction,
                             backend,
-                            tpb,
+                            tokens_per_block: tpb,
                             num_blocks,
                             warmup_iters,
                             timed_iters,
-                        ) {
+                        }) {
                             Some((median_ms, bw)) => {
                                 println!(
                                     "{tpb},{num_blocks},{},{},{},{total_bytes},{inner},{copy_size},{num_copies},{median_ms:.4},{bw:.2}",

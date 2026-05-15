@@ -20,13 +20,23 @@ name = "_core"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["block-manager"]
-block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
-nccl = ["block-manager", "dynamo-llm/nccl", "cudarc/nccl"]  # Enable NCCL collective operations for replicated mode
+default = ["v1", "v2"]
+dynamo = ["dep:dynamo-runtime"]
+v1 = ["dynamo", "dep:dynamo-llm", "dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
+v2 = ["dep:kvbm-connector", "kvbm-connector/static-kernels"]
+kernels = ["dep:kvbm-kernels", "dep:cudarc", "dep:once_cell"]
+nccl = ["v1", "dynamo-llm/nccl", "cudarc/nccl"]
 
 [dependencies]
-dynamo-llm = { path = "../../llm" }
-dynamo-runtime = { path = "../../runtime" }
+# v1 deps (optional)
+dynamo-llm = { path = "../../llm", optional = true }
+dynamo-runtime = { path = "../../runtime", optional = true }
+
+# v2 deps (optional)
+kvbm-connector = { path = "../../kvbm-connector", optional = true }
+
+# kernels deps (optional)
+kvbm-kernels = { path = "../../kvbm-kernels", optional = true }
 
 anyhow = { version = "1" }
 derive-getters = "0.5"
@@ -35,7 +45,7 @@ serde_json = { version = "1.0.138" }
 thiserror = { version = "2.0" }
 tokio = { version = "1.46.0", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-tracing = { version = "0"  }
+tracing = { version = "0" }
 uuid = { version = "1.17", features = ["v4", "serde"] }
 
 # "extension-module" tells pyo3 we want to build an extension module (skips linking against libpython.so)
@@ -56,7 +66,9 @@ pyo3-async-runtimes = { version = "0.23.0", default-features = false, features =
   "unstable-streams",
 ] }
 
+once_cell = { version = "1", optional = true }
 dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
 cudarc = { version = "=0.19.3", features = ["cuda-version-from-build-system", "fallback-latest"], optional = true }
 
 [dev-dependencies]
+rstest = "0.25"

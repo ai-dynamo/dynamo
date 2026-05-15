@@ -7,22 +7,27 @@
 //! Supports role-specific configuration for leader and worker components.
 
 mod cache;
+mod debug;
 mod discovery;
 mod events;
 mod messenger;
+mod metrics;
 mod nixl;
 mod object;
 mod offload;
 mod onboard;
 mod rayon;
 mod tokio;
+mod v1_compat;
 
 pub use cache::{CacheConfig, DiskCacheConfig, HostCacheConfig, ParallelismMode};
+pub use debug::DebugConfig;
 pub use discovery::{
     DiscoveryConfig, EtcdDiscoveryConfig, FilesystemDiscoveryConfig, P2pDiscoveryConfig,
 };
 pub use events::{BatchingConfig as EventsBatchingConfig, EventPolicyConfig, EventsConfig};
 pub use messenger::{MessengerBackendConfig, MessengerConfig};
+pub use metrics::MetricsConfig;
 pub use nixl::NixlConfig;
 pub use object::{NixlObjectConfig, ObjectClientConfig, ObjectConfig, S3ObjectConfig};
 pub use offload::{
@@ -31,6 +36,7 @@ pub use offload::{
 pub use onboard::{OnboardConfig, OnboardMode};
 pub use rayon::RayonConfig;
 pub use tokio::TokioConfig;
+pub use v1_compat::V1EnvCompat;
 
 use figment::{
     Figment, Metadata, Profile, Provider,
@@ -99,6 +105,16 @@ pub struct KvbmConfig {
     #[validate(nested)]
     #[serde(default)]
     pub events: EventsConfig,
+
+    /// Metrics and cache statistics configuration.
+    #[validate(nested)]
+    #[serde(default)]
+    pub metrics: MetricsConfig,
+
+    /// Debug configuration (recording, etc.).
+    #[validate(nested)]
+    #[serde(default)]
+    pub debug: DebugConfig,
 }
 
 impl KvbmConfig {
@@ -106,16 +122,23 @@ impl KvbmConfig {
     ///
     /// Configuration sources in priority order (lowest to highest):
     /// 1. Code defaults
-    /// 2. System config file at /opt/dynamo/etc/kvbm.toml
-    /// 3. TOML file from KVBM_CONFIG_PATH environment variable
-    /// 4. Environment variables (KVBM_* prefixed)
+    /// 2. V1 `DYN_KVBM_*` environment variables (compat layer)
+    /// 3. System config file at /opt/dynamo/etc/kvbm.toml
+    /// 4. TOML file from KVBM_CONFIG_PATH environment variable
+    /// 5. V2 environment variables (KVBM_* prefixed)
+    /// 6. JSON overrides from Python (via `from_figment_with_json`)
     pub fn figment() -> Figment {
         let config_path = std::env::var("KVBM_CONFIG_PATH").unwrap_or_default();
 
         Figment::new()
+            // 1. Code defaults (lowest priority)
             .merge(Serialized::defaults(KvbmConfig::default()))
+            // 2. V1 DYN_KVBM_* env vars (compat layer)
+            .merge(V1EnvCompat)
+            // 3-4. TOML files
             .merge(Toml::file("/opt/dynamo/etc/kvbm.toml"))
             .merge(Toml::file(&config_path))
+            // 5. V2 KVBM_* env vars (override v1 and files)
             // Tokio config: KVBM_TOKIO_WORKER_THREADS, KVBM_TOKIO_MAX_BLOCKING_THREADS
             .merge(
                 Env::prefixed("KVBM_TOKIO_")
@@ -135,6 +158,11 @@ impl KvbmConfig {
             .merge(
                 Env::prefixed("KVBM_MESSENGER_DISCOVERY_")
                     .map(|k| format!("messenger.discovery.{}", k.as_str().to_lowercase()).into()),
+            )
+            // Messenger init timeout: KVBM_MESSENGER_INIT_TIMEOUT_SECS
+            .merge(
+                Env::prefixed("KVBM_MESSENGER_INIT_TIMEOUT_SECS")
+                    .map(|_| "messenger.init_timeout_secs".into()),
             )
             // NixL config: KVBM_NIXL_BACKENDS (comma-separated list)
             .merge(
@@ -163,6 +191,27 @@ impl KvbmConfig {
                 Env::prefixed("KVBM_EVENTS_BATCHING_")
                     .map(|k| format!("events.batching.{}", k.as_str().to_lowercase()).into()),
             )
+            // Metrics config: KVBM_METRICS_ENABLED, KVBM_METRICS_PORT, etc.
+            .merge(
+                Env::prefixed("KVBM_METRICS_")
+                    .map(|k| format!("metrics.{}", k.as_str().to_lowercase()).into()),
+            )
+            // Debug config: KVBM_DEBUG_RECORDING
+            .merge(
+                Env::prefixed("KVBM_DEBUG_")
+                    .map(|k| format!("debug.{}", k.as_str().to_lowercase()).into()),
+            )
+            // Offload config: KVBM_OFFLOAD_G1_TO_G2_*, KVBM_OFFLOAD_G2_TO_G3_*
+            .merge(
+                Env::prefixed("KVBM_OFFLOAD_G1_TO_G2_")
+                    .map(|k| format!("offload.g1_to_g2.{}", k.as_str().to_lowercase()).into()),
+            )
+            .merge(
+                Env::prefixed("KVBM_OFFLOAD_G2_TO_G3_")
+                    .map(|k| format!("offload.g2_to_g3.{}", k.as_str().to_lowercase()).into()),
+            )
+            // Onboard config: KVBM_ONBOARD_MODE
+            .merge(Env::prefixed("KVBM_ONBOARD_MODE").map(|_| "onboard.mode".into()))
     }
 
     /// Load configuration from default figment (env and files).
@@ -184,11 +233,62 @@ impl KvbmConfig {
     /// )?;
     /// ```
     pub fn extract_from<T: Provider>(provider: T) -> Result<Self, ConfigError> {
-        let config: Self = Figment::from(provider)
+        let mut config: Self = Figment::from(provider)
             .extract()
             .map_err(|e| ConfigError::Extraction(Box::new(e)))?;
+        config.auto_enable_nixl_backends_for_tiers();
         config.validate()?;
         Ok(config)
+    }
+
+    /// Ensure `nixl.backends` includes whatever the configured cache tiers need.
+    ///
+    /// - Host cache (G2) enabled → UCX (used for inter-worker / remote transfers)
+    /// - Disk cache (G3) enabled → POSIX, or GDS_MT when `disk.use_gds = true`
+    /// - Host-bypass mode (`bypass_host_cache() == true`) → force GDS_MT for
+    ///   direct G1↔G3 transfers, and UCX for the cross-process metadata
+    ///   exchange path (`getLocalMD`) that registers G1 (VRAM) segments. POSIX
+    ///   alone cannot register VRAM, so without these the worker fails at
+    ///   `registerMem` for `VRAM_SEG`.
+    ///
+    /// Idempotent and additive: only fills gaps, never removes a backend the
+    /// user explicitly enabled. If no tier is enabled, leaves `nixl` untouched
+    /// (so a user with NIXL fully disabled stays that way).
+    fn auto_enable_nixl_backends_for_tiers(&mut self) {
+        let host_enabled = self.cache.host.is_enabled();
+        let disk_cfg = self.cache.disk.as_ref();
+        let disk_enabled = disk_cfg.is_some_and(|d| d.is_enabled());
+        let bypass_host = self.cache.bypass_host_cache();
+        let prefer_gds = disk_cfg.is_some_and(|d| d.use_gds) || bypass_host;
+
+        if !host_enabled && !disk_enabled {
+            return;
+        }
+
+        let nixl = self.nixl.get_or_insert_with(NixlConfig::empty);
+
+        // UCX is needed both when G2 is real (inter-worker transfers) and in
+        // host-bypass mode (the worker still needs UCX for the metadata
+        // exchange that exposes its VRAM segments to the leader).
+        if (host_enabled || bypass_host) && !nixl.has_backend("UCX") {
+            let reason = if bypass_host {
+                "host-bypass mode requires UCX for cross-process metadata exchange"
+            } else {
+                "host cache requires UCX for inter-worker transfers"
+            };
+            tracing::info!(reason, "Auto-enabling NIXL backend UCX");
+            *nixl = nixl.clone().with_backend("UCX");
+        }
+
+        if disk_enabled && !nixl.has_backend("POSIX") && !nixl.has_backend("GDS_MT") {
+            let backend = if prefer_gds { "GDS_MT" } else { "POSIX" };
+            tracing::info!(
+                backend,
+                bypass_host,
+                "Auto-enabling NIXL backend for disk cache"
+            );
+            *nixl = nixl.clone().with_backend(backend);
+        }
     }
 
     /// Build a figment from defaults, then merge a custom provider.
@@ -559,5 +659,120 @@ mod tests {
                 assert!(worker_config.is_ok(), "from_env_for_worker should succeed");
             },
         );
+    }
+
+    fn config_with_cache(host_gb: Option<f64>, disk_gb: Option<f64>, use_gds: bool) -> KvbmConfig {
+        let mut config = KvbmConfig {
+            cache: CacheConfig {
+                host: HostCacheConfig {
+                    cache_size_gb: host_gb,
+                    num_blocks: None,
+                },
+                disk: disk_gb.map(|gb| DiskCacheConfig {
+                    cache_size_gb: Some(gb),
+                    num_blocks: None,
+                    use_gds,
+                    storage_path: None,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.auto_enable_nixl_backends_for_tiers();
+        config
+    }
+
+    #[test]
+    fn test_auto_enable_no_tiers_leaves_nixl_none() {
+        let config = config_with_cache(None, None, false);
+        assert!(config.nixl.is_none());
+    }
+
+    #[test]
+    fn test_auto_enable_host_adds_ucx() {
+        let config = config_with_cache(Some(4.0), None, false);
+        let nixl = config.nixl.expect("nixl auto-created");
+        assert!(nixl.has_backend("UCX"));
+        assert!(!nixl.has_backend("POSIX"));
+    }
+
+    #[test]
+    fn test_auto_enable_disk_adds_posix() {
+        let config = config_with_cache(None, Some(10.0), false);
+        let nixl = config.nixl.expect("nixl auto-created");
+        assert!(nixl.has_backend("POSIX"));
+        assert!(!nixl.has_backend("GDS_MT"));
+        // host wasn't enabled, so UCX shouldn't be added
+        assert!(!nixl.has_backend("UCX"));
+    }
+
+    #[test]
+    fn test_auto_enable_disk_with_gds_adds_gds_mt() {
+        let config = config_with_cache(None, Some(10.0), true);
+        let nixl = config.nixl.expect("nixl auto-created");
+        assert!(nixl.has_backend("GDS_MT"));
+        assert!(!nixl.has_backend("POSIX"));
+    }
+
+    #[test]
+    fn test_auto_enable_host_and_disk_adds_both() {
+        let config = config_with_cache(Some(4.0), Some(10.0), false);
+        let nixl = config.nixl.expect("nixl auto-created");
+        assert!(nixl.has_backend("UCX"));
+        assert!(nixl.has_backend("POSIX"));
+    }
+
+    #[test]
+    fn test_auto_enable_preserves_user_backends() {
+        // User explicitly configured GDS_MT for disk; auto-enable must not add POSIX too.
+        let mut config = KvbmConfig {
+            cache: CacheConfig {
+                host: HostCacheConfig {
+                    cache_size_gb: Some(4.0),
+                    num_blocks: None,
+                },
+                disk: Some(DiskCacheConfig {
+                    cache_size_gb: Some(10.0),
+                    num_blocks: None,
+                    use_gds: false, // even with use_gds=false, user's existing GDS_MT wins
+                    storage_path: None,
+                }),
+                ..Default::default()
+            },
+            nixl: Some(NixlConfig::empty().with_backend("GDS_MT")),
+            ..Default::default()
+        };
+        config.auto_enable_nixl_backends_for_tiers();
+        let nixl = config.nixl.expect("nixl present");
+        assert!(nixl.has_backend("GDS_MT"));
+        assert!(!nixl.has_backend("POSIX"));
+        // UCX still gets added because host cache is enabled
+        assert!(nixl.has_backend("UCX"));
+    }
+
+    #[test]
+    fn test_auto_enable_idempotent() {
+        let mut config = config_with_cache(Some(4.0), Some(10.0), false);
+        let snapshot: Vec<String> = config
+            .nixl
+            .as_ref()
+            .unwrap()
+            .enabled_backends()
+            .into_iter()
+            .cloned()
+            .collect();
+        config.auto_enable_nixl_backends_for_tiers();
+        let mut after: Vec<String> = config
+            .nixl
+            .as_ref()
+            .unwrap()
+            .enabled_backends()
+            .into_iter()
+            .cloned()
+            .collect();
+        let mut before = snapshot;
+        before.sort();
+        after.sort();
+        assert_eq!(before, after);
     }
 }

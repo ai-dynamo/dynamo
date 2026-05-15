@@ -25,10 +25,12 @@ use crate::{BlockId, SequenceHash};
 use anyhow::{Result, anyhow, bail};
 use dynamo_memory::StorageKind;
 use dynamo_memory::nixl::NixlAgent;
+use kvbm_common::KvbmTransferRoute;
 use kvbm_common::LogicalLayoutHandle;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 /// Public entry point for layout and transfer management.
 ///
@@ -253,6 +255,7 @@ impl TransferManager {
             cuda_stream,
             src_kv_layout,
             dst_kv_layout,
+            metric_route,
         ) = options.dissolve();
 
         let mut internal_options = TransferOptionsInternal::builder();
@@ -283,7 +286,13 @@ impl TransferManager {
             internal_options = internal_options.dst_kv_layout(layout);
         }
 
+        if let Some(route) = metric_route {
+            internal_options = internal_options.metric_route(route);
+        }
+
         let options = internal_options.build()?;
+        let metric_route = options.metric_route;
+        let transfer_start = metric_route.map(|_| Instant::now());
 
         tracing::debug!(
             src_handle = src_handle.to_string(),
@@ -294,14 +303,32 @@ impl TransferManager {
         );
 
         // Execute transfer with no lock held
-        super::transfer::executor::execute_transfer(
+        let notification = super::transfer::executor::execute_transfer(
             &src_layout,
             &dst_layout,
             src_blocks,
             dst_blocks,
             options,
             &self.context,
-        )
+        );
+
+        match notification {
+            Ok(notification) => match (metric_route, transfer_start) {
+                (Some(route), Some(started_at)) => self.wrap_notification_with_metrics(
+                    route,
+                    dst_blocks.len() as u64,
+                    started_at,
+                    notification,
+                ),
+                _ => Ok(notification),
+            },
+            Err(error) => {
+                if let Some(route) = metric_route {
+                    self.record_transfer_failure(route, "internal");
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Execute a G4 offload.
@@ -382,6 +409,72 @@ impl TransferManager {
     #[doc(hidden)]
     pub fn context(&self) -> &TransferContext {
         &self.context
+    }
+
+    fn record_transfer_failure(&self, route: KvbmTransferRoute, reason: &'static str) {
+        if let Some(observability) = self.context.observability() {
+            observability
+                .transfer_metrics()
+                .record_failure(route, reason, 1);
+        }
+    }
+
+    fn wrap_notification_with_metrics(
+        &self,
+        route: KvbmTransferRoute,
+        blocks: u64,
+        started_at: Instant,
+        notification: TransferCompleteNotification,
+    ) -> Result<TransferCompleteNotification> {
+        let Some(observability) = self.context.observability().cloned() else {
+            return Ok(notification);
+        };
+
+        observability.transfer_metrics().begin_transfer(route);
+
+        if !notification.could_yield() {
+            observability
+                .compat_metrics()
+                .record_transfer_success(route, blocks);
+            observability.transfer_metrics().finish_transfer(
+                route,
+                started_at.elapsed(),
+                "success",
+            );
+            return Ok(notification);
+        }
+
+        let event = self.context.event_system().new_event()?;
+        let awaiter = self.context.event_system().awaiter(event.handle())?;
+
+        self.context.tokio().spawn(async move {
+            match notification.await {
+                Ok(()) => {
+                    observability
+                        .compat_metrics()
+                        .record_transfer_success(route, blocks);
+                    observability.transfer_metrics().finish_transfer(
+                        route,
+                        started_at.elapsed(),
+                        "success",
+                    );
+                    let _ = event.trigger();
+                }
+                Err(error) => {
+                    observability
+                        .transfer_metrics()
+                        .record_failure(route, "internal", 1);
+                    observability.transfer_metrics().finish_transfer(
+                        route,
+                        started_at.elapsed(),
+                        "failure",
+                    );
+                    let _ = event.poison(error.to_string());
+                }
+            }
+        });
+
+        Ok(TransferCompleteNotification::from_awaiter(awaiter))
     }
 
     /// Get access to the internal layout registry.

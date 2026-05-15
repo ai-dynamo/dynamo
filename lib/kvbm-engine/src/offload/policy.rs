@@ -377,9 +377,9 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> OffloadPolicy<Src> for PresenceFilt
 ///
 /// # Example
 /// ```ignore
-/// // Only offload blocks with LFU count > 8 that aren't in G3 or in-flight
+/// // Only offload blocks hit at least twice (count > 1) that aren't in G3 or in-flight
 /// let tracker = Arc::new(PendingTracker::new());
-/// let filter = PresenceAndLFUFilter::<G2, G3>::new(registry.clone(), 8)
+/// let filter = PresenceAndLFUFilter::<G2, G3>::new(registry.clone(), 1)
 ///     .with_pending_tracker(tracker);
 /// ```
 pub struct PresenceAndLFUFilter<Src: BlockMetadata, Dst: BlockMetadata> {
@@ -401,9 +401,9 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> PresenceAndLFUFilter<Src, Dst> {
         }
     }
 
-    /// Create with default threshold of 8.
+    /// Create with default threshold of 1 (offload on second hit, matching KVBM v1).
     pub fn with_default_threshold(registry: Arc<BlockRegistry>) -> Self {
-        Self::new(registry, 8)
+        Self::new(registry, 1)
     }
 
     /// Add a pending tracker for duplicate prevention.
@@ -941,7 +941,7 @@ impl<T: BlockMetadata> OffloadPolicy<T> for PassAllPolicy<T> {
 /// let tracker = Arc::new(PendingTracker::new());
 /// let config = TierOffloadConfig {
 ///     policies: vec![PolicyType::Presence, PolicyType::PresenceLfu],
-///     presence_lfu: PresenceLfuFilterConfig { min_lfu_count: 8 },
+///     presence_lfu: PresenceLfuFilterConfig { min_lfu_count: 1 },
 ///     ..Default::default()
 /// };
 ///

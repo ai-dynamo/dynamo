@@ -11,6 +11,7 @@ repository.workspace = true
 
 [dependencies]
 dynamo-tokens = { workspace = true }
+kvbm-observability = { workspace = true }
 
 anyhow = { workspace = true }
 async-stream = "0.3"
