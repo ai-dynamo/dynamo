@@ -4,7 +4,10 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use dynamo_kv_router::protocols::{
+    BlockHashOptions, compute_block_hash_for_seq, compute_seq_hash_for_block,
+};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
@@ -17,10 +20,17 @@ enum DriverMode {
     Concurrency,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptMode {
+    Full,
+    DeltaCumulative,
+}
+
 #[derive(Debug)]
 struct SessionRuntime {
     session_id: String,
     turns: Vec<TurnRuntime>,
+    cumulative_tokens: Vec<u32>,
     next_turn_index: usize,
     next_ready_at_ms: Option<f64>,
     in_flight: Option<Uuid>,
@@ -31,7 +41,6 @@ struct TurnRuntime {
     tokens: Vec<u32>,
     max_output_tokens: usize,
     delay_after_previous_ms: f64,
-    replay_hashes: ReplayRequestHashes,
 }
 
 #[derive(Debug)]
@@ -76,22 +85,79 @@ impl PartialOrd for ReadySession {
 #[derive(Debug)]
 pub struct WorkloadDriver {
     mode: DriverMode,
+    prompt_mode: PromptMode,
+    engine_block_size: u32,
     sessions: Vec<SessionRuntime>,
     in_flight: FxHashMap<Uuid, InFlightTurn>,
     ready_sessions: BinaryHeap<ReadySession>,
     max_in_flight: Option<usize>,
 }
 
+fn replay_hashes_from_tokens(tokens: &[u32], engine_block_size: u32) -> ReplayRequestHashes {
+    let local_block_hashes =
+        compute_block_hash_for_seq(tokens, engine_block_size, BlockHashOptions::default());
+    let sequence_hashes = compute_seq_hash_for_block(&local_block_hashes);
+
+    ReplayRequestHashes {
+        local_block_hashes,
+        sequence_hashes,
+    }
+}
+
 impl WorkloadDriver {
     pub(crate) fn new_trace(trace: Trace, engine_block_size: usize) -> Result<Self> {
-        Self::new(trace, engine_block_size, DriverMode::Trace)
+        Self::new(
+            trace,
+            engine_block_size,
+            DriverMode::Trace,
+            PromptMode::Full,
+        )
+    }
+
+    pub(crate) fn new_trace_accumulating_deltas(
+        trace: Trace,
+        engine_block_size: usize,
+    ) -> Result<Self> {
+        Self::new(
+            trace,
+            engine_block_size,
+            DriverMode::Trace,
+            PromptMode::DeltaCumulative,
+        )
     }
 
     pub(crate) fn new_concurrency(trace: Trace, engine_block_size: usize) -> Result<Self> {
-        Self::new(trace, engine_block_size, DriverMode::Concurrency)
+        Self::new(
+            trace,
+            engine_block_size,
+            DriverMode::Concurrency,
+            PromptMode::Full,
+        )
     }
 
-    fn new(trace: Trace, engine_block_size: usize, mode: DriverMode) -> Result<Self> {
+    pub(crate) fn new_concurrency_accumulating_deltas(
+        trace: Trace,
+        engine_block_size: usize,
+    ) -> Result<Self> {
+        Self::new(
+            trace,
+            engine_block_size,
+            DriverMode::Concurrency,
+            PromptMode::DeltaCumulative,
+        )
+    }
+
+    fn new(
+        trace: Trace,
+        engine_block_size: usize,
+        mode: DriverMode,
+        prompt_mode: PromptMode,
+    ) -> Result<Self> {
+        if engine_block_size == 0 {
+            bail!("engine_block_size must be greater than 0");
+        }
+        let engine_block_size =
+            u32::try_from(engine_block_size).context("engine_block_size does not fit in u32")?;
         let trace_block_size = trace.block_size;
         let sessions: Vec<SessionRuntime> = trace
             .sessions
@@ -109,14 +175,13 @@ impl WorkloadDriver {
                             tokens: turn.synthesize_tokens(trace_block_size)?,
                             max_output_tokens: turn.max_output_tokens,
                             delay_after_previous_ms: turn.delay_after_previous_ms,
-                            replay_hashes: turn
-                                .to_replay_hashes(trace_block_size, engine_block_size)?,
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
                 Ok(SessionRuntime {
                     session_id: session.session_id,
                     turns,
+                    cumulative_tokens: Vec::new(),
                     next_turn_index: 0,
                     next_ready_at_ms,
                     in_flight: None,
@@ -138,6 +203,8 @@ impl WorkloadDriver {
 
         Ok(Self {
             mode,
+            prompt_mode,
+            engine_block_size,
             sessions,
             in_flight: FxHashMap::default(),
             ready_sessions,
@@ -213,8 +280,16 @@ impl WorkloadDriver {
                 DriverMode::Trace => Some(scheduled_ready_at_ms),
                 DriverMode::Concurrency => None,
             };
+            let request_tokens = match self.prompt_mode {
+                PromptMode::Full => turn.tokens.clone(),
+                PromptMode::DeltaCumulative => {
+                    session.cumulative_tokens.extend_from_slice(&turn.tokens);
+                    session.cumulative_tokens.clone()
+                }
+            };
+            let replay_hashes = replay_hashes_from_tokens(&request_tokens, self.engine_block_size);
             let request = DirectRequest {
-                tokens: turn.tokens.clone(),
+                tokens: request_tokens,
                 max_output_tokens: turn.max_output_tokens,
                 uuid: Some(request_uuid),
                 dp_rank: 0,
@@ -234,7 +309,7 @@ impl WorkloadDriver {
                 session_id: session.session_id.clone(),
                 turn_index,
                 scheduled_ready_at_ms,
-                replay_hashes: Some(turn.replay_hashes.clone()),
+                replay_hashes: Some(replay_hashes),
                 request,
             });
         }
@@ -467,6 +542,44 @@ mod tests {
         assert!(
             driver.is_drained(),
             "is_drained must become true so run_workload can exit"
+        );
+    }
+
+    #[test]
+    fn accumulating_delta_mode_reblocks_partial_turns_in_token_space() {
+        let trace = Trace {
+            block_size: 4,
+            sessions: vec![SessionTrace {
+                session_id: "a".into(),
+                first_arrival_timestamp_ms: Some(0.0),
+                turns: vec![
+                    TurnTrace {
+                        input_length: 6,
+                        max_output_tokens: 1,
+                        hash_ids: vec![10, 11],
+                        delay_after_previous_ms: 0.0,
+                    },
+                    TurnTrace {
+                        input_length: 3,
+                        max_output_tokens: 1,
+                        hash_ids: vec![12],
+                        delay_after_previous_ms: 5.0,
+                    },
+                ],
+            }],
+        };
+        let mut driver = WorkloadDriver::new_concurrency_accumulating_deltas(trace, 4).unwrap();
+
+        let first = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].request.tokens, vec![10, 10, 10, 10, 11, 11]);
+        driver.on_complete(first[0].request_uuid, 10.0).unwrap();
+
+        let second = driver.pop_ready(15.0, usize::MAX);
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            second[0].request.tokens,
+            vec![10, 10, 10, 10, 11, 11, 12, 12, 12]
         );
     }
 }

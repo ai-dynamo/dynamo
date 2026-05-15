@@ -9,56 +9,79 @@ subtitle: Reproduce round-robin, sticky-session, KV-router, and sticky-proxy rep
 
 ## Results
 
+This table uses the first `10,000` rows of `/Users/peabrane/Downloads/dataset_aiperf.jsonl`,
+interpreted as per-session deltas with `--trace-format mooncake_delta`.
+
+Config: `8` workers, closed-loop concurrency `128`, trace block size `64`, engine block size `64`,
+`16,384` GPU KV blocks per worker, AIC-backed vLLM timing for `Qwen/Qwen3-32B` on `h200_sxm`.
+
 | Mode | Completed | Mean TTFT | P95 TTFT | P99 TTFT | Max TTFT | Mean E2E | Output tok/s | Req/s | Prefix reuse |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `round_robin` | 44,000 | 1.78 s | 1.85 s | 53.40 s | 93.24 s | 24.94 s | 8,397.4 | 36.29 | 0.433 |
-| `sticky_session` | 44,000 | 5.05 s | 13.05 s | 53.40 s | 93.24 s | 27.37 s | 7,801.5 | 33.72 | 0.433 |
-| `kv_router` | 44,000 | 1.75 s | 1.15 s | 54.81 s | 86.35 s | 24.52 s | 8,541.9 | 36.92 | 0.434 |
-| `kv_router_sticky_session_proxy` | 44,000 | 1.81 s | 1.32 s | 54.69 s | 86.14 s | 24.50 s | 8,514.2 | 36.80 | 0.433 |
+| `round_robin` | 10,000 | 1.89 s | 4.27 s | 6.80 s | 20.07 s | 35.71 s | 816.6 | 3.46 | 0.573 |
+| `sticky_session` | 10,000 | 6.02 s | 28.28 s | 39.70 s | 66.35 s | 32.77 s | 886.2 | 3.76 | 0.702 |
+| `kv_router` | 10,000 | 1.64 s | 3.80 s | 6.26 s | 18.13 s | 32.30 s | 908.1 | 3.85 | 0.624 |
+| `kv_router_sticky_session_proxy` | 10,000 | 1.70 s | 4.66 s | 7.50 s | 18.13 s | 30.97 s | 946.8 | 4.02 | 0.650 |
 
 Interpretation for this trace:
 
-- At closed-loop concurrency `1024`, non-sticky policies still have p95 TTFT near 1-2 seconds, but
-  p99/max TTFT show hard tail queueing.
-- In the KV rows, mean TTFT is higher than p95 because the top 1% tail is large enough to pull up
-  the average.
-- Plain sticky session is worse on mean and p95 TTFT than round-robin or KV-aware routing, even
-  though the trace has strong session structure.
-- Exact KV routing and the sticky-session proxy are close under this 16k-block setup.
-- Exact KV has a small edge in prefix reuse and throughput, but this trace does not show a large
-  gap between block-level affinity and the session proxy.
-- This is consistent with a traffic shape where most deep reuse is intra-session and cross-session
-  overlap is shallow.
+- `round_robin` at CC128 is already near the desired queueing edge: mean TTFT is `1.89 s` and
+  p95 TTFT is `4.27 s`.
+- Hard `sticky_session` is worse than `round_robin` on TTFT despite higher prefix reuse. It pins
+  sessions too rigidly and creates load imbalance.
+- `kv_router` has the best TTFT in this run: mean `1.64 s`, p95 `3.80 s`.
+- `kv_router_sticky_session_proxy` is not far from exact KV routing on mean TTFT, but its p95 is
+  worse. It still uses the KV router load-cost path, so it is much healthier than hard sticky.
+- The large max TTFT values are expected for this trace shape: output lengths are highly skewed,
+  and closed-loop replay creates bursty queueing behind long decode work.
+
+Raw reports from this run were written to:
+
+```bash
+/tmp/dynamo_replay_aiperf_10000_delta_compare_cc128
+```
 
 ## What This Branch Adds
 
-This branch adds two offline replay-only router modes for comparing session-level affinity against
-block-level KV affinity on a multi-turn AIPerf trace:
+This branch adds three pieces needed to compare session-level affinity against block-level KV
+affinity on a multi-turn AIPerf trace:
 
 - `sticky_session`: assigns the first turn of each `session_id` round-robin and pins later turns to
   the same worker.
 - `kv_router_sticky_session_proxy`: uses the KV router load/cost path, but replaces exact block
   overlap with a proxy assumption that a known session has a full-prefix hit on its pinned worker.
+- `mooncake_delta`: an offline replay trace format that treats each Mooncake row as a per-session
+  token delta, accumulates turns by `session_id`, and recomputes request block hashes from the
+  cumulative token sequence.
 
-The comparison below uses the AIPerf dataset at:
-
-```bash
-/Users/peabrane/Downloads/dataset_aiperf.jsonl
-```
+The `mooncake_delta` path matters for this dataset because each row's `hash_ids` match that row's
+own `input_length`; later turns do not include prior turns. Directly concatenating hash entries is
+incorrect at turn boundaries because the last block of a turn can be partial. The implemented path
+synthesizes token IDs from each row's hash IDs, appends those tokens per session, and recomputes
+engine block hashes over the cumulative token vector.
 
 ## Trace Shape
 
-The trace is Mooncake-style JSONL with `session_id`, `input_length`, `output_length`, `hash_ids`,
-and per-turn `delay`.
+The source trace is Mooncake-style JSONL with `session_id`, `input_length`, `output_length`,
+`hash_ids`, and per-turn `delay`.
 
-Observed shape:
+Full dataset shape:
 
 - `44,000` rows
 - `2,200` sessions
 - `20` turns per session
 - first turns have `timestamp: 0.0`
 - later turns use `delay`
-- block math is exactly 64-token blocks:
+- output length p50/p95/p99/max is roughly `77` / `1018` / `2142` / `2999` tokens
+
+The benchmark above uses a bounded slice:
+
+```bash
+head -n 10000 /Users/peabrane/Downloads/dataset_aiperf.jsonl > /tmp/dataset_aiperf_10000.jsonl
+```
+
+That slice contains `500` complete sessions with `20` turns per session.
+
+Block math is exactly 64-token blocks in the source trace:
 
 ```bash
 jq -r '[.input_length, (.hash_ids|length)] | @tsv' /Users/peabrane/Downloads/dataset_aiperf.jsonl \
@@ -94,7 +117,7 @@ uv pip install --python .venv/bin/python --force-reinstall /path/to/aiconfigurat
 .venv/bin/maturin develop --uv -m lib/bindings/python/Cargo.toml
 ```
 
-The run below used:
+The run above used:
 
 - Python `3.13.5`
 - `aiconfigurator==0.8.0`
@@ -106,75 +129,44 @@ The run below used:
 
 ## Replay Config
 
-All four modes use the same workload and engine settings:
-
-- replay mode: `offline`
-- workers: `8`
-- closed-loop concurrency: `1024`
-- trace block size: `64`
-- engine block size: `64`
-- GPU KV blocks per worker: `16,384`
-- prefix caching: enabled
-- engine timing: AIC-backed vLLM
-- speedup ratio: `1.0`
-
 Common engine args:
 
 ```bash
 ENGINE_ARGS='{"block_size":64,"num_gpu_blocks":16384,"enable_prefix_caching":true,"dp_size":1,"aic_backend":"vllm","aic_backend_version":"0.19.0","aic_system":"h200_sxm","aic_model_path":"Qwen/Qwen3-32B","aic_tp_size":1,"speedup_ratio":1.0}'
 ```
 
+The commands below set `PYTHONPATH=lib/bindings/python/src` so the replay CLI comes from this
+worktree even if another editable Dynamo package is installed in the same venv.
+
 ## Commands
 
 ```bash
-mkdir -p /tmp/dynamo_replay_aiperf_session_compare_16k_cc1024
+TRACE=/tmp/dataset_aiperf_10000.jsonl
+OUT=/tmp/dynamo_replay_aiperf_10000_delta_compare_cc128
+mkdir -p "$OUT"
+head -n 10000 /Users/peabrane/Downloads/dataset_aiperf.jsonl > "$TRACE"
 
-DYN_LOG=warn \
-  .venv/bin/python -m dynamo.replay /Users/peabrane/Downloads/dataset_aiperf.jsonl \
-  --replay-mode offline \
-  --router-mode round_robin \
-  --num-workers 8 \
-  --replay-concurrency 1024 \
-  --trace-block-size 64 \
-  --report-json /tmp/dynamo_replay_aiperf_session_compare_16k_cc1024/round_robin.json \
-  --extra-engine-args "$ENGINE_ARGS"
-
-DYN_LOG=warn \
-  .venv/bin/python -m dynamo.replay /Users/peabrane/Downloads/dataset_aiperf.jsonl \
-  --replay-mode offline \
-  --router-mode sticky_session \
-  --num-workers 8 \
-  --replay-concurrency 1024 \
-  --trace-block-size 64 \
-  --report-json /tmp/dynamo_replay_aiperf_session_compare_16k_cc1024/sticky_session.json \
-  --extra-engine-args "$ENGINE_ARGS"
-
-DYN_LOG='warn,dynamo_kv_router::scheduling::selector=warn' \
-  .venv/bin/python -m dynamo.replay /Users/peabrane/Downloads/dataset_aiperf.jsonl \
-  --replay-mode offline \
-  --router-mode kv_router \
-  --num-workers 8 \
-  --replay-concurrency 1024 \
-  --trace-block-size 64 \
-  --report-json /tmp/dynamo_replay_aiperf_session_compare_16k_cc1024/kv_router.json \
-  --extra-engine-args "$ENGINE_ARGS"
-
-DYN_LOG='warn,dynamo_kv_router::scheduling::selector=warn' \
-  .venv/bin/python -m dynamo.replay /Users/peabrane/Downloads/dataset_aiperf.jsonl \
-  --replay-mode offline \
-  --router-mode kv_router_sticky_session_proxy \
-  --num-workers 8 \
-  --replay-concurrency 1024 \
-  --trace-block-size 64 \
-  --report-json /tmp/dynamo_replay_aiperf_session_compare_16k_cc1024/kv_router_sticky_session_proxy.json \
-  --extra-engine-args "$ENGINE_ARGS"
+for mode in round_robin sticky_session kv_router kv_router_sticky_session_proxy; do
+  DYN_LOG='warn,dynamo_kv_router::scheduling::selector=warn' \
+  PYTHONPATH=lib/bindings/python/src \
+    .venv/bin/python -m dynamo.replay "$TRACE" \
+      --trace-format mooncake_delta \
+      --replay-mode offline \
+      --router-mode "$mode" \
+      --num-workers 8 \
+      --replay-concurrency 128 \
+      --trace-block-size 64 \
+      --report-json "$OUT/${mode}.json" \
+      --extra-engine-args "$ENGINE_ARGS" \
+      > "$OUT/${mode}.log" 2>&1
+done
 ```
 
 Summarize reports:
 
 ```bash
 for mode in round_robin sticky_session kv_router kv_router_sticky_session_proxy; do
-  f=/tmp/dynamo_replay_aiperf_session_compare_16k_cc1024/${mode}.json
+  f=/tmp/dynamo_replay_aiperf_10000_delta_compare_cc128/${mode}.json
   printf '%s\t' "$mode"
   jq -r '[.completed_requests,.mean_ttft_ms,.p95_ttft_ms,.p99_ttft_ms,.max_ttft_ms,.mean_e2e_latency_ms,.output_throughput_tok_s,.request_throughput_rps,.prefix_cache_reused_ratio] | @tsv' "$f"
 done
@@ -185,11 +177,13 @@ done
 Targeted replay tests:
 
 ```bash
+cargo test --package dynamo-mocker accumulating_delta_mode_reblocks_partial_turns_in_token_space --lib
 cargo test --package dynamo-mocker sticky_session --lib
 ```
 
 Expected result:
 
 ```text
-3 passed
+accumulating_delta_mode_reblocks_partial_turns_in_token_space ... ok
+3 sticky_session tests passed
 ```

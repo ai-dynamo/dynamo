@@ -17,6 +17,7 @@ pub struct Trace {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceFileFormat {
     Mooncake,
+    MooncakeDelta,
     AppliedComputeAgentic,
 }
 
