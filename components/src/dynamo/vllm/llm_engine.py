@@ -60,7 +60,7 @@ from .handlers import build_sampling_params, get_dp_range_for_worker
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
 
-    from dynamo._core.backend import EngineMetrics
+    from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
 
@@ -437,6 +437,7 @@ class VllmLLMEngine(LLMEngine):
         ]
 
     async def register_prometheus(self, metrics: "EngineMetrics") -> None:
+        assert self._component_registry is not None  # set in start()
         # Component registry (dynamo_component_*) is engine-owned;
         # global REGISTRY carries vLLM-native + LMCache metrics with the
         # K8s MultiProcessCollector fallback handled by the helper.

@@ -68,7 +68,7 @@ if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
     from tensorrt_llm.metrics import MetricsCollector
 
-    from dynamo._core.backend import EngineMetrics
+    from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
     from dynamo.trtllm.metrics import AdditionalMetricsCollector
 
 logger = logging.getLogger(__name__)
@@ -405,6 +405,7 @@ class TrtllmLLMEngine(LLMEngine):
     # (`attention_dp_rank`). Both match TRT-LLM's upstream conventions.
     def _metrics_poll_loop(self) -> None:
         assert self._engine is not None
+        assert self._component_gauges is not None  # set in start()
         while not self._publish_stop.is_set():
             try:
                 snaps = self._engine.llm.get_stats(timeout=_STATS_POLL_TIMEOUT_S)
@@ -782,6 +783,7 @@ class TrtllmLLMEngine(LLMEngine):
                     self._additional_metrics.record_request_abort()
 
     async def register_prometheus(self, metrics: "EngineMetrics") -> None:
+        assert self._component_registry is not None  # set in start()
         # Component registry (dynamo_component_*) is engine-owned;
         # global REGISTRY carries TRT-LLM-native MetricsCollector +
         # AdditionalMetricsCollector output (both `trtllm_` prefix).

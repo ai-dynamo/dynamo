@@ -24,7 +24,7 @@ from dynamo.common.utils.prometheus import LLMBackendMetrics, get_prometheus_exp
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
 
-    from dynamo._core.backend import EngineMetrics
+    from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def gather_with_labels(
         registry,
         metric_prefix_filters=prefix_filters,
         exclude_prefixes=exclude_prefixes,
-        inject_custom_labels=auto_labels or None,
+        inject_custom_labels=dict(auto_labels) if auto_labels else None,
     )
 
 

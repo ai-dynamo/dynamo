@@ -13,7 +13,7 @@ from dynamo._core import Context
 from .publisher import KvEventSource, SnapshotSource
 
 if TYPE_CHECKING:
-    from dynamo._core.backend import EngineMetrics
+    from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
 
     from .worker import WorkerConfig
 

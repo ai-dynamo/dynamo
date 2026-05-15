@@ -56,7 +56,7 @@ from dynamo.sglang.publisher import format_zmq_endpoint
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
 
-    from dynamo._core.backend import EngineMetrics
+    from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +245,7 @@ class SglangLLMEngine(LLMEngine):
     async def _metrics_pull_loop(self) -> None:
         sock = self._metrics_zmq_sock
         assert sock is not None
+        assert self._component_gauges is not None  # set in start()
         while True:
             try:
                 kv_metrics = await sock.recv_pyobj()
@@ -611,6 +612,9 @@ class SglangLLMEngine(LLMEngine):
         ]
 
     async def register_prometheus(self, metrics: "EngineMetrics") -> None:
+        assert (
+            self._component_registry is not None and self._component_gauges is not None
+        )  # set in start()
         # Component registry (gauges fed by `_metrics_pull_loop`), seeded
         # with zero per rank so the gauges show up in the first scrape
         # before the pull loop receives its first scheduler message.
