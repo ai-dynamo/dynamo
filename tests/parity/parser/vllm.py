@@ -23,8 +23,11 @@ except ImportError:
     )
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 
 from tests.parity.common import ParseResult, decode_arguments
+
+_HARMONY_ASSISTANT_START = "<|start|>assistant"
 
 
 class _OmnivorousVocab(dict):
@@ -56,6 +59,23 @@ class _StubTokenizer:
 
     def get_vocab(self) -> dict[str, int]:
         return _STUB_VOCAB
+
+
+def _harmony_token_ids(raw_text: str) -> list[int]:
+    """Encode gpt-oss/harmony fixture text for vLLM's token-ID parser.
+
+    vLLM's OpenAIToolParser delegates to `parse_output_into_messages()`,
+    which parses completion tokens from an assistant context. The first
+    assistant-start marker is therefore outside the parser's input shape, but
+    later assistant-start markers separate additional messages and must remain.
+    """
+
+    text = raw_text
+    if text.startswith(_HARMONY_ASSISTANT_START):
+        text = text[len(_HARMONY_ASSISTANT_START) :]
+
+    enc = get_encoding()
+    return enc.encode(text, allowed_special=enc.special_tokens_set)
 
 
 # Maps parser_family → vLLM's registered parser key (registered via
@@ -114,7 +134,14 @@ def parse(
         # vLLM's extract_tool_calls signature: (model_output, request) → ExtractedToolCallInformation.
         # We construct a minimal request shape with only the tools field, since most parsers ignore the rest.
         request = SimpleNamespace(tools=wrapped_tools)
-        info = parser.extract_tool_calls(raw_text, request)
+        if key == "openai":
+            info = parser.extract_tool_calls(
+                raw_text,
+                request,
+                token_ids=_harmony_token_ids(raw_text),
+            )
+        else:
+            info = parser.extract_tool_calls(raw_text, request)
     except NotImplementedError as e:
         # Known unsupported combinations (e.g., vLLM's harmony parser requires
         # token IDs, not text). Treat as env-unavailable so the harness skips

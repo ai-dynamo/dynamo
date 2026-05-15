@@ -21,10 +21,9 @@ cases:
       dynamo:
         reason: "Dynamo leaks the full envelope (narration + analysis + commentary) into normal_text instead of extracting the tool call and preserving the narration"
         calls: []
-        normal_text: I will check the weather. <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|>
+        normal_text: I will check the weather. Need to use function get_weather.
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        error: 'HarmonyError: unexpected tokens remaining in message header: Some("I will check")'
       sglang:
         calls:
         - name: get_weather
@@ -42,10 +41,9 @@ cases:
       dynamo:
         reason: "Dynamo leaks the full envelope (analysis + commentary + trailing narration) into normal_text instead of extracting the tool call and keeping the trailing prose"
         calls: []
-        normal_text: <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|> Let me know if you need more.
+        normal_text: Need to use function get_weather. Let me know if you need more.
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        error: 'HarmonyError: Unexpected token 9024 while expecting start token 200006'
       sglang:
         calls:
         - name: get_weather
@@ -63,10 +61,9 @@ cases:
       dynamo:
         reason: "Dynamo leaks the sandwich (leading + envelope + trailing) into normal_text instead of extracting the tool call and stitching the surrounding prose"
         calls: []
-        normal_text: I will check the weather. <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|> Let me know if you need more.
+        normal_text: I will check the weather. Need to use function get_weather. Let me know if you need more.
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        error: 'HarmonyError: unexpected tokens remaining in message header: Some("I will check")'
       sglang:
         calls:
         - name: get_weather
@@ -85,11 +82,9 @@ cases:
       dynamo:
         reason: "Dynamo leaks multi-call sequence with interspersed narration into normal_text instead of extracting both calls and preserving the inter-call prose"
         calls: []
-        normal_text: I will check the weather. <|channel|>analysis<|message|>Need to use function get_weather.<|end|><|start|>assistant<|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|> Then check LA weather. <|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"LA"}<|call|>
+        normal_text: I will check the weather. Need to use function get_weather. Then check LA weather.
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        error: 'HarmonyError: unexpected tokens remaining in message header: Some("I will check")'
       sglang:
         calls:
         - name: get_weather

@@ -28,10 +28,17 @@ cases:
       dynamo:
         reason: "Dynamo's harmony parser leaks the entire envelope into normal_text; SGLang extracts both calls"
         calls: []
-        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-          to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|>
+        normal_text: ''
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            timezone: EST
+          name: get_time
+        normal_text: ''
+        reason: "Dynamo drops back-to-back commentary blocks; vLLM extracts them"
       sglang:
         calls:
         - name: get_weather
@@ -53,10 +60,9 @@ cases:
       dynamo:
         reason: "Dynamo's harmony parser leaks the envelope (with surrounding narration) into normal_text; SGLang extracts both calls and preserves the narration"
         calls: []
-        normal_text: I need both. <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-          to=functions.get_time <|constrain|>json<|message|>{"timezone":"EST"}<|call|> Done.
+        normal_text: I need both.  Done.
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        error: 'HarmonyError: unexpected tokens remaining in message header: Some("I need both. <|start|>assistant")'
       sglang:
         calls:
         - name: get_weather
@@ -79,10 +85,17 @@ cases:
       dynamo:
         reason: "Dynamo's harmony parser leaks the envelope into normal_text instead of extracting both same-name calls; SGLang extracts both"
         calls: []
-        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|><|start|>assistant<|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"LA"}<|call|>
+        normal_text: ''
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            location: LA
+          name: get_weather
+        normal_text: ''
+        reason: "Dynamo drops back-to-back commentary blocks; vLLM extracts them"
       sglang:
         calls:
         - name: get_weather

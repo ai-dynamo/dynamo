@@ -21,10 +21,13 @@ cases:
           arguments: {}
         normal_text: ''
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls: []
+        normal_text: ''
+        reason: "vLLM OpenAIToolParser only finalizes harmony tool calls after '<|call|>'; fixture omits the closing call token"
       sglang:
         calls: []
         normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{}
+        reason: "SGLang's GptOssDetector bot_token requires '<|start|>assistant<|channel|>commentary' envelope; Dynamo accepts the bare '<|channel|>commentary' variant"
   PARSER.batch.6.b:
     description: Whitespace inside empty {}
     ref: dynamo
@@ -38,10 +41,13 @@ cases:
           arguments: {}
         normal_text: ''
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls: []
+        normal_text: ''
+        reason: "vLLM OpenAIToolParser only finalizes harmony tool calls after '<|call|>'; fixture omits the closing call token"
       sglang:
         calls: []
         normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{ }
+        reason: "SGLang's GptOssDetector bot_token requires '<|start|>assistant<|channel|>commentary' envelope; Dynamo accepts the bare '<|channel|>commentary' variant"
   PARSER.batch.6.c:
     description: No <|message|> body
     ref: dynamo
@@ -49,10 +55,11 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &id002
-        reason: "Dynamo's harmony parser leaves <|channel|> harmony token, <|constrain|> harmony token in normal_text on minimal/no-body case"
+      dynamo: &d_6_c
+        calls: []
+        normal_text: ''
+      vllm: *d_6_c
+      sglang:
         calls: []
         normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json
-      vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
-      sglang: *id002
+        reason: "Dynamo strips malformed harmony commentary headers from normal_text; SGLang preserves the raw input"

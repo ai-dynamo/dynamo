@@ -18,15 +18,18 @@ cases:
             type: string
     expected:
       dynamo:
-        reason: "Dynamo's harmony parser leaves <|channel|> harmony token, <|message|> harmony token, <|call|> harmony token (+2 more) in normal_text on malformed input (impl-defined recovery)"
         calls: []
-        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>not json
-          at all<|call|>
+        normal_text: ''
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - arguments: not json at all
+          name: get_weather
+        normal_text: ''
+        reason: "vLLM preserves malformed JSON tool-call args as a raw string; Dynamo drops the malformed call"
       sglang:
         calls: []
         normal_text: ''
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
   PARSER.batch.4.b:
     description: Unterminated JSON in message body
     ref: dynamo
@@ -35,11 +38,14 @@ cases:
     - *id001
     expected:
       dynamo:
-        reason: "Dynamo's harmony parser leaves <|channel|> harmony token, <|message|> harmony token, <|call|> harmony token (+2 more) in normal_text on malformed input (impl-defined recovery)"
         calls: []
-        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>
+        normal_text: ''
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - arguments: '{"location":"NYC'
+          name: get_weather
+        normal_text: ''
+        reason: "vLLM preserves unterminated JSON tool-call args as a raw string; Dynamo drops the malformed call"
       sglang:
         calls: []
         normal_text: ''
@@ -51,12 +57,11 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &id002
+      dynamo: &d_4_c
         calls: []
         normal_text: ''
-      vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
-      sglang: *id002
+      vllm: *d_4_c
+      sglang: *d_4_c
   PARSER.batch.4.d:
     description: Malformed variant 4.d — not applicable to this family
     reason: |-
