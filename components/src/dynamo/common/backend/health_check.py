@@ -28,6 +28,7 @@ __all__ = [
     "HEALTH_CHECK_KEY",
     "bos_token_id_or",
     "build_health_check_payload",
+    "build_text_health_check_payload",
     "is_probe",
     "parse_health_check_payload_cli",
 ]
@@ -35,7 +36,7 @@ __all__ = [
 
 def is_probe(request: Mapping[str, Any]) -> bool:
     """True when the request carries the canary marker; see module docstring."""
-    return bool(request.get(HEALTH_CHECK_KEY, False))
+    return request.get(HEALTH_CHECK_KEY) is True
 
 
 def build_health_check_payload(
@@ -43,7 +44,7 @@ def build_health_check_payload(
     *,
     extras: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Build a complete canary payload (default + extras + env override + marker)."""
+    """Token-shape canary payload (default + extras + env override + marker)."""
     payload: dict[str, Any] = {
         "token_ids": [bos_token_id],
         "stop_conditions": {"max_tokens": 1, "ignore_eos": True},
@@ -51,7 +52,34 @@ def build_health_check_payload(
     }
     if extras:
         payload.update(extras)
-    return _stamp_marker(load_health_check_from_env() or payload)
+    return _finalize(payload)
+
+
+def build_text_health_check_payload(
+    prompt: str = "Test",
+    *,
+    extras: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Text-shape canary payload for backends whose handler expects a
+    `prompt` plus flat sampling fields (e.g. SGLang's text-input mode).
+    Same env-override + marker semantics as :func:`build_health_check_payload`.
+    """
+    payload: dict[str, Any] = {
+        "prompt": prompt,
+        "max_tokens": 1,
+        "temperature": 0.0,
+    }
+    if extras:
+        payload.update(extras)
+    return _finalize(payload)
+
+
+def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
+    # Explicit `is None` so an intentional empty-dict env override
+    # (`DYN_HEALTH_CHECK_PAYLOAD={}`) wins over the engine default
+    # instead of falling through to it.
+    env_override = load_health_check_from_env()
+    return _stamp_marker(env_override if env_override is not None else payload)
 
 
 def bos_token_id_or(tokenizer: Any, default: int = 1) -> int:

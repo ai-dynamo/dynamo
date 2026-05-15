@@ -549,11 +549,11 @@ impl Worker {
             self.config.endpoint
         );
 
-        let ingress = Ingress::for_engine(Arc::new(EngineAdapter::new(
+        let engine_adapter = Arc::new(EngineAdapter::new(
             self.engine.clone(),
             self.config.disaggregation_mode,
-        )))
-        .map_err(|e| {
+        ));
+        let ingress = Ingress::for_engine(engine_adapter.clone()).map_err(|e| {
             err(
                 ErrorType::Backend(BackendError::Unknown),
                 format!("ingress: {e}"),
@@ -576,11 +576,13 @@ impl Worker {
 
         // Precedence: WorkerConfig (Python argparse plumbs CLI/env here) >
         // DYN_HEALTH_CHECK_PAYLOAD env (backstop for Rust-only engines) >
-        // engine default.
+        // engine default. Every override path stamps the `_HEALTH_CHECK`
+        // marker so engines can branch on `is_probe(request)` regardless of
+        // where the payload came from.
         let probe = match std::mem::take(&mut self.config.health_check_payload)
             .or_else(load_health_check_payload_from_env)
         {
-            Some(p) => Some(p),
+            Some(p) => stamp_canary_marker(p),
             None => self
                 .engine
                 .health_check_payload()
@@ -591,7 +593,8 @@ impl Worker {
                         "engine.health_check_payload() failed; canary disabled for this endpoint",
                     );
                     None
-                }),
+                })
+                .and_then(stamp_canary_marker),
         };
 
         let mut builder = endpoint
@@ -601,6 +604,20 @@ impl Worker {
             .graceful_shutdown(true);
         if let Some(payload) = probe {
             builder = builder.health_check_payload(payload);
+            // The runtime's `HealthCheckManager` fires the canary by looking
+            // up a `LocalAsyncEngine` for this endpoint name. Register a
+            // JSON-shaped wrapper over our `EngineAdapter` so the probe
+            // exercises the same `generate()` path as real traffic.
+            builder = builder
+                .register_local_engine(Arc::new(crate::adapter::JsonProbeAdapter::new(
+                    engine_adapter,
+                )))
+                .map_err(|e| {
+                    err(
+                        ErrorType::Backend(BackendError::Unknown),
+                        format!("register_local_engine: {e}"),
+                    )
+                })?;
         }
         let serve_fut = builder.start();
         tokio::pin!(serve_fut);
@@ -703,6 +720,26 @@ fn shutdown_deadline(timeout: Duration, grace_secs: f64) -> Duration {
         Duration::ZERO
     };
     timeout.saturating_add(grace)
+}
+
+/// Validate that `value` is a JSON object and stamp the canary marker on
+/// it. Returns `None` for non-object payloads (logs a warning) so the
+/// canary stays disabled rather than being registered with an invalid
+/// shape. Operator overrides reach the engine's `generate()` with the
+/// marker set so `is_probe(request)` detects them.
+fn stamp_canary_marker(mut value: serde_json::Value) -> Option<serde_json::Value> {
+    let Some(obj) = value.as_object_mut() else {
+        tracing::warn!(
+            ?value,
+            "health_check_payload override is not a JSON object; canary disabled"
+        );
+        return None;
+    };
+    obj.insert(
+        crate::engine::HEALTH_CHECK_KEY.to_string(),
+        serde_json::Value::Bool(true),
+    );
+    Some(value)
 }
 
 /// Read `DYN_HEALTH_CHECK_PAYLOAD` (JSON object or `@/path/to/file.json`).

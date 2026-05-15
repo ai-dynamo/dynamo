@@ -48,6 +48,49 @@ impl EngineAdapter {
     }
 }
 
+/// JSON-shaped wrapper around [`EngineAdapter`] for the `local_endpoint_registry`.
+///
+/// The runtime's `HealthCheckManager` fires canary requests as
+/// `SingleIn<serde_json::Value>` against whatever engine is registered for
+/// the endpoint name. The unified backend's network ingress operates on the
+/// typed `PreprocessedRequest`, so we register this adapter alongside the
+/// network handler: it deserializes the JSON canary into `PreprocessedRequest`,
+/// hands it to the same `EngineAdapter`, and re-serializes the response.
+pub(crate) struct JsonProbeAdapter {
+    inner: Arc<EngineAdapter>,
+}
+
+impl JsonProbeAdapter {
+    pub(crate) fn new(inner: Arc<EngineAdapter>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>>, Error>
+    for JsonProbeAdapter
+{
+    async fn generate(
+        &self,
+        input: SingleIn<serde_json::Value>,
+    ) -> Result<ManyOut<Annotated<serde_json::Value>>, Error> {
+        let (json, handle) = input.into_parts();
+        let request: PreprocessedRequest = serde_json::from_value(json)
+            .map_err(|e| anyhow::anyhow!("probe payload deserialization failed: {e}"))?;
+        let typed_input = handle.map(|_| request);
+
+        let typed_out = self.inner.generate(typed_input).await?;
+        let ctx = typed_out.context();
+        let mut inner_stream = typed_out;
+        let mapped = async_stream::stream! {
+            while let Some(ann) = inner_stream.next().await {
+                yield ann.map_data(|chunk| serde_json::to_value(&chunk).map_err(|e| e.to_string()));
+            }
+        };
+        Ok(ResponseStream::new(Box::pin(mapped), ctx))
+    }
+}
+
 #[async_trait]
 impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for EngineAdapter

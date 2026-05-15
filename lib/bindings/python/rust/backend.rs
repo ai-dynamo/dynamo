@@ -285,15 +285,23 @@ impl WorkerConfig {
             ModelInput::Tokens => RsModelInput::Tokens,
             ModelInput::Tensor => RsModelInput::Tensor,
         };
-        // Accept a Python dict or None; depythonize to serde_json::Value.
+        // Accept a Python dict or None; depythonize to serde_json::Value
+        // and require an object — engines branch on a dict marker, and the
+        // runtime canary registers a dict-shaped payload.
         let health_check_payload = match health_check_payload {
             Some(obj) if !obj.is_none(py) => {
                 let bound = obj.bind(py);
-                Some(depythonize::<serde_json::Value>(bound).map_err(|e| {
+                let value: serde_json::Value = depythonize(bound).map_err(|e| {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                         "health_check_payload must be a JSON-serializable dict: {e}"
                     ))
-                })?)
+                })?;
+                if !value.is_object() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "health_check_payload must be a JSON object (dict)",
+                    ));
+                }
+                Some(value)
             }
             _ => None,
         };
@@ -761,6 +769,11 @@ impl LLMEngine for PyLLMEngine {
                     "health_check_payload must return a JSON-serializable dict or None: {e}"
                 ))
             })?;
+            if !value.is_object() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "health_check_payload must return a JSON object (dict) or None",
+                ));
+            }
             Ok(Some(value))
         })
         .map_err(py_err_to_dynamo)

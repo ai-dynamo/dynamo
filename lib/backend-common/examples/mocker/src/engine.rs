@@ -499,6 +499,11 @@ impl LLMEngine for MockerBackend {
             "stop_conditions": {"max_tokens": 1, "ignore_eos": true},
             "sampling_options": {"temperature": 0.0},
         });
+        // Decode mode's generate() rejects requests without prefill_result;
+        // synthesize an empty handoff so the canary clears the precondition.
+        if self.disaggregation_mode.is_decode() {
+            payload["prefill_result"] = serde_json::json!({"disaggregated_params": {}});
+        }
         payload[HEALTH_CHECK_KEY] = serde_json::Value::Bool(true);
         Ok(Some(payload))
     }

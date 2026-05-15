@@ -35,6 +35,7 @@ from dynamo.common.backend.engine import (
 from dynamo.common.backend.health_check import (
     bos_token_id_or,
     build_health_check_payload,
+    build_text_health_check_payload,
 )
 from dynamo.common.backend.publisher import (
     KvEventSource,
@@ -577,7 +578,6 @@ class SglangLLMEngine(LLMEngine):
         ]
 
     async def health_check_payload(self) -> Optional[dict[str, Any]]:
-        bos = bos_token_id_or(getattr(self.engine, "tokenizer_manager", None))
         extras: Optional[dict[str, Any]] = None
         # FAKE_BOOTSTRAP_HOST tells SGLang to short-circuit real KV transfer;
         # room=0 always routes to DP rank 0.
@@ -599,6 +599,12 @@ class SglangLLMEngine(LLMEngine):
                     "bootstrap_room": 0,
                 }
             }
+        # `--use-sglang-tokenizer` reads flat sampling fields + a prompt
+        # via `_input_param_manager.get_input_param(..., use_tokenizer=True)`;
+        # token-shape payloads silently ignore `max_tokens` in that mode.
+        if self._use_sglang_tokenizer:
+            return build_text_health_check_payload(extras=extras)
+        bos = bos_token_id_or(getattr(self.engine, "tokenizer_manager", None))
         return build_health_check_payload(bos_token_id=bos, extras=extras)
 
     def _build_sampling_params(self, request: GenerateRequest) -> dict:

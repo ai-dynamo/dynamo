@@ -13,6 +13,7 @@ from dynamo.common.backend.health_check import (
     HEALTH_CHECK_KEY,
     bos_token_id_or,
     build_health_check_payload,
+    build_text_health_check_payload,
     is_probe,
     parse_health_check_payload_cli,
 )
@@ -39,10 +40,32 @@ def test_env_override_replaces_default_and_extras(monkeypatch):
     assert payload == {"prompt": "hello", HEALTH_CHECK_KEY: True}
 
 
-def test_is_probe_detects_marker():
+def test_is_probe_strict_bool_match():
+    # Only the bool True trips it; truthy non-bools (string "false",
+    # integer 1) must not be mistaken for the marker.
     assert is_probe({"_HEALTH_CHECK": True}) is True
     assert is_probe({"_HEALTH_CHECK": False}) is False
+    assert is_probe({"_HEALTH_CHECK": "true"}) is False
+    assert is_probe({"_HEALTH_CHECK": 1}) is False
     assert is_probe({"token_ids": [1]}) is False
+
+
+def test_env_override_empty_dict_wins_over_engine_default(monkeypatch):
+    # Explicit `{}` is a valid operator override (e.g. canary that just
+    # tests transport with no payload fields); must not fall back to the
+    # engine default.
+    monkeypatch.setenv("DYN_HEALTH_CHECK_PAYLOAD", "{}")
+    payload = build_health_check_payload(bos_token_id=42)
+    assert payload == {HEALTH_CHECK_KEY: True}
+
+
+def test_text_payload_shape(monkeypatch):
+    monkeypatch.delenv("DYN_HEALTH_CHECK_PAYLOAD", raising=False)
+    payload = build_text_health_check_payload()
+    assert payload["prompt"] == "Test"
+    assert payload["max_tokens"] == 1
+    assert payload["temperature"] == 0.0
+    assert payload[HEALTH_CHECK_KEY] is True
 
 
 def test_bos_token_id_or_walks_tokenizer_chain():
