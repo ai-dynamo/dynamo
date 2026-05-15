@@ -34,16 +34,28 @@ specific framework.
 | `kvbm-common` | Shared primitives: `BlockId`, `SequenceHash`, `LogicalLayoutHandle` (G1/G2/G3/G4 tier enum), and the `DeviceBackend { Cuda, Sycl }` tag enum. No device deps. | Tag only — the `DeviceBackend` enum was promoted here so `dynamo-memory` and `kvbm-physical` share a single canonical type. Device-neutral: no FFI, no feature gates; runtime probes live on `DeviceBackendExt` in `kvbm-physical`. |
 | `kvbm-config` | Static configuration for caches, discovery, NIXL, object storage, offload, onboard policies, tokio/rayon runtimes, messengers. Pure config structs. | No. |
 | `kvbm-logical` | Logical block lifecycle: registries, pools, sequence tracking, metrics, TinyLFU cache, pub/sub adapters, framework integrations. Works on logical handles; never touches devices directly. | No. |
+| `kvbm-consolidator` | Out-of-process aggregation/consolidation service. Reads event streams from KVBM workers via ZeroMQ (`tmq`), tracks events and hashes, emits to consumers. Operates on logical types (`BlockId`, `SequenceHash`) and serialized wire formats — never touches GPU memory. Deps: `kvbm-logical`, `dynamo-tokens`, `dynamo-kv-hashing`, `dynamo-kv-router`. | No. |
 | `dynamo-memory` (`lib/memory`) | `MemoryDescriptor`, `DeviceAllocator` / `PinnedAllocator` traits, `DeviceStorage` / `PinnedStorage`, `NumaWorkerPool`, `SyclMemPool`, `CudaMemPool`. Backend-agnostic storage layer — no device-SDK types in the public API. | **Yes** — houses `SyclMemPool`, SYCL-aware NUMA discovery, and the allocator traits that downstream device wrappers implement. |
 | `kvbm-kernels` | CUDA and SYCL kernel launchers: `vectorized_copy`, `memcpy_batch`, `sycl_vectorized_copy`, `sycl_*_from_block`. Built from `.cu` via nvcc and `.cpp` via `icpx -fsycl`. | **Yes** — SYCL kernel sources and FFI wrappers live here. |
 | `kvbm-physical` | Device abstraction traits (`DeviceContextOps`, `DeviceStreamOps`, `DeviceEventOps`, `DeviceMemPoolOps`), the `DeviceBackendExt` extension trait (runtime `is_available` / `detect_backend` / `list_available` probes on the `kvbm-common` enum), CUDA and SYCL implementations, and `TransferManager` / `TransferContext` on top of them. | **Yes** — the core of the multi-backend layer; CUDA and SYCL both implement the trait surface here. |
 | `kvbm-engine` | Orchestrator: `InstanceLeader`, `PhysicalWorker`, `ReplicatedDataWorker`, sessions, offload pipeline, object tier (G4), `CollectiveOps` with NCCL and **oneCCL** implementations, `OneCclBootstrap`. | **Yes** — adds the `oneccl` feature and the XPU-aware layer-wise onboard path. |
 | `kvbm-py3` (`lib/bindings/kvbm`) | Python/FFI bindings consumed by external frameworks. Owns the vLLM connector and its backend-specific `event_sync_blocking` (CUDA / SYCL / fallback). | **Yes** — SYCL variant added alongside CUDA, mutually exclusive by feature. |
 
-The small crates (`kvbm-common`, `kvbm-config`, `kvbm-logical`) are listed
-for completeness but contain no device-specific code and are not touched by
-XPU/SYCL enablement. The diagrams in this document draw them as
-inert upper layers so the reader can see where KVBM v2 sits as a whole.
+**Shared logical-tier deps (referenced by KVBM but not part of it):**
+
+| Crate | Consumed by | Purpose | XPU/SYCL relevance |
+|---|---|---|---|
+| `dynamo-tokens` (`lib/tokens`) | `kvbm-common` (re-exported as `SequenceHash = dynamo_tokens::PositionalLineageHash`), `kvbm-logical`, `kvbm-consolidator` | Token block sequencing and `PositionalLineageHash` computation. No device deps. | No. |
+| `dynamo-kv-hashing` (`lib/kv-hashing`) | `kvbm-consolidator` | Prefix-aware KV hashing utilities. No device deps. | No. |
+| `dynamo-kv-router` (`lib/kv-router`) | `kvbm-consolidator` | Logical request routing across replicas. No device deps. | No. |
+| `dynamo-llm` (`lib/llm`) | `kvbm-py3` (`bindings/kvbm`) imports `block_manager::*` types: `BlockDataExt`, `Controller`, `DistributedLeaderWorkerResources`, `connector::protocol::RequestType`, `metrics_kvbm::KvbmMetrics`, `recorder::Recorder`. | No device deps. The `lib/llm/src/block_manager/v2/` subtree is not on the XPU/SYCL enablement path and should not receive new XPU work. | No. |
+| `dynamo-mocker` (`lib/mocker`) | None of the kvbm-* crates depend on it. Conversely, mocker's `kvbm-offload` feature (off by default) pulls in `kvbm-engine`, `kvbm-physical`, `kvbm-common`, `velo` for G1↔G2 offload simulation in test scenarios. | No device-specific code in the source; pure logical/test harness. | No. |
+
+The small crates (`kvbm-common`, `kvbm-config`, `kvbm-logical`,
+`kvbm-consolidator`) are listed for completeness but contain no
+device-specific code and are not touched by XPU/SYCL enablement. The
+diagrams in this document draw them as inert upper layers so the
+reader can see where KVBM v2 sits as a whole.
 
 ## KVBM v2 crate stack
 

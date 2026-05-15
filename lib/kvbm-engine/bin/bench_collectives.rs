@@ -661,6 +661,73 @@ fn run_nccl_worker(
 
 // ─── Child entry point ───────────────────────────────────────────────────────
 
+/// Print this rank's selected device (backend, BDF, name) to stderr.
+/// Each child only sees one device because the coordinator has already
+/// set `CUDA_VISIBLE_DEVICES` / `ONEAPI_DEVICE_SELECTOR` before fork;
+/// we always read the device at restricted-view ordinal 0. Best-effort:
+/// any lookup failure prints "unknown" rather than aborting.
+fn eprint_rank_device(rank: usize, backend: &str) {
+    let (bdf, name) = match backend {
+        #[cfg(feature = "oneccl")]
+        "oneccl" => {
+            use oneapi_rs::safe::SyclDevice;
+            match SyclDevice::by_ordinal(0).and_then(|d| d.info()) {
+                Ok(info) => (
+                    info.pci_address.unwrap_or_else(|| "unknown".to_string()),
+                    info.name,
+                ),
+                Err(_) => ("unknown".to_string(), "unknown".to_string()),
+            }
+        }
+        #[cfg(feature = "nccl")]
+        "nccl" => {
+            use cudarc::driver::sys as cu;
+            use std::ffi::CStr;
+            let mut bdf = String::from("unknown");
+            let mut name = String::from("unknown");
+            unsafe {
+                let mut dev = std::mem::MaybeUninit::uninit();
+                if cu::cuInit(0).result().is_ok()
+                    && cu::cuDeviceGet(dev.as_mut_ptr(), 0).result().is_ok()
+                {
+                    let dev = dev.assume_init();
+                    let mut domain = 0i32;
+                    let mut bus = 0i32;
+                    let mut slot_num = 0i32;
+                    let dom_ok = cu::cuDeviceGetAttribute(
+                        &mut domain,
+                        cu::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID,
+                        dev,
+                    ).result().is_ok();
+                    let bus_ok = cu::cuDeviceGetAttribute(
+                        &mut bus,
+                        cu::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_BUS_ID,
+                        dev,
+                    ).result().is_ok();
+                    let slot_ok = cu::cuDeviceGetAttribute(
+                        &mut slot_num,
+                        cu::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID,
+                        dev,
+                    ).result().is_ok();
+                    if dom_ok && bus_ok && slot_ok {
+                        bdf = format!("{:04x}:{:02x}:{:02x}.0", domain, bus, slot_num);
+                    }
+                    let mut buf = [0i8; 256];
+                    if cu::cuDeviceGetName(buf.as_mut_ptr(), buf.len() as i32, dev).result().is_ok() {
+                        name = CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned();
+                    }
+                }
+            }
+            (bdf, name)
+        }
+        _ => ("unknown".to_string(), "unknown".to_string()),
+    };
+    eprintln!(
+        "  rank[{}] backend={}  bdf={}  name=\"{}\"",
+        rank, backend, bdf, name,
+    );
+}
+
 fn run_child() -> Result<Option<()>> {
     let rank_str = match std::env::var("BENCH_CCL_RANK") {
         Ok(r) => r,
@@ -712,6 +779,12 @@ fn run_child() -> Result<Option<()>> {
                 .with_context(|| format!("parsing size {s:?} in BENCH_CCL_SIZES"))
         })
         .collect::<Result<_>>()?;
+
+    // Print this rank's device assignment (backend, BDF, name) to stderr
+    // before any collective work. Each child only sees one device because
+    // CUDA_VISIBLE_DEVICES / ONEAPI_DEVICE_SELECTOR has been pinned by
+    // the coordinator; we report it here for log-level traceability.
+    eprint_rank_device(rank, &backend);
 
     // The worker reuses its communicator across the full (size × num_regions)
     // sweep — the collective bootstrap is a one-shot handshake, so we must
@@ -800,6 +873,40 @@ fn spawn_drain<R: std::io::Read + Send + 'static>(
     })
 }
 
+/// Like `spawn_drain`, but also forwards each line to the coordinator's
+/// stderr in real time (prefixed with `[rank N]`) while still buffering
+/// the full content for the failure-dump path. Used for child stderr so
+/// the user sees device-info lines, oneCCL diagnostics, and progress
+/// while the bench runs — instead of only on rank failure at exit.
+fn spawn_drain_tee_stderr<R: std::io::Read + Send + 'static>(
+    reader: R,
+    rank: usize,
+) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    use std::io::{BufRead, BufReader, Write};
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut br = BufReader::new(reader);
+        let stderr = std::io::stderr();
+        loop {
+            let mut line = Vec::new();
+            let n = br.read_until(b'\n', &mut line)?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&line);
+            // Strip trailing newline for the prefix path; re-emit it after.
+            let mut handle = stderr.lock();
+            let _ = handle.write_all(format!("[rank {rank}] ").as_bytes());
+            let _ = handle.write_all(&line);
+            // Ensure terminal lines without a trailing \n still flush.
+            if !line.ends_with(b"\n") {
+                let _ = handle.write_all(b"\n");
+            }
+        }
+        Ok(buf)
+    })
+}
+
 fn run_coordinator(cli: Cli) -> Result<()> {
     let world_size = cli.world_size;
     ensure!(world_size >= 2, "world_size must be >= 2");
@@ -824,6 +931,7 @@ fn run_coordinator(cli: Cli) -> Result<()> {
         backend, world_size, cli.sizes, cli.warmup, cli.iterations,
         cli.num_regions, wait_for_completion, selector_env_var, selector_pattern
     );
+    eprintln!("Selected devices ({}, one per rank):", world_size);
 
     let bootstrap_hex = generate_bootstrap_hex(&backend, world_size)?;
 
@@ -888,7 +996,7 @@ fn run_coordinator(cli: Cli) -> Result<()> {
             .take()
             .ok_or_else(|| anyhow::anyhow!("rank {rank}: no stderr pipe"))?;
         let stdout_thread = spawn_drain(stdout);
-        let stderr_thread = spawn_drain(stderr);
+        let stderr_thread = spawn_drain_tee_stderr(stderr, rank);
         children.push((child, stdout_thread, stderr_thread));
     }
 

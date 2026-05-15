@@ -56,6 +56,30 @@ use kvbm_physical::device::{DeviceBackend, DeviceBackendExt, DeviceContext};
 use kvbm_physical::layout::{LayoutConfig, PhysicalLayout};
 use kvbm_physical::transfer::{NixlAgent, TransferManager, TransferOptions};
 
+/// Print a one-line-per-device summary (backend, BDF) for the devices
+/// this bench will actually use. Best-effort: failures degrade to
+/// "unknown" rather than aborting. Device name is omitted here because
+/// the cudarc / oneapi-rs crates are optional dependencies of
+/// `kvbm-engine` (gated behind `nccl` / `oneccl`); BDF is enough to
+/// disambiguate physical devices.
+fn eprint_selected_devices(backend: DeviceBackend, device_ids: &[u32]) {
+    let backend_tag = match backend {
+        DeviceBackend::Cuda => "cuda",
+        DeviceBackend::Sycl => "sycl",
+    };
+    eprintln!("Selected devices ({}):", device_ids.len());
+    for (slot, &dev_id) in device_ids.iter().enumerate() {
+        let bdf = match DeviceContext::new(backend, dev_id) {
+            Ok(ctx) => ctx.pci_bdf_address().unwrap_or_else(|| "unknown".to_string()),
+            Err(_) => "unknown".to_string(),
+        };
+        eprintln!(
+            "  device[{}] backend={}  bdf={}  ordinal={}",
+            slot, backend_tag, bdf, dev_id,
+        );
+    }
+}
+
 // ─── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
@@ -1276,6 +1300,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = build_config(cli)?;
     validate_config(&config)?;
+
+    eprint_selected_devices(config.backend, &config.devices);
 
     eprintln!("KVBM Engine Benchmark (Leader+Worker Architecture)");
     eprintln!("  Devices: {:?}", config.devices);

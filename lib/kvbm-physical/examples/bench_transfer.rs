@@ -113,6 +113,41 @@ fn print_sycl_device_info(device_ordinal: u32) {
     eprintln!();
 }
 
+/// Best-effort device-name lookup for the selected-devices summary.
+/// Falls back to "unknown" so a missing driver / out-of-range ordinal
+/// does not abort the bench.
+fn selected_device_name(backend: DeviceBackend, ordinal: u32) -> String {
+    match backend {
+        DeviceBackend::Cuda => {
+            use cudarc::driver::sys as cu;
+            use std::ffi::CStr;
+            unsafe {
+                let mut dev = std::mem::MaybeUninit::uninit();
+                if cu::cuDeviceGet(dev.as_mut_ptr(), ordinal as i32).result().is_ok() {
+                    let dev = dev.assume_init();
+                    let mut buf = [0i8; 256];
+                    if cu::cuDeviceGetName(buf.as_mut_ptr(), buf.len() as i32, dev).result().is_ok() {
+                        return CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned();
+                    }
+                }
+            }
+            "unknown".to_string()
+        }
+        DeviceBackend::Sycl => {
+            #[cfg(feature = "xpu-sycl")]
+            {
+                use oneapi_rs::safe::SyclDevice;
+                if let Ok(d) = SyclDevice::by_ordinal(ordinal as usize) {
+                    if let Ok(info) = d.info() {
+                        return info.name;
+                    }
+                }
+            }
+            "unknown".to_string()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
@@ -357,13 +392,28 @@ async fn main() -> Result<()> {
     }
 
     // Create device context (shared across all tests)
-    let ctx: Arc<dyn DeviceAllocator> =
-        Arc::new(DeviceContext::new(device_backend, cli.device)?);
+    let device_ctx = Arc::new(DeviceContext::new(device_backend, cli.device)?);
+    let ctx: Arc<dyn DeviceAllocator> = device_ctx.clone();
 
     // -- Print device info ----------------------------------------------------
     #[cfg(feature = "xpu-sycl")]
     if matches!(device_backend, DeviceBackend::Sycl) {
         print_sycl_device_info(cli.device);
+    }
+
+    // -- Selected devices (compact summary with BDF + name) -----------------
+    {
+        let bdf = device_ctx.pci_bdf_address().unwrap_or_else(|| "unknown".to_string());
+        let name = selected_device_name(device_backend, cli.device);
+        let backend_tag = match device_backend {
+            DeviceBackend::Cuda => "cuda",
+            DeviceBackend::Sycl => "sycl",
+        };
+        eprintln!("Selected devices (1):");
+        eprintln!(
+            "  device[0] backend={}  bdf={}  name=\"{}\"",
+            backend_tag, bdf, name,
+        );
     }
 
     // -- Print config ---------------------------------------------------------

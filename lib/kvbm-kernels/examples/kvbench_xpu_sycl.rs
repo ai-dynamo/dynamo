@@ -146,6 +146,25 @@ use oneapi_rs::sycl::{SyclContext, SyclDevice, SyclEvent, SyclQueue};
 
 use kvbm_kernels::sycl_vectorized_copy;
 
+/// Print the selected SYCL devices: backend, BDF, name. Best-effort —
+/// failures fall back to "unknown" rather than aborting the bench.
+fn eprint_selected_devices(device_ids: &[usize]) {
+    eprintln!("Selected devices ({}):", device_ids.len());
+    for (slot, &dev_id) in device_ids.iter().enumerate() {
+        let (bdf, name) = match SyclDevice::by_ordinal(dev_id).and_then(|d| d.info()) {
+            Ok(info) => (
+                info.pci_address.unwrap_or_else(|| "unknown".to_string()),
+                info.name,
+            ),
+            Err(_) => ("unknown".to_string(), "unknown".to_string()),
+        };
+        eprintln!(
+            "  device[{}] backend=sycl  bdf={}  name=\"{}\"",
+            slot, bdf, name,
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Llama 3.1 70B, bf16 KV cache dimensions
 // ---------------------------------------------------------------------------
@@ -1056,6 +1075,13 @@ fn main() {
 
     // -- Cross-device D2D setup -----------------------------------------------
     let has_d2dx = cli.direction.iter().any(|s| s == "d2dx" || s == "cross");
+
+    // Summary of devices actually used in this run (after the full SYCL list above).
+    if has_d2dx && cli.dst_device < device_count && cli.dst_device != cli.device {
+        eprint_selected_devices(&[cli.device, cli.dst_device]);
+    } else {
+        eprint_selected_devices(&[cli.device]);
+    }
     let mut d2dx_host_staged = false;
     let (queue, dst_queue) = if has_d2dx {
         if device_count < 2 {
