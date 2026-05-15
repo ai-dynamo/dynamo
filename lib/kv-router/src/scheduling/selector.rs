@@ -203,29 +203,19 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         assert!(request.isl_tokens > 0);
-        request.validate_worker_constraints()?;
+        let eligibility = request.eligibility();
+        eligibility.validate_pinned_worker(request.pinned_worker)?;
 
         let pinned_worker = request.pinned_worker;
 
-        if pinned_worker.is_none() {
-            let allowed_workers: Vec<_> = workers
-                .iter()
-                .filter(|(worker_id, _)| request.is_worker_allowed(**worker_id))
-                .collect();
-
-            if allowed_workers.is_empty() {
-                return Err(KvSchedulerError::NoEndpoints);
-            }
-
-            if request.routing_constraints.has_hard_constraints()
-                && !allowed_workers.iter().any(|(_, config)| {
-                    request
-                        .routing_constraints
-                        .is_compatible_with_worker_taints(config.taints())
-                })
-            {
-                return Err(KvSchedulerError::NoEndpoints);
-            }
+        if pinned_worker.is_none()
+            && !eligibility.has_eligible_worker(
+                workers
+                    .iter()
+                    .map(|(&worker_id, config)| (worker_id, config)),
+            )
+        {
+            return Err(KvSchedulerError::NoEndpoints);
         }
 
         let request_blocks = request.request_blocks(block_size);
@@ -250,11 +240,10 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         if let Some(worker) = pinned_worker {
             pinned_worker_config(workers, worker)?;
-            if workers.get(&worker.worker_id).is_some_and(|config| {
-                !request
-                    .routing_constraints
-                    .is_compatible_with_worker_taints(config.taints())
-            }) {
+            if workers
+                .get(&worker.worker_id)
+                .is_some_and(|config| !eligibility.allows_worker(worker.worker_id, config))
+            {
                 return Err(KvSchedulerError::NoEndpoints);
             }
 
@@ -297,13 +286,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         let worker_iter = workers
             .iter()
-            .filter(move |(worker_id, _)| request.is_worker_allowed(**worker_id))
-            .filter(move |(_, config)| {
-                request.routing_constraints.is_empty()
-                    || request
-                        .routing_constraints
-                        .is_compatible_with_worker_taints(config.taints())
-            })
+            .filter(move |(worker_id, config)| eligibility.allows_worker(**worker_id, *config))
             .flat_map(|(worker_id, config)| {
                 let data_parallel_size = config.data_parallel_size();
                 let data_parallel_start_rank = config.data_parallel_start_rank();

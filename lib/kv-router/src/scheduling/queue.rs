@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -13,10 +13,10 @@ use tokio::time::Instant;
 use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
-use super::types::{SchedulingRequest, SchedulingResponse, pinned_worker_config};
-use crate::protocols::{
-    PrefillLoadHint, RoutingConstraints, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+use super::types::{
+    RoutingEligibility, SchedulingRequest, SchedulingResponse, pinned_worker_config,
 };
+use crate::protocols::{PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
@@ -145,7 +145,9 @@ impl<
     /// When `allowed_worker_ids` is set on the request without an exact pin
     /// (external routing), the capacity check is skipped.
     pub async fn enqueue(&self, mut request: SchedulingRequest) {
-        if let Err(error) = request.validate_worker_constraints() {
+        let eligibility = request.eligibility();
+
+        if let Err(error) = eligibility.validate_pinned_worker(request.pinned_worker) {
             request.respond(Err(error));
             return;
         }
@@ -158,16 +160,15 @@ impl<
             return;
         };
 
-        if request.bypass_capacity_check() {
+        if eligibility.bypasses_capacity_check(request.pinned_worker) {
             self.admit_one(request, decay_now).await;
             return;
         }
 
         if self.all_workers_busy(
             threshold,
-            request.allowed_worker_ids.as_ref(),
+            request.eligibility(),
             request.pinned_worker,
-            &request.routing_constraints,
             decay_now,
         ) {
             tracing::debug!("all workers busy, queueing request");
@@ -218,9 +219,8 @@ impl<
             // schedulable entries until we adopt a cheaper non-HOL strategy.
             if self.all_workers_busy(
                 threshold,
-                front.request.allowed_worker_ids.as_ref(),
+                front.request.eligibility(),
                 front.request.pinned_worker,
-                &front.request.routing_constraints,
                 decay_now,
             ) {
                 break;
@@ -354,9 +354,8 @@ impl<
     fn all_workers_busy(
         &self,
         threshold: f64,
-        allowed: Option<&HashSet<WorkerId>>,
+        eligibility: RoutingEligibility<'_>,
         pinned_worker: Option<WorkerWithDpRank>,
-        routing_constraints: &RoutingConstraints,
         decay_now: Instant,
     ) -> bool {
         let active_tokens = self.slots.active_tokens(decay_now);
@@ -366,9 +365,7 @@ impl<
             let Ok(config) = pinned_worker_config::<C>(&*configs, worker) else {
                 return false;
             };
-            if routing_constraints.has_hard_constraints()
-                && !routing_constraints.is_compatible_with_worker_taints(config.taints())
-            {
+            if !eligibility.allows_worker(worker.worker_id, config) {
                 return false;
             }
 
@@ -381,14 +378,7 @@ impl<
 
         let mut checked_any = false;
         for (&worker_id, config) in configs.iter() {
-            if let Some(ids) = allowed
-                && !ids.contains(&worker_id)
-            {
-                continue;
-            }
-            if routing_constraints.has_hard_constraints()
-                && !routing_constraints.is_compatible_with_worker_taints(config.taints())
-            {
+            if !eligibility.allows_worker(worker_id, config) {
                 continue;
             }
             let dp_size = config.data_parallel_size();
@@ -412,7 +402,7 @@ impl<
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Condvar, Mutex as StdMutex};
     use std::time::Duration;
 

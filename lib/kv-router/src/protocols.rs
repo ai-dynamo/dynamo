@@ -189,12 +189,20 @@ impl RoutingConstraints {
     }
 
     pub fn is_compatible_with_worker_taints(&self, worker_taints: &HashSet<String>) -> bool {
+        if self.required_taints.is_empty() {
+            return true;
+        }
+
         self.required_taints
             .iter()
             .all(|taint| worker_taints.contains(taint))
     }
 
     pub fn preferred_taint_matches(&self, worker_taints: &HashSet<String>) -> usize {
+        if self.preferred_taints.is_empty() {
+            return 0;
+        }
+
         self.preferred_taints
             .keys()
             .filter(|taint| worker_taints.contains(*taint))
@@ -202,6 +210,10 @@ impl RoutingConstraints {
     }
 
     pub fn preferred_taint_multiplier(&self, worker_taints: &HashSet<String>) -> f64 {
+        if self.preferred_taints.is_empty() {
+            return 1.0;
+        }
+
         let bias = self
             .preferred_taints
             .iter()
