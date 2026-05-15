@@ -156,7 +156,7 @@ pub struct Client {
     // These are the instance source ids less those reported as down from sending rpc
     instance_avail: Arc<ArcSwap<Vec<u64>>>,
     // These are the instance ids reported as busy (above threshold)
-    instance_busy: Arc<StdMutex<HashSet<u64>>>,
+    instance_busy: Arc<ArcSwap<HashSet<u64>>>,
     // Watch sender for available instance IDs (for sending updates)
     instance_avail_tx: Arc<tokio::sync::watch::Sender<Vec<u64>>>,
     // Watch receiver for available instance IDs (for cloning to external subscribers)
@@ -202,7 +202,7 @@ impl Client {
             endpoint_discovery_source,
             instance_source: instance_source.clone(),
             instance_avail: Arc::new(ArcSwap::from(Arc::new(initial_ids.clone()))),
-            instance_busy: Arc::new(StdMutex::new(HashSet::new())),
+            instance_busy: Arc::new(ArcSwap::from_pointee(HashSet::new())),
             instance_avail_tx: Arc::new(avail_tx),
             instance_avail_rx: avail_rx,
             reconcile_interval,
@@ -226,7 +226,7 @@ impl Client {
 
     pub fn instance_ids_free(&self) -> Vec<u64> {
         let instance_ids = self.instance_ids();
-        let busy_ids = self.instance_busy.lock().unwrap();
+        let busy_ids = self.instance_busy.load();
 
         instance_ids
             .into_iter()
@@ -291,9 +291,9 @@ impl Client {
 
     /// Update the set of free instances based on busy instance IDs
     pub fn update_free_instances(&self, busy_instance_ids: &[u64]) {
-        let mut busy_ids = self.instance_busy.lock().unwrap();
-        busy_ids.clear();
-        busy_ids.extend(busy_instance_ids.iter().copied());
+        self.instance_busy.store(Arc::new(
+            busy_instance_ids.iter().copied().collect::<HashSet<_>>(),
+        ));
     }
 
     /// Monitor the key-value instance source and update instance_avail.
