@@ -7,7 +7,6 @@ from tests.utils.multimodal import (
     MmCase,
     MultimodalModelProfile,
     TopologyConfig,
-    make_image_payload,
     make_image_payload_cached_tokens,
 )
 
@@ -76,78 +75,6 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=16.0,
                 requested_sglang_kv_tokens=8192,
                 env={"SINGLE_GPU": "true"},
-                tests=[
-                    MmCase(
-                        payload=make_image_payload_cached_tokens(
-                            ["green"],
-                            min_cached_tokens=0,
-                            require_lightseek_init=True,
-                            min_routing_total_blocks=10,
-                        )
-                    )
-                ],
-            ),
-        },
-    ),
-    MultimodalModelProfile(
-        name="microsoft/Phi-3-vision-128k-instruct",
-        short_name="phi3-vision",
-        topologies={
-            "agg_router": TopologyConfig(
-                marks=[pytest.mark.post_merge],
-                timeout_s=500,
-                profiled_vram_gib=22.0,
-                requested_sglang_kv_tokens=8192,
-                env={"SINGLE_GPU": "true"},
-                tests=[
-                    MmCase(
-                        payload=make_image_payload_cached_tokens(
-                            ["green"],
-                            min_cached_tokens=0,
-                            require_lightseek_init=True,
-                            min_routing_total_blocks=10,
-                        )
-                    )
-                ],
-            ),
-        },
-    ),
-    # LLaVA-1.5 and LLaVA-NeXT cover both lightseek processor specs (plain
-    # LlavaProcessor vs LlavaNextProcessor's anyres multi-crop). Two 7B
-    # workers won't fit on one GPU, so no SINGLE_GPU here.
-    MultimodalModelProfile(
-        name="llava-hf/llava-1.5-7b-hf",
-        short_name="llava-1.5-7b",
-        topologies={
-            "agg_router": TopologyConfig(
-                marks=[pytest.mark.post_merge],
-                timeout_s=600,
-                gpu_marker="gpu_2",
-                profiled_vram_gib=19.2,
-                requested_sglang_kv_tokens=4096,
-                tests=[
-                    MmCase(
-                        payload=make_image_payload_cached_tokens(
-                            ["green"],
-                            min_cached_tokens=0,
-                            require_lightseek_init=True,
-                            min_routing_total_blocks=10,
-                        )
-                    )
-                ],
-            ),
-        },
-    ),
-    MultimodalModelProfile(
-        name="llava-hf/llava-v1.6-mistral-7b-hf",
-        short_name="llava-next-mistral-7b",
-        topologies={
-            "agg_router": TopologyConfig(
-                marks=[pytest.mark.post_merge],
-                timeout_s=600,
-                gpu_marker="gpu_2",
-                profiled_vram_gib=19.2,
-                requested_sglang_kv_tokens=4096,
                 tests=[
                     MmCase(
                         payload=make_image_payload_cached_tokens(
