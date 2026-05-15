@@ -20,7 +20,7 @@ testing = []
 
 [dependencies]
 dynamo-runtime = { workspace = true }
-dynamo-llm = { path = "../llm", version = "1.2.0", default-features = false }
+dynamo-llm = { path = "../llm", default-features = false }
 dynamo-protocols = { workspace = true }
 
 anyhow = { workspace = true }
