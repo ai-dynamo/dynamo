@@ -19,7 +19,7 @@ We compare four Dynamo + TRTLLM deployment modes on **6x GB200 (24 GPU)**:
 
 ## Results
 
-<img width="1237" height="787" alt="throughput-interactivity-pareto" src="https://github.com/user-attachments/assets/8a91309a-839b-4086-be1d-8d9e9b0dee44" />
+<img width="800" alt="throughput-interactivity-pareto" src="https://github.com/user-attachments/assets/8a91309a-839b-4086-be1d-8d9e9b0dee44" />
 
 
 The disaggregated configuration with KV-aware routing, Eagle decoding, and KV offloading achieves the best system throughput and interactivity.
