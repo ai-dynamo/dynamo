@@ -723,3 +723,39 @@ class TestBenchmarkGrid:
         total_kv = 100 * 16
         for ctx_len, bs in points:
             assert ctx_len <= total_kv
+
+
+@pytest.mark.asyncio
+async def test_health_check_decode_opts_out_with_warning(caplog):
+    import logging
+
+    from dynamo.vllm.llm_engine import VllmLLMEngine
+
+    engine = VllmLLMEngine(
+        engine_args=None, disaggregation_mode=DisaggregationMode.DECODE
+    )
+    with caplog.at_level(logging.WARNING, logger="dynamo.vllm.llm_engine"):
+        payload = await engine.health_check_payload()
+
+    assert payload is None
+    matches = [
+        r
+        for r in caplog.records
+        if "DECODE worker: health-check canary disabled" in r.message
+    ]
+    assert len(matches) == 1, f"expected exactly one warning, got {len(matches)}"
+
+
+@pytest.mark.asyncio
+async def test_health_check_aggregated_returns_canary():
+    from dynamo.common.backend.health_check import HEALTH_CHECK_KEY
+    from dynamo.vllm.llm_engine import VllmLLMEngine
+
+    engine = VllmLLMEngine(
+        engine_args=None, disaggregation_mode=DisaggregationMode.AGGREGATED
+    )
+    payload = await engine.health_check_payload()
+
+    assert payload is not None
+    assert payload[HEALTH_CHECK_KEY] is True
+    assert payload["token_ids"]
