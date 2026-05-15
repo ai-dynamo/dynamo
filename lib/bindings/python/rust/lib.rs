@@ -827,6 +827,29 @@ impl DistributedRuntime {
         Ok(())
     }
 
+    /// Register an activity notifier with the given name.
+    /// Idempotent: subsequent calls with the same name are no-ops.
+    fn register_activity_notifier(&self, name: String) -> PyResult<()> {
+        self.inner
+            .system_health()
+            .lock()
+            .register_activity_notifier(&name, Arc::new(tokio::sync::Notify::new()));
+        Ok(())
+    }
+
+    /// Fire the activity notifier with the given name (wake its Waiter).
+    /// Returns true if the notifier was found and fired, false if not registered (no-op).
+    fn fire_activity_notifier(&self, name: String) -> PyResult<bool> {
+        let system_health = self.inner.system_health();
+        let health = system_health.lock();
+        if let Some(notifier) = health.get_endpoint_activity_check_notifier(&name) {
+            notifier.notify_one();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
     // to the KVBM bindings, since KVBM cannot directly use the struct from this cdylib.
     // TODO: Create a separate crate "dynamo-python" so that all binding crates can import
@@ -845,6 +868,15 @@ impl DistributedRuntime {
 
 #[pymethods]
 impl Endpoint {
+    /// Return the endpoint's name (e.g. "generate").
+    ///
+    /// This is the same key used by serve_endpoint when it registers the
+    /// endpoint with SystemHealth, so it can be passed directly to
+    /// DistributedRuntime.register_activity_notifier / fire_activity_notifier.
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
     #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
     fn serve_endpoint<'p>(
         &self,

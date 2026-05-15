@@ -99,6 +99,8 @@ class PrefillHandler(HandlerBase):
     ):
         super().__init__(config)
         self._encoder_cache = encoder_cache
+        if self.runtime and self.generate_endpoint:
+            self.runtime.register_activity_notifier(self.generate_endpoint.name())
 
     async def remote_encode_with_nixl(self, request: dict, context=None):
         """
@@ -137,7 +139,8 @@ class PrefillHandler(HandlerBase):
         Frontend routes to decode workers automatically.
         """
         logging.debug(f"Prefill Request ID: {context.id()}")
-        logging.debug(f"PrefillHandler.generate received request: {request}")
+        if self.runtime and self.generate_endpoint:
+            self.runtime.fire_activity_notifier(self.generate_endpoint.name())
         embeddings_tensor = None
         ep_disaggregated_params = None
 

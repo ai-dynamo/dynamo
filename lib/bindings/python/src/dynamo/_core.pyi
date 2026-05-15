@@ -120,6 +120,20 @@ class DistributedRuntime:
         """
         ...
 
+    def register_activity_notifier(self, name: str) -> None:
+        """
+        Register an activity notifier with the given name.
+        Idempotent: subsequent calls with the same name are no-ops.
+        """
+        ...
+
+    def fire_activity_notifier(self, name: str) -> bool:
+        """
+        Fire the activity notifier with the given name (wake its Waiter).
+        Returns true if the notifier was found and fired, false if not registered (no-op).
+        """
+        ...
+
     def register_engine_route(
         self,
         route_name: str,
@@ -153,6 +167,15 @@ class Endpoint:
     """
 
     ...
+
+    def name(self) -> str:
+        """Return the endpoint name (e.g. ``"generate"``).
+
+        This is the same key used by serve_endpoint when registering with
+        SystemHealth — pass it to DistributedRuntime.register_activity_notifier
+        and fire_activity_notifier so the health check can observe the signal.
+        """
+        ...
 
     async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None) -> None:
         """
