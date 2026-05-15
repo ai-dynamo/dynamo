@@ -273,10 +273,17 @@ async def init_llm_worker(
 
     arg_map["load_format"] = engine_load_format
 
-    # Enable sleep_config when GMS manages weights — required for GMS
-    # unmap/remap. Conditional because SleepConfig contains unpicklable
-    # lambdas that break MPI-based multi-rank distribution.
-    if config.load_format == "gms":
+    # Enable sleep_config when GMS manages weights, or when snapshot mode is
+    # active on a single-rank deployment. Multi-rank snapshot requires the
+    # SleepConfig MPI pickle fix upstream in TRT-LLM first. Conditional because
+    # SleepConfig contains unpicklable lambdas that break MPI-based multi-rank
+    # distribution.
+    _snapshot_single_rank = (
+        os.environ.get("DYN_SNAPSHOT_CONTROL_DIR")
+        and config.tensor_parallel_size <= 1
+        and config.pipeline_parallel_size <= 1
+    )
+    if config.load_format == "gms" or _snapshot_single_rank:
         from tensorrt_llm.llmapi.llm_args import SleepConfig
 
         arg_map["sleep_config"] = SleepConfig()

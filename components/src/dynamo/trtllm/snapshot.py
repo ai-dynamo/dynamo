@@ -45,6 +45,12 @@ async def prepare_snapshot_engine(
         Exits the process with status 0 if checkpointing completed
         successfully (checkpoint path, not restore path).
     """
+    if config.tensor_parallel_size > 1 or config.pipeline_parallel_size > 1:
+        raise ValueError(
+            "Multi-rank snapshot is not supported yet. "
+            "Please use a single-rank deployment for now."
+        )
+
     checkpoint_config = CheckpointConfig.from_env()
     if checkpoint_config is None:
         return None
