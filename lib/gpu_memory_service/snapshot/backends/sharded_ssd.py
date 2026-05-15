@@ -248,6 +248,7 @@ class _ShardedSSDTransferSession:
         grouped_paths: List[Tuple[str, List[FileTransferSource]]],
         targets: Mapping[str, GMSTransferTarget],
     ) -> None:
+        cuda_utils.cuda_runtime_set_device(self._device)
         slots: List[PinnedCopySlot] = []
         root_t0 = time.monotonic()
         root_bytes = 0

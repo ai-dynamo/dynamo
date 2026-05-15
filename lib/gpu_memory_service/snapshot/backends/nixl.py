@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, List, Mapping, Optional, Sequence, Tuple
@@ -119,44 +118,44 @@ class NixlTransferBackend:
         nixl_agent, nixl_agent_config = _load_nixl_api()
         self._device = config.device
         self._max_workers = config.max_workers
-        self._agent_name = f"gms_nixl_{self._device}_{os.getpid()}"
-        self._agent = nixl_agent(
-            self._agent_name,
-            nixl_agent_config(backends=[]),
-        )
-        self._agent.create_backend(_NIXL_POSIX_BACKEND)
+        self._nixl_agent = nixl_agent
+        self._nixl_agent_config = nixl_agent_config
         cuda_utils.cuda_runtime_set_device(self._device)
-        logger.info("NIXL POSIX backend initialized for device %d", self._device)
+        logger.info(
+            "NIXL POSIX backend initialized for device %d with %d workers",
+            self._device,
+            self._max_workers,
+        )
 
     def start_restore(self, sources: Sequence[FileTransferSource]) -> TransferSession:
         return _NixlTransferSession(
-            agent=self._agent,
-            agent_name=self._agent_name,
+            nixl_agent=self._nixl_agent,
+            nixl_agent_config=self._nixl_agent_config,
             device=self._device,
             max_workers=self._max_workers,
             sources=sources,
         )
 
     def close(self) -> None:
-        self._agent = None
+        pass
 
 
 class _NixlTransferSession:
     def __init__(
         self,
         *,
-        agent: Any,
-        agent_name: str,
+        nixl_agent: Any,
+        nixl_agent_config: Any,
         device: int,
         max_workers: int,
         sources: Sequence[FileTransferSource],
     ) -> None:
-        self._agent = agent
-        self._agent_name = agent_name
+        self._nixl_agent = nixl_agent
+        self._nixl_agent_config = nixl_agent_config
         self._device = device
         self._max_workers = max_workers
         self._sources = list(sources)
-        self._agent_lock = threading.Lock()
+        self._agent_name_base = f"gms_nixl_{self._device}_{os.getpid()}_{id(self):x}"
         self._active = True
 
     def restore(self, targets: Mapping[str, GMSTransferTarget]) -> None:
@@ -174,11 +173,14 @@ class _NixlTransferSession:
                 futures = {
                     pool.submit(
                         self._restore_file,
+                        worker_index,
                         file_path,
                         sources,
                         targets,
                     ): file_path
-                    for file_path, sources in grouped_sources.items()
+                    for worker_index, (file_path, sources) in enumerate(
+                        grouped_sources.items()
+                    )
                 }
                 for future in as_completed(futures):
                     file_path = futures[future]
@@ -205,10 +207,18 @@ class _NixlTransferSession:
 
     def _restore_file(
         self,
+        worker_index: int,
         file_path: str,
         sources: Sequence[FileTransferSource],
         targets: Mapping[str, GMSTransferTarget],
     ) -> None:
+        cuda_utils.cuda_runtime_set_device(self._device)
+        agent_name = f"{self._agent_name_base}_{worker_index}"
+        agent = self._nixl_agent(
+            agent_name,
+            self._nixl_agent_config(backends=[]),
+        )
+        agent.create_backend(_NIXL_POSIX_BACKEND)
         slots: List[PinnedCopySlot] = []
         next_slot = 0
         fd = os.open(file_path, os.O_RDONLY)
@@ -216,6 +226,8 @@ class _NixlTransferSession:
             slots = make_pinned_copy_slots(_PINNED_COPY_BUFFERS_PER_WORKER)
             for source in sources:
                 copied, next_slot = self._restore_source(
+                    agent,
+                    agent_name,
                     fd,
                     file_path,
                     source,
@@ -240,6 +252,8 @@ class _NixlTransferSession:
 
     def _restore_source(
         self,
+        agent: Any,
+        agent_name: str,
         fd: int,
         file_path: str,
         source: FileTransferSource,
@@ -253,6 +267,8 @@ class _NixlTransferSession:
             slot.wait()
             chunk_size = min(PINNED_COPY_CHUNK_SIZE, source.byte_count - done)
             self._read_file_to_host(
+                agent,
+                agent_name,
                 fd,
                 file_path,
                 source.file_offset + done,
@@ -266,6 +282,8 @@ class _NixlTransferSession:
 
     def _read_file_to_host(
         self,
+        agent: Any,
+        agent_name: str,
         fd: int,
         file_path: str,
         file_offset: int,
@@ -275,27 +293,24 @@ class _NixlTransferSession:
         file_reg = None
         host_reg = None
         handle = None
-        with self._agent_lock:
-            try:
-                file_reg = self._agent.register_memory(
-                    [(file_offset, size, fd, "")],
-                    "FILE",
-                )
-                host_reg = self._agent.register_memory(
-                    [(host_ptr, size, 0, "")],
-                    _DRAM_MEM_TYPE,
-                )
-                handle = self._agent.initialize_xfer(
-                    "READ",
-                    host_reg.trim(),
-                    file_reg.trim(),
-                    self._agent_name,
-                )
-                _wait_for_transfer(
-                    self._agent, handle, file_path, NIXL_TRANSFER_BACKEND
-                )
-            finally:
-                _release_transfer_resources(self._agent, handle, host_reg, file_reg)
+        try:
+            file_reg = agent.register_memory(
+                [(file_offset, size, fd, "")],
+                "FILE",
+            )
+            host_reg = agent.register_memory(
+                [(host_ptr, size, 0, "")],
+                _DRAM_MEM_TYPE,
+            )
+            handle = agent.initialize_xfer(
+                "READ",
+                host_reg.trim(),
+                file_reg.trim(),
+                agent_name,
+            )
+            _wait_for_transfer(agent, handle, file_path, NIXL_TRANSFER_BACKEND)
+        finally:
+            _release_transfer_resources(agent, handle, host_reg, file_reg)
 
 
 class NixlGDSTransferBackend:
