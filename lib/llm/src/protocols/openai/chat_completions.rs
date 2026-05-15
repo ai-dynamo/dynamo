@@ -101,6 +101,10 @@ impl NvExtProvider for NvCreateChatCompletionRequest {
     fn raw_prompt(&self) -> Option<String> {
         None
     }
+
+    fn unsupported_fields(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+        Some(&self.unsupported_fields)
+    }
 }
 
 /// Implements `AnnotationsProvider` for `NvCreateChatCompletionRequest`,
@@ -258,6 +262,22 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
     fn get_skip_special_tokens(&self) -> Option<bool> {
         self.common.skip_special_tokens
     }
+
+    fn get_prompt_logprobs_count(&self) -> Option<u32> {
+        self.common.prompt_logprobs
+    }
+
+    fn get_detokenize(&self) -> Option<bool> {
+        self.common.detokenize
+    }
+
+    fn get_allowed_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
+        self.common.allowed_token_ids.clone()
+    }
+
+    fn get_bad_words_token_ids(&self) -> Option<Vec<Vec<crate::types::TokenIdType>>> {
+        self.common.bad_words_token_ids.clone()
+    }
 }
 
 /// Implements `OpenAIStopConditionsProvider` for `NvCreateChatCompletionRequest`,
@@ -288,7 +308,14 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     }
 
     fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
-        self.inner.stop.as_ref().and_then(|stop| stop.token_ids())
+        // Token IDs may be provided in the standard OpenAI `stop` array.
+        if let Some(ids) = self.inner.stop.as_ref().and_then(|stop| stop.token_ids()) {
+            return Some(ids);
+        }
+        // Also accept top-level `stop_token_ids` from passthrough clients.
+        self.unsupported_fields
+            .get("stop_token_ids")
+            .and_then(|v| serde_json::from_value::<Vec<crate::types::TokenIdType>>(v.clone()).ok())
     }
 
     /// Returns a reference to the optional `NvExt` extension, if available.
@@ -320,7 +347,8 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
     }
 
     fn get_prompt_logprobs(&self) -> Option<u32> {
-        None
+        // Top-level `prompt_logprobs` is carried through CommonExt.
+        self.common.prompt_logprobs
     }
 
     fn get_skip_special_tokens(&self) -> Option<bool> {
@@ -504,14 +532,19 @@ mod tests {
             serde_json::from_value(scalar_token_id_stop);
         assert!(result.is_err());
 
-        let unsupported_stop_token_ids = json!({
+        // `stop_token_ids` is accepted and plumbed by the provider trait.
+        let whitelisted_stop_token_ids = json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "Hello"}],
             "stop_token_ids": [576]
         });
         let request: NvCreateChatCompletionRequest =
-            serde_json::from_value(unsupported_stop_token_ids)
+            serde_json::from_value(whitelisted_stop_token_ids)
                 .expect("Failed to deserialize request");
-        assert!(ValidateRequest::validate(&request).is_err());
+        assert_eq!(request.get_stop_token_ids(), Some(vec![576]));
+        assert!(
+            ValidateRequest::validate(&request).is_ok(),
+            "stop_token_ids must be accepted via PASSTHROUGH_EXTRA_FIELDS"
+        );
     }
 }

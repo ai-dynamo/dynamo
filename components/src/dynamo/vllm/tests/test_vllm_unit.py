@@ -328,6 +328,47 @@ def test_headless_namespace_has_required_fields(mock_vllm_cli):
     assert hasattr(ns, "tensor_parallel_size")
 
 
+def test_rl_logprobs_default_respects_explicit_override():
+    from dynamo.vllm.main import configure_rl_logprobs_mode
+
+    config = SimpleNamespace(
+        enable_rl=True,
+        logprobs_mode_explicitly_set=True,
+        engine_args=SimpleNamespace(logprobs_mode="raw_logprobs"),
+    )
+
+    configure_rl_logprobs_mode(config)
+
+    assert config.engine_args.logprobs_mode == "raw_logprobs"
+
+
+def test_rl_logprobs_default_applies_without_override():
+    from dynamo.vllm.main import configure_rl_logprobs_mode
+
+    config = SimpleNamespace(
+        enable_rl=True,
+        logprobs_mode_explicitly_set=False,
+        engine_args=SimpleNamespace(logprobs_mode="raw_logprobs"),
+    )
+
+    configure_rl_logprobs_mode(config)
+
+    assert config.engine_args.logprobs_mode == "processed_logprobs"
+
+
+def test_logprobs_mode_flag_is_tracked(mock_vllm_cli):
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--logprobs-mode",
+        "raw_logprobs",
+    )
+
+    config = parse_args()
+
+    assert config.logprobs_mode_explicitly_set is True
+
+
 # --disaggregation-mode tests
 
 

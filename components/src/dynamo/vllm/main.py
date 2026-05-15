@@ -100,6 +100,16 @@ def run_dynamo_headless(config: Config) -> None:
     run_headless(args)
 
 
+def configure_rl_logprobs_mode(config: Config) -> None:
+    if (
+        config.enable_rl
+        and not config.logprobs_mode_explicitly_set
+        and config.engine_args.logprobs_mode == "raw_logprobs"
+    ):
+        config.engine_args.logprobs_mode = "processed_logprobs"
+        logger.info("Defaulting logprobs_mode=processed_logprobs (--enable-rl active).")
+
+
 async def worker() -> None:
     config = parse_args()
 
@@ -109,6 +119,8 @@ async def worker() -> None:
     # or the HF name (e.g. "Qwen/Qwen3-0.6B"), depending on cmd line params.
     if not config.served_model_name:
         config.served_model_name = config.engine_args.served_model_name = config.model
+
+    configure_rl_logprobs_mode(config)
 
     # Download the model if necessary using modelexpress.
     # We want it on disk before we start vllm to avoid downloading from HuggingFace.

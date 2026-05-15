@@ -97,16 +97,22 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 // Shared Fields
 //
 
-/// Validates that no unsupported fields are present in the request
+/// Extra-body fields accepted for backend-specific handling.
+pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &["cache_salt", "stop_token_ids"];
+
+/// Validates that no unsupported fields are present in the request.
+///
+/// Fields in `PASSTHROUGH_EXTRA_FIELDS` are validated by downstream handlers.
 pub fn validate_no_unsupported_fields(
     unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), anyhow::Error> {
-    if !unsupported_fields.is_empty() {
-        let fields: Vec<_> = unsupported_fields
-            .keys()
-            .map(|s| format!("`{}`", s))
-            .collect();
-        anyhow::bail!("Unsupported parameter(s): {}", fields.join(", "));
+    let unknown: Vec<_> = unsupported_fields
+        .keys()
+        .filter(|k| !PASSTHROUGH_EXTRA_FIELDS.contains(&k.as_str()))
+        .map(|s| format!("`{}`", s))
+        .collect();
+    if !unknown.is_empty() {
+        anyhow::bail!("Unsupported parameter(s): {}", unknown.join(", "));
     }
     Ok(())
 }
