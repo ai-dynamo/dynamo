@@ -90,6 +90,10 @@ class WorkerConfig:
     reasoning_parser: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
     enable_local_indexer: bool = True
+    # Operator-level kill switch for KV-aware-routing publishers. When False,
+    # Worker skips engine.kv_event_sources() and engine.metrics_sources() so
+    # the worker ships no KV events or worker-load metrics.
+    enable_kv_routing: bool = True
     metrics_labels: list[tuple[str, str]] = field(default_factory=list)
     # Disaggregation role; default AGGREGATED keeps existing callers unchanged.
     # The Rust Worker reads this for registration (Prefill→ModelType::Prefill,
@@ -133,6 +137,7 @@ class WorkerConfig:
                 runtime_cfg, "exclude_tools_when_tool_choice_none", True
             ),
             "enable_local_indexer": getattr(runtime_cfg, "enable_local_indexer", True),
+            "enable_kv_routing": getattr(runtime_cfg, "enable_kv_routing", True),
         }
         # vLLM/TRT-LLM expose `disaggregation_mode`; SGLang exposes
         # `serving_mode`. Skip the probe when an override is supplied so
@@ -194,6 +199,7 @@ class Worker:
                 self.config.exclude_tools_when_tool_choice_none
             ),
             enable_local_indexer=self.config.enable_local_indexer,
+            enable_kv_routing=self.config.enable_kv_routing,
             metrics_labels=list(self.config.metrics_labels),
             disaggregation_mode=_to_rust_disaggregation_mode(
                 self.config.disaggregation_mode

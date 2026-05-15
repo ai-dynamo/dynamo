@@ -57,12 +57,14 @@ class PlannerConfig(BaseModel):
     )
     backend: Literal["vllm", "sglang", "trtllm", "mocker"] = SLAPlannerDefaults.backend
     mode: Literal["disagg", "prefill", "decode", "agg"] = SLAPlannerDefaults.mode
-    optimization_target: Literal["throughput", "latency", "sla"] = Field(
+    optimization_target: Literal["throughput", "latency", "load", "sla"] = Field(
         default="throughput",
         description=(
             "Scaling optimization target. "
             "'throughput' (default) and 'latency' use static thresholds on queue "
             "depth and KV cache utilization — no SLA targets or profiling needed. "
+            "'load' uses user-defined prefill queue token and decode KV "
+            "utilization thresholds. "
             "'sla' uses regression-based scaling that targets specific ttft_ms/itl_ms values."
         ),
     )
@@ -173,6 +175,43 @@ class PlannerConfig(BaseModel):
     load_scaling_down_sensitivity: int = (
         SLAPlannerDefaults.load_scaling_down_sensitivity
     )
+    prefill_scale_up_queue_tokens: Optional[int] = Field(
+        default=SLAPlannerDefaults.prefill_scale_up_queue_tokens,
+        ge=0,
+        description=(
+            "Prefill queue token count that triggers scale-up when "
+            "optimization_target='load'."
+        ),
+    )
+    prefill_scale_down_queue_tokens: Optional[int] = Field(
+        default=SLAPlannerDefaults.prefill_scale_down_queue_tokens,
+        ge=0,
+        description=(
+            "Prefill queue token count that allows scale-down when "
+            "optimization_target='load'."
+        ),
+    )
+    decode_scale_up_kv_rate: Optional[float] = Field(
+        default=SLAPlannerDefaults.decode_scale_up_kv_rate,
+        ge=0,
+        le=100,
+        validation_alias=AliasChoices(
+            "decode_scale_up_kv_rate", "decode_sacle_up_kv_rate"
+        ),
+        description=(
+            "Decode KV utilization percentage that triggers scale-up when "
+            "optimization_target='load'. Accepts 0-100."
+        ),
+    )
+    decode_scale_down_kv_rate: Optional[float] = Field(
+        default=SLAPlannerDefaults.decode_scale_down_kv_rate,
+        ge=0,
+        le=100,
+        description=(
+            "Decode KV utilization percentage that allows scale-down when "
+            "optimization_target='load'. Accepts 0-100."
+        ),
+    )
     load_metric_samples: int = SLAPlannerDefaults.load_metric_samples
     load_min_observations: int = SLAPlannerDefaults.load_min_observations
 
@@ -235,8 +274,48 @@ class PlannerConfig(BaseModel):
                 "Please specify the namespace where GlobalPlanner is running."
             )
 
+        if self.optimization_target == "load":
+            if self.mode in ("disagg", "prefill"):
+                if (
+                    self.prefill_scale_up_queue_tokens is None
+                    or self.prefill_scale_down_queue_tokens is None
+                ):
+                    raise ValueError(
+                        "optimization_target='load' requires "
+                        "prefill_scale_up_queue_tokens and "
+                        "prefill_scale_down_queue_tokens for prefill scaling"
+                    )
+                if (
+                    self.prefill_scale_up_queue_tokens
+                    <= self.prefill_scale_down_queue_tokens
+                ):
+                    raise ValueError(
+                        "prefill_scale_up_queue_tokens must be greater than "
+                        "prefill_scale_down_queue_tokens"
+                    )
+            if self.mode in ("disagg", "decode", "agg"):
+                if (
+                    self.decode_scale_up_kv_rate is None
+                    or self.decode_scale_down_kv_rate is None
+                ):
+                    raise ValueError(
+                        "optimization_target='load' requires "
+                        "decode_scale_up_kv_rate and decode_scale_down_kv_rate "
+                        "for decode scaling"
+                    )
+                if self.decode_scale_up_kv_rate <= self.decode_scale_down_kv_rate:
+                    raise ValueError(
+                        "decode_scale_up_kv_rate must be greater than "
+                        "decode_scale_down_kv_rate"
+                    )
+
         # Easy mode: force load scaling on, throughput scaling off
         if self.optimization_target != "sla":
+            if self.optimization_target == "load" and self.enable_throughput_scaling:
+                logger.warning(
+                    "optimization_target='load' disables throughput-based scaling; "
+                    "using reactive load-based scaling only"
+                )
             self.enable_load_scaling = True
             self.enable_throughput_scaling = False
             if (

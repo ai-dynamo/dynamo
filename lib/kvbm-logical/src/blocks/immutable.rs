@@ -86,6 +86,16 @@ impl<T: BlockMetadata + Sync> ImmutableBlockInner<T> {
     pub(crate) fn block_id(&self) -> BlockId {
         self.block_id
     }
+
+    /// Crate-private inherent accessor for the block's [`SequenceHash`].
+    ///
+    /// `LifecyclePin::sequence_hash` exposes the same value, but the
+    /// inherent method lets callers (e.g. `BlockManager::match_blocks`'
+    /// batched frequency-tracker touch) read it without importing the
+    /// `LifecyclePin` trait.
+    pub(crate) fn sequence_hash(&self) -> SequenceHash {
+        self.seq_hash
+    }
 }
 
 impl<T: BlockMetadata + Sync> LifecyclePin for ImmutableBlockInner<T> {

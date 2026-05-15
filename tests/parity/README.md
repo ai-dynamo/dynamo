@@ -186,13 +186,41 @@ in the HTML chart), `V?` / `S?` = divergence not yet classified
 † vLLM has no engine peer (or returns `UNAVAILABLE` at runtime, e.g.
   `harmony#vllm` requires token IDs not text). Cells show SGLang status
   only when SGLang is wired; otherwise the row is fully `n/a`.
-§ SGLang has no engine peer for this family. Cells show vLLM status
-  only when vLLM is wired; otherwise the row is fully `n/a`.
+§ SGLang `v0.5.10.post1` (the version pinned in `container/context.yaml`)
+  has no peer detector for this family. Cells show vLLM status only when
+  vLLM is wired; otherwise the row is fully `n/a`. **This may change with
+  future SGLang releases** — re-audit on each version bump.
 
 `nemotron_deci` and `nemotron_nano` carry both daggers (`†§`) — neither
-upstream has a peer parser, so the rows are fully `n/a`. Listed here for
-completeness; Dynamo-only self-parity could be added in a follow-up but
-yields no cross-impl signal.
+upstream has a peer parser, so the rows are fully `n/a`. They live under
+**Others** for completeness; Dynamo-only self-parity could be added in a
+follow-up but yields no cross-impl signal.
+
+### Coverage gaps — missing upstream peer parsers
+
+Snapshot pinned to **SGLang `v0.5.10.post1`** (per `container/context.yaml`)
+and the vLLM version installed in the parity dev image. **This may change
+with future releases** — re-audit on every SGLang / vLLM bump.
+
+**SGLang `v0.5.10.post1` has no detector for 4 families that DO have a vLLM peer (`§` in matrix):**
+`deepseek_v4`, `gemma4`, `jamba`, `phi4`. The harness skips the SGLang side
+of these rows at runtime (`UNAVAILABLE: SGLang has no detector for
+family='<name>'`); cells carry vLLM-only signal.
+
+**`llama3_json` is also `§` in the matrix but for a different reason** —
+SGLang does ship a Llama 3 detector ([sglang tool-parser docs](https://sgl-project.github.io/advanced_features/tool_parser.html));
+we just haven't wired it in `_FAMILY_TO_SGLANG_DETECTOR` yet. TODO follow-up
+to add it and regenerate the `llama3_json` SGLang fixtures.
+
+**Neither upstream has a peer parser for 2 families (`†§` in matrix):**
+`nemotron_deci`, `nemotron_nano`. Rows are fully `n/a`.
+
+Wrapper enumeration: `tests/parity/parser/sglang.py::_FAMILY_TO_SGLANG_DETECTOR`
+(missing keys = missing detectors). Adding an SGLang detector for any
+`§`-marked family above (either upstream-shipped in a newer SGLang release,
+or by us standing up a Dynamo-side stub) would let the harness surface
+`S`/`VS` divergences on those rows; today they carry only `V`/`✓`
+(vLLM-side).
 
 **Hot columns:**
 - `PARSER.batch.4` (malformed JSON) and `PARSER.batch.5` (missing
@@ -306,13 +334,57 @@ PYTHONPATH=lib/bindings/python/src python3 -m pytest \
 
 Impl tag is `#vllm` or `#sglang`.
 
-### 4. Decide who's right
+### 4. Pick an alignment target
 
-- **Dynamo wrong, impl right** → fix Dynamo (step 5).
-- **Dynamo right, impl wrong intentionally** → leave the entry, file
-  an upstream bug at `vllm-project/vllm` or `sgl-project/sglang`, link
-  it from the divergence reason.
-- **Both wrong / spec-ambiguous** → discuss before touching code.
+Parity isn't about declaring a winner. It's about picking what
+Dynamo should align *to* for this (family, case) so the fix has a
+clear oracle. Apply the priorities below in order: the first matching
+rule wins, and the chosen target is recorded in
+`reason:` (or `spec_ref:`) so future readers see the trail.
+
+**Alignment-target priority (highest wins):**
+
+0. **Upstream spec, if one exists.** Chat template, tokenizer
+   config, model-card section, vendor docs. Spec is the unambiguous
+   oracle; if both vendors disagree with it, both are upstream bugs
+   to file. Record `spec_ref:` in the fixture (step 8). Rare —
+   most families have no written spec; skip to 1.
+1. **The non-leaking vendor.** Tool-calling tags like `<｜tool_call｜>`,
+   `<tool_call>`, `[TOOL_CALLS]`, etc. must never reach the
+   `message.content` shown to an end user. If one vendor leaks and
+   the other doesn't, align to the non-leaking one.
+2. **The impacted customer's vendor.** If a prod deployment is broken
+   because of a divergence, align to that customer's vendor *now* to
+   unblock. Record incident + vendor chosen in
+   `reason:` (e.g.
+   `"aligned to SGLang per Acme prod report 2026-05-12; vLLM variant leaks <|tool_call|> tag into content"`).
+   Don't re-litigate in the same PR — ship the unblock and follow
+   up separately.
+3. **Vendor consensus.** When vLLM and SGLang agree, that shared
+   shape is the target. When they disagree and none of the above
+   applies, pick the one that better satisfies priority 1 (no leak)
+   and record why in `reason:`.
+
+**Once the target is picked, the action depends on where Dynamo stands:**
+
+- **Spec is the target, a vendor diverges** → file an upstream bug
+  at `vllm-project/vllm` or `sgl-project/sglang`, link from `reason:`.
+- **A vendor is the target, Dynamo diverges** → fix Dynamo (step 5).
+- **A vendor is the target, Dynamo already matches, the *other*
+  vendor diverges intentionally** → leave the divergence entry,
+  file an upstream bug at the disagreeing vendor.
+- **Two customers need different behavior on the same case** → file a
+  follow-up for a parser-side runtime parameter or environment variable,
+  then link that follow-up from `reason:`.
+- **Genuinely ambiguous** (no spec, both vendors leak, no incident)
+  → discuss before touching code.
+
+> **Sad reality:** sometimes the priority chain is unreconcilable
+> across customers — one prod deployment needs vLLM-style output,
+> another needs SGLang-style. We may eventually need a parser-side
+> param or env (e.g. `DYN_PARSER_<family>_MODE=vllm|sglang`) to flip
+> behavior per deployment. Track these cases in `reason:` so the
+> switch can be added later from a known set.
 
 ### 5. Fix the parser
 

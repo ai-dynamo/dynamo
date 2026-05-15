@@ -3,23 +3,21 @@
 
 """GMS server entry point.
 
-Launches two GMS server processes per GPU (one for weights, one for kv_cache).
-Writes a ready file once all expected UDS sockets are present. Runs until
-SIGTERM (pod termination kills it).
+Launches two GMS server processes per GPU (one for weights, one for kv_cache),
+then supervises them: terminates the rest if any child exits, and propagates
+the first non-zero exit code. Runs until SIGTERM (pod termination kills it)
+or until a child exits.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import signal
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 from gpu_memory_service.common.cuda_utils import list_devices
-from gpu_memory_service.common.utils import get_socket_path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,13 +26,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _TAGS = ("weights", "kv_cache")
-_READY_FILE = "gms-ready"
 
 
 def main() -> None:
-    ready_file = Path(os.environ.get("GMS_SOCKET_DIR", "/tmp")) / _READY_FILE
-    ready_file.unlink(missing_ok=True)
-
     devices = list_devices()
     processes = []
     for device in devices:
@@ -65,18 +59,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGINT, terminate)
 
-    ready_written = False
     while True:
-        if not ready_written:
-            sockets_ready = all(
-                os.path.exists(get_socket_path(device, tag))
-                for device in devices
-                for tag in _TAGS
-            )
-            if sockets_ready:
-                ready_file.write_text("ready", encoding="utf-8")
-                ready_written = True
-
         running = False
         for process in processes:
             exit_code = process.poll()

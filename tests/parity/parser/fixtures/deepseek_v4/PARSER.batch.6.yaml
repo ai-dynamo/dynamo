@@ -13,18 +13,18 @@ cases:
       </｜DSML｜invoke>
       </｜DSML｜tool_calls>
     tools:
-    - &id001
+    - &id002
       name: get_time
       parameters:
         type: object
         properties: {}
     expected:
-      dynamo: &d_6_a
+      dynamo: &id001
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
-      vllm: *d_6_a
+      vllm: *id001
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.6.b:
@@ -37,13 +37,17 @@ cases:
       </｜DSML｜invoke>
       </｜DSML｜tool_calls>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_6_b
+      dynamo: &id003
         calls:
         - name: get_time
           arguments: {}
         normal_text: ''
-      vllm: *d_6_b
+      vllm: *id003
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
+  PARSER.batch.6.c:
+    description: Empty-body variant 6.c — not yet authored for this family
+    reason: |-
+      Empty-body variant 6.c not yet authored for deepseek_v4; see 6.a / 6.b for this family's empty / whitespace scenarios.

@@ -345,6 +345,7 @@ def make_multimodal_configs(
             marks: list[Any] = [
                 getattr(pytest.mark, gpu),
                 pytest.mark.timeout(timeout),
+                pytest.mark.multimodal,
             ]
             marks.extend(case.marks if case.marks else topo_cfg.marks)
             if topo_cfg.profiled_vram_gib is not None:

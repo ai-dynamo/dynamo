@@ -22,31 +22,28 @@ cases:
             type: string
     expected:
       dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        normal_text: ''
+        calls: []
+        normal_text: |-
+          <minimax:tool_call>
+          <invoke name="get_weather">
+          <parameter name="location">NYC</parameter>
+          </invoke>
       vllm:
         calls: []
-        normal_text: '<minimax:tool_call>
-
+        normal_text: |-
+          <minimax:tool_call>
           <invoke name="get_weather">
-
           <parameter name="location">NYC</parameter>
-
-          </invoke>'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+          </invoke>
+        reason: impl-defined recovery contract (see PARSER_CASES.md)
       sglang:
         calls: []
-        normal_text: '<minimax:tool_call>
-
+        normal_text: |-
+          <minimax:tool_call>
           <invoke name="get_weather">
-
           <parameter name="location">NYC</parameter>
-
-          </invoke>'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+          </invoke>
+        reason: impl-defined recovery contract (see PARSER_CASES.md)
   PARSER.batch.5.b:
     description: Closing </minimax:tool_call> without matching open
     ref: dynamo
@@ -58,15 +55,16 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_5_b
+      dynamo: &id002
+        reason: "Dynamo's minimax_m2 parser leaves </invoke>, </parameter> closing tags plus their content in normal_text when opening <minimax:tool_call> marker is missing (impl-defined recovery)"
         calls: []
         normal_text: |-
           <invoke name="get_weather">
           <parameter name="location">NYC</parameter>
           </invoke>
           </minimax:tool_call>
-      vllm: *d_5_b
-      sglang: *d_5_b
+      vllm: *id002
+      sglang: *id002
   PARSER.batch.5.c:
     description: Truncation mid-parameter value
     ref: dynamo
@@ -78,24 +76,114 @@ cases:
     - *id001
     expected:
       dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NY
-        normal_text: ''
+        calls: []
+        normal_text: |-
+          <minimax:tool_call>
+          <invoke name="get_weather">
+          <parameter name="location">NY
       vllm:
         calls: []
-        normal_text: '<minimax:tool_call>
-
+        normal_text: |-
+          <minimax:tool_call>
           <invoke name="get_weather">
-
-          <parameter name="location">NY'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+          <parameter name="location">NY
+        reason: impl-defined recovery contract (see PARSER_CASES.md)
       sglang:
         calls: []
-        normal_text: '<minimax:tool_call>
-
+        normal_text: |-
+          <minimax:tool_call>
           <invoke name="get_weather">
-
-          <parameter name="location">NY'
-        reason: "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input"
+          <parameter name="location">NY
+        reason: sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: |-
+      I'll start by fetching the weather for both Boston and New York at the same time!
+      <minimax:tool_call>
+      <invoke name="get_weather">
+      <parameter name="location">Boston</parameter>
+      </invoke>
+      <invoke name="get_weather">
+      <parameter name="location">New York</parameter>
+      </invoke>
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: |-
+          I'll start by fetching the weather for both Boston and New York at the same time!
+          <minimax:tool_call>
+          <invoke name="get_weather">
+          <parameter name="location">Boston</parameter>
+          </invoke>
+          <invoke name="get_weather">
+          <parameter name="location">New York</parameter>
+          </invoke>
+      vllm:
+        calls: []
+        normal_text: |-
+          I'll start by fetching the weather for both Boston and New York at the same time!
+          <minimax:tool_call>
+          <invoke name="get_weather">
+          <parameter name="location">Boston</parameter>
+          </invoke>
+          <invoke name="get_weather">
+          <parameter name="location">New York</parameter>
+          </invoke>
+      sglang:
+        calls: []
+        normal_text: |-
+          I'll start by fetching the weather for both Boston and New York at the same time!
+          <minimax:tool_call>
+          <invoke name="get_weather">
+          <parameter name="location">Boston</parameter>
+          </invoke>
+          <invoke name="get_weather">
+          <parameter name="location">New York</parameter>
+          </invoke>
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: |-
+      I'll start by fetching the weather for both Boston and New York at the same time!
+      <minimax:tool_call>
+      <invoke name="get_weather">
+      <parameter name="location">Boston</parameter>
+      </invoke>
+      <invoke name="get_weather">
+      <parameter name="location">New York
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: |-
+          I'll start by fetching the weather for both Boston and New York at the same time!
+          <minimax:tool_call>
+          <invoke name="get_weather">
+          <parameter name="location">Boston</parameter>
+          </invoke>
+          <invoke name="get_weather">
+          <parameter name="location">New York
+      vllm:
+        calls: []
+        normal_text: |-
+          I'll start by fetching the weather for both Boston and New York at the same time!
+          <minimax:tool_call>
+          <invoke name="get_weather">
+          <parameter name="location">Boston</parameter>
+          </invoke>
+          <invoke name="get_weather">
+          <parameter name="location">New York
+      sglang:
+        calls: []
+        normal_text: |-
+          I'll start by fetching the weather for both Boston and New York at the same time!
+          <minimax:tool_call>
+          <invoke name="get_weather">
+          <parameter name="location">Boston</parameter>
+          </invoke>
+          <invoke name="get_weather">
+          <parameter name="location">New York

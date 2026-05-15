@@ -121,3 +121,7 @@ cases:
         unavailable: vLLM has no parser for family='nemotron_nano'
       sglang:
         unavailable: SGLang has no detector for family='nemotron_nano'
+  PARSER.batch.2.b:
+    description: Two back-to-back fence pairs — not applicable to this family
+    reason: |-
+      nemotron_nano's multi-call form is exercised by PARSER.batch.2.a / 2.c / 2.d; no back-to-back fence/wrapper pattern applies to this family's parser syntax.
