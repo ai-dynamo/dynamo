@@ -234,6 +234,32 @@ impl Client {
             .collect()
     }
 
+    pub fn instance_count(&self) -> usize {
+        self.instance_source.borrow().len()
+    }
+
+    pub fn busy_instance_count(&self) -> usize {
+        self.instance_busy.load().len()
+    }
+
+    pub fn all_instances_busy(&self) -> bool {
+        let busy_ids = self.instance_busy.load();
+        if busy_ids.is_empty() {
+            return false;
+        }
+
+        let instances = self.instance_source.borrow();
+        let mut saw_instance = false;
+        for instance in instances.iter() {
+            saw_instance = true;
+            if !busy_ids.contains(&instance.id()) {
+                return false;
+            }
+        }
+
+        saw_instance
+    }
+
     /// Get a watcher for available instance IDs
     pub fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
         self.instance_avail_rx.clone()
