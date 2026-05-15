@@ -394,6 +394,7 @@ mod tests {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
+            prefill_trace_link: None,
             completion_usage: None,
             engine_data: None,
         })

@@ -204,6 +204,11 @@ impl PrefillRouter {
             ));
         };
 
+        // Framework-owned trace link propagates through to the decode peer
+        // — kept separate from the engine's disaggregated_params so engine
+        // payload schemas can't collide with Dynamo's bookkeeping.
+        let prefill_trace_link = output.prefill_trace_link.clone();
+
         // Extract prefill worker ID and dp_rank from disaggregated_params
         let prefill_worker_info =
             disaggregated_params
@@ -221,6 +226,7 @@ impl PrefillRouter {
         Ok((
             PrefillResult {
                 disaggregated_params,
+                prefill_trace_link,
                 prompt_tokens_details,
             },
             prefill_worker_info,

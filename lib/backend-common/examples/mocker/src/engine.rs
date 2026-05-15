@@ -796,6 +796,7 @@ mod tests {
         let mut req = request(Some(8));
         req.prefill_result = Some(PrefillResult {
             disaggregated_params: prefill,
+            prefill_trace_link: None,
             prompt_tokens_details: None,
         });
         req

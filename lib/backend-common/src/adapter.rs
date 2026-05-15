@@ -8,6 +8,7 @@
 //! avoid orphaning the prefill peer's NIXL KV transfer.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -20,12 +21,22 @@ use dynamo_runtime::pipeline::{
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 use futures::StreamExt;
+use opentelemetry::trace::{SpanContext, SpanId, Status, TraceFlags, TraceId, TraceState};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::disagg::DisaggregationMode;
 use crate::engine::{GenerateContext, LLMEngine};
+
+/// Test-only override count. Production reads check this first so tests can
+/// force-enable the recording fast-path without touching `OTEL_EXPORT_ENABLED`
+/// (which would require `unsafe { set_var }` and race with concurrent
+/// `getenv` callers). Tests acquire an `OtlpExportOverride` guard; multiple
+/// concurrent guards stack (counter-based), and the default is restored when
+/// the last guard drops.
+static OTLP_EXPORT_OVERRIDES: AtomicUsize = AtomicUsize::new(0);
 
 /// OTLP-export gate. When the runtime isn't exporting traces (the operator
 /// hasn't set `OTEL_EXPORT_ENABLED=1`), the per-chunk ttft capture and
@@ -34,12 +45,45 @@ use crate::engine::{GenerateContext, LLMEngine};
 /// span itself still gets created so log events stay correlated with the
 /// request_id.
 ///
-/// Read uncached (~tens of ns per request) so tests that flip the env var
-/// see consistent behavior regardless of ordering.
+/// Read uncached (~tens of ns per request) — small cost, but it removes a
+/// class of test-ordering hazards that a cached version would introduce.
 fn is_otlp_export_enabled() -> bool {
+    if OTLP_EXPORT_OVERRIDES.load(Ordering::Relaxed) > 0 {
+        return true;
+    }
     std::env::var("OTEL_EXPORT_ENABLED")
         .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
+}
+
+/// Record ITL percentile attrs on the span. No-op on fewer than 2 token
+/// chunks (no sample available). Mutates `samples` in place (sort) so we
+/// don't pay for a second allocation; caller doesn't reuse after.
+///
+/// Percentile method: **nearest-rank** (`idx = round((n-1) * frac)`). For
+/// small streams (3–4 samples) the reported p50 is the closest-rank value,
+/// not the linear-interpolated median — expect ~1-sample jitter relative to
+/// "textbook" definitions. The choice keeps the math cheap and is stable
+/// against off-by-one comparisons across consecutive requests.
+fn record_itl_distribution(span: &tracing::Span, samples: &mut [f64]) {
+    if samples.is_empty() {
+        return;
+    }
+    let avg = samples.iter().sum::<f64>() / samples.len() as f64;
+    span.record("avg_itl_ms", format!("{avg:.2}").as_str());
+    // partial_cmp can yield None only for NaN; Instant deltas never NaN, so
+    // unwrap_or(Equal) is a safe fallback that keeps order stable.
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p = |frac: f64| -> f64 {
+        let idx = ((samples.len() - 1) as f64 * frac).round() as usize;
+        samples[idx]
+    };
+    span.record("itl_p50_ms", format!("{:.2}", p(0.50)).as_str());
+    span.record("itl_p99_ms", format!("{:.2}", p(0.99)).as_str());
+    span.record(
+        "itl_max_ms",
+        format!("{:.2}", samples[samples.len() - 1]).as_str(),
+    );
 }
 
 /// Cancels its token on Drop so the monitor task exits cleanly when the
@@ -83,7 +127,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // - `prefill_trace_id` / `prefill_span_id` on decode (when the prefill
         //   peer embedded its trace identity in disaggregated_params),
         // - `ttft_ms` on first non-empty chunk,
-        // - `output_tokens`, `finish_reason`, `cancelled` on terminal.
+        // - `output_tokens`, `finish_reason`, `cancelled`, `itl_*_ms` on
+        //   terminal.
         let span = tracing::info_span!(
             target: "request_span",
             "engine.generate",
@@ -97,40 +142,66 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             finish_reason = tracing::field::Empty,
             cancelled = tracing::field::Empty,
             error_kind = tracing::field::Empty,
+            avg_itl_ms = tracing::field::Empty,
+            itl_p50_ms = tracing::field::Empty,
+            itl_p99_ms = tracing::field::Empty,
+            itl_max_ms = tracing::field::Empty,
         );
 
-        // Decode-side: record the prefill peer's trace identity if it embedded
-        // one in disaggregated_params (see prefill-side injection below).
-        // Operators can follow the trail manually; a proper OTel Link
-        // requires the opentelemetry crate (deferred follow-up).
+        // Decode-side: attach a real OTel Link from the engine.generate span
+        // to the prefill peer's span. Tempo / Jaeger render this as a
+        // cross-trace edge — operators don't have to copy-paste trace IDs.
+        // We also record the IDs as attributes for log-analysis fallback
+        // (JSONL log readers can't render OTel Links).
+        //
+        // Reads from `prefill_trace_link` (framework-owned, typed), keeping
+        // the disagg trace contract separate from engine-owned
+        // `disaggregated_params` payloads.
         if self.mode.is_decode()
             && let Some(prefill) = request.prefill_result.as_ref()
-            && let Some(meta) = prefill.disaggregated_params.get("dynamo_trace")
+            && let Some(link) = prefill.prefill_trace_link.as_ref()
         {
-            if let Some(tid) = meta.get("trace_id").and_then(|v| v.as_str()) {
-                span.record("prefill_trace_id", tid);
-            }
-            if let Some(sid) = meta.get("span_id").and_then(|v| v.as_str()) {
-                span.record("prefill_span_id", sid);
+            span.record("prefill_trace_id", link.trace_id.as_str());
+            span.record("prefill_span_id", link.span_id.as_str());
+            if let (Ok(trace_id), Ok(span_id)) = (
+                TraceId::from_hex(&link.trace_id),
+                SpanId::from_hex(&link.span_id),
+            ) {
+                span.add_link(SpanContext::new(
+                    trace_id,
+                    span_id,
+                    TraceFlags::SAMPLED,
+                    true, // is_remote
+                    TraceState::default(),
+                ));
             }
         }
 
         // Prefill-side: capture this worker's trace identity for embedding
-        // into the terminal chunk's disaggregated_params. `in_scope` reads
+        // into the terminal chunk's `prefill_trace_link`. `in_scope` reads
         // from our `engine.generate` span (the DistributedTraceIdLayer has
         // populated it in JSONL mode); yields None in non-JSONL deployments.
-        let prefill_trace_meta: Option<serde_json::Value> = if self.mode.is_prefill() {
-            span.in_scope(|| {
-                dynamo_runtime::logging::get_distributed_tracing_context().map(|tc| {
-                    serde_json::json!({
-                        "trace_id": tc.trace_id,
-                        "span_id": tc.span_id,
+        let prefill_trace_link: Option<dynamo_llm::protocols::common::preprocessor::TraceLink> =
+            if self.mode.is_prefill() {
+                let link = span.in_scope(|| {
+                    dynamo_runtime::logging::get_distributed_tracing_context().map(|tc| {
+                        dynamo_llm::protocols::common::preprocessor::TraceLink {
+                            trace_id: tc.trace_id,
+                            span_id: tc.span_id,
+                        }
                     })
-                })
-            })
-        } else {
-            None
-        };
+                });
+                if link.is_none() {
+                    tracing::debug!(
+                        "disagg trace linking inactive — no DistributedTraceContext \
+                         on engine.generate span (DistributedTraceIdLayer requires JSONL \
+                         mode + OTEL_EXPORT_ENABLED)"
+                    );
+                }
+                link
+            } else {
+                None
+            };
 
         // Decode workers defer engine.abort() until first-token to protect
         // in-flight NIXL transfers. The Sender goes to the engine (via
@@ -154,6 +225,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .await
             .map_err(|e| {
                 span.record("error_kind", "setup_failed");
+                // Short, stable description — full error message is
+                // available via the trace_id-correlated log stream.
+                span.set_status(Status::error("setup_failed"));
                 Error::from(e)
             })?;
         let request_start = Instant::now();
@@ -208,7 +282,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let stream_ctx = ctx.clone();
         let stream_span = span.clone();
-        let record_attrs = is_otlp_export_enabled();
+        let should_record_attrs = is_otlp_export_enabled();
         let is_prefill_mode = self.mode.is_prefill();
         let mapped = async_stream::stream! {
             let _guard = guard;
@@ -216,6 +290,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             let mut chunk_count: usize = 0;
             let mut output_token_count: usize = 0;
             let mut signalled = false;
+            // ITL samples (ms) — millisecond gap between successive non-empty
+            // token chunks. Aggregate; we only render percentiles at terminal
+            // so the per-chunk overhead is one timestamp + one Vec push.
+            let mut itl_samples_ms: Vec<f64> = Vec::new();
+            let mut last_token_at: Option<Instant> = None;
             while let Some(item) = inner.next().await {
                 chunk_count += 1;
                 match item {
@@ -223,11 +302,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         // First non-empty chunk releases the deferred abort.
                         // Token-less chunks (SGLang's bootstrap handshake) don't count.
                         if !signalled && !chunk.token_ids.is_empty() {
-                            if record_attrs {
+                            if should_record_attrs {
                                 // ttft = time from setup completion to first token.
                                 // Recorded once; subsequent non-empty chunks don't update.
                                 let ttft_ms = request_start.elapsed().as_secs_f64() * 1000.0;
                                 stream_span.record("ttft_ms", format!("{:.2}", ttft_ms).as_str());
+                                last_token_at = Some(Instant::now());
                             }
                             if let Some(tx) = &ft_tx {
                                 // Receiver is held by the monitor task; send only
@@ -236,38 +316,37 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 let _ = tx.send(true);
                             }
                             signalled = true;
+                        } else if should_record_attrs
+                            && !chunk.token_ids.is_empty()
+                            && let Some(prev) = last_token_at
+                        {
+                            // Subsequent non-empty chunks contribute one ITL sample.
+                            let now = Instant::now();
+                            itl_samples_ms.push(now.duration_since(prev).as_secs_f64() * 1000.0);
+                            last_token_at = Some(now);
                         }
-                        if record_attrs {
+                        if should_record_attrs {
                             output_token_count += chunk.token_ids.len();
                         }
                         let is_terminal = chunk.finish_reason.is_some();
-                        if record_attrs && is_terminal {
+                        if should_record_attrs && is_terminal {
                             stream_span.record("output_tokens", output_token_count);
                             if let Some(reason) = chunk.finish_reason.as_ref() {
                                 stream_span.record("finish_reason", format!("{:?}", reason).as_str());
                             }
                             stream_span.record("cancelled", stream_ctx.is_stopped());
+                            record_itl_distribution(&stream_span, &mut itl_samples_ms);
                         }
-                        // Prefill-side: embed our trace identity into the
-                        // terminal chunk's disaggregated_params so the decode
-                        // peer can link back. Only mutate if the engine packed
-                        // a JSON object (or nothing); preserve non-object
-                        // shapes as-is.
+                        // Prefill-side: stamp our trace identity into
+                        // `prefill_trace_link` (framework-owned, typed). The
+                        // decode peer reads from prefill_result.prefill_trace_link.
+                        // We never touch the engine's disaggregated_params
+                        // payload — it stays opaque to the framework.
                         if is_prefill_mode
                             && is_terminal
-                            && let Some(meta) = &prefill_trace_meta
+                            && let Some(link) = &prefill_trace_link
                         {
-                            match chunk.disaggregated_params.as_mut() {
-                                Some(serde_json::Value::Object(map)) => {
-                                    map.insert("dynamo_trace".to_string(), meta.clone());
-                                }
-                                None => {
-                                    chunk.disaggregated_params = Some(serde_json::json!({
-                                        "dynamo_trace": meta,
-                                    }));
-                                }
-                                _ => {}
-                            }
+                            chunk.prefill_trace_link = Some(link.clone());
                         }
                         yield Annotated::from_data(chunk);
                         if is_terminal {
@@ -280,10 +359,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             error = %dynamo_err,
                             "engine stream yielded typed error",
                         );
-                        if record_attrs {
-                            stream_span.record("error_kind", format!("{:?}", dynamo_err.error_type()).as_str());
+                        if should_record_attrs {
+                            let error_kind = format!("{:?}", dynamo_err.error_type());
+                            stream_span.record("error_kind", error_kind.as_str());
                             stream_span.record("output_tokens", output_token_count);
                             stream_span.record("cancelled", stream_ctx.is_stopped());
+                            record_itl_distribution(&stream_span, &mut itl_samples_ms);
+                            // Surface as OTel status so Tempo / Jaeger render
+                            // the span as errored (red, counts in error-rate
+                            // dashboards). Use the variant name as a short,
+                            // machine-correlatable description — full error
+                            // message is available via the trace_id-
+                            // correlated log stream.
+                            stream_span.set_status(Status::error(error_kind));
                         }
                         yield Annotated::from_err(dynamo_err);
                         break;
@@ -839,6 +927,7 @@ mod tests {
 
     struct CaptureLayer {
         out: CapturedFields,
+        span_name: &'static str,
     }
 
     impl<S> Layer<S> for CaptureLayer
@@ -846,7 +935,7 @@ mod tests {
         S: tracing::Subscriber + for<'a> LookupSpan<'a>,
     {
         fn on_new_span(&self, attrs: &span::Attributes<'_>, _id: &span::Id, _ctx: TraceCtx<'_, S>) {
-            if attrs.metadata().name() != "engine.generate" {
+            if attrs.metadata().name() != self.span_name {
                 return;
             }
             let mut out = self.out.0.lock().unwrap();
@@ -854,7 +943,7 @@ mod tests {
         }
 
         fn on_record(&self, id: &span::Id, values: &span::Record<'_>, ctx: TraceCtx<'_, S>) {
-            if !ctx.span(id).is_some_and(|s| s.name() == "engine.generate") {
+            if !ctx.span(id).is_some_and(|s| s.name() == self.span_name) {
                 return;
             }
             let mut out = self.out.0.lock().unwrap();
@@ -862,22 +951,48 @@ mod tests {
         }
     }
 
-    /// Force-enable OTLP export for the recording fast-path and install a
-    /// fresh subscriber that captures every `engine.generate` field write
-    /// into a shared map. Returns the map handle plus a dispatch guard whose
-    /// drop restores the prior subscriber.
-    fn install_capture() -> (CapturedFields, tracing::dispatcher::DefaultGuard) {
-        // SAFETY: tests in this module run inside a single tokio runtime;
-        // OTEL_EXPORT_ENABLED is read once and cached behind a OnceLock.
-        unsafe {
-            std::env::set_var("OTEL_EXPORT_ENABLED", "1");
+    /// RAII counter on `OTLP_EXPORT_OVERRIDES`. Concurrent test guards stack;
+    /// the default OTLP-off behavior is restored when the last guard drops.
+    /// No env-var mutation, no `unsafe`.
+    struct OtlpExportOverride;
+
+    impl OtlpExportOverride {
+        fn enable() -> Self {
+            OTLP_EXPORT_OVERRIDES.fetch_add(1, Ordering::Relaxed);
+            Self
         }
+    }
+
+    impl Drop for OtlpExportOverride {
+        fn drop(&mut self) {
+            OTLP_EXPORT_OVERRIDES.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Bundle: OTLP override + tracing-subscriber dispatch guard. Tests hold
+    /// this for the duration of the captured assertions.
+    struct CaptureGuard {
+        _otlp: OtlpExportOverride,
+        _dispatch: tracing::dispatcher::DefaultGuard,
+    }
+
+    /// Force-enable the recording fast-path and install a fresh subscriber
+    /// that captures every `engine.generate` field write into a shared map.
+    fn install_capture() -> (CapturedFields, CaptureGuard) {
+        let otlp = OtlpExportOverride::enable();
         let captured = CapturedFields::default();
         let layer = CaptureLayer {
             out: captured.clone(),
+            span_name: "engine.generate",
         };
-        let guard = tracing_subscriber::registry().with(layer).set_default();
-        (captured, guard)
+        let dispatch = tracing_subscriber::registry().with(layer).set_default();
+        (
+            captured,
+            CaptureGuard {
+                _otlp: otlp,
+                _dispatch: dispatch,
+            },
+        )
     }
 
     #[tokio::test]
@@ -924,6 +1039,13 @@ mod tests {
             fields.contains_key("ttft_ms"),
             "ttft_ms missing; got fields: {fields:?}"
         );
+        // 3 token chunks → 2 ITL samples → all four ITL attrs populated.
+        for key in ["avg_itl_ms", "itl_p50_ms", "itl_p99_ms", "itl_max_ms"] {
+            assert!(
+                fields.contains_key(key),
+                "{key} missing; got fields: {fields:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -960,6 +1082,187 @@ mod tests {
         assert!(
             err_kind.contains("InvalidArgument"),
             "expected error_kind to contain InvalidArgument, got: {err_kind:?}"
+        );
+    }
+
+    /// Regression guard: the `engine.generate` span must be created
+    /// unconditionally — never gated on `is_otlp_export_enabled()`.
+    /// Companion to `auto_span_records_initial_attrs`, which runs WITH
+    /// the OTLP override and so wouldn't catch a future refactor that
+    /// gates the `info_span!` itself on the fast-path flag.
+    #[tokio::test]
+    async fn auto_span_fires_without_otlp_override() {
+        // Install ONLY the capture layer — no `OtlpExportOverride::enable()`.
+        let captured = CapturedFields::default();
+        let layer = CaptureLayer {
+            out: captured.clone(),
+            span_name: "engine.generate",
+        };
+        let _dispatch = tracing_subscriber::registry().with(layer).set_default();
+
+        let (engine, _abort) = MockEngine::new(vec![chunk::token(7), LLMEngineOutput::length()]);
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+        let input = Context::new(make_request(vec![1, 2, 3]));
+        let stream = adapter.generate(input).await.unwrap();
+        let _: Vec<_> = stream.collect().await;
+
+        let fields = captured.0.lock().unwrap().clone();
+        assert_eq!(
+            fields.get("model").map(String::as_str),
+            Some("mock"),
+            "engine.generate span must be created with `model` attr even when OTLP export is off"
+        );
+        assert_eq!(
+            fields.get("input_tokens").map(String::as_str),
+            Some("3"),
+            "engine.generate span must record input_tokens at entry"
+        );
+        assert_eq!(
+            fields.get("disagg_role").map(String::as_str),
+            Some("agg"),
+            "engine.generate span must record disagg_role at entry"
+        );
+    }
+
+    /// Pure unit test of the percentile helper. Five evenly-spaced samples;
+    /// median is the middle, p99 lands on max for n=5.
+    #[test]
+    fn record_itl_distribution_computes_percentiles() {
+        let (captured, _guard) = install_capture();
+        let span = tracing::info_span!(
+            target: "request_span",
+            "engine.generate",
+            avg_itl_ms = tracing::field::Empty,
+            itl_p50_ms = tracing::field::Empty,
+            itl_p99_ms = tracing::field::Empty,
+            itl_max_ms = tracing::field::Empty,
+        );
+        let mut samples = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+        record_itl_distribution(&span, &mut samples);
+
+        let fields = captured.0.lock().unwrap().clone();
+        assert_eq!(fields.get("avg_itl_ms").map(String::as_str), Some("30.00"));
+        assert_eq!(fields.get("itl_p50_ms").map(String::as_str), Some("30.00"));
+        assert_eq!(fields.get("itl_p99_ms").map(String::as_str), Some("50.00"));
+        assert_eq!(fields.get("itl_max_ms").map(String::as_str), Some("50.00"));
+    }
+
+    /// Empty sample set — no-op, no panic, no fields recorded.
+    #[test]
+    fn record_itl_distribution_no_op_when_empty() {
+        let (captured, _guard) = install_capture();
+        let span = tracing::info_span!(
+            target: "request_span",
+            "engine.generate",
+            avg_itl_ms = tracing::field::Empty,
+        );
+        let mut samples: Vec<f64> = vec![];
+        record_itl_distribution(&span, &mut samples);
+        assert!(!captured.0.lock().unwrap().contains_key("avg_itl_ms"));
+    }
+
+    /// Decode-side: `prefill_result` exists but carries no `dynamo_trace`
+    /// payload — the link branch must skip cleanly without recording attrs
+    /// or panicking.
+    #[tokio::test]
+    async fn auto_span_no_link_when_dynamo_trace_missing() {
+        use dynamo_llm::protocols::common::preprocessor::PrefillResult;
+
+        let (captured, _guard) = install_capture();
+        let (engine, _abort) = MockEngine::new(vec![chunk::token(1), LLMEngineOutput::length()]);
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Decode);
+
+        let mut request = make_request(vec![1, 2, 3]);
+        request.prefill_result = Some(PrefillResult {
+            // Engine packed its own kv-transfer payload; no Dynamo trace meta.
+            disaggregated_params: serde_json::json!({
+                "engine_specific": "value",
+            }),
+            prefill_trace_link: None,
+            prompt_tokens_details: None,
+        });
+        let input = Context::new(request);
+        let stream = adapter.generate(input).await.unwrap();
+        let _: Vec<_> = stream.collect().await;
+
+        let fields = captured.0.lock().unwrap().clone();
+        assert!(!fields.contains_key("prefill_trace_id"));
+        assert!(!fields.contains_key("prefill_span_id"));
+    }
+
+    /// Decode-side: `prefill_trace_link` is set but the hex IDs are
+    /// malformed — the link branch records the raw strings as attrs but
+    /// skips the OTel Link construction (TraceId::from_hex rejects bad hex).
+    /// The test asserts the attrs are still recorded so operators get the
+    /// fallback path; if `add_link` ever panics on bad input the test catches
+    /// the regression.
+    #[tokio::test]
+    async fn auto_span_handles_malformed_hex_gracefully() {
+        use dynamo_llm::protocols::common::preprocessor::{PrefillResult, TraceLink};
+
+        let (captured, _guard) = install_capture();
+        let (engine, _abort) = MockEngine::new(vec![chunk::token(1), LLMEngineOutput::length()]);
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Decode);
+
+        let mut request = make_request(vec![1, 2, 3]);
+        request.prefill_result = Some(PrefillResult {
+            disaggregated_params: serde_json::json!({}),
+            prefill_trace_link: Some(TraceLink {
+                trace_id: "not-valid-hex".to_string(),
+                span_id: "ALSO-INVALID".to_string(),
+            }),
+            prompt_tokens_details: None,
+        });
+        let input = Context::new(request);
+        let stream = adapter.generate(input).await.unwrap();
+        let _: Vec<_> = stream.collect().await;
+
+        let fields = captured.0.lock().unwrap().clone();
+        // Attrs still set (fallback for log analysis).
+        assert_eq!(
+            fields.get("prefill_trace_id").map(String::as_str),
+            Some("not-valid-hex")
+        );
+        assert_eq!(
+            fields.get("prefill_span_id").map(String::as_str),
+            Some("ALSO-INVALID")
+        );
+        // No panic — Link branch must have skipped via `if let Ok(...)`.
+    }
+
+    /// Decode-side: when the upstream request carries a
+    /// `prefill_result.prefill_trace_link`, the adapter must record
+    /// `prefill_trace_id` and `prefill_span_id` on its `engine.generate`
+    /// span so operators can hop traces.
+    #[tokio::test]
+    async fn auto_span_records_prefill_link_on_decode() {
+        use dynamo_llm::protocols::common::preprocessor::{PrefillResult, TraceLink};
+
+        let (captured, _guard) = install_capture();
+        let (engine, _abort) = MockEngine::new(vec![chunk::token(1), LLMEngineOutput::length()]);
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Decode);
+
+        let mut request = make_request(vec![1, 2, 3]);
+        request.prefill_result = Some(PrefillResult {
+            disaggregated_params: serde_json::json!({}),
+            prefill_trace_link: Some(TraceLink {
+                trace_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                span_id: "bbbbbbbbbbbbbbbb".to_string(),
+            }),
+            prompt_tokens_details: None,
+        });
+        let input = Context::new(request);
+        let stream = adapter.generate(input).await.unwrap();
+        let _: Vec<_> = stream.collect().await;
+
+        let fields = captured.0.lock().unwrap().clone();
+        assert_eq!(
+            fields.get("prefill_trace_id").map(String::as_str),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(
+            fields.get("prefill_span_id").map(String::as_str),
+            Some("bbbbbbbbbbbbbbbb")
         );
     }
 }
