@@ -28,8 +28,6 @@ struct CachedCrMetadata {
     uid: Option<String>,
 }
 
-type CrMetadataCache = HashMap<String, CachedCrMetadata>;
-
 /// Readiness data source for the discovery daemon.
 ///
 /// Pod mode watches EndpointSlices (one entry per ready pod).
@@ -202,7 +200,7 @@ impl DiscoveryDaemon {
         let mut sequence = 0u64;
         let mut prev_snapshot = MetadataSnapshot::empty();
         // Keeps transient invalid CR updates from looking like removals.
-        let mut valid_cr_cache: CrMetadataCache = HashMap::new();
+        let mut valid_cr_cache: HashMap<String, CachedCrMetadata> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -248,7 +246,7 @@ impl DiscoveryDaemon {
         &self,
         source: &DiscoverySource,
         cr_reader: &reflector::Store<DynamoWorkerMetadata>,
-        valid_cr_cache: &mut CrMetadataCache,
+        valid_cr_cache: &mut HashMap<String, CachedCrMetadata>,
         sequence: u64,
     ) -> Result<MetadataSnapshot> {
         let start = std::time::Instant::now();
@@ -262,7 +260,7 @@ impl DiscoveryDaemon {
         );
 
         let cr_state = cr_reader.state();
-        let mut cr_map: CrMetadataCache = HashMap::new();
+        let mut cr_map: HashMap<String, CachedCrMetadata> = HashMap::new();
         let mut invalid_crs: HashMap<String, Option<String>> = HashMap::new();
         let mut observed_crs: HashSet<String> = HashSet::new();
 
@@ -286,7 +284,7 @@ impl DiscoveryDaemon {
                     uid = %uid.as_deref().unwrap_or("unknown"),
                     resource_version = %resource_version,
                     generation,
-                    managed_fields = %managed_fields_summary(arc_cr.as_ref()),
+                    managed_fields = ?managed_fields_summary(arc_cr.as_ref()),
                     "DynamoWorkerMetadata CR has null spec.data; reusing last valid metadata if available"
                 );
                 invalid_crs.insert(cr_name.clone(), uid);
@@ -310,7 +308,7 @@ impl DiscoveryDaemon {
                         uid = %uid.as_deref().unwrap_or("unknown"),
                         resource_version = %resource_version,
                         generation,
-                        managed_fields = %managed_fields_summary(arc_cr.as_ref()),
+                        managed_fields = ?managed_fields_summary(arc_cr.as_ref()),
                         error = %e,
                         "Failed to deserialize metadata from DynamoWorkerMetadata CR"
                     );
@@ -385,7 +383,7 @@ impl DiscoveryDaemon {
 fn cached_metadata_for_invalid_cr<'a>(
     cr_key: &str,
     uid: Option<&str>,
-    valid_cr_cache: &'a CrMetadataCache,
+    valid_cr_cache: &'a HashMap<String, CachedCrMetadata>,
 ) -> Option<&'a CachedCrMetadata> {
     let cached = valid_cr_cache.get(cr_key)?;
 
@@ -396,36 +394,38 @@ fn cached_metadata_for_invalid_cr<'a>(
     }
 }
 
-fn managed_fields_summary(cr: &DynamoWorkerMetadata) -> String {
+fn managed_fields_summary(cr: &DynamoWorkerMetadata) -> Option<String> {
     let Some(managed_fields) = cr.metadata.managed_fields.as_ref() else {
-        return "none".to_string();
+        return None;
     };
 
     if managed_fields.is_empty() {
-        return "none".to_string();
+        return None;
     }
 
-    managed_fields
-        .iter()
-        .map(|entry| {
-            let manager = entry.manager.as_deref().unwrap_or("unknown");
-            let operation = entry.operation.as_deref().unwrap_or("unknown");
-            let api_version = entry.api_version.as_deref().unwrap_or("unknown");
-            let subresource = entry
-                .subresource
-                .as_deref()
-                .filter(|subresource| !subresource.is_empty())
-                .unwrap_or("-");
-            let time = entry
-                .time
-                .as_ref()
-                .map(|time| time.0.to_rfc3339())
-                .unwrap_or_else(|| "unknown".to_string());
+    Some(
+        managed_fields
+            .iter()
+            .map(|entry| {
+                let manager = entry.manager.as_deref().unwrap_or("unknown");
+                let operation = entry.operation.as_deref().unwrap_or("unknown");
+                let api_version = entry.api_version.as_deref().unwrap_or("unknown");
+                let subresource = entry
+                    .subresource
+                    .as_deref()
+                    .filter(|subresource| !subresource.is_empty())
+                    .unwrap_or("-");
+                let time = entry
+                    .time
+                    .as_ref()
+                    .map(|time| time.0.to_rfc3339())
+                    .unwrap_or_else(|| "unknown".to_string());
 
-            format!("{manager}/{operation}/{api_version}/subresource={subresource}/time={time}")
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+                format!("{manager}/{operation}/{api_version}/subresource={subresource}/time={time}")
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
 }
 
 #[cfg(test)]
@@ -443,7 +443,7 @@ mod tests {
 
     #[test]
     fn cached_metadata_for_invalid_cr_reuses_same_kube_object() {
-        let mut cache = CrMetadataCache::new();
+        let mut cache = HashMap::new();
         cache.insert("worker-a".to_string(), cached_cr("uid-1"));
 
         let cached = cached_metadata_for_invalid_cr("worker-a", Some("uid-1"), &cache)
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn cached_metadata_for_invalid_cr_rejects_recreated_kube_object() {
-        let mut cache = CrMetadataCache::new();
+        let mut cache = HashMap::new();
         cache.insert("worker-a".to_string(), cached_cr("uid-1"));
 
         assert!(cached_metadata_for_invalid_cr("worker-a", Some("uid-2"), &cache).is_none());
@@ -473,8 +473,18 @@ mod tests {
             ..Default::default()
         }]);
 
-        let summary = managed_fields_summary(&cr);
+        let summary = managed_fields_summary(&cr).expect("managed fields should produce a summary");
 
         assert!(summary.contains("dynamo-worker/Apply/nvidia.com/v1alpha1"));
+    }
+
+    #[test]
+    fn managed_fields_summary_returns_none_without_field_managers() {
+        let cr = DynamoWorkerMetadata::new(
+            "worker-a",
+            super::super::crd::DynamoWorkerMetadataSpec::new(serde_json::Value::Null),
+        );
+
+        assert!(managed_fields_summary(&cr).is_none());
     }
 }
