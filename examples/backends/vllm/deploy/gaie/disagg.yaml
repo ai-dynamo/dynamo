@@ -36,6 +36,14 @@
 #   * ``gpu-memory-utilization: 0.50`` leaves enough headroom for prefill
 #     and decode to share a GPU if they happen to co-schedule.
 #
+#   * ``--max-model-len 16384`` caps the context window so vLLM's KV cache
+#     budget fits in the reduced GPU memory available to each worker.
+#     Qwen/Qwen3-0.6B's model default is 40960 tokens, which would require
+#     ~4.4 GiB of KV cache and refuses to start under
+#     ``gpu-memory-utilization=0.50`` (~2.6 GiB available). 16384 leaves
+#     comfortable headroom; raise this only if you also raise
+#     ``gpu-memory-utilization``.
+#
 #   * ``DYN_ENFORCE_DISAGG=true`` on the EPP prevents fallback to aggregated
 #     serving when one role is unavailable (the test asserts disagg).
 apiVersion: nvidia.com/v1alpha1
@@ -137,7 +145,7 @@ spec:
             - name: UCX_RNDV_THRESH
               value: "inf"
           args:
-          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode prefill --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}' --gpu-memory-utilization 0.50 --enable-prefix-caching --block-size 16 --kv-events-config '{\"enable_kv_cache_events\":true}'"
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode prefill --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}' --gpu-memory-utilization 0.50 --max-model-len 16384 --enable-prefix-caching --block-size 16 --kv-events-config '{\"enable_kv_cache_events\":true}'"
           command:
           - /bin/sh
           - -c
@@ -182,7 +190,7 @@ spec:
             - name: UCX_RNDV_THRESH
               value: "inf"
           args:
-          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode decode --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}' --gpu-memory-utilization 0.50 --block-size 16"
+          - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode decode --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}' --gpu-memory-utilization 0.50 --max-model-len 16384 --block-size 16"
           command:
           - /bin/sh
           - -c
