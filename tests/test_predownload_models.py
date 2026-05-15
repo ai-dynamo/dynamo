@@ -22,7 +22,12 @@ import pytest
     [
         pytest.param(
             "predownload_models_vllm_gpu1",
-            marks=[pytest.mark.vllm, pytest.mark.e2e, pytest.mark.gpu_1],
+            marks=[
+                pytest.mark.vllm,
+                pytest.mark.core,
+                pytest.mark.e2e,
+                pytest.mark.gpu_1,
+            ],
         ),
         pytest.param(
             "predownload_models_sglang_gpu1",
@@ -34,7 +39,12 @@ import pytest
         ),
         pytest.param(
             "predownload_models_vllm_gpu2",
-            marks=[pytest.mark.vllm, pytest.mark.e2e, pytest.mark.gpu_2],
+            marks=[
+                pytest.mark.vllm,
+                pytest.mark.core,
+                pytest.mark.e2e,
+                pytest.mark.gpu_2,
+            ],
         ),
         pytest.param(
             "predownload_models_sglang_gpu2",

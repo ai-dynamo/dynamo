@@ -396,7 +396,11 @@ impl ModelWatcher {
         let card = match self.manager.remove_model_card(&key) {
             Some(card) => card,
             None => {
-                anyhow::bail!("Missing ModelDeploymentCard for {}", key);
+                tracing::warn!(
+                    key = %key,
+                    "ModelDeploymentCard already absent during removal; ignoring duplicate or stale remove event"
+                );
+                return Ok(None);
             }
         };
         let model_name = card.name().to_string();

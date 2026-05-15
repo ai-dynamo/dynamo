@@ -18,15 +18,15 @@ cases:
             type: string
     expected:
       dynamo:
+        reason: "Dynamo's harmony parser leaves <|channel|> harmony token, <|message|> harmony token, <|call|> harmony token (+2 more) in normal_text on malformed input (impl-defined recovery)"
         calls: []
-        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>not json at
-          all<|call|>
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>not json
+          at all<|call|>
       vllm:
         unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
       sglang:
         calls: []
         normal_text: ''
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
   PARSER.batch.4.b:
     description: Unterminated JSON in message body
     ref: dynamo
@@ -35,6 +35,7 @@ cases:
     - *id001
     expected:
       dynamo:
+        reason: "Dynamo's harmony parser leaves <|channel|> harmony token, <|message|> harmony token, <|call|> harmony token (+2 more) in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>
       vllm:
@@ -49,9 +50,13 @@ cases:
     tools:
     - *id001
     expected:
-      dynamo: &d_4_c
+      dynamo: &id002
         calls: []
         normal_text: ''
       vllm:
         unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
-      sglang: *d_4_c
+      sglang: *id002
+  PARSER.batch.4.d:
+    description: Malformed variant 4.d — not applicable to this family
+    reason: |-
+      Malformed-input variant 4.d does not apply to harmony's parser syntax (no equivalent end-marker recovery scenario).

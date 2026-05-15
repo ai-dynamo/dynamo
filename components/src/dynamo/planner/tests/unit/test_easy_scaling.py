@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for easy-mode scaling (optimization_target = throughput | latency)."""
+"""Tests for easy-mode scaling (optimization_target = throughput | latency | load)."""
 
 import pytest
+from pydantic import ValidationError
 
 try:
     import msgspec  # noqa: F401
@@ -151,6 +152,51 @@ class TestEasyConfig:
         assert cfg.enable_load_scaling is True
         assert cfg.enable_throughput_scaling is False
 
+    def test_load_forces_load_on_throughput_off(self, caplog):
+        with caplog.at_level("WARNING"):
+            cfg = PlannerConfig.model_validate(
+                dict(
+                    optimization_target="load",
+                    prefill_scale_up_queue_tokens=8000,
+                    prefill_scale_down_queue_tokens=1000,
+                    decode_scale_up_kv_rate=90,
+                    decode_scale_down_kv_rate=50,
+                    enable_throughput_scaling=True,
+                )
+            )
+        assert cfg.enable_load_scaling is True
+        assert cfg.enable_throughput_scaling is False
+        assert "disables throughput-based scaling" in caplog.text
+
+    def test_load_requires_prefill_thresholds_for_prefill_mode(self):
+        with pytest.raises(ValidationError, match="prefill_scale_up_queue_tokens"):
+            PlannerConfig.model_validate(
+                dict(
+                    optimization_target="load",
+                    mode="prefill",
+                )
+            )
+
+    def test_load_requires_decode_thresholds_for_decode_mode(self):
+        with pytest.raises(ValidationError, match="decode_scale_up_kv_rate"):
+            PlannerConfig.model_validate(
+                dict(
+                    optimization_target="load",
+                    mode="decode",
+                )
+            )
+
+    def test_load_accepts_decode_scale_up_typo_alias(self):
+        cfg = PlannerConfig.model_validate(
+            dict(
+                optimization_target="load",
+                mode="decode",
+                decode_sacle_up_kv_rate=90,
+                decode_scale_down_kv_rate=50,
+            )
+        )
+        assert cfg.decode_scale_up_kv_rate == 90
+
     def test_sla_mode_preserves_original_flags(self):
         cfg = PlannerConfig.model_validate(
             dict(
@@ -284,6 +330,54 @@ class TestPrefillLatencyEasy:
         assert effects.scale_to is None
 
 
+# ── Prefill load scaling ─────────────────────────────────────────────
+
+
+class TestPrefillLoadEasy:
+    def test_scale_up_at_configured_token_threshold(self):
+        caps = WorkerCapabilities(prefill=EngineCapabilities(num_gpu=1))
+        core = _make_core(
+            mode="prefill",
+            optimization_target="load",
+            prefill_scale_up_queue_tokens=8000,
+            prefill_scale_down_queue_tokens=1000,
+            caps=caps,
+        )
+        fpm = _make_fpm(queued_prefill_tokens=8000)
+        tick = TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(prefill={("w1", 0): fpm}),
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_prefill == 2
+        assert effects.diagnostics.load_decision_reason == "scale_up"
+
+    def test_scale_down_at_configured_token_threshold(self):
+        caps = WorkerCapabilities(prefill=EngineCapabilities(num_gpu=1))
+        core = _make_core(
+            mode="prefill",
+            optimization_target="load",
+            prefill_scale_up_queue_tokens=8000,
+            prefill_scale_down_queue_tokens=1000,
+            caps=caps,
+        )
+        fpm1 = _make_fpm(worker_id="w1", queued_prefill_tokens=1000)
+        fpm2 = _make_fpm(worker_id="w2", queued_prefill_tokens=999)
+        tick = TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(
+                prefill={("w1", 0): fpm1, ("w2", 0): fpm2}
+            ),
+            worker_counts=WorkerCounts(ready_num_prefill=2),
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_prefill == 1
+        assert effects.diagnostics.load_decision_reason == "scale_down"
+
+
 # ── Decode throughput scaling ────────────────────────────────────────
 
 
@@ -382,6 +476,54 @@ class TestDecodeLatencyEasy:
         effects = core.on_tick(_tick_for(tick), tick)
         assert effects.scale_to is not None
         assert effects.scale_to.num_decode == 1
+
+
+# ── Decode load scaling ──────────────────────────────────────────────
+
+
+class TestDecodeLoadEasy:
+    def test_scale_up_at_configured_kv_rate(self):
+        core = _make_core(
+            mode="decode",
+            optimization_target="load",
+            caps=_decode_caps(),
+            decode_scale_up_kv_rate=75,
+            decode_scale_down_kv_rate=25,
+        )
+        fpm = _make_fpm(sum_decode_kv_tokens=70000, queued_decode_kv_tokens=5000)
+        tick = TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(decode={("w1", 0): fpm}),
+            worker_counts=WorkerCounts(ready_num_decode=1),
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_decode == 2
+        assert effects.diagnostics.load_decision_reason == "scale_up"
+
+    def test_scale_down_at_configured_kv_rate(self):
+        core = _make_core(
+            mode="decode",
+            optimization_target="load",
+            caps=_decode_caps(),
+            decode_scale_up_kv_rate=75,
+            decode_scale_down_kv_rate=25,
+        )
+        fpm1 = _make_fpm(
+            worker_id="w1", sum_decode_kv_tokens=25000, queued_decode_kv_tokens=0
+        )
+        fpm2 = _make_fpm(
+            worker_id="w2", sum_decode_kv_tokens=10000, queued_decode_kv_tokens=0
+        )
+        tick = TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(decode={("w1", 0): fpm1, ("w2", 0): fpm2}),
+            worker_counts=WorkerCounts(ready_num_decode=2),
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.scale_to is not None
+        assert effects.scale_to.num_decode == 1
+        assert effects.diagnostics.load_decision_reason == "scale_down"
 
 
 # ── ANY-up / ALL-down logic ─────────────────────────────────────────

@@ -18,6 +18,7 @@ cases:
             type: string
     expected:
       dynamo:
+        reason: "Dynamo's nemotron_deci parser leaves <TOOLCALL> envelope in normal_text on malformed input (impl-defined recovery)"
         calls: []
         normal_text: <TOOLCALL>not a json array</TOOLCALL>
       vllm:

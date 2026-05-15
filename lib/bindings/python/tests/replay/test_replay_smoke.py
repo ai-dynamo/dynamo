@@ -23,7 +23,6 @@ from .replay_utils import (
 
 pytestmark = [
     pytest.mark.gpu_0,
-    pytest.mark.parallel,
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.timeout(120),
