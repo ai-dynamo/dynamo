@@ -98,3 +98,7 @@ cases:
           `|$` end-of-input alternation that lets a missing `</invoke>`
           still produce a call — contradicts MiniMax-M2 reference parser.
           Should be filed against sgl-project/sglang.
+  PARSER.batch.4.b:
+    description: Malformed variant 4.b — not yet authored for this family
+    reason: |-
+      Malformed-input variant 4.b not yet authored for minimax_m2; see 4.a / 4.c / 4.d for this family's malformed-input scenarios.
