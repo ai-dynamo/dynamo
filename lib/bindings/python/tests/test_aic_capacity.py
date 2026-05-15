@@ -87,9 +87,8 @@ def test_estimate_num_gpu_blocks_uses_sglang_static_memory_fraction():
     assert blocks == 37
 
 
-def test_unsupported_aic_backend_fails_hard():
-    with pytest.raises(ValueError, match="unsupported AIC backend"):
-        resolve_backend_version("trtllm", None)
+def test_trtllm_version_resolution_still_supports_latency_configs():
+    assert resolve_backend_version("trtllm", "0.20.0") == "0.20.0"
 
     session = make_session(
         "trtllm",
@@ -103,7 +102,7 @@ def test_unsupported_aic_backend_fails_hard():
         },
     )
 
-    with pytest.raises(ValueError, match="unsupported AIC backend"):
+    with pytest.raises(ValueError, match="KV cache capacity estimation"):
         session.estimate_num_gpu_blocks(
             block_size=10,
             max_num_batched_tokens=128,

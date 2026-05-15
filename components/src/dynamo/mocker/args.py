@@ -304,10 +304,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--aic-backend",
         type=str,
         default=None,
-        choices=["vllm", "sglang"],
+        choices=["vllm", "sglang", "trtllm"],
         help="AIC backend name used for perf database lookups. When unset, "
         "falls back to --engine-type. Set this to decouple the AIC perf model "
-        "from the simulated engine type.",
+        "from the simulated engine type (e.g. simulate with vllm while using "
+        "trtllm AIC data).",
     )
     parser.add_argument(
         "--aic-backend-version",

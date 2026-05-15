@@ -14,26 +14,28 @@ DEFAULT_BACKEND_VERSIONS = {
     "vllm": "0.14.0",
     "sglang": "0.5.6.post2",
 }
+_KV_CAPACITY_BACKENDS = frozenset(DEFAULT_BACKEND_VERSIONS)
 DEFAULT_STATIC_STRIDE = 32
 DEFAULT_GPU_MEMORY_UTILIZATION = 0.9
 DEFAULT_MEM_FRACTION_STATIC = 0.88
 _BYTES_PER_GIB = 1 << 30
 
 
-def _validate_supported_backend(backend_name: str) -> None:
-    if backend_name not in DEFAULT_BACKEND_VERSIONS:
-        supported = ", ".join(sorted(DEFAULT_BACKEND_VERSIONS))
+def _validate_kv_capacity_backend(backend_name: str) -> None:
+    if backend_name not in _KV_CAPACITY_BACKENDS:
+        supported = ", ".join(sorted(_KV_CAPACITY_BACKENDS))
         raise ValueError(
-            f"unsupported AIC backend {backend_name!r}; supported backends: {supported}"
+            "AIC KV cache capacity estimation does not support "
+            f"backend {backend_name!r}; supported backends: {supported}. "
+            "Set num_gpu_blocks explicitly for this backend."
         )
 
 
 def resolve_backend_version(backend_name: str, backend_version: str | None) -> str:
     """Return the pinned backend version used for AIC perf lookups."""
-    _validate_supported_backend(backend_name)
     if backend_version is not None:
         return backend_version
-    return DEFAULT_BACKEND_VERSIONS[backend_name]
+    return DEFAULT_BACKEND_VERSIONS.get(backend_name, DEFAULT_BACKEND_VERSIONS["vllm"])
 
 
 def _load_aiconfigurator():
@@ -193,7 +195,7 @@ class AicSession:
         mem_fraction_static: float | None = None,
     ) -> int:
         """Estimate rank-local KV cache blocks from AIC's per-GPU memory model."""
-        _validate_supported_backend(self._backend_name)
+        _validate_kv_capacity_backend(self._backend_name)
         if block_size <= 0:
             raise ValueError(
                 f"block_size must be positive, got block_size={block_size}"
@@ -318,6 +320,7 @@ def estimate_num_gpu_blocks(
     attention_dp_size: int | None = None,
 ) -> int:
     """Estimate rank-local KV cache blocks for mocker/replay AIC configs."""
+    _validate_kv_capacity_backend(backend_name)
     session = create_session(
         backend_name=backend_name,
         system=system,

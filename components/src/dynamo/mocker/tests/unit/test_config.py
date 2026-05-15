@@ -251,7 +251,7 @@ def test_aic_backend_override_decouples_from_engine_type():
         engine_type="vllm",
         aic_perf_model=True,
         aic_system="h200_sxm",
-        aic_backend="sglang",
+        aic_backend="trtllm",
         aic_tp_size=4,
         num_gpu_blocks=16384,
     )
@@ -260,7 +260,7 @@ def test_aic_backend_override_decouples_from_engine_type():
     payload = json.loads(engine_args.dump_json())
 
     assert payload["engine_type"] == "vllm"
-    assert payload["aic_backend"] == "sglang"
+    assert payload["aic_backend"] == "trtllm"
 
 
 def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
