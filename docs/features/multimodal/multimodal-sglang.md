@@ -15,6 +15,8 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 | **Video** | HTTP/HTTPS/`file://` URL | Yes | Yes | Vision encoder generates embeddings |
 | **Audio** | HTTP/HTTPS URL | No | No | Not supported in SGLang backend |
 
+> **MM-aware KV routing** is available for SGLang via the Rust frontend's `DYN_MM_ROUTING_BACKEND=sglang` path — it substitutes per-image `pad_value` tokens in the routing-side view so SGLang's RadixAttention prefix-cache key matches the router's overlap calculation. See [Multimodal KV Routing → SGLang section](./multimodal-kv-routing.md#sglang). That path is orthogonal to the encode-worker / EPD topologies documented below; it's a frontend routing concern that works with the aggregated SGLang worker layout in [`examples/backends/sglang/launch/agg_multimodal_router.sh`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch/agg_multimodal_router.sh).
+
 ### Supported URL Formats
 
 | Format | Example | Description |

@@ -30,7 +30,7 @@ Without MM-aware routing, the standard router treats image token blocks as opaqu
 | **vLLM** | Rust frontend (default) | ✅ | Uses lightseek `llm-multimodal` for image-token counting + placeholder expansion. Supported models tracked below. |
 | **vLLM** | Python chat-processor (`--dyn-chat-processor vllm --router-mode kv`) | ✅ | Uses vLLM's own multimodal processor — supports any VLM that vLLM supports. |
 | **TRT-LLM** | — | ✅ | Uses dedicated MM Router Worker. Requires `--publish-events-and-metrics` on TRT-LLM workers. |
-| **SGLang** | — | ❌ | Not supported yet. |
+| **SGLang** | Rust frontend (`DYN_MM_ROUTING_BACKEND=sglang`) | ✅ | Reuses the lightseek registry for image-token counting; substitutes per-image `pad_value` tokens in the routing-side view so SGLang's RadixAttention prefix cache key (`MM_PAD_SHIFT_VALUE + mm_hash % 2^30`) matches byte-for-byte. Requires the sglang fork with the `mm_hashes` field on `GenerateReqInput` ([sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300)) and the dynamo glue ([#9561](https://github.com/ai-dynamo/dynamo/pull/9561)). |
 
 ## Supported Model Families (Rust frontend path)
 
@@ -98,6 +98,40 @@ Frontend (round-robin) → MM Router Worker → Backend Workers
 ```
 
 For TRT-LLM, a dedicated MM Router Worker sits between the frontend and backend workers. See the [TRT-LLM MM Router README](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/mm_router_worker/README.md) for setup instructions.
+
+### SGLang
+
+```text
+Frontend (Rust + lightseek llm-multimodal + KV router) → SGLang Workers
+        │                                                       │
+        ├─ Hash image (same xxh3_64 path as vLLM Rust)           │
+        ├─ Resolve image-token id + (W, H) (same as vLLM Rust)   │
+        ├─ lightseek::count_tokens(W, H) → expanded count N      │
+        ├─ Expand placeholder × N in routing_token_ids           │
+        ├─ KV router selects best worker                         │
+        ├─ Substitute pad_value per image in worker token_ids:   │
+        │     pad_value = MM_PAD_SHIFT_VALUE + (mm_hash % 2^30)  │
+        └─ Forward mm_hash list via GenerateReqInput.mm_hashes ──┘
+                                                                  │
+                                          SGLang server seeds     │
+                                          MultimodalDataItem.hash │
+                                          from mm_hashes;         │
+                                          set_pad_value() honors  │
+                                          the preset hash → its   │
+                                          internal pad_value      │
+                                          matches the router's    │
+                                          → RadixAttention key    │
+                                          alignment.              │
+```
+
+Unlike the vLLM path (which forwards `mm_hashes` as `multi_modal_uuids` for vLLM's own KV-event publisher to consume), SGLang's RadixAttention computes its cache key from the **token IDs** of the prompt, including the per-image `pad_value` token that gets inserted in place of image placeholders. The router has to substitute that `pad_value` itself in its token-id view so its overlap calculation matches what the worker will actually cache.
+
+Two preconditions for byte-for-byte alignment between routing-side and server-side hashes:
+
+1. **Dynamo Rust frontend** computes `pad_value = MM_PAD_SHIFT_VALUE + (mm_hash % 2^30)` for each image and substitutes that value (× N expansion) in `routing_token_ids`. Enabled via `DYN_MM_ROUTING_BACKEND=sglang` on the frontend; see [PR #9561](https://github.com/ai-dynamo/dynamo/pull/9561).
+2. **SGLang fork** exposes `GenerateReqInput.mm_hashes: Optional[List[str]]`. When set, `set_pad_value()` skips its internal `hash_feature()` recompute and uses the caller's hash directly, so the worker's derived `pad_value` matches the router's substitution. See [upstream PR sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300).
+
+Without both pieces, the routing-side hash and the server-side hash decouple and MM-aware routing silently degrades to text-prefix-only (the request still completes; just no prefix-cache benefit across images).
 
 ## Launching
 
@@ -170,6 +204,43 @@ cd $DYNAMO_HOME/examples/backends/trtllm/mm_router_worker
 ```
 
 See the [TRT-LLM MM Router README](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/mm_router_worker/README.md) for full setup instructions and configuration options.
+
+### SGLang
+
+```bash
+cd $DYNAMO_HOME
+bash examples/backends/sglang/launch/agg_multimodal_router.sh
+```
+
+The launcher sets `DYN_MM_ROUTING_BACKEND=sglang` on the frontend and `--kv-events-config` on each worker, plus the standard `--router-mode kv --kv-cache-block-size 16` on the frontend so the KV router consumes block-level overlap.
+
+Key environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MODEL` | `Qwen/Qwen3-VL-2B-Instruct` | Model to serve |
+| `NUM_WORKERS` | `2` | Number of backend SGLang workers |
+| `BLOCK_SIZE` | `16` | SGLang `--page-size`; must match Frontend `--kv-cache-block-size` |
+| `SINGLE_GPU` | `false` | Pack all workers onto GPU 0 (for single-GPU functional tests) |
+| `KV_EVENTS_PORT_BASE` | `29090` | Worker `i` publishes ZMQ KV events on `BASE + i - 1` |
+| `DYN_LOG` | `info,mm_routing=debug,…` | Frontend log filter |
+| `SGLANG_EXTRA_ARGS` | (unset) | Pass-through args to `python -m dynamo.sglang` |
+
+Requirements:
+
+- Dynamo built with `--features lightseek-mm` (Rust frontend's image-token counter + the SGLang glue from [PR #9561](https://github.com/ai-dynamo/dynamo/pull/9561)).
+- SGLang fork with `GenerateReqInput.mm_hashes` ([upstream PR](https://github.com/sgl-project/sglang/pull/25300)). The dev container `dynamo:sglang-dev-*` ships this baked in; otherwise install the fork's `python/` over the upstream sglang install (`pip install --no-deps -e /path/to/sglang/python`).
+
+Verification (visible at `DYN_LOG=info,mm_routing=debug`):
+
+```text
+mm_routing: MM-aware KV routing enabled (lightseek)  model=Qwen/Qwen3-VL-2B-Instruct  …
+mm_routing: lightseek image-token count             tokens=1024  mm_hash=17828397777369824042  …
+mm_routing: lightseek MmRoutingInfo built (exact)   n_images=4  block_size=16  total_tokens=8416  n_blocks=526
+dynamo_llm::kv_router::push_router: [ROUTING] Best: worker_X with N/M blocks overlap
+```
+
+On the second identical request the same worker wins with high overlap (e.g. `137/138 blocks overlap` on Qwen3-VL-2B with 4 images), confirming MM-aware reuse.
 
 ## Transfer Mode Details (vLLM chat-processor variant only)
 
