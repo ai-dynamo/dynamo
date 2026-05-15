@@ -481,4 +481,66 @@ mod tests {
 
         cancel_token.cancel();
     }
+
+    /// Two prefill tasks racing on `wait_for_decode_ready()` for the same room exercise the
+    /// symmetric single-slot bug to the decode/decode race on `decode_waiting`: the second
+    /// prefill's `(tx, rx)` overwrites the first's in `prefill_waiting`, causing the first
+    /// prefill's receiver to get `Err(_)` ("sender dropped") and bail immediately.
+    ///
+    /// This test documents the current behaviour and ensures neither prefill hangs indefinitely
+    /// (both resolve within the 5 s safety timeout).
+    #[tokio::test]
+    async fn test_two_concurrent_prefills_same_room() {
+        let cancel_token = CancellationToken::new();
+        let server = BootstrapServer::start(0, cancel_token.clone())
+            .await
+            .unwrap();
+
+        let port = server.port();
+        let room_id = 7001u64;
+
+        // Spawn two prefill tasks that both call wait_for_decode_ready() for the same room.
+        // The second to enter Entry::Occupied will overwrite prefill_waiting, dropping the
+        // first task's oneshot sender. The first task therefore gets Err(_) and bails fast.
+        let server1 = server.clone();
+        let prefill1 = tokio::spawn(async move { server1.wait_for_decode_ready(room_id).await });
+
+        let server2 = server.clone();
+        let prefill2 = tokio::spawn(async move { server2.wait_for_decode_ready(room_id).await });
+
+        // Allow both tasks to enter wait_for_decode_ready() and register.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Decode connects, which sets decode_ready and fires prefill_waiting (whichever survives).
+        let decode = tokio::spawn(async move { connect_to_prefill("127.0.0.1", port, room_id).await });
+
+        // Allow handle_connection to fire prefill_waiting and set decode_waiting.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // complete_room() unblocks the surviving decode waiter.
+        server.complete_room(room_id);
+
+        let r1 = tokio::time::timeout(Duration::from_secs(5), prefill1)
+            .await
+            .expect("prefill1 timed out")
+            .expect("prefill1 panicked");
+        let r2 = tokio::time::timeout(Duration::from_secs(5), prefill2)
+            .await
+            .expect("prefill2 timed out")
+            .expect("prefill2 panicked");
+        let rd = tokio::time::timeout(Duration::from_secs(5), decode)
+            .await
+            .expect("decode timed out")
+            .expect("decode panicked");
+
+        // At least one prefill must succeed (the one whose sender survived the overwrite).
+        assert!(
+            r1.is_ok() || r2.is_ok(),
+            "At least one prefill should see decode metadata: r1={r1:?} r2={r2:?}"
+        );
+        // Decode always succeeds once prefill calls complete_room.
+        assert!(rd.is_ok(), "Decode should succeed: {rd:?}");
+
+        cancel_token.cancel();
+    }
 }
