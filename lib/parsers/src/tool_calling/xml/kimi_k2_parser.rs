@@ -277,7 +277,7 @@ fn extract_tool_calls(
             // response has only prefix narration before a Kimi tool section.
             // Keep this compatibility path narrow to avoid changing Dynamo's
             // existing handling of post-wrapper/inter-wrapper narration.
-            joined_normal_text.trim_start().to_string()
+            normal_parts[0].trim_start().to_string()
         } else {
             joined_normal_text.trim().to_string()
         };
@@ -454,8 +454,8 @@ mod tests {
         assert_eq!(args1["timezone"], "EST");
     }
 
-    #[test] // PARSER.batch.8
-    fn test_parse_with_normal_text() {
+    #[test] // PARSER.batch.8.c
+    fn test_parse_keeps_prefix_drops_post_tool_text() {
         let config = default_config();
         let input = r#"I'll help you with that. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|> Let me check."#;
 
@@ -469,6 +469,17 @@ mod tests {
     fn test_parse_preserves_vllm_prefix_trailing_space() {
         let config = default_config();
         let input = r#"I'll check the weather. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|>"#;
+
+        let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(normal, Some("I'll check the weather. ".to_string()));
+    }
+
+    #[test] // PARSER.batch.8.a
+    fn test_parse_prefix_only_ignores_post_wrapper_whitespace() {
+        let config = default_config();
+        let input = r#"I'll check the weather. <|tool_calls_section_begin|><|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{"location":"Dallas"}<|tool_call_end|><|tool_calls_section_end|>   "#;
 
         let (calls, normal) = try_tool_call_parse_kimi_k2(input, &config, None).unwrap();
         assert_eq!(calls.len(), 1);
