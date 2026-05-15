@@ -2166,11 +2166,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         out["finish_reason"] = normalize_finish_reason(
                             output.finish_reason
                         )
-                        out["completion_usage"] = (
-                            BaseWorkerHandler._build_completion_usage(
-                                request_output=res,
-                                embedding_sequence_length=embedding_sequence_length,
-                            )
+                        out[
+                            "completion_usage"
+                        ] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res,
+                            embedding_sequence_length=embedding_sequence_length,
                         )
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
@@ -2724,9 +2724,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         if embedding_params is not None:
             disaggregated_params["embedding_params"] = embedding_params
         if expanded_prompt_token_ids is not None:
-            disaggregated_params["expanded_prompt_token_ids"] = (
-                expanded_prompt_token_ids
-            )
+            disaggregated_params[
+                "expanded_prompt_token_ids"
+            ] = expanded_prompt_token_ids
 
         return disaggregated_params if disaggregated_params else None
 

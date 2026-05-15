@@ -146,9 +146,9 @@ class VllmLLMEngine(LLMEngine):
             )
 
         if not config.served_model_name:
-            config.served_model_name = config.engine_args.served_model_name = (
-                config.model
-            )
+            config.served_model_name = (
+                config.engine_args.served_model_name
+            ) = config.model
 
         # _resolve_disaggregation_mode() in DynamoVllmConfig has already
         # promoted the field to a DisaggregationMode enum; the field type

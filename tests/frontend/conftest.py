@@ -34,6 +34,14 @@ def pytest_ignore_collect(collection_path, config):
         if importlib.util.find_spec("torch") is None:
             return True  # torch not available, skip this file
 
+    # In-proc OTLP test needs grpc + opentelemetry-proto. Skip when
+    # missing (e.g. pre-commit env that only installs lint deps).
+    if filename == "test_unified_worker_otlp_export.py":
+        if importlib.util.find_spec("grpc") is None:
+            return True
+        if importlib.util.find_spec("opentelemetry.proto") is None:
+            return True
+
     return None
 
 
