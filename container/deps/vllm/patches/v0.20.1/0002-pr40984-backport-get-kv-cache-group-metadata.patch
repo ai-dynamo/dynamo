@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-License-Identifier: Apache-2.0
+
+From bcb9c133bafed161b3f4d0ea391c985465429680 Mon Sep 17 00:00:00 2001
+From: PeaBrane <yanrpei@gmail.com>
+Date: Wed, 7 May 2026 00:00:00 +0000
+Subject: [PATCH] feat(kv-events): backport get_kv_cache_group_metadata to
+ EngineCore (#40984)
+
+Backport of get_kv_cache_group_metadata from vllm main (PR #40984).
+In vllm 0.20.1 this method is absent from EngineCore, so Dynamo's
+call_utility_async("get_kv_cache_group_metadata") fails with an
+AttributeError in EngineCoreProc.  Dynamo uses this method to select the
+correct KV-event block size for models with multiple KV cache groups
+(e.g. hybrid MLA+Mamba models).  The backport inlines the isinstance
+logic because get_kv_cache_spec_kind() was also introduced after 0.20.1.
+
+Signed-off-by: PeaBrane <yanrpei@gmail.com>
+---
+ vllm/v1/engine/core.py | 32 ++++++++++++++++++++++++++++++++
+ 1 file changed, 32 insertions(+)
+
+diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
+--- a/vllm/v1/engine/core.py
++++ b/vllm/v1/engine/core.py
+@@ -793,11 +793,43 @@
+         self,
+         notification_type: EEPNotificationType,
+         vllm_config: VllmConfig | None = None,
+     ):
+         raise NotImplementedError
+
++    def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
++        """Return msgspec-serializable metadata for scheduler KV cache groups."""
++        from vllm.v1.kv_cache_interface import (  # noqa: PLC0415
++            FullAttentionSpec,
++            MLAAttentionSpec,
++            SinkFullAttentionSpec,
++        )
++        kv_cache_config = getattr(self.scheduler, "kv_cache_config", None)
++        if kv_cache_config is None:
++            return []
++
++        metadata: list[dict[str, int | str | None]] = []
++        for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
++            spec = group.kv_cache_spec
++            # Check subclasses before their parent: both MLAAttentionSpec and
++            # SinkFullAttentionSpec inherit from FullAttentionSpec.
++            if isinstance(spec, SinkFullAttentionSpec):
++                kind = "sink_full_attention"
++            elif isinstance(spec, MLAAttentionSpec):
++                kind = "mla_attention"
++            elif isinstance(spec, FullAttentionSpec):
++                kind = "full_attention"
++            else:
++                kind = type(spec).__name__.lower()
++            metadata.append({
++                "group_idx": group_idx,
++                "kind": kind,
++                "block_size": spec.block_size,
++                "sliding_window": getattr(spec, "sliding_window", None),
++            })
++        return metadata
++
+
+ class EngineShutdownState(IntEnum):
+     RUNNING = 0
+     REQUESTED = 1
+     SHUTTING_DOWN = 2
+--
+2.43.0
