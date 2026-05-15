@@ -66,6 +66,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = REPO_ROOT / "tests/parity/parser/fixtures"
 PARSER_CASES_MD = REPO_ROOT / "lib/parsers/PARSER_CASES.md"
 PYPROJECT_TOML = REPO_ROOT / "pyproject.toml"
+SCRIPT_DIR = Path(__file__).resolve().parent
+HTML_TEMPLATE = SCRIPT_DIR / "parity_chart.html.template"
 
 RUST_TOOL_CALLING_DIR = REPO_ROOT / "lib/parsers/src/tool_calling"
 
@@ -282,8 +284,7 @@ def _build_family_to_rust_ref() -> dict[str, tuple[str, int]]:
 # planning notes. When that list changes, this list and the corresponding
 # `model_label:` fields under `fixtures/<family>/PARSER.batch.yaml` must
 # be updated together.
-# Alphabetical-by-family-id within the list (matches DIS-1842's chart
-# row order).
+# Alphabetical-by-family-id within the list (matches the chart row order).
 TOP_N_FAMILIES = [
     "deepseek_v4",
     "gemma4",
@@ -977,8 +978,10 @@ def _cell_class(text: str) -> str:
         return "na"
     if "!" in text:
         return "err"
-    if "?" in text or "↯" in text:
+    if "?" in text:
         return "research"
+    if "↯" in text:
+        return "leak"
     if text == "=":
         return "ok"
     # V / S / VS with a documented `reason:` — accepted divergence, but
@@ -1333,133 +1336,15 @@ def _glossary_html(descriptions: dict[str, str], sub_cases: list[str]) -> str:
     )
 
 
-_HTML_STYLE = """
-body { font-family: -apple-system, system-ui, sans-serif; margin: 1.5em; }
-table { border-collapse: collapse; font-family: ui-monospace, monospace; font-size: 13px; }
-th, td { border: 1px solid #ccc; padding: 3px 4px; }
-th { background: #f5f5f5; }
-th.case-group { font-family: -apple-system, system-ui, sans-serif; font-size: 12px; }
-th.case-group.case-band-0 { background: #f1f3f5; }
-th.case-group.case-band-1 { background: #ffffff; }
-th.case-sub.case-band-0, td.cell.case-band-0 { background: #f8f9fa; }
-th.case-sub.case-band-1, td.cell.case-band-1 { background: #ffffff; }
-.parser-base   { color: #888;    font-size: 11px; margin-left: 4px; }
-.parser-suffix { color: #007acc; font-weight: bold; vertical-align: super; font-size: 0.75em; }
-th a { color: inherit; text-decoration: none; }
-th a:hover { background: #ffd; }
-td.model, td.parser { white-space: nowrap; }
-td.parser a { color: inherit; text-decoration: none; }
-td.parser a:hover { background: #ffd; }
-td.cell { text-align: center; min-width: 24px; }
-td.cell.ok         { color: #0a7d2c; }
-td.cell.documented { color: #555; }
-td.cell.research   { color: #c63;    font-weight: bold; }
-td.cell.err        { color: #b00;    font-weight: bold; }
-td.cell.na         { color: #aaa; }
-td.cell.missing    { color: #8a6d3b; }
-td.cell a { color: inherit; text-decoration: none; display: block; }
-td.cell a:hover { background: #ffd; }
-tr.section td { background: #eef; font-weight: bold; text-align: left; }
-.legend span { font-family: ui-monospace, monospace; }
-.stats { font-size: 13px; margin-top: 0.4em; }
-.stats span { font-family: ui-monospace, monospace; font-weight: bold; }
-.generated { color: #888; font-size: 12px; margin-top: -0.5em; }
-.versions { color: #555; font-size: 12px; margin-top: 0.2em; }
-table.glossary { margin-top: 0.5em; }
-table.glossary td.sub { white-space: nowrap; font-weight: bold; }
-
-/* CSS hover tooltip on cells (replaces native title= for cells).
- * 500ms delay on appear; instant disappear when the cursor leaves.
- * `td.parser` participates so the parser-column inheritance tooltip
- * uses the same styling as data-cell tooltips. */
-td.cell, td.parser { position: relative; }
-.ttip {
-    visibility: hidden;
-    opacity: 0;
-    position: absolute;
-    left: 0;
-    top: 100%;
-    z-index: 100;
-    background: #1f2937;
-    color: #e5e7eb;
-    padding: 8px 10px;
-    border-radius: 6px;
-    font-family: ui-monospace, monospace;
-    font-size: 12px;
-    line-height: 1.4;
-    max-width: 80vw;
-    min-width: 280px;
-    width: max-content;
-    box-shadow: 0 4px 14px rgba(0,0,0,0.35);
-    text-align: left;
-    pointer-events: none;
-    white-space: normal;
-}
-td.cell:hover .ttip,
-td.parser:hover .ttip {
-    visibility: visible;
-    opacity: 1;
-    transition: opacity 0s 500ms, visibility 0s 500ms;
-}
-.ttip-head { font-weight: bold; margin-bottom: 4px; color: #fbbf24; }
-.ttip-section { font-weight: bold; margin-top: 6px; color: #93c5fd; }
-.ttip-pre { margin: 2px 0 0 0; white-space: pre-wrap; word-break: break-word; font-family: inherit; color: #e5e7eb; }
-/* Paired-tag palette: each distinct tag name gets a unique color (cycles
- * if more names than colors). Orphans get the red-background treatment. */
-.tt-c0 { color: #34d399; }
-.tt-c1 { color: #60a5fa; }
-.tt-c2 { color: #fbbf24; }
-.tt-c3 { color: #f472b6; }
-.tt-c4 { color: #a78bfa; }
-.tt-c5 { color: #fb923c; }
-.tt-c6 { color: #22d3ee; }
-.tt-c7 { color: #f87171; }
-.tt-orphan { background: #7f1d1d; color: #fecaca; padding: 0 2px; border-radius: 2px; }
-.tt-h { padding: 0 1px; border-radius: 2px; }
-.tt-h-token { font-weight: 700; }
-.tt-h-start { color: #fbbf24; }
-.tt-h-channel { color: #60a5fa; }
-.tt-h-constrain { color: #a78bfa; }
-.tt-h-message { color: #34d399; }
-.tt-h-call { color: #fb923c; }
-.tt-h-stop { color: #f87171; }
-.tt-h-other { color: #22d3ee; }
-"""
-
-# Clamps `.ttip` into the viewport on hover. Pure CSS can't know each
-# cell's screen position, so we shift the tooltip's `left` (and flip it
-# above the cell if it would overflow the bottom) on mouseenter.
-_HTML_SCRIPT = r"""
-(function () {
-  const margin = 8;
-  function place(cell) {
-    const ttip = cell.querySelector('.ttip');
-    if (!ttip) return;
-    ttip.style.left = '0px';
-    ttip.style.top = '100%';
-    ttip.style.right = 'auto';
-    ttip.style.bottom = 'auto';
-    ttip.style.maxWidth = (window.innerWidth - 2 * margin) + 'px';
-    const cellRect = cell.getBoundingClientRect();
-    const tipRect = ttip.getBoundingClientRect();
-    const vw = window.innerWidth, vh = window.innerHeight;
-    let shiftX = 0;
-    const overflowRight = (cellRect.left + tipRect.width) - (vw - margin);
-    if (overflowRight > 0) shiftX = -overflowRight;
-    const absLeft = cellRect.left + shiftX;
-    if (absLeft < margin) shiftX += (margin - absLeft);
-    ttip.style.left = shiftX + 'px';
-    if (cellRect.bottom + tipRect.height > vh - margin
-        && cellRect.top - tipRect.height > margin) {
-      ttip.style.top = 'auto';
-      ttip.style.bottom = '100%';
-    }
-  }
-  document.querySelectorAll('td.cell, td.parser').forEach(function (cell) {
-    cell.addEventListener('mouseenter', function () { place(cell); });
-  });
-})();
-"""
+def _render_html_template(values: dict[str, str]) -> str:
+    text = HTML_TEMPLATE.read_text(encoding="utf-8")
+    placeholders = sorted(set(re.findall(r"@@([A-Z0-9_]+)@@", text)))
+    missing = [name for name in placeholders if name not in values]
+    if missing:
+        raise RuntimeError(f"unfilled HTML template placeholders: {', '.join(missing)}")
+    for key, value in values.items():
+        text = text.replace(f"@@{key}@@", value)
+    return text
 
 
 def _legend_html(versions: dict[str, str]) -> str:
@@ -1488,7 +1373,7 @@ def _legend_html(versions: dict[str, str]) -> str:
         "(V = vLLM, S = SGLang; intentional, has <code>reason:</code>) · "
         '<span style="color:#c63">?</span> more research needed '
         "(e.g. V?, S? — diverges with no <code>reason:</code> yet) · "
-        '<span style="color:#c63">↯</span> Dynamo leaks tool call markup into <code>normal_text</code> '
+        '<span style="color:#555">↯</span> Dynamo leaks tool call markup into <code>normal_text</code> '
         "(<code>expected.dynamo.reason:</code> carries the explanation) · "
         '<span style="color:#b00">!</span> expected-error suffix '
         "(e.g. V!, S! — engine crashes by design) · "
@@ -1541,7 +1426,7 @@ def _compute_stats(
                 s["parity"] += 1
             elif "!" in text:
                 s["errors"] += 1
-            elif "?" in text or "↯" in text:
+            elif "?" in text:
                 s["research"] += 1
             else:
                 s["documented"] += 1
@@ -1626,36 +1511,26 @@ def render_html(
 
     sha = _commit_sha()
     if sha:
+        escaped_sha = html_lib.escape(sha)
         sha_html = (
-            f' on commit <a href="https://github.com/ai-dynamo/dynamo/commit/{sha}">'
+            " on commit "
+            f'<a href="https://github.com/ai-dynamo/dynamo/commit/{escaped_sha}">'
             f"<code>{html_lib.escape(sha[:12])}</code></a>"
         )
     else:
         sha_html = ""
 
-    return (
-        "<!DOCTYPE html>\n"
-        '<html lang="en">\n'
-        f'<head><meta charset="utf-8"><title>{html_lib.escape(title)}</title>'
-        f"<style>{_HTML_STYLE}</style></head>\n"
-        "<body>\n"
-        f"<h1>{html_lib.escape(title)}</h1>\n"
-        f'<p class="generated">Auto-generated on {html_lib.escape(stamp)}{sha_html} '
-        f"from <code>tests/parity/parser/fixtures/**/PARSER.*.yaml</code>: "
-        f"<code>{html_lib.escape(command)} "
-        f"&gt; {html_lib.escape(output)}</code></p>\n"
-        "<p>Parser column links to the family's Rust config / parser. "
-        "Sub-case column headers link to "
-        '<a href="../../../lib/parsers/PARSER_CASES.md">PARSER_CASES.md</a> '
-        "(hover for the one-line description). Cells link to the source "
-        "fixture YAML; hover a non-= cell for the case description and "
-        "the divergence reason.</p>\n"
-        f"{table_html}\n"
-        f"{_legend_html(_peer_versions())}\n"
-        f"{_stats_html(stats)}\n"
-        f"{_glossary_html(descriptions, sub_cases)}\n"
-        f"<script>{_HTML_SCRIPT}</script>\n"
-        "</body></html>\n"
+    return _render_html_template(
+        {
+            "TITLE": html_lib.escape(title),
+            "STAMP": html_lib.escape(stamp),
+            "SHA_HTML": sha_html,
+            "COMMAND": f"{html_lib.escape(command)} &gt; {html_lib.escape(output)}",
+            "TABLE_HTML": table_html,
+            "LEGEND_HTML": _legend_html(_peer_versions()),
+            "STATS_HTML": _stats_html(stats),
+            "GLOSSARY_HTML": _glossary_html(descriptions, sub_cases),
+        }
     )
 
 
