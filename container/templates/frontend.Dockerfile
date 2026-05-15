@@ -88,6 +88,7 @@ ARG ENABLE_GPU_MEMORY_SERVICE
 # In an ideal world, we'd use a mirror of PyPI for much more reliable downloads.
 RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+    uv pip uninstall -y nixl nixl-cu12 nixl-cu13 nixl-cpu nixl-xpu || true && \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
@@ -106,7 +107,7 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
             echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
             exit 1; \
         fi; \
-        uv pip install "$KVBM_WHEEL"; \
+        uv pip install --no-deps "$KVBM_WHEEL"; \
     fi && \
     cd /workspace/benchmarks && \
     export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \

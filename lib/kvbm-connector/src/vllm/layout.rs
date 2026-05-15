@@ -75,15 +75,30 @@ pub fn determine_kv_layout(
     }
 
     // Locate the blocks dimension from shape (independent of explicit dims).
-    let block_dim = if shape[0] >= num_device_blocks {
-        BlockDimension::BlockIsFirstDim
-    } else if shape[1] >= num_device_blocks {
-        BlockDimension::BlockIsSecondDim
-    } else {
-        bail!(
-            "Unexpected tensor shape: {:?}; expected num_device_blocks: {num_device_blocks} to be present in the first or second dimension",
-            shape
-        );
+    //
+    // Be strict on ambiguity: if both leading dimensions could be interpreted as
+    // the blocks axis we fail instead of silently picking axis 0. Silent fallback
+    // here can corrupt layout math (outer_dim/inner_dim) and under-transfer bytes.
+    let dim0_matches = shape[0] >= num_device_blocks;
+    let dim1_matches = shape[1] >= num_device_blocks;
+    let block_dim = match (dim0_matches, dim1_matches) {
+        (true, false) => BlockDimension::BlockIsFirstDim,
+        (false, true) => BlockDimension::BlockIsSecondDim,
+        (false, false) => {
+            bail!(
+                "Unexpected tensor shape: {:?}; expected num_device_blocks ({}) to be present in one of the first two dimensions",
+                shape,
+                num_device_blocks
+            );
+        }
+        (true, true) => {
+            bail!(
+                "Ambiguous tensor shape for block-dimension detection: shape[:2]={:?}, num_device_blocks={}. \
+                 Both leading dims satisfy >= num_device_blocks; cannot safely infer block axis.",
+                &shape[..2],
+                num_device_blocks
+            );
+        }
     };
 
     // Resolve outer_dim / inner_dim.
