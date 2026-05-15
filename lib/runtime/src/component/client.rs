@@ -201,7 +201,7 @@ impl Client {
             endpoint: endpoint.clone(),
             endpoint_discovery_source,
             instance_source: instance_source.clone(),
-            instance_avail: Arc::new(ArcSwap::from(Arc::new(initial_ids.clone()))),
+            instance_avail: Arc::new(ArcSwap::from_pointee(initial_ids.clone())),
             instance_busy: Arc::new(ArcSwap::from_pointee(HashSet::new())),
             instance_avail_tx: Arc::new(avail_tx),
             instance_avail_rx: avail_rx,
