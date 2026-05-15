@@ -16,10 +16,6 @@ pub enum BlockValidationError {
     #[error("Destination block IDs are not unique: duplicates = {duplicates:?}")]
     DuplicateDestinationBlocks { duplicates: Vec<usize> },
 
-    /// Source and destination blocks overlap when using the same layout.
-    #[error("Source and destination blocks overlap (same layout): overlapping = {overlapping:?}")]
-    OverlappingBlocks { overlapping: Vec<usize> },
-
     /// Lists have mismatched lengths.
     #[error(
         "Block ID lists have mismatched lengths: src={src_len}, dst={dst_len}, bounce={bounce_len:?}"
@@ -82,53 +78,6 @@ pub fn validate_bounce_unique(bounce_block_ids: &[usize]) -> Result<(), BlockVal
         Ok(())
     } else {
         Err(BlockValidationError::DuplicateBounceBlocks { duplicates })
-    }
-}
-
-/// Check if two layouts are the same by comparing their Arc pointers.
-///
-/// This is a conservative check - if pointers differ, layouts might still be the same
-/// but we treat them as different to avoid false positives in disjoint validation.
-fn are_same_layout(layout1: &PhysicalLayout, layout2: &PhysicalLayout) -> bool {
-    // Compare Arc pointer addresses
-    std::ptr::eq(
-        std::sync::Arc::as_ptr(layout1.layout()),
-        std::sync::Arc::as_ptr(layout2.layout()),
-    )
-}
-
-/// Validate that src and dst block IDs are disjoint when using the same layout.
-///
-/// Only enforced in debug mode when src and dst point to the same layout.
-///
-/// # Arguments
-/// * `src_block_ids` - Source block IDs
-/// * `dst_block_ids` - Destination block IDs
-/// * `src_layout` - Source physical layout
-/// * `dst_layout` - Destination physical layout
-#[cfg(debug_assertions)]
-pub fn validate_disjoint_same_layout(
-    src_block_ids: &[usize],
-    dst_block_ids: &[usize],
-    src_layout: &PhysicalLayout,
-    dst_layout: &PhysicalLayout,
-) -> Result<(), BlockValidationError> {
-    // Only check if same layout
-    if !are_same_layout(src_layout, dst_layout) {
-        return Ok(());
-    }
-
-    let src_set: HashSet<_> = src_block_ids.iter().copied().collect();
-    let overlapping: Vec<_> = dst_block_ids
-        .iter()
-        .filter(|id| src_set.contains(id))
-        .copied()
-        .collect();
-
-    if overlapping.is_empty() {
-        Ok(())
-    } else {
-        Err(BlockValidationError::OverlappingBlocks { overlapping })
     }
 }
 
@@ -199,9 +148,6 @@ pub fn validate_block_transfer(
         if let Some(bounce_ids) = bounce_block_ids {
             validate_bounce_unique(bounce_ids)?;
         }
-
-        // Validate disjoint if same layout
-        validate_disjoint_same_layout(src_block_ids, dst_block_ids, src_layout, dst_layout)?;
 
         // Validate block IDs in range
         validate_block_ids_in_range(src_block_ids, src_layout, "source")?;
@@ -289,65 +235,6 @@ mod tests {
             }
             _ => panic!("Wrong error type"),
         }
-    }
-
-    #[test]
-    #[cfg(debug_assertions)]
-    fn test_disjoint_same_layout_valid() {
-        let physical = builder(2)
-            .fully_contiguous()
-            .allocate_system()
-            .build()
-            .unwrap();
-
-        let src_ids = vec![0, 1, 2];
-        let dst_ids = vec![5, 6, 7];
-
-        assert!(validate_disjoint_same_layout(&src_ids, &dst_ids, &physical, &physical).is_ok());
-    }
-
-    #[test]
-    #[cfg(debug_assertions)]
-    fn test_disjoint_same_layout_overlap() {
-        let physical = builder(2)
-            .fully_contiguous()
-            .allocate_system()
-            .build()
-            .unwrap();
-
-        let src_ids = vec![0, 1, 2];
-        let dst_ids = vec![2, 3, 4]; // 2 overlaps
-
-        let result = validate_disjoint_same_layout(&src_ids, &dst_ids, &physical, &physical);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            BlockValidationError::OverlappingBlocks { overlapping } => {
-                assert_eq!(overlapping, vec![2]);
-            }
-            _ => panic!("Wrong error type"),
-        }
-    }
-
-    #[test]
-    fn test_disjoint_different_layouts_ok() {
-        let physical1 = builder(2)
-            .fully_contiguous()
-            .allocate_system()
-            .build()
-            .unwrap();
-
-        let physical2 = builder(2)
-            .fully_contiguous()
-            .allocate_system()
-            .build()
-            .unwrap();
-
-        let src_ids = vec![0, 1, 2];
-        let dst_ids = vec![0, 1, 2]; // Same IDs but different layouts
-
-        // Should be OK since different layouts
-        #[cfg(debug_assertions)]
-        assert!(validate_disjoint_same_layout(&src_ids, &dst_ids, &physical1, &physical2).is_ok());
     }
 
     #[test]
