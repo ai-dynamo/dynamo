@@ -50,6 +50,12 @@ def _resolve_socket(device: int, socket_path) -> str:
     return get_socket_path(device)
 
 
+def _parse_sharded_ssd_roots(value) -> list[str]:
+    from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
+
+    return parse_sharded_ssd_roots(value or "")
+
+
 # ---------------------------------------------------------------------------
 # Subcommand implementations
 # ---------------------------------------------------------------------------
@@ -63,11 +69,13 @@ def _run_save(args) -> None:
     socket_path = _resolve_socket(args.device, args.socket_path)
 
     logger.info(
-        "Saving GMS state: device=%s, socket=%s, output_dir=%s, save_workers=%s",
+        "Saving GMS state: device=%s, socket=%s, output_dir=%s, "
+        "save_workers=%s, sharded_ssd_roots=%s",
         args.device,
         socket_path,
         args.output_dir,
         args.save_workers,
+        args.sharded_ssd_roots or "-",
     )
 
     client = GMSStorageClient(
@@ -76,6 +84,7 @@ def _run_save(args) -> None:
         device=args.device,
         timeout_ms=args.timeout_ms,
         shard_size_bytes=args.shard_size_bytes,
+        sharded_ssd_roots=_parse_sharded_ssd_roots(args.sharded_ssd_roots),
     )
 
     manifest = client.save(max_workers=args.save_workers)
@@ -98,17 +107,21 @@ def _run_load(args) -> None:
     socket_path = _resolve_socket(args.device, args.socket_path)
 
     logger.info(
-        "Loading GMS state: device=%s, socket=%s, input_dir=%s, clear_existing=%s",
+        "Loading GMS state: device=%s, socket=%s, input_dir=%s, "
+        "clear_existing=%s, transfer_backend=%s",
         args.device,
         socket_path,
         args.input_dir,
         not args.no_clear,
+        args.transfer_backend,
     )
 
     client = GMSStorageClient(
         socket_path=socket_path,
         device=args.device,
         timeout_ms=args.timeout_ms,
+        transfer_backend=args.transfer_backend,
+        sharded_ssd_roots=_parse_sharded_ssd_roots(args.sharded_ssd_roots),
     )
 
     id_map = client.load_to_gms(
@@ -130,6 +143,11 @@ _SHARD_SIZE_DEFAULT = 4 * 1024**3  # 4 GiB
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    from gpu_memory_service.snapshot.transfer import (
+        DEFAULT_TRANSFER_BACKEND,
+        TRANSFER_BACKEND_CHOICES,
+    )
+
     parser = argparse.ArgumentParser(
         prog="gms-storage-client",
         description="Save and load GPU Memory Service state to/from disk.",
@@ -181,6 +199,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     save_p.add_argument(
+        "--sharded-ssd-roots",
+        default=None,
+        help=(
+            "Comma-separated SSD roots for prototype sharded saves. "
+            "If unset, shards are written under --output-dir."
+        ),
+    )
+    save_p.add_argument(
         "--save-workers",
         type=int,
         default=8,
@@ -198,8 +224,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "load",
         help="Load a saved GMS state back into a running GMS server.",
         description=(
-            "Connect to a running GMS server in RW mode, read tensor data "
-            "from a saved directory (reading each shard file sequentially), "
+            "Connect to a running GMS server in RW mode, restore tensor data "
+            "from a saved directory through the selected transfer backend, "
             "and commit the state so readers can acquire the RO lock."
         ),
     )
@@ -231,6 +257,23 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=8,
         help="Thread pool size for parallel shard reads (default: 8).",
+    )
+    load_p.add_argument(
+        "--transfer-backend",
+        choices=TRANSFER_BACKEND_CHOICES,
+        default=DEFAULT_TRANSFER_BACKEND,
+        help=(
+            "Byte transfer backend for restore. "
+            "'nixl' uses NIXL POSIX with host staging; "
+            "'nixl-gds' uses NIXL GDS_MT for direct file-to-GPU transfers; "
+            "'sharded-ssd' uses the sharded SSD prototype with "
+            "pinned host buffers and cudaMemcpyAsync."
+        ),
+    )
+    load_p.add_argument(
+        "--sharded-ssd-roots",
+        default=None,
+        help="Comma-separated SSD roots for the sharded-ssd transfer backend.",
     )
     load_p.add_argument(
         "--no-clear",

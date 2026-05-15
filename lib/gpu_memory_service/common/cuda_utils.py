@@ -23,6 +23,19 @@ except ImportError:
 
     cuda = _MissingCuda()
 
+try:
+    from cuda.bindings import runtime as cuda_runtime
+except ImportError:
+    # Keep CPU-only import/collection working. Runtime calls fail with a
+    # targeted message when the sharded-SSD backend is actually used.
+    class _MissingCudaRuntime:
+        def __getattr__(self, name):
+            raise RuntimeError(
+                "cuda-python is required for GPU Memory Service CUDA runtime operations"
+            )
+
+    cuda_runtime = _MissingCudaRuntime()
+
 
 def list_devices() -> list[int]:
     """Return list of CUDA device indices visible to this process via NVML."""
@@ -179,3 +192,86 @@ def cuda_validate_pointer(va: int) -> None:
 def cuda_synchronize() -> None:
     (result,) = cuda.cuCtxSynchronize()
     cuda_check_result(result, "cuCtxSynchronize")
+
+
+def cuda_runtime_check_result(result, name: str):
+    if isinstance(result, tuple):
+        code = result[0]
+        payload = result[1:]
+    else:
+        code = result
+        payload = ()
+    if code == cuda_runtime.cudaError_t.cudaSuccess:
+        if len(payload) == 1:
+            return payload[0]
+        return payload
+
+    message_result = cuda_runtime.cudaGetErrorString(code)
+    if isinstance(message_result, tuple):
+        message = message_result[1] if len(message_result) > 1 else message_result[0]
+    else:
+        message = message_result
+    if isinstance(message, bytes):
+        err_msg = message.decode("utf-8", errors="replace")
+    else:
+        err_msg = str(message)
+    raise RuntimeError(f"CUDA runtime error in {name}: {err_msg}")
+
+
+def cuda_runtime_set_device(device: int) -> None:
+    cuda_runtime_check_result(
+        cuda_runtime.cudaSetDevice(device),
+        f"cudaSetDevice({device})",
+    )
+
+
+def cuda_host_register(ptr: int, size: int) -> None:
+    cuda_runtime_check_result(
+        cuda_runtime.cudaHostRegister(ptr, size, 0),
+        "cudaHostRegister",
+    )
+
+
+def cuda_host_unregister(ptr: int) -> None:
+    cuda_runtime_check_result(
+        cuda_runtime.cudaHostUnregister(ptr), "cudaHostUnregister"
+    )
+
+
+def cuda_stream_create_nonblocking():
+    flag = getattr(cuda_runtime, "cudaStreamNonBlocking", 1)
+    return cuda_runtime_check_result(
+        cuda_runtime.cudaStreamCreateWithFlags(flag),
+        "cudaStreamCreateWithFlags",
+    )
+
+
+def cuda_stream_destroy(stream) -> None:
+    cuda_runtime_check_result(
+        cuda_runtime.cudaStreamDestroy(stream), "cudaStreamDestroy"
+    )
+
+
+def cuda_stream_synchronize(stream) -> None:
+    cuda_runtime_check_result(
+        cuda_runtime.cudaStreamSynchronize(stream),
+        "cudaStreamSynchronize",
+    )
+
+
+def cuda_memcpy_h2d_async(
+    dst_ptr: int,
+    src_ptr: int,
+    size: int,
+    stream,
+) -> None:
+    cuda_runtime_check_result(
+        cuda_runtime.cudaMemcpyAsync(
+            dst_ptr,
+            src_ptr,
+            size,
+            cuda_runtime.cudaMemcpyKind.cudaMemcpyHostToDevice,
+            stream,
+        ),
+        "cudaMemcpyAsync",
+    )

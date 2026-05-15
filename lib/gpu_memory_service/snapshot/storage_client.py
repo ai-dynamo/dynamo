@@ -13,10 +13,12 @@ import queue
 import threading
 import time
 from collections import defaultdict
-from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
-import numpy as np
+from gpu_memory_service.snapshot.backends.sharded_ssd import (
+    SHARDED_SSD_ROOTS_CONFIG_KEY,
+)
 from gpu_memory_service.snapshot.disk import (  # noqa: F401  re-exported for external callers
     ShardWriter as _ShardWriter,
 )
@@ -38,34 +40,44 @@ from gpu_memory_service.snapshot.disk import (
 )
 from gpu_memory_service.snapshot.model import CURRENT_VERSION as _CURRENT_VERSION
 from gpu_memory_service.snapshot.model import AllocationEntry, SaveManifest
-from gpu_memory_service.snapshot.restore import (
-    RestorePipelineContext as _RestorePipelineContext,
+from gpu_memory_service.snapshot.transfer import (
+    DEFAULT_TRANSFER_BACKEND as _DEFAULT_TRANSFER_BACKEND,
 )
-from gpu_memory_service.snapshot.restore import (
-    RestorePipelineResources as _RestorePipelineResources,
+from gpu_memory_service.snapshot.transfer import (
+    GMSSnapshotConfig,
+    GMSTransferTarget,
+    build_file_transfer_sources,
+    create_transfer_backend,
 )
 
 logger = logging.getLogger(__name__)
 
-try:
-    from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
-    from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
-    from gpu_memory_service.common.locks import RequestedLockType
-
-    _GMS_IMPORTS_AVAILABLE = True
-except ImportError:
-    _GMS_IMPORTS_AVAILABLE = False
-    GMSClientMemoryManager = None  # type: ignore[assignment,misc]
-    _tensor_from_pointer = None  # type: ignore[assignment]
-    RequestedLockType = None  # type: ignore[assignment]
-
-try:
+if TYPE_CHECKING:
     import torch
 
-    _TORCH_AVAILABLE = True
+try:
+    from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
+    from gpu_memory_service.common.locks import RequestedLockType
+
+    _GMS_CORE_IMPORTS_AVAILABLE = True
 except ImportError:
-    _TORCH_AVAILABLE = False
-    torch = None  # type: ignore[assignment]
+    _GMS_CORE_IMPORTS_AVAILABLE = False
+    GMSClientMemoryManager = None  # type: ignore[assignment,misc]
+    RequestedLockType = None  # type: ignore[assignment]
+
+
+def _load_torch_snapshot_runtime() -> Tuple[Any, Any, Any]:
+    try:
+        import numpy as np_module
+        import torch as torch_module
+        from gpu_memory_service.client.torch.tensor import (
+            _tensor_from_pointer as tensor_from_pointer,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "numpy, PyTorch, and GMS tensor imports are required for this operation"
+        ) from exc
+    return np_module, torch_module, tensor_from_pointer
 
 
 def _read_shard_sequential(
@@ -75,14 +87,15 @@ def _read_shard_sequential(
     pin_memory: bool = False,
 ) -> Dict[str, "torch.Tensor"]:
     """Facade wrapper kept for test patchability and backwards compatibility."""
+    np_module, torch_module, _ = _load_torch_snapshot_runtime()
     return _read_shard_sequential_impl(
         abs_path,
         sorted_entries,
         device,
         pin_memory=pin_memory,
         os_module=os,
-        np_module=np,
-        torch_module=torch,
+        np_module=np_module,
+        torch_module=torch_module,
         logger=logger,
     )
 
@@ -152,11 +165,21 @@ class GMSStorageClient:
         *,
         timeout_ms: Optional[int] = None,
         shard_size_bytes: int = 4 * 1024**3,
+        transfer_backend: str = _DEFAULT_TRANSFER_BACKEND,
+        sharded_ssd_roots: Optional[Sequence[str]] = None,
     ) -> None:
         self.output_dir = output_dir
         self.device = device
         self._timeout_ms = timeout_ms
         self._shard_size = shard_size_bytes
+        self._transfer_backend = transfer_backend
+        self._sharded_ssd_roots = (
+            None
+            if sharded_ssd_roots is None
+            else [
+                os.path.abspath(root) for root in sharded_ssd_roots if str(root).strip()
+            ]
+        )
 
         if socket_path is None:
             from gpu_memory_service.common.utils import get_socket_path
@@ -167,7 +190,7 @@ class GMSStorageClient:
     def save(self, max_workers: int = 4) -> SaveManifest:
         """Connect to GMS in RO mode and save all allocations + metadata to disk."""
         self._validate_save_request()
-        output_dir, shards_dir = self._prepare_output_dir()
+        output_dir, shard_dirs, use_absolute_shard_paths = self._prepare_output_dir()
 
         mm = GMSClientMemoryManager(self._socket_path, device=self.device)
         try:
@@ -182,10 +205,11 @@ class GMSStorageClient:
             ]
             va_list = self._import_source_mappings(mm, allocations_info)
             entries = self._write_shards(
-                shards_dir,
+                shard_dirs,
                 allocations_info,
                 va_list,
                 max_workers=max_workers,
+                use_absolute_shard_paths=use_absolute_shard_paths,
             )
             metadata = self._save_metadata(mm)
         except Exception:
@@ -210,24 +234,25 @@ class GMSStorageClient:
         return manifest
 
     def _validate_save_request(self) -> None:
-        if not _GMS_IMPORTS_AVAILABLE:
-            raise RuntimeError(
-                "GMS client imports unavailable (missing cuda-python or torch)"
-            )
+        if not _GMS_CORE_IMPORTS_AVAILABLE:
+            raise RuntimeError("GMS client imports unavailable (missing cuda-python)")
+        _load_torch_snapshot_runtime()
         if self.output_dir is None:
             raise ValueError(
                 "output_dir must be set to call save(); pass it to GMSStorageClient()"
             )
 
-    def _prepare_output_dir(self) -> Tuple[str, str]:
+    def _prepare_output_dir(self) -> Tuple[str, List[str], bool]:
         assert self.output_dir is not None
         os.makedirs(self.output_dir, exist_ok=True)
-        shards_dir = os.path.join(self.output_dir, "shards")
-        os.makedirs(shards_dir, exist_ok=True)
-        for name in os.listdir(shards_dir):
-            if name.startswith("shard_") and name.endswith(".bin"):
-                os.unlink(os.path.join(shards_dir, name))
-        return self.output_dir, shards_dir
+        shard_roots = self._sharded_ssd_roots or [self.output_dir]
+        shard_dirs = [os.path.join(root, "shards") for root in shard_roots]
+        for shards_dir in shard_dirs:
+            os.makedirs(shards_dir, exist_ok=True)
+            for name in os.listdir(shards_dir):
+                if name.startswith("shard_") and name.endswith(".bin"):
+                    os.unlink(os.path.join(shards_dir, name))
+        return self.output_dir, shard_dirs, bool(self._sharded_ssd_roots)
 
     def _import_source_mappings(
         self,
@@ -243,12 +268,14 @@ class GMSStorageClient:
 
     def _write_shards(
         self,
-        shards_dir: str,
+        shard_dirs: List[str],
         allocations_info: List[Dict[str, Any]],
         va_list: List[int],
         *,
         max_workers: int,
+        use_absolute_shard_paths: bool = False,
     ) -> List[AllocationEntry]:
+        _, torch_module, tensor_from_pointer = _load_torch_snapshot_runtime()
         layout = _plan_shard_layout(allocations_info, self._shard_size)
         shard_groups: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
         for index, (shard_idx, byte_offset) in enumerate(layout):
@@ -260,17 +287,19 @@ class GMSStorageClient:
             shard_idx: int, alloc_pairs: List[Tuple[int, int]]
         ) -> None:
             filename = f"shard_{shard_idx:04d}.bin"
+            shards_dir = shard_dirs[shard_idx % len(shard_dirs)]
             abs_path = os.path.join(shards_dir, filename)
             rel_path = os.path.join("shards", filename)
+            tensor_file = abs_path if use_absolute_shard_paths else rel_path
             with open(abs_path, "wb") as handle:
                 for index, byte_offset in alloc_pairs:
                     alloc = allocations_info[index]
                     aligned_size = int(alloc["aligned_size"])
-                    tensor = _tensor_from_pointer(
+                    tensor = tensor_from_pointer(
                         va_list[index],
                         [aligned_size],
                         [1],
-                        torch.uint8,
+                        torch_module.uint8,
                         self.device,
                     )
                     tensor.cpu().numpy().tofile(handle)
@@ -279,7 +308,7 @@ class GMSStorageClient:
                         size=int(alloc["size"]),
                         aligned_size=aligned_size,
                         tag=str(alloc.get("tag", "default")),
-                        tensor_file=rel_path,
+                        tensor_file=tensor_file,
                         tensor_offset=byte_offset,
                     )
 
@@ -296,232 +325,39 @@ class GMSStorageClient:
             raise RuntimeError(
                 f"BUG: {missing} allocation(s) missing after shard writers completed"
             )
-        logger.info("Phase B complete: wrote %d shards", len(shard_groups))
+        logger.info(
+            "Phase B complete: wrote %d shards across %d shard root(s)",
+            len(shard_groups),
+            len(shard_dirs),
+        )
         return [entry for entry in entries if entry is not None]
 
     def _write_json(self, path: str, payload: Dict[str, Any]) -> None:
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)
 
-    def _run_restore_copy_worker(
-        self,
-        ctx: _RestorePipelineContext,
-        stream_idx: int,
-    ) -> None:
-        while True:
-            try:
-                item = ctx.work_q.get(timeout=0.1)
-            except queue.Empty:
-                if ctx.cancel_event.is_set():
-                    return
-                continue
-            if item is None:
-                return
-
-            entry, src = item
-            try:
-                while not ctx.va_events[entry.allocation_id].wait(timeout=0.1):
-                    if ctx.cancel_event.is_set():
-                        return
-                dst = _tensor_from_pointer(
-                    ctx.vas[entry.allocation_id],
-                    [entry.aligned_size],
-                    [1],
-                    torch.uint8,
-                    self.device,
-                )
-                if ctx.streams:
-                    with torch.cuda.stream(ctx.streams[stream_idx]):
-                        dst.copy_(src, non_blocking=src.is_pinned())
-                else:
-                    dst.copy_(src)
-                if ctx.use_streams and src.is_pinned():
-                    with ctx.lock:
-                        ctx.staged_srcs.append(src)
-            except Exception as exc:  # noqa: BLE001
-                with ctx.lock:
-                    ctx.copy_errors.append(exc)
-
-    def _start_restore_copy_threads(
-        self,
-        ctx: _RestorePipelineContext,
-    ) -> List[threading.Thread]:
-        threads = [
-            threading.Thread(
-                target=self._run_restore_copy_worker,
-                args=(ctx, index),
-                daemon=True,
-            )
-            for index in range(ctx.worker_count)
-        ]
-        for thread in threads:
-            thread.start()
-        return threads
-
-    def _prepare_restore_pipeline(
-        self,
-        manifest: SaveManifest,
-        groups: Dict[str, List[AllocationEntry]],
-        worker_count: int,
-        input_dir: str,
-    ) -> _RestorePipelineResources:
-        ctx = _RestorePipelineContext.build(
-            manifest.allocations,
-            worker_count,
-            device=self.device,
-            use_streams=_TORCH_AVAILABLE and torch.cuda.is_available(),
-            torch_module=torch,
-        )
-        copy_threads = self._start_restore_copy_threads(ctx)
-        disk_pool = ThreadPoolExecutor(max_workers=worker_count)
-        disk_futures = {
-            disk_pool.submit(
-                _read_shard_to_queue,
-                os.path.join(input_dir, rel_path),
-                sorted_entries,
-                ctx.work_q,
-                pin_memory=ctx.use_streams,
-                cancel_event=ctx.cancel_event,
-            ): rel_path
-            for rel_path, sorted_entries in groups.items()
-        }
-        return _RestorePipelineResources(
-            ctx=ctx,
-            disk_pool=disk_pool,
-            disk_futures=disk_futures,
-            copy_threads=copy_threads,
-        )
-
-    def _allocate_restore_mappings(
+    def _allocate_restore_targets(
         self,
         mm: Any,
         manifest: SaveManifest,
-        ctx: _RestorePipelineContext,
-    ) -> Dict[str, str]:
+    ) -> Tuple[Dict[str, str], Dict[str, GMSTransferTarget]]:
         id_map: Dict[str, str] = {}
+        targets: Dict[str, GMSTransferTarget] = {}
         for entry in manifest.allocations:
             old_id = entry.allocation_id
             va = mm.create_mapping(size=entry.size, tag=entry.tag)
             id_map[old_id] = mm.mappings[va].allocation_id
-            ctx.vas[old_id] = va
-            ctx.va_events[old_id].set()
+            targets[old_id] = GMSTransferTarget(
+                allocation_id=old_id,
+                va=va,
+                device=self.device,
+                byte_count=entry.aligned_size,
+            )
         logger.info(
-            "Phase A complete: allocated %d GMS VAs; waiting for disk/copy pipeline",
-            len(ctx.vas),
+            "Phase A complete: allocated %d GMS VAs",
+            len(targets),
         )
-        return id_map
-
-    def _await_disk_reads(self, disk_futures: Dict[Future[int], str]) -> None:
-        for future in as_completed(disk_futures):
-            rel_path = disk_futures[future]
-            try:
-                future.result()
-            except CancelledError:
-                pass
-            except Exception as exc:
-                raise RuntimeError(f"Failed to load shard {rel_path}: {exc}") from exc
-
-    def _stop_restore_copy_threads(
-        self,
-        ctx: _RestorePipelineContext,
-        threads: List[threading.Thread],
-        *,
-        drain_queue: bool = False,
-    ) -> None:
-        if drain_queue:
-            self._drain_restore_queue(ctx)
-        for _ in threads:
-            if drain_queue:
-                # Cancel path: workers may have exited, so drain to make room.
-                while True:
-                    try:
-                        ctx.work_q.put(None, timeout=0.1)
-                        break
-                    except queue.Full:
-                        self._drain_restore_queue(ctx)
-            else:
-                # Normal path: disk reads are done and workers are alive; block
-                # until a slot opens rather than spinning with a timeout.
-                ctx.work_q.put(None)
-        for thread in threads:
-            thread.join()
-
-    def _drain_restore_queue(self, ctx: _RestorePipelineContext) -> None:
-        while True:
-            try:
-                ctx.work_q.get_nowait()
-            except queue.Empty:
-                return
-
-    def _cancel_restore_pipeline(self, ctx: _RestorePipelineContext) -> None:
-        ctx.cancel_event.set()
-        for event in ctx.va_events.values():
-            event.set()
-        self._drain_restore_queue(ctx)
-
-    def _finalize_restore_pipeline(self, ctx: _RestorePipelineContext) -> None:
-        if ctx.use_streams:
-            torch.cuda.synchronize(device=self.device)
-            ctx.staged_srcs.clear()
-        if ctx.copy_errors:
-            raise RuntimeError(
-                f"Failed to copy restored data to GMS: {ctx.copy_errors[0]}"
-            )
-
-    def _drain_restore_pipeline(self, resources: _RestorePipelineResources) -> None:
-        disk_error: Optional[BaseException] = None
-        finalize_error: Optional[BaseException] = None
-        drain_queue = False
-        try:
-            self._await_disk_reads(resources.disk_futures)
-        except Exception as exc:
-            disk_error = exc
-            self._cancel_restore_pipeline(resources.ctx)
-            drain_queue = True
-            resources.disk_pool.shutdown(wait=True, cancel_futures=True)
-        else:
-            resources.disk_pool.shutdown(wait=True)
-        try:
-            self._stop_restore_copy_threads(
-                resources.ctx,
-                resources.copy_threads,
-                drain_queue=drain_queue,
-            )
-        finally:
-            resources.active = False
-            try:
-                self._finalize_restore_pipeline(resources.ctx)
-            except Exception as exc:  # noqa: BLE001
-                finalize_error = exc
-        if disk_error is not None:
-            raise disk_error
-        if finalize_error is not None:
-            raise finalize_error
-
-    def _shutdown_restore_pipeline(
-        self,
-        resources: _RestorePipelineResources,
-    ) -> None:
-        if not resources.active:
-            return
-        self._cancel_restore_pipeline(resources.ctx)
-        resources.disk_pool.shutdown(wait=True, cancel_futures=True)
-        self._stop_restore_copy_threads(
-            resources.ctx,
-            resources.copy_threads,
-            drain_queue=True,
-        )
-        resources.active = False
-        # Synchronize async copies to prevent use-after-free of staged pinned
-        # buffers, but suppress copy errors — the caller already has an error
-        # to propagate and we must not mask it.
-        try:
-            self._finalize_restore_pipeline(resources.ctx)
-        except Exception:  # noqa: BLE001
-            self._logger.warning(
-                "cleanup failed during restore error handling",
-                exc_info=True,
-            )
+        return id_map, targets
 
     def load_to_gms(
         self,
@@ -529,41 +365,48 @@ class GMSStorageClient:
         *,
         max_workers: int = 4,
         clear_existing: bool = True,
+        transfer_backend: Optional[str] = None,
     ) -> Dict[str, str]:
-        if not _GMS_IMPORTS_AVAILABLE:
-            raise RuntimeError(
-                "GMS client imports unavailable (missing cuda-python or torch)"
-            )
+        backend_name = transfer_backend or self._transfer_backend
+        self._validate_load_request()
 
         manifest, saved_metadata = _load_manifest_and_metadata(input_dir)
-        groups = _group_entries_by_shard(manifest.allocations)
-        worker_count = max(1, min(max_workers, len(groups) or 1))
+        sources = build_file_transfer_sources(input_dir, manifest.allocations)
+        backend = create_transfer_backend(
+            backend_name,
+            GMSSnapshotConfig(
+                device=self.device,
+                max_workers=max_workers,
+                backend_config={
+                    SHARDED_SSD_ROOTS_CONFIG_KEY: self._sharded_ssd_roots,
+                },
+            ),
+        )
+        session = None
+        id_map: Dict[str, str] = {}
 
-        with GMSClientMemoryManager(self._socket_path, device=self.device) as mm:
-            mm.connect(RequestedLockType.RW, timeout_ms=self._timeout_ms)
-            if clear_existing:
-                logger.info("RW connect cleared any previously committed GMS state")
+        try:
+            session = backend.start_restore(sources)
+            with GMSClientMemoryManager(self._socket_path, device=self.device) as mm:
+                mm.connect(RequestedLockType.RW, timeout_ms=self._timeout_ms)
+                if clear_existing:
+                    logger.info("RW connect cleared any previously committed GMS state")
 
-            resources = self._prepare_restore_pipeline(
-                manifest,
-                groups,
-                worker_count,
-                input_dir,
-            )
-            try:
-                id_map = self._allocate_restore_mappings(mm, manifest, resources.ctx)
-                self._drain_restore_pipeline(resources)
-            except Exception:
-                self._shutdown_restore_pipeline(resources)
-                raise
+                id_map, targets = self._allocate_restore_targets(mm, manifest)
+                session.restore(targets)
+                logger.info(
+                    "Phase B complete: %s restored %d allocations to GMS memory",
+                    backend.name,
+                    len(manifest.allocations),
+                )
 
-            logger.info(
-                "Phase B complete: streamed %d allocations to GMS memory",
-                len(manifest.allocations),
-            )
-            self._restore_metadata(mm, saved_metadata, id_map)
-            if not mm.commit():
-                raise RuntimeError("GMS commit failed after restore")
+                self._restore_metadata(mm, saved_metadata, id_map)
+                if not mm.commit():
+                    raise RuntimeError("GMS commit failed after restore")
+        finally:
+            if session is not None:
+                session.close()
+            backend.close()
 
         logger.info(
             "load_to_gms complete: %d allocations, %d metadata keys",
@@ -571,6 +414,10 @@ class GMSStorageClient:
             len(saved_metadata),
         )
         return id_map
+
+    def _validate_load_request(self) -> None:
+        if not _GMS_CORE_IMPORTS_AVAILABLE:
+            raise RuntimeError("GMS client imports unavailable (missing cuda-python)")
 
     def _restore_metadata(
         self,
@@ -594,9 +441,6 @@ class GMSStorageClient:
         *,
         max_workers: int = 4,
     ) -> Tuple[Dict[str, "torch.Tensor"], Dict[str, Dict[str, Any]]]:
-        if not _TORCH_AVAILABLE:
-            raise RuntimeError("PyTorch is required for load_tensors()")
-
         manifest, metadata = _load_manifest_and_metadata(input_dir)
         groups = _group_entries_by_shard(manifest.allocations)
         tensors: Dict[str, "torch.Tensor"] = {}
