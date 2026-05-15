@@ -25,14 +25,20 @@ cases:
           timezone:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
+      dynamo: &d_2_a
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm: *d_2_a
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits"
   PARSER.batch.2.c:
     description: With surrounding narration
     ref: dynamo
@@ -42,18 +48,29 @@ cases:
     - *id001
     - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: 'Both:'
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'NYC'}}, {'name': 'get_time', 'arguments': {'timezone': 'EST'}}]
-    #   normal_text: 'Both: '
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both:'
+      vllm:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            timezone: EST
+          name: get_time
+        normal_text: 'Both: '
+        reason: "drops trailing normal_text after tool-call wrapper end"
+      sglang:
+        calls: []
+        normal_text: 'Both:'
+        reason: "trims trailing space from preceding normal_text"
   PARSER.batch.2.d:
     description: Same-name twice
     ref: dynamo
@@ -63,11 +80,16 @@ cases:
     - *id001
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: ''
+      dynamo: &d_2_d
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *d_2_d
+      sglang:
+        calls: []
+        normal_text: ''

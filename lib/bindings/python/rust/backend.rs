@@ -20,8 +20,10 @@ use std::sync::{Arc, Mutex as StdMutex};
 use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, BackendError, DisaggregationMode as RsDisaggregationMode, DynamoError,
-    EngineConfig as RsEngineConfig, ErrorType, LLMEngine, LLMEngineOutput, PreprocessedRequest,
-    RuntimeConfig as RsRuntimeConfig, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
+    EngineConfig as RsEngineConfig, ErrorType, KvEventSource as RsKvEventSource, LLMEngine,
+    LLMEngineOutput, Metrics as RsMetrics, MetricsSource as RsMetricsSource, OnPublisherReady,
+    PreprocessedRequest, RuntimeConfig as RsRuntimeConfig, SnapshotFn, Worker as RsWorker,
+    WorkerConfig as RsWorkerConfig,
 };
 use dynamo_llm::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
@@ -35,6 +37,7 @@ use pythonize::{depythonize, pythonize};
 use crate::ModelInput;
 use crate::context::Context as PyContext;
 use crate::errors::py_exception_to_backend_error;
+use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::to_pyerr;
 
 /// Register `dynamo._core.backend` and its classes on the parent `_core` module.
@@ -111,6 +114,8 @@ impl EngineConfig {
         total_kv_blocks = None,
         max_num_seqs = None,
         max_num_batched_tokens = None,
+        data_parallel_size = None,
+        data_parallel_start_rank = None,
         bootstrap_host = None,
         bootstrap_port = None,
     ))]
@@ -123,6 +128,8 @@ impl EngineConfig {
         total_kv_blocks: Option<u64>,
         max_num_seqs: Option<u64>,
         max_num_batched_tokens: Option<u64>,
+        data_parallel_size: Option<u32>,
+        data_parallel_start_rank: Option<u32>,
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
     ) -> Self {
@@ -135,6 +142,8 @@ impl EngineConfig {
                 total_kv_blocks,
                 max_num_seqs,
                 max_num_batched_tokens,
+                data_parallel_size,
+                data_parallel_start_rank,
                 bootstrap_host,
                 bootstrap_port,
             },
@@ -168,6 +177,14 @@ impl EngineConfig {
     #[getter]
     fn max_num_batched_tokens(&self) -> Option<u64> {
         self.inner.max_num_batched_tokens
+    }
+    #[getter]
+    fn data_parallel_size(&self) -> Option<u32> {
+        self.inner.data_parallel_size
+    }
+    #[getter]
+    fn data_parallel_start_rank(&self) -> Option<u32> {
+        self.inner.data_parallel_start_rank
     }
     #[getter]
     fn bootstrap_host(&self) -> Option<&str> {
@@ -234,6 +251,7 @@ impl WorkerConfig {
         reasoning_parser = None,
         exclude_tools_when_tool_choice_none = true,
         enable_local_indexer = true,
+        enable_kv_routing = true,
         metrics_labels = Vec::new(),
         runtime = None,
         disaggregation_mode = DisaggregationMode::Aggregated,
@@ -252,6 +270,7 @@ impl WorkerConfig {
         reasoning_parser: Option<String>,
         exclude_tools_when_tool_choice_none: bool,
         enable_local_indexer: bool,
+        enable_kv_routing: bool,
         metrics_labels: Vec<(String, String)>,
         runtime: Option<RuntimeConfig>,
         disaggregation_mode: DisaggregationMode,
@@ -276,6 +295,7 @@ impl WorkerConfig {
                 reasoning_parser,
                 exclude_tools_when_tool_choice_none,
                 enable_local_indexer,
+                enable_kv_routing,
                 metrics_labels,
                 disaggregation_mode: disaggregation_mode.into(),
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
@@ -511,6 +531,8 @@ impl LLMEngine for PyLLMEngine {
                 total_kv_blocks: opt_attr::<u64>(bound, "total_kv_blocks")?,
                 max_num_seqs: opt_attr::<u64>(bound, "max_num_seqs")?,
                 max_num_batched_tokens: opt_attr::<u64>(bound, "max_num_batched_tokens")?,
+                data_parallel_size: opt_attr::<u32>(bound, "data_parallel_size")?,
+                data_parallel_start_rank: opt_attr::<u32>(bound, "data_parallel_start_rank")?,
                 bootstrap_host: opt_attr::<String>(bound, "bootstrap_host")?,
                 bootstrap_port: opt_attr::<u16>(bound, "bootstrap_port")?,
             })
@@ -672,6 +694,135 @@ impl LLMEngine for PyLLMEngine {
             .map_err(py_err_to_dynamo)?;
         Ok(())
     }
+
+    async fn kv_event_sources(&self) -> Result<Vec<RsKvEventSource>, DynamoError> {
+        let py_list = self
+            .call_method0_async("kv_event_sources")
+            .await
+            .map_err(py_err_to_dynamo)?;
+        Python::with_gil(|py| -> PyResult<Vec<RsKvEventSource>> {
+            let bound = py_list.bind(py);
+            let list = bound.downcast::<pyo3::types::PyList>()?;
+            let mut sources = Vec::with_capacity(list.len());
+            for item in list.iter() {
+                sources.push(depythonize_kv_source(&item)?);
+            }
+            Ok(sources)
+        })
+        .map_err(py_err_to_dynamo)
+    }
+
+    async fn metrics_sources(&self) -> Result<Vec<RsMetricsSource>, DynamoError> {
+        let py_list = self
+            .call_method0_async("metrics_sources")
+            .await
+            .map_err(py_err_to_dynamo)?;
+        Python::with_gil(|py| -> PyResult<Vec<RsMetricsSource>> {
+            let bound = py_list.bind(py);
+            let list = bound.downcast::<pyo3::types::PyList>()?;
+            let mut sources = Vec::with_capacity(list.len());
+            for item in list.iter() {
+                sources.push(depythonize_metrics_source(&item)?);
+            }
+            Ok(sources)
+        })
+        .map_err(py_err_to_dynamo)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Source-descriptor depythonization
+//
+// Each Python descriptor maps to one arm of the Rust source enum. Identify
+// by class name (`type(x).__name__`) — the Python module exports each as a
+// distinct dataclass, so the name is the unambiguous discriminator. Falling
+// back to attribute-presence checks would silently accept unrelated objects.
+// ---------------------------------------------------------------------------
+
+fn class_name(item: &Bound<'_, PyAny>) -> PyResult<String> {
+    item.get_type().getattr("__name__")?.extract::<String>()
+}
+
+fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
+    let cls = class_name(item)?;
+    let dp_rank: u32 = item.getattr("dp_rank")?.extract()?;
+    match cls.as_str() {
+        "ZmqSource" => Ok(RsKvEventSource::Zmq {
+            endpoint: item.getattr("endpoint")?.extract()?,
+            topic: item.getattr("topic")?.extract()?,
+            dp_rank,
+        }),
+        "PushSource" => {
+            // Capture the Python callable as a `PyObject` and wrap in a
+            // Rust closure. The closure runs once when Worker has the
+            // publisher ready: it acquires the GIL, wraps the Rust
+            // `Arc<KvEventPublisher>` as the existing Python pyclass, and
+            // invokes the engine-supplied callback. The callback is
+            // declared sync on the Python side (see `PushSource.on_ready`
+            // in `dynamo.common.backend.publisher`), so no asyncio
+            // round-trip is needed here.
+            let on_ready_obj: PyObject = item.getattr("on_ready")?.into();
+            let on_ready: OnPublisherReady = Box::new(move |publisher| {
+                Python::with_gil(|py| -> PyResult<()> {
+                    let py_pub = Py::new(py, PyKvEventPublisher::from_arc(publisher, dp_rank))?;
+                    on_ready_obj.call1(py, (py_pub,))?;
+                    Ok(())
+                })
+                .map_err(py_err_to_dynamo)
+            });
+            Ok(RsKvEventSource::Push { on_ready, dp_rank })
+        }
+        other => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "kv_event_sources() returned unknown descriptor type {other:?}; \
+             expected ZmqSource or PushSource"
+        ))),
+    }
+}
+
+fn depythonize_metrics_source(item: &Bound<'_, PyAny>) -> PyResult<RsMetricsSource> {
+    let cls = class_name(item)?;
+    if cls != "SnapshotSource" {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "metrics_sources() returned unknown descriptor type {cls:?}; \
+             expected SnapshotSource"
+        )));
+    }
+    let dp_rank: u32 = item.getattr("dp_rank")?.extract()?;
+    let snapshot_obj: PyObject = item.getattr("snapshot")?.into();
+    // Worker invokes this on a fixed interval under the GIL — keep it cheap.
+    // Each failure mode warns once per source then drops subsequent ticks.
+    let warned_call_failed = AtomicBool::new(false);
+    let warned_missing_field = AtomicBool::new(false);
+    let snapshot: SnapshotFn = Arc::new(move || -> Option<RsMetrics> {
+        Python::with_gil(|py| -> Option<RsMetrics> {
+            let result = match snapshot_obj.call0(py) {
+                Ok(r) => r,
+                Err(e) => {
+                    if !warned_call_failed.swap(true, Ordering::Relaxed) {
+                        tracing::warn!(dp_rank, error = %e, "snapshot fn raised; \
+                            dropping metric ticks until the engine recovers");
+                    }
+                    return None;
+                }
+            };
+            let bound = result.bind(py);
+            if bound.is_none() {
+                return None;
+            }
+            let kv_used_blocks: Option<u64> = match bound.getattr("kv_used_blocks") {
+                Ok(v) => v.extract().ok(),
+                Err(e) => {
+                    if !warned_missing_field.swap(true, Ordering::Relaxed) {
+                        tracing::warn!(dp_rank, error = %e,
+                            "snapshot result missing kv_used_blocks field");
+                    }
+                    return None;
+                }
+            };
+            Some(RsMetrics { kv_used_blocks })
+        })
+    });
+    Ok(RsMetricsSource { snapshot, dp_rank })
 }
 
 // ---------------------------------------------------------------------------

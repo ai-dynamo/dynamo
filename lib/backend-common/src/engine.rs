@@ -19,6 +19,7 @@ use tokio::sync::watch;
 
 use crate::error::DynamoError;
 
+pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
 pub use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 pub use dynamo_llm::protocols::common::preprocessor::{
     BootstrapInfo, PrefillResult, PreprocessedRequest,
@@ -105,6 +106,15 @@ pub struct EngineConfig {
     pub max_num_seqs: Option<u64>,
     /// Maximum tokens the engine will process in a single batched step.
     pub max_num_batched_tokens: Option<u64>,
+    /// Number of data-parallel ranks this worker hosts. Defaults to 1.
+    /// The router uses this to enumerate per-rank load when scoring.
+    pub data_parallel_size: Option<u32>,
+    /// Global index of the first DP rank this worker hosts. Defaults to 0.
+    /// Non-zero only under multi-worker DP layouts where each worker owns a
+    /// sub-range (e.g. vLLM hybrid/external LB, SGLang DP-attention across
+    /// multiple nodes). The router enumerates ranks
+    /// `[data_parallel_start_rank, data_parallel_start_rank + data_parallel_size)`.
+    pub data_parallel_start_rank: Option<u32>,
     /// Bootstrap host this prefill worker advertises to decode peers.
     ///
     /// Only meaningful for backends with a Dynamo-level host/port
@@ -244,6 +254,69 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// successful first call must return `Ok(())` without re-entering
     /// teardown (NCCL groups and similar fail noisily on double-free).
     async fn cleanup(&self) -> Result<(), DynamoError>;
+
+    /// KV event sources advertised by this engine, one per dp_rank.
+    /// Empty by default (engine opts out of KV-aware routing).
+    async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+        Ok(Vec::new())
+    }
+
+    /// Metrics snapshot sources, one per dp_rank. Empty by default.
+    async fn metrics_sources(&self) -> Result<Vec<MetricsSource>, DynamoError> {
+        Ok(Vec::new())
+    }
+}
+
+/// Invoked once with a freshly-built publisher; engine drives `publish`
+/// from its own thread thereafter.
+pub type OnPublisherReady =
+    Box<dyn FnOnce(Arc<KvEventPublisher>) -> Result<(), DynamoError> + Send + 'static>;
+
+/// Worker reads this on a fixed interval. MUST be a cheap member-field read.
+pub type SnapshotFn = Arc<dyn Fn() -> Option<Metrics> + Send + Sync>;
+
+/// KV event source descriptor. Two flavors: subscribe to an engine-provided
+/// ZMQ PUB, or hand a publisher to the engine and let it drive `publish`
+/// from its own thread (for engines whose event API blocks the caller).
+pub enum KvEventSource {
+    Zmq {
+        endpoint: String,
+        topic: String,
+        dp_rank: u32,
+    },
+    Push {
+        on_ready: OnPublisherReady,
+        dp_rank: u32,
+    },
+}
+
+impl KvEventSource {
+    /// Data-parallel rank this source publishes for.
+    pub fn dp_rank(&self) -> u32 {
+        match self {
+            KvEventSource::Zmq { dp_rank, .. } | KvEventSource::Push { dp_rank, .. } => *dp_rank,
+        }
+    }
+}
+
+/// One metrics-snapshot source per data-parallel rank.
+pub struct MetricsSource {
+    /// Worker polls this on a fixed interval. MUST be a cheap member-field
+    /// read — engine-internal calls land in the 10s of ms and stall the
+    /// publish loop. Conformance kit enforces a 1 ms ceiling.
+    pub snapshot: SnapshotFn,
+    pub dp_rank: u32,
+}
+
+/// Worker-level metrics snapshot consumed by the KV router.
+///
+/// `kv_used_blocks` is the primary load signal the router scores against.
+/// `Option` because the engine may not have a snapshot yet on the first few
+/// ticks after `start()`; `Worker` skips the publish call in that case.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Metrics {
+    /// Number of KV blocks currently occupied across all in-flight requests.
+    pub kv_used_blocks: Option<u64>,
 }
 
 /// Non-terminal chunk constructor. Terminal chunks come from upstream

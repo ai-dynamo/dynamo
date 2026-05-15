@@ -276,3 +276,29 @@ def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
     ]
     assert finish_reasons, "Expected at least one finish_reason"
     assert set(finish_reasons) <= {"stop", "tool_calls"}
+
+
+@pytest.mark.timeout(120)
+def test_vllm_chat_processor_forwards_max_thinking_tokens(
+    start_services: tuple[int, Path],
+) -> None:
+    """nvext.max_thinking_tokens reaches the worker as
+    stop_conditions.max_thinking_tokens after the Python frontend processes it."""
+    frontend_port, capture_path = start_services
+
+    payload = {
+        "model": TEST_MODEL,
+        "messages": [{"role": "user", "content": "Solve: 1+1."}],
+        "max_tokens": 32,
+        "nvext": {"max_thinking_tokens": 16},
+    }
+
+    response = requests.post(
+        f"http://localhost:{frontend_port}/v1/chat/completions",
+        json=payload,
+        timeout=60,
+    )
+    response.raise_for_status()
+    captured = _read_captured_request(capture_path)
+
+    assert captured["stop_conditions"]["max_thinking_tokens"] == 16
