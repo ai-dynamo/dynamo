@@ -85,8 +85,10 @@ repos:
       pass_filenames: false
       additional_dependencies:
         - pytest
+        - pytest-asyncio
         - tomli
         - pydantic
         - filelock
         - pyyaml
         - prometheus_client>=0.23.1
+        - openai

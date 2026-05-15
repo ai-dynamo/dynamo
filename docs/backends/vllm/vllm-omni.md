@@ -255,7 +255,7 @@ curl -X POST http://localhost:8000/v1/audio/speech \
 
 ### Parameters
 
-The `/v1/audio/speech` endpoint follows the [vLLM-Omni](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/examples/online_serving/qwen3_tts/) API format. All TTS-specific parameters are top-level fields:
+The `/v1/audio/speech` endpoint follows the [vLLM-Omni](https://docs.vllm.ai/projects/vllm-omni/en/latest/) API format. All TTS-specific parameters are top-level fields:
 
 | Field | Description | Default |
 |---|---|---|
@@ -375,8 +375,6 @@ sequenceDiagram
 GLM-Image is a 2-stage text-to-image model with an AR stage (generates prior token IDs) and a DiT stage (diffusion denoising + VAE decode). The built-in vLLM-Omni stage config already assigns each stage to a separate GPU.
 
 > **Experimental:** GLM-Image support is experimental; generation may fail or produce incorrect/garbled outputs for some prompts and sizes.
->
-> **Known issue:** GLM-Image requires `transformers>=5.0` to recognize the `glm_image` architecture. Older versions fail at model config creation with `The checkpoint you are trying to load has model type 'glm_image' but Transformers does not recognize this architecture`.
 
 ```bash
 bash examples/backends/vllm/launch/disagg_omni_glm_image.sh

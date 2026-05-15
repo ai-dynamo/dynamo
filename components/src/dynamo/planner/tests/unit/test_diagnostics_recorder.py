@@ -49,12 +49,12 @@ pytestmark = [
 def _make_config(tmp_dir: str, **overrides) -> PlannerConfig:
     defaults = dict(
         mode="disagg",
-        ttft=500.0,
-        itl=50.0,
+        ttft_ms=500.0,
+        itl_ms=50.0,
         min_endpoint=1,
         max_gpu_budget=-1,
-        throughput_adjustment_interval=60,
-        load_adjustment_interval=5,
+        throughput_adjustment_interval_seconds=60,
+        load_adjustment_interval_seconds=5,
         enable_load_scaling=True,
         enable_throughput_scaling=True,
         load_predictor="constant",

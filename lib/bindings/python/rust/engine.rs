@@ -183,7 +183,10 @@ where
                 let py_request = pythonize(py, &request)?;
 
                 // Create context with trace information
-                let py_ctx = Py::new(py, Context::new(ctx_python.clone(), current_trace_context))?;
+                let py_ctx = Py::new(
+                    py,
+                    Context::new(ctx_python.clone(), current_trace_context, None),
+                )?;
 
                 let gen_result = if has_context {
                     // Pass context as a kwarg

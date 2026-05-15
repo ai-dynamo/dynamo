@@ -3,51 +3,59 @@
 
 """Unit tests for advisory mode and decision summary logging."""
 
-import sys
-import types
-from unittest.mock import MagicMock
-
 import pytest
 
-# ---------------------------------------------------------------
-# Stub native Rust modules so planner config can be imported
-# without building dynamo._core
-# ---------------------------------------------------------------
-_stubs = {
-    "dynamo._core": {
-        "Client": MagicMock,
-        "DistributedRuntime": MagicMock,
-        "VirtualConnectorCoordinator": MagicMock,
-    },
-    "dynamo.runtime": {
-        "DistributedRuntime": MagicMock,
-        "dynamo_worker": lambda: lambda f: f,
-    },
-    "dynamo.runtime.logging": {
-        "configure_dynamo_logging": lambda: None,
-    },
-    "dynamo.llm": {
-        "FpmEventSubscriber": MagicMock,
-        "FpmEventRelay": MagicMock,
-    },
-    "dynamo.common.forward_pass_metrics": {
-        "ForwardPassMetrics": MagicMock,
-        "ScheduledRequestMetrics": MagicMock,
-    },
-}
-for _mod_name, _attrs in _stubs.items():
-    _m = types.ModuleType(_mod_name)
-    for _k, _v in _attrs.items():
-        setattr(_m, _k, _v)
-    sys.modules.setdefault(_mod_name, _m)
-
-from dynamo.planner.config.defaults import SLAPlannerDefaults  # noqa: E402
+from dynamo.planner.config.defaults import SLAPlannerDefaults
 
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _stub_heavy_deps():
+    # Stub optional Rust/IO-heavy dynamo modules when absent so planner.config
+    # imports used below can resolve. Scoped to this module and torn down after
+    # so sibling test modules see the real modules (regression: #8244 left
+    # these stubs in sys.modules and caused later tests to skip).
+    import sys
+    import types
+    from unittest.mock import MagicMock
+
+    stubs = {
+        "dynamo._core": {
+            "Client": MagicMock,
+            "DistributedRuntime": MagicMock,
+            "VirtualConnectorCoordinator": MagicMock,
+        },
+        "dynamo.runtime": {
+            "DistributedRuntime": MagicMock,
+            "dynamo_worker": lambda: lambda f: f,
+        },
+        "dynamo.runtime.logging": {
+            "configure_dynamo_logging": lambda: None,
+        },
+        "dynamo.llm": {
+            "FpmEventSubscriber": MagicMock,
+            "FpmEventRelay": MagicMock,
+        },
+        "dynamo.common.forward_pass_metrics": {
+            "ForwardPassMetrics": MagicMock,
+            "ScheduledRequestMetrics": MagicMock,
+        },
+    }
+    mp = pytest.MonkeyPatch()
+    for name, attrs in stubs.items():
+        if name in sys.modules:
+            continue
+        mod = types.ModuleType(name)
+        for k, v in attrs.items():
+            setattr(mod, k, v)
+        mp.setitem(sys.modules, name, mod)
+    yield
+    mp.undo()
 
 
 class TestAdvisoryDefaults:

@@ -79,6 +79,7 @@ pub struct WorkloadDriver {
     sessions: Vec<SessionRuntime>,
     in_flight: FxHashMap<Uuid, InFlightTurn>,
     ready_sessions: BinaryHeap<ReadySession>,
+    max_in_flight: Option<usize>,
 }
 
 impl WorkloadDriver {
@@ -140,16 +141,52 @@ impl WorkloadDriver {
             sessions,
             in_flight: FxHashMap::default(),
             ready_sessions,
+            max_in_flight: None,
         })
     }
 
+    /// Set a global in-flight cap. `pop_ready` will clamp by the remaining cap,
+    /// and `next_ready_time_ms` returns `None` while at cap.
+    pub fn set_max_in_flight(&mut self, cap: usize) {
+        debug_assert!(
+            self.in_flight.is_empty(),
+            "set_max_in_flight called on a driver with pending work"
+        );
+        self.max_in_flight = Some(cap);
+    }
+
+    /// Failure-path companion: release a cap slot and terminate the owning session.
+    /// No-op if `on_complete` already ran. Used when a request task is cancelled
+    /// or panics before reaching `on_complete`.
+    ///
+    /// Terminating the session (marking it exhausted) prevents `run_workload` from
+    /// deadlocking: `pop_ready` skips sessions with `in_flight.is_some()`, so a
+    /// leaked session would leave `is_drained` stuck at `false` forever.
+    pub fn release_cap_slot(&mut self, request_uuid: Uuid) {
+        let Some(in_flight) = self.in_flight.remove(&request_uuid) else {
+            return;
+        };
+        let Some(session) = self.sessions.get_mut(in_flight.session_index) else {
+            return;
+        };
+        if session.in_flight == Some(request_uuid) {
+            session.in_flight = None;
+            session.next_turn_index = session.turns.len();
+            session.next_ready_at_ms = None;
+        }
+    }
+
     pub fn pop_ready(&mut self, now_ms: f64, limit: usize) -> Vec<ReadyTurn> {
-        if limit == 0 {
+        let effective_limit = match self.max_in_flight {
+            Some(cap) => limit.min(cap.saturating_sub(self.in_flight.len())),
+            None => limit,
+        };
+        if effective_limit == 0 {
             return Vec::new();
         }
 
         let mut emitted = Vec::new();
-        while emitted.len() < limit {
+        while emitted.len() < effective_limit {
             let Some(ready_session) = self.ready_sessions.pop() else {
                 break;
             };
@@ -240,6 +277,11 @@ impl WorkloadDriver {
     }
 
     pub fn next_ready_time_ms(&mut self) -> Option<f64> {
+        if let Some(cap) = self.max_in_flight
+            && self.in_flight.len() >= cap
+        {
+            return None;
+        }
         loop {
             let ready_session = *self.ready_sessions.peek()?;
             let session = &self.sessions[ready_session.session_index];
@@ -267,5 +309,164 @@ impl WorkloadDriver {
             .iter()
             .map(|session| session.turns.len())
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::loadgen::{SessionTrace, Trace, TurnTrace};
+
+    fn two_session_trace() -> Trace {
+        Trace {
+            block_size: 1,
+            sessions: vec![
+                SessionTrace {
+                    session_id: "a".into(),
+                    first_arrival_timestamp_ms: Some(0.0),
+                    turns: vec![
+                        TurnTrace {
+                            input_length: 2,
+                            max_output_tokens: 1,
+                            hash_ids: vec![1, 2],
+                            delay_after_previous_ms: 0.0,
+                        },
+                        TurnTrace {
+                            input_length: 2,
+                            max_output_tokens: 1,
+                            hash_ids: vec![3, 4],
+                            delay_after_previous_ms: 5.0,
+                        },
+                    ],
+                },
+                SessionTrace {
+                    session_id: "b".into(),
+                    first_arrival_timestamp_ms: Some(0.0),
+                    turns: vec![TurnTrace {
+                        input_length: 2,
+                        max_output_tokens: 1,
+                        hash_ids: vec![5, 6],
+                        delay_after_previous_ms: 0.0,
+                    }],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn cap_clamps_pop_ready_when_limit_is_unbounded() {
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
+        driver.set_max_in_flight(1);
+
+        let first = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(first.len(), 1);
+        let second = driver.pop_ready(0.0, usize::MAX);
+        assert!(
+            second.is_empty(),
+            "cap should block dispatch while slot is held"
+        );
+    }
+
+    #[test]
+    fn pop_ready_admits_next_turn_after_on_complete() {
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
+        driver.set_max_in_flight(1);
+
+        let admitted = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(admitted.len(), 1);
+        let uuid = admitted[0].request_uuid;
+        driver.on_complete(uuid, 10.0).unwrap();
+
+        let next = driver.pop_ready(10.0, usize::MAX);
+        assert_eq!(next.len(), 1);
+        assert_ne!(next[0].request_uuid, uuid);
+    }
+
+    #[test]
+    fn next_ready_time_ms_returns_none_at_cap() {
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
+        driver.set_max_in_flight(1);
+
+        let admitted = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(admitted.len(), 1);
+
+        assert!(
+            driver.next_ready_time_ms().is_none(),
+            "expected None while at cap even with ready sessions queued"
+        );
+
+        driver.on_complete(admitted[0].request_uuid, 10.0).unwrap();
+        assert!(
+            driver.next_ready_time_ms().is_some(),
+            "expected readiness after a slot is freed"
+        );
+    }
+
+    #[test]
+    fn no_cap_preserves_caller_limit_behavior() {
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
+
+        let admitted = driver.pop_ready(0.0, 5);
+        assert_eq!(admitted.len(), 2, "both sessions should admit with no cap");
+        assert!(driver.next_ready_time_ms().is_none());
+    }
+
+    #[test]
+    fn release_cap_slot_is_noop_after_on_complete() {
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
+        driver.set_max_in_flight(1);
+
+        let admitted = driver.pop_ready(0.0, usize::MAX);
+        let uuid = admitted[0].request_uuid;
+        driver.on_complete(uuid, 5.0).unwrap();
+
+        driver.release_cap_slot(uuid);
+
+        let next = driver.pop_ready(5.0, usize::MAX);
+        assert_eq!(next.len(), 1);
+        assert_ne!(next[0].request_uuid, uuid);
+    }
+
+    #[test]
+    fn release_cap_slot_recovers_cap_when_on_complete_was_skipped() {
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
+        driver.set_max_in_flight(1);
+
+        let admitted = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(admitted.len(), 1);
+
+        driver.release_cap_slot(admitted[0].request_uuid);
+
+        let next = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(
+            next.len(),
+            1,
+            "cap slot should be available after release_cap_slot"
+        );
+    }
+
+    #[test]
+    fn release_cap_slot_terminates_session_so_is_drained_completes() {
+        let mut driver = WorkloadDriver::new_concurrency(two_session_trace(), 1).unwrap();
+        driver.set_max_in_flight(1);
+
+        let admitted = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(admitted.len(), 1);
+        let stuck_uuid = admitted[0].request_uuid;
+
+        driver.release_cap_slot(stuck_uuid);
+
+        let neighbor = driver.pop_ready(0.0, usize::MAX);
+        assert_eq!(
+            neighbor.len(),
+            1,
+            "other session must still be admissible after its neighbor was terminated"
+        );
+        driver.on_complete(neighbor[0].request_uuid, 1.0).unwrap();
+
+        assert!(
+            driver.is_drained(),
+            "is_drained must become true so run_workload can exit"
+        );
     }
 }

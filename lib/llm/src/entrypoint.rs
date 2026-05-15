@@ -6,7 +6,7 @@
 //! - Connect it to an Input
 
 pub mod input;
-pub use input::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
+pub use input::{PreprocessedRouting, build_preprocessed_routing};
 
 use std::future::Future;
 use std::pin::Pin;
@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
 use dynamo_runtime::{discovery::ModelCardInstanceId, pipeline::RouterMode};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     backend::ExecutionContext, discovery::LoadThresholdConfig, engines::StreamingEngine,
@@ -22,17 +23,25 @@ use crate::{
 };
 
 /// Callback type for chat engine factory (async)
+pub type PrefillRoutedEngine = dynamo_runtime::pipeline::ServiceEngine<
+    dynamo_runtime::pipeline::SingleIn<crate::protocols::common::preprocessor::PreprocessedRequest>,
+    dynamo_runtime::pipeline::ManyOut<
+        crate::types::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>,
+    >,
+>;
+
 pub type ChatEngineFactoryCallback = Arc<
     dyn Fn(
             ModelCardInstanceId,
             ModelDeploymentCard,
+            PrefillRoutedEngine,
         ) -> Pin<
             Box<dyn Future<Output = anyhow::Result<OpenAIChatCompletionsStreamingEngine>> + Send>,
         > + Send
         + Sync,
 >;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RouterConfig {
     pub router_mode: RouterMode,
     pub kv_router_config: KvRouterConfig,

@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: nemotron_deci
+model_label: Nemotron (DeciLM)
+mode: batch
+cases:
+  PARSER.batch.1:
+    description: Single tool call (happy path)
+    model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}]</TOOLCALL>'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'
+  PARSER.batch.3:
+    description: No tool call (plain text)
+    model_text: Hello, how can I help you today?
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: Hello, how can I help you today?
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'
+  PARSER.batch.9:
+    description: Empty input
+    model_text: ''
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'
+  PARSER.batch.10:
+    description: Duplicate calls (same name twice)
+    model_text: '<TOOLCALL>[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_weather", "arguments":
+      {"location": "LA"}}]</TOOLCALL>'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_deci'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_deci'

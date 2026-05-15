@@ -311,6 +311,33 @@ pub mod llm {
     /// Set to `0` or leave unset to disable the timeout (default: disabled).
     pub const DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS";
 
+    /// Enable the LoRA allocation controller (set to "true" to enable)
+    pub const DYN_LORA_ALLOCATION_ENABLED: &str = "DYN_LORA_ALLOCATION_ENABLED";
+
+    /// LoRA allocation algorithm ("hrw" or "random")
+    pub const DYN_LORA_ALLOCATION_ALGORITHM: &str = "DYN_LORA_ALLOCATION_ALGORITHM";
+
+    /// LoRA allocation controller recompute interval in seconds
+    pub const DYN_LORA_ALLOCATION_TIMESTEP_SECS: &str = "DYN_LORA_ALLOCATION_TIMESTEP_SECS";
+
+    /// Ticks to wait before scaling down a LoRA's replicas
+    pub const DYN_LORA_ALLOCATION_SCALE_DOWN_COOLDOWN_TICKS: &str =
+        "DYN_LORA_ALLOCATION_SCALE_DOWN_COOLDOWN_TICKS";
+
+    /// Multiplier for the load estimator's rate window relative to the controller timestep.
+    pub const DYN_LORA_ALLOCATION_RATE_WINDOW_MULTIPLIER: &str =
+        "DYN_LORA_ALLOCATION_RATE_WINDOW_MULTIPLIER";
+
+    /// Number of counter buckets per second in the BucketedRateCounter.
+    pub const DYN_LORA_ALLOCATION_BUCKETS_PER_SECOND: &str =
+        "DYN_LORA_ALLOCATION_BUCKETS_PER_SECOND";
+
+    /// Load predictor type: "none" (raw counts) or "ema" (exponential moving average).
+    pub const DYN_LORA_ALLOCATION_PREDICTOR_TYPE: &str = "DYN_LORA_ALLOCATION_PREDICTOR_TYPE";
+
+    /// EMA smoothing factor (alpha) for the EMA predictor. Range [0.0, 1.0].
+    pub const DYN_LORA_ALLOCATION_EMA_ALPHA: &str = "DYN_LORA_ALLOCATION_EMA_ALPHA";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -319,6 +346,80 @@ pub mod llm {
         /// Histogram bucket configuration (pattern: <PREFIX>_MIN, <PREFIX>_MAX, <PREFIX>_COUNT)
         /// Example: DYN_HISTOGRAM_TTFT_MIN, DYN_HISTOGRAM_TTFT_MAX, DYN_HISTOGRAM_TTFT_COUNT
         pub const HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
+    }
+
+    /// Audit sink configuration
+    pub mod audit {
+        /// Audit sink selection. Comma-separated values: `stderr`, `nats`,
+        /// `jsonl`, `jsonl_gz`. Setting any non-empty value enables audit
+        /// recording.
+        pub const DYN_AUDIT_SINKS: &str = "DYN_AUDIT_SINKS";
+
+        /// Force audit emission even when the request `store` flag is `false`.
+        pub const DYN_AUDIT_FORCE_LOGGING: &str = "DYN_AUDIT_FORCE_LOGGING";
+
+        /// In-process audit bus capacity.
+        pub const DYN_AUDIT_CAPACITY: &str = "DYN_AUDIT_CAPACITY";
+
+        /// NATS subject the JetStream audit sink publishes to.
+        pub const DYN_AUDIT_NATS_SUBJECT: &str = "DYN_AUDIT_NATS_SUBJECT";
+
+        /// Local output path for audit records.
+        ///
+        /// For `jsonl`, this is the literal file path. For `jsonl_gz`, this is
+        /// the segment prefix used to derive `<prefix>.<index>.jsonl.gz` files.
+        pub const DYN_AUDIT_OUTPUT_PATH: &str = "DYN_AUDIT_OUTPUT_PATH";
+
+        /// JSONL audit sink buffer size in bytes.
+        pub const DYN_AUDIT_JSONL_BUFFER_BYTES: &str = "DYN_AUDIT_JSONL_BUFFER_BYTES";
+
+        /// JSONL audit sink periodic flush interval in milliseconds.
+        pub const DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS: &str = "DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS";
+
+        /// Rotating gzip JSONL audit sink roll threshold in uncompressed bytes.
+        pub const DYN_AUDIT_JSONL_GZ_ROLL_BYTES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_BYTES";
+
+        /// Rotating gzip JSONL audit sink roll threshold in record lines.
+        pub const DYN_AUDIT_JSONL_GZ_ROLL_LINES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_LINES";
+    }
+
+    /// Agent trace configuration
+    pub mod agent_trace {
+        /// Agent trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
+        pub const DYN_AGENT_TRACE_SINKS: &str = "DYN_AGENT_TRACE_SINKS";
+
+        /// Local output path for normalized agent trace records.
+        ///
+        /// For `jsonl`, this is the literal file path. For `jsonl_gz`, this is the
+        /// segment prefix used to derive `<prefix>.<index>.jsonl.gz` files.
+        pub const DYN_AGENT_TRACE_OUTPUT_PATH: &str = "DYN_AGENT_TRACE_OUTPUT_PATH";
+
+        /// In-process trace bus capacity.
+        pub const DYN_AGENT_TRACE_CAPACITY: &str = "DYN_AGENT_TRACE_CAPACITY";
+
+        /// JSONL sink buffer size in bytes.
+        pub const DYN_AGENT_TRACE_JSONL_BUFFER_BYTES: &str = "DYN_AGENT_TRACE_JSONL_BUFFER_BYTES";
+
+        /// JSONL sink periodic flush interval in milliseconds.
+        pub const DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS: &str =
+            "DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS";
+
+        /// Rotating gzip JSONL sink roll threshold in uncompressed bytes.
+        pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES";
+
+        /// Rotating gzip JSONL sink roll threshold in record lines.
+        pub const DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES: &str = "DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES";
+
+        /// Enable replay-oriented prompt block hashes in agent request trace records.
+        pub const DYN_AGENT_TRACE_REPLAY_HASHES: &str = "DYN_AGENT_TRACE_REPLAY_HASHES";
+
+        /// Local ZMQ PULL endpoint Dynamo binds for harness tool events.
+        pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT: &str =
+            "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT";
+
+        /// Optional first-frame ZMQ topic filter for harness tool events.
+        pub const DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC: &str =
+            "DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
     }
 }
 
@@ -331,6 +432,13 @@ pub mod model {
 
         /// Model Express cache path
         pub const MODEL_EXPRESS_CACHE_PATH: &str = "MODEL_EXPRESS_CACHE_PATH";
+
+        /// Disable shared-storage mode for the Model Express client. When set,
+        /// the client streams model files from the server over gRPC instead of
+        /// relying on a shared filesystem path. Required when the Model Express
+        /// server and worker pods do not share a filesystem (e.g. RWO PVCs,
+        /// cross-namespace deployments). Set to "1" or "true" to enable.
+        pub const MODEL_EXPRESS_NO_SHARED_STORAGE: &str = "MODEL_EXPRESS_NO_SHARED_STORAGE";
     }
 
     /// Hugging Face configuration
@@ -352,6 +460,9 @@ pub mod model {
 
 /// KV Router configuration environment variables
 pub mod router {
+    /// Scale applied to adjusted prompt-side prefill load after overlap/cache-hit credits.
+    pub const DYN_ROUTER_PREFILL_LOAD_SCALE: &str = "DYN_ROUTER_PREFILL_LOAD_SCALE";
+
     /// Queue threshold fraction for prefill token capacity.
     /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
     pub const DYN_ROUTER_QUEUE_THRESHOLD: &str = "DYN_ROUTER_QUEUE_THRESHOLD";
@@ -373,7 +484,13 @@ pub mod tcp_response_stream {
 
 /// Event Plane transport environment variables
 pub mod event_plane {
-    /// Event transport selection: "zmq" or "nats". Default: "nats"
+    /// Event transport selection: "zmq" or "nats".
+    ///
+    /// When unset the default depends on the discovery backend:
+    /// - `file` / `mem` backends: defaults to `zmq` (no external services required).
+    /// - `etcd` / `kubernetes` backends: defaults to `nats`.
+    ///
+    /// Set this explicitly to override the context-aware default.
     pub const DYN_EVENT_PLANE: &str = "DYN_EVENT_PLANE";
 
     /// Event plane codec selection: "json" or "msgpack".
@@ -523,15 +640,44 @@ mod tests {
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
+            llm::DYN_LORA_ALLOCATION_ENABLED,
+            llm::DYN_LORA_ALLOCATION_ALGORITHM,
+            llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
+            llm::DYN_LORA_ALLOCATION_SCALE_DOWN_COOLDOWN_TICKS,
+            llm::DYN_LORA_ALLOCATION_RATE_WINDOW_MULTIPLIER,
+            llm::DYN_LORA_ALLOCATION_BUCKETS_PER_SECOND,
+            llm::DYN_LORA_ALLOCATION_PREDICTOR_TYPE,
+            llm::DYN_LORA_ALLOCATION_EMA_ALPHA,
             llm::metrics::DYN_METRICS_PREFIX,
+            llm::audit::DYN_AUDIT_SINKS,
+            llm::audit::DYN_AUDIT_FORCE_LOGGING,
+            llm::audit::DYN_AUDIT_CAPACITY,
+            llm::audit::DYN_AUDIT_NATS_SUBJECT,
+            llm::audit::DYN_AUDIT_OUTPUT_PATH,
+            llm::audit::DYN_AUDIT_JSONL_BUFFER_BYTES,
+            llm::audit::DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS,
+            llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_BYTES,
+            llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
+            llm::agent_trace::DYN_AGENT_TRACE_SINKS,
+            llm::agent_trace::DYN_AGENT_TRACE_OUTPUT_PATH,
+            llm::agent_trace::DYN_AGENT_TRACE_CAPACITY,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_BUFFER_BYTES,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_FLUSH_INTERVAL_MS,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_BYTES,
+            llm::agent_trace::DYN_AGENT_TRACE_JSONL_GZ_ROLL_LINES,
+            llm::agent_trace::DYN_AGENT_TRACE_REPLAY_HASHES,
+            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
+            llm::agent_trace::DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
+            model::model_express::MODEL_EXPRESS_NO_SHARED_STORAGE,
             model::huggingface::HF_TOKEN,
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,
             model::huggingface::HF_HUB_OFFLINE,
             // Router
+            router::DYN_ROUTER_PREFILL_LOAD_SCALE,
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,
             // TCP Response Stream
