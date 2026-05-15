@@ -9,6 +9,7 @@
 mod active_set;
 pub(crate) mod cleanup;
 
+pub mod conditional_prefill;
 pub mod indexer;
 pub mod protocols;
 pub mod recovery;

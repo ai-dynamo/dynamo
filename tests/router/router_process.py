@@ -38,6 +38,11 @@ class FrontendRouterProcess(ManagedProcess):
         conditional_prefill_max_new_tokens: int | None = None,
         conditional_prefill_policy: str | None = None,
         conditional_prefill_transfer_cost_blocks: int | None = None,
+        conditional_prefill_joint_sigmoid_load_threshold: float | None = None,
+        conditional_prefill_joint_sigmoid_load_scale: float | None = None,
+        conditional_prefill_joint_sigmoid_isl_threshold: float | None = None,
+        conditional_prefill_joint_sigmoid_isl_scale: float | None = None,
+        conditional_prefill_joint_sigmoid_bypass_threshold: float | None = None,
     ):
         command = [
             sys.executable,
@@ -106,6 +111,46 @@ class FrontendRouterProcess(ManagedProcess):
                 [
                     "--router-conditional-prefill-transfer-cost-blocks",
                     str(conditional_prefill_transfer_cost_blocks),
+                ]
+            )
+
+        if conditional_prefill_joint_sigmoid_load_threshold is not None:
+            command.extend(
+                [
+                    "--router-conditional-prefill-joint-sigmoid-load-threshold",
+                    str(conditional_prefill_joint_sigmoid_load_threshold),
+                ]
+            )
+
+        if conditional_prefill_joint_sigmoid_load_scale is not None:
+            command.extend(
+                [
+                    "--router-conditional-prefill-joint-sigmoid-load-scale",
+                    str(conditional_prefill_joint_sigmoid_load_scale),
+                ]
+            )
+
+        if conditional_prefill_joint_sigmoid_isl_threshold is not None:
+            command.extend(
+                [
+                    "--router-conditional-prefill-joint-sigmoid-isl-threshold",
+                    str(conditional_prefill_joint_sigmoid_isl_threshold),
+                ]
+            )
+
+        if conditional_prefill_joint_sigmoid_isl_scale is not None:
+            command.extend(
+                [
+                    "--router-conditional-prefill-joint-sigmoid-isl-scale",
+                    str(conditional_prefill_joint_sigmoid_isl_scale),
+                ]
+            )
+
+        if conditional_prefill_joint_sigmoid_bypass_threshold is not None:
+            command.extend(
+                [
+                    "--router-conditional-prefill-joint-sigmoid-bypass-threshold",
+                    str(conditional_prefill_joint_sigmoid_bypass_threshold),
                 ]
             )
 

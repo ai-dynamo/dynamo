@@ -291,6 +291,51 @@ pub struct KvRouterConfig {
     /// once per-backend bandwidth calibration lands.
     #[serde(default)]
     pub conditional_prefill_transfer_cost_blocks: usize,
+
+    /// JointSigmoid policy: center of the prefill-load sigmoid (in blocks).
+    /// Higher → harder to activate the load axis (favors disagg by default).
+    #[serde(default = "default_joint_sigmoid_load_threshold")]
+    pub conditional_prefill_joint_sigmoid_load_threshold: f64,
+
+    /// JointSigmoid policy: transition width of the prefill-load sigmoid
+    /// (in blocks). Smaller = sharper threshold. Must be > 0.
+    #[serde(default = "default_joint_sigmoid_load_scale")]
+    pub conditional_prefill_joint_sigmoid_load_scale: f64,
+
+    /// JointSigmoid policy: center of the effective-ISL sigmoid (in tokens).
+    /// Higher → easier to activate the ISL axis (more prompts count as "small").
+    #[serde(default = "default_joint_sigmoid_isl_threshold")]
+    pub conditional_prefill_joint_sigmoid_isl_threshold: f64,
+
+    /// JointSigmoid policy: transition width of the ISL sigmoid (in tokens).
+    /// Must be > 0.
+    #[serde(default = "default_joint_sigmoid_isl_scale")]
+    pub conditional_prefill_joint_sigmoid_isl_scale: f64,
+
+    /// JointSigmoid policy: final score (∈ [0, 1]) must exceed this for bypass
+    /// to fire. Typically 0.5.
+    #[serde(default = "default_joint_sigmoid_bypass_threshold")]
+    pub conditional_prefill_joint_sigmoid_bypass_threshold: f64,
+}
+
+fn default_joint_sigmoid_load_threshold() -> f64 {
+    100.0
+}
+
+fn default_joint_sigmoid_load_scale() -> f64 {
+    50.0
+}
+
+fn default_joint_sigmoid_isl_threshold() -> f64 {
+    1000.0
+}
+
+fn default_joint_sigmoid_isl_scale() -> f64 {
+    500.0
+}
+
+fn default_joint_sigmoid_bypass_threshold() -> f64 {
+    0.5
 }
 
 /// Identifies which `ConditionalPrefillPolicy` to instantiate.
@@ -301,9 +346,14 @@ pub enum ConditionalPrefillPolicyKind {
     #[serde(rename = "token_cap")]
     TokenCap,
     /// Bypass when LHS < RHS using the selector cost equation. See
-    /// `lib/llm/src/kv_router/prefill_router/types.rs` for the formula.
+    /// `lib/kv-router/src/conditional_prefill.rs` for the formula.
     #[serde(rename = "cost")]
     CostEquation,
+    /// Bypass when the product of two sigmoids (one over prefill load, one
+    /// over negated effective-ISL) exceeds a threshold. See
+    /// `lib/kv-router/src/conditional_prefill.rs::JointSigmoidConditionalPrefillPolicy`.
+    #[serde(rename = "joint_sigmoid")]
+    JointSigmoid,
 }
 
 impl ConditionalPrefillPolicyKind {
@@ -311,6 +361,7 @@ impl ConditionalPrefillPolicyKind {
         match self {
             ConditionalPrefillPolicyKind::TokenCap => "token_cap",
             ConditionalPrefillPolicyKind::CostEquation => "cost",
+            ConditionalPrefillPolicyKind::JointSigmoid => "joint_sigmoid",
         }
     }
 
@@ -318,6 +369,7 @@ impl ConditionalPrefillPolicyKind {
         match s {
             "token_cap" => Some(ConditionalPrefillPolicyKind::TokenCap),
             "cost" => Some(ConditionalPrefillPolicyKind::CostEquation),
+            "joint_sigmoid" => Some(ConditionalPrefillPolicyKind::JointSigmoid),
             _ => None,
         }
     }
@@ -353,6 +405,13 @@ impl Default for KvRouterConfig {
             conditional_prefill_max_new_tokens: DEFAULT_CONDITIONAL_PREFILL_MAX_NEW_TOKENS,
             conditional_prefill_policy: ConditionalPrefillPolicyKind::default(),
             conditional_prefill_transfer_cost_blocks: 0,
+            conditional_prefill_joint_sigmoid_load_threshold:
+                default_joint_sigmoid_load_threshold(),
+            conditional_prefill_joint_sigmoid_load_scale: default_joint_sigmoid_load_scale(),
+            conditional_prefill_joint_sigmoid_isl_threshold: default_joint_sigmoid_isl_threshold(),
+            conditional_prefill_joint_sigmoid_isl_scale: default_joint_sigmoid_isl_scale(),
+            conditional_prefill_joint_sigmoid_bypass_threshold:
+                default_joint_sigmoid_bypass_threshold(),
         }
     }
 }

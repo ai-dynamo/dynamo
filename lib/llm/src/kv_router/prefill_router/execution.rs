@@ -98,7 +98,6 @@ impl PrefillRouter {
         let overlap_blocks = details.cache_hit.rounded_overlap_blocks();
 
         let block_size = decode_router.block_size() as usize;
-        let overlap_tokens = overlap_blocks as usize * block_size;
         let prompt_tokens = routing_token_ids.len();
 
         // Cost-equation RHS terms: only computed when the policy asks for them.
@@ -111,15 +110,15 @@ impl PrefillRouter {
         // shifted. We don't model that drift here. In steady state the
         // distribution is roughly stable, and both LHS and RHS share the same
         // snapshot bias, so the relative comparison stays meaningful.
-        let (prefill_min_logit_full, decode_pool_min_load_blocks) = if self
-            .conditional_prefill_policy
-            .needs_cost_terms()
-        {
-            let prefill = self
-                .query_prefill_min_logit_full(
+        let (
+            prefill_chosen_overlap_blocks,
+            prefill_chosen_load_blocks,
+            decode_pool_min_load_blocks,
+        ) = if self.conditional_prefill_policy.needs_cost_terms() {
+            let (overlap, load) = self
+                .query_prefill_chosen_components(
                     routing_token_ids,
                     block_mm_infos,
-                    block_size,
                     lora_name.clone(),
                     priority_jump,
                     expected_output_tokens,
@@ -138,20 +137,22 @@ impl PrefillRouter {
                     allowed_worker_ids.clone(),
                 )
                 .await;
-            (prefill, decode_pool_min)
+            (overlap, load, decode_pool_min)
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         let input = ConditionalPrefillDecisionInput {
             prompt_tokens,
-            overlap_tokens,
             block_size,
-            chosen_decode_blocks: details.chosen_worker_decode_blocks,
-            prefill_min_logit_full,
+            decode_chosen_overlap_blocks: overlap_blocks,
+            decode_chosen_load_blocks: details.chosen_worker_decode_blocks,
+            prefill_chosen_overlap_blocks,
+            prefill_chosen_load_blocks,
             decode_pool_min_load_blocks,
         };
         let net_new_tokens = input.net_new_tokens();
+        let overlap_tokens = (overlap_blocks as usize) * block_size;
 
         if self
             .conditional_prefill_policy
@@ -170,35 +171,38 @@ impl PrefillRouter {
             dp_rank = worker.dp_rank,
             net_new_tokens,
             overlap_tokens,
-            chosen_decode_blocks = ?details.chosen_worker_decode_blocks,
-            prefill_min_logit_full = ?prefill_min_logit_full,
+            decode_chosen_load_blocks = ?details.chosen_worker_decode_blocks,
+            prefill_chosen_overlap_blocks = ?prefill_chosen_overlap_blocks,
+            prefill_chosen_load_blocks = ?prefill_chosen_load_blocks,
             decode_pool_min_load_blocks = ?decode_pool_min_load_blocks,
             "Conditional prefill policy declined to bypass"
         );
         Ok(None)
     }
 
-    /// Peek-query the prefill router for the best prefill worker and reconstruct
-    /// its `logit_full = potential_prefill_block(p) + decode_block(p)`. Returns
-    /// `None` if the prefill router isn't KV-mode, isn't activated, or the call
-    /// fails — the cost policy treats `None` as "term unavailable, don't bypass."
+    /// Peek-query the prefill router for the cost-equation-chosen prefill
+    /// worker and return the raw `(overlap_blocks, load_blocks)` components.
+    /// Returns `(None, None)` if the prefill router isn't KV-mode, isn't
+    /// activated, or the call fails. Policies that need the combined logit
+    /// can derive it via `ConditionalPrefillDecisionInput::prefill_min_logit_full()`.
     #[allow(clippy::too_many_arguments)]
-    async fn query_prefill_min_logit_full(
+    async fn query_prefill_chosen_components(
         &self,
         token_ids: &[u32],
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
-        block_size: usize,
         lora_name: Option<String>,
         priority_jump: f64,
         expected_output_tokens: Option<u32>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
-    ) -> Option<f64> {
-        let inner = self.prefill_router.get()?;
+    ) -> (Option<u32>, Option<usize>) {
+        let Some(inner) = self.prefill_router.get() else {
+            return (None, None);
+        };
         let kv = match inner {
             InnerPrefillRouter::KvRouter(r) => r,
-            InnerPrefillRouter::SimpleRouter(_) => return None,
+            InnerPrefillRouter::SimpleRouter(_) => return (None, None),
         };
-        let details = kv
+        let Ok(details) = kv
             .chooser
             .find_best_match_details(
                 None,
@@ -213,13 +217,12 @@ impl PrefillRouter {
                 allowed_worker_ids,
             )
             .await
-            .ok()?;
-        let decode_blocks = details.chosen_worker_decode_blocks? as f64;
-        let block_size_f = block_size.max(1) as f64;
-        let overlap_blocks = details.cache_hit.rounded_overlap_blocks() as f64;
-        let prompt_blocks = (token_ids.len() as f64) / block_size_f;
-        let potential_prefill_block = (prompt_blocks - overlap_blocks).max(0.0);
-        Some(potential_prefill_block + decode_blocks)
+        else {
+            return (None, None);
+        };
+        let overlap = Some(details.cache_hit.rounded_overlap_blocks());
+        let load = details.chosen_worker_decode_blocks;
+        (overlap, load)
     }
 
     /// Peek-query the decode router with `overlap_score_weight = 0` to find

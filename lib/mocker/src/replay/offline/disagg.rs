@@ -4,7 +4,10 @@
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use anyhow::{Result, anyhow, bail};
-use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::conditional_prefill::{
+    ConditionalPrefillDecisionInput, ConditionalPrefillPolicy, make_conditional_prefill_policy,
+};
+use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::RouterEvent;
 use uuid::Uuid;
 
@@ -70,6 +73,10 @@ pub(in crate::replay) struct DisaggRuntime {
     decode_engine: EngineComponent,
     prefill_router: Option<OfflineReplayRouter>,
     decode_router: Option<OfflineReplayRouter>,
+    /// Conditional-prefill bypass policy. When `is_enabled()` returns false
+    /// (default), the probe in `on_external_arrival` is skipped and the
+    /// pipeline runs as a hardcoded prefill→decode flow.
+    conditional_prefill_policy: Box<dyn ConditionalPrefillPolicy>,
     requests: HashMap<Uuid, DisaggRequestState>,
     collector: TraceCollector,
     events: BinaryHeap<SimulationEvent>,
@@ -128,6 +135,8 @@ impl DisaggRuntime {
         router_mode: ReplayRouterMode,
     ) -> Result<Self> {
         let progress = ReplayProgress::new(admission.total_requests(), "offline disagg replay");
+        let conditional_prefill_policy =
+            make_conditional_prefill_policy(router_config.as_ref());
         let (prefill_router, decode_router) = match router_mode {
             ReplayRouterMode::RoundRobin => (None, None),
             ReplayRouterMode::KvRouter => {
@@ -192,6 +201,7 @@ impl DisaggRuntime {
             decode_engine,
             prefill_router,
             decode_router,
+            conditional_prefill_policy,
             requests: HashMap::new(),
             collector: TraceCollector::default(),
             events: BinaryHeap::new(),
@@ -397,6 +407,24 @@ impl DisaggRuntime {
             self.dispatch_prefill(uuid, worker_idx)?;
             return Ok(uuid);
         }
+
+        // Conditional-prefill probe: ask the policy whether to bypass remote
+        // prefill and route the request directly to a decode worker. Active
+        // only when `conditional_prefill_enabled=true` in the router config.
+        if self.conditional_prefill_policy.is_enabled()
+            && self.decode_router.is_some()
+            && let Some(bypass_worker_idx) =
+                self.try_conditional_prefill_bypass(&queued_request, &replay_hashes)?
+        {
+            self.handle_conditional_prefill_bypass(
+                uuid,
+                bypass_worker_idx,
+                &queued_request,
+                replay_hashes,
+            )?;
+            return Ok(uuid);
+        }
+
         let admissions = self
             .prefill_router
             .as_mut()
@@ -406,6 +434,144 @@ impl DisaggRuntime {
         self.record_router_pending();
         self.dispatch_prefill_admissions(admissions)?;
         Ok(uuid)
+    }
+
+    /// Run the conditional-prefill probe. Peeks the decode router (and, for
+    /// the cost policy, also the prefill router + a load-only decode peek)
+    /// without mutating state, builds the policy input, and asks the policy
+    /// whether to bypass remote prefill.
+    ///
+    /// Returns `Some(decode_worker_idx)` if the policy votes to bypass, in
+    /// which case the request should be routed directly to that decode worker.
+    /// Returns `Ok(None)` otherwise (fall through to the standard prefill →
+    /// decode flow).
+    ///
+    /// Override semantics differ from the live system because the offline
+    /// decode router bakes in `overlap_score_weight=0.0` as its baseline
+    /// (see `derive_decode_router_config`). The LHS peek therefore needs an
+    /// explicit `Some(1.0)` override to recover the agg-equation behavior
+    /// that the live probe gets implicitly from the decode router's `1.0`
+    /// default.
+    fn try_conditional_prefill_bypass(
+        &mut self,
+        request: &DirectRequest,
+        replay_hashes: &Option<ReplayRequestHashes>,
+    ) -> Result<Option<usize>> {
+        let block_size = self
+            .decode_router
+            .as_ref()
+            .map(|r| r.block_size() as usize)
+            .unwrap_or(0)
+            .max(1);
+        let prompt_tokens = request.tokens.len();
+
+        // LHS peek: agg-equation against decode pool to find the hottest-cache
+        // decode worker plus its projected load.
+        let lhs_override = RouterConfigOverride {
+            overlap_score_weight: Some(1.0),
+            assume_kv_reuse: Some(true),
+            track_prefill_tokens: Some(true),
+            ..Default::default()
+        };
+        let lhs = self
+            .decode_router
+            .as_mut()
+            .expect("decode router presence checked")
+            .peek_request(
+                request,
+                replay_hashes.clone(),
+                Some(lhs_override),
+                self.now_ms,
+            )?;
+
+        let needs_cost_terms = self.conditional_prefill_policy.needs_cost_terms();
+        let (
+            prefill_chosen_overlap_blocks,
+            prefill_chosen_load_blocks,
+            decode_pool_min_load_blocks,
+        ) = if needs_cost_terms {
+            let (overlap, load) = self.peek_prefill_chosen_components(request, replay_hashes)?;
+            let decode_pool_min = self.peek_decode_pool_min_load_blocks(request, replay_hashes)?;
+            (overlap, load, decode_pool_min)
+        } else {
+            (None, None, None)
+        };
+
+        let input = ConditionalPrefillDecisionInput {
+            prompt_tokens,
+            block_size,
+            decode_chosen_overlap_blocks: lhs.overlap_blocks,
+            decode_chosen_load_blocks: lhs.chosen_decode_blocks,
+            prefill_chosen_overlap_blocks,
+            prefill_chosen_load_blocks,
+            decode_pool_min_load_blocks,
+        };
+
+        if self
+            .conditional_prefill_policy
+            .should_bypass_remote_prefill(input)
+        {
+            Ok(Some(lhs.worker_idx))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Peek the prefill router and return the raw chosen-worker
+    /// `(overlap_blocks, load_blocks)` components. Returns `(None, None)` if
+    /// the prefill router is absent or doesn't surface the load. Policies that
+    /// want the combined logit can derive it via
+    /// `ConditionalPrefillDecisionInput::prefill_min_logit_full()`.
+    fn peek_prefill_chosen_components(
+        &mut self,
+        request: &DirectRequest,
+        replay_hashes: &Option<ReplayRequestHashes>,
+    ) -> Result<(Option<u32>, Option<usize>)> {
+        let Some(prefill_router) = self.prefill_router.as_mut() else {
+            return Ok((None, None));
+        };
+        let peek =
+            prefill_router.peek_request(request, replay_hashes.clone(), None, self.now_ms)?;
+        Ok((Some(peek.overlap_blocks), peek.chosen_decode_blocks))
+    }
+
+    /// Peek the decode router with the load-only formulation (the same shape
+    /// the post-prefill decode hop uses) and return the load on the least-
+    /// loaded decode worker. Offline decode baseline is already
+    /// `overlap_score_weight=0.0`, so no override is needed.
+    fn peek_decode_pool_min_load_blocks(
+        &mut self,
+        request: &DirectRequest,
+        replay_hashes: &Option<ReplayRequestHashes>,
+    ) -> Result<Option<usize>> {
+        let Some(decode_router) = self.decode_router.as_mut() else {
+            return Ok(None);
+        };
+        let peek = decode_router.peek_request(request, replay_hashes.clone(), None, self.now_ms)?;
+        Ok(peek.chosen_decode_blocks)
+    }
+
+    /// Bypass remote prefill: pin the request to the probe-chosen decode
+    /// worker, admit through the decode router for slot tracking, and
+    /// dispatch directly to the decode engine.
+    fn handle_conditional_prefill_bypass(
+        &mut self,
+        uuid: Uuid,
+        worker_idx: usize,
+        request: &DirectRequest,
+        replay_hashes: Option<ReplayRequestHashes>,
+    ) -> Result<()> {
+        self.decode_router
+            .as_mut()
+            .expect("decode router presence checked")
+            .admit_pinned(request, replay_hashes, worker_idx, self.now_ms)?;
+        self.record_router_pending();
+        self.collector.on_conditional_prefill_bypass();
+        // dispatch_decode transitions state to RunningDecode without
+        // requiring a prior QueuedDecode phase, since `start_decode` is an
+        // unconditional setter.
+        self.dispatch_decode(uuid, worker_idx)?;
+        Ok(())
     }
 
     /// Return true once both stages, both routers, and all admissions are fully drained.

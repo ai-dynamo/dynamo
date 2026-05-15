@@ -21,6 +21,11 @@ pub struct TraceRequestCounts {
     pub completed_requests: usize,
     pub total_input_tokens: usize,
     pub total_output_tokens: usize,
+    /// Number of requests that took the conditional-prefill bypass path
+    /// (skipped remote prefill, routed directly to a decode worker).
+    /// Always 0 for agg replay and for disagg replay with conditional
+    /// prefill disabled.
+    pub conditional_prefill_bypass_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +90,16 @@ impl TraceSimulationReport {
         }
         self.request_counts.total_output_tokens as f64 / self.throughput.wall_time_ms * 1000.0
     }
+
+    /// Fraction of completed requests that took the conditional-prefill
+    /// bypass path. `0.0` when bypass count is 0 or completed_requests is 0.
+    pub fn conditional_prefill_bypass_ratio(&self) -> f64 {
+        if self.request_counts.completed_requests == 0 {
+            return 0.0;
+        }
+        self.request_counts.conditional_prefill_bypass_count as f64
+            / self.request_counts.completed_requests as f64
+    }
 }
 
 impl Display for TraceSimulationReport {
@@ -131,6 +146,16 @@ impl Display for TraceSimulationReport {
             "  prefix_cache_reused_ratio: {:.6}",
             self.prefix_cache_reused_ratio
         )?;
+        writeln!(
+            f,
+            "  conditional_prefill_bypass_count: {}",
+            self.request_counts.conditional_prefill_bypass_count
+        )?;
+        writeln!(
+            f,
+            "  conditional_prefill_bypass_ratio: {:.6}",
+            self.conditional_prefill_bypass_ratio()
+        )?;
         write!(f, "  wall_time_ms: {:.6}", self.throughput.wall_time_ms)
     }
 }
@@ -140,11 +165,19 @@ impl Serialize for TraceSimulationReport {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(61))?;
+        let mut map = serializer.serialize_map(Some(63))?;
         map.serialize_entry("num_requests", &self.request_counts.num_requests)?;
         map.serialize_entry(
             "completed_requests",
             &self.request_counts.completed_requests,
+        )?;
+        map.serialize_entry(
+            "conditional_prefill_bypass_count",
+            &self.request_counts.conditional_prefill_bypass_count,
+        )?;
+        map.serialize_entry(
+            "conditional_prefill_bypass_ratio",
+            &self.conditional_prefill_bypass_ratio(),
         )?;
         map.serialize_entry(
             "total_input_tokens",
@@ -259,6 +292,9 @@ pub(crate) struct TraceRequestStatsSnapshot {
 #[derive(Debug, Default)]
 pub(crate) struct TraceCollector {
     requests: FxHashMap<Uuid, TraceRequestStats>,
+    /// Count of requests routed via conditional-prefill bypass (offline
+    /// disagg replay only). Surfaced in `TraceRequestCounts`.
+    conditional_prefill_bypass_count: usize,
 }
 
 impl TraceRequestStats {
@@ -316,6 +352,14 @@ impl TraceCollector {
         );
     }
 
+    /// Record one request as having taken the conditional-prefill bypass
+    /// path. The actual admit + token timing for the request is still
+    /// recorded via `on_admit` / `on_token`; this just tags the request
+    /// type for reporting.
+    pub(crate) fn on_conditional_prefill_bypass(&mut self) {
+        self.conditional_prefill_bypass_count += 1;
+    }
+
     pub(crate) fn on_admit(&mut self, uuid: Uuid, admit_time_ms: f64, reused_input_tokens: usize) {
         if let Some(stats) = self.requests.get_mut(&uuid) {
             stats.first_admit_ms.get_or_insert(admit_time_ms);
@@ -339,6 +383,7 @@ impl TraceCollector {
     }
 
     pub(crate) fn finish(self) -> TraceSimulationReport {
+        let conditional_prefill_bypass_count = self.conditional_prefill_bypass_count;
         let requests = self.requests;
         let request_count = requests.len();
         let mut ttfts = Vec::with_capacity(request_count);
@@ -398,6 +443,7 @@ impl TraceCollector {
                 completed_requests,
                 total_input_tokens,
                 total_output_tokens,
+                conditional_prefill_bypass_count,
             },
             throughput: TraceThroughputStats {
                 duration_ms,

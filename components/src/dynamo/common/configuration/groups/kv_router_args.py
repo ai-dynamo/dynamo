@@ -42,6 +42,11 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "conditional_prefill_max_new_tokens",
     "conditional_prefill_policy",
     "conditional_prefill_transfer_cost_blocks",
+    "conditional_prefill_joint_sigmoid_load_threshold",
+    "conditional_prefill_joint_sigmoid_load_scale",
+    "conditional_prefill_joint_sigmoid_isl_threshold",
+    "conditional_prefill_joint_sigmoid_isl_scale",
+    "conditional_prefill_joint_sigmoid_bypass_threshold",
 )
 
 
@@ -72,6 +77,11 @@ class KvRouterConfigBase(ConfigBase):
     conditional_prefill_max_new_tokens: int = 5000
     conditional_prefill_policy: str = "token_cap"
     conditional_prefill_transfer_cost_blocks: int = 0
+    conditional_prefill_joint_sigmoid_load_threshold: float = 100.0
+    conditional_prefill_joint_sigmoid_load_scale: float = 50.0
+    conditional_prefill_joint_sigmoid_isl_threshold: float = 1000.0
+    conditional_prefill_joint_sigmoid_isl_scale: float = 500.0
+    conditional_prefill_joint_sigmoid_bypass_threshold: float = 0.5
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
@@ -314,10 +324,12 @@ class KvRouterArgGroup(ArgGroup):
                 "--router-conditional-prefill-max-new-tokens. Load-agnostic. "
                 "'cost': bypass when the selector cost equation says local prefill on "
                 "decode is cheaper than remote prefill + standard decode re-pick. "
-                "Consults observed prefill/decode pool load."
+                "Consults observed prefill/decode pool load. "
+                "'joint_sigmoid': bypass when sigmoid(prefill_load - T_L) * "
+                "sigmoid(T_isl - net_new) > T_bypass. Smooth multiplicative AND-gate."
             ),
             arg_type=str,
-            choices=["token_cap", "cost"],
+            choices=["token_cap", "cost", "joint_sigmoid"],
             dest="conditional_prefill_policy",
         )
         add_argument(
@@ -333,6 +345,66 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=int,
             dest="conditional_prefill_transfer_cost_blocks",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-prefill-joint-sigmoid-load-threshold",
+            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_JOINT_SIGMOID_LOAD_THRESHOLD",
+            default=100.0,
+            help=(
+                "KV Router: joint_sigmoid policy only. Center of the prefill-load "
+                "sigmoid in blocks. Higher = harder to activate the load axis."
+            ),
+            arg_type=float,
+            dest="conditional_prefill_joint_sigmoid_load_threshold",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-prefill-joint-sigmoid-load-scale",
+            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_JOINT_SIGMOID_LOAD_SCALE",
+            default=50.0,
+            help=(
+                "KV Router: joint_sigmoid policy only. Transition width of the "
+                "prefill-load sigmoid in blocks. Smaller = sharper threshold."
+            ),
+            arg_type=float,
+            dest="conditional_prefill_joint_sigmoid_load_scale",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-prefill-joint-sigmoid-isl-threshold",
+            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_JOINT_SIGMOID_ISL_THRESHOLD",
+            default=1000.0,
+            help=(
+                "KV Router: joint_sigmoid policy only. Center of the effective-ISL "
+                "sigmoid in tokens. Higher = more prompts count as 'small'."
+            ),
+            arg_type=float,
+            dest="conditional_prefill_joint_sigmoid_isl_threshold",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-prefill-joint-sigmoid-isl-scale",
+            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_JOINT_SIGMOID_ISL_SCALE",
+            default=500.0,
+            help=(
+                "KV Router: joint_sigmoid policy only. Transition width of the "
+                "effective-ISL sigmoid in tokens."
+            ),
+            arg_type=float,
+            dest="conditional_prefill_joint_sigmoid_isl_scale",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-prefill-joint-sigmoid-bypass-threshold",
+            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_JOINT_SIGMOID_BYPASS_THRESHOLD",
+            default=0.5,
+            help=(
+                "KV Router: joint_sigmoid policy only. Final score (in [0, 1]) must "
+                "exceed this for bypass to fire."
+            ),
+            arg_type=float,
+            dest="conditional_prefill_joint_sigmoid_bypass_threshold",
         )
         add_negatable_bool_argument(
             g,

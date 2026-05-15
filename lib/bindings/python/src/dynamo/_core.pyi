@@ -1297,6 +1297,11 @@ class KvRouterConfig:
         conditional_prefill_max_new_tokens: int = 5000,
         conditional_prefill_policy: str = "token_cap",
         conditional_prefill_transfer_cost_blocks: int = 0,
+        conditional_prefill_joint_sigmoid_load_threshold: float = 100.0,
+        conditional_prefill_joint_sigmoid_load_scale: float = 50.0,
+        conditional_prefill_joint_sigmoid_isl_threshold: float = 1000.0,
+        conditional_prefill_joint_sigmoid_isl_scale: float = 500.0,
+        conditional_prefill_joint_sigmoid_bypass_threshold: float = 0.5,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1342,8 +1347,20 @@ class KvRouterConfig:
                 "token_cap": bypass when net-new prompt tokens <= conditional_prefill_max_new_tokens. Load-agnostic.
                 "cost": bypass when the selector cost equation says local prefill on decode is cheaper than
                     remote prefill + standard decode re-pick. Uses observed prefill/decode pool load.
+                "joint_sigmoid": bypass when sigmoid(prefill_load - T_L) * sigmoid(T_isl - net_new) > T_bypass.
+                    Smooth, multiplicative AND-gate over prefill loadness and effective ISL smallness.
             conditional_prefill_transfer_cost_blocks: KV transfer cost in block units, added to the cost-equation
                 RHS (default: 0). Stubbed at 0 in v1; will be modeled as transfer_constant * num_transferred_blocks.
+            conditional_prefill_joint_sigmoid_load_threshold: Center of the prefill-load sigmoid in blocks
+                (default: 100.0). joint_sigmoid policy only.
+            conditional_prefill_joint_sigmoid_load_scale: Transition width of the prefill-load sigmoid in blocks
+                (default: 50.0). Smaller = sharper. joint_sigmoid policy only.
+            conditional_prefill_joint_sigmoid_isl_threshold: Center of the effective-ISL sigmoid in tokens
+                (default: 1000.0). joint_sigmoid policy only.
+            conditional_prefill_joint_sigmoid_isl_scale: Transition width of the ISL sigmoid in tokens
+                (default: 500.0). joint_sigmoid policy only.
+            conditional_prefill_joint_sigmoid_bypass_threshold: Final score (in [0, 1]) must exceed this for
+                bypass to fire (default: 0.5). joint_sigmoid policy only.
         """
         ...
 
