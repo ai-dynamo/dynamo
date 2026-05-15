@@ -271,17 +271,14 @@ class SglangLLMEngine(LLMEngine):
         """
         # Phase 1: scheduler idle check (NIXL transfer safety, #9345)
         if self.engine is not None:
-            deadline = asyncio.get_running_loop().time() + _DRAIN_TIMEOUT_S
-            while asyncio.get_running_loop().time() < deadline:
-                try:
-                    scheduler = getattr(
-                        self.engine.tokenizer_manager, "scheduler", None
-                    )
-                    if scheduler is None:
-                        logger.debug(
-                            "SGLang scheduler not yet available; skipping drain poll"
-                        )
-                        break
+            tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
+            scheduler = getattr(tokenizer_manager, "scheduler", None)
+            if scheduler is None:
+                logger.info("SGLang scheduler unavailable; skipping scheduler drain")
+            else:
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + _DRAIN_TIMEOUT_S
+                while loop.time() < deadline:
                     if scheduler.is_idle():
                         logger.info("All in-flight SGLang requests drained")
                         break
@@ -289,15 +286,13 @@ class SglangLLMEngine(LLMEngine):
                     logger.debug(
                         "Waiting for SGLang scheduler to drain (usage=%d)", total
                     )
-                except Exception as e:
-                    logger.debug("Scheduler poll failed during drain: %s", e)
-                await asyncio.sleep(_DRAIN_POLL_INTERVAL_S)
-            else:
-                logger.warning(
-                    "SGLang scheduler drain timeout (%.1fs) reached; "
-                    "some NIXL transfers may still be in flight.",
-                    _DRAIN_TIMEOUT_S,
-                )
+                    await asyncio.sleep(_DRAIN_POLL_INTERVAL_S)
+                else:
+                    logger.warning(
+                        "SGLang scheduler drain timeout (%.1fs) reached; "
+                        "some NIXL transfers may still be in flight.",
+                        _DRAIN_TIMEOUT_S,
+                    )
         else:
             logger.info("SGLang engine not initialised; skipping scheduler drain")
 
