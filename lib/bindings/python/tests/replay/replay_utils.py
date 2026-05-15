@@ -33,6 +33,20 @@ MOONCAKE_TRACE_FIRST20 = """{"timestamp": 0, "input_length": 6755, "output_lengt
 {"timestamp": 3052, "input_length": 2007, "output_length": 354, "hash_ids": [0, 446, 447, 448]}
 """
 
+<<<<<<< HEAD
+=======
+AIC_PARITY_MODEL = "Qwen/Qwen3-32B"
+AIC_PARITY_SYSTEM = "h200_sxm"
+AIC_PARITY_VERSIONS = {
+    "vllm": "0.14.0",
+    "sglang": "0.5.6.post2",
+}
+AIC_PARITY_BACKENDS = [
+    pytest.param("vllm", id="vllm"),
+    pytest.param("sglang", id="sglang"),
+]
+
+>>>>>>> 5279417b13c12d6119cf530be0c729800e3188ff
 
 def _vllm_args_payload():
     return {
@@ -59,7 +73,7 @@ def _router_config_payload():
         "router_event_threads": 1,
         "router_queue_policy": "wspt",
         "router_temperature": 0.0,
-        "overlap_score_weight": 1.0,
+        "overlap_score_credit": 1.0,
         "use_kv_events": True,
         "durable_kv_events": False,
         "router_replica_sync": False,
@@ -70,8 +84,6 @@ def _router_config_payload():
         "router_snapshot_threshold": 1000000,
         "router_reset_states": False,
         "router_ttl_secs": 120.0,
-        "router_max_tree_size": 1048576,
-        "router_prune_target_ratio": 0.8,
         "router_enable_cache_control": False,
         "skip_initial_worker_wait": False,
         "use_remote_indexer": False,
@@ -131,6 +143,33 @@ def _write_multiturn_trace(tmp_path):
             "input_length": 64,
             "output_length": 2,
             "hash_ids": [404],
+        },
+    ]
+    trace_path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    return trace_path
+
+
+def _write_applied_compute_agentic_trace(tmp_path):
+    trace_path = tmp_path / "applied_compute_agentic_trace.jsonl"
+    records = [
+        {
+            "num_turns": 2,
+            "input_prompt_length": 64,
+            "assistant_response_length": [2, 2],
+            "tool_call_output_length": [2, 2],
+            "tool_call_latency": [0.001, 0.001],
+            "final_assistant_response_length": 2,
+        },
+        {
+            "num_turns": 1,
+            "input_prompt_length": 64,
+            "assistant_response_length": [2],
+            "tool_call_output_length": [2],
+            "tool_call_latency": [0.001],
+            "final_assistant_response_length": 2,
         },
     ]
     trace_path.write_text(

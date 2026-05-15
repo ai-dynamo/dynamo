@@ -152,6 +152,15 @@ impl RetryManager {
             }
             retries_left = 0;
         }
+
+        if preprocessed_request.sampling_options.n.unwrap_or(1) > 1 {
+            if retries_left > 0 {
+                tracing::warn!(
+                    "n>1 request: migration disabled - per-choice generation state is not transferable"
+                );
+            }
+            retries_left = 0;
+        }
         let mut slf = Self {
             context,
             request: preprocessed_request,
@@ -323,6 +332,7 @@ mod tests {
             index: None,
             disaggregated_params: None,
             completion_usage: None,
+            engine_data: None,
         })
     }
 

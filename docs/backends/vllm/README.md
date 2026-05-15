@@ -81,6 +81,14 @@ cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/agg.sh
 ```
 
+> **Running launch scripts standalone.** The `launch/*.sh` scripts expect etcd and NATS to be reachable on localhost. Bring them up first (run from the repo root, or use the absolute path shown):
+>
+> ```bash
+> docker compose -f "$DYNAMO_HOME/deploy/docker-compose.yml" up -d
+> ```
+>
+> Then run the launch script. Without these, workers register but the frontend cannot discover them and requests hang.
+
 ## Next Steps
 
 - **[Reference Guide](vllm-reference-guide.md)**: Configuration, arguments, and operational details

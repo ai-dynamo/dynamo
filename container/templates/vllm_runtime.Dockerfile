@@ -21,6 +21,7 @@ ARG CUDA_MAJOR
 {% endif %}
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
+ARG LMCACHE_REF
 ARG NIXL_REF
 ARG VLLM_OMNI_REF
 
@@ -34,7 +35,7 @@ ENV PATH=/usr/local/ucx/bin:/usr/local/bin/etcd:${PATH}
 ENV PATH=/usr/local/bin/etcd:${PATH}
 {% endif %}
 
-ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/site-packages
 ENV TORCH_LIB_DIR=${SITE_PACKAGES}/torch/lib
 
 {% if device == "xpu" %}
@@ -120,26 +121,17 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 {% endif %}
 
-# Upgrade NIXL meta package and all device variants to match our built version.
-# The nixl meta package imports device-specific packages, so all must be at the same version.
-#
-# For CUDA, Upstream vLLM v0.19.1 currently ships NIXL 0.9.0, whose wheels omit
-# libnixl_capi.so. Upgrade both CUDA wheel variants so nixl_sys stubs and the
-# runtime-selected NIXL path see the same C API capable package.
+# Upgrade the upstream vLLM runtime's NIXL wheels so nixl_sys stubs can find
+# libnixl_capi.so and the runtime-selected NIXL path uses the same package.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eu; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     NIXL_VERSION="${NIXL_REF#v}"; \
-    uv pip install \
-{% if device == "cuda" %}
-        --system \
-{% endif %}
-        --force-reinstall --no-deps \
+    uv pip uninstall --system -y nixl nixl-cu12 nixl-cu13 || true; \
+    uv pip install --system --force-reinstall --no-deps \
         "nixl==${NIXL_VERSION}" \
-        "nixl-cu12==${NIXL_VERSION}" \
-        "nixl-cu13==${NIXL_VERSION}"
+        "nixl-cu${CUDA_MAJOR}==${NIXL_VERSION}"
 
-{% if device == "cuda" %}
 # Find upstream's CUDA-versioned NIXL and libcudart libs and expose them at
 # stable paths. CUDA 12 and CUDA 13 package the runtime under different
 # site-packages directories, so resolve the actual location once at build time.
@@ -147,57 +139,53 @@ RUN set -eu; \
     NIXL_SITE_DIR="$(find "${SITE_PACKAGES}" -maxdepth 1 -type d -name ".nixl_cu${CUDA_MAJOR}.mesonpy.libs" | sort | tail -n 1)"; \
     if [ -z "${NIXL_SITE_DIR}" ]; then \
         echo "Could not find CUDA-matched NIXL libs under ${SITE_PACKAGES}" >&2; \
-        find "${SITE_PACKAGES}" -maxdepth 1 -type d -name ".nixl_cu${CUDA_MAJOR}.mesonpy.libs" >&2; \
+        find "${SITE_PACKAGES}" -maxdepth 1 -type d -name '.nixl_cu*.mesonpy.libs' >&2; \
         exit 1; \
     fi; \
     ln -sfn "${NIXL_SITE_DIR}" "${NIXL_PREFIX}"; \
     CUDA_RUNTIME_SITE_LIB="$(find "${SITE_PACKAGES}/nvidia" -maxdepth 3 -type f -name 'libcudart.so.*' | sort | tail -n 1)"; \
     test -n "${CUDA_RUNTIME_SITE_LIB}"; \
     ln -sfn "$(dirname "${CUDA_RUNTIME_SITE_LIB}")" "${CUDA_RUNTIME_LIB_DIR}"
+{% else %}
+# Non-CUDA images keep using Dynamo-built NIXL/UCX while sharing the
+# framework-free runtime path.
+COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
+{% if device == "xpu" %}
+COPY --from=wheel_builder /opt/intel/intel_nixl /opt/intel/intel_nixl
+COPY --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
+{% else %}
+COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
+{% endif %}
+RUN echo "${NIXL_LIB_DIR}" > /etc/ld.so.conf.d/nixl.conf && \
+    echo "${NIXL_PLUGIN_DIR}" >> /etc/ld.so.conf.d/nixl.conf && \
+    echo "/usr/local/ucx/lib" > /etc/ld.so.conf.d/ucx.conf && \
+    echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
+    ldconfig
 {% endif %}
 
 # Copy attribution files and wheels
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
-# Install device-specific NIXL wheels for non-CUDA devices.
-# These are custom-built in wheel_builder and required for dev builds to link against NIXL libraries.
-{% if device != "cuda" %}
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    export UV_CACHE_DIR=/root/.cache/uv && \
-    uv pip install --no-deps /opt/dynamo/wheelhouse/nixl/nixl*.whl
-{% endif %}
-
 {% if target not in ("dev", "local-dev") %}
 # Keep the upstream Python solve intact: install only Dynamo-owned wheels and
 # suppress transitive dependency resolution unless a later validation proves a
 # missing package must be added explicitly.
-
-# Install Dynamo runtime wheels and optional KVBM/GMS wheels.
-# Use --no-deps to prevent dependency conflicts (e.g., KVBM downgrading nixl).
-
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    uv pip install \
-{% if device == "cuda" %}
-        --system \
-{% endif %}
-        --no-deps \
-        /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-        /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    && if [ "${ENABLE_KVBM}" = "true" ]; then \
+    uv pip install --system --no-deps "msgspec==0.19.0" && \
+    uv pip install --system --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
+    uv pip install --system --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
+    if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -n "$KVBM_WHEEL" ]; then uv pip install \
-{% if device == "cuda" %}
-            --system \
-{% endif %}
-            --no-deps "$KVBM_WHEEL"; fi; \
-    fi{% if device == "cuda" %} && \
+        if [ -n "$KVBM_WHEEL" ]; then uv pip install --system --no-deps "$KVBM_WHEEL"; fi; \
+    fi && \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then uv pip install --system --no-deps "$GMS_WHEEL"; fi; \
-    fi{% endif %}
+    fi
 
+{% if device == "cuda" %}
 # vLLM-Omni's audio helpers shell out to SoX, and the launch script examples use
 # jq for readable curl output just like the upstream omni image does.
 RUN set -eux; \
@@ -219,17 +207,28 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
-    export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
 
-{% if device == "xpu" %}
-# Remove conflicting standard triton package for XPU and reinstall triton-xpu
-# This must be done after vLLM-Omni installation to ensure no dependencies re-install triton
-# Reinstalling triton-xpu ensures the triton namespace is properly configured
-RUN uv pip uninstall -y triton && \
-    uv pip install --force-reinstall --no-deps triton-xpu
+# The upstream CUDA 13 image currently ships an LMCache wheel linked against
+# CUDA 12. Rebuild the same stable LMCache release from source only on CUDA 13
+# so the connector matches the image's torch/CUDA stack without pulling a
+# nightly wheel or changing unrelated dependencies.
+RUN --mount=type=bind,source=./container/deps/vllm/install_lmcache.sh,target=/tmp/install_lmcache.sh \
+    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    set -eux; \
+    export UV_CACHE_DIR=/root/.cache/uv; \
+    bash /tmp/install_lmcache.sh
+{% endif %}
 {% endif %}
 
+{% if context.vllm.enable_media_ffmpeg == "true" %}
+# Copy ffmpeg libraries from wheel_builder (requires root, runs before USER dynamo)
+RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
+    mkdir -p /usr/local/lib/pkgconfig && \
+    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
+    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
 {% endif %}
 
 USER dynamo

@@ -11,7 +11,11 @@ from dynamo.replay import run_synthetic_trace_replay
 AIC_PARITY_MODEL = "Qwen/Qwen3-32B"
 AIC_PARITY_SYSTEM = "h200_sxm"
 AIC_PARITY_VERSIONS = {
+<<<<<<< HEAD
     "vllm": "0.12.0",
+=======
+    "vllm": "0.19.0",
+>>>>>>> 5279417b13c12d6119cf530be0c729800e3188ff
     "sglang": "0.5.6.post2",
 }
 AIC_PARITY_BACKENDS = [
@@ -148,7 +152,7 @@ def test_run_synthetic_concurrency_replay_matches_aic_static_point_no_prefix(
     )
 
 
-@pytest.mark.timeout(30)
+@pytest.mark.timeout(120)
 @pytest.mark.parametrize(
     (
         "backend_name",

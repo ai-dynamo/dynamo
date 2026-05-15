@@ -299,7 +299,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--aic-backend-version",
         type=str,
         default=None,
-        help="AIC backend engine version (e.g., '0.12.0' for vLLM, '0.5.6.post2' for SGLang). "
+        help="AIC backend engine version (e.g., '0.14.0' for vLLM, '0.5.6.post2' for SGLang). "
         "If not set, uses the default version for the backend.",
     )
     parser.add_argument(
@@ -523,8 +523,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--event-plane",
         type=str,
         choices=["nats", "zmq"],
-        default=os.environ.get("DYN_EVENT_PLANE", "nats"),
-        help="Determines how events are published [nats|zmq]",
+        default=os.environ.get("DYN_EVENT_PLANE"),
+        help="Determines how events are published [nats|zmq]. If unset, "
+        "auto-detected from --discovery-backend (zmq for file/mem, nats "
+        "for etcd/kubernetes).",
     )
 
     args = parser.parse_args(argv)

@@ -44,6 +44,12 @@ def logger(request):
     yield
 
 
+@pytest.fixture(autouse=True)
+def dgdr_name_env(monkeypatch):
+    """Set DGDR_NAME so _validate_dgd_service_name_lengths runs in tests."""
+    monkeypatch.setenv("DGDR_NAME", "test-dgdr")
+
+
 def _load_dgdr(yaml_path) -> DynamoGraphDeploymentRequestSpec:
     with open(yaml_path) as f:
         data = yaml.safe_load(f)
@@ -334,13 +340,13 @@ def _save_dummy_npz(output_dir: str):
 _DECODE_SVC_NAMES = {
     "sglang": "decode",
     "vllm": "VllmDecodeWorker",
-    "trtllm": "TRTLLMDecodeWorker",
+    "trtllm": "decode",
 }
 
 
 def _make_thorough_patches(backend: str = "trtllm"):
     """Build mock-patches for thorough mode, parameterised by backend."""
-    svc_name = _DECODE_SVC_NAMES.get(backend, "TRTLLMDecodeWorker")
+    svc_name = _DECODE_SVC_NAMES.get(backend, "decode")
     return [
         patch(
             "dynamo.profiler.thorough.DynamoDeploymentClient",
@@ -353,7 +359,7 @@ def _make_thorough_patches(backend: str = "trtllm"):
         ),
         patch("dynamo.profiler.thorough.get_num_request_range", return_value=[1, 4, 8]),
         patch(
-            "dynamo.profiler.thorough.get_service_name_by_type",
+            "dynamo.profiler.thorough.pick_decode_component",
             return_value=svc_name,
         ),
     ]
@@ -429,7 +435,7 @@ class TestThoroughMocked:
                 side_effect=mock_profile_decode,
             ),
             patch(
-                "dynamo.profiler.interpolation.get_service_name_by_type",
+                "dynamo.profiler.interpolation.pick_decode_component",
                 return_value="TRTLLMWorker",
             ),
         ]

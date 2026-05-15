@@ -60,7 +60,7 @@ Two environment variables loosen the defaults for non-public deployments:
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `DYN_MM_ALLOW_INTERNAL` | `0` | Set to `1` to allow `http://` and private / internal IP targets. Intended for on-prem or local-dev setups where media lives on an internal network. |
+| `DYN_MM_ALLOW_INTERNAL` | `0` | Set to `1` to allow `http://`, private / internal IPs, and explicit ports. Intended for on-prem or local-dev setups where media lives on an internal network. |
 | `DYN_MM_LOCAL_PATH` | *(empty)* | Absolute directory prefix. When set, `file://` URIs and bare paths are allowed if they resolve inside this prefix. |
 
 <Warning>

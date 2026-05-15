@@ -110,11 +110,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libclang-dev \
         libfontconfig-dev && \
     # Use system python explicitly: some runtime bases put a framework venv first on PATH.
-    /usr/bin/python3 -m pip install \
-{% if device == "cuda" or device == "xpu" %}
-        --break-system-packages \
-{% endif %}
-        --no-cache-dir yq && \
+    PIP_BREAK_SYSTEM_PACKAGES="" && \
+    if /usr/bin/python3 -m pip install --help | grep -q -- "--break-system-packages"; then \
+        PIP_BREAK_SYSTEM_PACKAGES="--break-system-packages"; \
+    fi && \
+    /usr/bin/python3 -m pip install ${PIP_BREAK_SYSTEM_PACKAGES} --no-cache-dir yq && \
     rm -rf /var/lib/apt/lists/* && \
     # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
     git lfs install

@@ -47,6 +47,10 @@ from dynamo.runtime.logging import configure_dynamo_logging
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+CURRENT_WORKER_HASH_ANNOTATION = "nvidia.com/current-worker-hash"
+CURRENT_WORKER_HASH_V2_ANNOTATION = "nvidia.com/current-worker-hash-v2"
+LEGACY_WORKER_HASH = "legacy"
+
 
 class KubernetesConnector(PlannerConnector):
     def __init__(
@@ -77,6 +81,23 @@ class KubernetesConnector(PlannerConnector):
 
         # For backwards compatibility
         self.graph_deployment_name = self.parent_dgd_name
+
+    def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
+        """Return the Dynamo namespace used by the current worker generation.
+
+        Managed DGD rolling updates run worker components in
+        ``<base_namespace>-<worker_hash>`` while non-worker components, including
+        the frontend metrics labels, stay on ``base_namespace``.  The active hash
+        is stored on the parent DGD so planners can discover it dynamically.
+        """
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        annotations = deployment.get("metadata", {}).get("annotations", {}) or {}
+        worker_hash = annotations.get(CURRENT_WORKER_HASH_ANNOTATION)
+        if not worker_hash or worker_hash == LEGACY_WORKER_HASH:
+            worker_hash = annotations.get(CURRENT_WORKER_HASH_V2_ANNOTATION)
+        if not worker_hash or worker_hash == LEGACY_WORKER_HASH:
+            return base_dynamo_namespace
+        return f"{base_dynamo_namespace}-{worker_hash}"
 
     async def add_component(
         self, sub_component_type: SubComponentType, blocking: bool = True
@@ -388,19 +409,38 @@ class KubernetesConnector(PlannerConnector):
     ) -> tuple[Optional[str], str]:
         """Return (dgd_service_name, component_name_for_filter).
 
-        Uses the DGD when available; otherwise falls back to backend defaults
-        so that stale/missing DGD state still lets us filter out LoRA cards
-        by their expected component name.
+        ``dgd_service_name`` is the DGD ``spec.services`` dict key (typically
+        PascalCase, e.g. ``"VllmPrefillWorker"``) and is used for Kubernetes
+        operations like patching replica counts.
+
+        ``component_name_for_filter`` is the component name that the Rust
+        runtime registers via ``Endpoint`` and writes into the MDC
+        ``component`` field. Source of truth, in priority order:
+
+        1. The user's ``--endpoint <ns>.<component>.<ep>`` override in the
+           worker's container args (supported by all backends --
+           see vllm/args.py:171-176, sglang/args.py:428, trtllm/args.py:137).
+        2. The backend-specific default from
+           :func:`build_worker_info_from_defaults` (e.g. ``"prefill"`` /
+           ``"backend"`` / ``"tensorrt_llm"``).
+
+        Note: the DGD services dict key (``service.name``) must NOT be used
+        here -- it is typically PascalCase (``"VllmPrefillWorker"``) and
+        would never match the lowercase value the worker writes to MDC.
         """
+        defaults = build_worker_info_from_defaults(backend, sub_component_type)
+        expected_component = defaults.component_name or ""
         try:
             deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
             service = get_service_from_sub_component_type_or_name(
                 deployment, sub_component_type
             )
-            return service.name, service.name
+            user_component = service.get_component_name_from_endpoint_arg()
+            if user_component:
+                expected_component = user_component
+            return service.name, expected_component
         except PlannerError:
-            defaults = build_worker_info_from_defaults(backend, sub_component_type)
-            return None, defaults.component_name or ""
+            return None, expected_component
 
     def get_worker_info(
         self,

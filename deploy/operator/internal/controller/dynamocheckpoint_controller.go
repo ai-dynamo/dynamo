@@ -182,6 +182,25 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService); err != nil {
+		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
+		ckpt.Status.JobName = ""
+		ckpt.Status.CreatedAt = nil
+		ckpt.Status.Message = err.Error()
+		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
+			Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
+			Status:             metav1.ConditionFalse,
+			Reason:             "GMSSnapshotDisabled",
+			Message:            err.Error(),
+			LastTransitionTime: metav1.Now(),
+		})
+		if updateErr := r.Status().Update(ctx, ckpt); updateErr != nil {
+			logger.Error(updateErr, "Failed to mark DynamoCheckpoint as failed")
+			return ctrl.Result{}, updateErr
+		}
+		return ctrl.Result{}, nil
+	}
+
 	if err := r.reconcileK8sDiscoveryResources(ctx, ckpt); err != nil {
 		logger.Error(err, "Failed to reconcile K8s discovery resources for checkpoint")
 		return ctrl.Result{}, fmt.Errorf("failed to reconcile K8s discovery resources for checkpoint: %w", err)
@@ -200,7 +219,7 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
 		if !r.RuntimeConfig.DRAEnabled {
 			return ctrl.Result{}, fmt.Errorf(
-				"GMS requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available")
+				"GMS requires DRA (Dynamic Resource Allocation), but the resource.k8s.io/v1 API is not available")
 		}
 		if len(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers) == 0 {
 			return ctrl.Result{}, fmt.Errorf("checkpoint job requires at least one container for GMS")

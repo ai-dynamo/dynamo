@@ -53,8 +53,6 @@ MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
 
 
 def setup_engine_factory(
-    runtime: DistributedRuntime,
-    router_config: RouterConfig,
     config: FrontendConfig,
     vllm_flags: Namespace,
 ) -> "EngineFactory":
@@ -64,7 +62,7 @@ def setup_engine_factory(
     """
     from .vllm_processor import EngineFactory
 
-    return EngineFactory(runtime, router_config, config, vllm_flags)
+    return EngineFactory(config, vllm_flags)
 
 
 def setup_sglang_engine_factory(
@@ -168,7 +166,8 @@ async def async_main():
     os.environ.pop("DYN_SYSTEM_PORT", None)
     config, vllm_flags, sglang_flags = parse_args()
     dump_config(config.dump_config_to, config)
-    os.environ["DYN_EVENT_PLANE"] = config.event_plane
+    if config.event_plane:
+        os.environ["DYN_EVENT_PLANE"] = config.event_plane
     if config.tokenizer_backend == "fastokens":
         os.environ["DYN_TOKENIZER"] = "fastokens"
     else:
@@ -231,12 +230,7 @@ async def async_main():
 
     os.environ[MIN_INITIAL_WORKERS_ENV] = str(config.min_initial_workers)
     router_config = RouterConfig(
-        router_mode,
-        kv_router_config,
-        active_decode_blocks_threshold=config.active_decode_blocks_threshold,
-        active_prefill_tokens_threshold=config.active_prefill_tokens_threshold,
-        active_prefill_tokens_threshold_frac=config.active_prefill_tokens_threshold_frac,
-        enforce_disagg=config.enforce_disagg,
+        router_mode, kv_router_config, **config.router_kwargs()
     )
     kwargs: dict[str, Any] = {
         "http_host": config.http_host,
@@ -286,7 +280,7 @@ async def async_main():
             vllm_flags is not None
         ), "vllm_flags is required when chat processor is vllm"
         chat_engine_factory = setup_engine_factory(
-            runtime, router_config, config, vllm_flags
+            config, vllm_flags
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
     elif config.chat_processor == "sglang":

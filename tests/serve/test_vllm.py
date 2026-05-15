@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import base64
 import dataclasses
 import logging
 import os
@@ -17,7 +16,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
+from tests.serve.conftest import MULTIMODAL_IMG_URL
 from tests.serve.lora_utils import MinioLoraConfig
 from tests.serve.multimodal_profiles.vllm import (
     VLLM_MULTIMODAL_PROFILES,
@@ -51,6 +50,7 @@ def _is_aarch64() -> bool:
     return arch in ("aarch64", "arm64")
 
 
+<<<<<<< HEAD
 def _xfail_unsupported_lmcache_container():
     return pytest.mark.xfail(
         _is_cuda13() or _is_aarch64(),
@@ -58,6 +58,14 @@ def _xfail_unsupported_lmcache_container():
             "Upstream vllm/vllm-openai containers only provide working LMCache "
             "c_ops for CUDA 12 on x86_64 today; CUDA 13 links the CUDA 12 "
             "runtime, and LMCache does not publish aarch64 wheels yet"
+=======
+def _xfail_lmcache_aarch64_container():
+    return pytest.mark.xfail(
+        _is_aarch64(),
+        reason=(
+            "LMCache does not publish aarch64 wheels yet; the CUDA 13 x86_64 "
+            "container rebuilds LMCache from source instead"
+>>>>>>> 5279417b13c12d6119cf530be0c729800e3188ff
         ),
         strict=False,
     )
@@ -93,6 +101,10 @@ vllm_configs = {
         name="aggregated",
         directory=vllm_dir,
         script_name="agg.sh",
+        # Forwarded through agg.sh -> dynamo.vllm. Required for the
+        # max_thinking_tokens payload below: vLLM only enables the thinking-
+        # budget logits processor when reasoning_config is populated.
+        script_args=["--reasoning-parser", "qwen3"],
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
@@ -100,13 +112,21 @@ vllm_configs = {
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(
-                360
-            ),  # ~8.5x observed 42.2s; bumped for GPU-parallel headroom
+                480
+            ),  # vLLM 0.20.x startup can exceed 360s on contended CI runners
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_default(),
+            chat_payload(
+                "Name one color in a short sentence.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=16,
+                extra_body={"n": 2},
+                expected_num_choices=2,
+            ),
             completion_payload_default(),
             chat_payload(
                 "Can you write me a song?",
@@ -118,6 +138,17 @@ vllm_configs = {
                     "stop": ["song"],
                     "include_stop_str_in_output": True,
                 },
+            ),
+            # Smoke: nvext.max_thinking_tokens reaches vLLM's
+            # SamplingParams.thinking_token_budget without erroring. Requires
+            # the worker to be started with `--reasoning-parser qwen3`
+            # (see script_args above).
+            chat_payload(
+                "Solve: 1+1.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=64,
+                extra_body={"nvext": {"max_thinking_tokens": 16}},
             ),
             metric_payload_default(min_num_requests=6, backend="vllm"),
         ],
@@ -131,8 +162,9 @@ vllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),
             pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
-            pytest.mark.timeout(360),
+            pytest.mark.timeout(480),
             pytest.mark.pre_merge,
+            pytest.mark.unified,
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -177,7 +209,11 @@ vllm_configs = {
         script_name="agg_lmcache.sh",
         marks=[
             pytest.mark.lmcache,
+<<<<<<< HEAD
             _xfail_unsupported_lmcache_container(),
+=======
+            _xfail_lmcache_aarch64_container(),
+>>>>>>> 5279417b13c12d6119cf530be0c729800e3188ff
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -200,7 +236,11 @@ vllm_configs = {
         script_name="agg_lmcache_multiproc.sh",
         marks=[
             pytest.mark.lmcache,
+<<<<<<< HEAD
             _xfail_unsupported_lmcache_container(),
+=======
+            _xfail_lmcache_aarch64_container(),
+>>>>>>> 5279417b13c12d6119cf530be0c729800e3188ff
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
@@ -359,6 +399,51 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    "disaggregated_same_gpu_chat_processor": VLLMConfig(
+        name="disaggregated_same_gpu_chat_processor",
+        directory=vllm_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(7.3),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_023_525_000),
+            pytest.mark.timeout(300),
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=10,
+        health_check_workers=True,
+        env={"DYN_CHAT_PROCESSOR": "vllm"},
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
+    "disaggregated_same_gpu_chat_processor_kv_router": VLLMConfig(
+        name="disaggregated_same_gpu_chat_processor_kv_router",
+        directory=vllm_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(7.3),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_023_525_000),
+            pytest.mark.timeout(300),
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=10,
+        health_check_workers=True,
+        env={
+            "DYN_CHAT_PROCESSOR": "vllm",
+            "DYN_ROUTER_MODE": "kv",
+            # Deterministic hash for KV event IDs, matches disagg_router.sh.
+            "PYTHONHASHSEED": "0",
+        },
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
     "deepep": VLLMConfig(
         name="deepep",
         directory=vllm_dir,
@@ -387,6 +472,7 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+<<<<<<< HEAD
     "multimodal_agg_frontend_decoding": VLLMConfig(
         name="multimodal_agg_frontend_decoding",
         directory=vllm_dir,
@@ -469,6 +555,8 @@ vllm_configs = {
             ),
         ],
     ),
+=======
+>>>>>>> 5279417b13c12d6119cf530be0c729800e3188ff
     "aggregated_toolcalling": VLLMConfig(
         name="aggregated_toolcalling",
         directory=vllm_dir,
@@ -606,7 +694,7 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(110),  # ~5x observed 22.3s; CI machines are slower
+            pytest.mark.timeout(180),  # vLLM 0.20.x needs more CI headroom
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -674,6 +762,7 @@ def test_serve_deployment(
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
+<<<<<<< HEAD
 @pytest.mark.vllm
 @pytest.mark.e2e
 @pytest.mark.gpu_1
@@ -801,6 +890,8 @@ def test_multimodal_b64_frontend_decoding(
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
+=======
+>>>>>>> 5279417b13c12d6119cf530be0c729800e3188ff
 # LoRA Test Directory
 lora_dir = os.path.join(vllm_dir, "launch/lora")
 
@@ -843,6 +934,7 @@ def lora_chat_payload(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.model("codelion/Qwen3-0.6B-accuracy-recovery-lora")
 @pytest.mark.profiled_vram_gib(4.0)  # actual nvidia-smi peak with kv-bytes cap
 @pytest.mark.requested_vllm_kv_cache_bytes(
     941_712_000
@@ -902,6 +994,7 @@ def test_lora_aggregated(
 @pytest.mark.e2e
 @pytest.mark.gpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.model("codelion/Qwen3-0.6B-accuracy-recovery-lora")
 @pytest.mark.timeout(600)
 @pytest.mark.pre_merge
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
