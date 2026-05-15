@@ -45,15 +45,15 @@ class PinnedCopySlot:
     """One reusable pinned host buffer and CUDA stream."""
 
     def __init__(self, size: int = PINNED_COPY_CHUNK_SIZE) -> None:
-        self.size = int(size)
-        self.view, self._raw, self.ptr = _allocate_aligned_buffer(self.size)
+        size = int(size)
+        self.view, self._raw, self.ptr = _allocate_aligned_buffer(size)
         self.stream = None
         self.busy = False
         self._registered = False
         self._closed = False
         try:
             self.stream = cuda_utils.cuda_stream_create_nonblocking()
-            cuda_utils.cuda_host_register(self.ptr, self.size)
+            cuda_utils.cuda_host_register(self.ptr, size)
             self._registered = True
         except Exception:
             try:
@@ -64,10 +64,6 @@ class PinnedCopySlot:
             raise
 
     def copy_to_device_async(self, dst_ptr: int, size: int) -> None:
-        if not isinstance(size, int) or size < 0 or size > self.size:
-            raise ValueError(
-                f"copy size {size!r} exceeds pinned buffer capacity {self.size}"
-            )
         cuda_utils.cuda_memcpy_h2d_async(dst_ptr, self.ptr, size, self.stream)
         self.busy = True
 
