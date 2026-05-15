@@ -226,7 +226,7 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_HEALTH_CHECK_PAYLOAD",
             default=None,
             help="Override the runtime health-check canary payload. Accepts a JSON "
-            "object (e.g. '{\"token_ids\": [1], \"stop_conditions\": {\"max_tokens\": 1}}') "
+            'object (e.g. \'{"token_ids": [1], "stop_conditions": {"max_tokens": 1}}\') '
             "or '@/path/to/payload.json'. Takes precedence over the engine's "
             "default health_check_payload(). Unified backend only.",
         )
