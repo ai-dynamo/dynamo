@@ -54,6 +54,7 @@ from dynamo.llm import KvEventPublisher, ModelInput
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine
+from dynamo.trtllm.request_handlers.handler_base import extract_logprobs
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
@@ -644,6 +645,15 @@ class TrtllmLLMEngine(LLMEngine):
                         "index": output_idx,
                     }
 
+                    log_probs, top_logprobs = extract_logprobs(output, tokens_so_far)
+                    if log_probs is not None:
+                        out["log_probs"] = log_probs
+                    if top_logprobs is not None:
+                        out["top_logprobs"] = top_logprobs
+                    cum_logprob = getattr(output, "cumulative_logprob", None)
+                    if cum_logprob is not None:
+                        out["cum_log_probs"] = float(cum_logprob)
+
                     if output.finish_reason:
                         out["finish_reason"] = str(output.finish_reason)
 
@@ -884,6 +894,29 @@ class TrtllmLLMEngine(LLMEngine):
                     guided_decoding.get("structural_tag")
                 ),
             )
+
+        # Map output_options.logprobs / prompt_logprobs to TRT-LLM's
+        # SamplingParams. Invalid values are warned and ignored — same
+        # behavior as the vLLM mapper.
+        output_options = request.get("output_options") or {}
+        for name in ("logprobs", "prompt_logprobs"):
+            value = output_options.get(name)
+            if value is None or value == "":
+                continue
+            try:
+                parsed = int(value)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Invalid %s value: %r (must be integer), ignoring", name, value
+                )
+                continue
+            if parsed < 0:
+                logger.warning(
+                    "Invalid %s value: %r (must be non-negative), ignoring", name, value
+                )
+                continue
+            if hasattr(sampling_params, name):
+                overrides[name] = parsed
 
         n = overrides.get("n")
         if (

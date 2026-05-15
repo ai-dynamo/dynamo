@@ -33,6 +33,7 @@ from vllm.sampling_params import (
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
+from dynamo.common.backend.logprob_wire import TopLogprob, build_chunk
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
@@ -574,6 +575,46 @@ def _request_reasoning_metadata(
             reasoning_parser_kwargs = extra_args.get("reasoning_parser_kwargs")
 
     return reasoning_ended, reasoning_parser_kwargs
+
+
+def extract_logprobs(
+    output, num_output_tokens_so_far: int, tokenizer=None
+) -> tuple[list[float] | None, list[list[dict]] | None]:
+    """Slice vLLM ``CompletionOutput.logprobs`` into Dynamo's wire shape."""
+    if output.logprobs is None:
+        return None, None
+    new_logprobs = output.logprobs[num_output_tokens_so_far:]
+    if not new_logprobs:
+        return None, None
+
+    selected: list[float] = []
+    top_per_position: list[list[TopLogprob]] = []
+    for token_idx, token_logprobs_dict in enumerate(new_logprobs):
+        if token_logprobs_dict is None:
+            continue
+        actual_token_id = output.token_ids[num_output_tokens_so_far + token_idx]
+        selected.append(float(token_logprobs_dict[actual_token_id].logprob))
+
+        entries: list[TopLogprob] = []
+        for tok_id, info in token_logprobs_dict.items():
+            token_str = getattr(info, "decoded_token", None)
+            if not token_str and tokenizer:
+                try:
+                    token_str = tokenizer.decode([tok_id])
+                except Exception:
+                    token_str = None
+            entries.append(
+                TopLogprob(
+                    rank=getattr(info, "rank", 0) or 0,
+                    token_id=tok_id,
+                    token=token_str,
+                    logprob=float(info.logprob),
+                    bytes_=list(token_str.encode("utf-8")) if token_str else None,
+                )
+            )
+        top_per_position.append(entries)
+
+    return build_chunk(selected, top_per_position)
 
 
 def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
@@ -2015,76 +2056,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _extract_logprobs(
         output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
+        """Compat shim for callers that already use the static-method
+        form. New code uses :func:`extract_logprobs` directly so the
+        unified ``LLMEngine`` path doesn't need to import this class.
         """
-        Extract logprobs from vLLM CompletionOutput for new tokens.
-
-        Args:
-            output: vLLM CompletionOutput object
-            num_output_tokens_so_far: Number of tokens already processed
-            tokenizer: Optional tokenizer for decoding token IDs when
-                       decoded_token is not populated by the engine
-
-        Returns:
-            Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
-            - log_probs: List of log probabilities for each new token
-            - top_logprobs: List of top logprobs dicts for each new token
-        """
-        if output.logprobs is None:
-            return None, None
-
-        token_ids = list(output.token_ids or [])
-        if not token_ids or num_output_tokens_so_far >= len(token_ids):
-            return None, None
-
-        # Get logprobs for new tokens only
-        new_logprobs = output.logprobs[num_output_tokens_so_far:]
-        new_token_ids = token_ids[num_output_tokens_so_far:]
-        new_logprobs = new_logprobs[: len(new_token_ids)]
-        if not new_logprobs:
-            return None, None
-
-        log_probs = []
-        top_logprobs = []
-
-        for token_idx, token_logprobs_dict in enumerate(new_logprobs):
-            if token_logprobs_dict is None:
-                continue
-
-            # Get the actual token_id that was generated at this position
-            actual_token_id = new_token_ids[token_idx]
-
-            # Extract log probability for the selected token
-            # vLLM guarantees the selected token is always in the logprobs dict
-            selected_logprob = token_logprobs_dict.get(actual_token_id)
-            if selected_logprob is None:
-                continue
-            log_probs.append(float(selected_logprob.logprob))
-
-            # Build top_logprobs list for this token position
-            token_top_logprobs = []
-            for tok_id, logprob_info in token_logprobs_dict.items():
-                token_str = getattr(logprob_info, "decoded_token", None)
-                if not token_str and tokenizer:
-                    try:
-                        token_str = tokenizer.decode([tok_id])
-                    except Exception:
-                        token_str = None
-                token_top_logprobs.append(
-                    {
-                        "rank": (
-                            logprob_info.rank if hasattr(logprob_info, "rank") else 0
-                        ),
-                        "token_id": tok_id,
-                        "token": token_str,
-                        "logprob": float(logprob_info.logprob),
-                        "bytes": (
-                            list(token_str.encode("utf-8")) if token_str else None
-                        ),
-                    }
-                )
-            top_logprobs.append(token_top_logprobs)
-
-        return log_probs if log_probs else None, top_logprobs if top_logprobs else None
+        return extract_logprobs(output, num_output_tokens_so_far, tokenizer)
 
     @staticmethod
     def _log_with_lora_context(

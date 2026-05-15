@@ -5,10 +5,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, Required, TypedDict
 
 from dynamo._core import Context
+from dynamo._core.backend import Capability  # type: ignore[import-not-found]
 
 from .publisher import KvEventSource
 
@@ -53,8 +54,12 @@ class GenerateChunk(TypedDict, total=False):
     Every chunk must include ``token_ids`` and ``index``.
     Use ``index=0`` for single-choice responses. The final chunk must
     additionally include ``finish_reason`` and ``completion_usage``.
-    Prefill terminals carry ``disaggregated_params`` for the
-    PrefillRouter to forward to the decode peer.
+    Prefill terminals carry ``disaggregated_params``.
+
+    Logprob fields are populated when the request set
+    ``output_options.logprobs`` and the engine declared the
+    ``"logprobs"`` capability. ``top_logprobs`` entries follow
+    ``{rank, token_id, token, logprob, bytes}``.
     """
 
     token_ids: Required[list[int]]
@@ -62,6 +67,9 @@ class GenerateChunk(TypedDict, total=False):
     finish_reason: str
     completion_usage: dict[str, int]
     disaggregated_params: dict[str, Any]
+    log_probs: list[float]
+    top_logprobs: list[list[dict[str, Any]]]
+    cum_log_probs: float
 
 
 @dataclass
@@ -97,6 +105,9 @@ class EngineConfig:
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
     runtime_data: Optional[dict[str, Any]] = None
+    # Forwarded-field capabilities consumed by the Rust schema gate; see
+    # lib/backend-common/src/schema.rs.
+    capabilities: set[Capability] = field(default_factory=set)
 
 
 class LLMEngine(ABC):

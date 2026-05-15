@@ -6,11 +6,23 @@ SPDX-License-Identifier: Apache-2.0
 # Dynamo Rust Backend (`dynamo-backend-common`)
 
 > **Work in progress.** The unified backend supports aggregated and
-> disaggregated (prefill/decode) inference; multimodal, LoRA, logprobs,
-> guided decoding, and engine-level metrics are still on the
+> disaggregated (prefill/decode) inference, logprobs (output + prompt)
+> and guided decoding (JSON / regex / grammar / choice / structural
+> tag); multimodal, LoRA, and engine-level metrics are still on the
 > non-unified path. The Python `Worker`
 > ([`dynamo.common.backend`](../../components/src/dynamo/common/backend/))
 > is a thin shim over this crate.
+>
+> The [schema registry](src/schema.rs) classifies every
+> `PreprocessedRequest` field as `Supported` or `Forwarded`. The
+> adapter gates `Forwarded` fields per-request: an engine declares
+> the matching [`Capability`](src/schema.rs) variant in
+> `EngineConfig` to consume the field; otherwise the worker's
+> `unsupported_field_policy` (`Reject` / `Warn` / `Ignore`,
+> operator-controlled) decides what happens.
+> Logprobs and guided decoding live entirely inside `Supported`
+> fields (`output_options.logprobs`, `sampling_options.guided_decoding`)
+> and need no per-engine capability declaration.
 
 > **Looking for a walkthrough?** Start with
 > [Writing a Rust Unified Backend](../../docs/development/rust-backend-guide.md).

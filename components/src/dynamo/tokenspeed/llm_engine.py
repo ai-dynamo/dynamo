@@ -23,6 +23,7 @@ from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
+from dynamo.common.backend.sglang_logprobs import build_logprob_kwargs, extract_logprobs
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.tokenspeed.args import parse_args
 
@@ -102,11 +103,17 @@ class TokenspeedLLMEngine(LLMEngine):
 
         _validate_single_choice_sampling(request)
         sampling_params = build_sampling_params(request, self._model_max_len)
+        # Logprob kwargs go on GenerateReqInput, not on sampling_params.
+        logprob_kwargs = build_logprob_kwargs(dict(request))
         token_ids = request.get("token_ids", [])
+        return_tokens_as_token_ids = bool(
+            (request.get("output_options") or {}).get("return_tokens_as_token_ids", False)
+        )
         obj = _generate_req_input_cls()(
             input_ids=token_ids,
             sampling_params=sampling_params,
             stream=True,
+            **logprob_kwargs,
         )
 
         request_id = context.id()
@@ -115,12 +122,24 @@ class TokenspeedLLMEngine(LLMEngine):
             self._active_rids_by_context[request_id] = [request_id]
 
         emitted_completion_tokens = 0
+        num_logprobs_so_far = 0
         try:
             async for out in self.engine.tokenizer_manager.generate_request(obj):
                 delta_out, emitted_completion_tokens = _completion_delta_output(
                     out, emitted_completion_tokens
                 )
-                yield convert_output_to_chunk(delta_out)
+                chunk = convert_output_to_chunk(delta_out)
+                meta_info = delta_out.get("meta_info", {}) or {}
+                log_probs, top_logprobs, num_logprobs_so_far = extract_logprobs(
+                    meta_info,
+                    num_logprobs_so_far,
+                    return_tokens_as_token_ids=return_tokens_as_token_ids,
+                )
+                if log_probs is not None:
+                    chunk["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    chunk["top_logprobs"] = top_logprobs
+                yield chunk
         finally:
             if request_id is not None:
                 self._active_rids_by_context.pop(request_id, None)

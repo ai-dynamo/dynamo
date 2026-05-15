@@ -2336,6 +2336,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "clap 4.6.1",
+ "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-protocols",
  "dynamo-runtime",

@@ -3,7 +3,6 @@
 
 import asyncio
 import logging
-import os
 import time
 from typing import Any, AsyncGenerator, Dict, Optional
 
@@ -14,30 +13,14 @@ from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.common.backend.sglang_logprobs import (
+    build_logprob_kwargs as _shared_build_logprob_kwargs,
+    extract_logprobs as _shared_extract_logprobs,
+)
 from dynamo.sglang._compat import filter_supported_async_generate_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
-
-# Escape hatch: set to "1" (or any truthy value) to allow top_logprobs_num >= 1.
-# Default-off because SGLang's tokenizer manager detokenizes top-k tokens
-# per-position serially (O(N) per generated token), causing severe latency
-# degradation. Flip once upstream lands batched top-logprob detokenization:
-# https://github.com/sgl-project/sglang/pull/24447
-_ALLOW_TOP_LOGPROBS_ENV = "DYN_SGL_ALLOW_TOP_LOGPROBS"
-
-_TOP_LOGPROBS_UNSUPPORTED_MSG = (
-    "Dynamo's SGLang backend does not currently support logprobs >= 1 due to "
-    "an O(N) per-position detokenization in the upstream sglang tokenizer "
-    "manager. Use logprobs=0 for chosen-token logprobs, or set "
-    "DYN_SGL_ALLOW_TOP_LOGPROBS=1 to override at your own risk. "
-    "Track the upstream fix at https://github.com/sgl-project/sglang/pull/24447."
-)
-
-
-def _top_logprobs_allowed() -> bool:
-    """Return True if the DYN_SGL_ALLOW_TOP_LOGPROBS escape hatch is enabled."""
-    return os.environ.get(_ALLOW_TOP_LOGPROBS_ENV, "").lower() not in ("", "0", "false")
 
 
 def _extract_media_urls(mm_data: Dict[str, Any], media_key: str) -> list[str] | None:
@@ -272,78 +255,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     @staticmethod
     def _build_logprob_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
-        """Build logprob kwargs for SGLang async_generate from output_options.
-
-        Maps the Dynamo output_options format (shared with vLLM/TRT-LLM) to
-        SGLang's async_generate keyword arguments:
-
-          - return_logprob (bool): enables logprob computation
-          - top_logprobs_num (int): number of top-k logprobs per token
-          - logprob_start_len (int): absolute position in the sequence where
-            logprob computation begins. SGLang defaults this to -1, which
-            means len(prompt) - 1 (i.e. output tokens only). Setting it to 0
-            computes logprobs from the start of the prompt — this is how we
-            implement prompt_logprobs. We don't expose logprob_start_len
-            directly; it's an SGLang-internal detail derived from whether the
-            user requested prompt_logprobs.
-
-        Args:
-            request: Request dict containing optional output_options.
-
-        Returns:
-            Dict of logprob-related kwargs for engine.async_generate().
-        """
-        kwargs: Dict[str, Any] = {}
-        output_options = request.get("output_options", {})
-        if not output_options:
-            return kwargs
-
-        allow_top = _top_logprobs_allowed()
-
-        def _parse(name: str, value: Any) -> Optional[int]:
-            try:
-                parsed = int(value)
-            except (ValueError, TypeError):
-                logging.warning(
-                    f"Invalid {name} value: {value} (must be integer), ignoring"
-                )
-                return None
-            if parsed < 0:
-                logging.warning(
-                    f"Invalid {name} value: {value} (must be non-negative), ignoring"
-                )
-                return None
-            if parsed >= 1 and not allow_top:
-                raise ValueError(_TOP_LOGPROBS_UNSUPPORTED_MSG)
-            return parsed
-
-        logprobs_value = output_options.get("logprobs")
-        if logprobs_value is not None:
-            parsed = _parse("logprobs", logprobs_value)
-            if parsed is not None:
-                kwargs["return_logprob"] = True
-                kwargs["top_logprobs_num"] = parsed
-
-        prompt_logprobs_value = output_options.get("prompt_logprobs")
-        if prompt_logprobs_value is not None:
-            parsed = _parse("prompt_logprobs", prompt_logprobs_value)
-            if parsed is not None:
-                kwargs["return_logprob"] = True
-                # SGLang has a single top_logprobs_num for both prompt
-                # and output tokens, so take the max of the two.
-                kwargs["top_logprobs_num"] = max(
-                    kwargs.get("top_logprobs_num", 0), parsed
-                )
-                # logprob_start_len=0 computes from prompt start;
-                # omitting it (or -1) computes output tokens only.
-                kwargs["logprob_start_len"] = 0
-
-        # Belt-and-suspenders: if return_logprob was requested and the gate is
-        # not open, pin top_logprobs_num=0 so no future code path can flip it on.
-        if kwargs.get("return_logprob") and not allow_top:
-            kwargs["top_logprobs_num"] = 0
-
-        return kwargs
+        """Compat shim — see :func:`dynamo.common.backend.sglang_logprobs.build_logprob_kwargs`."""
+        return _shared_build_logprob_kwargs(request)
 
     @staticmethod
     def _extract_logprobs(
@@ -351,66 +264,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         num_output_logprobs_so_far: int,
         return_tokens_as_token_ids: bool = False,
     ) -> tuple:
-        """Extract logprobs from SGLang meta_info for new tokens.
-
-        While Dynamo forces stream_output=True (args.py) so that output_ids
-        are disjoint per chunk, SGLang's output_token_logprobs and
-        output_top_logprobs in meta_info are always cumulative. We track an
-        offset to slice out only the new entries each chunk.
-
-        Args:
-            meta_info: SGLang response meta_info dict.
-            num_output_logprobs_so_far: Number of logprob entries already
-                processed in previous chunks.
-
-        Returns:
-            Tuple of (log_probs, top_logprobs, new_total):
-            - log_probs: List of floats (selected token logprob per position)
-            - top_logprobs: List of lists of dicts with rank/token_id/token/logprob
-            - new_total: Updated count of logprob entries processed so far
-        """
-        output_token_logprobs = meta_info.get("output_token_logprobs")
-        if not output_token_logprobs:
-            return None, None, num_output_logprobs_so_far
-
-        new_logprobs = output_token_logprobs[num_output_logprobs_so_far:]
-        if not new_logprobs:
-            return None, None, num_output_logprobs_so_far
-
-        # Extract selected-token logprobs: each entry is (logprob, token_id, text_or_None)
-        log_probs = [float(entry[0]) for entry in new_logprobs]
-
-        # Extract top logprobs if available
-        top_logprobs: list[list[dict[str, Any]]] | None = None
-        output_top = meta_info.get("output_top_logprobs")
-        if output_top:
-            new_top = output_top[num_output_logprobs_so_far:]
-            if new_top:
-                top_logprobs = []
-                for position_entries in new_top:
-                    if position_entries is None:
-                        top_logprobs.append([])
-                        continue
-                    position_list = []
-                    for rank_idx, entry in enumerate(position_entries):
-                        tok_id = entry[1]
-                        token_str = (
-                            f"token_id:{tok_id}"
-                            if return_tokens_as_token_ids
-                            else entry[2]
-                        )
-                        position_list.append(
-                            {
-                                "rank": rank_idx + 1,
-                                "token_id": tok_id,
-                                "token": token_str,
-                                "logprob": float(entry[0]),
-                            }
-                        )
-                    top_logprobs.append(position_list)
-
-        new_total = len(output_token_logprobs)
-        return log_probs, top_logprobs, new_total
+        """Compat shim — see :func:`dynamo.common.backend.sglang_logprobs.extract_logprobs`."""
+        return _shared_extract_logprobs(
+            meta_info, num_output_logprobs_so_far, return_tokens_as_token_ids
+        )
 
     async def generate(
         self, request: Dict[str, Any], context: Context

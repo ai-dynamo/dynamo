@@ -345,3 +345,38 @@ def test_worker_config_accepts_default_model_input():
     """ModelInput.Tokens is the default — engines that don't pass it must
     still construct cleanly so the Python shim's defaults are usable."""
     backend.WorkerConfig(namespace="dynamo")
+
+
+def test_engine_config_capabilities_default_and_round_trip():
+    assert backend.EngineConfig(model="m").capabilities == []
+    cfg = backend.EngineConfig(
+        model="m",
+        capabilities=[backend.Capability.PromptEmbeds, backend.Capability.ExtraArgs],
+    )
+    assert cfg.capabilities == [
+        backend.Capability.PromptEmbeds,
+        backend.Capability.ExtraArgs,
+    ]
+
+
+def test_production_defaults_are_warn_and_empty():
+    """Pin the operator-facing defaults. WorkerConfig defaults to Warn so
+    existing deployments aren't broken by a Reject rollout; EngineConfig
+    defaults to no capabilities so engines must explicitly opt in to
+    consuming Forwarded fields. A silent flip here would either start
+    breaking production traffic (Warn→Reject) or silently disable the
+    gate (Warn→Ignore)."""
+    assert (
+        backend.WorkerConfig(namespace="dynamo").unsupported_field_policy
+        == backend.UnsupportedFieldPolicy.Warn
+    )
+    assert backend.EngineConfig(model="m").capabilities == []
+
+
+def test_worker_config_rejects_non_enum_policy():
+    backend.WorkerConfig(
+        namespace="dynamo",
+        unsupported_field_policy=backend.UnsupportedFieldPolicy.Reject,
+    )
+    with pytest.raises(TypeError):
+        backend.WorkerConfig(namespace="dynamo", unsupported_field_policy="bogus")

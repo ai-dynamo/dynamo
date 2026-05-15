@@ -52,7 +52,7 @@ from dynamo.vllm.cache_info import (
 )
 from dynamo.vllm.capacity import per_rank_kv_blocks
 
-from .handlers import build_sampling_params, get_dp_range_for_worker
+from .handlers import build_sampling_params, extract_logprobs, get_dp_range_for_worker
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
@@ -332,19 +332,46 @@ class VllmLLMEngine(LLMEngine):
             for output in res.outputs:
                 output_idx = getattr(output, "index", 0) or 0
                 token_ids = list(output.token_ids or [])
-                total_output_tokens_by_index[
-                    output_idx
-                ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                previous_total = total_output_tokens_by_index.get(output_idx, 0)
+                total_output_tokens_by_index[output_idx] = previous_total + len(
+                    token_ids
+                )
                 finish_reason = getattr(output, "finish_reason", None)
                 if not token_ids and not finish_reason:
                     continue
-                prepared_outputs.append((output_idx, token_ids, finish_reason))
+                # vLLM pre-decodes top-k strings on CompletionOutput so we
+                # don't need a tokenizer here.
+                log_probs, top_logprobs = extract_logprobs(output, previous_total)
+                cum_logprob = getattr(output, "cumulative_logprob", None)
+                prepared_outputs.append(
+                    (
+                        output_idx,
+                        token_ids,
+                        finish_reason,
+                        log_probs,
+                        top_logprobs,
+                        cum_logprob,
+                    )
+                )
 
-            for output_idx, token_ids, finish_reason in prepared_outputs:
+            for (
+                output_idx,
+                token_ids,
+                finish_reason,
+                log_probs,
+                top_logprobs,
+                cum_logprob,
+            ) in prepared_outputs:
                 out: GenerateChunk = {
                     "index": output_idx,
                     "token_ids": token_ids,
                 }
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    out["top_logprobs"] = top_logprobs
+                if cum_logprob is not None:
+                    out["cum_log_probs"] = float(cum_logprob)
 
                 if finish_reason:
                     out["finish_reason"] = str(finish_reason)

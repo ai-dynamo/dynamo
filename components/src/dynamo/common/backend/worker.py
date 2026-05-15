@@ -25,6 +25,7 @@ from enum import Enum
 from typing import Optional
 
 from dynamo._core import backend as _backend
+from dynamo._core.backend import UnsupportedFieldPolicy  # type: ignore[import-not-found]
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -107,6 +108,12 @@ class WorkerConfig:
     structural_tag_mode: str = "off"
     structural_tag_scope: str = "auto"
     structural_tag_schema: str = "auto"
+    # See lib/backend-common/src/schema.rs for the policy semantics.
+    # `default_factory` because dataclasses treat the PyO3 enum class as
+    # a mutable type and reject it as a direct default.
+    unsupported_field_policy: UnsupportedFieldPolicy = field(
+        default_factory=lambda: UnsupportedFieldPolicy.Warn
+    )
 
     @classmethod
     def from_runtime_config(
@@ -229,6 +236,7 @@ class Worker:
             structural_tag_mode=self.config.structural_tag_mode,
             structural_tag_scope=self.config.structural_tag_scope,
             structural_tag_schema=self.config.structural_tag_schema,
+            unsupported_field_policy=self.config.unsupported_field_policy,
             runtime=runtime_cfg,
         )
 

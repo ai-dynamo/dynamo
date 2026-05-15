@@ -20,6 +20,7 @@ pub mod error;
 pub mod metrics;
 mod publisher;
 pub mod run;
+pub mod schema;
 pub mod snapshot_publisher;
 pub mod telemetry;
 #[cfg(any(test, feature = "testing"))]
@@ -40,5 +41,6 @@ pub use engine::{
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};
 pub use run::run;
+pub use schema::{Capability, UnsupportedFieldPolicy, check_request, list_request_fields};
 pub use snapshot_publisher::SnapshotPublisher;
 pub use worker::{RuntimeConfig, Worker, WorkerConfig};
