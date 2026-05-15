@@ -4355,7 +4355,6 @@ mod tests {
                 reasoning_content: reasoning.map(|s| s.to_string()),
             },
             finish_reason: finish,
-            stop_reason: None,
             logprobs: None,
         };
         NvCreateChatCompletionStreamResponse {
