@@ -228,20 +228,22 @@ mod tests {
     struct RecordingPublisher {
         sources: Vec<ComponentMetricsSource>,
         updates: Arc<Mutex<Vec<ComponentSnapshot>>>,
+        cleanup_time: Arc<Mutex<Option<f64>>>,
+        drain_time: Arc<Mutex<Option<f64>>>,
     }
 
     impl ComponentMetricsPublisher for RecordingPublisher {
         fn sources(&self) -> Vec<ComponentMetricsSource> {
-            self.sources
-                .iter()
-                .map(|s| ComponentMetricsSource {
-                    snapshot: s.snapshot.clone(),
-                    dp_rank: s.dp_rank,
-                })
-                .collect()
+            self.sources.clone()
         }
         fn update(&self, snapshot: &ComponentSnapshot) {
             self.updates.lock().unwrap().push(*snapshot);
+        }
+        fn set_cleanup_time(&self, seconds: f64) {
+            *self.cleanup_time.lock().unwrap() = Some(seconds);
+        }
+        fn set_drain_time(&self, seconds: f64) {
+            *self.drain_time.lock().unwrap() = Some(seconds);
         }
     }
 
@@ -271,11 +273,10 @@ mod tests {
         let router_pub = Arc::new(WorkerMetricsPublisher::new().expect("wmp::new"));
         let updates = Arc::new(Mutex::new(Vec::<ComponentSnapshot>::new()));
         let component_pub: Arc<dyn ComponentMetricsPublisher> = Arc::new(RecordingPublisher {
-            sources: vec![ComponentMetricsSource {
-                snapshot: source.snapshot.clone(),
-                dp_rank: source.dp_rank,
-            }],
+            sources: vec![source.clone()],
             updates: updates.clone(),
+            cleanup_time: Arc::new(Mutex::new(None)),
+            drain_time: Arc::new(Mutex::new(None)),
         });
 
         let pairs = vec![(router_pub.clone(), source)];
@@ -302,11 +303,10 @@ mod tests {
         let router_pub = Arc::new(WorkerMetricsPublisher::new().expect("wmp::new"));
         let updates = Arc::new(Mutex::new(Vec::<ComponentSnapshot>::new()));
         let component_pub: Arc<dyn ComponentMetricsPublisher> = Arc::new(RecordingPublisher {
-            sources: vec![ComponentMetricsSource {
-                snapshot: source.snapshot.clone(),
-                dp_rank: source.dp_rank,
-            }],
+            sources: vec![source.clone()],
             updates: updates.clone(),
+            cleanup_time: Arc::new(Mutex::new(None)),
+            drain_time: Arc::new(Mutex::new(None)),
         });
 
         let pairs = vec![(router_pub, source)];
@@ -315,6 +315,25 @@ mod tests {
 
         assert!(updates.lock().unwrap().is_empty(), "no update on None");
         assert!(warned.is_empty());
+    }
+
+    /// Default trait impls are no-op; `RecordingPublisher` overrides them so
+    /// `Worker::cleanup_once` / drain can hand the elapsed time to whoever
+    /// owns the gauges. Both setters are independent: setting one doesn't
+    /// touch the other.
+    #[test]
+    fn lifecycle_setters_record_independently() {
+        let publisher = RecordingPublisher {
+            sources: vec![],
+            updates: Arc::new(Mutex::new(Vec::new())),
+            cleanup_time: Arc::new(Mutex::new(None)),
+            drain_time: Arc::new(Mutex::new(None)),
+        };
+        publisher.set_drain_time(0.25);
+        assert_eq!(*publisher.drain_time.lock().unwrap(), Some(0.25));
+        assert_eq!(*publisher.cleanup_time.lock().unwrap(), None);
+        publisher.set_cleanup_time(1.5);
+        assert_eq!(*publisher.cleanup_time.lock().unwrap(), Some(1.5));
     }
 
     /// `PublisherHandles::shutdown` cancels the shared token and awaits the

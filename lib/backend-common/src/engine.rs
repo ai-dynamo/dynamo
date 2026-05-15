@@ -358,6 +358,7 @@ pub struct ComponentSnapshot {
 pub type ComponentSnapshotFn = Arc<dyn Fn() -> Option<ComponentSnapshot> + Send + Sync>;
 
 /// One per data-parallel rank.
+#[derive(Clone)]
 pub struct ComponentMetricsSource {
     pub snapshot: ComponentSnapshotFn,
     pub dp_rank: u32,

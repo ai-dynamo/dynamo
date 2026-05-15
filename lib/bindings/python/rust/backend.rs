@@ -866,16 +866,16 @@ enum BridgeStage {
     WrapPySource,
 }
 
-impl BridgeStage {
-    fn as_str(self) -> &'static str {
-        match self {
+impl std::fmt::Display for BridgeStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
             BridgeStage::GetSources => "get_sources",
             BridgeStage::BuildGauges => "build_gauges",
             BridgeStage::SeedZeros => "seed_zeros",
             BridgeStage::SetLoadTime => "set_load_time",
             BridgeStage::RegisterCallback => "register_callback",
             BridgeStage::WrapPySource => "wrap_py_source",
-        }
+        })
     }
 }
 
@@ -896,8 +896,7 @@ impl From<BridgeError> for DynamoError {
             .error_type(ErrorType::Backend(BackendError::Unknown))
             .message(format!(
                 "setup_component_metrics[{}]: {}",
-                e.stage.as_str(),
-                e.inner
+                e.stage, e.inner
             ))
             .build()
     }
@@ -914,15 +913,7 @@ struct PyComponentMetricsPublisher {
 
 impl ComponentMetricsPublisher for PyComponentMetricsPublisher {
     fn sources(&self) -> Vec<ComponentMetricsSource> {
-        // ComponentMetricsSource isn't Clone (the snapshot Arc IS, but the
-        // struct isn't derive(Clone)). Rebuild by cloning each field.
-        self.sources_cache
-            .iter()
-            .map(|s| ComponentMetricsSource {
-                snapshot: s.snapshot.clone(),
-                dp_rank: s.dp_rank,
-            })
-            .collect()
+        self.sources_cache.clone()
     }
     fn update(&self, snap: &ComponentSnapshot) {
         Python::with_gil(|py| {
