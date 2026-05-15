@@ -124,10 +124,13 @@ mod tests {
         let context_rank1 = Context::with_id((), context_rank0.id().to_string());
 
         // connect to the server socket
-        let mut send_stream =
-            client::TcpClient::create_response_stream(context_rank1.context(), connection_info)
-                .await
-                .unwrap();
+        let mut send_stream = client::TcpClient::create_response_stream(
+            context_rank1.context(),
+            connection_info,
+            None,
+        )
+        .await
+        .unwrap();
         println!("Client connected");
 
         // the client can now setup it's end of the stream and if it errors, it can send a message
@@ -142,12 +145,8 @@ mod tests {
         send_stream.send_prologue(None).await.unwrap();
 
         // [server] next - now pending connections should be connected
-        let recv_stream = pending_connection
-            .recv_stream
-            .unwrap()
-            .stream_provider
-            .await
-            .unwrap();
+        let (_conn_info, stream_provider) = pending_connection.recv_stream.unwrap().into_parts();
+        let recv_stream = stream_provider.await.unwrap();
 
         println!("Server paired");
 

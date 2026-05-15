@@ -10,6 +10,16 @@ upgrades that break our integration surface are caught immediately.
 import inspect
 import pickle
 
+import pytest
+
+# Total runtime ~0.08s — no need for parallel marker.
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.sglang,
+    pytest.mark.gpu_1,
+    pytest.mark.pre_merge,
+]
+
 # ---------------------------------------------------------------------------
 # Import tests -- verify all required modules and symbols exist
 # ---------------------------------------------------------------------------

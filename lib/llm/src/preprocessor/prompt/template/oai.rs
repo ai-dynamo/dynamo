@@ -101,9 +101,18 @@ fn convert_media_url_to_placeholder(
         .collect()
 }
 
-fn may_be_fix_msg_content(messages: serde_json::Value, preserve_arrays: bool) -> Value {
+fn may_be_fix_msg_content(
+    messages: serde_json::Value,
+    preserve_arrays: bool,
+    image_placeholder_template: Option<&str>,
+) -> Value {
     // preserve_arrays=true: strings → arrays (multimodal)
     // preserve_arrays=false: text-only arrays → strings (standard)
+    // image_placeholder_template: when `preserve_arrays=false` and the array
+    // mixes text + image parts, this template (e.g. `<|image_{n}|>`) lets us
+    // flatten by substituting image parts with model-family placeholders
+    // instead of leaving the raw array for the template, which would crash
+    // string-content templates like Phi-3-vision's `'+' message.content`.
 
     let Some(arr) = messages.as_array() else {
         return Value::from_serialize(&messages);
@@ -155,6 +164,22 @@ fn may_be_fix_msg_content(messages: serde_json::Value, preserve_arrays: bool) ->
                                 "content".to_string(),
                                 serde_json::Value::String(concatenated_text),
                             );
+                        } else if !preserve_arrays
+                            && !content_array.is_empty()
+                            && let Some(placeholder_tpl) = image_placeholder_template
+                        {
+                            // Mixed text+image array for a string-content
+                            // template — flatten with model-family image
+                            // placeholders inlined where the image parts were.
+                            // The `is_empty` guard preserves a literal `[]`
+                            // content (matches pre-PR behavior); flattening
+                            // an empty array to `""` would silently change
+                            // what the template renders.
+                            let flattened = flatten_mixed_content(&content_array, placeholder_tpl);
+                            msg_object.insert(
+                                "content".to_string(),
+                                serde_json::Value::String(flattened),
+                            );
                         } else {
                             // Keep as array (with media_url → media placeholder conversion applied)
                             msg_object.insert(
@@ -173,9 +198,48 @@ fn may_be_fix_msg_content(messages: serde_json::Value, preserve_arrays: bool) ->
     Value::from_serialize(&updated_messages)
 }
 
-fn normalize_tool_arguments_in_messages(messages: &mut serde_json::Value) {
-    // Deserialize tool call arguments from JSON strings to objects/arrays before template rendering
-    // avoids double encoding and enables iteration
+/// Concatenate a mixed-content array (text parts + image placeholders) into a
+/// single string. Text parts contribute their `text` field as-is; non-text
+/// parts (image, video, audio after the URL→placeholder conversion in
+/// `convert_media_url_to_placeholder`) emit the per-family placeholder with
+/// `{n}` substituted by the 1-based index of the image in the message.
+///
+/// Used in `may_be_fix_msg_content` when `preserve_arrays=false` and the
+/// template knows a placeholder convention — currently Phi-3-vision
+/// (`<|image_{n}|>`) and LLaVA-1.5 (`<image>`).
+///
+/// **Caveat — non-text index slot:** `img_idx` increments for every non-text
+/// part, not just images. The current supported families (Phi-3, LLaVA-1.5)
+/// are image-only so there's no collision today, but a future image+video
+/// family would silently consume an image-index slot for each video/audio
+/// part and emit the image placeholder there. When adding a family that
+/// mixes modalities in one message, either:
+///   1. expand this function with per-modality placeholder strings, or
+///   2. assert in `convert_media_url_to_placeholder` that only "image"
+///      placeholders reach this path.
+fn flatten_mixed_content(parts: &[serde_json::Value], placeholder_tpl: &str) -> String {
+    let mut out = String::new();
+    let mut img_idx: u32 = 1;
+    for part in parts {
+        let type_str = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if type_str == "text" {
+            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                out.push_str(text);
+            }
+        } else if !type_str.is_empty() {
+            let placeholder = placeholder_tpl.replace("{n}", &img_idx.to_string());
+            out.push_str(&placeholder);
+            img_idx += 1;
+        }
+    }
+    out
+}
+
+fn normalize_tool_calls_arguments_in_messages(messages: &mut serde_json::Value) {
+    // Deserialize `tool_calls[].function.arguments` from JSON strings to
+    // objects/arrays before template rendering — avoids double encoding
+    // and enables iteration. Skipped for templates whose own `is string`
+    // branch wants the raw string verbatim (see render()).
     let Some(msgs) = messages.as_array_mut() else {
         return;
     };
@@ -192,13 +256,101 @@ fn normalize_tool_arguments_in_messages(messages: &mut serde_json::Value) {
                 }
             }
         }
+    }
+}
 
+fn normalize_function_call_arguments_in_messages(messages: &mut serde_json::Value) {
+    // Legacy (deprecated) OpenAI `function_call.arguments` path. Kept separate
+    // from `tool_calls` normalization so the per-template `arguments is string`
+    // opt-out — which only refers to `tool_call.arguments` inside the
+    // tool_calls loop — does not accidentally suppress this path.
+    let Some(msgs) = messages.as_array_mut() else {
+        return;
+    };
+
+    for msg in msgs.iter_mut() {
         if let Some(function_call) = msg.get_mut("function_call").and_then(|v| v.as_object_mut())
             && let Some(args) = function_call.get_mut("arguments")
             && let Some(s) = args.as_str()
             && let Ok(parsed) = serde_json::from_str(s)
         {
             *args = parsed;
+        }
+    }
+}
+
+/// Inject `reasoning_content` back into the `content` field as `<think>` blocks.
+///
+/// Chat templates only reference `{{ message.content }}` — they don't know about
+/// `reasoning_content`. Without this injection, the model's prior chain-of-thought
+/// is silently dropped across turns.
+///
+/// Uses `<think>`/`</think>` delimiters — the same tags that reasoning models emit
+/// and that the reasoning parser strips on output. Reasoning is prepended to content
+/// to match the original generation order (`<think>...</think> response`).
+///
+/// Segments are concatenated rather than interleaved with tool_calls because Jinja
+/// templates render `tool_calls` separately from `content`. The model still sees
+/// all reasoning text before the template-rendered tool call block.
+fn inject_reasoning_content_into_messages(messages: &mut serde_json::Value) {
+    let Some(msgs) = messages.as_array_mut() else {
+        return;
+    };
+
+    for msg in msgs.iter_mut() {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+
+        let reasoning = match msg.get("reasoning_content") {
+            Some(serde_json::Value::String(s)) if !s.is_empty() => {
+                format!("<think>{}</think>", s)
+            }
+            Some(serde_json::Value::Array(segments)) => {
+                let mut result = String::new();
+                for seg in segments {
+                    if let Some(s) = seg.as_str()
+                        && !s.is_empty()
+                    {
+                        result.push_str("<think>");
+                        result.push_str(s);
+                        result.push_str("</think>");
+                    }
+                }
+                if result.is_empty() {
+                    continue;
+                }
+                result
+            }
+            _ => continue,
+        };
+
+        match msg.get("content") {
+            // Content is a string or null — prepend reasoning as text
+            Some(serde_json::Value::String(s)) if !s.is_empty() => {
+                msg["content"] = serde_json::Value::String(format!("{}{}", reasoning, s));
+            }
+            None | Some(serde_json::Value::Null) | Some(serde_json::Value::String(_)) => {
+                msg["content"] = serde_json::Value::String(reasoning);
+            }
+            // Content is an array (multimodal) — prepend as a text part
+            Some(serde_json::Value::Array(_)) => {
+                let think_part = serde_json::json!({
+                    "type": "text",
+                    "text": reasoning
+                });
+                if let Some(arr) = msg.get_mut("content").and_then(|v| v.as_array_mut()) {
+                    arr.insert(0, think_part);
+                }
+            }
+            // Other types (number, bool, object) — skip, don't corrupt
+            _ => continue,
+        }
+
+        // Remove so the template doesn't see both the injected <think> in content
+        // and the original reasoning_content field.
+        if let Some(obj) = msg.as_object_mut() {
+            obj.remove("reasoning_content");
         }
     }
 }
@@ -213,9 +365,7 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         Value::from_serialize(&messages_json)
     }
 
-    fn typed_messages(
-        &self,
-    ) -> Option<&[dynamo_async_openai::types::ChatCompletionRequestMessage]> {
+    fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
         Some(self.inner.messages.as_slice())
     }
 
@@ -255,7 +405,7 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         //     .map(|last| {
         //         !matches!(
         //             last,
-        //             dynamo_async_openai::types::ChatCompletionRequestMessage::Assistant(_)
+        //             dynamo_protocols::types::ChatCompletionRequestMessage::Assistant(_)
         //         )
         //     })
         //     .unwrap_or(true)
@@ -272,6 +422,10 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
         self.media_io_kwargs.as_ref()
     }
+
+    fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
+        self.inner.mm_processor_kwargs.as_ref()
+    }
 }
 
 impl OAIChatLikeRequest for NvCreateCompletionRequest {
@@ -279,9 +433,9 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
         self.inner.model.clone()
     }
     fn messages(&self) -> minijinja::value::Value {
-        let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-            dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+        let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+            dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                     crate::protocols::openai::completions::prompt_to_string(&self.inner.prompt),
                 ),
                 name: None,
@@ -297,16 +451,16 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
 
     fn prompt_input_type(&self) -> PromptInput {
         match &self.inner.prompt {
-            dynamo_async_openai::types::Prompt::IntegerArray(_) => {
+            dynamo_protocols::types::Prompt::IntegerArray(_) => {
                 PromptInput::Tokens(TokenInput::Single(vec![]))
             }
-            dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(_) => {
+            dynamo_protocols::types::Prompt::ArrayOfIntegerArray(_) => {
                 PromptInput::Tokens(TokenInput::Batch(vec![]))
             }
-            dynamo_async_openai::types::Prompt::String(_) => {
+            dynamo_protocols::types::Prompt::String(_) => {
                 PromptInput::Text(TextInput::Single(String::new()))
             }
-            dynamo_async_openai::types::Prompt::StringArray(_) => {
+            dynamo_protocols::types::Prompt::StringArray(_) => {
                 PromptInput::Text(TextInput::Batch(vec![]))
             }
         }
@@ -314,10 +468,10 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
 
     fn extract_tokens(&self) -> Option<TokenInput> {
         match &self.inner.prompt {
-            dynamo_async_openai::types::Prompt::IntegerArray(tokens) => {
+            dynamo_protocols::types::Prompt::IntegerArray(tokens) => {
                 Some(TokenInput::Single(tokens.clone()))
             }
-            dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arrays) => {
+            dynamo_protocols::types::Prompt::ArrayOfIntegerArray(arrays) => {
                 Some(TokenInput::Batch(arrays.clone()))
             }
             _ => None,
@@ -326,10 +480,10 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
 
     fn extract_text(&self) -> Option<TextInput> {
         match &self.inner.prompt {
-            dynamo_async_openai::types::Prompt::String(text) => {
+            dynamo_protocols::types::Prompt::String(text) => {
                 Some(TextInput::Single(text.to_string()))
             }
-            dynamo_async_openai::types::Prompt::StringArray(texts) => {
+            dynamo_protocols::types::Prompt::StringArray(texts) => {
                 Some(TextInput::Batch(texts.to_vec()))
             }
             _ => None,
@@ -342,10 +496,24 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         self.supports_add_generation_prompt
     }
 
+    fn image_placeholder_template(&self) -> Option<&'static str> {
+        self.image_placeholder_template
+    }
+
     fn render(&self, req: &dyn OAIChatLikeRequest) -> Result<String> {
         let mixins = Value::from_dyn_object(self.mixins.clone());
 
         let tools = req.tools();
+        // Strip tools when tool_choice is "none" and the flag is enabled, so the model
+        // doesn't see tool definitions and generate raw XML tool calls in its response.
+        let tools = if self.exclude_tools_when_tool_choice_none {
+            match req.tool_choice() {
+                Some(ref tc) if tc.as_str() == Some("none") => None,
+                _ => tools,
+            }
+        } else {
+            tools
+        };
         // has_tools should be true if tools is a non-empty array
         let has_tools = tools.as_ref().and_then(|v| v.len()).is_some_and(|l| l > 0);
         let add_generation_prompt = req.should_add_generation_prompt();
@@ -363,10 +531,49 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         messages_for_template = serde_json::to_value(may_be_fix_msg_content(
             messages_for_template,
             self.requires_content_arrays,
+            self.image_placeholder_template,
         ))
         .unwrap();
 
-        normalize_tool_arguments_in_messages(&mut messages_for_template);
+        // Pick the concrete template first so the normalization opt-out can be
+        // template- and field-specific: only the chosen template's
+        // `tool_call.arguments is string` flag should suppress normalization,
+        // and only for the `tool_calls[].function.arguments` field. Legacy
+        // `function_call.arguments` lives outside that branch and is always
+        // normalized.
+        let (template_name, template_handles_tool_calls_args_string) = if has_tools {
+            (
+                "tool_use",
+                self.tool_use_template_handles_tool_calls_arguments_string,
+            )
+        } else {
+            (
+                "default",
+                self.default_template_handles_tool_calls_arguments_string,
+            )
+        };
+
+        // Pre-parse JSON-string `arguments` into objects — but only for templates
+        // that unconditionally `| tojson` them. Templates that branch on
+        // `tool_call.arguments is string` (Qwen3, Hermes) want the raw string
+        // verbatim so the rendered bytes match what the model emitted on the
+        // prior turn. Re-serializing through minijinja's compact `tojson` here
+        // breaks append-only prefix matching across multi-step tool use.
+        if !template_handles_tool_calls_args_string {
+            normalize_tool_calls_arguments_in_messages(&mut messages_for_template);
+        }
+        // Legacy `function_call.arguments` is always normalized — the
+        // `arguments is string` opt-out only covers the modern `tool_calls`
+        // branch.
+        normalize_function_call_arguments_in_messages(&mut messages_for_template);
+
+        // Inject reasoning_content as <think> blocks into content — but only if
+        // the template doesn't handle it natively. Templates like Nemotron and
+        // Qwen3 reference reasoning_content directly in their Jinja logic; injecting
+        // would produce duplicate <think> blocks.
+        if !self.template_handles_reasoning {
+            inject_reasoning_content_into_messages(&mut messages_for_template);
+        }
 
         let ctx = context! {
             messages => messages_for_template,
@@ -386,11 +593,7 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
             ctx
         };
 
-        let tmpl: minijinja::Template<'_, '_> = if has_tools {
-            self.env.get_template("tool_use")?
-        } else {
-            self.env.get_template("default")?
-        };
+        let tmpl: minijinja::Template<'_, '_> = self.env.get_template(template_name)?;
         Ok(tmpl.render(&ctx)?)
     }
 }
@@ -398,7 +601,7 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_async_openai::types::ChatCompletionRequestMessage as Msg;
+    use dynamo_protocols::types::ChatCompletionRequestMessage as Msg;
     use minijinja::{Environment, context};
 
     /// Tests that media URL content parts are converted to empty placeholders.
@@ -673,7 +876,8 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Test array → string normalization (preserve_arrays=false for standard templates)
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: text-only array is concatenated into a single string
         assert_eq!(
@@ -719,7 +923,8 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Test array → string normalization (preserve_arrays=false for standard templates)
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: System message with string content remains unchanged
         assert_eq!(
@@ -763,10 +968,48 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Empty arrays should be preserved regardless of preserve_arrays setting
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: Empty arrays are preserved as-is
         assert!(messages[0]["content"].is_array());
+        assert_eq!(messages[0]["content"].as_array().unwrap().len(), 0);
+    }
+
+    /// Empty arrays must stay as `[]` even when a flatten-time placeholder
+    /// template is provided (Phi-3 / LLaVA-1.5 path). Without the
+    /// `!content_array.is_empty()` guard in `may_be_fix_msg_content`,
+    /// an empty content array would silently flatten to `""` and the
+    /// chat template would render an entirely empty message instead of
+    /// failing or being preserved.
+    #[test]
+    fn test_may_be_fix_msg_content_empty_array_with_placeholder_template() {
+        let json_str = r#"{
+            "model": "phi-3-vision",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": []
+                }
+            ]
+        }"#;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let messages_raw = serde_json::to_value(request.messages()).unwrap();
+
+        // preserve_arrays=false + image_placeholder_template=Some(...) is
+        // the combination that previously flattened `[]` to `""`.
+        let messages = serde_json::to_value(may_be_fix_msg_content(
+            messages_raw,
+            false,
+            Some("<|image_{n}|>"),
+        ))
+        .unwrap();
+
+        assert!(
+            messages[0]["content"].is_array(),
+            "empty array should be preserved as `[]`, not flattened to `\"\"`"
+        );
         assert_eq!(messages[0]["content"].as_array().unwrap().len(), 0);
     }
 
@@ -787,7 +1030,8 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Test with preserve_arrays=false (standard templates)
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: String content is not modified
         assert_eq!(
@@ -818,7 +1062,8 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Mixed content should be preserved regardless of preserve_arrays setting
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: Mixed content types are preserved as array for template handling
         // image_url should be converted to image placeholder
@@ -829,6 +1074,68 @@ mod tests {
         assert_eq!(content_array[1]["type"], "image");
         assert!(content_array[1].get("image_url").is_none());
         assert_eq!(content_array[2]["type"], "text");
+    }
+
+    /// Mixed text+image array with a string-content template and an
+    /// `<|image_{n}|>`-style placeholder (Phi-3-vision) — content must be
+    /// flattened to a single string with numbered image markers in place of
+    /// the image parts. The previous default (leave as array) would crash
+    /// the Phi-3 template's `'+' message.content` concatenation.
+    #[test]
+    fn test_may_be_fix_msg_content_flattens_phi3_style() {
+        let json_str = r#"{
+            "model": "phi-3-vision",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "First "},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/a.jpg"}},
+                        {"type": "text", "text": " then "},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/b.jpg"}},
+                        {"type": "text", "text": "?"}
+                    ]
+                }
+            ]
+        }"#;
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let messages_raw = serde_json::to_value(request.messages()).unwrap();
+
+        let messages = serde_json::to_value(may_be_fix_msg_content(
+            messages_raw,
+            false,
+            Some("<|image_{n}|>"),
+        ))
+        .unwrap();
+
+        let content = messages[0]["content"].as_str().expect("content flattened");
+        assert_eq!(content, "First <|image_1|> then <|image_2|>?");
+    }
+
+    /// Same flattening with a static placeholder (LLaVA-1.5 `<image>`).
+    #[test]
+    fn test_may_be_fix_msg_content_flattens_llava_style() {
+        let json_str = r#"{
+            "model": "llava-1.5-7b-hf",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe: "},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/x.jpg"}}
+                    ]
+                }
+            ]
+        }"#;
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
+        let messages_raw = serde_json::to_value(request.messages()).unwrap();
+
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, Some("<image>")))
+                .unwrap();
+
+        let content = messages[0]["content"].as_str().expect("content flattened");
+        assert_eq!(content, "Describe: <image>");
     }
 
     /// Tests that content arrays containing only non-text types remain as arrays,
@@ -852,7 +1159,8 @@ mod tests {
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Non-text arrays should be preserved regardless of preserve_arrays setting
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Verify: Non-text content arrays are preserved, with image_url converted to image
         assert!(messages[0]["content"].is_array());
@@ -949,7 +1257,8 @@ NORMAL MODE
 
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Mixed types should preserve array structure, with image_url converted to image
         assert!(messages[0]["content"].is_array());
@@ -978,7 +1287,8 @@ NORMAL MODE
 
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
         // Unknown types mixed with text should preserve array
         assert!(messages[0]["content"].is_array());
@@ -1001,7 +1311,7 @@ NORMAL MODE
             }]
         })]);
 
-        normalize_tool_arguments_in_messages(&mut messages);
+        normalize_tool_calls_arguments_in_messages(&mut messages);
 
         let mut env = Environment::new();
         env.add_filter("tojson", super::super::tokcfg::tojson);
@@ -1034,7 +1344,7 @@ NORMAL MODE
             }]
         })]);
 
-        normalize_tool_arguments_in_messages(&mut messages);
+        normalize_tool_calls_arguments_in_messages(&mut messages);
 
         let mut env = Environment::new();
         env.add_template("t", tmpl).unwrap();
@@ -1058,7 +1368,7 @@ NORMAL MODE
             }
         })]);
 
-        normalize_tool_arguments_in_messages(&mut messages);
+        normalize_function_call_arguments_in_messages(&mut messages);
 
         assert_eq!(
             messages[0]["function_call"]["arguments"],
@@ -1080,7 +1390,7 @@ NORMAL MODE
             }]
         })]);
 
-        normalize_tool_arguments_in_messages(&mut messages);
+        normalize_tool_calls_arguments_in_messages(&mut messages);
 
         assert_eq!(
             messages[0]["tool_calls"][0]["function"]["arguments"],
@@ -1120,9 +1430,9 @@ NORMAL MODE
 
         // Apply content normalization with preserve_arrays=false (standard templates)
         let mut messages =
-            serde_json::to_value(may_be_fix_msg_content(messages_raw, false)).unwrap();
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, false, None)).unwrap();
 
-        normalize_tool_arguments_in_messages(&mut messages);
+        normalize_tool_calls_arguments_in_messages(&mut messages);
 
         // Multimodal content preserved as array (mixed types not flattened)
         assert!(messages[0]["content"].is_array());
@@ -1153,7 +1463,8 @@ NORMAL MODE
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Test with preserve_arrays=true (multimodal templates)
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, true)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, true, None)).unwrap();
 
         // Verify: String is converted to array format
         assert!(messages[0]["content"].is_array());
@@ -1183,7 +1494,8 @@ NORMAL MODE
         let messages_raw = serde_json::to_value(request.messages()).unwrap();
 
         // Test with preserve_arrays=true (multimodal templates)
-        let messages = serde_json::to_value(may_be_fix_msg_content(messages_raw, true)).unwrap();
+        let messages =
+            serde_json::to_value(may_be_fix_msg_content(messages_raw, true, None)).unwrap();
 
         // Verify: Array is preserved as-is
         assert!(messages[0]["content"].is_array());
@@ -1224,5 +1536,652 @@ NORMAL MODE
     fn add_when_empty() {
         let s = dummy_state(vec![]);
         assert!(s.should_add_generation_prompt());
+    }
+
+    /// Helper to build a formatter with a simple tool-aware template.
+    fn tool_aware_formatter(
+        exclude_tools_when_tool_choice_none: bool,
+    ) -> HfTokenizerConfigJsonFormatter {
+        let template = r#"
+{%- if tools is iterable and tools | length > 0 %}
+TOOL_MODE tools={{ tools | length }}
+{%- else %}
+NORMAL_MODE
+{%- endif %}
+{{ messages[0].content }}"#;
+
+        let chat_template: super::tokcfg::ChatTemplate =
+            serde_json::from_value(serde_json::json!({ "chat_template": template })).unwrap();
+
+        HfTokenizerConfigJsonFormatter::with_options(
+            chat_template,
+            ContextMixins::new(&[]),
+            exclude_tools_when_tool_choice_none,
+        )
+        .unwrap()
+    }
+
+    /// Helper to build a request with tools and optional tool_choice.
+    fn request_with_tool_choice(tool_choice: &str) -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {"type": "object", "properties": {"location": {"type": "string"}}}
+                }
+            }],
+            "tool_choice": tool_choice
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_exclude_tools_strips_when_tool_choice_none() {
+        let formatter = tool_aware_formatter(true);
+        let request = request_with_tool_choice("none");
+        let result = formatter.render(&request).unwrap();
+        assert!(
+            result.contains("NORMAL_MODE"),
+            "With exclude_tools=true and tool_choice=none, tools should be stripped. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_exclude_tools_keeps_when_tool_choice_auto() {
+        let formatter = tool_aware_formatter(true);
+        let request = request_with_tool_choice("auto");
+        let result = formatter.render(&request).unwrap();
+        assert!(
+            result.contains("TOOL_MODE"),
+            "With tool_choice=auto, tools should be included. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_no_exclude_tools_keeps_when_tool_choice_none() {
+        let formatter = tool_aware_formatter(false);
+        let request = request_with_tool_choice("none");
+        let result = formatter.render(&request).unwrap();
+        assert!(
+            result.contains("TOOL_MODE"),
+            "With exclude_tools=false and tool_choice=none, tools should NOT be stripped. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_inject_reasoning_content_segments_with_tool_calls() {
+        // Assistant message with reasoning_content segments and tool_calls
+        let mut messages = serde_json::json!([
+            {
+                "role": "user",
+                "content": "What is sqrt(144) and sqrt(256)?"
+            },
+            {
+                "role": "assistant",
+                "content": "Let me calculate those.",
+                "reasoning_content": ["I need to compute sqrt(144)", "Now sqrt(256)", ""],
+                "tool_calls": [
+                    {
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": "{\"expr\": \"sqrt(144)\"}"
+                        }
+                    },
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": "{\"expr\": \"sqrt(256)\"}"
+                        }
+                    }
+                ]
+            }
+        ]);
+
+        inject_reasoning_content_into_messages(&mut messages);
+
+        let assistant = &messages[1];
+
+        // reasoning_content should be removed
+        assert!(
+            assistant.get("reasoning_content").is_none(),
+            "reasoning_content should be removed after injection"
+        );
+
+        // content should have <think> blocks prepended (empty segment skipped)
+        let content = assistant["content"].as_str().unwrap();
+        assert!(
+            content.starts_with("<think>I need to compute sqrt(144)</think>"),
+            "content should start with first reasoning segment, got: {}",
+            content
+        );
+        assert!(
+            content.contains("<think>Now sqrt(256)</think>"),
+            "content should contain second reasoning segment"
+        );
+        // Empty third segment should NOT produce <think></think>
+        assert!(
+            !content.contains("<think></think>"),
+            "empty segments should be skipped"
+        );
+        // Original content should be preserved at the end
+        assert!(
+            content.ends_with("Let me calculate those."),
+            "original content should be at the end, got: {}",
+            content
+        );
+
+        // tool_calls should be untouched
+        assert!(assistant.get("tool_calls").is_some());
+        assert_eq!(assistant["tool_calls"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_inject_reasoning_content_text_variant() {
+        let mut messages = serde_json::json!([
+            {
+                "role": "assistant",
+                "content": "The answer is 42.",
+                "reasoning_content": "Let me think about this carefully."
+            }
+        ]);
+
+        inject_reasoning_content_into_messages(&mut messages);
+
+        let assistant = &messages[0];
+        assert!(assistant.get("reasoning_content").is_none());
+        let content = assistant["content"].as_str().unwrap();
+        assert_eq!(
+            content,
+            "<think>Let me think about this carefully.</think>The answer is 42."
+        );
+    }
+
+    #[test]
+    fn test_inject_reasoning_content_null_content() {
+        // reasoning_content present but content is null
+        let mut messages = serde_json::json!([
+            {
+                "role": "assistant",
+                "content": null,
+                "reasoning_content": "Thinking...",
+                "tool_calls": [{"id": "call_0", "type": "function", "function": {"name": "f", "arguments": "{}"}}]
+            }
+        ]);
+
+        inject_reasoning_content_into_messages(&mut messages);
+
+        let content = messages[0]["content"].as_str().unwrap();
+        assert_eq!(content, "<think>Thinking...</think>");
+        assert!(messages[0].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn test_inject_reasoning_content_skips_non_assistant() {
+        let mut messages = serde_json::json!([
+            {
+                "role": "user",
+                "content": "hello",
+                "reasoning_content": "should not be touched"
+            }
+        ]);
+
+        inject_reasoning_content_into_messages(&mut messages);
+
+        // User message should be untouched
+        assert!(messages[0].get("reasoning_content").is_some());
+    }
+
+    // Helper: create a formatter with a minimal chat template for render tests
+    fn make_test_formatter() -> HfTokenizerConfigJsonFormatter {
+        use super::tokcfg::ChatTemplate;
+        use super::{ContextMixins, HfTokenizerConfigJsonFormatter};
+
+        // Minimal template that renders content verbatim — enough to verify
+        // that reasoning_content injection works through the full pipeline.
+        let template = r#"{%- for message in messages %}{{ message.role }}: {{ message.content }}
+{%- endfor %}
+{%- if add_generation_prompt %}assistant:{%- endif %}"#;
+
+        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": template
+        }))
+        .unwrap();
+
+        HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap()
+    }
+
+    // Verify reasoning_content (Text variant) from a prior assistant turn
+    // appears as a <think> block in the rendered prompt.
+    #[test]
+    fn test_reasoning_content_text_roundtrip_render() {
+        use super::OAIPromptFormatter;
+        let formatter = make_test_formatter();
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "What is sqrt(144)?"},
+                {
+                    "role": "assistant",
+                    "content": "The answer is 12.",
+                    "reasoning_content": "I need to compute the square root of 144."
+                },
+                {"role": "user", "content": "Are you sure?"}
+            ]
+        }))
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+
+        assert!(
+            rendered.contains("<think>I need to compute the square root of 144.</think>"),
+            "reasoning_content must appear as <think> block, got: {}",
+            rendered
+        );
+        assert!(
+            rendered.contains("The answer is 12."),
+            "original content must be preserved"
+        );
+        assert!(
+            !rendered.contains("reasoning_content"),
+            "raw reasoning_content field should not leak into prompt"
+        );
+    }
+
+    // Verify a full agentic flow: assistant reasons, calls a tool, gets a
+    // result, then reasons again before answering. Both reasoning turns must
+    // survive into the rendered prompt.
+    #[test]
+    fn test_reasoning_content_agentic_tool_call_roundtrip_render() {
+        use super::OAIPromptFormatter;
+        let formatter = make_test_formatter();
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "What is sqrt(144) + sqrt(256)?"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_content": "I need to compute both square roots. Let me start with sqrt(144).",
+                    "tool_calls": [{
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": "{\"expr\": \"sqrt(144)\"}"
+                        }
+                    }]
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_0",
+                    "content": "12"
+                },
+                {
+                    "role": "assistant",
+                    "content": "sqrt(144) = 12 and sqrt(256) = 16, so the answer is 28.",
+                    "reasoning_content": "Got 12 for sqrt(144). Now sqrt(256) = 16. Sum is 28."
+                },
+                {"role": "user", "content": "Thanks!"}
+            ]
+        }))
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+
+        // First assistant turn: reasoning with tool call, null content
+        assert!(
+            rendered.contains("<think>I need to compute both square roots"),
+            "first turn reasoning must be in prompt, got: {}",
+            rendered
+        );
+        // Second assistant turn: reasoning with final answer
+        assert!(
+            rendered.contains("<think>Got 12 for sqrt(144)"),
+            "second turn reasoning must be in prompt"
+        );
+        assert!(
+            rendered.contains("the answer is 28"),
+            "final answer content must be preserved"
+        );
+        // No raw reasoning_content in output
+        assert!(
+            !rendered.contains("reasoning_content"),
+            "raw reasoning_content field should not leak into prompt"
+        );
+    }
+
+    // Template that does NOT reference reasoning_content — injection should happen.
+    #[test]
+    fn test_reasoning_injected_when_template_ignores_it() {
+        use super::OAIPromptFormatter;
+        let formatter = make_test_formatter();
+
+        // Formatter uses a simple template that doesn't reference reasoning_content
+        assert!(!formatter.template_handles_reasoning);
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "assistant",
+                    "content": "Hi.",
+                    "reasoning_content": "The user said hello."
+                },
+                {"role": "user", "content": "Bye"}
+            ]
+        }))
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+        assert!(
+            rendered.contains("<think>The user said hello.</think>"),
+            "injection must happen when template ignores reasoning_content, got: {}",
+            rendered
+        );
+    }
+
+    // Template that DOES reference reasoning_content — injection must be skipped.
+    #[test]
+    fn test_reasoning_not_injected_when_template_handles_it() {
+        use super::tokcfg::ChatTemplate;
+        use super::{ContextMixins, HfTokenizerConfigJsonFormatter, OAIPromptFormatter};
+
+        // Template that natively renders reasoning_content (like Nemotron/Qwen3)
+        let template = r#"{%- for message in messages %}{%- if message.role == "assistant" and message.reasoning_content is defined and message.reasoning_content %}<think>{{ message.reasoning_content }}</think>
+{%- endif %}{{ message.role }}: {{ message.content }}
+{%- endfor %}
+{%- if add_generation_prompt %}assistant:{%- endif %}"#;
+
+        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": template
+        }))
+        .unwrap();
+
+        let formatter =
+            HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap();
+
+        // Verify detection worked
+        assert!(formatter.template_handles_reasoning);
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "assistant",
+                    "content": "Hi.",
+                    "reasoning_content": "The user said hello."
+                },
+                {"role": "user", "content": "Bye"}
+            ]
+        }))
+        .unwrap();
+
+        let rendered = formatter.render(&request).unwrap();
+
+        // Template renders reasoning natively — no duplicate injection
+        assert!(
+            rendered.contains("<think>The user said hello.</think>"),
+            "template must render reasoning_content natively, got: {}",
+            rendered
+        );
+        // Must NOT have double <think> blocks
+        let think_count = rendered.matches("<think>").count();
+        assert_eq!(
+            think_count, 1,
+            "must have exactly one <think> block (from template), got {} in: {}",
+            think_count, rendered
+        );
+    }
+
+    /// Real Qwen3-4B-Thinking-2507 chat template (verbatim from
+    /// `Qwen/Qwen3-4B-Thinking-2507/tokenizer_config.json`). Used to
+    /// regression-test append-only rendering across multi-step tool use.
+    const QWEN3_THINKING_TEMPLATE: &str = r##"{%- if tools %}
+    {{- '<|im_start|>system\n' }}
+    {%- if messages[0].role == 'system' %}
+        {{- messages[0].content + '\n\n' }}
+    {%- endif %}
+    {{- "# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>" }}
+    {%- for tool in tools %}
+        {{- "\n" }}
+        {{- tool | tojson }}
+    {%- endfor %}
+    {{- "\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n" }}
+{%- else %}
+    {%- if messages[0].role == 'system' %}
+        {{- '<|im_start|>system\n' + messages[0].content + '<|im_end|>\n' }}
+    {%- endif %}
+{%- endif %}
+{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}
+{%- for message in messages[::-1] %}
+    {%- set index = (messages|length - 1) - loop.index0 %}
+    {%- if ns.multi_step_tool and message.role == "user" and message.content is string and not(message.content.startswith('<tool_response>') and message.content.endswith('</tool_response>')) %}
+        {%- set ns.multi_step_tool = false %}
+        {%- set ns.last_query_index = index %}
+    {%- endif %}
+{%- endfor %}
+{%- for message in messages %}
+    {%- if message.content is string %}
+        {%- set content = message.content %}
+    {%- else %}
+        {%- set content = '' %}
+    {%- endif %}
+    {%- if (message.role == "user") or (message.role == "system" and not loop.first) %}
+        {{- '<|im_start|>' + message.role + '\n' + content + '<|im_end|>' + '\n' }}
+    {%- elif message.role == "assistant" %}
+        {%- set reasoning_content = '' %}
+        {%- if message.reasoning_content is string %}
+            {%- set reasoning_content = message.reasoning_content %}
+        {%- else %}
+            {%- if '</think>' in content %}
+                {%- set reasoning_content = content.split('</think>')[0].rstrip('\n').split('<think>')[-1].lstrip('\n') %}
+                {%- set content = content.split('</think>')[-1].lstrip('\n') %}
+            {%- endif %}
+        {%- endif %}
+        {%- if loop.index0 > ns.last_query_index %}
+            {%- if loop.last or (not loop.last and reasoning_content) %}
+                {{- '<|im_start|>' + message.role + '\n<think>\n' + reasoning_content.strip('\n') + '\n</think>\n\n' + content.lstrip('\n') }}
+            {%- else %}
+                {{- '<|im_start|>' + message.role + '\n' + content }}
+            {%- endif %}
+        {%- else %}
+            {{- '<|im_start|>' + message.role + '\n' + content }}
+        {%- endif %}
+        {%- if message.tool_calls %}
+            {%- for tool_call in message.tool_calls %}
+                {%- if (loop.first and content) or (not loop.first) %}
+                    {{- '\n' }}
+                {%- endif %}
+                {%- if tool_call.function %}
+                    {%- set tool_call = tool_call.function %}
+                {%- endif %}
+                {{- '<tool_call>\n{"name": "' }}
+                {{- tool_call.name }}
+                {{- '", "arguments": ' }}
+                {%- if tool_call.arguments is string %}
+                    {{- tool_call.arguments }}
+                {%- else %}
+                    {{- tool_call.arguments | tojson }}
+                {%- endif %}
+                {{- '}\n</tool_call>' }}
+            {%- endfor %}
+        {%- endif %}
+        {{- '<|im_end|>\n' }}
+    {%- elif message.role == "tool" %}
+        {%- if loop.first or (messages[loop.index0 - 1].role != "tool") %}
+            {{- '<|im_start|>user' }}
+        {%- endif %}
+        {{- '\n<tool_response>\n' }}
+        {{- content }}
+        {{- '\n</tool_response>' }}
+        {%- if loop.last or (messages[loop.index0 + 1].role != "tool") %}
+            {{- '<|im_end|>\n' }}
+        {%- endif %}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n<think>\n' }}
+{%- endif %}"##;
+
+    fn qwen3_thinking_formatter() -> HfTokenizerConfigJsonFormatter {
+        let chat_template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "chat_template": QWEN3_THINKING_TEMPLATE,
+        }))
+        .unwrap();
+        HfTokenizerConfigJsonFormatter::new(chat_template, ContextMixins::new(&[])).unwrap()
+    }
+
+    #[test]
+    fn test_qwen3_thinking_template_flags_detected() {
+        let formatter = qwen3_thinking_formatter();
+        assert!(
+            formatter.template_handles_reasoning,
+            "template references reasoning_content directly"
+        );
+        // The Qwen3-Thinking template is registered as both `default` and
+        // `tool_use` (single-string HF chat template), so both flags must fire.
+        assert!(
+            formatter.default_template_handles_tool_calls_arguments_string,
+            "default template branches on `arguments is string`"
+        );
+        assert!(
+            formatter.tool_use_template_handles_tool_calls_arguments_string,
+            "tool_use template branches on `arguments is string`"
+        );
+    }
+
+    /// Across a multi-step tool-use turn, the rendered prompt for turn N+1
+    /// must be a strict prefix-extension of [turn-N prompt + bytes the model
+    /// emitted on turn N]. Otherwise KV-cache prefix matching falls off a
+    /// cliff every time a tool result comes back.
+    ///
+    /// The Qwen3-Thinking template's `is string` branch (template lines 63-67)
+    /// renders `tool_call.arguments` verbatim from the OpenAI-canonical JSON
+    /// string. Pre-parsing that string into an object forces the `else` branch
+    /// and re-emits with minijinja's compact `tojson`, breaking append-only.
+    #[test]
+    fn test_qwen3_thinking_append_only_across_tool_use_turn() {
+        let formatter = qwen3_thinking_formatter();
+
+        let tools = serde_json::json!([{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather for a location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string"},
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+                    },
+                    "required": ["location"]
+                }
+            }
+        }]);
+
+        // Turn 1: server is asked to produce the first assistant turn.
+        let turn1_request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "qwen3-thinking",
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "What's the weather in San Francisco?"},
+                ],
+                "tools": tools,
+            }))
+            .unwrap();
+        let p1 = formatter.render(&turn1_request).unwrap();
+
+        // Bytes the model emits next. Spacing matches the Qwen3 training
+        // distribution (Python jinja2 / json.dumps defaults: `, ` and `: `).
+        // Empty content + reasoning + a tool call.
+        let model_emitted = "I'll call get_weather for SF.\n\
+            </think>\n\n\
+            <tool_call>\n\
+            {\"name\": \"get_weather\", \"arguments\": {\"location\": \"San Francisco\", \"unit\": \"celsius\"}}\n\
+            </tool_call><|im_end|>\n";
+        let wire_after_t1 = format!("{p1}{model_emitted}");
+
+        // Turn 2: client sends the prior assistant turn back in OpenAI canonical
+        // form (arguments as a JSON STRING with spaces) plus the tool result.
+        let turn2_request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "qwen3-thinking",
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "What's the weather in San Francisco?"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "I'll call get_weather for SF.",
+                        "tool_calls": [{
+                            "id": "call_sf",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": "{\"location\": \"San Francisco\", \"unit\": \"celsius\"}"
+                            }
+                        }]
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_sf",
+                        "content": "{\"temp\": 18, \"conditions\": \"Foggy\"}"
+                    }
+                ],
+                "tools": tools,
+            }))
+            .unwrap();
+        let p2 = formatter.render(&turn2_request).unwrap();
+
+        if !p2.starts_with(&wire_after_t1) {
+            // Find first divergence and report it for easy debugging.
+            let div = wire_after_t1
+                .as_bytes()
+                .iter()
+                .zip(p2.as_bytes())
+                .position(|(a, b)| a != b)
+                .unwrap_or_else(|| wire_after_t1.len().min(p2.len()));
+            let lo = div.saturating_sub(40);
+            panic!(
+                "turn-2 prompt is NOT a prefix-extension of [turn-1 + model bytes]\n  \
+                 diverges at byte {div}\n  \
+                 wire ends: ...{}|{}\n  \
+                 t2 has:    ...{}|{}",
+                String::from_utf8_lossy(&wire_after_t1.as_bytes()[lo..div]),
+                String::from_utf8_lossy(
+                    &wire_after_t1.as_bytes()[div..(div + 60).min(wire_after_t1.len())]
+                ),
+                String::from_utf8_lossy(&p2.as_bytes()[lo..div]),
+                String::from_utf8_lossy(&p2.as_bytes()[div..(div + 60).min(p2.len())]),
+            );
+        }
+
+        // The only new bytes in P2 should be the tool response and the next
+        // generation prompt — nothing in the prior conversation should change.
+        let suffix = &p2[wire_after_t1.len()..];
+        assert!(
+            suffix.contains("<tool_response>"),
+            "appended bytes must include the tool response, got: {suffix}"
+        );
+        assert!(
+            suffix.ends_with("<|im_start|>assistant\n<think>\n"),
+            "appended bytes must end with the next generation prompt, got: {suffix}"
+        );
     }
 }

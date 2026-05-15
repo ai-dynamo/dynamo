@@ -6,15 +6,19 @@
 //! This crate provides the core radix tree implementation and protocols for
 //! efficient KV cache lookup and routing in distributed LLM inference systems.
 
-pub mod event_sink;
+mod active_set;
+pub(crate) mod cleanup;
+
 pub mod indexer;
 pub mod protocols;
+pub mod recovery;
 pub mod scheduling;
 pub mod sequences;
 pub mod zmq_wire;
 
 // Backward-compat re-exports: old top-level module paths still work
 pub use indexer::concurrent_radix_tree;
+pub use indexer::concurrent_radix_tree_compressed;
 pub use indexer::positional as nested_map;
 pub use indexer::pruning as approx;
 pub use indexer::radix_tree;
@@ -28,6 +32,9 @@ pub use sequences::single as sequence;
 #[cfg(feature = "standalone-indexer")]
 pub mod standalone_indexer;
 
+#[cfg(feature = "standalone-indexer")]
+pub mod standalone_shared_cache;
+
 #[cfg(any(test, feature = "bench"))]
 pub mod test_utils;
 
@@ -37,17 +44,28 @@ pub use self::multi_worker_sequence::{
     SequenceSubscriber,
 };
 pub use self::sequence::{ActiveSequences, RequestId};
+pub use self::sequences::PrefillTokenDeltas;
 pub use concurrent_radix_tree::ConcurrentRadixTree;
-pub use config::{KvRouterConfig, RouterConfigOverride, RouterQueuePolicy};
-pub use event_sink::EventSink;
-pub use indexer::{MaybeError, SyncIndexer, ThreadPoolIndexer};
+pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
+pub use config::{
+    KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel, RouterQueuePolicy,
+    SharedCacheType,
+};
+#[allow(deprecated)]
+pub use indexer::{
+    AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, BranchShardedIndexer,
+    LowerTierContinuation, LowerTierIndexer, MaybeError, SharedKvCache, SyncIndexer,
+    ThreadPoolIndexer,
+};
 pub use nested_map::PositionalIndexer;
 pub use protocols::{
-    KvCacheEventError, LocalBlockHash, OverlapScores, RouterEvent, WorkerConfigLike, WorkerId,
-    compute_block_hash_for_seq,
+    KvCacheEventError, LocalBlockHash, OverlapScores, RouterEvent, RouterEventSink,
+    SharedCacheHits, WorkerConfigLike, WorkerId, compute_block_hash_for_seq,
 };
 pub use queue::SchedulerQueue;
 pub use radix_tree::RadixTree;
+pub use scheduling::LocalScheduler;
+pub use scheduling::PrefillLoadEstimator;
 pub use scheduling::policy::{FcfsPolicy, RouterSchedulingPolicy, SchedulingPolicy, WsptPolicy};
 pub use scheduling::{KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse};
 pub use selector::{DefaultWorkerSelector, WorkerSelector};

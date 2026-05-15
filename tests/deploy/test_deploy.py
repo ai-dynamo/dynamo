@@ -9,14 +9,23 @@ to chat completion requests correctly.
 """
 
 import logging
+import os
+import subprocess
+import time
 from typing import Any, Dict
 
+import kr8s
 import pytest
 import requests
+import yaml
 
 from tests.deploy.conftest import DeploymentTarget
 from tests.utils.client import send_request, wait_for_model_availability
-from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
+from tests.utils.managed_deployment import (
+    DeploymentSpec,
+    ManagedDeployment,
+    _get_workspace_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +47,7 @@ DEFAULT_REQUEST_TIMEOUT = 120
 # Minimum response content length to validate that the model is generating meaningful output.
 # This matches the validation threshold from the original shell-based deployment tests.
 MIN_RESPONSE_CONTENT_LENGTH = 100
+GAIE_MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 def validate_chat_response(
@@ -100,6 +110,7 @@ def validate_chat_response(
     return data
 
 
+@pytest.mark.framework_only
 @pytest.mark.k8s
 @pytest.mark.deploy
 @pytest.mark.post_merge
@@ -133,6 +144,13 @@ async def test_deployment(
     # Extract identifying information from the target
     framework = deployment_target.framework
     profile = deployment_target.profile
+
+    # NIXL_ERR_BACKEND: vCluster CI nodes lack RDMA/UCX for inter-pod KV
+    # transfer.  Prefill workers crash in NixlWrapper.create_backend.
+    if framework == "vllm" and profile in ("disagg", "disagg_router"):
+        pytest.skip(
+            "NIXL_ERR_BACKEND: CI cluster lacks RDMA/UCX for inter-pod KV transfer"
+        )
 
     model = next((s.model for s in deployment_spec.services if s.model), None)
     if not model:
@@ -213,3 +231,203 @@ async def test_deployment(
             f"Deployment test PASSED for {deployment_target.test_id} "
             f"(source: {deployment_target.source}, model: {model}, namespace: {namespace})"
         )
+
+
+# GAIE (Gateway API Inference Extension) deployment test
+@pytest.mark.framework_with_gaie
+@pytest.mark.k8s
+@pytest.mark.deploy
+@pytest.mark.post_merge
+@pytest.mark.e2e
+@pytest.mark.timeout(900)
+async def test_gaie_deployment(
+    image: str,
+    namespace: str,
+    skip_service_restart: bool,
+    request,
+) -> None:
+    """Test GAIE disaggregated deployment with vLLM workers.
+
+    Applies the GAIE DynamoGraphDeployment (with CI-built images) and the
+    companion HTTPRoute, then verifies inference works end-to-end through
+    the full Gateway path.
+    """
+    frontend_image = request.config.getoption("--frontend-image")
+    worker_image = image
+
+    assert frontend_image, "--frontend-image is required for GAIE deploy test"
+    assert worker_image, "--image is required for GAIE deploy test"
+    assert namespace, "--namespace is required for GAIE deploy test"
+
+    workspace = _get_workspace_dir()
+    gaie_dir = os.path.join(workspace, "examples", "backends", "vllm", "deploy", "gaie")
+    disagg_path = os.path.join(gaie_dir, "disagg.yaml")
+    httproute_path = os.path.join(gaie_dir, "http-route.yaml")
+
+    assert os.path.exists(disagg_path), f"disagg.yaml not found: {disagg_path}"
+    assert os.path.exists(
+        httproute_path
+    ), f"http-route.yaml not found: {httproute_path}"
+
+    deployment_spec = DeploymentSpec(disagg_path)
+    deployment_spec.namespace = namespace
+
+    logger.info(f"Frontend image: {frontend_image}")
+    logger.info(f"Worker image: {worker_image}")
+
+    deployment_spec.set_image(frontend_image, service_name="Epp")
+    for worker in ("VllmPrefillWorker", "VllmDecodeWorker"):
+        deployment_spec.set_image(worker_image, service_name=worker)
+        deployment_spec.set_frontend_sidecar_image(frontend_image, service_name=worker)
+
+    route_hostname = f"{namespace}.example.com"
+    logger.info(f"HTTPRoute hostname: {route_hostname}")
+
+    with open(httproute_path) as f:
+        httproute_spec = yaml.safe_load(f)
+    httproute_spec["spec"]["hostnames"] = [route_hostname]
+    httproute_yaml = yaml.safe_dump(httproute_spec)
+
+    logger.info("Applying GAIE HTTPRoute...")
+    result = subprocess.run(
+        ["kubectl", "apply", "-n", namespace, "-f", "-"],
+        input=httproute_yaml,
+        capture_output=True,
+        text=True,
+    )
+    logger.info(f"HTTPRoute apply stdout: {result.stdout}")
+    if result.stderr:
+        logger.warning(f"HTTPRoute apply stderr: {result.stderr}")
+    assert result.returncode == 0, f"Failed to apply HTTPRoute: {result.stderr}"
+
+    # Debug: verify namespace state before creating DGD
+    logger.info(f"Namespace: {namespace}")
+    ns_check = subprocess.run(
+        ["kubectl", "get", "namespace", namespace],
+        capture_output=True,
+        text=True,
+    )
+    logger.info(f"Namespace check: {ns_check.stdout.strip()}")
+    if ns_check.returncode != 0:
+        logger.error(f"Namespace not found: {ns_check.stderr}")
+
+    # Debug: check if operator CRD is registered
+    crd_check = subprocess.run(
+        ["kubectl", "get", "crd", "dynamographdeployments.nvidia.com"],
+        capture_output=True,
+        text=True,
+    )
+    logger.info(f"CRD check: {crd_check.stdout.strip()}")
+    if crd_check.returncode != 0:
+        logger.error(f"CRD not found: {crd_check.stderr}")
+
+    # Debug: check operator pod status
+    operator_check = subprocess.run(
+        [
+            "kubectl",
+            "get",
+            "pods",
+            "-n",
+            namespace,
+            "-l",
+            "app.kubernetes.io/name=dynamo-operator",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    logger.info(f"Operator pods: {operator_check.stdout.strip()}")
+
+    # Debug: log the full deployment spec being submitted
+    logger.info(f"DGD name: {deployment_spec.name}")
+    logger.info(f"DGD namespace: {deployment_spec.namespace}")
+    logger.info(f"DGD services: {[s.name for s in deployment_spec.services]}")
+
+    async with ManagedDeployment(
+        log_dir=request.node.name,
+        deployment_spec=deployment_spec,
+        namespace=namespace,
+        skip_service_restart=skip_service_restart,
+        frontend_service_name="Epp",
+    ) as deployment:
+        # Debug: check what DGDs exist after creation
+        dgd_check = subprocess.run(
+            ["kubectl", "get", "dynamographdeployments", "-n", namespace],
+            capture_output=True,
+            text=True,
+        )
+        logger.info(f"DGDs after creation: {dgd_check.stdout.strip()}")
+
+        pod_check = subprocess.run(
+            ["kubectl", "get", "pods", "-n", namespace, "-o", "wide"],
+            capture_output=True,
+            text=True,
+        )
+        logger.info(f"Pods after creation: {pod_check.stdout.strip()}")
+        epp_pods = deployment.get_pods(["Epp"])
+        epp_pod_list = epp_pods.get("Epp", [])
+        assert len(epp_pod_list) > 0, "No EPP pods found for GAIE deployment"
+        logger.info(f"Found EPP pod: {epp_pod_list[0].name}")
+
+        gateway_svcs = list(
+            kr8s.get("services", "inference-gateway", namespace=namespace)
+        )
+        assert (
+            len(gateway_svcs) > 0
+        ), f"inference-gateway service not found in namespace {namespace}"
+        gateway_pf = gateway_svcs[0].portforward(remote_port=80, local_port=0)
+        gateway_pf.start()
+        time.sleep(2)
+
+        try:
+            gateway_url = f"http://localhost:{gateway_pf.local_port}"
+            logger.info(f"Gateway port-forward established: {gateway_url}")
+
+            endpoint = deployment_spec.endpoint
+            headers = {"Host": route_hostname}
+            logger.info(f"Using Host header: {route_hostname}")
+
+            model_ready = wait_for_model_availability(
+                url=gateway_url,
+                endpoint=endpoint,
+                model=GAIE_MODEL_NAME,
+                logger=logger,
+                max_attempts=30,
+                headers=headers,
+            )
+            assert model_ready, (
+                f"Model '{GAIE_MODEL_NAME}' did not become available "
+                f"within the timeout period"
+            )
+
+            url = f"{gateway_url}{endpoint}"
+            payload = {
+                "model": GAIE_MODEL_NAME,
+                "messages": [{"role": "user", "content": TEST_PROMPT}],
+                "max_tokens": DEFAULT_MAX_TOKENS,
+                "temperature": DEFAULT_TEMPERATURE,
+                "stream": False,
+            }
+            logger.info(f"Sending inference request to {url}")
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=DEFAULT_REQUEST_TIMEOUT,
+            )
+
+            validate_chat_response(
+                response=response,
+                expected_model=GAIE_MODEL_NAME,
+                min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
+            )
+
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+            logger.info(
+                f"GAIE deployment test PASSED | "
+                f"model={data['model']}, status={response.status_code}, "
+                f"response_length={len(content)} chars\n"
+                f"Model response: {content}"
+            )
+        finally:
+            gateway_pf.stop()

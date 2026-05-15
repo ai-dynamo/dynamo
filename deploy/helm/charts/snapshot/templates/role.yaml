@@ -10,7 +10,6 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "snapshot.labels" . | nindent 4 }}
-    app.kubernetes.io/component: checkpoint-agent
 rules:
   # Watch and annotate pods in this namespace to drive checkpoint/restore lifecycle
   - apiGroups: [""]
@@ -28,6 +27,10 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create"]
+  # Resolve DRA GPU UUIDs via ResourceClaim allocation (namespace-scoped)
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaims"]
+    verbs: ["get", "list"]
 {{- else }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -35,7 +38,6 @@ metadata:
   name: {{ include "snapshot.fullname" . }}-agent
   labels:
     {{- include "snapshot.labels" . | nindent 4 }}
-    app.kubernetes.io/component: checkpoint-agent
 rules:
   # Watch and annotate pods cluster-wide on assigned nodes
   - apiGroups: [""]
@@ -53,5 +55,24 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create"]
+  # Resolve DRA GPU UUIDs via ResourceClaim and ResourceSlice
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceclaims", "resourceslices"]
+    verbs: ["get", "list"]
 {{- end }}
+{{- end }}
+
+{{- if and .Values.rbac.create .Values.rbac.namespaceRestricted }}
+---
+# ResourceSlices are cluster-scoped; agent needs this when using a namespace-restricted Role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "snapshot.fullname" . }}-agent-resourceslices
+  labels:
+    {{- include "snapshot.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceslices"]
+    verbs: ["get", "list"]
 {{- end }}

@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -66,6 +67,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
@@ -262,6 +264,16 @@ func main() {
 			restrictedNamespace: {},
 		}
 		setupLog.Info("Restricted namespace configured, launching in restricted mode", "namespace", restrictedNamespace)
+
+		banner := strings.Repeat("=", 80)
+		setupLog.Error(nil, banner)
+		setupLog.Error(nil, "DEPRECATION WARNING: Namespace-restricted mode is deprecated "+
+			"and will be removed in a future release.")
+		setupLog.Error(nil, "The operator is running in namespace-restricted mode",
+			"namespace", restrictedNamespace)
+		setupLog.Error(nil, "Please migrate to cluster-wide mode "+
+			"by removing the namespaceRestriction configuration.")
+		setupLog.Error(nil, banner)
 	} else {
 		setupLog.Info("No restricted namespace configured, launching in cluster-wide mode")
 	}
@@ -433,11 +445,35 @@ func main() {
 		runtimeConfig.KaiSchedulerEnabled = false
 	}
 
+	setupLog.Info("Detecting DRA (Dynamic Resource Allocation) availability...")
+	draDetected := commonController.DetectDRAAvailability(mainCtx, mgr)
+	switch {
+	case operatorCfg.DRA.Enabled == nil:
+		runtimeConfig.DRAEnabled = draDetected
+	case *operatorCfg.DRA.Enabled:
+		if !draDetected {
+			setupLog.Error(nil,
+				"DRA is explicitly enabled in config but the resource.k8s.io/v1 API"+
+					" was not detected in the cluster (requires Kubernetes 1.34+)",
+			)
+			os.Exit(1)
+		}
+		runtimeConfig.DRAEnabled = true
+	default:
+		setupLog.Info("DRA is explicitly disabled via config override")
+		runtimeConfig.DRAEnabled = false
+	}
+
+	setupLog.Info("Detecting Istio availability...")
+	runtimeConfig.IstioAvailable = commonController.DetectIstioAvailability(mainCtx, mgr)
+
 	setupLog.Info("Detected orchestrators availability",
 		"grove", runtimeConfig.GroveEnabled,
 		"lws", runtimeConfig.LWSEnabled,
 		"volcano", volcanoDetected,
 		"kai-scheduler", runtimeConfig.KaiSchedulerEnabled,
+		"dra", runtimeConfig.DRAEnabled,
+		"istio", runtimeConfig.IstioAvailable,
 	)
 
 	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetClient())
@@ -666,6 +702,15 @@ func registerControllers(
 		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
 	}
 
+	if runtimeConfig.GroveEnabled {
+		if err = controller.NewFailoverCascadeReconciler(
+			mgr.GetClient(),
+			mgr.GetEventRecorderFor("gms-failover-cascade"),
+		).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("unable to create GMS FailoverCascade controller: %w", err)
+		}
+	}
+
 	setupLog.Info("Controllers registered successfully")
 	return nil
 }
@@ -686,6 +731,22 @@ func registerWebhooks(
 		internalwebhook.SetExcludedNamespaces(nil)
 	}
 
+	var operatorPrincipal string
+	if sa, ns := os.Getenv("POD_SERVICE_ACCOUNT"), os.Getenv("POD_NAMESPACE"); sa != "" && ns != "" {
+		operatorPrincipal = fmt.Sprintf("system:serviceaccount:%s:%s", ns, sa)
+		setupLog.Info("Detected operator principal from downward API", "principal", operatorPrincipal)
+	} else {
+		setupLog.Info("POD_SERVICE_ACCOUNT/POD_NAMESPACE not set; operator SA self-identification disabled")
+	}
+
+	// Temporary internal gate for GMS + Snapshot.
+	if os.Getenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar) == "1" {
+		setupLog.Info(
+			"INTERNAL OVERRIDE: GMS + Snapshot admission rule disabled via env var; do NOT enable in production",
+			"envVar", consts.DynamoOperatorAllowGMSSnapshotEnvVar,
+		)
+	}
+
 	setupLog.Info("Registering validation webhooks")
 
 	dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler()
@@ -693,9 +754,14 @@ func registerWebhooks(
 		return fmt.Errorf("unable to register DynamoComponentDeployment webhook: %w", err)
 	}
 
-	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr)
+	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr, operatorPrincipal, runtimeConfig.GroveEnabled)
 	if err := dgdHandler.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment webhook: %w", err)
+	}
+
+	dckptHandler := webhookvalidation.NewDynamoCheckpointHandler()
+	if err := dckptHandler.RegisterWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to register DynamoCheckpoint webhook: %w", err)
 	}
 
 	dmHandler := webhookvalidation.NewDynamoModelHandler()
@@ -716,7 +782,30 @@ func registerWebhooks(
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest conversion webhook: %w", err)
 	}
 
+	if err := ctrl.NewWebhookManagedBy(mgr).
+		For(&nvidiacomv1beta1.DynamoGraphDeployment{}).
+		Complete(); err != nil {
+		return fmt.Errorf("unable to register DynamoGraphDeployment conversion webhook: %w", err)
+	}
+
+	if err := ctrl.NewWebhookManagedBy(mgr).
+		For(&nvidiacomv1beta1.DynamoComponentDeployment{}).
+		Complete(); err != nil {
+		return fmt.Errorf("unable to register DynamoComponentDeployment conversion webhook: %w", err)
+	}
+
+	if err := ctrl.NewWebhookManagedBy(mgr).
+		For(&nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}).
+		Complete(); err != nil {
+		return fmt.Errorf("unable to register DynamoGraphDeploymentScalingAdapter conversion webhook: %w", err)
+	}
+
 	setupLog.Info("Registering defaulting webhooks")
+
+	dcdDefaulter := webhookdefaulting.NewDCDDefaulter()
+	if err := dcdDefaulter.RegisterWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to register DynamoComponentDeployment defaulting webhook: %w", err)
+	}
 
 	dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion)
 	if err := dgdDefaulter.RegisterWithManager(mgr); err != nil {

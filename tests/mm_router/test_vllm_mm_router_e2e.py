@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""End-to-end tests for multimodal KV routing with vLLM.
+"""End-to-end tests for multimodal KV routing with vLLM frontend processor.
 
 Architecture:
-  Frontend -> MM Router Worker -> vLLM Worker
-                (computes mm_hash)   (publishes KV events)
+  Frontend (vLLM processor + KV router) → vLLM Worker
+       (process_inputs, mm_hash, NIXL)     (publishes KV events)
 
 This test validates MM-aware routing by sending repeated multimodal requests and
 asserting that router overlap is greater than 1 block (regression guard against
@@ -28,6 +28,7 @@ import pytest
 import requests
 
 from tests.conftest import EtcdServer, NatsServer
+from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
@@ -39,11 +40,15 @@ THREE_IMAGE_TOTAL_BLOCKS_RANGE = (180, 340)
 SINGLE_IMAGE_TOTAL_BLOCKS_RANGE = (60, 160)
 
 pytestmark = [
+    pytest.mark.pre_merge,  # all tests take <1 min to run finish on RTX 6000
     pytest.mark.e2e,
     pytest.mark.vllm,
     pytest.mark.multimodal,
     pytest.mark.gpu_1,
     pytest.mark.model(VLLM_MM_MODEL),
+    pytest.mark.requested_vllm_kv_cache_bytes(
+        1_719_075_000
+    ),  # KV cache cap (2x safety over min=859_537_408)
 ]
 
 _COLORS = [
@@ -80,6 +85,7 @@ def _make_process_env(log_level: str = "debug", **extra) -> dict[str, str]:
     env["DYN_LOG"] = log_level
     env["DYN_NAMESPACE"] = NAMESPACE
     env["DYN_REQUEST_PLANE"] = "tcp"
+    env["DYN_MM_ALLOW_INTERNAL"] = "1"
     env.update(extra)
     return env
 
@@ -96,10 +102,17 @@ _COMMON_PROCESS_KWARGS: dict[str, Any] = {
 }
 
 
+def _vllm_gpu_mem_args(default_utilization: str) -> list[str]:
+    return build_gpu_mem_args("build_vllm_gpu_mem_args") or [
+        "--gpu-memory-utilization",
+        default_utilization,
+    ]
+
+
 class VLLMWorkerProcess(ManagedProcess):
     """vLLM backend worker that emits KV events."""
 
-    def __init__(self, request, *, system_port: int):
+    def __init__(self, request, *, system_port: int, kv_event_port: int):
         super().__init__(
             command=[
                 "python3",
@@ -108,12 +121,18 @@ class VLLMWorkerProcess(ManagedProcess):
                 "--model",
                 VLLM_MM_MODEL,
                 "--enable-multimodal",
-                "--gpu-memory-utilization",
-                "0.85",
+                "--block-size",
+                str(BLOCK_SIZE),
+                "--enforce-eager",
+                *_vllm_gpu_mem_args("0.40"),
                 "--max-model-len",
-                "8192",
-                "--served-model-name",
-                f"{VLLM_MM_MODEL}__internal",
+                "4096",
+                "--kv-events-config",
+                (
+                    f'{{"publisher":"zmq","topic":"kv-events",'
+                    f'"endpoint":"tcp://*:{kv_event_port}",'
+                    f'"enable_kv_cache_events": true}}'
+                ),
             ],
             env=_make_process_env(DYN_SYSTEM_PORT=str(system_port)),
             health_check_urls=[
@@ -126,48 +145,20 @@ class VLLMWorkerProcess(ManagedProcess):
         )
 
 
-class VLLMMMRouterWorkerProcess(ManagedProcess):
-    """vLLM MM router worker."""
-
-    def __init__(self, request, *, system_port: int):
-        super().__init__(
-            command=[
-                "python3",
-                "-m",
-                "examples.backends.vllm.mm_router_worker",
-                "--model",
-                VLLM_MM_MODEL,
-                "--namespace",
-                NAMESPACE,
-                "--component",
-                "mm_router",
-                "--endpoint",
-                "generate",
-                "--downstream-component",
-                "backend",
-                "--downstream-endpoint",
-                "generate",
-                "--block-size",
-                str(BLOCK_SIZE),
-            ],
-            env=_make_process_env(
-                DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS='["generate"]',
-                DYN_SYSTEM_PORT=str(system_port),
-            ),
-            health_check_urls=[
-                (f"http://localhost:{system_port}/health", _check_ready)
-            ],
-            timeout=240,
-            straggler_commands=["mm_router_worker"],
-            log_dir=_prepare_log_dir(request, "vllm-mm-router"),
-            **_COMMON_PROCESS_KWARGS,
-        )
-
-
 class FrontendProcess(ManagedProcess):
-    """Frontend HTTP ingress."""
+    """Frontend with vLLM processor and KV router."""
 
-    def __init__(self, request, *, frontend_port: int):
+    def __init__(self, request, *, frontend_port: int, transfer_mode: str = "shm"):
+        # Transfer mode controls how mm_kwargs are sent from frontend to backend:
+        #   shm: shared memory (same-node, ~2ms)
+        #   nixl: NIXL RDMA (cross-node capable)
+        #   disabled: no transfer; backend re-processes images from URLs
+        extra_env: dict[str, str] = {}
+        if transfer_mode == "disabled":
+            extra_env["DYNAMO_DISABLE_NIXL_MM"] = "1"
+        else:
+            extra_env["DYNAMO_MM_TRANSFER"] = transfer_mode
+
         super().__init__(
             command=[
                 "python3",
@@ -175,16 +166,22 @@ class FrontendProcess(ManagedProcess):
                 "dynamo.frontend",
                 "--http-port",
                 str(frontend_port),
+                "--dyn-chat-processor",
+                "vllm",
                 "--router-mode",
-                "round-robin",
+                "kv",
+                "--kv-cache-block-size",
+                str(BLOCK_SIZE),
+                "--model-name",
+                VLLM_MM_MODEL,
             ],
-            env=_make_process_env(log_level="info"),
+            env=_make_process_env(log_level="debug", **extra_env),
             health_check_urls=[
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api)
             ],
             timeout=240,
             straggler_commands=["-m dynamo.frontend"],
-            log_dir=_prepare_log_dir(request, "vllm-mm-frontend"),
+            log_dir=_prepare_log_dir(request, f"vllm-mm-frontend-{transfer_mode}"),
             **_COMMON_PROCESS_KWARGS,
         )
 
@@ -199,18 +196,20 @@ def mm_runtime_services(request):
         os.environ.pop("ETCD_ENDPOINTS", None)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="module", params=["shm", "nixl", "disabled"])
 def start_vllm_mm_services(
     request, mm_runtime_services
 ) -> Generator[tuple[int, ManagedProcess], None, None]:
-    frontend_port, vllm_port, router_port = allocate_ports(count=3, start_port=10000)
+    transfer_mode = request.param
+    frontend_port, vllm_port, kv_event_port = allocate_ports(count=3, start_port=10000)
 
-    with VLLMWorkerProcess(request, system_port=vllm_port):
-        time.sleep(10)
-        with VLLMMMRouterWorkerProcess(request, system_port=router_port) as router_proc:
-            time.sleep(3)
-            with FrontendProcess(request, frontend_port=frontend_port):
-                yield frontend_port, router_proc
+    with VLLMWorkerProcess(request, system_port=vllm_port, kv_event_port=kv_event_port):
+        # Worker health check passed; wait briefly for ZMQ publisher to bind.
+        time.sleep(2)
+        with FrontendProcess(
+            request, frontend_port=frontend_port, transfer_mode=transfer_mode
+        ) as frontend_proc:
+            yield frontend_port, frontend_proc
 
 
 def _make_png_bytes(color: tuple[int, int, int], size: int = 1024) -> bytes:
@@ -252,7 +251,7 @@ def _wait_for_new_routing_score(
     router_proc: ManagedProcess,
     start_offset: int,
     pre_request_routing_count: int,
-    timeout_s: float = 120.0,
+    timeout_s: float = 25.0,
 ) -> tuple[int, int, str]:
     deadline = time.time() + timeout_s
     last_segment = ""
@@ -297,15 +296,14 @@ def _send_request_get_overlap(
         router_proc=router_proc,
         start_offset=start_offset,
         pre_request_routing_count=pre_request_routing_count,
-        timeout_s=120,
+        timeout_s=25,
     )
     print(f"[MM_ROUTER_E2E] {label}: current={overlap}/{total}")
     time.sleep(1)
     return overlap, total, segment
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(300)
 def test_vllm_text_only_overlap_repeated_prompt(
     start_vllm_mm_services, predownload_models
 ):
@@ -350,8 +348,7 @@ def test_vllm_text_only_overlap_repeated_prompt(
     )
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_repeated_three_images(
     start_vllm_mm_services, predownload_models
 ):
@@ -391,8 +388,7 @@ def test_vllm_mm_overlap_repeated_three_images(
     )
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_repeated_single_image(
     start_vllm_mm_services, predownload_models
 ):
@@ -432,8 +428,7 @@ def test_vllm_mm_overlap_repeated_single_image(
     )
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_repeated_two_identical_images(
     start_vllm_mm_services, predownload_models
 ):
@@ -469,8 +464,7 @@ def test_vllm_mm_overlap_repeated_two_identical_images(
     )
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
     start_vllm_mm_services, predownload_models
 ):
@@ -525,8 +519,7 @@ def test_vllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
     )
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_diff_images_less_than_same(
     start_vllm_mm_services, predownload_models
 ):
@@ -580,8 +573,7 @@ def test_vllm_mm_overlap_diff_images_less_than_same(
     )
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
     start_vllm_mm_services, predownload_models
 ):
@@ -641,8 +633,7 @@ def test_vllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
     )
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_swapped_order_less_than_same_order(
     start_vllm_mm_services, predownload_models
 ):
@@ -736,8 +727,7 @@ def http_image_server() -> Generator[list[str], None, None]:
     thread.join(timeout=5)
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_repeated_http_images(
     start_vllm_mm_services, predownload_models, http_image_server
 ):
@@ -778,8 +768,7 @@ def test_vllm_mm_overlap_repeated_http_images(
     )
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_http_vs_data_uri_same_image(
     start_vllm_mm_services, predownload_models, http_image_server
 ):

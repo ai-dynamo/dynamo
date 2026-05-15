@@ -76,7 +76,11 @@ async fn maybe_download_model(local_path: &str, model: &str, revision: &str) -> 
     let repo = Repo::with_revision(String::from(model), RepoType::Model, String::from(revision));
 
     let files_to_download = vec!["config.json", "tokenizer.json", "tokenizer_config.json"];
-    let optional_files = vec!["generation_config.json", "chat_template.jinja"];
+    let optional_files = vec![
+        "generation_config.json",
+        "chat_template.jinja",
+        "chat_template.json",
+    ];
     let repo_builder = api.repo(repo);
 
     let mut downloaded_path = PathBuf::new();
@@ -215,31 +219,31 @@ const TOOLS: &str = r#"
 "#;
 
 // Notes:
-// protocols::openai::chat_completions::ChatCompletionMessage -> dynamo_async_openai::types::ChatCompletionRequestMessage
-// protocols::openai::chat_completions::Tool -> dynamo_async_openai::types::ChatCompletionTool
-// protocols::openai::chat_completions::ToolChoiceType -> dynamo_async_openai::types::ChatCompletionToolChoiceOption
+// protocols::openai::chat_completions::ChatCompletionMessage -> dynamo_protocols::types::ChatCompletionRequestMessage
+// protocols::openai::chat_completions::Tool -> dynamo_protocols::types::ChatCompletionTool
+// protocols::openai::chat_completions::ToolChoiceType -> dynamo_protocols::types::ChatCompletionToolChoiceOption
 #[derive(Serialize, Deserialize)]
 struct Request {
-    messages: Vec<dynamo_async_openai::types::ChatCompletionRequestMessage>,
-    tools: Option<Vec<dynamo_async_openai::types::ChatCompletionTool>>,
-    tool_choice: Option<dynamo_async_openai::types::ChatCompletionToolChoiceOption>,
+    messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage>,
+    tools: Option<Vec<dynamo_protocols::types::ChatCompletionTool>>,
+    tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
 }
 
 impl Request {
     fn from(
         messages: &str,
         tools: Option<&str>,
-        tool_choice: Option<dynamo_async_openai::types::ChatCompletionToolChoiceOption>,
+        tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
         model: String,
     ) -> NvCreateChatCompletionRequest {
-        let messages: Vec<dynamo_async_openai::types::ChatCompletionRequestMessage> =
+        let messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage> =
             serde_json::from_str(messages).unwrap();
-        let tools: Option<Vec<dynamo_async_openai::types::ChatCompletionTool>> =
+        let tools: Option<Vec<dynamo_protocols::types::ChatCompletionTool>> =
             tools.map(|x| serde_json::from_str(x).unwrap());
         //let tools = tools.unwrap();
         //let tool_choice = tool_choice.unwrap();
 
-        let mut inner = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default();
+        let mut inner = dynamo_protocols::types::CreateChatCompletionRequestArgs::default();
         inner.model(model);
         inner.messages(messages);
         if let Some(tools) = tools {
@@ -256,6 +260,7 @@ impl Request {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -313,7 +318,7 @@ async fn test_single_turn_with_tools() {
         let request = Request::from(
             SINGLE_CHAT_MESSAGE,
             Some(TOOLS),
-            Some(dynamo_async_openai::types::ChatCompletionToolChoiceOption::Auto),
+            Some(dynamo_protocols::types::ChatCompletionToolChoiceOption::Auto),
             mdc.slug().to_string(),
         );
         let formatted_prompt = formatter.render(&request).unwrap();
@@ -420,7 +425,7 @@ async fn test_multi_turn_with_system_with_tools() {
         let request = Request::from(
             THREE_TURN_CHAT_MESSAGE_WITH_SYSTEM,
             Some(TOOLS),
-            Some(dynamo_async_openai::types::ChatCompletionToolChoiceOption::Auto),
+            Some(dynamo_protocols::types::ChatCompletionToolChoiceOption::Auto),
             mdc.slug().to_string(),
         );
         let formatted_prompt = formatter.render(&request).unwrap();
@@ -482,6 +487,7 @@ async fn test_multi_turn_with_continuation() {
 pub mod openai_preprocessor_tests {
     // re-export all the tests from the parent module
     pub use super::*;
+    use dynamo_llm::protocols::openai::nvext::{AgentContext, NvExt};
     use std::collections::HashSet;
 
     #[tokio::test]
@@ -522,6 +528,55 @@ pub mod openai_preprocessor_tests {
         assert_eq!(
             eos_token_id_set,
             vec![200002, 199999, 200012].into_iter().collect()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_context_propagates_to_preprocessed_request() {
+        if let Err(e) = get_hf_token() {
+            println!("HF_TOKEN is not set, skipping test: {}", e);
+            return;
+        }
+        let mdc = make_mdc_from_repo(
+            "tests/data/sample-models",
+            "openai/gpt-oss-120b",
+            "b5c939de8f754692c1647ca79fbf85e8c1e70f8a",
+            Some(vec![PromptContextMixin::OaiChat]),
+        )
+        .await;
+
+        let oai_preprocessor = OpenAIPreprocessor::new(mdc.clone()).unwrap();
+        let mut request = Request::from(SINGLE_CHAT_MESSAGE, None, None, mdc.slug().to_string());
+        request.nvext = Some(
+            NvExt::builder()
+                .agent_context(
+                    AgentContext::builder()
+                        .session_type_id("deep_research:v1".to_string())
+                        .session_id("run-123".to_string())
+                        .trajectory_id("run-123:researcher-0".to_string())
+                        .parent_trajectory_id("run-123:orchestrator".to_string())
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        );
+
+        let preprocessed_request = oai_preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap()
+            .0;
+
+        let agent_context = preprocessed_request
+            .agent_context
+            .expect("agent_context should propagate");
+        assert_eq!(agent_context.session_type_id, "deep_research:v1");
+        assert_eq!(agent_context.session_id, "run-123");
+        assert_eq!(agent_context.trajectory_id, "run-123:researcher-0");
+        assert_eq!(
+            agent_context.parent_trajectory_id.as_deref(),
+            Some("run-123:orchestrator")
         );
     }
 }
@@ -633,9 +688,9 @@ mod context_length_validation {
     const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
 
     fn make_chat_request(message: &str, model: &str) -> NvCreateChatCompletionRequest {
-        let messages: Vec<dynamo_async_openai::types::ChatCompletionRequestMessage> =
+        let messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage> =
             serde_json::from_str(message).unwrap();
-        let inner = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+        let inner = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
             .model(model)
             .messages(messages)
             .build()
@@ -646,6 +701,7 @@ mod context_length_validation {
             nvext: None,
             chat_template_args: None,
             media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }

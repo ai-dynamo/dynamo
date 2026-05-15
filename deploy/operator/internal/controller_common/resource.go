@@ -26,12 +26,10 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -215,56 +213,86 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 }
 
 // CopySpec copies only the Spec field from source to destination using Unstructured
+
+// kubeEnvelopeFields are standard top-level Kubernetes fields that don't
+// represent the resource's desired state. Everything else (spec, data,
+// rules, roleRef, subjects, etc.) is considered content.
+var kubeEnvelopeFields = map[string]bool{
+	"apiVersion": true,
+	"kind":       true,
+	"metadata":   true,
+	"status":     true,
+}
+
+// nonEnvelopeFields returns all top-level fields from an unstructured map
+// except the Kubernetes envelope (apiVersion, kind, metadata, status).
+func nonEnvelopeFields(obj map[string]interface{}) map[string]interface{} {
+	content := make(map[string]interface{}, len(obj))
+	for k, v := range obj {
+		if kubeEnvelopeFields[k] {
+			continue
+		}
+		content[k] = v
+	}
+	return content
+}
+
+// getContentFields returns all content fields from an unstructured object,
+// i.e. everything except the Kubernetes envelope (apiVersion, kind, metadata, status).
+// For resources with a "spec" field, it returns the spec directly for
+// backward-compatible hashing. For spec-less resources (ConfigMaps, Secrets,
+// Roles, etc.), it returns a map of all content fields.
+func getContentFields(u *unstructured.Unstructured) (any, bool) {
+	if spec, found, err := unstructured.NestedFieldCopy(u.Object, "spec"); err == nil && found {
+		return spec, true
+	}
+
+	content := nonEnvelopeFields(u.Object)
+	if len(content) == 0 {
+		return nil, false
+	}
+	return content, true
+}
+
 func CopySpec(source, destination client.Object) error {
-	// Convert source to unstructured
 	sourceMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(source)
 	if err != nil {
 		return err
 	}
 	sourceUnstructured := &unstructured.Unstructured{Object: sourceMap}
 
-	// Convert destination to unstructured
 	destMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(destination)
 	if err != nil {
 		return err
 	}
 	destUnstructured := &unstructured.Unstructured{Object: destMap}
 
-	// Extract only the spec from source
-	sourceSpec, found, err := unstructured.NestedFieldCopy(sourceUnstructured.Object, "spec")
-	if err != nil {
-		return err
-	}
-	if !found {
-		return fmt.Errorf("spec not found in source object")
+	if spec, found, err := unstructured.NestedFieldCopy(sourceUnstructured.Object, "spec"); err == nil && found {
+		if err := unstructured.SetNestedField(destUnstructured.Object, spec, "spec"); err != nil {
+			return err
+		}
+		return runtime.DefaultUnstructuredConverter.FromUnstructured(destUnstructured.Object, destination)
 	}
 
-	// Set the spec in the destination
-	err = unstructured.SetNestedField(destUnstructured.Object, sourceSpec, "spec")
-	if err != nil {
-		return err
+	for k, v := range nonEnvelopeFields(sourceUnstructured.Object) {
+		destUnstructured.Object[k] = v
 	}
 
-	// Convert back to the original object
 	return runtime.DefaultUnstructuredConverter.FromUnstructured(destUnstructured.Object, destination)
 }
 
 func getSpec(obj client.Object) (any, error) {
-	// Convert source to unstructured
 	sourceMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
 	if err != nil {
 		return nil, err
 	}
 	sourceUnstructured := &unstructured.Unstructured{Object: sourceMap}
-	// Extract only the spec from source
-	spec, found, err := unstructured.NestedFieldCopy(sourceUnstructured.Object, "spec")
-	if err != nil {
-		return nil, err
-	}
+
+	content, found := getContentFields(sourceUnstructured)
 	if !found {
 		return nil, nil
 	}
-	return spec, nil
+	return content, nil
 }
 
 // SpecChangeResult contains the result of spec change detection
@@ -492,107 +520,6 @@ func firstKey(m map[string]interface{}) string {
 	return keys[0]
 }
 
-func GetResourcesConfig(resources *v1alpha1.Resources) (*corev1.ResourceRequirements, error) {
-
-	if resources == nil {
-		return nil, nil
-	}
-
-	currentResources := &corev1.ResourceRequirements{}
-
-	if resources.Limits != nil {
-		if resources.Limits.CPU != "" {
-			q, err := resource.ParseQuantity(resources.Limits.CPU)
-			if err != nil {
-				return nil, fmt.Errorf("parse limits cpu quantity: %w", err)
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceCPU] = q
-		}
-		if resources.Limits.Memory != "" {
-			q, err := resource.ParseQuantity(resources.Limits.Memory)
-			if err != nil {
-				return nil, fmt.Errorf("parse limits memory quantity: %w", err)
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceMemory] = q
-		}
-		if resources.Limits.GPU != "" {
-			q, err := resource.ParseQuantity(resources.Limits.GPU)
-			if err != nil {
-				return nil, fmt.Errorf("parse limits gpu quantity: %w", err)
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[getGPUResourceName(resources.Limits)] = q
-		}
-		for k, v := range resources.Limits.Custom {
-			q, err := resource.ParseQuantity(v)
-			if err != nil {
-				return nil, fmt.Errorf("parse limits %s quantity: %w", k, err)
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceName(k)] = q
-		}
-	}
-	if resources.Requests != nil {
-		if resources.Requests.CPU != "" {
-			q, err := resource.ParseQuantity(resources.Requests.CPU)
-			if err != nil {
-				return nil, fmt.Errorf("parse requests cpu quantity: %w", err)
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceCPU] = q
-		}
-		if resources.Requests.Memory != "" {
-			q, err := resource.ParseQuantity(resources.Requests.Memory)
-			if err != nil {
-				return nil, fmt.Errorf("parse requests memory quantity: %w", err)
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceMemory] = q
-		}
-		for k, v := range resources.Requests.Custom {
-			q, err := resource.ParseQuantity(v)
-			if err != nil {
-				return nil, fmt.Errorf("parse requests %s quantity: %w", k, err)
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceName(k)] = q
-		}
-	}
-	if resources.Claims != nil {
-		if currentResources.Claims == nil {
-			currentResources.Claims = make([]corev1.ResourceClaim, 0)
-		}
-		currentResources.Claims = append(currentResources.Claims, resources.Claims...)
-	}
-	return currentResources, nil
-}
-
-func getGPUResourceName(resourceItem *v1alpha1.ResourceItem) corev1.ResourceName {
-	if resourceItem == nil {
-		return corev1.ResourceName(consts.KubeResourceGPUNvidia)
-	}
-	if resourceItem.GPUType != "" {
-		return corev1.ResourceName(resourceItem.GPUType)
-	}
-	return corev1.ResourceName(consts.KubeResourceGPUNvidia)
-}
-
 // AppendUniqueImagePullSecrets appends secrets to existing, skipping any that already exist by name.
 func AppendUniqueImagePullSecrets(existing, additional []corev1.LocalObjectReference) []corev1.LocalObjectReference {
 	if len(additional) == 0 {
@@ -612,10 +539,10 @@ func AppendUniqueImagePullSecrets(existing, additional []corev1.LocalObjectRefer
 }
 
 type Resource struct {
-	object          client.Object
-	isReady         bool
-	readyReason     string
-	serviceStatuses map[string]v1alpha1.ServiceReplicaStatus
+	object            client.Object
+	isReady           bool
+	readyReason       string
+	componentStatuses map[string]v1beta1.ComponentReplicaStatus
 }
 
 func NewResource[T client.Object](resource T, isReady func() (bool, string)) (*Resource, error) {
@@ -632,18 +559,18 @@ func NewResource[T client.Object](resource T, isReady func() (bool, string)) (*R
 	}, nil
 }
 
-func NewResourceWithServiceStatuses[T client.Object](resource T, isReadyAndServiceStatuses func() (bool, string, map[string]v1alpha1.ServiceReplicaStatus)) (*Resource, error) {
+func NewResourceWithComponentStatuses[T client.Object](resource T, isReadyAndComponentStatuses func() (bool, string, map[string]v1beta1.ComponentReplicaStatus)) (*Resource, error) {
 	v := reflect.ValueOf(resource)
 	// handles untype nil and typed nil
 	if !v.IsValid() || v.IsNil() {
 		return nil, fmt.Errorf("resource is nil")
 	}
-	ready, reason, serviceStatuses := isReadyAndServiceStatuses()
+	ready, reason, componentStatuses := isReadyAndComponentStatuses()
 	return &Resource{
-		object:          resource,
-		isReady:         ready,
-		readyReason:     reason,
-		serviceStatuses: serviceStatuses,
+		object:            resource,
+		isReady:           ready,
+		readyReason:       reason,
+		componentStatuses: componentStatuses,
 	}, nil
 }
 
@@ -655,6 +582,6 @@ func (r *Resource) GetName() string {
 	return r.object.GetName()
 }
 
-func (r *Resource) GetServiceStatuses() map[string]v1alpha1.ServiceReplicaStatus {
-	return r.serviceStatuses
+func (r *Resource) GetComponentStatuses() map[string]v1beta1.ComponentReplicaStatus {
+	return r.componentStatuses
 }

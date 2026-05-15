@@ -1,20 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import sglang as sgl
 import zmq
 import zmq.asyncio
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
-from sglang.srt.utils import get_local_ip_auto, get_zmq_socket, maybe_wrap_ipv6_address
+from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto, get_zmq_socket
 
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
-    from sglang.srt.managers.scheduler_metrics_mixin import KvMetrics
 
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -25,11 +27,42 @@ from dynamo.runtime import Endpoint
 from dynamo.sglang.args import Config
 
 
+def get_local_dp_rank_range(server_args) -> range:
+    """Return the global DP ranks hosted by this local worker."""
+    dp_size = getattr(server_args, "dp_size", 1) or 1
+    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
+    nnodes = getattr(server_args, "nnodes", 1) or 1
+    node_rank = getattr(server_args, "node_rank", 0) or 0
+
+    if enable_dp_attention and dp_size > 1:
+        local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
+        start_dp_rank = node_rank * local_dp_size
+        end_dp_rank = start_dp_rank + local_dp_size
+    else:
+        start_dp_rank = 0
+        end_dp_rank = 1
+
+    return range(start_dp_rank, end_dp_rank)
+
+
+def set_forward_pass_metrics_worker_id(
+    server_args, generate_endpoint: Endpoint
+) -> None:
+    """Inject the endpoint instance identity and IPC path into SGLang before engine init."""
+    if not getattr(server_args, "enable_forward_pass_metrics", False):
+        return
+
+    import tempfile
+
+    server_args.forward_pass_metrics_worker_id = str(generate_endpoint.connection_id())
+    ipc_path = tempfile.NamedTemporaryFile(delete=False).name
+    server_args.forward_pass_metrics_ipc_name = f"ipc://{ipc_path}"
+
+
 def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
     """Format ZMQ endpoint by replacing wildcard with IP address.
 
-    Properly handles IPv6 addresses by wrapping them in square brackets.
-    Uses SGLang's maybe_wrap_ipv6_address for consistent formatting.
+    Properly handles IPv6 addresses using SGLang's NetworkAddress utility.
 
     Args:
         endpoint_template: ZMQ endpoint template with wildcard (e.g., "tcp://*:5557")
@@ -44,9 +77,12 @@ def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
         >>> format_zmq_endpoint("tcp://*:5557", "2a02:6b8:c46:2b4:0:74c1:75b0:0")
         'tcp://[2a02:6b8:c46:2b4:0:74c1:75b0:0]:5557'
     """
-    # Use SGLang's utility to wrap IPv6 addresses in brackets
-    formatted_ip = maybe_wrap_ipv6_address(ip_address)
-    return endpoint_template.replace("*", formatted_ip)
+    parsed = urlparse(endpoint_template)
+    if parsed.scheme != "tcp" or parsed.port is None:
+        raise ValueError(
+            f"Expected tcp://host:port endpoint, got {endpoint_template!r}"
+        )
+    return NetworkAddress(ip_address, parsed.port).to_tcp()
 
 
 # Note: We use SGLang's ZmqEventPublisher.offset_endpoint_port() directly
@@ -89,6 +125,7 @@ class DynamoSglangPublisher:
 
         self._running = True
         self.kv_publishers: List[KvEventPublisher] = []
+        self.fpm_relays: list = []
 
         # ZMQ setup for receiving scheduler metrics (leader node only)
         # Non-leader nodes don't receive scheduler metrics via this socket - they only
@@ -127,16 +164,17 @@ class DynamoSglangPublisher:
         while self._running:
             try:
                 # Receive KvMetrics object from SGLang scheduler via ZMQ
-                # KvMetrics class: sglang/srt/managers/scheduler_metrics_mixin.py lines 45-54
-                # Sent from: sglang/srt/managers/scheduler_metrics_mixin.py lines 482-499 (_emit_kv_metrics)
-                kv_metrics: KvMetrics = await self._sock.recv_pyobj()
+                # KvMetrics class: sglang/srt/observability/scheduler_metrics_mixin.py
+                kv_metrics = await self._sock.recv_pyobj()
                 dp_rank = (
                     kv_metrics.data_parallel_rank
                     if kv_metrics.data_parallel_rank is not None
                     else self.dp_rank
                 )
                 active_decode_blocks = kv_metrics.kv_active_blocks
-                self.metrics_publisher.publish(dp_rank, active_decode_blocks)
+                self.metrics_publisher.publish(
+                    dp_rank, kv_used_blocks=active_decode_blocks
+                )
                 dp_rank_str = str(dp_rank)
                 # Publish total blocks (always available in KvMetrics)
                 self.component_gauges.set_total_blocks(
@@ -176,12 +214,19 @@ class DynamoSglangPublisher:
             except Exception as e:
                 logging.warning(f"Failed to shutdown kv publisher: {e}")
 
+        # Shutdown FPM relays
+        for relay in self.fpm_relays:
+            try:
+                relay.shutdown()
+            except Exception as e:
+                logging.warning(f"Failed to shutdown FPM relay: {e}")
+
         logging.info("DynamoSglangPublisher cleanup complete")
 
     def init_engine_metrics_publish(self) -> None:
         """Publish initial dummy metrics to bootstrap the metrics endpoint."""
         logging.info("Sending dummy metrics to initialize")
-        self.metrics_publisher.publish(self.dp_rank, 0)
+        self.metrics_publisher.publish(self.dp_rank, kv_used_blocks=0)
         dp_rank_str = str(self.dp_rank)
         self.component_gauges.set_total_blocks(dp_rank_str, 0)
         self.component_gauges.set_gpu_cache_usage(dp_rank_str, 0.0)
@@ -214,30 +259,15 @@ class DynamoSglangPublisher:
             local_ip = get_local_ip_auto()
 
             # Determine DP attention configuration
-            dp_size = getattr(self.server_args, "dp_size", 1) or 1
-            enable_dp_attention = getattr(
-                self.server_args, "enable_dp_attention", False
-            )
-            nnodes = getattr(self.server_args, "nnodes", 1) or 1
-            node_rank = getattr(self.server_args, "node_rank", 0) or 0
-
-            if enable_dp_attention and dp_size > 1:
-                # Calculate which DP ranks are local to this node
-                # DP ranks are distributed evenly across nodes
-                local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
-                start_dp_rank = node_rank * local_dp_size
-                end_dp_rank = start_dp_rank + local_dp_size
-
+            dp_ranks = get_local_dp_rank_range(self.server_args)
+            if len(dp_ranks) > 1:
                 logging.info(
-                    f"DP attention mode: node_rank={node_rank}, dp_size={dp_size}, "
-                    f"nnodes={nnodes}. Subscribing to local DP ranks [{start_dp_rank}, {end_dp_rank})"
+                    "DP attention mode: subscribing to local DP ranks [%d, %d)",
+                    dp_ranks.start,
+                    dp_ranks.stop,
                 )
-            else:
-                # Standard mode: single subscriber for rank 0
-                start_dp_rank = 0
-                end_dp_rank = 1
 
-            for dp_rank in range(start_dp_rank, end_dp_rank):
+            for dp_rank in dp_ranks:
                 # Use SGLang's offset_endpoint_port to ensure alignment with publishers
                 # This is the same function SGLang schedulers use to determine their bind ports
                 zmq_ep = ZmqEventPublisher.offset_endpoint_port(base_ep, dp_rank)
@@ -268,6 +298,56 @@ class DynamoSglangPublisher:
         self.kv_publisher = self.kv_publishers[0] if self.kv_publishers else None
 
         return self.kv_publishers
+
+    def init_fpm_relay(self) -> list:
+        """Set up forward pass metrics relays for the event plane.
+
+        Connects to the IPC endpoint published by SGLang's _FpmPublisherThread
+        (exposed as server_args.forward_pass_metrics_ipc_name after engine init)
+        and re-publishes to the Dynamo event plane.
+
+        Returns:
+            List of FpmEventRelay instances, or empty list if not enabled.
+        """
+        ipc_name = getattr(self.server_args, "forward_pass_metrics_ipc_name", None)
+        if ipc_name is None:
+            return []
+
+        try:
+            from dynamo.llm import FpmEventRelay
+        except ImportError:
+            logging.warning(
+                "FpmEventRelay not available (Rust bindings not built with FPM support). "
+                "Forward pass metrics will not be relayed to the event plane."
+            )
+            return []
+
+        # FPM uses per-scheduler IPC endpoints suffixed by dp_rank.
+        # Unlike KV events (per-request, routed), every scheduler emits FPM
+        # independently — subscribe to all local DP ranks.
+        dp_size = getattr(self.server_args, "dp_size", 1) or 1
+        enable_dp_attention = getattr(self.server_args, "enable_dp_attention", False)
+        nnodes = getattr(self.server_args, "nnodes", 1) or 1
+        node_rank = getattr(self.server_args, "node_rank", 0) or 0
+
+        if enable_dp_attention and nnodes > 1:
+            local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
+            dp_start = node_rank * local_dp_size
+            dp_ranks = range(dp_start, dp_start + local_dp_size)
+        else:
+            dp_ranks = range(dp_size)
+
+        relays = []
+        for dp_rank in dp_ranks:
+            zmq_ep = f"{ipc_name}.{dp_rank}"
+            relay = FpmEventRelay(
+                endpoint=self.generate_endpoint,
+                zmq_endpoint=zmq_ep,
+            )
+            relays.append(relay)
+            logging.info(f"FPM relay for dp_rank={dp_rank} subscribing to {zmq_ep}")
+        self.fpm_relays = relays
+        return self.fpm_relays
 
 
 def setup_prometheus_registry(
@@ -372,6 +452,7 @@ async def setup_sgl_metrics(
 
     publisher.init_engine_metrics_publish()
     publisher.init_kv_event_publish()
+    publisher.init_fpm_relay()
 
     task = asyncio.create_task(publisher.run())
     logging.info("SGLang metrics loop started")

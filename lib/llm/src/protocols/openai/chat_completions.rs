@@ -35,7 +35,8 @@ pub use delta::DeltaGenerator;
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
-    pub inner: dynamo_async_openai::types::CreateChatCompletionRequest,
+    #[schema(value_type = Object)]
+    pub inner: dynamo_protocols::types::CreateChatCompletionRequest,
 
     #[serde(flatten, default)]
     pub common: CommonExt,
@@ -58,27 +59,35 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_io_kwargs: Option<MediaDecoder>,
 
+    /// When true, logprob token fields are returned as "token_id:<id>" instead
+    /// of decoded text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_tokens_as_token_ids: Option<bool>,
+
     /// Catch-all for unsupported fields - checked during validation
     #[serde(flatten, default, skip_serializing)]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// A response structure for unary chat completion responses, embedding OpenAI's
-/// `CreateChatCompletionResponse`.
-///
-/// # Fields
-/// - `inner`: The base OpenAI unary chat completion response, embedded
-///   using `serde(flatten)`.
-pub type NvCreateChatCompletionResponse = dynamo_async_openai::types::CreateChatCompletionResponse;
+/// `CreateChatCompletionResponse` with optional NVIDIA extension metadata.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct NvCreateChatCompletionResponse {
+    #[serde(flatten)]
+    pub inner: dynamo_protocols::types::CreateChatCompletionResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
+}
 
 /// A response structure for streamed chat completions, embedding OpenAI's
-/// `CreateChatCompletionStreamResponse`.
-///
-/// # Fields
-/// - `inner`: The base OpenAI streaming chat completion response, embedded
-///   using `serde(flatten)`.
-pub type NvCreateChatCompletionStreamResponse =
-    dynamo_async_openai::types::CreateChatCompletionStreamResponse;
+/// `CreateChatCompletionStreamResponse` with optional NVIDIA extension metadata.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct NvCreateChatCompletionStreamResponse {
+    #[serde(flatten)]
+    pub inner: dynamo_protocols::types::CreateChatCompletionStreamResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
+}
 
 /// Implements `NvExtProvider` for `NvCreateChatCompletionRequest`,
 /// providing access to NVIDIA-specific extensions.
@@ -91,10 +100,6 @@ impl NvExtProvider for NvCreateChatCompletionRequest {
     /// Returns `None`, as raw prompt extraction is not implemented.
     fn raw_prompt(&self) -> Option<String> {
         None
-    }
-
-    fn effective_cache_control(&self) -> Option<&crate::protocols::openai::nvext::CacheControl> {
-        NvExtProvider::nvext(self).and_then(|ext| ext.cache_control.as_ref())
     }
 }
 
@@ -109,12 +114,6 @@ impl AnnotationsProvider for NvCreateChatCompletionRequest {
     }
 
     /// Checks whether a specific annotation exists in the request.
-    ///
-    /// # Arguments
-    /// * `annotation` - A string slice representing the annotation to check.
-    ///
-    /// # Returns
-    /// `true` if the annotation exists, `false` otherwise.
     fn has_annotation(&self, annotation: &str) -> bool {
         self.nvext
             .as_ref()
@@ -199,7 +198,7 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
 
         // 2) OpenAI `response_format` (applies to assistant content, not tool calls)
         if let Some(response_format) = self.inner.response_format.as_ref() {
-            use dynamo_async_openai::types::ResponseFormat;
+            use dynamo_protocols::types::ResponseFormat;
             match response_format {
                 ResponseFormat::Text => {}
                 ResponseFormat::JsonObject => {
@@ -285,10 +284,11 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     /// * `Some(Vec<String>)` if stop conditions are set.
     /// * `None` if no stop conditions are defined.
     fn get_stop(&self) -> Option<Vec<String>> {
-        self.inner.stop.as_ref().map(|stop| match stop {
-            dynamo_async_openai::types::Stop::String(s) => vec![s.clone()],
-            dynamo_async_openai::types::Stop::StringArray(arr) => arr.clone(),
-        })
+        self.inner.stop.as_ref().and_then(|stop| stop.strings())
+    }
+
+    fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
+        self.inner.stop.as_ref().and_then(|stop| stop.token_ids())
     }
 
     /// Returns a reference to the optional `NvExt` extension, if available.
@@ -329,6 +329,10 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 
     fn get_formatted_prompt(&self) -> Option<bool> {
         None
+    }
+
+    fn get_return_tokens_as_token_ids(&self) -> Option<bool> {
+        self.return_tokens_as_token_ids
     }
 }
 
@@ -381,7 +385,8 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::OutputOptionsProvider;
+    use crate::engines::ValidateRequest;
+    use crate::protocols::common::{OutputOptionsProvider, StopConditionsProvider};
     use serde_json::json;
 
     #[test]
@@ -425,5 +430,88 @@ mod tests {
 
             assert_eq!(output_options.skip_special_tokens, Some(skip_value));
         }
+    }
+
+    #[test]
+    fn test_stop_contract() {
+        let one_stop = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": " The"
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(one_stop).expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), Some(vec![" The".to_string()]));
+        assert_eq!(request.get_stop_token_ids(), None);
+
+        let many_stops = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": ["A", "B"]
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(many_stops).expect("Failed to deserialize request");
+        assert_eq!(
+            request.get_stop(),
+            Some(vec!["A".to_string(), "B".to_string()])
+        );
+        assert_eq!(request.get_stop_token_ids(), None);
+
+        let token_id_stops = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": [32, 34]
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(token_id_stops).expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), None);
+        assert_eq!(request.get_stop_token_ids(), Some(vec![32, 34]));
+
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("extract stop conditions");
+        assert_eq!(stop_conditions.stop, None);
+        assert_eq!(stop_conditions.stop_token_ids, Some(vec![32, 34]));
+
+        let token_id_display_string_stop = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": "token_id:576"
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(token_id_display_string_stop)
+                .expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), Some(vec!["token_id:576".to_string()]));
+        assert_eq!(request.get_stop_token_ids(), None);
+
+        let token_id_display_string_array_stop = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": ["token_id:576"]
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(token_id_display_string_array_stop)
+                .expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), Some(vec!["token_id:576".to_string()]));
+        assert_eq!(request.get_stop_token_ids(), None);
+
+        let scalar_token_id_stop = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": 576
+        });
+        let result: Result<NvCreateChatCompletionRequest, _> =
+            serde_json::from_value(scalar_token_id_stop);
+        assert!(result.is_err());
+
+        let unsupported_stop_token_ids = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop_token_ids": [576]
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(unsupported_stop_token_ids)
+                .expect("Failed to deserialize request");
+        assert!(ValidateRequest::validate(&request).is_err());
     }
 }

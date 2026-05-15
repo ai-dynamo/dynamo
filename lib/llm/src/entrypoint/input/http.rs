@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::{
@@ -53,7 +54,6 @@ pub async fn run(
         http_service_builder.cancel_token(Some(distributed_runtime.primary_token()));
     http_service_builder =
         http_service_builder.with_request_template(engine_config.local_model().request_template());
-
     // Inject the DRT's metrics registry so that component-scoped metrics
     // (e.g. KvIndexerMetrics) are exposed (default port 8000 if not overridden).
     http_service_builder =
@@ -68,6 +68,7 @@ pub async fn run(
         EngineConfig::Dynamic {
             ref model,
             ref chat_engine_factory,
+            ref prefill_load_estimator,
         } => {
             // Pass the discovery client so the /health endpoint can query active instances
             http_service_builder =
@@ -76,21 +77,27 @@ pub async fn run(
 
             let router_config = model.router_config();
             let migration_limit = model.migration_limit();
+            let migration_max_seq_len = model.migration_max_seq_len();
             // Listen for models registering themselves, add them to HTTP service
             // Create namespace filter from model configuration
             let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
                 model.namespace(),
                 model.namespace_prefix(),
             );
+            let local_model_path =
+                (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
             run_watcher(
                 distributed_runtime.clone(),
                 http_service.state().manager_clone(),
                 router_config.clone(),
                 migration_limit,
+                migration_max_seq_len,
                 namespace_filter,
                 Arc::new(http_service.clone()),
                 http_service.state().metrics_clone(),
                 chat_engine_factory.clone(),
+                prefill_load_estimator.clone(),
+                local_model_path,
             )
             .await?;
             http_service
@@ -164,19 +171,25 @@ async fn run_watcher(
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     namespace_filter: NamespaceFilter,
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    local_model_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let mut watch_obj = ModelWatcher::new(
         runtime.clone(),
         model_manager,
         router_config,
         migration_limit,
+        migration_max_seq_len,
         chat_engine_factory,
+        prefill_load_estimator,
         metrics.clone(),
     );
+    watch_obj.set_local_model_path(local_model_path);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
@@ -189,6 +202,7 @@ async fn run_watcher(
     // Create a channel to receive model type updates
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
     watch_obj.set_notify_on_model_update(tx);
+    let watch_obj = Arc::new(watch_obj);
 
     // Spawn a task to watch for model type changes and update HTTP service endpoints and metrics
     let _endpoint_enabler_task = tokio::spawn(async move {

@@ -21,3 +21,8 @@ xxhash-rust = { workspace = true }
 bs58 = "0.5"
 
 bytemuck = "1.22"
+
+[dev-dependencies]
+itertools = "0.14"
+rmp-serde = { workspace = true }
+serde_json = { workspace = true }

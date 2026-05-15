@@ -26,11 +26,16 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -58,29 +63,24 @@ var testHash = func() string {
 	return hash
 }()
 
-var defaultCheckpointJobName = "checkpoint-job-" + testHash + "-" + consts.DefaultCheckpointArtifactVersion
+var defaultCheckpointJobName = snapshotprotocol.GetCheckpointJobName(testHash, snapshotprotocol.DefaultCheckpointArtifactVersion)
 
 func checkpointTestScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	_ = nvidiacomv1alpha1.AddToScheme(s)
+	_ = appsv1.AddToScheme(s)
 	_ = corev1.AddToScheme(s)
 	_ = batchv1.AddToScheme(s)
 	_ = coordinationv1.AddToScheme(s)
+	_ = rbacv1.AddToScheme(s)
+	_ = resourcev1.AddToScheme(s)
 	return s
 }
 
 func checkpointTestConfig() *configv1alpha1.OperatorConfiguration {
 	return &configv1alpha1.OperatorConfiguration{
 		Checkpoint: configv1alpha1.CheckpointConfiguration{
-			Enabled:                    true,
-			ReadyForCheckpointFilePath: "/tmp/ready-for-checkpoint",
-			Storage: configv1alpha1.CheckpointStorageConfiguration{
-				Type: configv1alpha1.CheckpointStorageTypePVC,
-				PVC: configv1alpha1.CheckpointPVCConfig{
-					PVCName:  "snapshot-pvc",
-					BasePath: "/checkpoints",
-				},
-			},
+			Enabled: true,
 		},
 	}
 }
@@ -134,6 +134,17 @@ func makeCheckpointLease(name string, renewTime time.Time, durationSeconds int32
 	}
 }
 
+func requireCheckpointContainer(t *testing.T, containers []corev1.Container, name string) *corev1.Container {
+	t.Helper()
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
+	t.Fatalf("container %q not found", name)
+	return nil
+}
+
 func TestBuildCheckpointJob(t *testing.T) {
 	s := checkpointTestScheme()
 	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
@@ -143,21 +154,22 @@ func TestBuildCheckpointJob(t *testing.T) {
 	}
 
 	r := makeCheckpointReconciler(s, ckpt)
-	job := r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
+	job, err := buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
 	podSpec := job.Spec.Template.Spec
 	main := podSpec.Containers[0]
 
 	// Job and pod template labels
-	assert.Equal(t, testHash, job.Labels[consts.KubeLabelCheckpointHash])
-	assert.Equal(t, "true", job.Spec.Template.Labels[consts.KubeLabelIsCheckpointSource])
-	assert.Equal(t, testHash, job.Spec.Template.Labels[consts.KubeLabelCheckpointHash])
+	assert.Equal(t, testHash, job.Labels[snapshotprotocol.CheckpointIDLabel])
+	assert.Equal(t, "true", job.Spec.Template.Labels[snapshotprotocol.CheckpointSourceLabel])
+	assert.Equal(t, testHash, job.Spec.Template.Labels[snapshotprotocol.CheckpointIDLabel])
 
 	// Env vars (checkpoint-specific + user-provided preserved)
 	envMap := make(map[string]string, len(main.Env))
 	for _, e := range main.Env {
 		envMap[e.Name] = e.Value
 	}
-	assert.Equal(t, "/tmp/ready-for-checkpoint", envMap[consts.EnvReadyForCheckpointFile])
+	assert.Equal(t, snapshotprotocol.SnapshotControlMountPath, envMap[snapshotprotocol.SnapshotControlDirEnv])
 	assert.Equal(t, "manual-checkpoint", envMap[consts.DynamoNamespaceEnvVar])
 	assert.Equal(t, consts.ComponentTypeWorker, envMap[consts.DynamoComponentEnvVar])
 	assert.Equal(t, "worker-1234", envMap[consts.DynamoNamespaceWorkerSuffixEnvVar])
@@ -182,7 +194,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	require.NotNil(t, podSpec.SecurityContext)
 	require.NotNil(t, podSpec.SecurityContext.SeccompProfile)
 	assert.Equal(t, corev1.SeccompProfileTypeLocalhost, podSpec.SecurityContext.SeccompProfile.Type)
-	assert.Equal(t, consts.SeccompProfilePath, *podSpec.SecurityContext.SeccompProfile.LocalhostProfile)
+	assert.Equal(t, snapshotprotocol.DefaultSeccompLocalhostProfile, *podSpec.SecurityContext.SeccompProfile.LocalhostProfile)
 	require.NotNil(t, podSpec.SecurityContext.RunAsUser)
 	assert.Equal(t, int64(1234), *podSpec.SecurityContext.RunAsUser)
 	require.NotNil(t, podSpec.SecurityContext.FSGroup)
@@ -190,7 +202,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 
 	// Probes: readiness set, liveness/startup cleared
 	require.NotNil(t, main.ReadinessProbe)
-	assert.Equal(t, []string{"cat", "/tmp/ready-for-checkpoint"}, main.ReadinessProbe.Exec.Command)
+	assert.Equal(t, []string{"cat", "/snapshot-control/ready-for-checkpoint"}, main.ReadinessProbe.Exec.Command)
 	assert.Nil(t, main.LivenessProbe)
 	assert.Nil(t, main.StartupProbe)
 
@@ -199,17 +211,19 @@ func TestBuildCheckpointJob(t *testing.T) {
 	for _, v := range podSpec.Volumes {
 		volNames[v.Name] = true
 	}
-	assert.False(t, volNames[consts.CheckpointVolumeName])
+	assert.False(t, volNames[snapshotprotocol.CheckpointVolumeName])
 	assert.True(t, volNames[consts.PodInfoVolumeName])
+	assert.True(t, volNames[snapshotprotocol.SnapshotControlVolumeName])
 
 	mountPaths := make(map[string]string)
 	for _, m := range main.VolumeMounts {
 		mountPaths[m.Name] = m.MountPath
 	}
-	_, hasCheckpointMount := mountPaths[consts.CheckpointVolumeName]
+	_, hasCheckpointMount := mountPaths[snapshotprotocol.CheckpointVolumeName]
 	assert.False(t, hasCheckpointMount)
 	assert.Equal(t, consts.PodInfoMountPath, mountPaths[consts.PodInfoVolumeName])
 	assert.Equal(t, consts.DefaultSharedMemoryMountPath, mountPaths[consts.KubeValueNameSharedMemory])
+	assert.Equal(t, snapshotprotocol.SnapshotControlMountPath, mountPaths[snapshotprotocol.SnapshotControlVolumeName])
 
 	foundSharedMemoryVolume := false
 	for _, v := range podSpec.Volumes {
@@ -234,25 +248,160 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, int32(0), *job.Spec.BackoffLimit)
 	assert.Equal(t, int32(300), *job.Spec.TTLSecondsAfterFinished)
 
-	// Custom deadlines override defaults, but checkpoint jobs never retry.
+	// Custom active deadlines override defaults, but checkpoint jobs never retry and keep a fixed TTL.
 	deadline := int64(7200)
 	backoff := int32(5)
-	ttl := int32(600)
 	ckpt.Spec.Job.ActiveDeadlineSeconds = &deadline
 	ckpt.Spec.Job.BackoffLimit = &backoff //nolint:staticcheck // Compatibility test: deprecated field must remain ignored by checkpoint Jobs.
-	ckpt.Spec.Job.TTLSecondsAfterFinished = &ttl
-	job = r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
+	job, err = buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
 	assert.Equal(t, int64(7200), *job.Spec.ActiveDeadlineSeconds)
 	assert.Equal(t, int32(0), *job.Spec.BackoffLimit)
-	assert.Equal(t, int32(600), *job.Spec.TTLSecondsAfterFinished)
+	assert.Equal(t, int32(300), *job.Spec.TTLSecondsAfterFinished)
 
+	// Multi-GPU: wrapping decision uses identity.TensorParallelSize, not container GPU limits.
+	ckpt.Spec.Identity.TensorParallelSize = 2
 	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources = corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{
 			corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
 		},
 	}
-	job = r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
-	assert.Equal(t, []string{"cuda-checkpoint", "--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Command)
+	job, err = buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"cuda-checkpoint"}, job.Spec.Template.Spec.Containers[0].Command)
+	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Args)
+}
+
+func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
+	s := checkpointTestScheme()
+	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+	ckpt.Spec.Identity.TensorParallelSize = 2
+	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers = []corev1.Container{
+		{
+			Name:    consts.MainContainerName,
+			Image:   "test-image:latest",
+			Command: []string{"python3", "-m", "dynamo.vllm"},
+			Env:     []corev1.EnvVar{{Name: "HF_TOKEN", Value: "secret"}},
+			Resources: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("2"),
+				},
+			},
+		},
+		{
+			Name:    "sidecar",
+			Image:   "sidecar:latest",
+			Command: []string{"sleep"},
+			Args:    []string{"infinity"},
+		},
+	}
+
+	r := makeCheckpointReconciler(s, ckpt)
+	job, err := buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
+
+	main := &job.Spec.Template.Spec.Containers[0]
+	assert.Equal(t, []string{"cuda-checkpoint"}, main.Command)
+	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, main.Args)
+	require.NotNil(t, main.ReadinessProbe)
+	assert.Equal(t, []string{"cat", "/snapshot-control/ready-for-checkpoint"}, main.ReadinessProbe.Exec.Command)
+	assert.Nil(t, main.LivenessProbe)
+	assert.Nil(t, main.StartupProbe)
+
+	mainEnv := map[string]string{}
+	for _, env := range main.Env {
+		mainEnv[env.Name] = env.Value
+	}
+	assert.Equal(t, snapshotprotocol.SnapshotControlMountPath, mainEnv[snapshotprotocol.SnapshotControlDirEnv])
+	assert.Equal(t, "secret", mainEnv["HF_TOKEN"])
+
+	sidecar := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "sidecar")
+	assert.Equal(t, []string{"sleep"}, sidecar.Command)
+	assert.Equal(t, []string{"infinity"}, sidecar.Args)
+	assert.Nil(t, sidecar.ReadinessProbe)
+	assert.Nil(t, sidecar.LivenessProbe)
+	assert.Nil(t, sidecar.StartupProbe)
+	for _, env := range sidecar.Env {
+		assert.NotEqual(t, snapshotprotocol.SnapshotControlDirEnv, env.Name)
+	}
+}
+
+func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
+	s := checkpointTestScheme()
+	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+	ckpt.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}
+	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
+	snapshotAgentDaemonSet := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "snapshot-agent",
+			Namespace: testNamespace,
+			Labels: map[string]string{
+				snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
+			},
+		},
+		Spec: appsv1.DaemonSetSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name: snapshotprotocol.SnapshotAgentContainerName,
+						VolumeMounts: []corev1.VolumeMount{{
+							Name:      snapshotprotocol.SnapshotAgentVolumeName,
+							MountPath: "/checkpoints",
+						}},
+					}},
+					Volumes: []corev1.Volume{{
+						Name: snapshotprotocol.SnapshotAgentVolumeName,
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: "snapshot-pvc",
+							},
+						},
+					}},
+				},
+			},
+		},
+	}
+	reader := fake.NewClientBuilder().WithScheme(s).WithObjects(snapshotAgentDaemonSet).Build()
+
+	r := makeCheckpointReconciler(s, ckpt)
+	job, err := buildCheckpointJob(context.Background(), reader, r.Config, ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
+
+	main := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, consts.MainContainerName)
+	weightsServer := requireCheckpointContainer(t, job.Spec.Template.Spec.InitContainers, gms.ServerContainerName)
+	saver := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, checkpoint.GMSSaverContainer)
+
+	volNames := map[string]bool{}
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		volNames[v.Name] = true
+	}
+	assert.True(t, volNames[gms.SharedVolumeName])
+	assert.True(t, volNames[snapshotprotocol.CheckpointVolumeName])
+	assert.True(t, volNames[snapshotprotocol.SnapshotControlVolumeName])
+
+	mainMounts := map[string]string{}
+	for _, m := range main.VolumeMounts {
+		mainMounts[m.Name] = m.MountPath
+	}
+	assert.Equal(t, gms.SharedMountPath, mainMounts[gms.SharedVolumeName])
+
+	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, weightsServer.Command)
+	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *weightsServer.RestartPolicy)
+	assert.Nil(t, weightsServer.StartupProbe, "no probe — clients drive readiness via connect-retry")
+	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.saver"}, saver.Command)
+	assert.Nil(t, saver.RestartPolicy, "saver runs as a regular Job container so Job completion waits for it")
+
+	saverMounts := map[string]string{}
+	for _, m := range saver.VolumeMounts {
+		saverMounts[m.Name] = m.MountPath
+	}
+	assert.Equal(t, "/checkpoints", saverMounts[snapshotprotocol.CheckpointVolumeName])
+
+	saverEnv := map[string]string{}
+	for _, env := range saver.Env {
+		saverEnv[env.Name] = env.Value
+	}
+	assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", saverEnv["GMS_CHECKPOINT_DIR"])
 }
 
 func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
@@ -274,7 +423,8 @@ func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
 
 	customShmSize := resource.MustParse("16Gi")
 	ckpt.Spec.Job.SharedMemory = &nvidiacomv1alpha1.SharedMemorySpec{Size: customShmSize}
-	job := r.buildCheckpointJob(ckpt, defaultCheckpointJobName)
+	job, err := buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
 	foundCustomShmVolume := false
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		if v.Name == consts.KubeValueNameSharedMemory {
@@ -326,7 +476,37 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhasePending, updated.Status.Phase)
 		assert.Equal(t, testHash, updated.Status.IdentityHash)
 		assert.Empty(t, updated.Status.Message)
-		assert.Equal(t, testHash, updated.Labels[consts.KubeLabelCheckpointHash])
+		assert.Equal(t, testHash, updated.Labels[snapshotprotocol.CheckpointIDLabel])
+	})
+
+	t.Run("GMS snapshot fails when gate is disabled", func(t *testing.T) {
+		t.Setenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar, "")
+		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+		ckpt.Spec.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}
+		r := makeCheckpointReconciler(s, ckpt)
+
+		result, err := r.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+
+		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace}, updated))
+		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
+		assert.Contains(t, updated.Status.Message, "GMS + Snapshot is temporarily disabled")
+
+		jobs := &batchv1.JobList{}
+		require.NoError(t, r.List(ctx, jobs, client.InNamespace(testNamespace)))
+		assert.Empty(t, jobs.Items)
+
+		claimTemplates := &resourcev1.ResourceClaimTemplateList{}
+		require.NoError(t, r.List(ctx, claimTemplates, client.InNamespace(testNamespace)))
+		assert.Empty(t, claimTemplates.Items)
+
+		serviceAccounts := &corev1.ServiceAccountList{}
+		require.NoError(t, r.List(ctx, serviceAccounts, client.InNamespace(testNamespace)))
+		assert.Empty(t, serviceAccounts.Items)
 	})
 
 	t.Run("Ready phase is a no-op", func(t *testing.T) {
@@ -352,7 +532,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: friendlyCheckpointName, Namespace: testNamespace}, updated))
-		assert.Equal(t, testHash, updated.Labels[consts.KubeLabelCheckpointHash])
+		assert.Equal(t, testHash, updated.Labels[snapshotprotocol.CheckpointIDLabel])
 		assert.Equal(t, testHash, updated.Status.IdentityHash)
 	})
 
@@ -375,8 +555,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
 		ckpt.Status.IdentityHash = testHash
 		ckpt.Status.JobName = defaultCheckpointJobName
-		ckpt.Status.Location = "/checkpoints/" + testHash + "/versions/" + consts.DefaultCheckpointArtifactVersion
-		ckpt.Annotations = map[string]string{consts.KubeAnnotationCheckpointArtifactVersion: "2"}
+		ckpt.Annotations = map[string]string{snapshotprotocol.CheckpointArtifactVersionAnnotation: "2"}
 		r := makeCheckpointReconciler(s, ckpt)
 
 		_, err := r.Reconcile(ctx, ctrl.Request{
@@ -388,7 +567,6 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
 		assert.Equal(t, "checkpoint-job-"+testHash+"-2", updated.Status.JobName)
-		assert.Equal(t, "/checkpoints/"+testHash+"/versions/2", updated.Status.Location)
 	})
 
 	t.Run("duplicate identity hash is rejected even with a readable name", func(t *testing.T) {
@@ -431,13 +609,11 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 
 	t.Run("succeeded job transitions to Ready", func(t *testing.T) {
 		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
-		ckpt.Status.Location = "/checkpoints/" + testHash + "/versions/" + consts.DefaultCheckpointArtifactVersion
-		ckpt.Status.StorageType = "pvc"
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        defaultCheckpointJobName,
 				Namespace:   testNamespace,
-				Annotations: map[string]string{checkpointStatusAnnotation: checkpointStatusCompleted},
+				Annotations: map[string]string{snapshotprotocol.CheckpointStatusAnnotation: snapshotprotocol.CheckpointStatusCompleted},
 			},
 			Status: batchv1.JobStatus{
 				Succeeded: 1,
@@ -454,8 +630,6 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseReady, updated.Status.Phase)
-		assert.Equal(t, "/checkpoints/"+testHash+"/versions/"+consts.DefaultCheckpointArtifactVersion, updated.Status.Location)
-		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointStorageType("pvc"), updated.Status.StorageType)
 		assert.NotNil(t, updated.Status.CreatedAt)
 	})
 
@@ -531,7 +705,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        "job-agent-failed",
 				Namespace:   testNamespace,
-				Annotations: map[string]string{checkpointStatusAnnotation: checkpointStatusFailed},
+				Annotations: map[string]string{snapshotprotocol.CheckpointStatusAnnotation: snapshotprotocol.CheckpointStatusFailed},
 			},
 			Status: batchv1.JobStatus{
 				Succeeded: 1,
@@ -557,7 +731,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        "job-running-agent-failed",
 				Namespace:   testNamespace,
-				Annotations: map[string]string{checkpointStatusAnnotation: checkpointStatusFailed},
+				Annotations: map[string]string{snapshotprotocol.CheckpointStatusAnnotation: snapshotprotocol.CheckpointStatusFailed},
 			},
 			Status: batchv1.JobStatus{Active: 1},
 		}
@@ -590,14 +764,12 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 
 	t.Run("in-flight version changes do not relabel the running job's artifact", func(t *testing.T) {
 		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
-		ckpt.Status.Location = "/checkpoints/" + testHash + "/versions/" + consts.DefaultCheckpointArtifactVersion
-		ckpt.Status.StorageType = "pvc"
-		ckpt.Annotations = map[string]string{consts.KubeAnnotationCheckpointArtifactVersion: "2"}
+		ckpt.Annotations = map[string]string{snapshotprotocol.CheckpointArtifactVersionAnnotation: "2"}
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        defaultCheckpointJobName,
 				Namespace:   testNamespace,
-				Annotations: map[string]string{checkpointStatusAnnotation: checkpointStatusCompleted},
+				Annotations: map[string]string{snapshotprotocol.CheckpointStatusAnnotation: snapshotprotocol.CheckpointStatusCompleted},
 			},
 			Status: batchv1.JobStatus{
 				Succeeded: 1,
@@ -614,7 +786,6 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseReady, updated.Status.Phase)
-		assert.Equal(t, "/checkpoints/"+testHash+"/versions/"+consts.DefaultCheckpointArtifactVersion, updated.Status.Location)
 	})
 
 	t.Run("succeeded count without complete condition keeps Creating phase", func(t *testing.T) {

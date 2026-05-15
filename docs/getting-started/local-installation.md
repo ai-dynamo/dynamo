@@ -34,13 +34,13 @@ Containers have all dependencies pre-installed. No setup required.
 
 ```bash
 # SGLang
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1
 
 # TensorRT-LLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.1
 
 # vLLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
 ```
 
 To run frontend and worker in the same container, either:
@@ -104,8 +104,8 @@ Dynamo components discover each other through a shared backend. Two options are 
 
 | Backend | When to Use | Setup |
 |---|---|---|
-| **File** | Single machine, local development | No setup -- pass `--discovery-backend file` to all components |
-| **etcd** | Multi-node, production | Requires a running etcd instance (default if no flag is specified) |
+| **File** | Single machine, local development | No setup -- pass `--discovery-backend file` to all components. The event plane automatically defaults to ZMQ (no NATS required). |
+| **etcd** | Multi-node, production | Requires a running etcd instance (default if no flag is specified). The event plane defaults to NATS. |
 
 This guide uses `--discovery-backend file`. For etcd setup, see [Service Discovery](../kubernetes/service-discovery.md).
 
@@ -154,7 +154,12 @@ python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
 ```
 
 The warning `Cannot connect to ModelExpress server/transport error. Using direct download.`
-is expected in local deployments and can be safely ignored.
+is expected in this local single-machine setup (no ModelExpress server running) and can
+be safely ignored. In a Kubernetes deployment where `MODEL_EXPRESS_URL` is configured,
+this warning -- or the related `Failed to resolve local model path after server download`
+-- indicates that ModelExpress is configured but is not actually serving cached models;
+see [Model Caching in Kubernetes](../kubernetes/model-caching.md#option-2-modelexpress-p2p-distribution)
+for the correct configuration.
 
 **vLLM**
 
@@ -171,7 +176,7 @@ For dependency-free local development, disable KV event publishing (avoids NATS)
 - **SGLang:** No flag needed (KV events disabled by default)
 - **TensorRT-LLM:** No flag needed (KV events disabled by default)
 
-vLLM automatically enables KV event publishing when prefix caching is active. In a future release, KV events will be disabled by default for all backends. Start using `--kv-events-config` explicitly to prepare.
+KV events are disabled by default for all backends. Add `--kv-events-config` explicitly only when you want KV event publishing enabled.
 
 ## Test Your Deployment
 
@@ -211,10 +216,10 @@ Ensure you passed `--gpus all` to `docker run`. Without this flag, the container
 
 ```bash
 # Correct
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1
 
 # Wrong -- no GPU access
-docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1
 ```
 
 ## Next Steps

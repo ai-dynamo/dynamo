@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 
 import torch
-from gpu_memory_service import get_gms_client_memory_manager
+from gpu_memory_service.client.torch.allocator import get_gms_client_memory_managers
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +32,15 @@ def patch_empty_cache() -> None:
     _original_empty_cache = torch.cuda.empty_cache
 
     def safe_empty_cache() -> None:
-        manager = get_gms_client_memory_manager()
-        if manager is not None and len(manager.mappings) > 0:
+        # Allow empty_cache when all managers are unmapped (sleep/checkpoint)
+        # or when there are no active VMM mappings with live handles.
+        has_live_mappings = any(
+            any(m.handle != 0 for m in manager.mappings.values())
+            for manager in get_gms_client_memory_managers()
+        )
+        if has_live_mappings:
             logger.debug(
-                "[GMS] Skipping torch.cuda.empty_cache() - %d VMM allocations active",
-                len(manager.mappings),
+                "[GMS] Skipping torch.cuda.empty_cache() - live VMM mappings active",
             )
             return
         _original_empty_cache()

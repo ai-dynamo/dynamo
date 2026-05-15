@@ -22,9 +22,16 @@ import torch
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import core_schema
 from typing_extensions import NotRequired
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs import TokensPrompt  # noqa: F401
+
+try:
+    # vllm >= 0.19.0: MultiModalUUIDDict moved to vllm.inputs
+    from vllm.inputs import MultiModalUUIDDict  # noqa: F401
+except ImportError:
+    # vllm < 0.19.0: MultiModalUUIDDict lives in vllm.multimodal.inputs
+    from vllm.multimodal.inputs import MultiModalUUIDDict  # noqa: F401
+
 from vllm.logprobs import PromptLogprobs
-from vllm.multimodal.inputs import MultiModalUUIDDict  # noqa: F401
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import RequestStateStats
@@ -55,7 +62,7 @@ class PrefillResponse(BaseModel):
 
 # Hack to override the type of multi_modal_data in TokensPrompt
 # as pydantic doesn't understand generic types
-# TokensPrompt is defined here: https://github.com/vllm-project/vllm/blob/a4c402a756fa3213caf9d2cde0e4ceb2d57727f2/vllm/inputs/data.py#L38
+# TokensPrompt is exported from vllm.inputs and implemented in vllm/inputs/llm.py.
 # multi_modal_data is defined here: https://github.com/vllm-project/vllm/blob/main/vllm/multimodal/inputs.py#L103
 # ModalityData is defined here: https://github.com/vllm-project/vllm/blob/main/vllm/multimodal/inputs.py#L80
 class PatchedTokensPrompt(TokensPrompt):

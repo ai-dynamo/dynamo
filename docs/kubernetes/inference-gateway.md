@@ -10,12 +10,17 @@ title: Inference Gateway (GAIE)
 
 Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-aware request routing at the gateway layer.
 
-EPP's default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model's tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
+## Features
 
-Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving. The epp config is the same for both. If no prefill workers found the service degrades gracefully to perform aggregated serving.
-If you want to use LoRA deploy Dynamo without the Inference Gateway.
+- EPP's default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model's tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml), following the checked-in GAIE/EPP configuration layout used by this repository.
 
-Currently, these setups are only supported with the kGateway based Inference Gateway.
+- Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving. A request only exercises disaggregated routing when the EPP config defines a `prefill` profile and prefill workers are available. The standalone [`epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml) currently only defines a `decode` profile, while the recipe examples use separate aggregated and disaggregated configs under `recipes/llama-3-70b/vllm/agg/gaie/` and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/`. Unless `DYN_ENFORCE_DISAGG=true`, deployments without a `prefill` profile or prefill workers fall back to aggregated serving.
+
+- GAIE integration supports Data Parallelism.
+
+- If you want to use LoRA deploy Dynamo without the Inference Gateway.
+
+- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation.
 
 ## Prerequisites
 
@@ -27,26 +32,27 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 ### 1. Install Dynamo Platform ###
 
 [See Quickstart Guide](./README.md) to install Dynamo Kubernetes Platform.
+If you are installing from the source tree rather than a release chart, follow [Path B: Custom Build from Source](./installation-guide.md#path-b-custom-build-from-source) and run `helm dep build ./platform/` before `helm install` so the vendored subcharts match the local chart contents.
 
 ### 2. Deploy Inference Gateway ###
 
-First, deploy an inference gateway service. In this example, we'll install `kgateway` based gateway implementation.
+First, deploy an inference gateway service. In this example, we'll install agentgateway with the inference extension enabled.
 
 ```bash
 cd deploy/inference-gateway
 export NAMESPACE=my-model # You can put the inference gateway into another namespace and then adjust your http-route.yaml
-./scripts/install_gaie_crd_kgateway.sh
+./scripts/install_gaie_crd_agentgateway.sh
 ```
-**Note**: The manifest at `config/manifests/gateway/kgateway/gateway.yaml` uses `gatewayClassName: agentgateway`, but kGateway's helm chart creates a GatewayClass named `kgateway`. The patch command in the script fixes this mismatch.
+This script installs the Gateway API CRDs, the GAIE CRDs, agentgateway into `agentgateway-system`, and a `Gateway` named `inference-gateway` into `${NAMESPACE}`.
 
 #### f. Verify the Gateway is running
 
 ```bash
-kubectl get gateway inference-gateway
+kubectl get gateway inference-gateway -n ${NAMESPACE}
 
 # Sample output
 # NAME                CLASS      ADDRESS   PROGRAMMED   AGE
-# inference-gateway   kgateway             True         1m
+# inference-gateway   agentgateway   <none>   True         1m
 ```
 
 
@@ -108,8 +114,8 @@ Note that when deploying Dynamo with the Inference Gateway Extension each worker
 #### 5.a. Deploy as a DGD component (recommended)
 
 We provide an example for the Qwen vLLM below.
-You have to deploy the Dynamo Graph and the HttpRoute service.
-For the HttpRoute service make sure to specify the namespace where your gateway (i.e. kGateway was deployed) as shown below.
+You have to deploy the Dynamo Graph and the `HTTPRoute`.
+For the `HTTPRoute`, make sure `parentRefs.namespace` matches the namespace where your `Gateway` is deployed as shown below.
 ```bash
   parentRefs:
     - group: gateway.networking.k8s.io
@@ -120,8 +126,12 @@ For the HttpRoute service make sure to specify the namespace where your gateway 
 
 ```bash
 cd <dynamo-source-root>
-# kubectl get httproutes -n my-model # Make sure you do not have an incompatible HttpRoute running, delete if so.
+# kubectl get httproutes -n my-model # Make sure you do not have an incompatible HTTPRoute running, delete if so.
+# Choose disagg or agg example
+kubectl apply -f examples/backends/vllm/deploy/gaie/disagg.yaml -n my-model
+# or
 kubectl apply -f examples/backends/vllm/deploy/gaie/agg.yaml -n my-model
+# make sure to apply the route
 kubectl apply -f examples/backends/vllm/deploy/gaie/http-route.yaml -n my-model
 ```
 
@@ -145,7 +155,7 @@ Use the proper folder in commands below.
 
 # agg
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml -n ${NAMESPACE}
-# Deploy the GAIE http-route CR. Adjust parentRefs.namespace in this file first to point where your gateway is.
+# Deploy the GAIE http-route CR. Adjust parentRefs.namespace in this file first to point to the namespace where your Gateway is deployed.
 kubectl apply -f recipes/llama-3-70b/vllm/agg/gaie/http-route.yaml -n ${NAMESPACE}
 
 # or disagg
@@ -159,7 +169,7 @@ kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/http-route.yam
 
 ```yaml
 frontendSidecar:
-  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+  image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
   args:
     - --router-mode
     - direct
@@ -181,9 +191,8 @@ extraPodSpec:
 ```
 
 **Gateway Namespace**
-Note that this assumes your gateway is installed into `NAMESPACE=my-model` (examples' default)
-If you installed it into a different namespace, you need to adjust the HttpRoute entry in `http-route.yaml`.
-
+Note that this assumes your `Gateway` is installed into `NAMESPACE=my-model`. If you installed it into a
+different namespace, update your `http-route.yaml`.
 
 #### 5.b. Deploy as a standalone pod
 
@@ -233,7 +242,6 @@ KV-aware routing uses live KV cache block events from workers so the EPP can rou
    - **vLLM:** Pass `--enable-prefix-caching` and `--kv-events-config '{"enable_kv_cache_events":true}'`.
    - **SGLang:** Pass `--kv-events-config` with the appropriate endpoint.
    - **TRT-LLM:** Pass `--publish-events-and-metrics`.
-   - **Disaggregated vLLM (prefill/decode separation):** Do **not** pass `--disaggregation-mode decode` on decode workers — this flag hardcodes KV event publishing to off. Instead, omit the flag (defaults to aggregated mode) so decode workers also publish their cache state.
 2. **EPP — leave `DYN_USE_KV_EVENTS` at its default (`true`).** The EPP subscribes to worker KV events via event plane (NATS/ZMQ) and uses them for prefix-overlap scoring.
 3. **Block size — must be consistent.** The `--block-size` on all workers must match `DYN_KV_CACHE_BLOCK_SIZE` on the EPP (default: 128). Mismatched block sizes cause incorrect block hash computation.
 
@@ -243,13 +251,15 @@ To disable the EPP from listening for KV events (e.g., when prefix caching is of
 
 1. **EPP:** Set `DYN_USE_KV_EVENTS=false`. The router falls back to approximate mode (routing decisions are tracked locally with TTL decay instead of live KV events from workers).
 2. **Workers:** Pass `--no-enable-prefix-caching` to disable prefix caching entirely. Without prefix caching, no KV events are generated regardless of other flags.
-3. **Optionally** set `DYN_OVERLAP_SCORE_WEIGHT=0` on the EPP to skip prefix-overlap scoring altogether, making the router select workers based on load only.
+3. **Optionally** set `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT=0` on the EPP to skip prefix-overlap scoring altogether, making the router select workers based on load only.
 
 - Set `DYN_BUSY_THRESHOLD` to configure the upper bound on how "full" a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
-- Set `DYN_ENFORCE_DISAGG=true` to strictly enforce disaggregated mode. When enabled, requests fail if prefill workers have not registered yet. Without this, requests arriving before prefill workers are discovered fall through to decode-only routing. Prefill errors always fail requests regardless of this setting.
-- Set `DYN_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes. (default: 1)
-- Set `DYN_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
-- `DYN_ROUTER_TEMPERATURE` — Temperature for worker sampling via softmax (default: 0.0)
+- Set `DYN_ENFORCE_DISAGG=true` (default: `false`) to control per-request behavior when prefill workers are unavailable:
+  - **`true` (recommended for disaggregated serving):** Requests fail with an error if prefill workers are not available. Use this when disaggregated serving is required and aggregated fallback is not acceptable.
+  - **`false` (default):** Requests gracefully fall back to aggregated mode (skip prefill, route directly to decode) when prefill workers are not available. When prefill workers appear later, subsequent requests automatically use disaggregated routing.
+- Set `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` to control the device-local prefix-overlap credit multiplier, from 0.0 to 1.0. Higher values bias toward reusing workers with similar cached prefixes. (default: 1)
+- Set `DYN_ROUTER_PREFILL_LOAD_SCALE` to scale adjusted prompt-side prefill load before decode blocks are added. (default: 1)
+- Set `DYN_ROUTER_TEMPERATURE` (default: `0.0`) to soften or sharpen normalized worker sampling. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
 - `DYN_ROUTER_REPLICA_SYNC` — Enable replica synchronization (default: false)
 - `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` — Track active blocks (default: true)
 - `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` — Track output blocks during generation (default: false)
@@ -258,15 +268,67 @@ To disable the EPP from listening for KV events (e.g., when prefix caching is of
 Stand-Alone installation only:
 - Overwrite the `DYN_NAMESPACE` env var if needed to match your model's dynamo namespace.
 
+**Service Mesh Integration (Istio)**
+
+When running under a service mesh such as Istio, the mesh sidecar proxy may conflict with the EPP's own TLS serving, causing connection failures (double-TLS). To avoid this, the mesh must be told how to connect to the EPP service via an Istio `DestinationRule`.
+
+The Dynamo operator can generate this DestinationRule automatically. Enable it by setting the `dynamo.serviceMesh` parameters when installing or upgrading the Dynamo platform Helm chart:
+
+```bash
+helm install dynamo deploy/helm/charts/platform \
+  --set dynamo.serviceMesh.enabled=true
+```
+
+Or equivalently in a custom values file:
+
+```yaml
+dynamo:
+  serviceMesh:
+    enabled: true
+    provider: "istio"
+    istio:
+      tlsMode: "SIMPLE"
+      insecureSkipVerify: true
+```
+
+**Helm Parameters**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `dynamo.serviceMesh.enabled` | bool | `false` | Enable automatic DestinationRule generation for EPP services. |
+| `dynamo.serviceMesh.provider` | string | `"istio"` | Service mesh provider. Only `"istio"` is supported. |
+| `dynamo.serviceMesh.istio.tlsMode` | string | `"SIMPLE"` | TLS mode for the DestinationRule. Supported values: `DISABLE`, `SIMPLE`, `MUTUAL`, `ISTIO_MUTUAL`. |
+| `dynamo.serviceMesh.istio.insecureSkipVerify` | bool | `true` | Skip TLS certificate verification. Set to `true` when EPP uses self-signed certificates (the default). |
+
+> [!NOTE]
+> The Istio CRDs (`networking.istio.io`) must be installed on the cluster before enabling this feature. The operator detects Istio availability at startup — if the CRDs are not present, DestinationRule reconciliation is skipped even when `serviceMesh.enabled` is `true`.
+
+When enabled, the operator produces a `DestinationRule` for each EPP service equivalent to:
+
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: <epp-service-name>
+spec:
+  host: <epp-service-name>.<namespace>.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+      insecureSkipVerify: true
+```
+
+If you are **not** using the Dynamo operator's Helm chart, you must create this `DestinationRule` manually for each EPP service. Without it, Istio's default mTLS policy will conflict with the EPP's gRPC TLS endpoint.
+
 ### 6. Verify Installation ###
 
 Check that all resources are properly deployed:
 
 ```bash
-kubectl get inferencepool
-kubectl get httproute
-kubectl get service
-kubectl get gateway
+kubectl get inferencepool -n ${NAMESPACE}
+kubectl get httproute -n ${NAMESPACE}
+kubectl get service -n ${NAMESPACE}
+kubectl get gateway -n ${NAMESPACE}
 ```
 
 Sample output:
@@ -305,7 +367,7 @@ use port-forward to expose the gateway to the host
 
 ```bash
 # in first terminal
-kubectl port-forward svc/inference-gateway 8000:80 -n ${NAMESPACE} # for NAMESPACE put wherever you installed the gateway i.e. kgateway-system or my-model
+kubectl port-forward svc/inference-gateway 8000:80 -n ${NAMESPACE} # for NAMESPACE use the namespace where the Gateway service was created, for example my-model
 
 # in second terminal where you want to send inference requests
 GATEWAY_URL=http://localhost:8000
@@ -412,8 +474,8 @@ Sample inference output:
 }
 ```
 
-***If you have more than one HttpRoute running on the cluster***
-Add the host to your HttpRoute.yaml and add the header
+***If you have more than one HTTPRoute running on the cluster***
+Add the host to your `http-route.yaml` and add the header
 `curl -H "Host: llama3-70b-agg.example.com" ...` or `curl -H "Host: llama3-70b-disagg.example.com" http://localhost:8000/v1/models`
 
 ```bash
@@ -434,26 +496,25 @@ helm uninstall dynamo-gaie -n my-model
 # 1. Delete the inference-gateway
 kubectl delete gateway inference-gateway --ignore-not-found
 
-# 2. Uninstall kgateway helm releases
-helm uninstall kgateway -n kgateway-system
-helm uninstall kgateway-crds -n kgateway-system
+# 2. Uninstall agentgateway helm releases
+helm uninstall agentgateway -n agentgateway-system
+helm uninstall agentgateway-crds -n agentgateway-system
 
-# 3. Delete the kgateway-system namespace (optional, cleans up everything in it)
-helm uninstall kgateway --namespace kgateway-system
-kubectl delete namespace kgateway-system --ignore-not-found
+# 3. Delete the agentgateway-system namespace (optional, cleans up everything in it)
+kubectl delete namespace agentgateway-system --ignore-not-found
 
 # 4. Delete the Inference Extension CRDs
-IGW_LATEST_RELEASE=v1.2.1
+IGW_LATEST_RELEASE=v1.5.0-rc.2
 kubectl delete -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml --ignore-not-found
 
 # 5. Delete the Gateway API CRDs
-GATEWAY_API_VERSION=v1.4.1
+GATEWAY_API_VERSION=v1.5.1
 kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml --ignore-not-found
 ```
 
 ## Gateway API Inference Extension Integration
 
-This section documents the updated plugin implementation for Gateway API Inference Extension **v1.2.1**.
+This section documents the updated plugin implementation for Gateway API Inference Extension **v1.5.0-rc.2**.
 
 ### Router bookkeeping operations
 
@@ -462,8 +523,9 @@ EPP performs Dynamo router book keeping operations so the FrontEnd's Router does
 
 ### Header Routing Hints
 
-Since v1.2.1, the EPP uses a **header-only approach** for communicating routing decisions.
-The plugins set HTTP headers that are forwarded to the backend workers.
+Since v1.5.0-rc.1, the EPP uses **headers and body mutations** for communicating routing decisions.
+The plugins set HTTP headers for worker targeting and inject pre-computed token IDs
+into the request body (`nvext.token_data`) so the frontend sidecar can skip redundant tokenization.
 
 #### Headers Set by Dynamo Plugins
 

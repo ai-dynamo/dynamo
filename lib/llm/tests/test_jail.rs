@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-use dynamo_async_openai::types::{
-    ChatChoiceStream, ChatCompletionStreamResponseDelta, CompletionUsage, FinishReason, Role,
-};
+use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
+use dynamo_protocols::types::{
+    ChatChoiceStream, ChatCompletionStreamResponseDelta, ChatCompletionToolChoiceOption,
+    CompletionUsage, FinishReason, Role,
+};
 use dynamo_runtime::protocols::annotated::Annotated;
 
 #[cfg(test)]
@@ -16,7 +18,7 @@ mod tests {
     // Test utilities module - shared test infrastructure
     pub(crate) mod test_utils {
         use super::*;
-        use dynamo_async_openai::types::ChatCompletionMessageContent;
+        use dynamo_protocols::types::ChatCompletionMessageContent;
 
         /// Helper to extract text from ChatCompletionMessageContent
         pub fn extract_text(content: &ChatCompletionMessageContent) -> &str {
@@ -43,19 +45,20 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: None,
-                stop_reason: None,
                 logprobs: None,
             };
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices: vec![choice],
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: Some("test-fingerprint".to_string()),
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices: vec![choice],
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: Some("test-fingerprint".to_string()),
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
                 nvext: None,
             };
 
@@ -84,19 +87,20 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
-                stop_reason: None,
                 logprobs: None,
             };
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices: vec![choice],
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: Some("test-fingerprint".to_string()),
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices: vec![choice],
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: Some("test-fingerprint".to_string()),
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
                 nvext: None,
             };
 
@@ -129,19 +133,20 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: None,
-                stop_reason: None,
                 logprobs: None,
             };
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices: vec![choice],
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: Some("test-fingerprint".to_string()),
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices: vec![choice],
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: Some("test-fingerprint".to_string()),
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
                 nvext: None,
             };
 
@@ -173,21 +178,22 @@ mod tests {
                             reasoning_content: None,
                         },
                         finish_reason: None,
-                        stop_reason: None,
                         logprobs: None,
                     }
                 })
                 .collect();
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices,
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: Some("test-fingerprint".to_string()),
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices,
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: Some("test-fingerprint".to_string()),
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
                 nvext: None,
             };
 
@@ -219,21 +225,22 @@ mod tests {
                             reasoning_content: None,
                         },
                         finish_reason: Some(FinishReason::Stop),
-                        stop_reason: None,
                         logprobs: None,
                     }
                 })
                 .collect();
 
             let response = NvCreateChatCompletionStreamResponse {
-                id: "test-id".to_string(),
-                choices,
-                created: 1234567890,
-                model: "test-model".to_string(),
-                system_fingerprint: Some("test-fingerprint".to_string()),
-                object: "chat.completion.chunk".to_string(),
-                usage: None,
-                service_tier: None,
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices,
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: Some("test-fingerprint".to_string()),
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
                 nvext: None,
             };
 
@@ -254,7 +261,7 @@ mod tests {
             let content = result
                 .data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.content.as_ref())
                 .expect("Expected content in result");
 
@@ -276,7 +283,7 @@ mod tests {
             let tool_calls = result
                 .data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.tool_calls.as_ref())
                 .expect("Expected tool calls in result");
 
@@ -313,12 +320,12 @@ mod tests {
         #[allow(dead_code)]
         pub fn assert_empty_emission(result: &Annotated<NvCreateChatCompletionStreamResponse>) {
             if let Some(data) = &result.data
-                && let Some(choice) = data.choices.first()
+                && let Some(choice) = data.inner.choices.first()
             {
                 assert!(
                     choice.delta.content.is_none()
                         || choice.delta.content.as_ref().is_none_or(|c| match c {
-                            dynamo_async_openai::types::ChatCompletionMessageContent::Text(t) =>
+                            dynamo_protocols::types::ChatCompletionMessageContent::Text(t) =>
                                 t.is_empty(),
                             _ => false,
                         }),
@@ -343,7 +350,7 @@ mod tests {
                 .filter_map(|r| {
                     r.data
                         .as_ref()
-                        .and_then(|d| d.choices.first())
+                        .and_then(|d| d.inner.choices.first())
                         .and_then(|c| c.delta.content.as_ref())
                 })
                 .map(extract_text)
@@ -356,7 +363,7 @@ mod tests {
             result
                 .data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.content.as_ref())
                 .and_then(|content| match content {
                     ChatCompletionMessageContent::Text(text) => Some(text.clone()),
@@ -370,7 +377,7 @@ mod tests {
             result
                 .data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.tool_calls.as_ref())
                 .map(|tc| !tc.is_empty())
                 .unwrap_or(false)
@@ -382,7 +389,7 @@ mod tests {
             result
                 .data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.content.as_ref())
                 .map(|content| !extract_text(content).is_empty())
                 .unwrap_or(false)
@@ -422,7 +429,7 @@ mod tests {
 
         // First chunk should pass through
         assert_eq!(
-            results[0].data.as_ref().unwrap().choices[0]
+            results[0].data.as_ref().unwrap().inner.choices[0]
                 .delta
                 .content
                 .as_ref()
@@ -431,7 +438,9 @@ mod tests {
         );
 
         // When jail ends, accumulated content should be released
-        let unjailed_content = &results[1].data.as_ref().unwrap().choices[0].delta.content;
+        let unjailed_content = &results[1].data.as_ref().unwrap().inner.choices[0]
+            .delta
+            .content;
         assert!(unjailed_content.is_some());
         assert!(
             extract_text(unjailed_content.as_ref().unwrap())
@@ -440,7 +449,7 @@ mod tests {
 
         // Last chunk should pass through normally
         assert_eq!(
-            results[2].data.as_ref().unwrap().choices[0]
+            results[2].data.as_ref().unwrap().inner.choices[0]
                 .delta
                 .content
                 .as_ref()
@@ -476,7 +485,7 @@ mod tests {
         // Check if tool calls were parsed
         if let Some(last_result) = results.last()
             && let Some(ref response_data) = last_result.data
-            && let Some(ref tool_calls) = response_data.choices[0].delta.tool_calls
+            && let Some(ref tool_calls) = response_data.inner.choices[0].delta.tool_calls
         {
             assert!(!tool_calls.as_slice().is_empty());
             assert_eq!(
@@ -514,7 +523,7 @@ mod tests {
 
         // First chunk should pass through
         assert_eq!(
-            results[0].data.as_ref().unwrap().choices[0]
+            results[0].data.as_ref().unwrap().inner.choices[0]
                 .delta
                 .content
                 .as_ref()
@@ -523,7 +532,7 @@ mod tests {
         );
 
         // Second chunk should contain the accumulated jailed content
-        let jailed = results[1].data.as_ref().unwrap().choices[0]
+        let jailed = results[1].data.as_ref().unwrap().inner.choices[0]
             .delta
             .content
             .as_ref()
@@ -931,9 +940,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_jailed_stream_partial_tool_call() {
-        // Tests handling of incomplete tool call when stream ends abruptly
+        // Tests handling of incomplete tool call when stream ends abruptly.
+        // After PR #8888, finalize() runs `try_tool_call_parse_aggregate_finalize`
+        // which enables EOF recovery — the parser balances the unclosed braces
+        // and surfaces the call (with whatever args were captured) instead of
+        // dropping it as plain text. Streaming early-exit still requires the
+        // end-token to actually arrive, so this only fires at stream end.
+        //
         // Input: "Starting function call. " + "<TOOLCALL>[{\"name\": \"incomplete_func\", \"arguments\": {" (no end marker)
-        // Expected output: 2 chunks [Content(), Content(partial)] - partial accumulated content released on stream end
+        // Expected output: 2 chunks [Content(), ToolCall(incomplete_func, {})]
         let chunks = vec![
             create_mock_response_chunk("Starting function call. ".to_string(), 0),
             create_mock_response_chunk("<TOOLCALL>".to_string(), 0),
@@ -951,26 +966,14 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Should handle partial tool call gracefully - releases accumulated content on stream end
         assert_eq!(
             results.len(),
             2,
-            "Should handle partial tool call and release content"
+            "Should emit prefix content + recovered tool call"
         );
 
-        // Verify exact output structure: [Content(), Content(accumulated partial)]
         test_utils::assert_content(&results[0], "Starting function call. ");
-        test_utils::assert_content(
-            &results[1],
-            "<TOOLCALL>[{\"name\": \"incomplete_func\", \"arguments\": {",
-        );
-
-        // Verify partial content is preserved as text since no valid tool call could be parsed
-        let reconstructed = test_utils::reconstruct_content(&results);
-        assert_eq!(
-            reconstructed,
-            "Starting function call. <TOOLCALL>[{\"name\": \"incomplete_func\", \"arguments\": {"
-        );
+        test_utils::assert_tool_call(&results[1], "incomplete_func", serde_json::json!({}));
     }
 
     #[tokio::test]
@@ -1226,7 +1229,7 @@ mod tests {
             .find(|r| {
                 r.data
                     .as_ref()
-                    .and_then(|d| d.choices.first())
+                    .and_then(|d| d.inner.choices.first())
                     .map(|c| c.delta.tool_calls.is_some())
                     .unwrap_or(false)
             })
@@ -1247,7 +1250,7 @@ mod tests {
         );
 
         // Verify tool call was parsed correctly
-        let tool_calls = &tool_call_chunk.data.as_ref().unwrap().choices[0]
+        let tool_calls = &tool_call_chunk.data.as_ref().unwrap().inner.choices[0]
             .delta
             .tool_calls;
         assert!(tool_calls.is_some(), "Should have tool calls");
@@ -1315,10 +1318,23 @@ mod tests {
             "Comment should be preserved when stream ends while jailed"
         );
 
+        // Verify inner response metadata carries forward real stream values (not placeholders)
+        let inner = accumulated_chunk.data.as_ref().unwrap();
+        assert_eq!(
+            inner.inner.id, "test-id",
+            "Inner response id should carry forward from real stream chunks, not be 'stream-end'"
+        );
+        assert_eq!(
+            inner.inner.model, "test-model",
+            "Inner response model should carry forward from real stream chunks, not be 'unknown'"
+        );
+        assert_eq!(
+            inner.inner.created, 1234567890,
+            "Inner response created should carry forward from real stream chunks, not be 0"
+        );
+
         // Verify accumulated content is returned
-        let content = &accumulated_chunk.data.as_ref().unwrap().choices[0]
-            .delta
-            .content;
+        let content = &inner.inner.choices[0].delta.content;
         assert!(content.is_some(), "Should have accumulated content");
         let content = content.as_ref().unwrap();
         assert!(
@@ -1366,7 +1382,7 @@ mod tests {
             .find(|r| {
                 r.data
                     .as_ref()
-                    .and_then(|d| d.choices.first())
+                    .and_then(|d| d.inner.choices.first())
                     .map(|c| c.delta.tool_calls.is_some())
                     .unwrap_or(false)
             })
@@ -1531,7 +1547,7 @@ mod tests {
         let choice_1_chunks: Vec<_> = results
             .iter()
             .filter_map(|r| r.data.as_ref())
-            .flat_map(|d| &d.choices)
+            .flat_map(|d| &d.inner.choices)
             .filter(|c| c.index == 1 && c.delta.content.is_some())
             .collect();
 
@@ -1545,7 +1561,7 @@ mod tests {
         let choice_0_tool_calls: Vec<_> = results
             .iter()
             .filter_map(|r| r.data.as_ref())
-            .flat_map(|d| &d.choices)
+            .flat_map(|d| &d.inner.choices)
             .filter(|c| c.index == 0 && c.finish_reason == Some(FinishReason::ToolCalls))
             .collect();
 
@@ -1558,7 +1574,7 @@ mod tests {
         let choice_2_tool_calls: Vec<_> = results
             .iter()
             .filter_map(|r| r.data.as_ref())
-            .flat_map(|d| &d.choices)
+            .flat_map(|d| &d.inner.choices)
             .filter(|c| c.index == 2 && c.finish_reason == Some(FinishReason::ToolCalls))
             .collect();
 
@@ -1601,7 +1617,7 @@ mod tests {
         let mut tool_call_responses: Vec<_> = results
             .iter()
             .filter_map(|r| r.data.as_ref())
-            .flat_map(|d| &d.choices)
+            .flat_map(|d| &d.inner.choices)
             .filter(|c| c.finish_reason == Some(FinishReason::ToolCalls))
             .collect();
 
@@ -1646,7 +1662,7 @@ mod tests {
             let run_responses: Vec<_> = run_results
                 .iter()
                 .filter_map(|r| r.data.as_ref())
-                .flat_map(|d| &d.choices)
+                .flat_map(|d| &d.inner.choices)
                 .filter(|c| c.finish_reason == Some(FinishReason::ToolCalls))
                 .collect();
 
@@ -1670,8 +1686,8 @@ mod tests {
 
         // Modify the inner data to be a usage-only chunk
         if let Some(ref mut data) = usage_chunk.data {
-            data.choices.clear();
-            data.usage = Some(CompletionUsage {
+            data.inner.choices.clear();
+            data.inner.usage = Some(CompletionUsage {
                 prompt_tokens: 11,
                 completion_tokens: 3,
                 total_tokens: 14,
@@ -1690,7 +1706,7 @@ mod tests {
         assert_eq!(results.len(), 2, "Should have exactly 2 chunks");
 
         // First chunk should be content chunk
-        let content = results[0].data.as_ref().unwrap().choices[0]
+        let content = results[0].data.as_ref().unwrap().inner.choices[0]
             .delta
             .content
             .as_ref()
@@ -1703,10 +1719,17 @@ mod tests {
 
         // Second chunk should be usage-only chunk
         assert!(
-            results[1].data.as_ref().unwrap().choices.is_empty(),
+            results[1].data.as_ref().unwrap().inner.choices.is_empty(),
             "Usage chunk should have no choices"
         );
-        let usage = results[1].data.as_ref().unwrap().usage.as_ref().unwrap();
+        let usage = results[1]
+            .data
+            .as_ref()
+            .unwrap()
+            .inner
+            .usage
+            .as_ref()
+            .unwrap();
         assert_eq!(usage.prompt_tokens, 11);
         assert_eq!(usage.completion_tokens, 3);
         assert_eq!(usage.total_tokens, 14);
@@ -1883,7 +1906,7 @@ mod tests {
         let has_analysis_text = results.iter().any(|r| {
             r.data
                 .as_ref()
-                .and_then(|d| d.choices.first())
+                .and_then(|d| d.inner.choices.first())
                 .and_then(|c| c.delta.content.as_ref())
                 .map(|content| {
                     test_utils::extract_text(content)
@@ -1937,7 +1960,7 @@ mod tests {
             let Some(data) = result.data else {
                 continue;
             };
-            for choice in data.choices {
+            for choice in data.inner.choices {
                 if let Some(content) = choice.delta.content {
                     assert!(
                         !test_utils::extract_text(&content).contains("<｜tool▁calls▁end｜>"),
@@ -2011,7 +2034,7 @@ mod tests {
             let Some(data) = result.data else {
                 continue;
             };
-            for choice in data.choices {
+            for choice in data.inner.choices {
                 if let Some(content) = choice.delta.content {
                     assert!(
                         !test_utils::extract_text(&content).contains("<｜tool▁calls▁end｜>"),
@@ -2208,7 +2231,7 @@ mod tests {
             .filter_map(|r| {
                 r.data
                     .as_ref()
-                    .and_then(|d| d.choices.first())
+                    .and_then(|d| d.inner.choices.first())
                     .and_then(|c| c.delta.content.as_ref())
             })
             .filter(|content| {
@@ -2228,7 +2251,7 @@ mod tests {
             .filter_map(|r| {
                 r.data
                     .as_ref()
-                    .and_then(|d| d.choices.first())
+                    .and_then(|d| d.inner.choices.first())
                     .and_then(|c| c.delta.content.as_ref())
             })
             .find(|content| {
@@ -2251,7 +2274,7 @@ mod tests {
             .filter(|r| {
                 r.data
                     .as_ref()
-                    .and_then(|d| d.choices.first())
+                    .and_then(|d| d.inner.choices.first())
                     .and_then(|c| c.delta.tool_calls.as_ref())
                     .map(|tc| !tc.is_empty())
                     .unwrap_or(false)
@@ -2352,7 +2375,7 @@ mod tests {
 mod parallel_jail_tests {
     use super::tests::test_utils;
     use super::*;
-    use dynamo_async_openai::types::ChatCompletionMessageContent;
+    use dynamo_protocols::types::ChatCompletionMessageContent;
     use futures::StreamExt;
     use futures::stream;
     use serde_json::json;
@@ -2377,21 +2400,22 @@ mod parallel_jail_tests {
                         reasoning_content: None,
                     },
                     finish_reason: None,
-                    stop_reason: None,
                     logprobs: None,
                 }
             })
             .collect();
 
         let response = NvCreateChatCompletionStreamResponse {
-            id: "test-id".to_string(),
-            choices,
-            created: 1234567890,
-            model: "test-model".to_string(),
-            system_fingerprint: Some("test-fingerprint".to_string()),
-            object: "chat.completion.chunk".to_string(),
-            usage: None,
-            service_tier: None,
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "test-id".to_string(),
+                choices,
+                created: 1234567890,
+                model: "test-model".to_string(),
+                system_fingerprint: Some("test-fingerprint".to_string()),
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+                service_tier: None,
+            },
             nvext: None,
         };
 
@@ -2415,7 +2439,7 @@ mod parallel_jail_tests {
             .filter(|r| {
                 r.data
                     .as_ref()
-                    .is_some_and(|d| d.choices.iter().any(|c| c.delta.tool_calls.is_some()))
+                    .is_some_and(|d| d.inner.choices.iter().any(|c| c.delta.tool_calls.is_some()))
             })
             .collect();
 
@@ -2428,7 +2452,7 @@ mod parallel_jail_tests {
         let mut all_tool_calls = Vec::new();
         for result in &tool_call_results {
             if let Some(ref data) = result.data {
-                for choice in &data.choices {
+                for choice in &data.inner.choices {
                     if let Some(ref tool_calls) = choice.delta.tool_calls {
                         all_tool_calls.extend(tool_calls.iter());
                     }
@@ -2457,7 +2481,7 @@ mod parallel_jail_tests {
 
             assert_eq!(
                 tool_call.r#type,
-                Some(dynamo_async_openai::types::ChatCompletionToolType::Function),
+                Some(dynamo_protocols::types::FunctionType::Function),
                 "Tool call {} should be of type 'function'",
                 i
             );
@@ -2554,6 +2578,143 @@ mod parallel_jail_tests {
         validate_parallel_streaming_tool_calls(&results, &expected_calls);
     }
 
+    /// Regression test for issue #6822:
+    /// Hermes-style parallel tool calls in a single chunk must produce N tool call
+    /// results, not 1 call + trailing raw XML text.
+    #[tokio::test]
+    async fn test_parallel_tool_calls_single_chunk_hermes() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        // Two parallel calls arrive in one streaming chunk (hermes uses JSON inside tags).
+        let input_chunks = vec![test_utils::create_mock_response_chunk(
+            "<tool_call>\n\
+{\"name\": \"get_current_weather\", \"arguments\": {\"city\": \"Dallas\", \"state\": \"TX\"}}\n\
+</tool_call>\n\
+<tool_call>\n\
+{\"name\": \"get_current_weather\", \"arguments\": {\"city\": \"Orlando\", \"state\": \"FL\"}}\n\
+</tool_call>"
+                .to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(input_chunks);
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        assert!(!results.is_empty(), "Should have results");
+
+        let expected_calls = [
+            (
+                "get_current_weather",
+                json!({"city": "Dallas", "state": "TX"}),
+            ),
+            (
+                "get_current_weather",
+                json!({"city": "Orlando", "state": "FL"}),
+            ),
+        ];
+
+        validate_parallel_streaming_tool_calls(&results, &expected_calls);
+
+        // Verify that raw XML does not leak as text content (the original bug).
+        for result in &results {
+            if let Some(ref data) = result.data {
+                for choice in &data.inner.choices {
+                    if let Some(ref content) = choice.delta.content {
+                        let text = test_utils::extract_text(content);
+                        assert!(
+                            !text.contains("<tool_call>"),
+                            "Raw XML must not leak as text content, got: {text:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Regression test for issue #6822:
+    /// Qwen3Coder-style parallel tool calls in a single chunk must produce N tool
+    /// call results (identical format to hermes, different parser name).
+    #[tokio::test]
+    async fn test_parallel_tool_calls_single_chunk_qwen3_coder() {
+        let jail = JailedStream::builder()
+            .tool_call_parser("qwen3_coder")
+            .build();
+
+        let input_chunks = vec![test_utils::create_mock_response_chunk(
+            "<tool_call>\n\
+<function=search>\n\
+<parameter=query>Rust async</parameter>\n\
+</function>\n\
+</tool_call>\n\
+<tool_call>\n\
+<function=search>\n\
+<parameter=query>Python async</parameter>\n\
+</function>\n\
+</tool_call>"
+                .to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(input_chunks);
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        assert!(!results.is_empty(), "Should have results");
+
+        let expected_calls = [
+            ("search", json!({"query": "Rust async"})),
+            ("search", json!({"query": "Python async"})),
+        ];
+
+        validate_parallel_streaming_tool_calls(&results, &expected_calls);
+    }
+
+    /// GLM-4.7 parallel tool calls in a single chunk. GLM uses a distinct
+    /// `<tool_call>func<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>`
+    /// wire format with its own `find_tool_call_end_position_glm47`.
+    /// Regression test: the old single-find end-position function exited after the
+    /// first `</tool_call>`, leaking subsequent calls as raw XML into content.
+    #[tokio::test]
+    async fn test_parallel_tool_calls_single_chunk_glm47() {
+        let jail = JailedStream::builder().tool_call_parser("glm47").build();
+
+        let input_chunks = vec![test_utils::create_mock_response_chunk(
+            "<tool_call>get_weather\
+<arg_key>location</arg_key><arg_value>Boston</arg_value>\
+</tool_call>\
+<tool_call>get_weather\
+<arg_key>location</arg_key><arg_value>New York</arg_value>\
+</tool_call>"
+                .to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(input_chunks);
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        assert!(!results.is_empty(), "Should have results");
+
+        let expected_calls = [
+            ("get_weather", json!({"location": "Boston"})),
+            ("get_weather", json!({"location": "New York"})),
+        ];
+
+        validate_parallel_streaming_tool_calls(&results, &expected_calls);
+
+        for result in &results {
+            if let Some(ref data) = result.data {
+                for choice in &data.inner.choices {
+                    if let Some(ref content) = choice.delta.content {
+                        let text = test_utils::extract_text(content);
+                        assert!(
+                            !text.contains("<tool_call>"),
+                            "Raw XML must not leak as text content, got: {text:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // =============================================================================
     // 2. PARALLEL TOOL CALLS ACROSS MULTIPLE CHUNKS (STREAMING)
     // =============================================================================
@@ -2622,7 +2783,7 @@ mod parallel_jail_tests {
         // Should have normal text before tool calls
         let normal_text_before = results.iter().find(|r| {
             r.data.as_ref().is_some_and(|d| {
-                d.choices.iter().any(|c| {
+                d.inner.choices.iter().any(|c| {
                     c.delta.content.as_ref().is_some_and(|content| {
                         test_utils::extract_text(content).contains("I'll check the weather")
                     })
@@ -2651,7 +2812,7 @@ mod parallel_jail_tests {
         // Should have normal text after tool calls
         let normal_text_after = results.iter().find(|r| {
             r.data.as_ref().is_some_and(|d| {
-                d.choices.iter().any(|c| {
+                d.inner.choices.iter().any(|c| {
                     c.delta.content.as_ref().is_some_and(|content| {
                         test_utils::extract_text(content).contains("Let me get that information")
                     })
@@ -2692,7 +2853,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -2782,7 +2944,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -2852,7 +3015,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -2868,14 +3032,14 @@ mod parallel_jail_tests {
             .filter(|r| {
                 r.data
                     .as_ref()
-                    .is_some_and(|d| d.choices.iter().any(|c| c.delta.tool_calls.is_some()))
+                    .is_some_and(|d| d.inner.choices.iter().any(|c| c.delta.tool_calls.is_some()))
             })
             .collect();
 
         if let Some(result) = tool_call_results.first()
             && let Some(ref data) = result.data
         {
-            for choice in &data.choices {
+            for choice in &data.inner.choices {
                 if let Some(ref tool_calls) = choice.delta.tool_calls {
                     for tool_call in tool_calls {
                         if let Some(ref function) = tool_call.function
@@ -2930,7 +3094,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -2977,7 +3142,8 @@ mod parallel_jail_tests {
         // Should try to parse whatever content was accumulated
         let has_some_content = results.iter().any(|r| {
             r.data.as_ref().is_some_and(|d| {
-                d.choices
+                d.inner
+                    .choices
                     .iter()
                     .any(|c| c.delta.content.is_some() || c.delta.tool_calls.is_some())
             })
@@ -3012,7 +3178,7 @@ mod parallel_jail_tests {
         // Should have normal text content but no tool calls
         let has_normal_text = results.iter().any(|r| {
             r.data.as_ref().is_some_and(|d| {
-                d.choices.iter().any(|c| {
+                d.inner.choices.iter().any(|c| {
                     c.delta.content.as_ref().is_some_and(|content| {
                         test_utils::extract_text(content).contains("I'll help you")
                             || test_utils::extract_text(content).contains("don't need any tools")
@@ -3027,7 +3193,8 @@ mod parallel_jail_tests {
             .iter()
             .map(|r| {
                 r.data.as_ref().map_or(0, |d| {
-                    d.choices
+                    d.inner
+                        .choices
                         .iter()
                         .map(|c| c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len()))
                         .sum::<usize>()
@@ -3038,6 +3205,486 @@ mod parallel_jail_tests {
         assert_eq!(
             tool_call_count, 0,
             "Should have no tool calls for empty array"
+        );
+    }
+
+    /// Regression test for #6821: tool_choice=required with qwen3_coder parser.
+    ///
+    /// When tool_choice=required AND a tool_call_parser (e.g. qwen3_coder) is
+    /// configured, the jail must use marker-based mode so the parser handles the
+    /// XML output.  Previously this fell through to Immediate JSON mode which
+    /// could not parse qwen3_coder XML, causing raw XML to leak as content.
+    #[tokio::test]
+    async fn test_tool_choice_required_with_qwen3_coder_parser() {
+        // Simulate qwen3_coder XML output for a single tool call
+        let xml_output = r#"<tool_call>
+<function=get_weather>
+<parameter=city>
+San Francisco
+</parameter>
+<parameter=unit>
+fahrenheit
+</parameter>
+</function>
+</tool_call>"#;
+
+        let input_chunks = vec![test_utils::create_mock_response_chunk(
+            xml_output.to_string(),
+            0,
+        )];
+
+        let input_stream = stream::iter(input_chunks);
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("qwen3_coder".to_string()),
+            Some(ChatCompletionToolChoiceOption::Required),
+            None,
+            input_stream,
+        )
+        .collect()
+        .await;
+
+        // Should have parsed a tool call, not leaked raw XML as content
+        let tool_call_count: usize = results
+            .iter()
+            .map(|r| {
+                r.data.as_ref().map_or(0, |d| {
+                    d.inner
+                        .choices
+                        .iter()
+                        .map(|c: &ChatChoiceStream| {
+                            c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len())
+                        })
+                        .sum::<usize>()
+                })
+            })
+            .sum();
+
+        assert!(
+            tool_call_count >= 1,
+            "tool_choice=required with qwen3_coder should produce at least one tool call, got {}",
+            tool_call_count
+        );
+
+        // Verify the tool call was parsed correctly
+        for r in &results {
+            if let Some(data) = &r.data {
+                for choice in &data.inner.choices {
+                    if let Some(tool_calls) = &choice.delta.tool_calls {
+                        for tc in tool_calls {
+                            assert_eq!(
+                                tc.function.as_ref().unwrap().name.as_deref(),
+                                Some("get_weather"),
+                                "Tool call name should be 'get_weather'"
+                            );
+                        }
+                    }
+                    // Content should be empty, not raw XML
+                    if let Some(content) = &choice.delta.content {
+                        let text = test_utils::extract_text(content);
+                        assert!(
+                            !text.contains("<tool_call>"),
+                            "Raw XML should not leak as content, got: {}",
+                            text
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Test for tool_choice=named with qwen3_coder parser and named_tool_filter.
+    ///
+    /// When tool_choice=named is used with a specific tool_name, the
+    /// preprocessor decision logic should apply the named_tool_filter to ensure
+    /// only the requested tool is parsed, even if the model emits other tools.
+    #[tokio::test]
+    async fn test_tool_choice_named_with_qwen3_coder_parser() {
+        // Simulate qwen3_coder XML output for a single tool call
+        let xml_output = r#"<tool_call>
+<function=get_weather>
+<parameter=city>
+San Francisco
+</parameter>
+<parameter=unit>
+fahrenheit
+</parameter>
+</function>
+</tool_call>"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(xml_output.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let input_stream = stream::iter(input_chunks);
+
+        // Apply tool_choice=named for get_weather
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("qwen3_coder".to_string()),
+            Some(ChatCompletionToolChoiceOption::Named(
+                "get_weather".to_string().into(),
+            )),
+            None,
+            input_stream,
+        )
+        .collect()
+        .await;
+
+        // Should have parsed the named tool call
+        let tool_call_count: usize = results
+            .iter()
+            .map(|r| {
+                r.data.as_ref().map_or(0, |d| {
+                    d.inner
+                        .choices
+                        .iter()
+                        .map(|c: &ChatChoiceStream| {
+                            c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len())
+                        })
+                        .sum::<usize>()
+                })
+            })
+            .sum();
+
+        assert!(
+            tool_call_count >= 1,
+            "tool_choice=named with qwen3_coder should produce at least one tool call, got {}",
+            tool_call_count
+        );
+
+        // Verify the tool call was parsed correctly and matches the named tool
+        for r in &results {
+            if let Some(data) = &r.data {
+                for choice in &data.inner.choices {
+                    if let Some(tool_calls) = &choice.delta.tool_calls {
+                        for tc in tool_calls {
+                            assert_eq!(
+                                tc.function.as_ref().unwrap().name.as_deref(),
+                                Some("get_weather"),
+                                "Tool call name should match the named tool choice"
+                            );
+                        }
+                    }
+                    // Content should be empty, not raw XML
+                    if let Some(content) = &choice.delta.content {
+                        let text = test_utils::extract_text(content);
+                        assert!(
+                            !text.contains("<tool_call>"),
+                            "Raw XML should not leak as content, got: {}",
+                            text
+                        );
+                    }
+                }
+            }
+        }
+
+        // OpenAI spec: whenever tool_calls are emitted, finish_reason must be
+        // ToolCalls — regardless of whether tool_choice was auto, required, or named.
+        let finish_reasons: Vec<_> = results
+            .iter()
+            .filter_map(|r| {
+                r.data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first().and_then(|c| c.finish_reason))
+            })
+            .collect();
+
+        assert!(
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "tool_choice=named with emitted tool_calls should have ToolCalls finish reason, got {:?}",
+            finish_reasons
+        );
+    }
+
+    /// tool_choice=required + parser configured + backend applied guided
+    /// decoding → model emits a bare JSON array of tool calls.
+    ///
+    /// This is the minimax/SGLang-after-PR-#6620 regression: previously we
+    /// fell through to the marker-based parser (looking for `<minimax:
+    /// tool_call>` etc.) which cannot parse unmarked JSON, so tool_calls
+    /// were empty and the JSON leaked into content/reasoning_content.
+    /// The Immediate branch now routes through base_json_parser first.
+    #[tokio::test]
+    async fn test_tool_choice_required_with_parser_bare_json() {
+        let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(bare_json.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("minimax_m2".to_string()),
+            Some(ChatCompletionToolChoiceOption::Required),
+            None,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let tool_calls: Vec<_> = results
+            .iter()
+            .flat_map(|r| {
+                r.data
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|d| d.inner.choices.iter())
+                    .flat_map(|c| c.delta.tool_calls.iter().flatten())
+            })
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "bare JSON array must be parsed by base_json_parser even when parser is set"
+        );
+        assert_eq!(
+            tool_calls[0].function.as_ref().unwrap().name.as_deref(),
+            Some("get_weather")
+        );
+
+        // finish_reason should be rewritten to ToolCalls (required path).
+        let finish_reasons: Vec<_> = results
+            .iter()
+            .filter_map(|r| {
+                r.data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first().and_then(|c| c.finish_reason))
+            })
+            .collect();
+        assert!(
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "tool_choice=required with tool_calls emitted should have ToolCalls finish_reason"
+        );
+
+        // No raw JSON leaked as content.
+        for r in &results {
+            if let Some(data) = &r.data {
+                for choice in &data.inner.choices {
+                    if let Some(content) = &choice.delta.content {
+                        let text = test_utils::extract_text(content);
+                        assert!(
+                            !text.contains("get_weather"),
+                            "tool call JSON should not leak as content, got: {}",
+                            text
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// tool_choice=required with the alternate `arguments` key (SGLang's
+    /// JsonArrayParser and some vLLM paths emit this variant).  The
+    /// base_json_parser accepts either `parameters` or `arguments`.
+    #[tokio::test]
+    async fn test_tool_choice_required_bare_json_with_arguments_key() {
+        let bare_json = r#"[{"name":"get_weather","arguments":{"location":"Paris"}}]"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(bare_json.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("hermes".to_string()),
+            Some(ChatCompletionToolChoiceOption::Required),
+            None,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let tool_calls: Vec<_> = results
+            .iter()
+            .flat_map(|r| {
+                r.data
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|d| d.inner.choices.iter())
+                    .flat_map(|c| c.delta.tool_calls.iter().flatten())
+            })
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "base_json_parser must accept the `arguments` key variant"
+        );
+        let args = tool_calls[0]
+            .function
+            .as_ref()
+            .and_then(|f| f.arguments.as_deref())
+            .unwrap_or_default();
+        assert!(
+            args.contains("Paris"),
+            "arguments should carry the parameters payload, got: {}",
+            args
+        );
+    }
+
+    /// tool_choice=named + parser configured + bare JSON array from guided
+    /// decoding.  The call must be parsed (by base_json_parser) and the
+    /// named-tool filter must accept a matching name; finish_reason stays
+    /// Stop per OpenAI spec for named tool_choice.
+    #[tokio::test]
+    async fn test_tool_choice_named_with_parser_bare_json() {
+        let bare_json = r#"[{"name":"get_weather","parameters":{"location":"Tokyo"}}]"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(bare_json.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("minimax_m2".to_string()),
+            Some(ChatCompletionToolChoiceOption::Named(
+                "get_weather".to_string().into(),
+            )),
+            None,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let tool_calls: Vec<_> = results
+            .iter()
+            .flat_map(|r| {
+                r.data
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|d| d.inner.choices.iter())
+                    .flat_map(|c| c.delta.tool_calls.iter().flatten())
+            })
+            .cloned()
+            .collect();
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            tool_calls[0].function.as_ref().unwrap().name.as_deref(),
+            Some("get_weather")
+        );
+
+        // OpenAI spec: whenever tool_calls are emitted, finish_reason must be
+        // ToolCalls — regardless of whether tool_choice was auto, required, or named.
+        let finish_reasons: Vec<_> = results
+            .iter()
+            .filter_map(|r| {
+                r.data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first().and_then(|c| c.finish_reason))
+            })
+            .collect();
+        assert!(
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "tool_choice=named with emitted tool_calls should be rewritten to ToolCalls, got {:?}",
+            finish_reasons
+        );
+    }
+
+    /// tool_choice=named + parser + bare JSON where the model emits a
+    /// different tool than requested.  The named_tool_filter must drop
+    /// the mismatched call so nothing is emitted as a tool call.
+    #[tokio::test]
+    async fn test_tool_choice_named_bare_json_wrong_tool_filtered() {
+        let bare_json = r#"[{"name":"search","parameters":{"q":"foo"}}]"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(bare_json.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("minimax_m2".to_string()),
+            Some(ChatCompletionToolChoiceOption::Named(
+                "get_weather".to_string().into(),
+            )),
+            None,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let tool_call_count: usize = results
+            .iter()
+            .map(|r| {
+                r.data.as_ref().map_or(0, |d| {
+                    d.inner
+                        .choices
+                        .iter()
+                        .map(|c: &ChatChoiceStream| {
+                            c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len())
+                        })
+                        .sum::<usize>()
+                })
+            })
+            .sum();
+
+        assert_eq!(
+            tool_call_count, 0,
+            "named_tool_filter must drop tool calls whose name doesn't match the requested tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_choice_named_no_parser_bare_json_wrong_tool_filtered() {
+        // Regression: with tool_choice=Named and NO parser, the base-JSON
+        // parser (step 1 in create_tool_call_choice) can now parse arbitrary
+        // JSON arrays. The named filter must still apply or a mismatched
+        // tool name would leak to the client.
+        let bare_json = r#"[{"name":"search","parameters":{"q":"foo"}}]"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(bare_json.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            None,
+            Some(ChatCompletionToolChoiceOption::Named(
+                "get_weather".to_string().into(),
+            )),
+            None,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let tool_call_count: usize = results
+            .iter()
+            .map(|r| {
+                r.data.as_ref().map_or(0, |d| {
+                    d.inner
+                        .choices
+                        .iter()
+                        .map(|c: &ChatChoiceStream| {
+                            c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len())
+                        })
+                        .sum::<usize>()
+                })
+            })
+            .sum();
+
+        assert_eq!(
+            tool_call_count, 0,
+            "Named + no-parser: wrong-name tool call must be filtered"
+        );
+
+        // The filtered-out tool JSON must not leak as assistant content.
+        let emitted_text: String = results
+            .iter()
+            .flat_map(|r| r.data.as_ref().map(|d| &d.inner.choices).into_iter())
+            .flatten()
+            .filter_map(|c| match c.delta.content.as_ref()? {
+                ChatCompletionMessageContent::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !emitted_text.contains("search"),
+            "wrong-tool JSON leaked to content: {emitted_text:?}"
         );
     }
 }

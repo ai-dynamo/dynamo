@@ -6,7 +6,7 @@
 //!
 //! Requests are routed to a WorkerSet selected by weighted random (proportional to worker count).
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use rand::Rng;
@@ -19,6 +19,7 @@ use crate::protocols::openai::ParsingOptions;
 use crate::types::{
     generic::tensor::TensorStreamingEngine,
     openai::{
+        audios::OpenAIAudiosStreamingEngine,
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
         images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
@@ -29,10 +30,6 @@ use crate::types::{
 pub struct Model {
     name: String,
     worker_sets: DashMap<String, Arc<WorkerSet>>,
-    /// The canonical MDC checksum for this model. Set by the first WorkerSet registered;
-    /// all subsequent WorkerSets must match. Naturally cleared when the Model is dropped
-    /// (last WorkerSet removed), allowing a new version to register.
-    canonical_checksum: OnceLock<String>,
 }
 
 impl Model {
@@ -40,7 +37,6 @@ impl Model {
         Self {
             name,
             worker_sets: DashMap::new(),
-            canonical_checksum: OnceLock::new(),
         }
     }
 
@@ -48,21 +44,23 @@ impl Model {
         &self.name
     }
 
-    /// Add a WorkerSet to this model. Returns `Err` if the WorkerSet's checksum
-    /// doesn't match the model's canonical checksum (set by the first WorkerSet).
-    pub fn add_worker_set(
-        &self,
-        namespace: String,
-        worker_set: Arc<WorkerSet>,
-    ) -> Result<(), ModelManagerError> {
-        self.set_canonical_checksum(worker_set.mdcsum())?;
+    /// Add a WorkerSet to this model.
+    pub fn add_worker_set(&self, namespace: String, worker_set: Arc<WorkerSet>) {
         tracing::info!(
             model = %self.name,
             namespace = %namespace,
             "Adding worker set to model"
         );
         self.worker_sets.insert(namespace, worker_set);
-        Ok(())
+    }
+
+    /// Check whether a candidate checksum is compatible with an existing WorkerSet
+    /// identified by `ws_key`.
+    pub fn is_checksum_compatible(&self, ws_key: &str, candidate_checksum: &str) -> bool {
+        match self.worker_sets.get(ws_key) {
+            Some(existing_ws) => existing_ws.mdcsum() == candidate_checksum,
+            None => true,
+        }
     }
 
     pub fn remove_worker_set(&self, namespace: &str) -> Option<Arc<WorkerSet>> {
@@ -152,6 +150,13 @@ impl Model {
             .any(|entry| entry.value().has_videos_engine())
     }
 
+    /// Check if any WorkerSet has an audios engine.
+    pub fn has_audios_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_audios_engine())
+    }
+
     /// Whether this model should be visible in /v1/models.
     pub fn is_displayable(&self) -> bool {
         let has_serving_engine = |ws: &WorkerSet| {
@@ -161,6 +166,7 @@ impl Model {
                 || ws.has_images_engine()
                 || ws.has_tensor_engine()
                 || ws.has_videos_engine()
+                || ws.has_audios_engine()
         };
 
         let has_any_serving_engine = self.worker_sets.iter().any(|entry| {
@@ -170,41 +176,11 @@ impl Model {
 
         self.worker_sets.iter().any(|entry| {
             let ws = entry.value();
-            if ws.worker_count() == 0 {
+            if ws.worker_count() == 0 || !ws.can_serve_requests() {
                 return false;
             }
             has_serving_engine(ws.as_ref()) || (!has_any_serving_engine && ws.is_prefill_set())
         })
-    }
-
-    /// Check if a candidate checksum is valid for this model.
-    /// Returns `Some(true)` if it matches the canonical checksum, `Some(false)` if it
-    /// doesn't match, or `None` if no canonical checksum has been set yet (no WorkerSets).
-    pub fn is_valid_checksum(&self, candidate: &str) -> Option<bool> {
-        let canonical = self.canonical_checksum.get()?;
-        Some(canonical == candidate)
-    }
-
-    /// Set the canonical checksum for this model. The first caller wins (OnceLock).
-    /// Returns `Err` if a different checksum was already set.
-    fn set_canonical_checksum(&self, checksum: &str) -> Result<(), ModelManagerError> {
-        // Try to set; if already set, verify it matches.
-        match self.canonical_checksum.set(checksum.to_string()) {
-            Ok(()) => Ok(()),
-            Err(_) => {
-                // OnceLock was already set — check if the value matches
-                let canonical = self.canonical_checksum.get().unwrap();
-                if canonical == checksum {
-                    Ok(())
-                } else {
-                    Err(ModelManagerError::ChecksumMismatch {
-                        model: self.name.clone(),
-                        expected: canonical.clone(),
-                        got: checksum.to_string(),
-                    })
-                }
-            }
-        }
     }
 
     // -- Engine accessors: select a WorkerSet, return its engine --
@@ -213,36 +189,41 @@ impl Model {
         &self,
     ) -> Result<OpenAIChatCompletionsStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.chat_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_chat_engine()))
     }
 
     pub fn get_completions_engine(
         &self,
     ) -> Result<OpenAICompletionsStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.completions_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_completions_engine()))
     }
 
     pub fn get_embeddings_engine(
         &self,
     ) -> Result<OpenAIEmbeddingsStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.embeddings_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_embeddings_engine()))
     }
 
     pub fn get_images_engine(&self) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.images_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_images_engine()))
     }
 
     pub fn get_videos_engine(&self) -> Result<OpenAIVideosStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.videos_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_videos_engine()))
+    }
+
+    pub fn get_audios_engine(&self) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.audios_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_audios_engine()))
     }
 
     pub fn get_tensor_engine(&self) -> Result<TensorStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.tensor_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_tensor_engine()))
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -251,7 +232,7 @@ impl Model {
         &self,
     ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
         self.select_worker_set_with(|ws| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_chat_engine()))
     }
 
     pub fn get_completions_engine_with_parsing(
@@ -262,7 +243,7 @@ impl Model {
                 .clone()
                 .map(|e| (e, ws.parsing_options()))
         })
-        .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+        .ok_or_else(|| self.engine_error(self.has_completions_engine()))
     }
 
     // -- Worker monitoring (aggregated across WorkerSets) --
@@ -302,6 +283,19 @@ impl Model {
             .sum()
     }
 
+    // -- Internal helpers --
+
+    /// Return the appropriate error when no servable WorkerSet was found.
+    /// If the engine exists but no WorkerSet can serve (zero workers, prefill not activated,
+    /// etc.), return ModelUnavailable (maps to 503). Otherwise ModelNotFound (maps to 404).
+    fn engine_error(&self, engine_exists: bool) -> ModelManagerError {
+        if engine_exists {
+            ModelManagerError::ModelUnavailable(self.name.clone())
+        } else {
+            ModelManagerError::ModelNotFound(self.name.clone())
+        }
+    }
+
     // -- Internal selection --
 
     /// Select a WorkerSet and extract a value from it.
@@ -317,19 +311,18 @@ impl Model {
         F: Fn(&WorkerSet) -> Option<T>,
     {
         // Fast path: single set (same zero-worker filtering as the multi-set path below)
-        // TODO: When the single set has 0 workers, this returns None which maps to
-        // ModelNotFound (404). Ideally should be 503 "no available workers" — see follow-up.
         if self.worker_sets.len() == 1 {
             return self.worker_sets.iter().next().and_then(|entry| {
                 let ws = entry.value();
-                if ws.worker_count() == 0 {
+                if ws.worker_count() == 0 || !ws.can_serve_requests() {
                     return None;
                 }
                 extract(ws)
             });
         }
 
-        // Collect eligible sets with their worker counts, skipping sets with no workers.
+        // Collect eligible sets with their worker counts, skipping sets with no workers
+        // or sets whose prefill router has died under enforce_disagg.
         // In-process models (no discovery watcher) return count=1, so they always participate.
         // Discovery models with count=0 have no available workers and are skipped.
         let eligible: Vec<(T, usize)> = self
@@ -338,7 +331,7 @@ impl Model {
             .filter_map(|entry| {
                 let ws = entry.value();
                 let count = ws.worker_count();
-                if count == 0 {
+                if count == 0 || !ws.can_serve_requests() {
                     return None;
                 }
                 extract(ws).map(|val| (val, count))
@@ -410,7 +403,7 @@ mod tests {
         let model = Model::new("llama".to_string());
         let ws = make_worker_set("ns1", "abc");
 
-        model.add_worker_set("ns1".to_string(), ws).unwrap();
+        model.add_worker_set("ns1".to_string(), ws);
         assert!(!model.is_empty());
         assert_eq!(model.worker_set_count(), 1);
         assert!(model.has_worker_set("ns1"));
@@ -428,7 +421,7 @@ mod tests {
     fn test_get_worker_set() {
         let model = Model::new("llama".to_string());
         let ws = make_worker_set("ns1", "abc");
-        model.add_worker_set("ns1".to_string(), ws).unwrap();
+        model.add_worker_set("ns1".to_string(), ws);
 
         let retrieved = model.get_worker_set("ns1");
         assert!(retrieved.is_some());
@@ -440,12 +433,8 @@ mod tests {
     #[test]
     fn test_multiple_worker_sets_same_checksum() {
         let model = Model::new("llama".to_string());
-        model
-            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
-            .unwrap();
-        model
-            .add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"))
-            .unwrap();
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+        model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"));
 
         assert_eq!(model.worker_set_count(), 2);
         assert!(model.has_worker_set("ns1"));
@@ -458,41 +447,57 @@ mod tests {
     }
 
     #[test]
-    fn test_add_worker_set_rejects_checksum_mismatch() {
+    fn test_multiple_worker_sets_different_checksums() {
+        // Different namespaces are allowed to have different checksums
         let model = Model::new("llama".to_string());
-        model
-            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
-            .unwrap();
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+        model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "def"));
 
-        // Different checksum from a different namespace should be rejected
-        let result = model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "def"));
-        assert!(result.is_err());
-        assert_eq!(model.worker_set_count(), 1); // ns2 was not added
+        assert_eq!(model.worker_set_count(), 2);
+        assert!(model.has_worker_set("ns1"));
+        assert!(model.has_worker_set("ns2"));
     }
 
     #[test]
-    fn test_is_valid_checksum() {
+    fn test_is_checksum_compatible_no_existing_worker_set() {
         let model = Model::new("llama".to_string());
+        // No WorkerSet exists yet — any checksum is compatible
+        assert!(model.is_checksum_compatible("ns1", "abc"));
+        assert!(model.is_checksum_compatible("ns1", "xyz"));
+    }
 
-        // No canonical set yet
-        assert_eq!(model.is_valid_checksum("abc123"), None);
+    #[test]
+    fn test_is_checksum_compatible_matching_checksum() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
 
-        model
-            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc123"))
-            .unwrap();
+        // Same ws_key, same checksum → compatible
+        assert!(model.is_checksum_compatible("ns1", "abc"));
+    }
 
-        // Matches canonical
-        assert_eq!(model.is_valid_checksum("abc123"), Some(true));
-        // Does not match canonical
-        assert_eq!(model.is_valid_checksum("wrong"), Some(false));
+    #[test]
+    fn test_is_checksum_compatible_mismatched_checksum() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+
+        // Same ws_key, different checksum → incompatible
+        assert!(!model.is_checksum_compatible("ns1", "def"));
+    }
+
+    #[test]
+    fn test_is_checksum_compatible_different_ws_key() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+
+        // Different ws_key — no existing WorkerSet for "ns2", so any checksum is fine
+        assert!(model.is_checksum_compatible("ns2", "def"));
+        assert!(model.is_checksum_compatible("ns2", "abc"));
     }
 
     #[test]
     fn test_no_engines_means_prefill() {
         let model = Model::new("llama".to_string());
-        model
-            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
-            .unwrap();
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
 
         // WorkerSets with no engines are treated as prefill sets
         assert!(model.has_prefill());
@@ -507,9 +512,7 @@ mod tests {
     #[test]
     fn test_get_engine_returns_error_without_engines() {
         let model = Model::new("llama".to_string());
-        model
-            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
-            .unwrap();
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
 
         assert!(model.get_chat_engine().is_err());
         assert!(model.get_completions_engine().is_err());
@@ -530,15 +533,11 @@ mod tests {
         assert!(model.get_chat_engine().is_err());
 
         // Single set (fast path)
-        model
-            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
-            .unwrap();
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
         assert!(model.get_chat_engine().is_err()); // No engine → filtered out
 
         // Multiple sets (weighted path)
-        model
-            .add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"))
-            .unwrap();
+        model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"));
         assert!(model.get_chat_engine().is_err()); // Still no engines → all filtered out
     }
 
@@ -548,14 +547,10 @@ mod tests {
         let model = Model::new("llama".to_string());
         assert_eq!(model.total_workers(), 0); // empty model
 
-        model
-            .add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"))
-            .unwrap();
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
         assert_eq!(model.total_workers(), 1);
 
-        model
-            .add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"))
-            .unwrap();
+        model.add_worker_set("ns2".to_string(), make_worker_set("ns2", "abc"));
         assert_eq!(model.total_workers(), 2);
     }
 
@@ -565,8 +560,8 @@ mod tests {
 
         let (ws1, _tx1) = make_worker_set_with_count("ns1", "abc", vec![1, 2, 3]);
         let (ws2, _tx2) = make_worker_set_with_count("ns2", "abc", vec![10, 20]);
-        model.add_worker_set("ns1".to_string(), ws1).unwrap();
-        model.add_worker_set("ns2".to_string(), ws2).unwrap();
+        model.add_worker_set("ns1".to_string(), ws1);
+        model.add_worker_set("ns2".to_string(), ws2);
 
         assert_eq!(model.total_workers(), 5); // 3 + 2
     }
@@ -576,7 +571,7 @@ mod tests {
         let model = Model::new("llama".to_string());
 
         let (ws1, tx1) = make_worker_set_with_count("ns1", "abc", vec![1, 2]);
-        model.add_worker_set("ns1".to_string(), ws1).unwrap();
+        model.add_worker_set("ns1".to_string(), ws1);
         assert_eq!(model.total_workers(), 2);
 
         // Workers leave
@@ -597,7 +592,7 @@ mod tests {
         let model = Model::new("llama".to_string());
 
         let (ws, _tx) = make_worker_set_with_count("ns1", "abc", vec![]);
-        model.add_worker_set("ns1".to_string(), ws).unwrap();
+        model.add_worker_set("ns1".to_string(), ws);
 
         // WorkerSet exists but has 0 workers → selection filtered out → Err
         assert!(model.get_chat_engine().is_err());
@@ -611,10 +606,118 @@ mod tests {
 
         let (ws1, _tx1) = make_worker_set_with_count("ns1", "abc", vec![]);
         let (ws2, _tx2) = make_worker_set_with_count("ns2", "abc", vec![]);
-        model.add_worker_set("ns1".to_string(), ws1).unwrap();
-        model.add_worker_set("ns2".to_string(), ws2).unwrap();
+        model.add_worker_set("ns1".to_string(), ws1);
+        model.add_worker_set("ns2".to_string(), ws2);
 
         // Both have 0 workers → all filtered → Err
         assert!(model.get_chat_engine().is_err());
+    }
+
+    // -- Disaggregated prefill death tests --
+
+    use crate::kv_router::PrefillRouter;
+
+    /// Build a WorkerSet with a deactivated PrefillRouter simulating "was activated, now dead".
+    /// worker_count defaults to 1 (no instance_count_rx -> in-process default).
+    fn make_worker_set_with_dead_prefill(namespace: &str, enforce_disagg: bool) -> Arc<WorkerSet> {
+        let mut ws = WorkerSet::new(
+            namespace.to_string(),
+            "abc".to_string(),
+            crate::model_card::ModelDeploymentCard::default(),
+        );
+        let pr = PrefillRouter::disabled(
+            std::sync::Arc::new(crate::discovery::ModelManager::new()),
+            dynamo_runtime::pipeline::RouterMode::RoundRobin,
+            enforce_disagg,
+        );
+        pr.deactivate();
+        ws.prefill_router = Some(pr);
+        Arc::new(ws)
+    }
+
+    /// Baseline: a WorkerSet without a PrefillRouter is always displayable
+    /// (worker_count=1, is_prefill_set=true, no can_serve_requests block).
+    #[test]
+    fn test_is_displayable_true_basic() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+        assert!(
+            model.is_displayable(),
+            "model with an unconstrained WorkerSet must be displayable"
+        );
+    }
+
+    /// When the prefill engine dies and enforce_disagg is set, the model must be
+    /// hidden from /v1/models.
+    #[test]
+    fn test_is_displayable_false_when_prefill_dies_enforce_disagg() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set(
+            "ns1".to_string(),
+            make_worker_set_with_dead_prefill("ns1", true),
+        );
+
+        assert!(
+            !model.is_displayable(),
+            "model must be hidden when prefill died and enforce_disagg=true"
+        );
+    }
+
+    /// When enforce_disagg is false the deployment can fall back to aggregated mode,
+    /// so the model should remain visible in /v1/models.
+    #[test]
+    fn test_is_displayable_true_when_prefill_dies_no_enforce() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set(
+            "ns1".to_string(),
+            make_worker_set_with_dead_prefill("ns1", false),
+        );
+
+        assert!(
+            model.is_displayable(),
+            "model must remain visible when prefill died but enforce_disagg=false (fallback)"
+        );
+    }
+
+    /// A single WorkerSet with a deactivated prefill router (enforce_disagg=true) must be
+    /// skipped by select_worker_set_with(), causing engine accessors to return Err.
+    #[test]
+    fn test_dead_prefill_single_set_not_selectable() {
+        let model = Model::new("llama".to_string());
+        model.add_worker_set(
+            "ns1".to_string(),
+            make_worker_set_with_dead_prefill("ns1", true),
+        );
+
+        assert!(model.get_chat_engine().is_err());
+        assert!(model.get_completions_engine().is_err());
+    }
+
+    /// With two WorkerSets -- one healthy, one with dead prefill -- the healthy set
+    /// keeps the model displayable. Removing the healthy set hides the model.
+    #[test]
+    fn test_dead_prefill_multi_set_skips_dead_namespace() {
+        let model = Model::new("llama".to_string());
+
+        // Healthy set (no prefill constraint)
+        model.add_worker_set("healthy".to_string(), make_worker_set("healthy", "abc"));
+
+        // Dead set (deactivated prefill + enforce_disagg)
+        model.add_worker_set(
+            "dead".to_string(),
+            make_worker_set_with_dead_prefill("dead", true),
+        );
+
+        assert!(
+            model.is_displayable(),
+            "model must be displayable when at least one healthy set exists"
+        );
+
+        // Removing the healthy set leaves only the dead set -- model must be hidden.
+        model.remove_worker_set("healthy");
+        assert!(
+            !model.is_displayable(),
+            "model must be hidden when only the dead prefill set remains"
+        );
     }
 }

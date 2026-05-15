@@ -3,6 +3,12 @@
 
 apiVersion: v1
 kind: ConfigMap
+{{- if ne .Values.storage.type "pvc" }}
+{{- fail (printf "snapshot.storage.type=%q is not supported yet; only pvc is currently implemented" .Values.storage.type) }}
+{{- end }}
+{{- if not (has .Values.storage.accessMode (list "agentMount" "podMount")) }}
+{{- fail (printf "snapshot.storage.accessMode=%q is not supported; expected agentMount or podMount" .Values.storage.accessMode) }}
+{{- end }}
 metadata:
   name: {{ include "snapshot.fullname" . }}-config
   namespace: {{ .Release.Namespace }}
@@ -10,12 +16,19 @@ metadata:
     {{- include "snapshot.labels" . | nindent 4 }}
 data:
   config.yaml: |
+    storage:
+      type: {{ .Values.storage.type | quote }}
+      accessMode: {{ .Values.storage.accessMode | quote }}
+      {{- if eq .Values.storage.type "pvc" }}
+      basePath: {{ .Values.storage.pvc.basePath | quote }}
+      {{- end }}
+
     overlay:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}
 
     restore:
       nsRestorePath: {{ .Values.config.restore.nsRestorePath | quote }}
-      restoreReadyTimeoutSeconds: {{ .Values.config.restore.restoreReadyTimeoutSeconds }}
+      restoreTimeoutSeconds: {{ .Values.config.restore.restoreTimeoutSeconds }}
 
     criu:
       binaryPath: {{ .Values.config.criu.binaryPath | quote }}

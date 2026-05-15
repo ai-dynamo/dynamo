@@ -7,7 +7,10 @@ import logging
 import os
 import tempfile
 import time
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from dynamo.vllm.omni.args import OmniConfig
 
 import uvloop
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
@@ -26,6 +29,8 @@ from dynamo.common.utils.prometheus import (
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import (
     KvEventPublisher,
+    MediaDecoder,
+    MediaFetcher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
@@ -34,27 +39,15 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
 from .args import Config, _uses_dynamo_connector, parse_args
+from .cache_info import get_configured_kv_event_block_size
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
-
-# Optional imports for frontend decoding support
-MediaDecoder: type | None = None
-MediaFetcher: type | None = None
-try:
-    from dynamo.llm import MediaDecoder, MediaFetcher
-
-    MEDIA_DECODER_AVAILABLE = True
-except ImportError:
-    MediaDecoder = None
-    MediaFetcher = None
-    MEDIA_DECODER_AVAILABLE = False
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -81,6 +74,24 @@ def run_dynamo_headless(config: Config) -> None:
     Secondary nodes spawn vLLM workers only — no engine core, no scheduler,
     no Dynamo endpoints. Bypasses DistributedRuntime entirely (no NATS/etcd).
     """
+    # Propagate worker_cls for custom load formats so headless workers use
+    # the same model loader and patches as the leader node.
+    if config.engine_args.load_format == "gms":
+        config.engine_args.worker_cls = (
+            "gpu_memory_service.integrations.vllm.worker.GMSWorker"
+        )
+
+        if config.gms_shadow_mode:
+            from gpu_memory_service.integrations.vllm.utils import (
+                configure_gms_lock_mode,
+            )
+
+            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
+            configure_gms_lock_mode(config.engine_args)
+
+    elif config.engine_args.load_format in ("mx-source", "mx-target"):
+        config.engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
+
     # Keep the upstream CLI import local so tests that only exercise
     # build_headless_namespace() do not pull in vLLM's full CLI import graph.
     from vllm.entrypoints.cli.serve import run_headless
@@ -124,7 +135,10 @@ async def worker() -> None:
         (
             config.namespace,
             config.discovery_backend,
-        ) = snapshot_controller.reload_restore_identity()
+        ) = snapshot_controller.reload_restore_identity(
+            config.namespace,
+            config.discovery_backend,
+        )
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
@@ -137,7 +151,6 @@ async def worker() -> None:
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
-        use_kv_events=config.use_kv_events,
     )
 
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
@@ -164,7 +177,7 @@ async def worker() -> None:
 
 
 def setup_metrics_collection(
-    config: Config | OmniConfig, generate_endpoint: Endpoint, logger: logging.Logger
+    config: "Config | OmniConfig", generate_endpoint: Endpoint, logger: logging.Logger
 ) -> None:
     """Set up metrics collection for vLLM and LMCache metrics.
 
@@ -197,7 +210,15 @@ def setup_metrics_collection(
             registry=DYNAMO_COMPONENT_REGISTRY,
         )
 
-        if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+        multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+        # After CRIU restore to another node, env still has the checkpoint pod's path
+        # but that directory exists only on the checkpoint node; create it here if missing.
+        if multiproc_dir and not os.path.isdir(multiproc_dir):
+            try:
+                os.makedirs(multiproc_dir, exist_ok=True)
+            except OSError:
+                pass
+        if multiproc_dir and os.path.isdir(multiproc_dir):
             try:
                 # MultiProcessCollector reads metrics from .db files in PROMETHEUS_MULTIPROC_DIR
                 # Adding it to REGISTRY allows collecting both in-memory and .db file metrics
@@ -243,6 +264,11 @@ def setup_metrics_collection(
                     model_name=config.model,
                 )
         else:
+            if multiproc_dir:
+                logger.warning(
+                    f"PROMETHEUS_MULTIPROC_DIR={multiproc_dir} is not a valid directory, "
+                    "falling back to single-process metrics"
+                )
             # No multiprocess mode
             register_engine_metrics_callback(
                 endpoint=generate_endpoint,
@@ -298,6 +324,7 @@ def setup_kv_event_publisher(
     # all served workers should cover all ranks.
     dp_start, dp_size = get_dp_range_for_worker(vllm_config)
     kv_publishers = []
+    kv_event_block_size = get_configured_kv_event_block_size(vllm_config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):
         if consolidator_enabled:
@@ -318,7 +345,7 @@ def setup_kv_event_publisher(
 
         kv_publisher = KvEventPublisher(
             endpoint=generate_endpoint,
-            kv_block_size=vllm_config.cache_config.block_size,
+            kv_block_size=kv_event_block_size,
             zmq_endpoint=zmq_endpoint,
             zmq_topic="",
             enable_local_indexer=config.enable_local_indexer,
@@ -387,6 +414,12 @@ def setup_vllm_engine(
     # instead of .name string, causing false error on exit. Set PROMETHEUS_MULTIPROC_DIR
     # ourselves to avoid this and handle cleanup properly.
     prometheus_temp_dir = None
+    existing_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+    if existing_dir and not os.path.isdir(existing_dir):
+        logger.warning(
+            f"PROMETHEUS_MULTIPROC_DIR={existing_dir} does not exist, recreating"
+        )
+        os.makedirs(existing_dir, exist_ok=True)
     if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
         prometheus_temp_dir = tempfile.TemporaryDirectory(prefix="vllm_prometheus_")
         os.environ["PROMETHEUS_MULTIPROC_DIR"] = prometheus_temp_dir.name
@@ -425,6 +458,19 @@ def setup_vllm_engine(
 
     if engine_args.load_format == "gms":
         engine_args.worker_cls = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
+
+        if config.gms_shadow_mode:
+            from gpu_memory_service.integrations.vllm.utils import (
+                configure_gms_lock_mode,
+            )
+
+            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
+            logger.info(
+                "[GMS] Failover enabled: will use scratch KV for initialization until engine is primary"
+            )
+            # ENGINE_ID=0 writes weights, all others import (RO).
+            # Prevents deadlock during TP>1 failover.
+            configure_gms_lock_mode(engine_args)
 
     if engine_args.load_format in ("mx-source", "mx-target"):
         try:
@@ -500,6 +546,15 @@ def setup_vllm_engine(
     if fpm_worker_id is not None:
         vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
 
+    # Pass benchmark config to InstrumentedScheduler via additional_config.
+    if hasattr(config, "_benchmark_additional_config"):
+        bench = config._benchmark_additional_config
+        if fpm_worker_id and bench["output_path"] == "/tmp/benchmark_results.json":
+            short_id = fpm_worker_id[-8:]
+            bench["output_path"] = f"/tmp/benchmark_results_{short_id}.json"
+        vllm_config.additional_config["benchmark"] = bench
+        logger.info("Benchmark config injected into additional_config")
+
     factory = []
     if stat_logger:
         factory.append(stat_logger)
@@ -519,6 +574,10 @@ def setup_vllm_engine(
     component_gauges.set_model_load_time(load_time)
 
     logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
+
+    # update block_size in vllm_config based on final engine cache info for later use
+    runtime_values = get_engine_cache_info(engine_client)
+    vllm_config.cache_config.block_size = runtime_values["block_size"]
 
     return (
         engine_client,
@@ -555,7 +614,20 @@ async def register_vllm_model(
         f"Getting engine runtime configuration metadata from vLLM engine for {model_type}..."
     )
     runtime_values = get_engine_cache_info(engine_client)
-    runtime_config.total_kv_blocks = runtime_values["num_gpu_blocks"]
+    num_gpu_blocks = runtime_values["num_gpu_blocks"]
+    if num_gpu_blocks is None:
+        # TODO(upstream-vllm): remove this workaround once vLLM propagates
+        # num_gpu_blocks from Ray DP workers back to the main-process vllm_config.
+        # With Ray-based data-parallel backend, num_gpu_blocks is computed inside
+        # Ray worker processes and is never written back to the main-process
+        # vllm_config.  Use 0 as a sentinel so the Rust runtime can still register
+        # the model; KV-cache capacity metrics will be unavailable in this mode.
+        logging.warning(
+            "num_gpu_blocks is None (expected when using --data-parallel-backend ray). "
+            "Setting total_kv_blocks=0 for model registration."
+        )
+        num_gpu_blocks = 0
+    runtime_config.total_kv_blocks = num_gpu_blocks
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
@@ -568,6 +640,16 @@ async def register_vllm_model(
     if model_type != ModelType.Prefill:
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
+    runtime_config.exclude_tools_when_tool_choice_none = (
+        config.exclude_tools_when_tool_choice_none
+    )
+
+    # Propagate stream_interval so the frontend can respect --stream-interval.
+    # set_engine_specific requires a JSON-encoded string (the Rust binding
+    # parses it with serde_json::from_str); str(int) happens to be valid JSON.
+    stream_interval = getattr(config.engine_args, "stream_interval", None)
+    if stream_interval is not None:
+        runtime_config.set_engine_specific("stream_interval", str(stream_interval))
 
     # Get data_parallel_size from vllm_config (defaults to 1)
     dp_range = get_dp_range_for_worker(vllm_config)
@@ -579,19 +661,15 @@ async def register_vllm_model(
     media_decoder = None
     media_fetcher = None
     if config.frontend_decoding:
-        if not MEDIA_DECODER_AVAILABLE:
-            raise RuntimeError(
-                "--frontend-decoding requires MediaDecoder support. "
-                "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
-            )
-        assert MediaDecoder is not None and MediaFetcher is not None
         media_decoder = MediaDecoder()
         media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
         # media_decoder.enable_video({})
 
         media_fetcher = MediaFetcher()
         media_fetcher.timeout_ms(30000)
-        media_fetcher.allow_direct_port(True)
+        allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
+        media_fetcher.allow_direct_ip(allow_internal)
+        media_fetcher.allow_direct_port(allow_internal)
 
     await register_model(
         model_input,
@@ -600,7 +678,7 @@ async def register_vllm_model(
         config.model,
         config.served_model_name,
         context_length=vllm_config.model_config.max_model_len,
-        kv_cache_block_size=runtime_values["block_size"],
+        kv_cache_block_size=runtime_values["kv_event_block_size"],
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
         media_decoder=media_decoder,
@@ -609,13 +687,15 @@ async def register_vllm_model(
 
 
 def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
-    """Retrieve cache configuration information from [`AsyncLLM`] engine."""
+    """Return vLLM cache and scheduler limits used for model registration."""
 
     try:
         # Get values directly from vllm_config instead of collective_rpc
+        kv_event_block_size = get_configured_kv_event_block_size(engine.vllm_config)
         cache_values = {
             "num_gpu_blocks": engine.vllm_config.cache_config.num_gpu_blocks,
             "block_size": engine.vllm_config.cache_config.block_size,
+            "kv_event_block_size": kv_event_block_size,
         }
 
         scheduler_values = {
@@ -623,11 +703,12 @@ def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
             "max_num_batched_tokens": engine.vllm_config.scheduler_config.max_num_batched_tokens,
         }
 
-        logging.info(f"Cache config values: {cache_values}")
-        logging.info(f"Scheduler config values: {scheduler_values}")
+        logging.debug(f"Cache config values: {cache_values}")
+        logging.debug(f"Scheduler config values: {scheduler_values}")
         return {
             "num_gpu_blocks": cache_values["num_gpu_blocks"],
             "block_size": cache_values["block_size"],
+            "kv_event_block_size": cache_values["kv_event_block_size"],
             "max_num_seqs": scheduler_values["max_num_seqs"],
             "max_num_batched_tokens": scheduler_values["max_num_batched_tokens"],
         }

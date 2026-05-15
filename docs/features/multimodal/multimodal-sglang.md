@@ -12,14 +12,15 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 |----------|--------------|------------|---------------|-------|
 | **Image** | HTTP/HTTPS URL | Yes | Yes | Vision encoder generates embeddings |
 | **Image** | Data URL (Base64) | No | No |  |
-| **Video** | HTTP/HTTPS URL | No | No |  |
-| **Audio** | HTTP/HTTPS URL | No | No |  |
+| **Video** | HTTP/HTTPS/`file://` URL | Yes | Yes | Vision encoder generates embeddings |
+| **Audio** | HTTP/HTTPS URL | No | No | Not supported in SGLang backend |
 
 ### Supported URL Formats
 
 | Format | Example | Description |
 |--------|---------|-------------|
 | **HTTP/HTTPS** | `http://example.com/image.jpg` | Remote media files |
+| **file://** | `file:///tmp/test.mp4` | Local files accessible to the backend |
 
 ## Deployment Patterns
 
@@ -27,7 +28,7 @@ SGLang supports EPD, E/PD, and E/P/D patterns. See [Multimodal Architecture Patt
 
 | Pattern | Supported | Launch Script | Notes |
 |---------|-----------|---------------|-------|
-| EPD (Simple Aggregated) | ✅ | `agg.sh` | Internal encoding |
+| EPD (Simple Aggregated) | ✅ | `agg_vision.sh` | Internal encoding |
 | E/PD (Encode Separate) | ✅ | `multimodal_epd.sh` | Vision encoder separate |
 | E/P/D (Full Disaggregation) | ✅ | `multimodal_disagg.sh` | KV cache via bootstrap |
 | EP/D (Traditional Disaggregated) | ❌ | N/A | Not supported |
@@ -68,19 +69,19 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ### Workflow
 
-The `DecodeWorkerHandler` receives multimodal requests with image URLs and passes them directly to SGLang's engine. SGLang's internal `mm_data_processor` handles image fetching, loading, encoding, and token expansion.
+The `DecodeWorkerHandler` receives multimodal requests with image/video URLs and passes them directly to SGLang's engine. SGLang's internal `mm_data_processor` handles image/video fetching, loading, encoding, and token expansion.
 
 ```mermaid
 flowchart LR
   HTTP --> worker
-  worker --tokenized text + image_urls--> SGLang[SGLang Engine]
+  worker --tokenized text + image/video URLs--> SGLang[SGLang Engine]
 ```
 
 ### Launch
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/sglang
-./launch/agg.sh --model Qwen/Qwen2.5-VL-7B-Instruct --chat-template qwen2-vl
+./launch/agg_vision.sh --model-path Qwen/Qwen2-VL-7B-Instruct
 ```
 
 **Client:**
@@ -102,6 +103,35 @@ curl http://localhost:8000/v1/chat/completions \
             "type": "image_url",
             "image_url": {
               "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+            }
+          }
+        ]
+      }
+    ],
+    "max_tokens": 50,
+    "stream": false
+  }' | jq
+```
+
+Video requests use the same aggregated path:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen2-VL-7B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Describe the video in detail"
+          },
+          {
+            "type": "video_url",
+            "video_url": {
+              "url": "https://samplelib.com/mp4/sample-5s.mp4"
             }
           }
         ]
@@ -431,7 +461,6 @@ Key NVTX ranges emitted:
 
 - **No Data URL support** - Only HTTP/HTTPS URLs supported; `data:image/...` base64 URLs not supported
 - **No pre-computed embeddings** - Cannot use `.pt`, `.pth`, `.bin` embedding files; vision encoder runs for every request
-- **No video support** - No video encoder implementation
 - **No audio support** - No audio encoder implementation
 - **Only Processor registers with Dynamo** - Workers are internal components, frontend routes to Processor only
 - **Disaggregated routing** - Decode Worker is the entry point (calls Prefill), cannot route directly to Prefill workers

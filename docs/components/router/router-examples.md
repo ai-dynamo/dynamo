@@ -11,7 +11,14 @@ For quick start instructions, see the [Router README](README.md). This document 
 Instead of launching the KV Router via command line, you can create a `KvRouter` object directly in Python. This allows per-request routing configuration overrides.
 
 >[!Warning]
-> **Multiple Routers in Same Process**: If you need to run multiple `KvRouter` instances for fault tolerance or load distribution, you must launch them in **separate processes** (e.g., using `python -m dynamo.frontend` with different ports). Creating multiple `KvRouter` objects in the same Python process is not supported - they share the same cancellation token from the component's primary lease, so dropping one router will cancel all routers in that process. For in-process routing, use a single `KvRouter` instance.
+> **Multiple Routers from the Same Runtime**: Do not create multiple independently managed `KvRouter` instances from the same `DistributedRuntime`. Routers created from endpoints owned by the same runtime share that runtime's primary cancellation token, so dropping one router can cancel background work used by the others. For one in-process frontend, use a single `KvRouter`; for independent router lifetimes, use separate frontend processes or create each router from a separate `DistributedRuntime`.
+
+With the event loop available as `loop`, independent in-process router lifetimes require separate runtimes:
+
+```python
+router_a = KvRouter(DistributedRuntime(loop, "etcd", "tcp").endpoint("dynamo.backend.generate"), 16, KvRouterConfig())
+router_b = KvRouter(DistributedRuntime(loop, "etcd", "tcp").endpoint("dynamo.backend.generate"), 16, KvRouterConfig())
+```
 
 ### Methods
 
@@ -19,9 +26,10 @@ The `KvRouter` provides the following methods:
 
 - **`generate(token_ids, model, ...)`**: Route and execute a request, returning an async stream of responses. Automatically handles worker selection, state tracking, and lifecycle management.
 
-- **`best_worker(token_ids, router_config_override=None, request_id=None)`**: Query which worker would be selected for given tokens. Returns `(worker_id, dp_rank, overlap_blocks)`.
+- **`best_worker(token_ids, router_config_override=None, request_id=None, update_indexer=False)`**: Query which worker would be selected for given tokens. Returns `(worker_id, dp_rank, overlap_blocks)`.
   - Without `request_id`: Query-only, doesn't update router state
-  - With `request_id`: Updates router state to track the request. **Note**: If used with `request_id`, you must call `mark_prefill_complete()` and `free()` at the appropriate lifecycle points to maintain accurate load tracking
+  - With `request_id`: Updates router lifecycle state to track the request. **Note**: If used with `request_id`, you must call `mark_prefill_complete()` and `free()` at the appropriate lifecycle points to maintain accurate load tracking
+  - With `update_indexer=True`: Records the selected worker in the approximate indexer for future overlap predictions. This is only meaningful when `use_kv_events=False`
 
 - **`get_potential_loads(token_ids)`**: Get detailed load information for all workers, including potential prefill tokens and active decode blocks. Returns a list of load dictionaries.
 
@@ -59,6 +67,9 @@ async def main():
         kv_router_config=kv_router_config
     )
 
+    # Optional startup gate shared with the frontend and standalone indexer:
+    # os.environ["DYN_ROUTER_MIN_INITIAL_WORKERS"] = "2"
+
     # Your input tokens
     token_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
@@ -75,7 +86,7 @@ async def main():
             "top_p": 0.9,
         },
         router_config_override={
-            "overlap_score_weight": 2.0,    # Prioritize cache hits for this request
+            "overlap_score_credit": 1.0,    # Prioritize cache hits for this request
             "router_temperature": 0.5,       # Add routing randomness
         }
     )
@@ -94,14 +105,14 @@ if __name__ == "__main__":
 
 ## K8s Examples
 
-For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployment section](README.md#kubernetes-deployment) in the Quick Start guide.
+For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployment section](router-guide.md#kubernetes-deployment) in the Router Guide.
 
 ### Complete K8s Examples
 
-- [TRT-LLM aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/agg_router.yaml)
-- [vLLM aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/agg_router.yaml)
-- [SGLang aggregated router example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/agg_router.yaml)
-- [Distributed inference tutorial](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/kubernetes/Distributed_Inference/agg_router.yaml)
+- [TRT-LLM aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/agg_router.yaml)
+- [vLLM aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_router.yaml)
+- [SGLang aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg_router.yaml)
+- [Kubernetes deployment guide](../../kubernetes/README.md)
 
 **For A/B Testing and Advanced K8s Setup:**
 See the comprehensive [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md) for step-by-step instructions on deploying, configuring, and benchmarking the KV router in Kubernetes.
@@ -116,7 +127,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: my-namespace
       componentType: frontend
       replicas: 1
       envs:
@@ -124,13 +134,15 @@ spec:
           value: kv
         - name: DYN_ROUTER_TEMPERATURE
           value: "0.5"  # Add some randomness to prevent worker saturation
-        - name: DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT
+        - name: DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT
+          value: "1.0"  # Prefer device-local KV cache reuse
+        - name: DYN_ROUTER_PREFILL_LOAD_SCALE
           value: "1.5"  # Prioritize TTFT over ITL
         - name: DYN_KV_CACHE_BLOCK_SIZE
           value: "16"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
 ```
 
 ### Alternative: Using Command Args in K8s
@@ -140,7 +152,7 @@ You can also pass CLI arguments directly in the container command:
 ```yaml
 extraPodSpec:
   mainContainer:
-    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
     command:
       - /bin/sh
       - -c
@@ -165,7 +177,11 @@ stream = await router.generate(token_ids=tokens, model="model-name")
 ### 2. Manual State Management (Advanced)
 Use `best_worker(request_id=...)` to select and track, then manage the request yourself:
 ```python
-worker_id, _dp_rank, overlap = await router.best_worker(tokens, request_id="req-123")
+worker_id, _dp_rank, overlap = await router.best_worker(
+    tokens,
+    request_id="req-123",
+    update_indexer=True,  # needed for approximate mode (use_kv_events=False)
+)
 response = await client.generate(tokens, request_id="req-123")
 # await anext(response)  # Get first token
 await router.mark_prefill_complete("req-123")  # After first token
@@ -175,6 +191,7 @@ await router.free("req-123")  # After completion
 ```
 - **Best for**: Custom request handling with router state tracking
 - **Requires**: Calling `mark_prefill_complete()` and `free()` at correct lifecycle points
+- **Approximate mode**: Pass `update_indexer=True` when `use_kv_events=False` so the router learns from manual worker selections
 - **Caution**: Incorrect lifecycle management degrades load balancing accuracy
 
 ### 3. Hierarchical Router Probing
@@ -284,5 +301,5 @@ For deployments with multiple worker pools, the **Global Router** enables hierar
 ## See Also
 
 - **[Router README](README.md)**: Quick start guide for the KV Router
-- **[Router Guide](router-guide.md)**: Configuration, tuning, and production setup
+- **[Configuration and Tuning](router-configuration.md)**: Router flags and production setup
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes

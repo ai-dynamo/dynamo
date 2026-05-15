@@ -37,9 +37,10 @@ pub struct NvExt {
     pub guidance_scale: Option<f32>,
 
     /// The seed for the random number generator.
+    /// i64 to match PyTorch's torch.manual_seed() accepted range.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
-    pub seed: Option<u32>,
+    pub seed: Option<i64>,
 }
 
 impl Default for NvExt {

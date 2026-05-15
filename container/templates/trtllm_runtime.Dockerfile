@@ -230,11 +230,15 @@ COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 {% if target not in ("dev", "local-dev") %}
-# Install dynamo, NIXL, and dynamo-specific dependencies
+# Install dynamo, NIXL, and dynamo-specific dependencies.
+# `pip` is installed into the venv so TRT-LLM's NVRTC JIT can locate this
+# install via `pip show tensorrt_llm` at runtime (required for FMHA kernel
+# JIT compilation on sm_100a, where cubins are not pre-compiled).
 ARG ENABLE_KVBM
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install \
+      pip \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
       /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
@@ -252,46 +256,57 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
 # Install NIXL wheel only (pre-built C++ binary, not buildable from source).
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+# `pip` is installed into the venv so TRT-LLM's NVRTC JIT can locate this
+# install via `pip show tensorrt_llm` at runtime (required for FMHA kernel
+# JIT compilation on sm_100a, where cubins are not pre-compiled).
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-    uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl
+    uv pip install pip /opt/dynamo/wheelhouse/nixl/nixl*.whl
 {% endif %}
 
 # Install gpu_memory_service wheel if enabled (all targets)
 ARG ENABLE_GPU_MEMORY_SERVICE
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then uv pip install "$GMS_WHEEL"; fi; \
     fi
 
-# Install runtime dependencies (common + planner + benchmarks).
+# Install runtime dependencies (common + benchmarks).
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
 # --no-cache is intentional: mixed indexes (PyPI + PyTorch CUDA wheels) risk serving stale/wrong-variant cached wheels
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
-    --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
     export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} && \
+    # Remove any cupy variant that may already be in the inherited venv.
+    # cupy's `_detect_duplicate_installation` ERRORS at import if both cu12
+    # and cu13 variants are present, so we install exactly one variant
+    # matching the build target's CUDA major version. Discover the installed
+    # variants instead of hardcoding so future cupy versions (cupy-cuda14x,
+    # etc.) are covered without further edits.
+    (uv pip freeze 2>/dev/null | awk -F= '/^cupy-/{print $1}' | xargs -r uv pip uninstall 2>/dev/null || true) && \
     uv pip install \
         --no-cache \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.common.txt \
-        --requirement /tmp/requirements.planner.txt \
         --requirement /tmp/requirements.benchmark.txt \
-        cupy-cuda13x && \
+        cupy-cuda${CUDA_VERSION_MAJOR}x && \
     # nvidia-cutlass-dsl-libs-base==4.4.1 (transitive dep) ships a stub cute/experimental/__init__.py
     # that unconditionally raises NotImplementedError, crashing TRT-LLM on import. cutlass-dsl==4.3.4
     # (pinned by TRT-LLM) works without cute/experimental/. Remove the stub to fix the NotImplementedError.
     rm -rf ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cute/experimental/
 
-# Copy tests, deploy and components for CI with correct ownership
+# Copy tests, deploy, and the trtllm/common/mocker component subtrees for CI.
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
-COPY --chmod=775 --chown=dynamo:0 components/ /workspace/components/
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/trtllm /workspace/components/src/dynamo/trtllm
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
 COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
 
 # Setup launch banner in common directory accessible to all users

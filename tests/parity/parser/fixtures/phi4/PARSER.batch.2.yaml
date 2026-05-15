@@ -1,0 +1,90 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: phi4
+mode: batch
+cases:
+  PARSER.batch.2.a:
+    description: Parallel calls in JSON array
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L185
+    model_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_time", "arguments": {"timezone":
+      "EST"}}]'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    - &id002
+      name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo: &d_2_a
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm: *d_2_a
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
+  PARSER.batch.2.c:
+    description: With surrounding narration
+    ref: dynamo
+    model_text: 'Both: functools[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_time", "arguments":
+      {"timezone": "EST"}}] Done.'
+    tools:
+    - *id001
+    - *id002
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both:'
+      vllm:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            timezone: EST
+          name: get_time
+        normal_text: ''
+        reason: "drops trailing normal_text after tool-call wrapper end"
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'
+  PARSER.batch.2.d:
+    description: Same-name twice
+    ref: dynamo
+    model_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}, {"name": "get_weather", "arguments":
+      {"location": "LA"}}]'
+    tools:
+    - *id001
+    - *id001
+    expected:
+      dynamo: &d_2_d
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *d_2_d
+      sglang:
+        unavailable: SGLang has no detector for family='phi4'

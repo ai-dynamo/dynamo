@@ -16,8 +16,6 @@ use clap::Parser;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
-#[cfg(feature = "kv-indexer-runtime")]
-use dynamo_kv_router::standalone_indexer::RuntimeConfig;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::standalone_indexer::{self, IndexerConfig};
 use rs::pipeline::{AsyncEngine, SingleIn};
@@ -29,6 +27,9 @@ use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use serde_json::json;
+
+use super::aic_callback::create_aic_prefill_load_estimator;
+use super::entrypoint::AicPerfConfig;
 
 fn depythonize_block_mm_infos(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Option<BlockExtraInfo>>> {
     depythonize(obj).map_err(to_pyerr)
@@ -68,26 +69,6 @@ struct KvIndexerCli {
     /// Comma-separated peer URLs for P2P recovery (e.g. "http://host1:8090,http://host2:8091")
     #[arg(long)]
     peers: Option<String>,
-
-    /// Enable Dynamo runtime integration (discovery, event plane, request plane).
-    #[cfg(feature = "kv-indexer-runtime")]
-    #[arg(long)]
-    dynamo_runtime: bool,
-
-    /// Dynamo namespace to register the indexer component under.
-    #[cfg(feature = "kv-indexer-runtime")]
-    #[arg(long, default_value = "default")]
-    namespace: String,
-
-    /// Component name for this indexer in the Dynamo runtime.
-    #[cfg(feature = "kv-indexer-runtime")]
-    #[arg(long, default_value = "kv-indexer")]
-    component_name: String,
-
-    /// Component name that workers register under.
-    #[cfg(feature = "kv-indexer-runtime")]
-    #[arg(long, default_value = "backend")]
-    worker_component: String,
 }
 
 pub fn run_kv_indexer_cli<I, T>(args: I) -> anyhow::Result<()>
@@ -101,31 +82,6 @@ where
             std::iter::once(OsString::from("python -m dynamo.indexer"))
                 .chain(args.into_iter().map(Into::into)),
         )?;
-
-        #[cfg(feature = "kv-indexer-runtime")]
-        if cli.dynamo_runtime {
-            dynamo_runtime::logging::init();
-            let worker = dynamo_runtime::Worker::from_settings()?;
-            return worker.execute(move |runtime| {
-                standalone_indexer::run_with_runtime(
-                    runtime,
-                    IndexerConfig {
-                        block_size: cli.block_size,
-                        port: cli.port,
-                        threads: cli.threads,
-                        workers: cli.workers,
-                        model_name: cli.model_name,
-                        tenant_id: cli.tenant_id,
-                        peers: cli.peers,
-                    },
-                    RuntimeConfig {
-                        namespace: cli.namespace,
-                        component_name: cli.component_name,
-                        worker_component: cli.worker_component,
-                    },
-                )
-            });
-        }
 
         init_standalone_logging();
 
@@ -161,13 +117,14 @@ fn init_standalone_logging() {
 }
 
 #[pyfunction]
-#[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None, lora_name=None))]
+#[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None, lora_name=None, is_eagle=None))]
 pub fn compute_block_hash_for_seq_py(
     _py: Python,
     tokens: Vec<u32>,
     kv_block_size: usize,
     block_mm_infos: Option<Bound<PyAny>>,
     lora_name: Option<String>,
+    is_eagle: Option<bool>,
 ) -> PyResult<Vec<u64>> {
     if kv_block_size == 0 {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -183,8 +140,11 @@ pub fn compute_block_hash_for_seq_py(
     let hashes = compute_block_hash_for_seq(
         &tokens,
         kv_block_size as u32,
-        mm_infos.as_deref(),
-        lora_name.as_deref(),
+        BlockHashOptions {
+            block_mm_infos: mm_infos.as_deref(),
+            lora_name: lora_name.as_deref(),
+            is_eagle,
+        },
     );
 
     Ok(hashes.into_iter().map(|h| h.0).collect())
@@ -227,11 +187,17 @@ impl WorkerMetricsPublisher {
     ///
     /// # Arguments
     /// * `dp_rank` - Data parallel rank of the worker (None defaults to 0)
-    /// * `active_decode_blocks` - Number of active KV cache blocks
-    #[pyo3(signature = (dp_rank, active_decode_blocks))]
-    fn publish(&self, dp_rank: Option<u32>, active_decode_blocks: u64) -> PyResult<()> {
+    /// * `active_decode_blocks` - Scheduler-compatible active decode block count
+    /// * `kv_used_blocks` - Authoritative total KV blocks currently in use
+    #[pyo3(signature = (dp_rank=None, active_decode_blocks=None, kv_used_blocks=None))]
+    fn publish(
+        &self,
+        dp_rank: Option<u32>,
+        active_decode_blocks: Option<u64>,
+        kv_used_blocks: Option<u64>,
+    ) -> PyResult<()> {
         self.inner
-            .publish(dp_rank, active_decode_blocks)
+            .publish(dp_rank, active_decode_blocks, kv_used_blocks)
             .map_err(to_pyerr)
     }
 }
@@ -242,6 +208,27 @@ pub(crate) struct KvEventPublisher {
     kv_block_size: usize,
     dp_rank: DpRank,
     warning_count: Arc<AtomicU32>,
+}
+
+impl KvEventPublisher {
+    /// Wrap an already-constructed Rust publisher as the Python pyclass.
+    ///
+    /// Used by the unified-backend bridge (`crate::backend`) so the Worker
+    /// can hand a publisher built from a [`PushSource`] back to the Python
+    /// engine without going through the Python-side `__init__` (which
+    /// requires an `Endpoint` and rebuilds the publisher from scratch).
+    pub(crate) fn from_arc(
+        inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
+        dp_rank: DpRank,
+    ) -> Self {
+        let kv_block_size = inner.kv_block_size() as usize;
+        Self {
+            inner,
+            kv_block_size,
+            dp_rank,
+            warning_count: Arc::new(AtomicU32::new(0)),
+        }
+    }
 }
 
 #[pymethods]
@@ -310,7 +297,7 @@ impl KvEventPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None))]
+    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None, is_eagle=None))]
     fn publish_stored(
         &self,
         py: Python,
@@ -320,6 +307,7 @@ impl KvEventPublisher {
         parent_hash: Option<i64>,
         block_mm_infos: Option<Bound<PyAny>>,
         lora_name: Option<String>,
+        is_eagle: Option<bool>,
     ) -> PyResult<()> {
         let kv_block_size = self.kv_block_size as u32;
         let dp_rank = self.dp_rank;
@@ -339,6 +327,7 @@ impl KvEventPublisher {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
+                    start_position: None,
                     blocks: create_stored_blocks(
                         kv_block_size,
                         &token_ids,
@@ -347,6 +336,7 @@ impl KvEventPublisher {
                         lora_name.as_deref(),
                         &warning_count,
                         mm_infos.as_deref(),
+                        is_eagle,
                     ),
                 }),
                 dp_rank,
@@ -697,6 +687,7 @@ async fn create_kv_router_from_endpoint(
     endpoint: &Endpoint,
     block_size: usize,
     kv_router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
 ) -> Result<Arc<llm_rs::kv_router::KvRouter>, PyErr> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
@@ -716,41 +707,68 @@ async fn create_kv_router_from_endpoint(
         llm_rs::discovery::WORKER_TYPE_DECODE
     };
 
-    // Only query discovery for model_name when a remote indexer is configured,
-    // since model_name is only needed for the RemoteIndexer path.
+    // Look up the worker's model card so we can derive both model_name (required
+    // for remote/served indexer) and Eagle routing semantics. When the model_name
+    // is required but no worker has registered yet, wait via the discovery watch
+    // stream until one appears so we don't race worker startup. Bounded by
+    // `DYN_ROUTER_MODEL_CARD_WAIT_SECS` (default 600s).
     let needs_model_name = kv_router_config
         .as_ref()
-        .map(|cfg| cfg.remote_indexer_component.is_some())
+        .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
-
-    let model_name = if needs_model_name {
-        let discovery = endpoint.inner.component().drt().discovery();
-        let instances = discovery
-            .list(rs::discovery::DiscoveryQuery::EndpointModels {
-                namespace: endpoint_id.namespace.clone(),
-                component: endpoint_id.component.clone(),
-                endpoint: endpoint_id.name.clone(),
-            })
+    let (model_name, enable_eagle) = {
+        let maybe_card = if needs_model_name {
+            let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(600);
+            tracing::info!(
+                namespace = %endpoint_id.namespace,
+                component = %endpoint_id.component,
+                endpoint = %endpoint_id.name,
+                wait_secs,
+                "Waiting for worker model card in discovery (required for remote/served indexer)"
+            );
+            llm_rs::discovery::wait_for_endpoint_model_card(
+                &endpoint.inner,
+                std::time::Duration::from_secs(wait_secs),
+                None,
+            )
             .await
-            .map_err(to_pyerr)?;
-
-        Some(
-            instances
-                .into_iter()
-                .find_map(|inst| {
-                    inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
-                        .ok()
-                        .map(|card| card.display_name)
+            .map_err(to_pyerr)?
+        } else {
+            // Non-blocking snapshot — used only to detect Eagle routing semantics
+            // when a card happens to already be registered.
+            let discovery = endpoint.inner.component().drt().discovery();
+            let instances = discovery
+                .list(rs::discovery::DiscoveryQuery::EndpointModels {
+                    namespace: endpoint_id.namespace.clone(),
+                    component: endpoint_id.component.clone(),
+                    endpoint: endpoint_id.name.clone(),
                 })
-                .ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-                        "no model card found in discovery for endpoint {}/{}/{}",
-                        endpoint_id.namespace, endpoint_id.component, endpoint_id.name
-                    ))
-                })?,
-        )
-    } else {
-        None
+                .await
+                .map_err(to_pyerr)?;
+            instances.into_iter().find_map(|inst| {
+                inst.deserialize_model::<llm_rs::model_card::ModelDeploymentCard>()
+                    .ok()
+            })
+        };
+
+        match maybe_card {
+            Some(card) => {
+                let model_name = needs_model_name.then(|| card.display_name.clone());
+                (model_name, card.runtime_config.enable_eagle)
+            }
+            None => {
+                tracing::warn!(
+                    namespace = %endpoint_id.namespace,
+                    component = %endpoint_id.component,
+                    endpoint = %endpoint_id.name,
+                    "No model card found in discovery; defaulting to non-Eagle routing semantics"
+                );
+                (None, false)
+            }
+        }
     };
 
     let kv_router = model_manager
@@ -758,8 +776,10 @@ async fn create_kv_router_from_endpoint(
             &endpoint.inner,
             block_size as u32,
             kv_router_config,
+            prefill_load_estimator,
             worker_type,
             model_name,
+            enable_eagle,
         )
         .await
         .map_err(to_pyerr)?;
@@ -879,12 +899,29 @@ impl KvRouter {
     /// Note: Worker type for Prometheus metrics is inferred from the endpoint name/component
     /// (contains "prefill") or by `router_track_active_blocks` being disabled.
     #[new]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config))]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None))]
     fn new(
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
+        aic_perf_config: Option<&AicPerfConfig>,
     ) -> PyResult<Self> {
+        let prefill_load_estimator = aic_perf_config
+            .map(|config| {
+                Python::with_gil(|py| {
+                    create_aic_prefill_load_estimator(
+                        py,
+                        config.backend_name(),
+                        config.system(),
+                        config.model_path(),
+                        config.tp_size(),
+                        config.backend_version(),
+                    )
+                })
+            })
+            .transpose()
+            .map_err(to_pyerr)?;
+
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async move {
             let client = endpoint.inner.client().await.map_err(to_pyerr)?;
@@ -907,6 +944,7 @@ impl KvRouter {
                 endpoint,
                 block_size,
                 Some(kv_router_config.inner()),
+                prefill_load_estimator,
             )
             .await?;
 
@@ -1048,13 +1086,15 @@ impl KvRouter {
         Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
     }
 
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, block_mm_infos=None, lora_name=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
         router_config_override: Option<PyObject>,
         request_id: Option<String>,
+        update_indexer: bool,
         block_mm_infos: Option<PyObject>,
         lora_name: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
@@ -1081,13 +1121,32 @@ impl KvRouter {
                     block_mm_infos.as_deref(),
                     router_config_override.as_ref(),
                     update_states,
-                    lora_name,
+                    lora_name.clone(),
                     0.0,
                     None,
                     None, // allowed_worker_ids: pass via RoutingHints in PreprocessedRequest path
                 )
                 .await
                 .map_err(to_pyerr)?;
+
+            if update_indexer {
+                let cfg = chooser.kv_router_config();
+                if !cfg.use_kv_events || cfg.predict_on_route_enabled() {
+                    let mut tokens_with_hashes =
+                        TokensWithHashes::new(token_ids.clone(), chooser.block_size())
+                            .with_is_eagle(chooser.is_eagle());
+                    if let Some(infos) = block_mm_infos.as_ref() {
+                        tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.clone());
+                    }
+                    if let Some(lora_name) = lora_name.as_ref() {
+                        tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name.clone());
+                    }
+                    chooser
+                        .record_routing_decision(tokens_with_hashes, best_worker)
+                        .await
+                        .map_err(to_pyerr)?;
+                }
+            }
 
             Ok((best_worker.worker_id, best_worker.dp_rank, overlap_blocks))
         })
@@ -1120,18 +1179,27 @@ impl KvRouter {
         })
     }
 
-    #[pyo3(signature = (token_ids, lora_name=None))]
+    #[pyo3(signature = (token_ids, block_mm_infos=None, lora_name=None))]
     fn get_potential_loads<'p>(
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
+        block_mm_infos: Option<PyObject>,
         lora_name: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
+        let block_mm_infos = block_mm_infos
+            .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
+            .transpose()?;
         let chooser = self.inner.chooser.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let loads = chooser
-                .get_potential_loads(&token_ids, None, lora_name.as_deref())
+                .get_potential_loads(
+                    &token_ids,
+                    None,
+                    block_mm_infos.as_deref(),
+                    lora_name.as_deref(),
+                )
                 .await
                 .map_err(to_pyerr)?;
 
@@ -1139,6 +1207,48 @@ impl KvRouter {
             // Use pythonize to convert Vec<PotentialLoad> to Python list of dicts
             Python::with_gil(|py| {
                 pythonize(py, &loads)
+                    .map(|obj| obj.unbind())
+                    .map_err(to_pyerr)
+            })
+        })
+    }
+
+    #[pyo3(signature = (token_ids, router_config_override=None, block_mm_infos=None, lora_name=None, include_shared=true))]
+    fn get_overlap_scores<'p>(
+        &self,
+        py: Python<'p>,
+        token_ids: Vec<u32>,
+        router_config_override: Option<PyObject>,
+        block_mm_infos: Option<PyObject>,
+        lora_name: Option<String>,
+        include_shared: bool,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let router_config_override = if let Some(obj) = router_config_override {
+            let override_config: RouterConfigOverride =
+                depythonize(obj.bind(py)).map_err(to_pyerr)?;
+            Some(override_config)
+        } else {
+            None
+        };
+        let block_mm_infos = block_mm_infos
+            .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
+            .transpose()?;
+        let chooser = self.inner.chooser.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let scores = chooser
+                .get_overlap_scores(
+                    &token_ids,
+                    router_config_override.as_ref(),
+                    block_mm_infos.as_deref(),
+                    lora_name.as_deref(),
+                    include_shared,
+                )
+                .await
+                .map_err(to_pyerr)?;
+
+            Python::with_gil(|py| {
+                pythonize(py, &scores)
                     .map(|obj| obj.unbind())
                     .map_err(to_pyerr)
             })

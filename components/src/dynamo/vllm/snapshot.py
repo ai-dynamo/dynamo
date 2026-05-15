@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import gc
 import logging
 from collections.abc import Callable
 
@@ -32,6 +33,7 @@ async def prepare_snapshot_engine(
     config.engine_args.enable_sleep_mode = True
 
     engine = setup_vllm_engine(config)
+    gc.collect()
     snapshot_controller = EngineSnapshotController(
         engine=engine,
         quiesce_controller=VllmEngineQuiesceController(engine[0]),

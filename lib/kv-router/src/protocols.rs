@@ -1,10 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_tokens::{SequenceHash, Token};
+use std::future::Future;
+use std::ops::Range;
+use std::time::Duration;
+
+use dynamo_tokens::{SequenceHash, Token, compute_hash_v2, compute_next_sequence_hash};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
+
+const fn default_track_prefill_tokens() -> bool {
+    true
+}
 
 /// The event subject that workers publish KV cache events on.
 pub const KV_EVENT_SUBJECT: &str = "kv-events";
@@ -12,14 +20,39 @@ pub const KV_EVENT_SUBJECT: &str = "kv-events";
 /// Seed for XXH3 hashing, consistent with indexer.rs
 pub const XXH3_SEED: u64 = 1337;
 
-/// Compute hash of data using XXH3 with the standard seed.
-pub fn compute_hash(data: &[u8]) -> u64 {
-    xxh3::xxh3_64_with_seed(data, XXH3_SEED)
-}
-
 /// Compute the hash of a local block.
 pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
-    LocalBlockHash(compute_hash(data))
+    LocalBlockHash(compute_hash_v2(data, XXH3_SEED))
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BlockHashOptions<'a> {
+    pub block_mm_infos: Option<&'a [Option<BlockExtraInfo>]>,
+    pub lora_name: Option<&'a str>,
+    pub is_eagle: Option<bool>,
+}
+
+#[inline]
+fn hash_block_no_mm(chunk: &[u32], seed: u64, scratch_bytes: &mut Vec<u8>) -> LocalBlockHash {
+    #[cfg(target_endian = "little")]
+    {
+        let _ = scratch_bytes;
+        // SAFETY: `u32` is plain-old-data, and on little-endian targets its in-memory
+        // representation matches the `to_le_bytes()` sequence used for hashing.
+        let chunk_bytes = unsafe {
+            std::slice::from_raw_parts(chunk.as_ptr().cast::<u8>(), std::mem::size_of_val(chunk))
+        };
+        LocalBlockHash(xxh3::xxh3_64_with_seed(chunk_bytes, seed))
+    }
+
+    #[cfg(not(target_endian = "little"))]
+    {
+        scratch_bytes.clear();
+        for &token in chunk {
+            scratch_bytes.extend_from_slice(&token.to_le_bytes());
+        }
+        LocalBlockHash(xxh3::xxh3_64_with_seed(scratch_bytes, seed))
+    }
 }
 
 /// Compute the hash for a sequence of tokens, optionally including multimodal metadata
@@ -37,37 +70,70 @@ pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
 pub fn compute_block_hash_for_seq(
     tokens: &[u32],
     kv_block_size: u32,
-    block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
-    lora_name: Option<&str>,
+    options: BlockHashOptions<'_>,
 ) -> Vec<LocalBlockHash> {
-    let seed = match lora_name.filter(|n| !n.is_empty()) {
+    if kv_block_size == 0 {
+        return Vec::new();
+    }
+
+    let seed = match options.lora_name.filter(|n| !n.is_empty()) {
         Some(name) => XXH3_SEED.wrapping_add(xxh3::xxh3_64(name.as_bytes())),
         None => XXH3_SEED,
     };
-    tokens
-        .chunks_exact(kv_block_size as usize)
-        .enumerate()
-        .map(|(block_idx, chunk)| {
-            let mut bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
+    let is_eagle_flag = options.is_eagle.unwrap_or(false);
+    let stride = kv_block_size as usize;
+    let window_size = if is_eagle_flag { stride + 1 } else { stride };
+    let estimated_blocks = if is_eagle_flag {
+        tokens.len().saturating_sub(1) / stride
+    } else {
+        tokens.len() / stride
+    };
+    let mut hashes = Vec::with_capacity(estimated_blocks);
+    let mut bytes = Vec::with_capacity(window_size * std::mem::size_of::<u32>());
+    let mut mm_hashes = Vec::new();
+    let mut block_idx = 0;
+    let mut start = 0;
 
-            if let Some(mm_infos) = block_mm_infos
-                && let Some(Some(block_mm_info)) = mm_infos.get(block_idx)
-            {
-                let mut mm_hashes: Vec<u64> = block_mm_info
-                    .mm_objects
-                    .iter()
-                    .map(|obj| obj.mm_hash)
-                    .collect();
-                mm_hashes.sort_unstable();
-
-                for mm_hash in mm_hashes {
-                    bytes.extend_from_slice(&mm_hash.to_le_bytes());
-                }
+    while start + window_size <= tokens.len() {
+        let chunk = &tokens[start..start + window_size];
+        if let Some(mm_infos) = options.block_mm_infos
+            && let Some(Some(block_mm_info)) = mm_infos.get(block_idx)
+        {
+            bytes.clear();
+            for &token in chunk {
+                bytes.extend_from_slice(&token.to_le_bytes());
             }
 
-            LocalBlockHash(xxh3::xxh3_64_with_seed(&bytes, seed))
-        })
-        .collect()
+            mm_hashes.clear();
+            mm_hashes.extend(block_mm_info.mm_objects.iter().map(|obj| obj.mm_hash));
+            mm_hashes.sort_unstable();
+
+            for &mm_hash in &mm_hashes {
+                bytes.extend_from_slice(&mm_hash.to_le_bytes());
+            }
+
+            hashes.push(LocalBlockHash(xxh3::xxh3_64_with_seed(&bytes, seed)));
+        } else {
+            hashes.push(hash_block_no_mm(chunk, seed, &mut bytes));
+        }
+
+        start += stride;
+        block_idx += 1;
+    }
+
+    hashes
+}
+
+/// Compute the next rolling sequence hash from a parent sequence hash and the
+/// current block hash. Delegates to [`dynamo_tokens::compute_next_sequence_hash`] — the
+/// single source of truth for the chain recurrence shared across kv-router,
+/// kvbm-logical, and the universal hashing crate.
+#[inline]
+pub fn compute_next_seq_hash(
+    parent_seq_hash: SequenceHash,
+    current_block_hash: LocalBlockHash,
+) -> SequenceHash {
+    compute_next_sequence_hash(parent_seq_hash, current_block_hash.0)
 }
 
 /// Compute rolling sequence hashes for a vector of block hashes.
@@ -84,12 +150,7 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
 
     for i in 1..block_hashes.len() {
         let parent_seq_hash = sequence_hashes[i - 1];
-        let current_block_hash = block_hashes[i].0;
-
-        let combined = [parent_seq_hash, current_block_hash];
-        let bytes: Vec<u8> = combined.iter().flat_map(|&num| num.to_le_bytes()).collect();
-        let seq_hash = compute_hash(&bytes);
-        sequence_hashes.push(seq_hash);
+        sequence_hashes.push(compute_next_seq_hash(parent_seq_hash, block_hashes[i]));
     }
 
     sequence_hashes
@@ -103,6 +164,12 @@ pub trait WorkerConfigLike {
     fn data_parallel_size(&self) -> u32;
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
+}
+
+/// Transport abstraction for publishing batched router-visible KV cache events.
+pub trait RouterEventSink: Send + Sync {
+    fn publish_event(&self, event: &RouterEvent)
+    -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
 /// A worker identifier.
@@ -158,6 +225,17 @@ impl StorageTier {
         medium
             .and_then(Self::from_kv_medium)
             .unwrap_or(Self::Device)
+    }
+
+    /// Canonical wire-format medium string. `None` for the default GPU tier so
+    /// existing consumers that omit the field continue to round-trip.
+    pub fn to_kv_medium(self) -> Option<&'static str> {
+        match self {
+            Self::Device => None,
+            Self::HostPinned => Some("CPU_PINNED"),
+            Self::Disk => Some("DISK"),
+            Self::External => Some("EXTERNAL"),
+        }
     }
 
     pub fn is_gpu(self) -> bool {
@@ -273,24 +351,33 @@ pub struct WorkerSelectionResult {
     /// The total number of blocks required to prefill the request
     pub required_blocks: u64,
 
-    /// The number of blocks that the selected worker may already have cached.
-    /// This is not a guarantee, but an estimate.
-    pub overlap_blocks: u32,
+    /// Approximate effective cache hit on the selected worker in fractional blocks.
+    /// Use `.round() as u32` for a block-count approximation.
+    pub effective_overlap_blocks: f64,
+
+    /// Approximate cached-token count derived from the weighted cache hit.
+    pub cached_tokens: usize,
 }
 
 /// Active load metrics for a worker, used for busy detection.
 ///
-/// Published by workers (with only `active_decode_blocks`) and by the scheduler
-/// (with both `active_decode_blocks` and `active_prefill_tokens`).
+/// Published by workers (with `kv_used_blocks`) and by the scheduler (with
+/// `active_decode_blocks` and `active_prefill_tokens`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ActiveLoad {
     pub worker_id: WorkerId,
     #[serde(default)]
     pub dp_rank: DpRank,
-    /// Number of active KV cache blocks on the worker (decode phase).
+    /// Scheduler-reported decode block load.
     pub active_decode_blocks: Option<u64>,
     /// Number of active prefill tokens (from scheduler's view).
     pub active_prefill_tokens: Option<u64>,
+    /// Total KV blocks currently in use on the worker.
+    ///
+    /// This is published by workers only and is the authoritative signal for
+    /// backend KV occupancy used by busy detection.
+    #[serde(default)]
+    pub kv_used_blocks: Option<u64>,
 }
 
 /// A [`LocalBlockHash`] is a hash computed from the token IDs, optional multimodal metadata,
@@ -349,13 +436,21 @@ pub struct ActiveSequenceEvent {
     pub lora_name: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefillLoadHint {
+    pub initial_effective_prefill_tokens: usize,
+    pub expected_prefill_duration: Option<Duration>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ActiveSequenceEventData {
     AddRequest {
         token_sequence: Option<Vec<SequenceHash>>,
-        isl: usize,
-        overlap: u32,
+        #[serde(default = "default_track_prefill_tokens")]
+        track_prefill_tokens: bool,
         expected_output_tokens: Option<u32>,
+        #[serde(default)]
+        prefill_load_hint: Option<PrefillLoadHint>,
     },
     Free,
     MarkPrefillCompleted,
@@ -410,6 +505,9 @@ pub enum KvCacheEventData {
 pub struct KvCacheStoreData {
     /// The optional hash of the parent block.
     pub parent_hash: Option<ExternalSequenceBlockHash>,
+    /// Absolute position of the first block in this batch for positional replay.
+    #[serde(default)]
+    pub start_position: Option<u32>,
     /// A list of stored blocked data.
     pub blocks: Vec<KvCacheStoredBlockData>,
 }
@@ -635,6 +733,65 @@ impl RouterEvent {
     }
 }
 
+/// Shared cache hit information, represented as sorted non-overlapping half-open ranges.
+///
+/// Ranges encode which block positions exist in the external shared KV cache pool.
+/// Using ranges instead of `Vec<bool>` avoids iterating over potentially thousands
+/// of blocks per worker. Typical shared cache patterns produce few contiguous regions,
+/// making `hits_beyond` O(num_ranges) ~ O(1-5).
+#[derive(Debug, Clone, Default)]
+pub struct SharedCacheHits {
+    /// Ranges of block positions that exist in the shared cache.
+    /// Half-open ranges [start, end), sorted and non-overlapping.
+    pub ranges: Vec<Range<u32>>,
+    /// Total number of hits (sum of range lengths).
+    pub total_hits: u32,
+}
+
+impl SharedCacheHits {
+    /// Create from sorted, non-overlapping ranges.
+    pub fn from_ranges(ranges: Vec<Range<u32>>) -> Self {
+        let total_hits = ranges.iter().map(|r| r.end - r.start).sum();
+        Self { ranges, total_hits }
+    }
+
+    /// Create from a boolean hit vector (convenience for tests and simple backends).
+    /// Coalesces consecutive `true` entries into ranges.
+    pub fn from_hits(hits: &[bool]) -> Self {
+        let mut ranges = Vec::new();
+        let mut i = 0;
+        while i < hits.len() {
+            if hits[i] {
+                let start = i as u32;
+                while i < hits.len() && hits[i] {
+                    i += 1;
+                }
+                ranges.push(start..i as u32);
+            } else {
+                i += 1;
+            }
+        }
+        Self::from_ranges(ranges)
+    }
+
+    /// Count hits at positions >= `from_position`.
+    /// O(num_ranges), not O(num_blocks).
+    pub fn hits_beyond(&self, from_position: u32) -> u32 {
+        self.ranges
+            .iter()
+            .map(|r| {
+                if r.end <= from_position {
+                    0
+                } else if r.start >= from_position {
+                    r.end - r.start
+                } else {
+                    r.end - from_position
+                }
+            })
+            .sum()
+    }
+}
+
 /// Scores representing the overlap of workers (with their dp_rank).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlapScores {
@@ -642,8 +799,6 @@ pub struct OverlapScores {
     pub scores: FxHashMap<WorkerWithDpRank, u32>,
     /// List of frequencies that the blocks have been accessed. Entries with value 0 are omitted.
     pub frequencies: Vec<usize>,
-    /// Map of worker to their tree size (number of blocks in the tree for that worker).
-    pub tree_sizes: FxHashMap<WorkerWithDpRank, usize>,
 }
 
 impl Default for OverlapScores {
@@ -662,7 +817,6 @@ impl OverlapScores {
         Self {
             scores: FxHashMap::default(),
             frequencies: Vec::with_capacity(32),
-            tree_sizes: FxHashMap::default(),
         }
     }
 
@@ -710,6 +864,7 @@ pub struct TokensWithHashes {
     lora_name: Option<String>,
     block_hashes: Option<Vec<LocalBlockHash>>,
     seq_hashes: Option<Vec<SequenceHash>>,
+    is_eagle: Option<bool>,
 }
 
 impl TokensWithHashes {
@@ -722,6 +877,7 @@ impl TokensWithHashes {
             lora_name: None,
             block_hashes: None,
             seq_hashes: None,
+            is_eagle: None,
         }
     }
 
@@ -735,6 +891,24 @@ impl TokensWithHashes {
     pub fn with_lora_name(mut self, name: String) -> Self {
         self.lora_name = Some(name);
         self
+    }
+
+    /// Sets Eagle hashing semantics for this token sequence.
+    pub fn with_is_eagle(mut self, is_eagle: bool) -> Self {
+        self.set_is_eagle(is_eagle);
+        self
+    }
+
+    /// Updates Eagle hashing semantics and invalidates cached hashes when it changes.
+    pub fn set_is_eagle(&mut self, is_eagle: bool) {
+        let is_eagle = Some(is_eagle);
+        if self.is_eagle == is_eagle {
+            return;
+        }
+
+        self.is_eagle = is_eagle;
+        self.block_hashes = None;
+        self.seq_hashes = None;
     }
 
     /// Returns a reference to the tokens.
@@ -768,8 +942,11 @@ impl TokensWithHashes {
             self.block_hashes = Some(compute_block_hash_for_seq(
                 &self.tokens,
                 self.block_size,
-                self.block_mm_infos.as_deref(),
-                self.lora_name.as_deref(),
+                BlockHashOptions {
+                    block_mm_infos: self.block_mm_infos.as_deref(),
+                    lora_name: self.lora_name.as_deref(),
+                    is_eagle: self.is_eagle,
+                },
             ));
         }
         self.block_hashes.as_ref().unwrap()
@@ -814,6 +991,7 @@ mod tests {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(0),
                     mm_extra_info: None,
@@ -850,24 +1028,56 @@ mod tests {
     #[case(64)]
     fn test_compute_block_hash_for_seq(#[case] kv_block_size: u32) {
         let sequence = (0..kv_block_size).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None, None);
+        let hashes =
+            compute_block_hash_for_seq(&sequence, kv_block_size, BlockHashOptions::default());
         assert_eq!(hashes.len(), 1);
 
         let sequence = (0..(kv_block_size + 1)).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None, None);
+        let hashes =
+            compute_block_hash_for_seq(&sequence, kv_block_size, BlockHashOptions::default());
         assert_eq!(hashes.len(), 1);
 
         let sequence = (0..(2 * kv_block_size + 1)).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None, None);
+        let hashes =
+            compute_block_hash_for_seq(&sequence, kv_block_size, BlockHashOptions::default());
         assert_eq!(hashes.len(), 2);
+    }
+
+    #[test]
+    fn test_compute_next_seq_hash_matches_rolling_hash() {
+        let block_hashes = [LocalBlockHash(11), LocalBlockHash(22), LocalBlockHash(33)];
+        let seq_hashes = compute_seq_hash_for_block(&block_hashes);
+
+        assert_eq!(
+            seq_hashes[1],
+            compute_next_seq_hash(seq_hashes[0], block_hashes[1])
+        );
+        assert_eq!(
+            seq_hashes[2],
+            compute_next_seq_hash(seq_hashes[1], block_hashes[2])
+        );
     }
 
     #[test]
     fn test_lora_name_produces_different_hash() {
         let tokens: Vec<u32> = (0..4).collect();
-        let base = compute_block_hash_for_seq(&tokens, 4, None, None);
-        let lora_a = compute_block_hash_for_seq(&tokens, 4, None, Some("adapter-a"));
-        let lora_b = compute_block_hash_for_seq(&tokens, 4, None, Some("adapter-b"));
+        let base = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
+        let lora_a = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some("adapter-a"),
+                ..Default::default()
+            },
+        );
+        let lora_b = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some("adapter-b"),
+                ..Default::default()
+            },
+        );
 
         assert_ne!(base[0], lora_a[0]);
         assert_ne!(base[0], lora_b[0]);
@@ -875,18 +1085,17 @@ mod tests {
     }
 
     #[test]
-    fn test_lora_name_none_matches_legacy() {
-        let tokens: Vec<u32> = (0..8).collect();
-        let hashes_none = compute_block_hash_for_seq(&tokens, 4, None, None);
-        let hashes_none2 = compute_block_hash_for_seq(&tokens, 4, None, None);
-        assert_eq!(hashes_none, hashes_none2);
-    }
-
-    #[test]
     fn test_lora_name_empty_string_normalized_to_none() {
         let tokens: Vec<u32> = (0..4).collect();
-        let base = compute_block_hash_for_seq(&tokens, 4, None, None);
-        let empty = compute_block_hash_for_seq(&tokens, 4, None, Some(""));
+        let base = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
+        let empty = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some(""),
+                ..Default::default()
+            },
+        );
         assert_eq!(
             base, empty,
             "empty lora_name should be treated as base model"
@@ -908,6 +1117,73 @@ mod tests {
         for (b, l) in base_hashes.iter().zip(lora_hashes.iter()) {
             assert_ne!(b, l);
         }
+    }
+
+    #[test]
+    fn test_compute_block_hash_for_seq_eagle_windows() {
+        let tokens: Vec<u32> = (0..6).collect();
+
+        let default_hashes = compute_block_hash_for_seq(&tokens, 2, BlockHashOptions::default());
+        let eagle_hashes = compute_block_hash_for_seq(
+            &tokens,
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+        let expected_first = compute_block_hash_for_seq(
+            &[0, 1, 2],
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+        let expected_second = compute_block_hash_for_seq(
+            &[2, 3, 4],
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(default_hashes.len(), 3);
+        assert_eq!(eagle_hashes.len(), 2);
+        assert_eq!(eagle_hashes, vec![expected_first[0], expected_second[0]]);
+        assert_ne!(default_hashes[0], eagle_hashes[0]);
+    }
+
+    #[test]
+    fn test_tokens_with_hashes_set_is_eagle_invalidates_cache() {
+        let tokens: Vec<u32> = (0..6).collect();
+        let mut with_hashes = TokensWithHashes::new(tokens, 2);
+
+        let default_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        with_hashes.set_is_eagle(true);
+        let eagle_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        let expected_first = compute_block_hash_for_seq(
+            &[0, 1, 2],
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+        let expected_second = compute_block_hash_for_seq(
+            &[2, 3, 4],
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(default_hashes.len(), 3);
+        assert_eq!(eagle_hashes.len(), 2);
+        assert_eq!(eagle_hashes, vec![expected_first[0], expected_second[0]]);
+        assert_ne!(default_hashes[0], eagle_hashes[0]);
     }
 
     #[test]
@@ -934,6 +1210,7 @@ mod tests {
     fn test_kv_cache_events_serialization() {
         let event_data = KvCacheEventData::Stored(KvCacheStoreData {
             parent_hash: Some(ExternalSequenceBlockHash(1)),
+            start_position: None,
             blocks: vec![KvCacheStoredBlockData {
                 block_hash: ExternalSequenceBlockHash(2),
                 tokens_hash: LocalBlockHash(3),
@@ -990,6 +1267,66 @@ mod tests {
             request,
             RouterRequest::MarkFree { request_id: None }
         ));
+    }
+
+    #[test]
+    fn test_shared_cache_hits_from_hits() {
+        // All hits contiguous
+        let hits = SharedCacheHits::from_hits(&[true, true, true, true]);
+        assert_eq!(hits.ranges, vec![0..4]);
+        assert_eq!(hits.total_hits, 4);
+
+        // Sparse hits
+        let hits = SharedCacheHits::from_hits(&[true, false, true, true, false, true]);
+        assert_eq!(hits.ranges, vec![0..1, 2..4, 5..6]);
+        assert_eq!(hits.total_hits, 4);
+
+        // No hits
+        let hits = SharedCacheHits::from_hits(&[false, false, false]);
+        assert!(hits.ranges.is_empty());
+        assert_eq!(hits.total_hits, 0);
+
+        // Empty
+        let hits = SharedCacheHits::from_hits(&[]);
+        assert!(hits.ranges.is_empty());
+        assert_eq!(hits.total_hits, 0);
+    }
+
+    #[test]
+    fn test_shared_cache_hits_beyond() {
+        // Shared has [A, B, C, D] => range 0..4
+        #[allow(clippy::single_range_in_vec_init)]
+        let hits = SharedCacheHits::from_ranges(vec![0..4]);
+
+        // Device has overlap=2 (positions 0,1 on device) => shared_beyond should count positions 2,3
+        assert_eq!(hits.hits_beyond(2), 2);
+
+        // Device has overlap=0 => all 4 shared hits count
+        assert_eq!(hits.hits_beyond(0), 4);
+
+        // Device has overlap=4 => nothing beyond
+        assert_eq!(hits.hits_beyond(4), 0);
+
+        // Device overlap exceeds range
+        assert_eq!(hits.hits_beyond(10), 0);
+    }
+
+    #[test]
+    fn test_shared_cache_hits_beyond_sparse() {
+        // Ranges: [1..3, 5..8] => positions 1,2,5,6,7
+        let hits = SharedCacheHits::from_ranges(vec![1..3, 5..8]);
+        assert_eq!(hits.total_hits, 5);
+
+        // from_position=0 => all 5 hits
+        assert_eq!(hits.hits_beyond(0), 5);
+        // from_position=2 => pos 2 (from first range) + 5,6,7 (from second) = 4
+        assert_eq!(hits.hits_beyond(2), 4);
+        // from_position=3 => only second range: 3 hits
+        assert_eq!(hits.hits_beyond(3), 3);
+        // from_position=6 => positions 6,7 from second range = 2
+        assert_eq!(hits.hits_beyond(6), 2);
+        // from_position=8 => nothing
+        assert_eq!(hits.hits_beyond(8), 0);
     }
 
     #[test]

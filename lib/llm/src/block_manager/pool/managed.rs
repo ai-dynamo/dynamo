@@ -51,6 +51,7 @@ pub mod inactive;
 pub mod priority_key;
 pub mod state;
 
+use crate::block_manager::kv_consolidator::StorageTier;
 use active::ActiveBlockPool;
 use inactive::InactiveBlockPool;
 
@@ -72,6 +73,9 @@ pub struct ManagedBlockPoolArgs<S: Storage, L: LocalityProvider, M: BlockMetadat
     #[builder(default = "Handle::current()")]
     async_runtime: Handle,
 
+    #[builder(default = "StorageTier::Device")]
+    storage_tier: StorageTier,
+
     #[builder(default = "BlockRegistrationDuplicationSetting::Disabled")]
     default_duplication_setting: BlockRegistrationDuplicationSetting,
 }
@@ -85,6 +89,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPoolArgsBuil
             blocks,
             global_registry,
             async_runtime,
+            storage_tier,
             default_duplication_setting,
         ) = args.dissolve();
 
@@ -95,6 +100,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPoolArgsBuil
             blocks,
             global_registry,
             async_runtime,
+            storage_tier,
             default_duplication_setting,
         );
 
@@ -176,6 +182,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
         blocks: Vec<Block<S, L, M>>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
+        storage_tier: StorageTier,
         default_duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> Self {
         let (pool, progress_engine) = Self::with_progress_engine(
@@ -184,6 +191,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
             blocks,
             global_registry,
             async_runtime,
+            storage_tier,
             default_duplication_setting,
         );
 
@@ -228,6 +236,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
         blocks: Vec<Block<S, L, M>>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
+        storage_tier: StorageTier,
         default_duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> (Self, ProgressEngine<S, L, M>) {
         let (priority_tx, priority_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -241,6 +250,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
             blocks,
             global_registry,
             async_runtime,
+            storage_tier,
         );
 
         let available_blocks_counter = progress_engine.available_blocks_counter.clone();
@@ -515,10 +525,16 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine
         blocks: Vec<Block<S, L, M>>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
+        storage_tier: StorageTier,
     ) -> Self {
         let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state =
-            State::<S, L, M>::new(event_manager, return_tx, global_registry, async_runtime);
+        let mut state = State::<S, L, M>::new(
+            event_manager,
+            return_tx,
+            global_registry,
+            async_runtime,
+            storage_tier,
+        );
 
         let count = blocks.len();
 
@@ -589,6 +605,7 @@ mod tests {
                 blocks,
                 global_registry,
                 async_runtime,
+                storage_tier,
                 default_duplication_setting,
             ) = args.dissolve();
 
@@ -598,6 +615,7 @@ mod tests {
                 blocks,
                 global_registry,
                 async_runtime,
+                storage_tier,
                 default_duplication_setting,
             );
 

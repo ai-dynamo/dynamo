@@ -27,7 +27,8 @@ pub use delta::DeltaGenerator;
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionRequest {
     #[serde(flatten)]
-    pub inner: dynamo_async_openai::types::CreateCompletionRequest,
+    #[schema(value_type = Object)]
+    pub inner: dynamo_protocols::types::CreateCompletionRequest,
 
     #[serde(flatten)]
     pub common: CommonExt,
@@ -39,6 +40,11 @@ pub struct NvCreateCompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
 
+    /// When true, logprob token fields are returned as "token_id:<id>"
+    /// instead of the decoded text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_tokens_as_token_ids: Option<bool>,
+
     /// Catch-all for unsupported fields - checked during validation
     #[serde(flatten, default, skip_serializing)]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
@@ -47,25 +53,28 @@ pub struct NvCreateCompletionRequest {
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionResponse {
     #[serde(flatten)]
-    pub inner: dynamo_async_openai::types::CreateCompletionResponse,
+    #[schema(value_type = Object)]
+    pub inner: dynamo_protocols::types::CreateCompletionResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
 }
 
-impl ContentProvider for dynamo_async_openai::types::Choice {
+impl ContentProvider for dynamo_protocols::types::Choice {
     fn content(&self) -> String {
         self.text.clone()
     }
 }
 
-pub fn prompt_to_string(prompt: &dynamo_async_openai::types::Prompt) -> String {
+pub fn prompt_to_string(prompt: &dynamo_protocols::types::Prompt) -> String {
     match prompt {
-        dynamo_async_openai::types::Prompt::String(s) => s.clone(),
-        dynamo_async_openai::types::Prompt::StringArray(arr) => arr.join(" "), // Join strings with spaces
-        dynamo_async_openai::types::Prompt::IntegerArray(arr) => arr
+        dynamo_protocols::types::Prompt::String(s) => s.clone(),
+        dynamo_protocols::types::Prompt::StringArray(arr) => arr.join(" "), // Join strings with spaces
+        dynamo_protocols::types::Prompt::IntegerArray(arr) => arr
             .iter()
             .map(|&num| num.to_string())
             .collect::<Vec<_>>()
             .join(" "),
-        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => arr
+        dynamo_protocols::types::Prompt::ArrayOfIntegerArray(arr) => arr
             .iter()
             .map(|inner| {
                 inner
@@ -80,12 +89,12 @@ pub fn prompt_to_string(prompt: &dynamo_async_openai::types::Prompt) -> String {
 }
 
 /// Get the batch size from a prompt (1 for single prompts, array length for batch prompts)
-pub fn get_prompt_batch_size(prompt: &dynamo_async_openai::types::Prompt) -> usize {
+pub fn get_prompt_batch_size(prompt: &dynamo_protocols::types::Prompt) -> usize {
     match prompt {
-        dynamo_async_openai::types::Prompt::String(_) => 1,
-        dynamo_async_openai::types::Prompt::IntegerArray(_) => 1,
-        dynamo_async_openai::types::Prompt::StringArray(arr) => arr.len(),
-        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => arr.len(),
+        dynamo_protocols::types::Prompt::String(_) => 1,
+        dynamo_protocols::types::Prompt::IntegerArray(_) => 1,
+        dynamo_protocols::types::Prompt::StringArray(arr) => arr.len(),
+        dynamo_protocols::types::Prompt::ArrayOfIntegerArray(arr) => arr.len(),
     }
 }
 
@@ -93,21 +102,21 @@ pub fn get_prompt_batch_size(prompt: &dynamo_async_openai::types::Prompt) -> usi
 /// For single prompts, returns a clone regardless of index.
 /// For batch prompts, returns the prompt at the specified index.
 pub fn extract_single_prompt(
-    prompt: &dynamo_async_openai::types::Prompt,
+    prompt: &dynamo_protocols::types::Prompt,
     index: usize,
-) -> dynamo_async_openai::types::Prompt {
+) -> dynamo_protocols::types::Prompt {
     match prompt {
-        dynamo_async_openai::types::Prompt::String(s) => {
-            dynamo_async_openai::types::Prompt::String(s.clone())
+        dynamo_protocols::types::Prompt::String(s) => {
+            dynamo_protocols::types::Prompt::String(s.clone())
         }
-        dynamo_async_openai::types::Prompt::IntegerArray(arr) => {
-            dynamo_async_openai::types::Prompt::IntegerArray(arr.clone())
+        dynamo_protocols::types::Prompt::IntegerArray(arr) => {
+            dynamo_protocols::types::Prompt::IntegerArray(arr.clone())
         }
-        dynamo_async_openai::types::Prompt::StringArray(arr) => {
-            dynamo_async_openai::types::Prompt::String(arr[index].clone())
+        dynamo_protocols::types::Prompt::StringArray(arr) => {
+            dynamo_protocols::types::Prompt::String(arr[index].clone())
         }
-        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
-            dynamo_async_openai::types::Prompt::IntegerArray(arr[index].clone())
+        dynamo_protocols::types::Prompt::ArrayOfIntegerArray(arr) => {
+            dynamo_protocols::types::Prompt::IntegerArray(arr[index].clone())
         }
     }
 }
@@ -239,11 +248,11 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
     }
 
     fn get_stop(&self) -> Option<Vec<String>> {
-        use dynamo_async_openai::types::Stop;
-        self.inner.stop.as_ref().map(|s| match s {
-            Stop::String(s) => vec![s.clone()],
-            Stop::StringArray(arr) => arr.clone(),
-        })
+        self.inner.stop.as_ref().and_then(|stop| stop.strings())
+    }
+
+    fn get_stop_token_ids(&self) -> Option<Vec<crate::types::TokenIdType>> {
+        self.inner.stop.as_ref().and_then(|stop| stop.token_ids())
     }
 
     fn nvext(&self) -> Option<&NvExt> {
@@ -285,10 +294,10 @@ impl ResponseFactory {
 
     pub fn make_response(
         &self,
-        choice: dynamo_async_openai::types::Choice,
-        usage: Option<dynamo_async_openai::types::CompletionUsage>,
+        choice: dynamo_protocols::types::Choice,
+        usage: Option<dynamo_protocols::types::CompletionUsage>,
     ) -> NvCreateCompletionResponse {
-        let inner = dynamo_async_openai::types::CreateCompletionResponse {
+        let inner = dynamo_protocols::types::CreateCompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
             created: self.created,
@@ -296,9 +305,8 @@ impl ResponseFactory {
             choices: vec![choice],
             system_fingerprint: self.system_fingerprint.clone(),
             usage,
-            nvext: None, // Will be populated by router layer if needed
         };
-        NvCreateCompletionResponse { inner }
+        NvCreateCompletionResponse { inner, nvext: None }
     }
 }
 
@@ -360,7 +368,7 @@ impl TryFrom<NvCreateCompletionRequest> for common::CompletionRequest {
     }
 }
 
-impl TryFrom<common::StreamingCompletionResponse> for dynamo_async_openai::types::Choice {
+impl TryFrom<common::StreamingCompletionResponse> for dynamo_protocols::types::Choice {
     type Error = anyhow::Error;
 
     fn try_from(response: common::StreamingCompletionResponse) -> Result<Self, Self::Error> {
@@ -381,10 +389,10 @@ impl TryFrom<common::StreamingCompletionResponse> for dynamo_async_openai::types
         // TODO handle aggregating logprobs
         let logprobs = None;
 
-        let finish_reason: Option<dynamo_async_openai::types::CompletionFinishReason> =
+        let finish_reason: Option<dynamo_protocols::types::CompletionFinishReason> =
             response.delta.finish_reason.map(Into::into);
 
-        let choice = dynamo_async_openai::types::Choice {
+        let choice = dynamo_protocols::types::Choice {
             text,
             index,
             logprobs,
@@ -412,6 +420,10 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
 
     fn get_formatted_prompt(&self) -> Option<bool> {
         None
+    }
+
+    fn get_return_tokens_as_token_ids(&self) -> Option<bool> {
+        self.return_tokens_as_token_ids
     }
 }
 
@@ -657,6 +669,7 @@ mod tests {
         let request: NvCreateCompletionRequest =
             serde_json::from_value(null_stop).expect("Failed to deserialize request");
         assert_eq!(request.get_stop(), None);
+        assert_eq!(request.get_stop_token_ids(), None);
 
         let one_stop = json!({
             "model": "test-model",
@@ -666,6 +679,7 @@ mod tests {
         let request: NvCreateCompletionRequest =
             serde_json::from_value(one_stop).expect("Failed to deserialize request");
         assert_eq!(request.get_stop(), Some(vec!["foo".to_string()]));
+        assert_eq!(request.get_stop_token_ids(), None);
 
         let many_stops = json!({
             "model": "test-model",
@@ -678,5 +692,54 @@ mod tests {
             request.get_stop(),
             Some(vec!["foo".to_string(), "bar".to_string()])
         );
+        assert_eq!(request.get_stop_token_ids(), None);
+
+        let token_id_stop = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "stop": [32, 34]
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(token_id_stop).expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), None);
+        assert_eq!(request.get_stop_token_ids(), Some(vec![32, 34]));
+
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("extract stop conditions");
+        assert_eq!(stop_conditions.stop, None);
+        assert_eq!(stop_conditions.stop_token_ids, Some(vec![32, 34]));
+        assert_eq!(stop_conditions.stop_token_ids_hidden, None);
+
+        let token_id_display_string_scalar_stop = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "stop": "token_id:576"
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(token_id_display_string_scalar_stop)
+                .expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), Some(vec!["token_id:576".to_string()]));
+        assert_eq!(request.get_stop_token_ids(), None);
+
+        let token_id_display_string_stop = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "stop": ["token_id:576"]
+        });
+        let request: NvCreateCompletionRequest =
+            serde_json::from_value(token_id_display_string_stop)
+                .expect("Failed to deserialize request");
+        assert_eq!(request.get_stop(), Some(vec!["token_id:576".to_string()]));
+        assert_eq!(request.get_stop_token_ids(), None);
+
+        let unsupported_stop_token_ids = json!({
+            "model": "test-model",
+            "prompt": [1, 2, 3],
+            "stop_token_ids": [576]
+        });
+        let request: NvCreateCompletionRequest = serde_json::from_value(unsupported_stop_token_ids)
+            .expect("Failed to deserialize request");
+        assert!(ValidateRequest::validate(&request).is_err());
     }
 }

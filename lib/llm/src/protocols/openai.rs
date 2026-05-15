@@ -11,14 +11,17 @@ use super::{
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use crate::types::TokenIdType;
 
+pub mod audios;
 pub mod chat_completions;
 pub mod common_ext;
 pub mod completions;
+pub(crate) mod delta_common;
 pub mod embeddings;
 pub mod images;
 pub mod models;
 pub mod nvext;
 pub mod responses;
+pub mod stream_aggregator;
 pub mod tools;
 pub mod validate;
 pub mod videos;
@@ -36,7 +39,7 @@ pub struct AnnotatedDelta<R> {
     pub comment: Option<String>,
 }
 
-trait OpenAISamplingOptionsProvider {
+pub(crate) trait OpenAISamplingOptionsProvider {
     fn get_temperature(&self) -> Option<f32>;
 
     fn get_top_p(&self) -> Option<f32>;
@@ -54,12 +57,16 @@ trait OpenAISamplingOptionsProvider {
     fn nvext(&self) -> Option<&nvext::NvExt>;
 }
 
-trait OpenAIStopConditionsProvider {
+pub(crate) trait OpenAIStopConditionsProvider {
     fn get_max_tokens(&self) -> Option<u32>;
 
     fn get_min_tokens(&self) -> Option<u32>;
 
     fn get_stop(&self) -> Option<Vec<String>>;
+
+    fn get_stop_token_ids(&self) -> Option<Vec<TokenIdType>> {
+        None
+    }
 
     fn nvext(&self) -> Option<&nvext::NvExt>;
 
@@ -81,7 +88,7 @@ trait OpenAIStopConditionsProvider {
     }
 }
 
-trait OpenAIOutputOptionsProvider {
+pub(crate) trait OpenAIOutputOptionsProvider {
     fn get_logprobs(&self) -> Option<u32>;
 
     fn get_prompt_logprobs(&self) -> Option<u32>;
@@ -89,6 +96,10 @@ trait OpenAIOutputOptionsProvider {
     fn get_skip_special_tokens(&self) -> Option<bool>;
 
     fn get_formatted_prompt(&self) -> Option<bool>;
+
+    fn get_return_tokens_as_token_ids(&self) -> Option<bool> {
+        None
+    }
 }
 
 impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvider for T {
@@ -141,6 +152,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             guided_grammar,
             guided_decoding_backend,
             guided_whitespace_pattern,
+            None,
         ) {
             Ok(options) => options,
             Err(e) => {
@@ -174,12 +186,18 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
         let max_tokens = self.get_max_tokens();
         let min_tokens = self.get_min_tokens();
         let stop = self.get_stop();
+        let stop_token_ids = self.get_stop_token_ids();
         let max_thinking_tokens = self.get_max_thinking_tokens();
 
         if let Some(stop) = &stop
             && stop.len() > 4
         {
             anyhow::bail!("stop conditions must be less than 4")
+        }
+        if let Some(stop_token_ids) = &stop_token_ids
+            && stop_token_ids.len() > 4
+        {
+            anyhow::bail!("stop token IDs must be less than 4")
         }
 
         // Use the trait method to get ignore_eos, which handles precedence
@@ -189,6 +207,7 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             max_tokens,
             min_tokens,
             stop,
+            stop_token_ids,
             stop_token_ids_hidden: None,
             ignore_eos,
             max_thinking_tokens,
@@ -202,12 +221,14 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
         let prompt_logprobs = self.get_prompt_logprobs();
         let skip_special_tokens = self.get_skip_special_tokens();
         let formatted_prompt = self.get_formatted_prompt();
+        let return_tokens_as_token_ids = self.get_return_tokens_as_token_ids();
 
         Ok(common::OutputOptions {
             logprobs,
             prompt_logprobs,
             skip_special_tokens,
             formatted_prompt,
+            return_tokens_as_token_ids,
         })
     }
 }
@@ -229,15 +250,24 @@ pub(crate) fn convert_backend_top_logprobs(
     selected_token: &str,
     selected_token_id: TokenIdType,
     selected_logprob: f32,
-) -> Vec<dynamo_async_openai::types::TopLogprobs> {
+    return_tokens_as_token_ids: bool,
+) -> Vec<dynamo_protocols::types::TopLogprobs> {
     let mut found_selected = false;
-    let mut result: Vec<dynamo_async_openai::types::TopLogprobs> = top_lps
+    let mut result: Vec<dynamo_protocols::types::TopLogprobs> = top_lps
         .iter()
         .map(|top_lp| {
-            let tok = top_lp.token.clone().unwrap_or_default();
+            let tok = if return_tokens_as_token_ids {
+                format!("token_id:{}", top_lp.token_id)
+            } else {
+                top_lp.token.clone().unwrap_or_default()
+            };
             found_selected = found_selected || top_lp.token_id == selected_token_id;
-            let bytes = top_lp.bytes.clone().or_else(|| token_to_utf8_bytes(&tok));
-            dynamo_async_openai::types::TopLogprobs {
+            let bytes = if return_tokens_as_token_ids {
+                token_to_utf8_bytes(&tok)
+            } else {
+                top_lp.bytes.clone().or_else(|| token_to_utf8_bytes(&tok))
+            };
+            dynamo_protocols::types::TopLogprobs {
                 token: tok,
                 logprob: top_lp.logprob as f32,
                 bytes,
@@ -246,10 +276,15 @@ pub(crate) fn convert_backend_top_logprobs(
         .collect();
 
     if !found_selected {
-        result.push(dynamo_async_openai::types::TopLogprobs {
-            token: selected_token.to_string(),
+        let token = if return_tokens_as_token_ids {
+            format!("token_id:{}", selected_token_id)
+        } else {
+            selected_token.to_string()
+        };
+        result.push(dynamo_protocols::types::TopLogprobs {
+            bytes: token_to_utf8_bytes(&token),
+            token,
             logprob: selected_logprob,
-            bytes: token_to_utf8_bytes(selected_token),
         });
     }
     result
@@ -276,7 +311,7 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
     fn is_continuous_usage_enabled(&self) -> bool;
 
     /// Get the current usage statistics with properly calculated total_tokens.
-    fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage;
+    fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage;
 
     /// Returns the request tracker if available, for accessing worker timing metrics.
     fn tracker(&self) -> Option<std::sync::Arc<common::timing::RequestTracker>> {

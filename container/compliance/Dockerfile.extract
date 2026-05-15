@@ -41,7 +41,11 @@ RUN --mount=type=bind,from=target,target=/target \
     python3 /helpers/python_helper.py --root /target > /output/python.tsv 2>/output/python_err.txt ; \
     cat /output/dpkg_err.txt >&2 ; \
     cat /output/python_err.txt >&2 ; \
-    [ -s /output/dpkg.tsv ] || { echo "ERROR: dpkg extraction produced no output" >&2; exit 1; } ; \
+    if [ -f /target/var/lib/dpkg/status ]; then \
+        [ -s /output/dpkg.tsv ] || { echo "ERROR: dpkg extraction produced no output" >&2; exit 1; } ; \
+    else \
+        echo "⚠️  WARNING: dpkg status file not present; skipping OS package extraction" >&2 ; \
+    fi ; \
     [ -s /output/python.tsv ] || echo "⚠️  WARNING: python extraction produced no output" >&2
 
 FROM scratch

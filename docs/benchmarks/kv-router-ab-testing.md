@@ -85,10 +85,11 @@ kubectl create secret generic hf-token-secret \
 
 ### Step 1.3: Install Dynamo Platform
 
-If your cluster uses namespace-restricted Dynamo operators, you'll need to install the Dynamo platform in the workload namespace. Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md) to install the platform in `dynamo-bench`.
+Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md) to install the platform in `dynamo-bench`.
+
+> **Note:** Namespace-restricted mode (`namespaceRestriction.enabled=true`) is deprecated and will be removed in a future release. Use cluster-wide mode for new deployments.
 
 **Key Configuration Notes:**
-- If your cluster uses namespace restrictions, ensure `dynamo-operator.namespaceRestriction.enabled=true` is set during installation
 - Adjust version tags to match your cluster's available Dynamo versions
 - If you encounter operator compatibility issues (e.g., unsupported MPI arguments), consult your cluster administrator or the Dynamo troubleshooting documentation
 
@@ -116,12 +117,11 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-agg-no-router
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
           env:
             - name: POD_UID
               valueFrom:
@@ -129,7 +129,6 @@ spec:
                   fieldPath: metadata.uid
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg-no-router
       componentType: worker
       replicas: 8
       resources:
@@ -146,7 +145,7 @@ spec:
                       values:
                         - gpu-h100-sxm  # Adjust to your GPU node type
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
           workingDir: /workspace
           command:
             - /bin/sh
@@ -162,7 +161,7 @@ spec:
               --gpu-memory-utilization 0.90
               --block-size 64
               --async-scheduling
-              --disable-log-requests
+              --no-enable-log-requests
           env:
             - name: DYN_HEALTH_CHECK_ENABLED
               value: "false"
@@ -207,12 +206,11 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-agg-router
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
           env:
             - name: POD_UID
               valueFrom:
@@ -223,7 +221,6 @@ spec:
           value: kv  # KEY DIFFERENCE: Enable KV Smart Router
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg-router
       componentType: worker
       replicas: 8
       resources:
@@ -240,7 +237,7 @@ spec:
                       values:
                         - gpu-h100-sxm  # Adjust to your GPU node type
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
           workingDir: /workspace
           command:
             - /bin/sh
@@ -256,7 +253,7 @@ spec:
               --gpu-memory-utilization 0.90
               --block-size 64
               --async-scheduling
-              --disable-log-requests
+              --no-enable-log-requests
           env:
             - name: DYN_HEALTH_CHECK_ENABLED
               value: "false"
@@ -392,6 +389,13 @@ For this A/B comparison, we use the [**Mooncake FAST'25 Toolagent Trace**](https
 
 These two requests share blocks 46–57 (12 blocks × 512 tokens = ~6,144 tokens of shared prefix) — a tool agent continuing the same session with accumulated context. Each hash ID represents a **512-token block**, and the hash includes both the current block and all preceding blocks, preserving the pattern of prefix reuse while protecting user privacy. The **KV Smart Router** routes requests with matching hash IDs to the same worker, maximizing cache hits.
 
+If you reproduce this benchmark with `python -m dynamo.replay`, keep that dataset fact separate from
+the replay engine configuration:
+
+- use `--trace-block-size 512` for the Mooncake/toolagent trace itself
+- keep engine `block_size` in `--extra-engine-args` aligned with the runtime you want to mimic
+  (for the published vLLM deployment, that is typically `64`)
+
 **Key Dataset Properties:**
 - ✅ **Realistic timing:** Request arrival patterns from production tool-agent workloads
 - ✅ **High prefix overlap:** 59% cache ratio ([Mooncake FAST'25 paper](https://github.com/kvcache-ai/Mooncake/blob/main/FAST25-release/Mooncake-FAST25.pdf)); iterative tool calls within sessions produce natural prefix reuse
@@ -438,7 +442,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: benchmark
-        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
         securityContext:
           runAsUser: 0  # Required: apt-get and pip install need root in ephemeral benchmark pod
         command:
@@ -818,7 +822,7 @@ VllmPrefillWorker:
 
 ## Conclusion
 
-This guide provides a complete methodology for A/B testing Dynamo's KV Smart Router. The KV router's effectiveness depends heavily on workload characteristics—datasets with high prefix overlap will show the most benefit. For further details on tuning the KV router, see the [Tuning Guidelines](../components/router/router-guide.md#tuning-guidelines).
+This guide provides a complete methodology for A/B testing Dynamo's KV Smart Router. The KV router's effectiveness depends heavily on workload characteristics—datasets with high prefix overlap will show the most benefit. For further details on tuning the KV router, see [Tuning Guidelines](../components/router/router-configuration.md#tuning-guidelines).
 
 For questions or issues, consult the [Dynamo documentation](https://github.com/ai-dynamo/dynamo) or open an issue on GitHub.
 
