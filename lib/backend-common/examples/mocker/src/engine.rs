@@ -24,9 +24,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use dynamo_backend_common::{
-    AsyncEngineContext, BackendError, CommonArgs, DisaggregationMode, DynamoError, EngineConfig,
+    AsyncEngineContext, BackendError, CommonArgs, ComponentMetricsCtx, ComponentMetricsPublisher,
+    ComponentMetricsSource, ComponentSnapshot, DisaggregationMode, DynamoError, EngineConfig,
     ErrorType, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
-    Metrics, MetricsSource, PreprocessedRequest, WorkerConfig, chunk, usage,
+    PreprocessedRequest, WorkerConfig, chunk, usage,
 };
 use dynamo_mocker::common::protocols::{
     DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
@@ -138,6 +139,30 @@ impl Drop for ActiveRequestGuard {
                 .fetch_sub(self.blocks_held, Ordering::Relaxed);
         }
     }
+}
+
+/// Trivial publisher: snapshot reads the shared atomic, `update` is a
+/// no-op since the mocker has no real gauges to feed.
+struct MockerComponentMetrics {
+    kv_used_blocks: Arc<AtomicU64>,
+}
+
+impl ComponentMetricsPublisher for MockerComponentMetrics {
+    fn sources(&self) -> Vec<ComponentMetricsSource> {
+        let used = self.kv_used_blocks.clone();
+        vec![ComponentMetricsSource {
+            snapshot: Arc::new(move || {
+                Some(ComponentSnapshot {
+                    kv_used_blocks: used.load(Ordering::Relaxed),
+                    kv_total_blocks: 0,
+                    gpu_cache_usage: 0.0,
+                    dp_rank: DP_RANK,
+                })
+            }),
+            dp_rank: DP_RANK,
+        }]
+    }
+    fn update(&self, _snapshot: &ComponentSnapshot) {}
 }
 
 pub struct MockerBackend {
@@ -481,16 +506,13 @@ impl LLMEngine for MockerBackend {
         }])
     }
 
-    async fn metrics_sources(&self) -> Result<Vec<MetricsSource>, DynamoError> {
-        let used = self.kv_used_blocks.clone();
-        Ok(vec![MetricsSource {
-            snapshot: Arc::new(move || {
-                Some(Metrics {
-                    kv_used_blocks: Some(used.load(Ordering::Relaxed)),
-                })
-            }),
-            dp_rank: DP_RANK,
-        }])
+    async fn setup_component_metrics(
+        &self,
+        _ctx: ComponentMetricsCtx<'_>,
+    ) -> Result<Option<Arc<dyn ComponentMetricsPublisher>>, DynamoError> {
+        Ok(Some(Arc::new(MockerComponentMetrics {
+            kv_used_blocks: self.kv_used_blocks.clone(),
+        })))
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {

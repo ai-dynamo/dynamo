@@ -298,78 +298,85 @@ differently.
 
 ## Metrics
 
-Engines expose Prometheus metrics by overriding the optional
-`register_prometheus(metrics)` hook on `LLMEngine`. `Worker` calls it
-once after `start()` succeeds and before serving begins; the engine
-receives an `EngineMetrics` capability handle (it never sees the full
-`Endpoint`, `worker_id`, or hierarchy labels — the framework owns
-those).
+Metrics flow through two surfaces:
 
-The handle exposes:
+1. **`dynamo_component_*` gauges + router-input signal** — engines
+   implement `component_metrics_sources()` returning one
+   `ComponentMetricsSource` per dp_rank. The framework builds the
+   `LLMBackendMetrics` registry, seeds zeros, sets `model_load_time`,
+   wires the `/metrics` callback, and runs one poll task per source
+   that drives both gauges and the KV-router load signal. **Engines
+   never see `LLMBackendMetrics`.**
+2. **Vendor-prefixed metrics** (`vllm:`, `sglang:`, `trtllm_`,
+   `lmcache:`) — engines bridge their own
+   `prometheus_client.CollectorRegistry` into the runtime's combined
+   `/metrics` output via the `register_prometheus(metrics)` hook using
+   `register_global_registry` (or `register_engine_registry` for a
+   private registry).
 
-* `register_prometheus_expfmt_callback(callback)` — register a
-  `Callable[[], str]` returning Prometheus text exposition format on
-  each `/metrics` scrape. Bridges a `prometheus_client.CollectorRegistry`
-  (e.g. vLLM's `REGISTRY`) into the runtime's combined output.
-* `auto_labels` — a precomputed `dict[str, str]` of hierarchy + model
-  labels (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`,
-  `worker_id`, `model`, `model_name`). Pass into the
-  `dynamo.common.backend.metrics.gather_with_labels` helper so foreign
-  registries are labelled consistently with runtime-native metrics.
-
-The `metrics.py` helper module wraps the common patterns:
+### Pattern
 
 ```python
+from dynamo.common.backend.publisher import (
+    ComponentMetricsSource,
+    ComponentSnapshot,
+)
 from dynamo.common.backend.metrics import (
     ensure_prometheus_multiproc_dir,
-    gather_with_labels,
-    make_component_metrics,
-    register_engine_registry,
     register_global_registry,
 )
 
 class MyEngine(LLMEngine):
     def __init__(self):
-        self._gauges = None
-        self._comp_reg = None
+        # Per-rank dict filled by your push surface (stat-logger / ZMQ
+        # recv / poll thread). Snapshot fn reads from here as a cheap
+        # field read.
+        self._snapshots: dict[int, ComponentSnapshot] = {}
 
     async def start(self, worker_id):
         # Set PROMETHEUS_MULTIPROC_DIR before the engine init that
-        # populates the global prometheus_client.REGISTRY. The returned
-        # TemporaryDirectory (if any) needs to be cleaned up by us.
+        # populates the global prometheus_client.REGISTRY (vLLM-style).
         self._prom_tmpdir = ensure_prometheus_multiproc_dir("my_prom_")
-
-        # dynamo_component_* gauges live on a dedicated registry that
-        # the engine feeds from its own stat-logger callbacks.
-        self._gauges, self._comp_reg = make_component_metrics(
-            self.served_model_name, self.component
-        )
-
-        t0 = time.monotonic()
         self.engine = build_engine(...)
-        self._gauges.set_model_load_time(time.monotonic() - t0)
         return EngineConfig(...)
 
+    def component_metrics_sources(self) -> list[ComponentMetricsSource]:
+        # One source per dp_rank. Snapshot fn is a dict read.
+        return [
+            ComponentMetricsSource(
+                snapshot=lambda r=rank: self._snapshots.get(r),
+                dp_rank=rank,
+            )
+            for rank in range(self.dp_size)
+        ]
+
     async def register_prometheus(self, metrics):
-        # 1. The dedicated dynamo_component_* registry — single callback.
-        register_engine_registry(metrics, self._comp_reg)
-        # 2. The global prometheus_client.REGISTRY for vllm:/lmcache: or
-        #    trtllm_ prefixed metrics. Handles the K8s MultiProcessCollector
-        #    conflict case where the env var was pre-set.
+        # Bridge vendor-prefixed metrics into the runtime's /metrics.
+        # The K8s MultiProcessCollector conflict case is handled here.
         register_global_registry(
             metrics,
-            engine_prefix="vllm:",
+            engine_prefix="myengine:",
             multiproc_only_prefixes=["lmcache:"],
+        )
+
+    def _on_engine_iteration(self, scheduler_stats, dp_rank):
+        # Called by the engine's natural push surface. Updates the dict;
+        # the framework polls it.
+        self._snapshots[dp_rank] = ComponentSnapshot(
+            kv_used_blocks=int(self.total_blocks * scheduler_stats.usage),
+            kv_total_blocks=self.total_blocks,
+            gpu_cache_usage=scheduler_stats.usage,
+            dp_rank=dp_rank,
         )
 ```
 
-The handle must not be retained past `register_prometheus`'s return —
-stash the dict returned by `auto_labels` or the instruments returned by
-the engine's metric library, not the handle itself.
+`ComponentMetricsSource.snapshot` MUST be a cheap field read (< 1 ms);
+the conformance kit enforces this. The framework's poll task fires
+every 100 ms — engine cadence can be much faster (vLLM iterates many
+times per tick) since the dict is overwrite-on-write.
 
-Errors raised inside `register_prometheus` propagate as a startup
-failure: `Worker` aborts initialisation and runs `cleanup()` on the
-partial engine state.
+Both `register_prometheus` and `setup_component_metrics` errors abort
+startup: `Worker` runs `cleanup()` on the partial engine state.
 
 ## File Index
 

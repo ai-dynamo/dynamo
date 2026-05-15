@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Source descriptors returned by :meth:`LLMEngine.kv_event_sources` and
-:meth:`LLMEngine.metrics_sources`. Worker constructs one publisher per
-descriptor — engines never instantiate publishers themselves."""
+:meth:`LLMEngine.component_metrics_sources`. Worker constructs one publisher
+per descriptor — engines never instantiate publishers themselves."""
 
 from __future__ import annotations
 
@@ -33,29 +33,41 @@ class PushSource:
     dp_rank: int = 0
 
 
-@dataclass(frozen=True)
-class SnapshotSource:
-    """``snapshot`` is invoked under the GIL on a fixed interval. Keep it to a
-    member-field read; return ``None`` to skip publishing for that tick."""
+@dataclass
+class ComponentSnapshot:
+    """Rich per-rank snapshot returned by
+    :class:`ComponentMetricsSource`. ``Worker`` consumes it to drive both
+    the router-input signal (``kv_used_blocks``) and the engine-side
+    ``dynamo_component_*`` gauges (``kv_total_blocks``, ``gpu_cache_usage``).
 
-    snapshot: Callable[[], Optional["Metrics"]]
+    Engines fill an in-memory dict from their natural push surface
+    (stat-logger / ZMQ / poll thread); the snapshot fn just returns the
+    latest entry as a cheap field read.
+    """
+
+    kv_used_blocks: int
+    kv_total_blocks: int
+    gpu_cache_usage: float
+    dp_rank: int
+
+
+@dataclass(frozen=True)
+class ComponentMetricsSource:
+    """``snapshot`` is invoked under the GIL on a fixed interval. Keep it to
+    a member-field read; return ``None`` to skip publishing for that tick.
+    Conformance kit enforces a 1 ms ceiling."""
+
+    snapshot: Callable[[], Optional[ComponentSnapshot]]
     dp_rank: int = 0
 
 
 KvEventSource = Union[ZmqSource, PushSource]
 
 
-@dataclass
-class Metrics:
-    """Router input. Lower ``kv_used_blocks`` = more free capacity."""
-
-    kv_used_blocks: Optional[int] = None
-
-
 __all__ = [
+    "ComponentMetricsSource",
+    "ComponentSnapshot",
     "KvEventSource",
-    "Metrics",
     "PushSource",
-    "SnapshotSource",
     "ZmqSource",
 ]

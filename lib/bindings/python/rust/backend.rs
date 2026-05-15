@@ -19,10 +19,11 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
-    AsyncEngineContext, BackendError, DisaggregationMode as RsDisaggregationMode, DynamoError,
-    EngineConfig as RsEngineConfig, ErrorType, KvEventSource as RsKvEventSource, LLMEngine,
-    LLMEngineOutput, Metrics as RsMetrics, MetricsSource as RsMetricsSource, OnPublisherReady,
-    PreprocessedRequest, RuntimeConfig as RsRuntimeConfig, SnapshotFn, Worker as RsWorker,
+    AsyncEngineContext, BackendError, ComponentMetricsCtx, ComponentMetricsPublisher,
+    ComponentMetricsSource, ComponentSnapshot, ComponentSnapshotFn,
+    DisaggregationMode as RsDisaggregationMode, DynamoError, EngineConfig as RsEngineConfig,
+    ErrorType, KvEventSource as RsKvEventSource, LLMEngine, LLMEngineOutput, OnPublisherReady,
+    PreprocessedRequest, RuntimeConfig as RsRuntimeConfig, Worker as RsWorker,
     WorkerConfig as RsWorkerConfig,
 };
 use dynamo_llm::model_type::ModelInput as RsModelInput;
@@ -713,23 +714,6 @@ impl LLMEngine for PyLLMEngine {
         .map_err(py_err_to_dynamo)
     }
 
-    async fn metrics_sources(&self) -> Result<Vec<RsMetricsSource>, DynamoError> {
-        let py_list = self
-            .call_method0_async("metrics_sources")
-            .await
-            .map_err(py_err_to_dynamo)?;
-        Python::with_gil(|py| -> PyResult<Vec<RsMetricsSource>> {
-            let bound = py_list.bind(py);
-            let list = bound.downcast::<pyo3::types::PyList>()?;
-            let mut sources = Vec::with_capacity(list.len());
-            for item in list.iter() {
-                sources.push(depythonize_metrics_source(&item)?);
-            }
-            Ok(sources)
-        })
-        .map_err(py_err_to_dynamo)
-    }
-
     async fn register_prometheus(
         &self,
         metrics: &dynamo_backend_common::EngineMetrics,
@@ -759,6 +743,186 @@ impl LLMEngine for PyLLMEngine {
         py_future.await.map_err(py_err_to_dynamo)?;
         Ok(())
     }
+
+    async fn setup_component_metrics(
+        &self,
+        ctx: ComponentMetricsCtx<'_>,
+    ) -> Result<Option<Arc<dyn ComponentMetricsPublisher>>, DynamoError> {
+        let engine = self.engine.clone();
+        let model = ctx.model.to_string();
+        let component = ctx.component.to_string();
+        let load_time = ctx.model_load_time_seconds;
+        let py_metrics_state = crate::prometheus_metrics::EngineMetrics::from_rust(ctx.metrics);
+
+        tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<Option<Arc<dyn ComponentMetricsPublisher>>> {
+                // 1. Ask engine for source descriptors. Engines that opt out
+                //    return an empty list and we return None to the framework.
+                let bound = engine.bind(py);
+                let py_sources_obj = bound.call_method0("component_metrics_sources")?;
+                let py_sources = py_sources_obj.downcast::<pyo3::types::PyList>()?;
+                if py_sources.is_empty() {
+                    return Ok(None);
+                }
+
+                // 2. Construct gauges + registry via the engine-facing helper.
+                let metrics_mod = py.import("dynamo.common.backend.metrics")?;
+                let pair = metrics_mod
+                    .call_method1("make_component_metrics", (model.as_str(), component.as_str()))?;
+                let pair_tuple = pair.downcast::<pyo3::types::PyTuple>()?;
+                let gauges = pair_tuple.get_item(0)?.unbind();
+                let registry = pair_tuple.get_item(1)?.unbind();
+
+                // 3. Seed zeros for each rank so the gauges show up in the
+                //    very first /metrics scrape. Set model_load_time once.
+                let mut ranks: Vec<u32> = Vec::with_capacity(py_sources.len());
+                for item in py_sources.iter() {
+                    let dp_rank: u32 = item.getattr("dp_rank")?.extract()?;
+                    let rank_str = dp_rank.to_string();
+                    gauges
+                        .bind(py)
+                        .call_method1("set_total_blocks", (rank_str.clone(), 0u64))?;
+                    gauges
+                        .bind(py)
+                        .call_method1("set_gpu_cache_usage", (rank_str, 0.0f64))?;
+                    ranks.push(dp_rank);
+                }
+                gauges
+                    .bind(py)
+                    .call_method1("set_model_load_time", (load_time,))?;
+
+                // 4. Wire the registry as a /metrics callback against the
+                //    shared EngineMetrics handle.
+                let py_metrics = Py::new(py, py_metrics_state)?;
+                metrics_mod.call_method1(
+                    "register_engine_registry",
+                    (py_metrics.clone_ref(py), registry),
+                )?;
+
+                // 5. Wrap each Python snapshot fn as a Rust closure.
+                let sources_cache: Vec<ComponentMetricsSource> = py_sources
+                    .iter()
+                    .map(|item| build_rust_source(&item))
+                    .collect::<PyResult<_>>()?;
+
+                Ok(Some(Arc::new(PyComponentMetricsPublisher {
+                    gauges,
+                    sources_cache,
+                    update_failed_logged: AtomicBool::new(false),
+                }) as Arc<dyn ComponentMetricsPublisher>))
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("setup_component_metrics offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)
+    }
+}
+
+/// Engine-supplied publisher backed by the Python `LLMBackendMetrics`
+/// instance. Each `update` acquires the GIL and calls the gauge setters;
+/// failures are warned-once to avoid log spam under sustained errors.
+struct PyComponentMetricsPublisher {
+    gauges: PyObject,
+    sources_cache: Vec<ComponentMetricsSource>,
+    update_failed_logged: AtomicBool,
+}
+
+impl ComponentMetricsPublisher for PyComponentMetricsPublisher {
+    fn sources(&self) -> Vec<ComponentMetricsSource> {
+        // ComponentMetricsSource isn't Clone (the snapshot Arc IS, but the
+        // struct isn't derive(Clone)). Rebuild by cloning each field.
+        self.sources_cache
+            .iter()
+            .map(|s| ComponentMetricsSource {
+                snapshot: s.snapshot.clone(),
+                dp_rank: s.dp_rank,
+            })
+            .collect()
+    }
+    fn update(&self, snap: &ComponentSnapshot) {
+        Python::with_gil(|py| {
+            let rank_str = snap.dp_rank.to_string();
+            let g = self.gauges.bind(py);
+            let r1 = g.call_method1("set_total_blocks", (rank_str.clone(), snap.kv_total_blocks));
+            let r2 = g.call_method1("set_gpu_cache_usage", (rank_str, snap.gpu_cache_usage as f64));
+            if let Err(e) = r1.and(r2)
+                && !self.update_failed_logged.swap(true, Ordering::Relaxed)
+            {
+                tracing::warn!(error = %e, "component gauge update failed; suppressing further");
+            }
+        });
+    }
+}
+
+/// Wraps a Python `ComponentMetricsSource` (the dataclass exported by
+/// `dynamo.common.backend.publisher`) into a Rust source whose snapshot fn
+/// acquires the GIL on each call.
+fn build_rust_source(item: &Bound<'_, PyAny>) -> PyResult<ComponentMetricsSource> {
+    let cls = class_name(item)?;
+    if cls != "ComponentMetricsSource" {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "component_metrics_sources() returned unknown descriptor type {cls:?}; \
+             expected ComponentMetricsSource"
+        )));
+    }
+    let dp_rank: u32 = item.getattr("dp_rank")?.extract()?;
+    let snapshot_obj: PyObject = item.getattr("snapshot")?.into();
+    let warned_call_failed = AtomicBool::new(false);
+    let warned_missing_field = AtomicBool::new(false);
+    let snapshot: ComponentSnapshotFn = Arc::new(move || -> Option<ComponentSnapshot> {
+        Python::with_gil(|py| -> Option<ComponentSnapshot> {
+            let result = match snapshot_obj.call0(py) {
+                Ok(r) => r,
+                Err(e) => {
+                    if !warned_call_failed.swap(true, Ordering::Relaxed) {
+                        tracing::warn!(dp_rank, error = %e, "snapshot fn raised; \
+                            dropping metric ticks until the engine recovers");
+                    }
+                    return None;
+                }
+            };
+            let bound = result.bind(py);
+            if bound.is_none() {
+                return None;
+            }
+            let extract_u64 = |name: &str| -> Option<u64> {
+                match bound.getattr(name) {
+                    Ok(v) => v.extract().ok(),
+                    Err(e) => {
+                        if !warned_missing_field.swap(true, Ordering::Relaxed) {
+                            tracing::warn!(dp_rank, error = %e, field = name,
+                                "snapshot result missing field");
+                        }
+                        None
+                    }
+                }
+            };
+            let extract_f32 = |name: &str| -> Option<f32> {
+                match bound.getattr(name) {
+                    Ok(v) => v.extract().ok(),
+                    Err(e) => {
+                        if !warned_missing_field.swap(true, Ordering::Relaxed) {
+                            tracing::warn!(dp_rank, error = %e, field = name,
+                                "snapshot result missing field");
+                        }
+                        None
+                    }
+                }
+            };
+            Some(ComponentSnapshot {
+                kv_used_blocks: extract_u64("kv_used_blocks")?,
+                kv_total_blocks: extract_u64("kv_total_blocks")?,
+                gpu_cache_usage: extract_f32("gpu_cache_usage")?,
+                dp_rank,
+            })
+        })
+    });
+    Ok(ComponentMetricsSource { snapshot, dp_rank })
 }
 
 // ---------------------------------------------------------------------------
@@ -808,52 +972,6 @@ fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
              expected ZmqSource or PushSource"
         ))),
     }
-}
-
-fn depythonize_metrics_source(item: &Bound<'_, PyAny>) -> PyResult<RsMetricsSource> {
-    let cls = class_name(item)?;
-    if cls != "SnapshotSource" {
-        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-            "metrics_sources() returned unknown descriptor type {cls:?}; \
-             expected SnapshotSource"
-        )));
-    }
-    let dp_rank: u32 = item.getattr("dp_rank")?.extract()?;
-    let snapshot_obj: PyObject = item.getattr("snapshot")?.into();
-    // Worker invokes this on a fixed interval under the GIL — keep it cheap.
-    // Each failure mode warns once per source then drops subsequent ticks.
-    let warned_call_failed = AtomicBool::new(false);
-    let warned_missing_field = AtomicBool::new(false);
-    let snapshot: SnapshotFn = Arc::new(move || -> Option<RsMetrics> {
-        Python::with_gil(|py| -> Option<RsMetrics> {
-            let result = match snapshot_obj.call0(py) {
-                Ok(r) => r,
-                Err(e) => {
-                    if !warned_call_failed.swap(true, Ordering::Relaxed) {
-                        tracing::warn!(dp_rank, error = %e, "snapshot fn raised; \
-                            dropping metric ticks until the engine recovers");
-                    }
-                    return None;
-                }
-            };
-            let bound = result.bind(py);
-            if bound.is_none() {
-                return None;
-            }
-            let kv_used_blocks: Option<u64> = match bound.getattr("kv_used_blocks") {
-                Ok(v) => v.extract().ok(),
-                Err(e) => {
-                    if !warned_missing_field.swap(true, Ordering::Relaxed) {
-                        tracing::warn!(dp_rank, error = %e,
-                            "snapshot result missing kv_used_blocks field");
-                    }
-                    return None;
-                }
-            };
-            Some(RsMetrics { kv_used_blocks })
-        })
-    });
-    Ok(RsMetricsSource { snapshot, dp_rank })
 }
 
 // ---------------------------------------------------------------------------

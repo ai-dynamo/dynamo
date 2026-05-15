@@ -374,18 +374,31 @@ impl Worker {
         // unique-per-replica by construction; engines see only an opaque
         // `worker_id`.
         let worker_id = drt.connection_id();
+        let engine_start = std::time::Instant::now();
         let engine_config = self.start_engine(worker_id).await?;
+        let model_load_time_seconds = engine_start.elapsed().as_secs_f64();
         tracing::debug!(
             model = %engine_config.model,
             worker_id,
+            model_load_time_seconds,
             "engine.start() complete"
         );
 
-        self.setup_kv_aware_publishers(&component, &engine_config)
-            .await?;
+        // Engine builds its EngineMetrics once and shares the handle with
+        // register_prometheus and setup_component_metrics. Ordering:
+        // register_prometheus runs first so engines have a chance to add
+        // vendor-registry callbacks; component-metrics setup follows.
+        let engine_metrics =
+            crate::metrics::EngineMetrics::with_engine_config(endpoint.clone(), &engine_config);
+        self.engine.register_prometheus(&engine_metrics).await?;
 
-        self.setup_prometheus_registration(&endpoint, &engine_config)
-            .await?;
+        self.setup_publishing(
+            &component,
+            &engine_config,
+            &engine_metrics,
+            model_load_time_seconds,
+        )
+        .await?;
 
         // Mid-start signal: engine.start() ran to completion but a signal
         // arrived during it. Skip the serve loop and run the orchestrator
@@ -401,42 +414,41 @@ impl Worker {
             .await
     }
 
-    /// Invoke `LLMEngine::register_prometheus` with a hierarchy-scoped
-    /// `EngineMetrics`. See the trait method for failure semantics.
-    async fn setup_prometheus_registration(
-        &self,
-        endpoint: &dynamo_runtime::component::Endpoint,
-        engine_config: &EngineConfig,
-    ) -> Result<(), DynamoError> {
-        let metrics =
-            crate::metrics::EngineMetrics::with_engine_config(endpoint.clone(), engine_config);
-        self.engine.register_prometheus(&metrics).await
-    }
-
-    /// Build KV-event and worker-metric publishers from the engine's source
-    /// declarations. No-op if `enable_kv_routing` is off, the engine declares
-    /// no sources, or `engine_config.kv_cache_block_size` is unset.
-    async fn setup_kv_aware_publishers(
+    /// Build KV-event and component-metrics publishers from the engine's
+    /// declarations. Combines KV event sources with the engine-supplied
+    /// [`ComponentMetricsPublisher`] (load-signal + `dynamo_component_*`
+    /// gauges) into a single poll loop. No-op if `enable_kv_routing` is
+    /// off, the engine returned no sources / publisher, or
+    /// `engine_config.kv_cache_block_size` is unset for KV events.
+    async fn setup_publishing(
         &mut self,
         component: &dynamo_runtime::component::Component,
         engine_config: &EngineConfig,
+        engine_metrics: &crate::metrics::EngineMetrics,
+        model_load_time_seconds: f64,
     ) -> Result<(), DynamoError> {
         if !self.config.enable_kv_routing {
-            tracing::debug!("enable_kv_routing=false; skipping kv_event_sources / metrics_sources");
+            tracing::debug!("enable_kv_routing=false; skipping kv/component publishers");
             return Ok(());
         }
         let kv_sources = self.engine.kv_event_sources().await?;
-        let metrics_snapshots = self.engine.metrics_sources().await?;
-        if kv_sources.is_empty() && metrics_snapshots.is_empty() {
+        let ctx = crate::engine::ComponentMetricsCtx {
+            model: &engine_config.model,
+            component: &self.config.component,
+            model_load_time_seconds,
+            metrics: engine_metrics,
+        };
+        let component_publisher = self.engine.setup_component_metrics(ctx).await?;
+        if kv_sources.is_empty() && component_publisher.is_none() {
             tracing::debug!(
-                "engine returned no KV/metrics sources; KV-aware routing disabled for this worker"
+                "engine returned no KV sources / component publisher; KV-aware routing disabled"
             );
             return Ok(());
         }
         let enable_local_indexer = self.config.effective_enable_local_indexer();
         tracing::debug!(
             kv_sources = kv_sources.len(),
-            metrics_sources = metrics_snapshots.len(),
+            has_component_publisher = component_publisher.is_some(),
             enable_local_indexer,
             kv_cache_block_size = ?engine_config.kv_cache_block_size,
             "Starting KV-aware-routing publishers"
@@ -444,7 +456,7 @@ impl Worker {
         let handles = setup_publishers(
             component,
             kv_sources,
-            metrics_snapshots,
+            component_publisher,
             engine_config.kv_cache_block_size,
             enable_local_indexer,
         )

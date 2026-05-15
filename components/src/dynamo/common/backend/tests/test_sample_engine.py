@@ -15,9 +15,8 @@ pytest.importorskip(
 )
 
 from dynamo.common.backend.publisher import (  # noqa: E402
-    Metrics,
+    ComponentMetricsSource,
     PushSource,
-    SnapshotSource,
 )
 from dynamo.common.backend.sample_engine import SampleLLMEngine  # noqa: E402
 from dynamo.common.constants import DisaggregationMode  # noqa: E402
@@ -121,17 +120,17 @@ async def test_from_args_propagates_mode_to_worker_config():
 async def test_source_descriptors_have_expected_shape():
     engine = SampleLLMEngine(max_tokens=4, delay=0.0)
     [kv_src] = await engine.kv_event_sources()
-    [metrics_src] = await engine.metrics_sources()
+    [metrics_src] = engine.component_metrics_sources()
     assert isinstance(kv_src, PushSource) and kv_src.dp_rank == 0
-    assert isinstance(metrics_src, SnapshotSource) and metrics_src.dp_rank == 0
-    assert metrics_src.snapshot() == Metrics(kv_used_blocks=0)
+    assert isinstance(metrics_src, ComponentMetricsSource) and metrics_src.dp_rank == 0
+    assert metrics_src.snapshot().kv_used_blocks == 0
 
 
 async def test_generate_round_trips_kv_used_blocks_through_snapshot():
     engine = SampleLLMEngine(max_tokens=2, delay=0.0)
-    snapshot = (await engine.metrics_sources())[0].snapshot
+    snapshot = engine.component_metrics_sources()[0].snapshot
     await _collect(engine, {"token_ids": list(range(32))})
-    assert snapshot() == Metrics(kv_used_blocks=0)
+    assert snapshot().kv_used_blocks == 0
 
 
 async def test_cleanup_joins_publisher_thread_started_via_on_ready():

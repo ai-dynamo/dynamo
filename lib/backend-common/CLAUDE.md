@@ -12,13 +12,13 @@ Python-shaped request/response wrappers.
 ## Engine Lifecycle
 
 ```
-construct -> start(worker_id) -> register_prometheus() -> generate/abort -> drain -> cleanup
-    |               |                     |                      |             |        |
-parse args,    start engine,        wire Prometheus         serve requests pre-cleanup shutdown,
-return engine  return metadata      (optional, no-op)       (concurrent)   drain       release
+construct -> start(worker_id) -> register_prometheus -> setup_component_metrics -> generate/abort -> drain -> cleanup
+    |               |                     |                      |                       |              |        |
+parse args,    start engine,        wire Prometheus         build gauges +           serve requests pre-cleanup shutdown,
+return engine  return metadata      (optional)              poll task (optional)     (concurrent)   drain       release
 ```
 
-The trait has six methods. `from_args` is NOT on the trait — each
+The trait has seven methods. `from_args` is NOT on the trait — each
 backend exposes a backend-specific constructor (typically a sync
 `from_args(argv) -> Result<(Self, WorkerConfig)>` inherent method).
 This keeps the trait fully object-safe without a `where Self: Sized`
@@ -34,6 +34,12 @@ opt-out and lets `run.rs` stay non-generic.
   into the runtime's `/metrics` output via `metrics.add_expfmt_callback`.
   Failures abort startup; `cleanup` runs on the partial engine state.
   The handle must not be retained past this method's return.
+- `setup_component_metrics(&self, ctx: ComponentMetricsCtx<'_>) -> Result<Option<Arc<dyn ComponentMetricsPublisher>>, DynamoError>` —
+  optional, default `None` (opts out). Returns a publisher that owns
+  the engine's `dynamo_component_*` gauges and exposes one snapshot
+  source per dp_rank. `Worker` runs one poll task per source feeding
+  both the gauges and the router-input signal. See **KV-aware Routing
+  & Component Metrics** below.
 - `generate(&self, request, ctx: GenerateContext) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError>`
   — streaming inference. `GenerateContext` derefs to
   `dyn AsyncEngineContext` (`ctx.stopped()`, `ctx.is_stopped()`,
@@ -265,22 +271,21 @@ Mid-stream errors have two equivalent terminal forms:
   * **String**: yield `Ok(LLMEngineOutput::error(msg))`. Convenient for
     pure message-level failures. Loses the typed `BackendError` variant.
 
-## KV-aware Routing Sources
+## KV-aware Routing & Component Metrics
 
-Engines opt into KV-aware routing by overriding two trait methods on
-`LLMEngine`:
+Engines wire two independent surfaces on `LLMEngine`:
 
-- `kv_event_sources() -> Vec<KvEventSource>` — one descriptor per
-  data-parallel rank that emits KV cache events.
-- `metrics_sources() -> Vec<MetricsSource>` — one descriptor per
-  data-parallel rank reporting load (`kv_used_blocks`).
+- `kv_event_sources() -> Vec<KvEventSource>` — KV cache event descriptors,
+  one per data-parallel rank. Drives the router's prefix cache.
+- `setup_component_metrics(ctx) -> Option<Arc<dyn ComponentMetricsPublisher>>`
+  — returns an opaque publisher that owns the engine's
+  `dynamo_component_*` gauges AND exposes one snapshot source per
+  data-parallel rank. Returning `None` opts out.
 
-Both default to empty. Returning empty opts the worker out of KV-aware
-routing entirely; the router falls back to non-KV scheduling for that
-worker. `Worker` calls these once after `start()` succeeds and constructs
-the publishers itself — engines never instantiate
-`KvEventPublisher`/`WorkerMetricsPublisher`. On shutdown, `Worker` drops
-the handles while NATS is still alive.
+Both default to empty / None. `Worker` calls them once after `start()`
+succeeds and constructs `KvEventPublisher` / `WorkerMetricsPublisher`
+itself — engines never instantiate publishers. On shutdown, `Worker`
+drops the handles while NATS is still alive.
 
 ### `KvEventSource` flavors
 
@@ -298,20 +303,42 @@ The `mocker` example uses `Push` with a no-op `on_ready`; real Rust
 engines would spawn a polling thread inside `on_ready`. See
 `examples/mocker/src/engine.rs` for the wire-up.
 
-### `MetricsSource`
+### `ComponentMetricsPublisher`
+
+`setup_component_metrics(ctx)` receives a `ComponentMetricsCtx` carrying
+`model`, `component`, `model_load_time_seconds`, and a borrowed
+`EngineMetrics` handle. The engine constructs (or wraps) gauges, seeds
+initial values, and returns an `Arc<dyn ComponentMetricsPublisher>`:
 
 ```rust
-MetricsSource {
-    snapshot: Arc::new(move || Some(Metrics { kv_used_blocks: ... })),
-    dp_rank,
+pub trait ComponentMetricsPublisher: Send + Sync {
+    fn sources(&self) -> Vec<ComponentMetricsSource>;
+    fn update(&self, snapshot: &ComponentSnapshot);
 }
 ```
 
-`Worker` invokes `snapshot()` on a fixed interval. It **must** be a
-cheap member-field read — engine-internal calls land in the 10s of ms
-and stall the publish loop. The conformance kit enforces a 1 ms ceiling
-(`MetricsSnapshotTooSlow`). Return `None` to skip publishing for that
-tick (e.g. before the engine has emitted its first scheduler iteration).
+Each `ComponentMetricsSource.snapshot` MUST be a cheap field read — the
+conformance kit enforces a 1 ms ceiling (`ComponentSnapshotTooSlow`).
+Engines fill an in-memory dict from their natural push surface
+(stat-logger / ZMQ recv / poll thread); the snapshot fn just returns
+the latest entry. Return `None` from the snapshot to skip the tick
+(e.g. before the engine has emitted its first sample).
+
+`Worker` runs one fixed-interval poll task that:
+1. Calls `snapshot()` for each source.
+2. Feeds `WorkerMetricsPublisher.publish(kv_used_blocks)` (router signal).
+3. Calls `publisher.update(snapshot)` (gauge update).
+
+One source of truth for both consumers — `/metrics` scrape and the
+KV router score the same `ComponentSnapshot`.
+
+For Python engines, the PyO3 bridge in `lib/bindings/python/rust/backend.rs`
+implements `setup_component_metrics`: it calls
+`dynamo.common.backend.metrics.make_component_metrics` to build the
+gauges, seeds zeros for each rank, sets `model_load_time`, registers
+the registry as a `/metrics` callback, and returns a
+`PyComponentMetricsPublisher` whose `update` calls into Python under
+the GIL. The Python engine only implements `component_metrics_sources()`.
 
 ### Conformance
 

@@ -73,9 +73,9 @@ pub enum ConformanceFailure {
     CleanupWithoutStartFailed(String),
     KvEventSourcesFailed(String),
     KvEventSourcesNotIdempotent,
-    MetricsSourcesFailed(String),
-    MetricsSourcesNotIdempotent,
-    MetricsSnapshotTooSlow { took: Duration },
+    ComponentMetricsFailed(String),
+    ComponentMetricsNotIdempotent,
+    ComponentSnapshotTooSlow { took: Duration },
     RegisterPrometheusFailed(String),
 }
 
@@ -117,16 +117,16 @@ impl std::fmt::Display for ConformanceFailure {
                 "kv_event_sources() returned different dp_rank set on a second call \
                  (the descriptor list must be stable for the engine's lifetime)"
             ),
-            MetricsSourcesFailed(m) => write!(f, "metrics_sources() failed: {m}"),
-            MetricsSourcesNotIdempotent => write!(
+            ComponentMetricsFailed(m) => write!(f, "setup_component_metrics() failed: {m}"),
+            ComponentMetricsNotIdempotent => write!(
                 f,
-                "metrics_sources() returned different dp_rank set on a second call \
-                 (the descriptor list must be stable for the engine's lifetime)"
+                "ComponentMetricsPublisher.sources() returned different dp_rank set \
+                 across calls (the descriptor list must be stable for the engine's lifetime)"
             ),
-            MetricsSnapshotTooSlow { took } => write!(
+            ComponentSnapshotTooSlow { took } => write!(
                 f,
-                "SnapshotSource.snapshot took {took:?} (must be a cheap field read, \
-                 < 1 ms; an engine-internal call would land in the 10s of ms)"
+                "ComponentMetricsSource.snapshot took {took:?} (must be a cheap field \
+                 read, < 1 ms; an engine-internal call would land in the 10s of ms)"
             ),
             RegisterPrometheusFailed(m) => write!(f, "register_prometheus() failed: {m}"),
         }
@@ -163,7 +163,7 @@ where
     //    Run before generate() to match Worker's actual call order
     //    (setup_kv_aware_publishers happens between start() and serve).
     check_kv_event_sources(&engine).await?;
-    check_metrics_sources(&engine).await?;
+    check_component_metrics(&engine).await?;
 
     // 3. register_prometheus runs without error against a synthetic
     //    EngineMetrics handle. Same ordering rationale as above — Worker
@@ -309,25 +309,32 @@ async fn check_kv_event_sources<E: LLMEngine>(engine: &E) -> Result<(), Conforma
     Ok(())
 }
 
-async fn check_metrics_sources<E: LLMEngine>(engine: &E) -> Result<(), ConformanceFailure> {
-    let first = engine
-        .metrics_sources()
+async fn check_component_metrics<E: LLMEngine>(engine: &E) -> Result<(), ConformanceFailure> {
+    let metrics = EngineMetrics::from_hierarchy(TestHierarchy::new());
+    let ctx = crate::engine::ComponentMetricsCtx {
+        model: "test-model",
+        component: "test",
+        model_load_time_seconds: 0.0,
+        metrics: &metrics,
+    };
+    let publisher = engine
+        .setup_component_metrics(ctx)
         .await
-        .map_err(|e| MetricsSourcesFailed(e.to_string()))?;
-    let second = engine
-        .metrics_sources()
-        .await
-        .map_err(|e| MetricsSourcesFailed(e.to_string()))?;
-    let ranks_a: Vec<u32> = first.iter().map(|s| s.dp_rank).collect();
-    let ranks_b: Vec<u32> = second.iter().map(|s| s.dp_rank).collect();
+        .map_err(|e| ComponentMetricsFailed(e.to_string()))?;
+    // Engines that opt out are allowed.
+    let Some(publisher) = publisher else {
+        return Ok(());
+    };
+    let ranks_a: Vec<u32> = publisher.sources().iter().map(|s| s.dp_rank).collect();
+    let ranks_b: Vec<u32> = publisher.sources().iter().map(|s| s.dp_rank).collect();
     if ranks_a != ranks_b {
-        return Err(MetricsSourcesNotIdempotent);
+        return Err(ComponentMetricsNotIdempotent);
     }
-    // Probe snapshot latency on every returned source. The closure is what
-    // `Worker` invokes under the GIL on a tokio interval; if it's slow
-    // here it'll stall the publish loop in production. Take min-of-3 so
-    // a contended CI runner doesn't flake on a single-sample outlier.
-    for src in &first {
+    // Probe snapshot latency. The closure is what `Worker` invokes under
+    // the GIL on a tokio interval; if it's slow here it'll stall the publish
+    // loop in production. Take min-of-3 so a contended CI runner doesn't
+    // flake on a single-sample outlier.
+    for src in publisher.sources() {
         let took = (0..3)
             .map(|_| {
                 let started = std::time::Instant::now();
@@ -337,7 +344,7 @@ async fn check_metrics_sources<E: LLMEngine>(engine: &E) -> Result<(), Conforman
             .min()
             .unwrap_or_default();
         if took > SNAPSHOT_MAX_LATENCY {
-            return Err(MetricsSnapshotTooSlow { took });
+            return Err(ComponentSnapshotTooSlow { took });
         }
     }
     Ok(())

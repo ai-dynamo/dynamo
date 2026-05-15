@@ -261,11 +261,6 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
-    /// Metrics snapshot sources, one per dp_rank. Empty by default.
-    async fn metrics_sources(&self) -> Result<Vec<MetricsSource>, DynamoError> {
-        Ok(Vec::new())
-    }
-
     /// Register Prometheus instruments or scrape callbacks. Called once
     /// by `Worker` after [`start`](LLMEngine::start) succeeds; default
     /// no-op. See [`EngineMetrics`](crate::metrics::EngineMetrics) for
@@ -277,6 +272,22 @@ pub trait LLMEngine: Send + Sync + 'static {
     ) -> Result<(), DynamoError> {
         Ok(())
     }
+
+    /// Hand `Worker` an opaque publisher that owns the engine's
+    /// `dynamo_component_*` gauges and exposes one snapshot source per
+    /// dp_rank. Returning `None` opts the engine out — neither gauges
+    /// nor the router-input signal are emitted.
+    ///
+    /// Called once after [`start`](LLMEngine::start) succeeds. The
+    /// framework drives one poll task per source at a fixed interval;
+    /// each tick reads the snapshot fn and calls
+    /// [`ComponentMetricsPublisher::update`].
+    async fn setup_component_metrics(
+        &self,
+        _ctx: ComponentMetricsCtx<'_>,
+    ) -> Result<Option<Arc<dyn ComponentMetricsPublisher>>, DynamoError> {
+        Ok(None)
+    }
 }
 
 /// Invoked once with a freshly-built publisher; engine drives `publish`
@@ -284,8 +295,6 @@ pub trait LLMEngine: Send + Sync + 'static {
 pub type OnPublisherReady =
     Box<dyn FnOnce(Arc<KvEventPublisher>) -> Result<(), DynamoError> + Send + 'static>;
 
-/// Worker reads this on a fixed interval. MUST be a cheap member-field read.
-pub type SnapshotFn = Arc<dyn Fn() -> Option<Metrics> + Send + Sync>;
 
 /// KV event source descriptor. Two flavors: subscribe to an engine-provided
 /// ZMQ PUB, or hand a publisher to the engine and let it drive `publish`
@@ -311,15 +320,6 @@ impl KvEventSource {
     }
 }
 
-/// One metrics-snapshot source per data-parallel rank.
-pub struct MetricsSource {
-    /// Worker polls this on a fixed interval. MUST be a cheap member-field
-    /// read — engine-internal calls land in the 10s of ms and stall the
-    /// publish loop. Conformance kit enforces a 1 ms ceiling.
-    pub snapshot: SnapshotFn,
-    pub dp_rank: u32,
-}
-
 /// Worker-level metrics snapshot consumed by the KV router.
 ///
 /// `kv_used_blocks` is the primary load signal the router scores against.
@@ -329,6 +329,57 @@ pub struct MetricsSource {
 pub struct Metrics {
     /// Number of KV blocks currently occupied across all in-flight requests.
     pub kv_used_blocks: Option<u64>,
+}
+
+/// Rich per-rank snapshot driving both the router-input signal and the
+/// engine-side `dynamo_component_*` gauges.
+///
+/// Engines fill an in-memory dict from their natural push mechanism
+/// (stat-logger / ZMQ / poll thread); `ComponentMetricsSource::snapshot`
+/// returns the latest entry as a cheap field read.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ComponentSnapshot {
+    pub kv_used_blocks: u64,
+    pub kv_total_blocks: u64,
+    /// Fractional cache usage, 0.0..1.0.
+    pub gpu_cache_usage: f32,
+    pub dp_rank: u32,
+}
+
+/// `Worker` reads this on a fixed interval. MUST be a cheap field read —
+/// engine-internal calls land in the 10s of ms and breach the 1 ms
+/// conformance ceiling. Engines feed an in-memory dict from their natural
+/// push surface; the snapshot fn just returns the latest entry.
+pub type ComponentSnapshotFn = Arc<dyn Fn() -> Option<ComponentSnapshot> + Send + Sync>;
+
+/// One per data-parallel rank.
+pub struct ComponentMetricsSource {
+    pub snapshot: ComponentSnapshotFn,
+    pub dp_rank: u32,
+}
+
+/// Engine-supplied object that owns its gauge representation and provides
+/// snapshot accessors. `Worker` constructs the publisher via
+/// [`LLMEngine::setup_component_metrics`], then drives one poll task per
+/// source. Each tick reads the snapshot fn and calls [`Self::update`].
+///
+/// Python engines plug in via the PyO3 bridge in
+/// `lib/bindings/python/rust/backend.rs`, which constructs a
+/// `PyComponentMetricsPublisher` holding `Py<LLMBackendMetrics>`. Native
+/// Rust engines implement the trait directly with Rust-side gauges.
+pub trait ComponentMetricsPublisher: Send + Sync {
+    /// One per dp_rank, stable for the engine's lifetime.
+    fn sources(&self) -> Vec<ComponentMetricsSource>;
+    /// Apply `snapshot` to wherever gauges live.
+    fn update(&self, snapshot: &ComponentSnapshot);
+}
+
+/// Context handed to [`LLMEngine::setup_component_metrics`].
+pub struct ComponentMetricsCtx<'a> {
+    pub model: &'a str,
+    pub component: &'a str,
+    pub model_load_time_seconds: f64,
+    pub metrics: &'a crate::metrics::EngineMetrics,
 }
 
 /// Non-terminal chunk constructor. Terminal chunks come from upstream

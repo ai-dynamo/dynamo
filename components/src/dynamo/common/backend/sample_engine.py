@@ -19,7 +19,12 @@ from dynamo.llm import KvEventPublisher
 
 from .disagg import enforce_prefill_max_tokens, require_prefill_result
 from .engine import EngineConfig, GenerateChunk, GenerateRequest, LLMEngine
-from .publisher import KvEventSource, Metrics, PushSource, SnapshotSource
+from .publisher import (
+    ComponentMetricsSource,
+    ComponentSnapshot,
+    KvEventSource,
+    PushSource,
+)
 from .worker import WorkerConfig
 
 logger = logging.getLogger(__name__)
@@ -56,7 +61,7 @@ class SampleLLMEngine(LLMEngine):
         self.max_tokens = max_tokens
         self.delay = delay
         self.disaggregation_mode = disaggregation_mode
-        self._metrics = Metrics(kv_used_blocks=0)
+        self._kv_used_blocks = 0
         self._publish_queue: queue.SimpleQueue[tuple[str, dict]] = queue.SimpleQueue()
         self._publish_stop = threading.Event()
         self._publish_thread: Optional[threading.Thread] = None
@@ -125,8 +130,18 @@ class SampleLLMEngine(LLMEngine):
     async def kv_event_sources(self) -> list[KvEventSource]:
         return [PushSource(on_ready=self._start_publisher_thread, dp_rank=0)]
 
-    async def metrics_sources(self) -> list[SnapshotSource]:
-        return [SnapshotSource(snapshot=lambda: self._metrics, dp_rank=0)]
+    def component_metrics_sources(self) -> list[ComponentMetricsSource]:
+        return [
+            ComponentMetricsSource(
+                snapshot=lambda: ComponentSnapshot(
+                    kv_used_blocks=self._kv_used_blocks,
+                    kv_total_blocks=1000,
+                    gpu_cache_usage=self._kv_used_blocks / 1000.0,
+                    dp_rank=0,
+                ),
+                dp_rank=0,
+            )
+        ]
 
     def _start_publisher_thread(self, publisher: KvEventPublisher) -> None:
         self._publish_thread = threading.Thread(
@@ -167,16 +182,12 @@ class SampleLLMEngine(LLMEngine):
                 },
             )
         )
-        self._metrics = Metrics(
-            kv_used_blocks=(self._metrics.kv_used_blocks or 0) + block_count
-        )
+        self._kv_used_blocks += block_count
         return hashes
 
     def _release_synthetic_blocks(self, hashes: list[int]) -> None:
         self._publish_queue.put(("removed", {"block_hashes": hashes}))
-        self._metrics = Metrics(
-            kv_used_blocks=max(0, (self._metrics.kv_used_blocks or 0) - len(hashes))
-        )
+        self._kv_used_blocks = max(0, self._kv_used_blocks - len(hashes))
 
     async def generate(
         self, request: GenerateRequest, context: Context

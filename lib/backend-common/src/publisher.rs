@@ -14,7 +14,7 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::engine::{KvEventSource, Metrics, MetricsSource};
+use crate::engine::{ComponentMetricsPublisher, ComponentMetricsSource, KvEventSource};
 use crate::error::{BackendError, DynamoError, ErrorType};
 
 const METRICS_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -85,16 +85,20 @@ fn setup_kv_publishers(
 
 async fn setup_metrics_publishers(
     component: &Component,
-    snapshots: Vec<MetricsSource>,
+    component_publisher: Option<Arc<dyn ComponentMetricsPublisher>>,
     cancel: CancellationToken,
 ) -> Result<(Vec<Arc<WorkerMetricsPublisher>>, Option<JoinHandle<()>>), DynamoError> {
-    if snapshots.is_empty() {
+    let Some(component_publisher) = component_publisher else {
+        return Ok((Vec::new(), None));
+    };
+    let sources = component_publisher.sources();
+    if sources.is_empty() {
         return Ok((Vec::new(), None));
     }
-    let mut pairs = Vec::with_capacity(snapshots.len());
-    let mut publishers = Vec::with_capacity(snapshots.len());
-    for snap in snapshots {
-        let dp_rank = snap.dp_rank;
+    let mut pairs = Vec::with_capacity(sources.len());
+    let mut publishers = Vec::with_capacity(sources.len());
+    for source in sources {
+        let dp_rank = source.dp_rank;
         let publisher = WorkerMetricsPublisher::new().map_err(|e| {
             publisher_err(format!("metrics publisher new (dp_rank={dp_rank}): {e}"))
         })?;
@@ -107,7 +111,7 @@ async fn setup_metrics_publishers(
                 ))
             })?;
         let publisher = Arc::new(publisher);
-        pairs.push((publisher.clone(), snap));
+        pairs.push((publisher.clone(), source));
         publishers.push(publisher);
     }
     // `secondary()` so the fixed-interval poll loop doesn't share the
@@ -116,7 +120,7 @@ async fn setup_metrics_publishers(
         .drt()
         .runtime()
         .secondary()
-        .spawn(run_metrics_loop(pairs, cancel));
+        .spawn(run_metrics_loop(pairs, component_publisher, cancel));
     Ok((publishers, Some(task)))
 }
 
@@ -124,7 +128,8 @@ async fn setup_metrics_publishers(
 /// engines this serializes GIL acquisition through one OS thread instead of
 /// fanning out N contending tokio tasks at the snapshot cadence.
 async fn run_metrics_loop(
-    pairs: Vec<(Arc<WorkerMetricsPublisher>, MetricsSource)>,
+    pairs: Vec<(Arc<WorkerMetricsPublisher>, ComponentMetricsSource)>,
+    component_publisher: Arc<dyn ComponentMetricsPublisher>,
     cancel: CancellationToken,
 ) {
     let mut ticker = tokio::time::interval(METRICS_POLL_INTERVAL);
@@ -134,29 +139,34 @@ async fn run_metrics_loop(
         tokio::select! {
             biased;
             _ = cancel.cancelled() => return,
-            _ = ticker.tick() => publish_tick(&pairs, &mut warned_ranks),
+            _ = ticker.tick() => publish_tick(&pairs, &component_publisher, &mut warned_ranks),
         }
     }
 }
 
 fn publish_tick(
-    pairs: &[(Arc<WorkerMetricsPublisher>, MetricsSource)],
+    pairs: &[(Arc<WorkerMetricsPublisher>, ComponentMetricsSource)],
+    component_publisher: &Arc<dyn ComponentMetricsPublisher>,
     warned_ranks: &mut Vec<u32>,
 ) {
-    for (publisher, snap) in pairs {
-        let Some(Metrics {
-            kv_used_blocks: Some(kv_used_blocks),
-        }) = (snap.snapshot)()
-        else {
+    for (router_publisher, source) in pairs {
+        let Some(snapshot) = (source.snapshot)() else {
             continue;
         };
-        if let Err(e) = publisher.publish(Some(snap.dp_rank), None, Some(kv_used_blocks)) {
-            if !warned_ranks.contains(&snap.dp_rank) {
-                warned_ranks.push(snap.dp_rank);
-                tracing::warn!(dp_rank = snap.dp_rank, error = %e,
+        // Single source of truth feeds both consumers: router-input signal
+        // for the KV router, and `dynamo_component_*` gauges for /metrics.
+        component_publisher.update(&snapshot);
+        if let Err(e) = router_publisher.publish(
+            Some(source.dp_rank),
+            None,
+            Some(snapshot.kv_used_blocks),
+        ) {
+            if !warned_ranks.contains(&source.dp_rank) {
+                warned_ranks.push(source.dp_rank);
+                tracing::warn!(dp_rank = source.dp_rank, error = %e,
                     "metrics publish failed; suppressing further warnings");
             } else {
-                tracing::debug!(dp_rank = snap.dp_rank, error = %e, "metrics publish failed");
+                tracing::debug!(dp_rank = source.dp_rank, error = %e, "metrics publish failed");
             }
         }
     }
@@ -173,7 +183,7 @@ fn publisher_err(message: String) -> DynamoError {
 pub(crate) async fn setup_publishers(
     component: &Component,
     kv_sources: Vec<KvEventSource>,
-    metrics_snapshots: Vec<MetricsSource>,
+    component_publisher: Option<Arc<dyn ComponentMetricsPublisher>>,
     kv_cache_block_size: Option<u32>,
     enable_local_indexer: bool,
 ) -> Result<PublisherHandles, DynamoError> {
@@ -193,7 +203,7 @@ pub(crate) async fn setup_publishers(
     };
     let cancel = CancellationToken::new();
     let (metrics_publishers, metrics_task) =
-        setup_metrics_publishers(component, metrics_snapshots, cancel.clone()).await?;
+        setup_metrics_publishers(component, component_publisher, cancel.clone()).await?;
     Ok(PublisherHandles {
         kv_publishers,
         metrics_publishers,

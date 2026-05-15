@@ -21,9 +21,9 @@ from dynamo.common.backend.engine import (  # noqa: E402
     LLMEngine,
 )
 from dynamo.common.backend.publisher import (  # noqa: E402
-    Metrics,
+    ComponentMetricsSource,
+    ComponentSnapshot,
     PushSource,
-    SnapshotSource,
     ZmqSource,
 )
 
@@ -45,9 +45,12 @@ def test_source_descriptors_carry_payload_and_defaults():
     assert seen == ["publisher"]
     assert push.dp_rank == 2
 
-    snap = SnapshotSource(snapshot=lambda: Metrics(kv_used_blocks=42))
-    assert snap.snapshot() == Metrics(kv_used_blocks=42)
-    assert snap.dp_rank == 0
+    component_snap = ComponentSnapshot(
+        kv_used_blocks=42, kv_total_blocks=100, gpu_cache_usage=0.42, dp_rank=0
+    )
+    src = ComponentMetricsSource(snapshot=lambda: component_snap)
+    assert src.snapshot() == component_snap
+    assert src.dp_rank == 0
 
 
 class _MinimalEngine(LLMEngine):
@@ -71,7 +74,7 @@ class _MinimalEngine(LLMEngine):
 async def test_abc_source_methods_default_to_empty_list():
     engine = _MinimalEngine()
     assert await engine.kv_event_sources() == []
-    assert await engine.metrics_sources() == []
+    assert engine.component_metrics_sources() == []
 
 
 @pytest.mark.asyncio

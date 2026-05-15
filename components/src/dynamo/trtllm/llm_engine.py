@@ -41,19 +41,16 @@ from dynamo.common.backend.engine import (
     LLMEngine,
 )
 from dynamo.common.backend.metrics import (
-    make_component_metrics,
-    register_engine_registry,
     register_global_registry,
 )
 from dynamo.common.backend.publisher import (
+    ComponentMetricsSource,
+    ComponentSnapshot,
     KvEventSource,
-    Metrics,
     PushSource,
-    SnapshotSource,
 )
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
-from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.llm import KvEventPublisher, ModelInput
 from dynamo.trtllm.args import parse_args
 from dynamo.trtllm.constants import DisaggregationMode
@@ -65,7 +62,6 @@ from dynamo.trtllm.utils.disagg_utils import (
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 
 if TYPE_CHECKING:
-    from prometheus_client import CollectorRegistry
     from tensorrt_llm.metrics import MetricsCollector
 
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
@@ -139,17 +135,14 @@ class TrtllmLLMEngine(LLMEngine):
         self.kv_block_size = kv_block_size
         # Drives context_only / generation_only branching in generate().
         self.disaggregation_mode = disaggregation_mode
-        # Gates the metrics-poll thread and the kv_event/metrics source
-        # publishers. See `_kv_routing_enabled`.
+        # Gates the KV event publication path (engine event buffer + the
+        # `_kv_events_thread`). Component metrics + native `trtllm_*` metrics
+        # emit unconditionally.
         self.publish_events_and_metrics = publish_events_and_metrics
-        # Prometheus state — component_gauges/registry built in start().
-        # Optional collectors are skipped when publishers are disabled.
         self._component = component
-        self._component_gauges: Optional[LLMBackendMetrics] = None
-        self._component_registry: Optional["CollectorRegistry"] = None
         self._additional_metrics: Optional["AdditionalMetricsCollector"] = None
         self._trtllm_metrics_collector: Optional["MetricsCollector"] = None
-        # Resolved at construction time so the hot poll loop doesn't run
+        # Resolved once at construction so the hot poll loop doesn't run
         # `hasattr` per iteration; same for the per-request log method
         # which varies by upstream TRT-LLM version.
         self._log_iteration_stats: Optional[Callable[[dict], None]] = None
@@ -173,9 +166,9 @@ class TrtllmLLMEngine(LLMEngine):
         # dict is fully populated before `_kv_events_thread` starts and
         # read-only thereafter.
         self._kv_publishers: dict[int, KvEventPublisher] = {}
-        # Written by `_metrics_poll_loop`, read by snapshot lambdas under the
-        # GIL. Per-rank key-level writes are GIL-serialized.
-        self._latest_metrics: dict[int, Metrics] = {}
+        # Written by `_metrics_poll_loop`, read by snapshot lambdas under
+        # the GIL. Per-rank key-level writes are GIL-serialized.
+        self._snapshots: dict[int, ComponentSnapshot] = {}
         # Per-rank hashes of partial blocks; their later "removed" events
         # must not reach the router (which never saw them stored). Scoping
         # by rank prevents a partial block on one rank from suppressing a
@@ -219,11 +212,13 @@ class TrtllmLLMEngine(LLMEngine):
             "max_seq_len": config.max_seq_len,
             "max_beam_width": config.max_beam_width,
             "max_batch_size": config.max_batch_size,
-            "return_perf_metrics": config.publish_events_and_metrics,
-            # enable_iter_perf_stats is required by the PyTorch backend to
-            # compute iteration-level stats (KV cache utilization, hit rate).
-            # See TRT-LLM PR #11243.
-            "enable_iter_perf_stats": config.publish_events_and_metrics,
+            # Always on — drives `get_stats()` and `request_perf_metrics`
+            # which feed the framework's component-metrics snapshot and the
+            # native `trtllm_*` MetricsCollector. KV-event publication is
+            # gated separately on `publish_events_and_metrics` (only
+            # `event_buffer_max_size` + the events thread care).
+            "return_perf_metrics": True,
+            "enable_iter_perf_stats": True,
         }
 
         # Apply --extra-engine-args / --override-engine-args. Match the
@@ -295,50 +290,43 @@ class TrtllmLLMEngine(LLMEngine):
             worker_id,
         )
 
-        # MetricsCollector uses the global REGISTRY in single-process
-        # mode, so import order doesn't matter here (unlike SGLang).
-        gauge_model_name = self.served_model_name or self.model_name
-        self._component_gauges, self._component_registry = make_component_metrics(
-            gauge_model_name, self._component
-        )
-
-        t0 = time.monotonic()
         self._engine = TensorRTLLMEngine(self.engine_args, self.disaggregation_mode)
         await self._engine.initialize()
-        self._component_gauges.set_model_load_time(time.monotonic() - t0)
 
-        if self.publish_events_and_metrics:
-            from tensorrt_llm.metrics import MetricsCollector
+        from tensorrt_llm.metrics import MetricsCollector
 
-            from dynamo.trtllm.metrics import AdditionalMetricsCollector
+        from dynamo.trtllm.metrics import AdditionalMetricsCollector
 
-            self._additional_metrics = AdditionalMetricsCollector(
-                labels={
-                    "model_name": gauge_model_name,
-                    "disaggregation_mode": self.disaggregation_mode.value,
-                    "engine_type": "trtllm",
-                },
-            )
-            self._trtllm_metrics_collector = MetricsCollector(
-                {"model_name": gauge_model_name, "engine_type": "trtllm"}
-            )
-            # Resolve per-version method names once; TRT-LLM renamed
-            # `log_metrics_dict` -> `log_request_metrics_dict` mid-cycle.
-            self._log_iteration_stats = getattr(
-                self._trtllm_metrics_collector, "log_iteration_stats", None
-            )
-            self._log_request_metrics = getattr(
-                self._trtllm_metrics_collector, "log_request_metrics_dict", None
-            ) or getattr(self._trtllm_metrics_collector, "log_metrics_dict", None)
+        gauge_model_name = self.served_model_name or self.model_name
+        self._additional_metrics = AdditionalMetricsCollector(
+            labels={
+                "model_name": gauge_model_name,
+                "disaggregation_mode": self.disaggregation_mode.value,
+                "engine_type": "trtllm",
+            },
+        )
+        self._trtllm_metrics_collector = MetricsCollector(
+            {"model_name": gauge_model_name, "engine_type": "trtllm"}
+        )
+        # Resolve per-version method names once; TRT-LLM renamed
+        # `log_metrics_dict` -> `log_request_metrics_dict` mid-cycle.
+        self._log_iteration_stats = getattr(
+            self._trtllm_metrics_collector, "log_iteration_stats", None
+        )
+        self._log_request_metrics = getattr(
+            self._trtllm_metrics_collector, "log_request_metrics_dict", None
+        ) or getattr(self._trtllm_metrics_collector, "log_metrics_dict", None)
 
         self._attention_dp_size = self._engine.get_attention_dp_size()
-        if self._kv_routing_enabled():
-            self._metrics_thread = threading.Thread(
-                target=self._metrics_poll_loop,
-                daemon=True,
-                name="trtllm-metrics-poll",
-            )
-            self._metrics_thread.start()
+        # Always start the metrics-poll thread: it populates the snapshot
+        # dict that `component_metrics_sources()` exposes, and forwards
+        # each snap to `_log_iteration_stats` for `trtllm_kv_cache_*`.
+        self._metrics_thread = threading.Thread(
+            target=self._metrics_poll_loop,
+            daemon=True,
+            name="trtllm-metrics-poll",
+        )
+        self._metrics_thread.start()
 
         return EngineConfig(
             model=self.model_name,
@@ -370,15 +358,12 @@ class TrtllmLLMEngine(LLMEngine):
             for rank in range(self._attention_dp_size)
         ]
 
-    async def metrics_sources(self) -> list[SnapshotSource]:
-        if not self._kv_routing_enabled():
-            return []
-
-        def snapshot_for(r: int) -> Callable[[], Optional[Metrics]]:
-            return lambda: self._latest_metrics.get(r)
+    def component_metrics_sources(self) -> list[ComponentMetricsSource]:
+        def snapshot_for(r: int) -> Callable[[], Optional[ComponentSnapshot]]:
+            return lambda: self._snapshots.get(r)
 
         return [
-            SnapshotSource(snapshot=snapshot_for(rank), dp_rank=rank)
+            ComponentMetricsSource(snapshot=snapshot_for(rank), dp_rank=rank)
             for rank in range(self._attention_dp_size)
         ]
 
@@ -405,7 +390,6 @@ class TrtllmLLMEngine(LLMEngine):
     # (`attention_dp_rank`). Both match TRT-LLM's upstream conventions.
     def _metrics_poll_loop(self) -> None:
         assert self._engine is not None
-        assert self._component_gauges is not None  # set in start()
         while not self._publish_stop.is_set():
             try:
                 snaps = self._engine.llm.get_stats(timeout=_STATS_POLL_TIMEOUT_S)
@@ -424,16 +408,13 @@ class TrtllmLLMEngine(LLMEngine):
                 if kv_used is None:
                     continue
                 rank = int(snap.get("attentionDpRank", 0))
-                rank_str = str(rank)
                 kv_total = int(kv_stats.get("maxNumBlocks") or 0)
-
-                # Router-input cache.
-                self._latest_metrics[rank] = Metrics(kv_used_blocks=int(kv_used))
-
-                # Per-rank dynamo_component_* gauges.
-                self._component_gauges.set_total_blocks(rank_str, kv_total)
-                usage = kv_used / kv_total if kv_total else 0.0
-                self._component_gauges.set_gpu_cache_usage(rank_str, usage)
+                self._snapshots[rank] = ComponentSnapshot(
+                    kv_used_blocks=int(kv_used),
+                    kv_total_blocks=kv_total,
+                    gpu_cache_usage=(kv_used / kv_total) if kv_total else 0.0,
+                    dp_rank=rank,
+                )
 
                 # TRT-LLM-native trtllm_kv_cache_* gauges (PR #11243).
                 if self._log_iteration_stats is not None:
@@ -783,13 +764,11 @@ class TrtllmLLMEngine(LLMEngine):
                     self._additional_metrics.record_request_abort()
 
     async def register_prometheus(self, metrics: "EngineMetrics") -> None:
-        assert self._component_registry is not None  # set in start()
-        # Component registry (dynamo_component_*) is engine-owned;
-        # global REGISTRY carries TRT-LLM-native MetricsCollector +
-        # AdditionalMetricsCollector output (both `trtllm_` prefix).
-        register_engine_registry(metrics, self._component_registry)
-        if self.publish_events_and_metrics:
-            register_global_registry(metrics, engine_prefix="trtllm_")
+        # Framework owns the dynamo_component_* registry; we just bridge
+        # the global REGISTRY (`trtllm_*` family from MetricsCollector +
+        # AdditionalMetricsCollector). Always on — the collectors emit
+        # vendor metrics independent of KV-event publishing.
+        register_global_registry(metrics, engine_prefix="trtllm_")
 
     async def drain(self) -> None:
         """Prefill-only: poll until in-flight requests finish so a

@@ -6,29 +6,32 @@ Two-class abstraction: `Worker` (runtime integration) and
 ## Engine Lifecycle
 
 ```
-from_args -> start -> register_prometheus -> generate/abort -> drain -> cleanup
-     |          |              |                    |             |        |
-  parse args, start engine, wire Prometheus    serve requests  drain in-flight,
-  return     return        (optional, default  (concurrent)    then cleanup,
-  config     metadata      no-op)                              release resources
+from_args -> start -> register_prometheus -> component_metrics_sources -> generate/abort -> drain -> cleanup
+     |          |              |                       |                         |             |        |
+  parse args, start engine, vendor registry      framework polls these     serve requests  drain in-flight,
+  return     return        bridge (optional)     to drive dynamo_         (concurrent)    then cleanup,
+  config     metadata                            component_* + router                     release resources
 ```
 
 1. `from_args(argv)` -- classmethod factory. Parses CLI args, returns
    `(engine, WorkerConfig)`. Engine is NOT started yet.
 2. `start()` -- starts the engine, returns `EngineConfig`. After this returns
    `generate()` MUST be ready to accept calls.
-3. `register_prometheus(metrics)` -- wire Prometheus exposition callbacks
-   onto the runtime's `/metrics` endpoint (optional, default no-op).
-   Engine receives a slim `EngineMetrics` capability handle — never the
-   full endpoint. See `metrics.py` helpers (`gather_with_labels`,
-   `make_component_metrics`, `register_engine_registry`,
-   `register_global_registry`).
-4. `generate(request, context)` -- streaming inference, called concurrently.
-5. `abort(context)` -- cancel an in-flight request (optional, default no-op).
-6. `drain()` -- backend-side drain before cleanup (optional, default no-op).
+3. `register_prometheus(metrics)` -- bridge a vendor-prefixed registry
+   (`vllm:`, `sglang:`, `trtllm_`, `lmcache:`) into the runtime's
+   `/metrics` output. Optional, default no-op. The engine receives a
+   slim `EngineMetrics` capability handle. The `dynamo_component_*`
+   gauges are framework-owned — see `component_metrics_sources()`.
+4. `component_metrics_sources()` -- one `ComponentMetricsSource` per
+   data-parallel rank. Default empty list opts out. Framework polls
+   each source's snapshot fn on a fixed interval and drives both the
+   `dynamo_component_*` gauges and the router-input load signal.
+5. `generate(request, context)` -- streaming inference, called concurrently.
+6. `abort(context)` -- cancel an in-flight request (optional, default no-op).
+7. `drain()` -- backend-side drain before cleanup (optional, default no-op).
    Called after the discovery unregister + grace period; use it for in-flight
    NIXL transfers (issue #7319) that must complete while the runtime is alive.
-7. `cleanup()` -- called exactly once. Runs after `start()` succeeded
+8. `cleanup()` -- called exactly once. Runs after `start()` succeeded
    on shutdown, **and** after `start()` raised — so implementations
    must be null-safe against partial state (inner engine handle,
    sockets, background tasks). All current engines guard each
@@ -172,7 +175,7 @@ Standardize on:
 | File | What it does |
 |------|-------------|
 | `engine.py` | `LLMEngine` ABC -- the only interface engines must implement |
-| `metrics.py` | Prometheus integration helpers used inside `register_prometheus`: `gather_with_labels`, `make_component_metrics`, `register_engine_registry`, `register_global_registry`, `ensure_prometheus_multiproc_dir` |
+| `metrics.py` | Prometheus integration helpers. `register_global_registry` / `register_engine_registry` are engine-facing (vendor-registry bridge inside `register_prometheus`). `make_component_metrics` is framework-only (called from the PyO3 bridge in `lib/bindings/python/rust/backend.rs`). `ensure_prometheus_multiproc_dir` / `gather_with_labels` remain engine-side utilities. |
 | `worker.py` | `Worker` -- thin shim over `dynamo._core.backend.Worker`; lifecycle state machine and signal handling live in Rust (`lib/backend-common`) |
 | `run.py` | Common entry point -- `run(engine_cls)` used by all `unified_main.py` files |
 | `sample_engine.py` | Reference engine -- use as template and for testing |

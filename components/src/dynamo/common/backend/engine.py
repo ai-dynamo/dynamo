@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Optional, Required, TypedDict
 
 from dynamo._core import Context
 
-from .publisher import KvEventSource, SnapshotSource
+from .publisher import ComponentMetricsSource, KvEventSource
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
@@ -213,12 +213,18 @@ class LLMEngine(ABC):
         of KV-aware routing. ``Worker`` calls once after :meth:`start`."""
         return []
 
-    async def metrics_sources(self) -> list[SnapshotSource]:
-        """Metrics snapshot sources, one per data-parallel rank. Default
-        opts out of metrics publishing. ``Worker`` calls once after
-        :meth:`start`."""
-        return []
-
     async def register_prometheus(self, metrics: "EngineMetrics") -> None:
         """Default no-op. See :mod:`dynamo.common.backend.metrics` for
         helpers. Do not retain ``metrics`` past return."""
+
+    def component_metrics_sources(self) -> list[ComponentMetricsSource]:
+        """One :class:`ComponentMetricsSource` per data-parallel rank.
+        Each entry's ``snapshot`` fn returns the latest
+        :class:`ComponentSnapshot` for that rank (cheap field read, < 1 ms).
+        Default empty list opts the engine out of component metrics.
+
+        ``Worker`` invokes the snapshot fns on a fixed interval, feeds the
+        result through both the router-input signal and the
+        ``dynamo_component_*`` gauges. The rank set must be stable for the
+        engine's lifetime."""
+        return []
