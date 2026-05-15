@@ -215,9 +215,9 @@ impl RoutingConstraints {
         }
 
         // Use exp(-tanh(sum)) so equal-magnitude positive and negative preferences
-        // have symmetric effect around the neutral multiplier 1.0, while keeping the
-        // multiplier strictly positive and bounded for numerically stable composition
-        // with the existing linear work score.
+        // have reciprocal effect around the neutral multiplier 1.0, while keeping the
+        // multiplier strictly positive and bounded to [exp(-1), exp(1)] ~= [0.368, 2.718]
+        // for numerically stable composition with the existing linear work score.
         let bias = self
             .preferred_taints
             .iter()
