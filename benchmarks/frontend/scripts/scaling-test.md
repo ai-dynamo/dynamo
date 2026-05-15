@@ -128,7 +128,7 @@ spec:
           command: ["/bin/sh", "-c"]
           args: ["python3 -m dynamo.frontend --router-mode round-robin --http-port 8000"]
           env:
-            - name: DYN_TOKENIZER_BACKEND
+            - name: DYN_TOKENIZER
               value: "default"
             - name: DYN_PERF_DIAG
               value: "1"
@@ -333,7 +333,7 @@ python3 sweep_runner.py --mode k8s \
 
 The template substitutes these variables at deploy time:
 `${DGD_NAME}`, `${IMAGE}`, `${MODEL}`, `${MODEL_NAME}`,
-`${WORKER_REPLICAS}`, `${DYN_TOKENIZER_BACKEND}`, `${FRONTEND_PORT}`,
+`${WORKER_REPLICAS}`, `${DYN_TOKENIZER}`, `${FRONTEND_PORT}`,
 `${ROUTER_MODE}`.
 
 ---

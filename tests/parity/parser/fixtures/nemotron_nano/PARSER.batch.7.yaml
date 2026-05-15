@@ -33,13 +33,18 @@ cases:
           first_class:
             type: boolean
     expected:
-      calls:
-      - name: book_flight
-        arguments:
-          destination: Paris
-          passengers: 2
-          first_class: true
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: book_flight
+          arguments:
+            destination: Paris
+            passengers: 2
+            first_class: true
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'
   PARSER.batch.7.b:
     description: Unicode in parameter
     ref: dynamo
@@ -59,8 +64,13 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: Tōkyō central
-      normal_text: ''
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Tōkyō central
+        normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'

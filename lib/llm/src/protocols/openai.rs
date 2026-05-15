@@ -15,6 +15,7 @@ pub mod audios;
 pub mod chat_completions;
 pub mod common_ext;
 pub mod completions;
+pub(crate) mod delta_common;
 pub mod embeddings;
 pub mod images;
 pub mod models;
@@ -151,6 +152,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             guided_grammar,
             guided_decoding_backend,
             guided_whitespace_pattern,
+            None,
         ) {
             Ok(options) => options,
             Err(e) => {

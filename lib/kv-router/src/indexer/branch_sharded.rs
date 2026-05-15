@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Branch-sharded routing-trie sharding over `ThreadPoolIndexer<T>`.
+//! Branch-based prefix sharding over `ThreadPoolIndexer<T>`.
 //!
-//! This implementation owns a bounded routing prefix tree that can answer
+//! [`BranchShardedIndexer`] owns a bounded routing prefix tree. It can answer
 //! shallow drained reads and route depth-boundary suffixes through explicit
-//! backend anchors.
+//! backend anchors, while keeping the public branch-sharded indexer API.
 
 use std::{
     collections::VecDeque,
@@ -540,9 +540,11 @@ impl<T: AnchorCapableSyncIndexer> BranchShardedIndexer<T> {
                 continue;
             };
             let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
-            if let Some(parent_hash) = store_data.parent_hash
-                && !dumped_blocks.contains(&(worker, parent_hash))
-            {
+            let missing_parent = match store_data.parent_hash {
+                Some(parent_hash) => !dumped_blocks.contains(&(worker, parent_hash)),
+                None => false,
+            };
+            if missing_parent {
                 continue;
             }
             for block in &store_data.blocks {
@@ -563,9 +565,7 @@ impl<T: AnchorCapableSyncIndexer> BranchShardedIndexer<T> {
             return;
         }
 
-        if decision.rewrite_for_anchor
-            && let Some(anchor) = decision.anchor
-        {
+        if let (true, Some(anchor)) = (decision.rewrite_for_anchor, decision.anchor) {
             self.ensure_worker_anchor(decision.shard_idx, worker, anchor);
             if let Some(rewritten) = self.rewritten_store_event(event, &decision) {
                 self.shards[decision.shard_idx].apply_event(rewritten).await;

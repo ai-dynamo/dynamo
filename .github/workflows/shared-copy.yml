@@ -78,4 +78,4 @@ jobs:
           target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          override_arch: ${{ inputs.override_arch }} # We are using AMD64 images only on the rest of the clusters.
+          override_arch: ${{ inputs.override_arch }}

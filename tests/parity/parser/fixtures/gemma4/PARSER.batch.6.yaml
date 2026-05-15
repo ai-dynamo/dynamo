@@ -15,10 +15,14 @@ cases:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &d_6_a
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *d_6_a
+      sglang:
+        unavailable: SGLang has no detector for family='gemma4'
   PARSER.batch.6.b:
     description: Whitespace inside empty {}
     ref: dynamo
@@ -26,10 +30,14 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &d_6_b
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *d_6_b
+      sglang:
+        unavailable: SGLang has no detector for family='gemma4'
   PARSER.batch.6.c:
     description: No body (just call:name)
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L280
@@ -37,5 +45,9 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|tool_call>call:get_time<tool_call|>
+      dynamo: &d_6_c
+        calls: []
+        normal_text: <|tool_call>call:get_time<tool_call|>
+      vllm: *d_6_c
+      sglang:
+        unavailable: SGLang has no detector for family='gemma4'

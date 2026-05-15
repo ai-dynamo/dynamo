@@ -8,6 +8,7 @@ members = [
     "lib/config",
     "lib/tokenizers",
     "lib/tokens",
+    "lib/kv-hashing",
     "lib/mocker",
     "lib/kv-router",
     "lib/memory",
@@ -15,6 +16,7 @@ members = [
     "lib/kvbm-config",
     "lib/kvbm-engine",
     "lib/kvbm-kernels",
+    "lib/kvbm-consolidator",
     "lib/kvbm-logical",
     "lib/kvbm-physical",
     "lib/protocols",
@@ -44,22 +46,26 @@ dynamo-llm = { path = "lib/llm", version = "1.2.1" }
 dynamo-config = { path = "lib/config", version = "1.2.1" }
 dynamo-tokenizers = { path = "lib/tokenizers", version = "1.2.1" }
 dynamo-tokens = { path = "lib/tokens", version = "1.2.1" }
+dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.2.1" }
 dynamo-memory = { path = "lib/memory", version = "1.2.1" }
 dynamo-mocker = { path = "lib/mocker", version = "1.2.1" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.2.1", features = ["metrics", "runtime-protocols"] }
 dynamo-protocols = { path = "lib/protocols", version = "1.2.1" }
 dynamo-parsers = { path = "lib/parsers", version = "1.2.1" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.2.1" }
+
 fastokens = { version = "0.1.0" }
 
 
 # kvbm
 kvbm-common = { path = "lib/kvbm-common", version = "1.2.1" }
 kvbm-config = { path = "lib/kvbm-config", version = "1.2.1" }
+kvbm-consolidator = { path = "lib/kvbm-consolidator", version = "1.2.1" }
 kvbm-engine = { path = "lib/kvbm-engine", version = "1.2.1" }
 kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.2.1" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "1.2.1" }
 kvbm-physical = { path = "lib/kvbm-physical", version = "1.2.1" }
+
 
 # velo
 velo = { version = "0.1.0" }

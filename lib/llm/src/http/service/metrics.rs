@@ -250,6 +250,7 @@ struct MetricsHandlerState {
 }
 
 pub struct Metrics {
+    request_started_counter: IntCounterVec,
     request_counter: IntCounterVec,
     /// Deprecated: use `active_requests_gauge`. Kept for backwards compatibility until Phase 3.
     inflight_gauge: IntGaugeVec,
@@ -497,6 +498,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let request_started_counter = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::REQUESTS_STARTED_TOTAL),
+                "Total number of LLM requests accepted by the frontend handler",
+            ),
+            &["model", "endpoint", "request_type"],
+        )
+        .unwrap();
+
         let inflight_gauge = IntGaugeVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::INFLIGHT_REQUESTS),
@@ -731,6 +741,7 @@ impl Metrics {
         .unwrap();
 
         Metrics {
+            request_started_counter,
             request_counter,
             inflight_gauge,
             active_requests_gauge,
@@ -805,6 +816,18 @@ impl Metrics {
             .inc()
     }
 
+    /// Increment the counter for requests accepted by the frontend handler.
+    fn inc_request_started_counter(
+        &self,
+        model: &str,
+        endpoint: &Endpoint,
+        request_type: &RequestType,
+    ) {
+        self.request_started_counter
+            .with_label_values(&[model, endpoint.as_str(), request_type.as_str()])
+            .inc()
+    }
+
     /// Get the number if inflight requests for the given model
     pub fn get_inflight_count(&self, model: &str) -> i64 {
         self.inflight_gauge.with_label_values(&[model]).get()
@@ -839,6 +862,7 @@ impl Metrics {
     }
 
     pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
+        registry.register(Box::new(self.request_started_counter.clone()))?;
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
         registry.register(Box::new(self.active_requests_gauge.clone()))?;
@@ -1065,6 +1089,7 @@ impl InflightGuard {
     ) -> Self {
         let timer = Instant::now();
         metrics.inc_inflight_gauge(&model);
+        metrics.inc_request_started_counter(&model, &endpoint, &request_type);
 
         tracing::Span::current().record("model", model.as_str());
 
@@ -2320,6 +2345,16 @@ mod tests {
             ])
             .get();
         assert_eq!(counter_value, 1);
+
+        let started_counter_value = metrics
+            .request_started_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Unary.as_str(),
+            ])
+            .get();
+        assert_eq!(started_counter_value, 1);
     }
 
     #[test]

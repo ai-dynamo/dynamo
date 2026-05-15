@@ -1,0 +1,1047 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Generate the parity chart (matrix of cell markers) from the YAML fixtures.
+
+================================================================================
+EXAMPLE OUTPUT (truncated; illustrative, NOT a snapshot of current fixtures
+— run the script for the real chart):
+
+    | model          | parser     | 1 | 2.a | 2.b | 2.c | ... | 9 | 10 |
+    |---|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+    | **Top-N models** |   |   |   |   |   |   |   |   |
+    | Kimi K2.6      | kimi_k2    | = | =   | =   | VS  | ... | = | =  |
+    | gpt-oss        | harmony †  | S | S   | n/a | S?  | ... | = | S  |
+    | **Others** |   |   |   |   |   |   |   |   |
+    | Mistral series | mistral    | S | S   | n/a | VS  | ... | = | S  |
+
+================================================================================
+
+Reads every `tests/parity/parser/fixtures/<family>/PARSER.*.yaml` and emits
+the chart referenced in `tests/parity/README.md`.
+
+Cell markers (per peer, vllm + sglang):
+  =     peer block is `*d_<case>` anchor ref to dynamo (matches)
+  V/S   peer is a concrete inline block AND has `reason:` (intentional —
+        rendered same color as =, since the divergence is accounted for)
+  V?/S? peer is a concrete inline block AND has no `reason:` yet
+        (research-needed; we observed it but haven't classified it)
+  V!/S! peer has `error: <substring>` (expected to crash)
+  VS, V?S, VS!, etc. — combinations
+  n/a   peer marked `unavailable`, or family/case doesn't apply
+
+Footnote markers `†` (no vLLM peer) and `§` (no SGLang peer) are auto-derived
+from `expected.<impl>.unavailable` across each family's cases.
+
+Run:
+    # Markdown chart to stdout
+    python3 tests/parity/parser/generate_parity_chart.py \
+        > tests/parity/parser/PARITY.md
+
+    # HTML chart with clickable YAML links + hover tooltips. Write next
+    # to this script so `<a href="fixtures/<family>/PARSER.batch.N.yaml">`
+    # resolves when opened in a browser.
+    python3 tests/parity/parser/generate_parity_chart.py --html \
+        > tests/parity/parser/PARITY.html
+
+PARITY.{md,html} are for local viewing only; don't check them in.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime
+import html as html_lib
+import json
+import re
+import zoneinfo
+from pathlib import Path
+
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+FIXTURES = REPO_ROOT / "tests/parity/parser/fixtures"
+PARSER_CASES_MD = REPO_ROOT / "lib/parsers/PARSER_CASES.md"
+PYPROJECT_TOML = REPO_ROOT / "pyproject.toml"
+
+RUST_TOOL_CALLING_DIR = REPO_ROOT / "lib/parsers/src/tool_calling"
+
+
+def _peer_versions() -> dict[str, str]:
+    """Extract pinned vllm / sglang versions from pyproject.toml.
+
+    Matches a line like `"vllm[flashinfer,runai,otel]==0.20.1",` (TOML is
+    not parsed — the regex is sufficient and avoids a tomllib import on
+    older Pythons running this script outside a Python 3.11+ env)."""
+    out: dict[str, str] = {}
+    if not PYPROJECT_TOML.exists():
+        return out
+    text = PYPROJECT_TOML.read_text()
+    for name in ("vllm", "sglang"):
+        m = re.search(rf'"{name}(?:\[[^\]]*\])?==([0-9][^"]*)"', text)
+        if m:
+            out[name] = m.group(1)
+    return out
+
+
+def _build_family_to_rust_ref() -> dict[str, tuple[str, int]]:
+    """Scan the Rust source for each family's anchor point.
+
+    Two patterns:
+      `config.rs` :  `pub fn <family>() -> Self`               (parser config ctor)
+      `parsers.rs`:  `map.insert("<family>", ToolCallConfig::...);`  (aliases)
+
+    Config-ctor wins when the same family appears in both (the ctor is
+    the canonical definition; the registration is just plumbing). Aliases
+    (e.g. `nemotron_nano`, `qwen25`) only appear in `parsers.rs`.
+    Returns `{family: (filename, line)}`; line is 1-indexed.
+    """
+    out: dict[str, tuple[str, int]] = {}
+
+    config_rs = RUST_TOOL_CALLING_DIR / "config.rs"
+    if config_rs.exists():
+        pat = re.compile(r"^\s*pub fn (\w+)\(\)\s*->\s*Self\b")
+        for lineno, line in enumerate(config_rs.read_text().splitlines(), 1):
+            m = pat.match(line)
+            if m:
+                out[m.group(1)] = ("config.rs", lineno)
+
+    parsers_rs = RUST_TOOL_CALLING_DIR / "parsers.rs"
+    if parsers_rs.exists():
+        pat = re.compile(r'^\s*map\.insert\("([^"]+)",\s*ToolCallConfig::')
+        for lineno, line in enumerate(parsers_rs.read_text().splitlines(), 1):
+            m = pat.match(line)
+            if m and m.group(1) not in out:
+                out[m.group(1)] = ("parsers.rs", lineno)
+
+    return out
+
+
+# Curated featured-model order. The only hand-maintained list left in the
+# script: it picks WHICH families lead the chart and IN WHAT ORDER. The
+# human-readable label for each (e.g. "DeepSeek V4") is sourced from the
+# fixture YAML's `model_label:` field, so the label travels with the
+# family definition, not with this script.
+#
+# Source of truth: the Top-8 models in DIS-1839's Medium Term Plan,
+# mirrored in DIS-1842 ("Top-N model unit-test coverage matrix") under
+# its "Top 8 models → parser mapping" table. When DIS-1842 changes, this
+# list and the corresponding `model_label:` fields under
+# `fixtures/<family>/PARSER.batch.yaml` must be updated together.
+# Alphabetical-by-family-id within the list (matches DIS-1842's chart
+# row order).
+TOP_N_FAMILIES = [
+    "deepseek_v4",
+    "gemma4",
+    "glm47",
+    "harmony",
+    "kimi_k2",
+    "minimax_m2",
+    "nemotron_deci",
+    "qwen3_coder",
+]
+
+
+def _sub_sort_key(sub: str) -> tuple[int, str]:
+    """`8.a` → (8, 'a'); `9` → (9, '')."""
+    parts = sub.split(".")
+    return (int(parts[0]), parts[1] if len(parts) > 1 else "")
+
+
+def _discover_sub_cases(cases: dict) -> list[str]:
+    """Union of sub-case IDs across all loaded fixtures, in stable order."""
+    return sorted({sub for _fam, sub in cases.keys()}, key=_sub_sort_key)
+
+
+def _derive_no_peer_sets(cases: dict) -> tuple[set[str], set[str]]:
+    """Families where every case marks the engine `unavailable`.
+
+    Used to render the † (no vLLM peer) and § (no SGLang peer) footnote
+    markers next to a family's name. A family qualifies when every case
+    in every fixture file under that family has
+    `expected.<impl>.unavailable: <reason>` recorded — i.e. the wrapper
+    rejected the family for that parser in `capture_parser_outputs.py`.
+    """
+    by_family: dict[str, list[dict]] = {}
+    for (fam, _sub), case in cases.items():
+        by_family.setdefault(fam, []).append(case)
+
+    def all_unavail(fam_cases: list[dict], impl: str) -> bool:
+        for c in fam_cases:
+            block = c.get("expected", {}).get(impl)
+            if not isinstance(block, dict) or "unavailable" not in block:
+                return False
+        return True
+
+    no_vllm = {fam for fam, cs in by_family.items() if all_unavail(cs, "vllm")}
+    no_sglang = {fam for fam, cs in by_family.items() if all_unavail(cs, "sglang")}
+    return no_vllm, no_sglang
+
+
+def family_suffix(fam: str, no_vllm: set[str], no_sglang: set[str]) -> str:
+    suff = ""
+    if fam in no_vllm:
+        suff += " †"
+    if fam in no_sglang:
+        suff += " §"
+    return suff
+
+
+def load_all_cases() -> tuple[dict[tuple[str, str], dict], dict[str, str]]:
+    """Load every fixture YAML.
+
+    Returns `(cases, labels)`:
+      cases  — `{(family, sub_case_id): case_data}`; each case dict gets
+               `__fixture_path` (relative to this script) and `__case_id`
+               annotations for the HTML renderer.
+      labels — `{family: model_label}` collected from the fixtures' doc-level
+               `model_label:` field. Falls back to the family ID if a fixture
+               doesn't declare one.
+    """
+    cases: dict[tuple[str, str], dict] = {}
+    labels: dict[str, str] = {}
+    script_dir = Path(__file__).resolve().parent
+    for fp in sorted(FIXTURES.glob("*/PARSER.*.yaml")):
+        doc = yaml.safe_load(fp.read_text())
+        family = doc["family"]
+        rel = str(fp.relative_to(script_dir))
+        if "model_label" in doc:
+            labels.setdefault(family, doc["model_label"])
+        for cid, case in doc["cases"].items():
+            sub = cid.replace("PARSER.batch.", "")
+            case["__fixture_path"] = rel
+            case["__case_id"] = cid
+            cases[(family, sub)] = case
+    return cases, labels
+
+
+def _build_display_groups(
+    cases: dict, labels: dict[str, str]
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Return `(top_n, others)` as `[(label, family), ...]` lists.
+
+    Top-N: families listed in `TOP_N_FAMILIES`, in that exact order.
+    Others: every YAML-discovered family not in TOP_N, sorted by label.
+    Missing labels fall back to the family ID.
+    """
+    families = {fam for fam, _ in cases.keys()}
+
+    def label_of(fam: str) -> str:
+        return labels.get(fam, fam)
+
+    top_n = [(label_of(f), f) for f in TOP_N_FAMILIES if f in families]
+    other_fams = sorted(
+        families - set(TOP_N_FAMILIES), key=lambda f: label_of(f).lower()
+    )
+    others = [(label_of(f), f) for f in other_fams]
+    return top_n, others
+
+
+def peer_status(case: dict, dyn: dict, impl: str) -> tuple[str, bool]:
+    """Returns (kind, is_unknown).
+
+    kind:
+      'na'      — peer key missing from `expected:` (block not recorded)
+      'match'   — peer is anchor ref to dynamo, or value-equal to dynamo
+      'unavail' — peer block is `{unavailable: <msg>}`
+      'err'     — peer block is `{error: <substring>}`
+      'div'     — peer block is a concrete divergent {calls, normal_text}
+    is_unknown is True iff kind == 'div' AND block has no `reason:`.
+    """
+    block = case.get("expected", {}).get(impl)
+    if block is None:
+        return ("na", False)
+    if block is dyn:
+        return ("match", False)
+    if not isinstance(block, dict):
+        return ("na", False)
+    if "unavailable" in block:
+        return ("unavail", False)
+    if "error" in block:
+        return ("err", False)
+    if "calls" in block or "normal_text" in block:
+        # Value-equal to dynamo (non-anchor)? Treat as match.
+        n_block = {
+            "calls": block.get("calls") or [],
+            "normal_text": block.get("normal_text") or "",
+        }
+        n_dyn = {
+            "calls": dyn.get("calls") or [],
+            "normal_text": dyn.get("normal_text") or "",
+        }
+        if n_block == n_dyn:
+            return ("match", False)
+        return ("div", "reason" not in block)
+    return ("na", False)
+
+
+def cell_for(case: dict | None) -> str:
+    if case is None:
+        return "n/a"
+    dyn = case.get("expected", {}).get("dynamo")
+    if not isinstance(dyn, dict):
+        return "n/a"
+    v_kind, v_unknown = peer_status(case, dyn, "vllm")
+    s_kind, s_unknown = peer_status(case, dyn, "sglang")
+
+    parts: list[str] = []
+    if v_kind == "div":
+        parts.append("V?" if v_unknown else "V")
+    elif v_kind == "err":
+        parts.append("V!")
+    if s_kind == "div":
+        parts.append("S?" if s_unknown else "S")
+    elif s_kind == "err":
+        parts.append("S!")
+
+    if parts:
+        return "".join(parts)
+    if v_kind == "unavail" and s_kind == "unavail":
+        return "n/a"
+    return "="
+
+
+def render_row(
+    model: str,
+    family: str,
+    cases: dict,
+    sub_cases: list[str],
+    no_vllm: set[str],
+    no_sglang: set[str],
+) -> str:
+    cells = [cell_for(cases.get((family, sub))) for sub in sub_cases]
+    suff = family_suffix(family, no_vllm, no_sglang)
+    return f"| {model} | {family}{suff} | " + " | ".join(cells) + " |"
+
+
+_LEGEND_MD = (
+    "**Legend:** "
+    "`=` full parity (Dynamo, vLLM, and SGLang produce the same results) · "
+    "`V`/`S` divergence (V = vLLM, S = SGLang; intentional, has `reason:`) · "
+    "`?` research-needed suffix (e.g. V?, S? — diverges with no `reason:` yet) · "
+    "`!` expected-error suffix (e.g. V!, S! — engine crashes by design) · "
+    "`n/a` not applicable · "
+    "`†` (parser column) = no vLLM peer parser for this family · "
+    "`§` (parser column) = no SGLang peer parser for this family."
+)
+
+
+def render_markdown(
+    cases: dict,
+    sub_cases: list[str],
+    no_vllm: set[str],
+    no_sglang: set[str],
+    top_n: list[tuple[str, str]],
+    others: list[tuple[str, str]],
+) -> str:
+    header = "| model | parser | " + " | ".join(sub_cases) + " |"
+    sep = "|---|---|" + ":-:|" * len(sub_cases)
+    lines = [header, sep]
+    lines.append("| **Top-N models** |   |" + "   |" * len(sub_cases))
+    for model, fam in top_n:
+        lines.append(render_row(model, fam, cases, sub_cases, no_vllm, no_sglang))
+    lines.append("| **Others** |   |" + "   |" * len(sub_cases))
+    for model, fam in others:
+        lines.append(render_row(model, fam, cases, sub_cases, no_vllm, no_sglang))
+    lines.append("")
+    lines.append(_LEGEND_MD)
+    return "\n".join(lines)
+
+
+_IMPL_DISPLAY = {"dynamo": "Dynamo", "vllm": "vLLM", "sglang": "SGLang"}
+
+
+def _format_output_block_html(block) -> str:
+    """HTML rendering of an `expected.<impl>` block for tooltips.
+    Applies _colorize_xml to `normal_text` so raw model output the engine
+    failed to parse shows the same tag coloring as the input."""
+    if not isinstance(block, dict):
+        return html_lib.escape("(no expectation)")
+    if block.get("unavailable"):
+        return html_lib.escape("(unavailable)")
+    if "error" in block:
+        return html_lib.escape(f"error matching {block['error']!r}")
+    nt = block.get("normal_text", "") or ""
+    calls = block.get("calls") or []
+    if calls:
+        rendered = ", ".join(
+            f"{c.get('name', '?')}({json.dumps(c.get('arguments', {}), ensure_ascii=False)})"
+            for c in calls
+        )
+        calls_line = html_lib.escape(f"calls=[{rendered}]")
+    else:
+        calls_line = "calls=[]"
+    nt_line = f"normal_text='{_colorize_xml(nt)}'"
+    return f"{nt_line}\n{calls_line}"
+
+
+# Matches both `<...>` and the Mistral-style `[NAME]`/`[/NAME]` form.
+# Brackets only match ALL-CAPS-underscore names so JSON arrays
+# (e.g. `[{...}]`, `[1, 2]`) don't get false-matched as tags.
+_TAG_RE = re.compile(r"<[^<>]+>|\[/?[A-Z][A-Z0-9_]*\]")
+
+# Two coloring schemes share one cycling palette:
+#   * Paired open/close: every matched pair gets a *fresh* palette index, so
+#     two `<tool_call>...</tool_call>` instances in the same input render as
+#     two different colors.
+#   * Singletons (e.g. harmony's `<|channel|>` section markers): stable
+#     by-role color so all `<|channel|>` tokens share one class everywhere.
+_PAIRED_PALETTE_SIZE = 8
+_color_seq = 0
+_singleton_classes: dict[str, str] = {}
+
+
+def _next_color_class() -> str:
+    global _color_seq
+    cls = f"tt-c{_color_seq % _PAIRED_PALETTE_SIZE}"
+    _color_seq += 1
+    return cls
+
+
+def _singleton_class_for(name: str) -> str:
+    cls = _singleton_classes.get(name)
+    if cls is None:
+        cls = _next_color_class()
+        _singleton_classes[name] = cls
+    return cls
+
+
+_PIPES = ("|", "｜")  # ASCII and FULLWIDTH VERTICAL LINE (U+FF5C)
+_BEGIN_SUFFIXES = (
+    "_begin",
+    "▁begin",
+)  # ASCII underscore and LOWER ONE EIGHTH BLOCK (U+2581)
+_END_SUFFIXES = ("_end", "▁end")
+
+# Harmony (gpt-oss) tokens are linear state-machine delimiters. Turn-boundary
+# tokens form pseudo-pairs: `<|start|>` opens a turn; `<|end|>`, `<|return|>`,
+# or `<|call|>` closes it. Each closer flavor gets its own paired color so a
+# tool-call turn (start→call) is visually distinct from a normal turn (start→end)
+# or a final turn (start→return). Section markers stay as same-colored singletons.
+_HARMONY_TURN_OPEN = "start"
+_HARMONY_TURN_CLOSE = frozenset({"end", "return", "call"})
+_HARMONY_SECTION_MARKERS = frozenset({"channel", "constrain", "message"})
+
+
+def _strip_suffix(s: str, suffixes: tuple[str, ...]) -> str | None:
+    for suf in suffixes:
+        if s.endswith(suf) and len(s) > len(suf):
+            return s[: -len(suf)]
+    return None
+
+
+def _tag_kind_and_name(inner: str) -> tuple[str | None, str, str | None]:
+    """Classify `<...>` tag inner text into an open/close/singleton kind.
+
+    Returns (kind, pair_id, color_override):
+      * kind: 'open' | 'close' | 'singleton' | None
+      * pair_id: name used to match open against close on the stack
+      * color_override: when set, the paired span uses this name for the
+        color class instead of pair_id (lets `<|start|>...<|call|>` color
+        differently from `<|start|>...<|end|>` despite sharing pair_id).
+    """
+
+    def _name_of(s: str) -> str:
+        # Split on whitespace, slash, `>`, OR `=` so that
+        # `<function=book_flight>` pairs with `</function>` and
+        # `<parameter=destination>` pairs with `</parameter>`.
+        if not s:
+            return ""
+        return re.split(r"[\s/>=]", s, 1)[0].rstrip("|")
+
+    if inner.startswith("/"):
+        return ("close", _name_of(inner[1:]), None)
+    starts_pipe = inner[:1] in _PIPES
+    ends_pipe = inner[-1:] in _PIPES
+    if starts_pipe and ends_pipe and len(inner) >= 2:
+        middle = inner[1:-1]
+        stripped = _strip_suffix(middle, _BEGIN_SUFFIXES)
+        if stripped is not None:
+            return ("open", stripped, None)
+        stripped = _strip_suffix(middle, _END_SUFFIXES)
+        if stripped is not None:
+            return ("close", stripped, None)
+        if middle == _HARMONY_TURN_OPEN:
+            return ("open", "__harmony_turn", None)
+        if middle in _HARMONY_TURN_CLOSE:
+            # Color the pair by which closer flavor was used.
+            return ("close", "__harmony_turn", f"__harmony_pair_{middle}")
+        if middle in _HARMONY_SECTION_MARKERS:
+            return ("singleton", "__harmony_section", None)
+        return (None, "", None)
+    if starts_pipe and inner[:1] == "|":
+        return ("open", _name_of(inner[1:]), None)
+    if ends_pipe and inner[-1:] == "|":
+        return ("close", _name_of(inner[:-1]), None)
+    return ("open", _name_of(inner), None)
+
+
+def _colorize_xml(text: str) -> str:
+    """HTML-escape `text` and wrap each `<...>` token in a span.
+    Paired open/close (stack match by tag name) → class 'tt-paired'.
+    Unmatched close, or open that never closes → class 'tt-orphan'.
+
+    Pairs standard XML (`<X>...</X>`) AND alt pipe-marker conventions:
+      `<|X>...<X|>`          (boundary ASCII pipes)
+      `<|X_begin|>...<|X_end|>`  (both-side pipes with _begin/_end suffix)
+    Lenient pop-through: a close looks down the stack for the nearest
+    name-match; anything un-closed above it is marked orphan. Lets
+    no-close singletons (e.g. `<|tool_call_argument_begin|>`) localize
+    their orphan-ness without poisoning the surrounding pairs.
+    """
+    pieces: list[str] = []
+    stack: list[tuple[str, int]] = []
+    last = 0
+    for m in _TAG_RE.finditer(text):
+        if m.start() > last:
+            pieces.append(html_lib.escape(text[last : m.start()]))
+        tok = m.group(0)
+        kind, pair_id, color_override = _tag_kind_and_name(tok[1:-1])
+        esc = html_lib.escape(tok)
+        if kind is None:
+            pieces.append(f'<span class="tt-orphan">{esc}</span>')
+        elif kind == "singleton":
+            cls = _singleton_class_for(pair_id)
+            pieces.append(f'<span class="{cls}">{esc}</span>')
+        elif kind == "close":
+            match_at = -1
+            for i in range(len(stack) - 1, -1, -1):
+                if stack[i][0] == pair_id:
+                    match_at = i
+                    break
+            if match_at >= 0:
+                for _, unmatched_idx in stack[match_at + 1 :]:
+                    pieces[
+                        unmatched_idx
+                    ] = f'<span class="tt-orphan">{pieces[unmatched_idx]}</span>'
+                open_idx = stack[match_at][1]
+                # Per-instance color: every matched pair gets a fresh palette
+                # index, so two `<tool_call>...</tool_call>` (or two
+                # `<|start|>...<|call|>`) blocks in the same input render as
+                # different colors. (color_override unused on the paired
+                # path — kept on the singleton-flavor branch only.)
+                _ = color_override
+                cls = _next_color_class()
+                pieces[open_idx] = f'<span class="{cls}">{pieces[open_idx]}</span>'
+                pieces.append(f'<span class="{cls}">{esc}</span>')
+                del stack[match_at:]
+            else:
+                pieces.append(f'<span class="tt-orphan">{esc}</span>')
+        else:
+            pieces.append(esc)
+            stack.append((pair_id, len(pieces) - 1))
+        last = m.end()
+    for _, idx in stack:
+        pieces[idx] = f'<span class="tt-orphan">{pieces[idx]}</span>'
+    if last < len(text):
+        pieces.append(html_lib.escape(text[last:]))
+    return "".join(pieces)
+
+
+def _build_tooltip_html(case: dict, dyn) -> str:
+    """Rich HTML hover tooltip: head, input (colorized), per-engine output,
+    divergence reasons. Returns the full `<div class="ttip">...</div>`."""
+    case_id = case.get("__case_id", "")
+    desc = case.get("description") or ""
+    head = f"{case_id} — {desc}" if (case_id and desc) else (case_id or desc)
+
+    parts: list[str] = ['<div class="ttip">']
+    if head:
+        parts.append(f'<div class="ttip-head">{html_lib.escape(head)}</div>')
+
+    model_text = case.get("model_text")
+    if isinstance(model_text, str) and model_text:
+        parts.append('<div class="ttip-section">Input:</div>')
+        parts.append(f'<pre class="ttip-pre">{_colorize_xml(model_text)}</pre>')
+
+    expected = case.get("expected") or {}
+
+    def _norm(b):
+        return {
+            "calls": b.get("calls") or [],
+            "normal_text": b.get("normal_text") or "",
+        }
+
+    n_dyn = _norm(dyn) if isinstance(dyn, dict) else None
+    all_parity = isinstance(dyn, dict) and all(
+        isinstance(expected.get(i), dict)
+        and not expected[i].get("unavailable")
+        and "error" not in expected[i]
+        and _norm(expected[i]) == n_dyn
+        for i in ("dynamo", "vllm", "sglang")
+    )
+
+    if all_parity:
+        parts.append('<div class="ttip-section">All engines parity:</div>')
+        parts.append(f'<pre class="ttip-pre">{_format_output_block_html(dyn)}</pre>')
+    else:
+        for impl in ("dynamo", "vllm", "sglang"):
+            block = expected.get(impl)
+            parts.append(f'<div class="ttip-section">{_IMPL_DISPLAY[impl]}:</div>')
+            parts.append(
+                f'<pre class="ttip-pre">{_format_output_block_html(block)}</pre>'
+            )
+
+    reasons = _tooltip_for(case, dyn) if isinstance(dyn, dict) else ""
+    if reasons:
+        parts.append('<div class="ttip-section">Divergence:</div>')
+        parts.append(f'<pre class="ttip-pre">{html_lib.escape(reasons)}</pre>')
+
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _tooltip_for(case: dict, dyn: dict) -> str:
+    """Build the hover-tooltip text for a divergent cell.
+
+    Each non-matching, non-unavailable peer contributes one line:
+      vllm: <reason>                        # `reason:` field present
+      vllm: UNKNOWN — divergent ...         # divergent, no reason
+      vllm: expected error matching '...'   # `error:` field present
+    """
+    parts: list[str] = []
+    n_dyn = {
+        "calls": dyn.get("calls") or [],
+        "normal_text": dyn.get("normal_text") or "",
+    }
+    for impl in ("vllm", "sglang"):
+        block = case.get("expected", {}).get(impl)
+        if not isinstance(block, dict) or block is dyn:
+            continue
+        if "unavailable" in block:
+            continue
+        name = _IMPL_DISPLAY.get(impl, impl)
+        if "error" in block:
+            parts.append(
+                f"Divergent {name}: expected error matching {block['error']!r}"
+            )
+            continue
+        # Don't rely on PyYAML preserving anchor identity (the `block is dyn`
+        # check above is the fast path; value equality is the safety net).
+        n_block = {
+            "calls": block.get("calls") or [],
+            "normal_text": block.get("normal_text") or "",
+        }
+        if n_block == n_dyn:
+            continue
+        if "reason" in block:
+            parts.append(f"Divergent reason ({name}): {block['reason']}")
+        elif "calls" in block or "normal_text" in block:
+            parts.append(f"Divergent {name}: research-needed (no `reason:` field yet)")
+    return "\n".join(parts)
+
+
+def _cell_class(text: str) -> str:
+    if text == "n/a":
+        return "na"
+    if "!" in text:
+        return "err"
+    if "?" in text:
+        return "research"
+    # = and intentional-divergence cells (V, S, VS) share the "ok" class:
+    # a documented `reason:` means the divergence is accounted for.
+    return "ok"
+
+
+def render_cell_html(case: dict | None) -> str:
+    text = cell_for(case)
+    cls = _cell_class(text)
+    if case is None:
+        return f'<td class="cell {cls}">{text}</td>'
+
+    dyn = case.get("expected", {}).get("dynamo")
+    if not isinstance(dyn, dict):
+        return f'<td class="cell {cls}">{text}</td>'
+
+    fp = case.get("__fixture_path", "")
+    # Case id + description live in the rich CSS tooltip head — don't also
+    # set `title=` on the link, or browsers stack a native tooltip on top.
+    ttip = _build_tooltip_html(case, dyn)
+    if not fp:
+        return f'<td class="cell {cls}">{text}{ttip}</td>'
+    href = html_lib.escape(fp)
+    return f'<td class="cell {cls}"><a href="{href}">{text}</a>{ttip}</td>'
+
+
+def _parser_cell_html(
+    family: str,
+    refs: dict[str, tuple[str, int]],
+    no_vllm: set[str],
+    no_sglang: set[str],
+) -> str:
+    label = html_lib.escape(family + family_suffix(family, no_vllm, no_sglang))
+    ref = refs.get(family)
+    if ref is None:
+        return f'<td class="parser">{label}</td>'
+    fname, line = ref
+    href = f"../../../lib/parsers/src/tool_calling/{fname}"
+    title = html_lib.escape(f"→ {fname}:{line} (pub fn {family} / alias registration)")
+    return f'<td class="parser"><a href="{href}" title="{title}">{label}</a></td>'
+
+
+def render_row_html(
+    model: str,
+    family: str,
+    cases: dict,
+    sub_cases: list[str],
+    refs: dict[str, tuple[str, int]],
+    no_vllm: set[str],
+    no_sglang: set[str],
+) -> str:
+    cells = "".join(render_cell_html(cases.get((family, sub))) for sub in sub_cases)
+    return (
+        f'<tr><td class="model">{html_lib.escape(model)}</td>'
+        f"{_parser_cell_html(family, refs, no_vllm, no_sglang)}"
+        f"{cells}</tr>"
+    )
+
+
+def _parse_subcase_descriptions() -> dict[str, str]:
+    """Parse `lib/parsers/PARSER_CASES.md` for per-case descriptions.
+
+    The Quick-reference section has one-liner bullets for top-level cases
+    (`PARSER.batch.1` … `PARSER.batch.10`); the deeper per-case sections
+    contain multi-line bullets for sub-cases (`2.a`, `4.c`, etc.). Both
+    look like `- **`PARSER.batch.X`** <desc>`, where the bullet body may
+    wrap across indented continuation lines. Returns
+    `{"1": "...", "2.a": "...", ...}`.
+    """
+    if not PARSER_CASES_MD.exists():
+        return {}
+    pat = re.compile(r"\*\*`PARSER\.batch\.([0-9]+(?:\.[a-z])?)`\*\*\s+(.+)")
+    out: dict[str, str] = {}
+    lines = PARSER_CASES_MD.read_text(encoding="utf-8").splitlines()
+    i = 0
+    while i < len(lines):
+        m = pat.search(lines[i])
+        if not m:
+            i += 1
+            continue
+        sub = m.group(1)
+        body_parts = [m.group(2).strip()]
+        # Join indented continuation lines until blank / next bullet / unindented.
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j]
+            if not nxt.strip():
+                break
+            if not nxt.startswith(" "):
+                break
+            if pat.search(nxt):
+                break
+            body_parts.append(nxt.strip())
+            j += 1
+        desc = " ".join(body_parts).rstrip(".")
+        out.setdefault(sub, desc)
+        i = j
+    return out
+
+
+def _subcase_header_html(sub: str, descriptions: dict[str, str]) -> str:
+    desc = descriptions.get(sub) or descriptions.get(sub.split(".")[0]) or ""
+    href = "../../../lib/parsers/PARSER_CASES.md"
+    title = html_lib.escape(desc) if desc else ""
+    return f'<th><a href="{href}" title="{title}">{html_lib.escape(sub)}</a></th>'
+
+
+def _glossary_html(descriptions: dict[str, str], sub_cases: list[str]) -> str:
+    if not descriptions:
+        return ""
+    rows = []
+    for sub in sub_cases:
+        desc = descriptions.get(sub) or descriptions.get(sub.split(".")[0]) or ""
+        rows.append(
+            f'<tr><td class="sub">PARSER.batch.{html_lib.escape(sub)}</td>'
+            f"<td>{html_lib.escape(desc)}</td></tr>"
+        )
+    return (
+        '<h2 id="case-descriptions">Case descriptions</h2>\n'
+        "<p>Source of truth: "
+        '<a href="../../../lib/parsers/PARSER_CASES.md">'
+        "lib/parsers/PARSER_CASES.md</a>.</p>\n"
+        '<table class="glossary"><tbody>' + "".join(rows) + "</tbody></table>"
+    )
+
+
+_HTML_STYLE = """
+body { font-family: -apple-system, system-ui, sans-serif; margin: 1.5em; }
+table { border-collapse: collapse; font-family: ui-monospace, monospace; font-size: 13px; }
+th, td { border: 1px solid #ccc; padding: 3px 7px; }
+th { background: #f5f5f5; }
+th a { color: inherit; text-decoration: none; }
+th a:hover { background: #ffd; }
+td.model, td.parser { white-space: nowrap; }
+td.parser a { color: inherit; text-decoration: none; }
+td.parser a:hover { background: #ffd; }
+td.cell { text-align: center; min-width: 24px; }
+td.cell.ok       { color: #0a7d2c; }
+td.cell.research { color: #c63;    font-weight: bold; }
+td.cell.err      { color: #b00;    font-weight: bold; }
+td.cell.na       { color: #aaa; }
+td.cell a { color: inherit; text-decoration: none; display: block; }
+td.cell a:hover { background: #ffd; }
+tr.section td { background: #eef; font-weight: bold; text-align: left; }
+.legend span { font-family: ui-monospace, monospace; }
+.stats { font-size: 13px; margin-top: 0.4em; }
+.stats span { font-family: ui-monospace, monospace; font-weight: bold; }
+.generated { color: #888; font-size: 12px; margin-top: -0.5em; }
+.versions { color: #555; font-size: 12px; margin-top: 0.2em; }
+table.glossary { margin-top: 0.5em; }
+table.glossary td.sub { white-space: nowrap; font-weight: bold; }
+
+/* CSS hover tooltip on cells (replaces native title= for cells).
+ * 500ms delay on appear; instant disappear when the cursor leaves. */
+td.cell { position: relative; }
+.ttip {
+    visibility: hidden;
+    opacity: 0;
+    position: absolute;
+    left: 0;
+    top: 100%;
+    z-index: 100;
+    background: #1f2937;
+    color: #e5e7eb;
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    line-height: 1.4;
+    max-width: 80vw;
+    min-width: 280px;
+    width: max-content;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+    text-align: left;
+    pointer-events: none;
+    white-space: normal;
+}
+td.cell:hover .ttip {
+    visibility: visible;
+    opacity: 1;
+    transition: opacity 0s 500ms, visibility 0s 500ms;
+}
+.ttip-head { font-weight: bold; margin-bottom: 4px; color: #fbbf24; }
+.ttip-section { font-weight: bold; margin-top: 6px; color: #93c5fd; }
+.ttip-pre { margin: 2px 0 0 0; white-space: pre-wrap; word-break: break-word; font-family: inherit; color: #e5e7eb; }
+/* Paired-tag palette: each distinct tag name gets a unique color (cycles
+ * if more names than colors). Orphans get the red-background treatment. */
+.tt-c0 { color: #34d399; }
+.tt-c1 { color: #60a5fa; }
+.tt-c2 { color: #fbbf24; }
+.tt-c3 { color: #f472b6; }
+.tt-c4 { color: #a78bfa; }
+.tt-c5 { color: #fb923c; }
+.tt-c6 { color: #22d3ee; }
+.tt-c7 { color: #f87171; }
+.tt-orphan { background: #7f1d1d; color: #fecaca; padding: 0 2px; border-radius: 2px; }
+"""
+
+# Clamps `.ttip` into the viewport on hover. Pure CSS can't know each
+# cell's screen position, so we shift the tooltip's `left` (and flip it
+# above the cell if it would overflow the bottom) on mouseenter.
+_HTML_SCRIPT = r"""
+(function () {
+  const margin = 8;
+  function place(cell) {
+    const ttip = cell.querySelector('.ttip');
+    if (!ttip) return;
+    ttip.style.left = '0px';
+    ttip.style.top = '100%';
+    ttip.style.right = 'auto';
+    ttip.style.bottom = 'auto';
+    ttip.style.maxWidth = (window.innerWidth - 2 * margin) + 'px';
+    const cellRect = cell.getBoundingClientRect();
+    const tipRect = ttip.getBoundingClientRect();
+    const vw = window.innerWidth, vh = window.innerHeight;
+    let shiftX = 0;
+    const overflowRight = (cellRect.left + tipRect.width) - (vw - margin);
+    if (overflowRight > 0) shiftX = -overflowRight;
+    const absLeft = cellRect.left + shiftX;
+    if (absLeft < margin) shiftX += (margin - absLeft);
+    ttip.style.left = shiftX + 'px';
+    if (cellRect.bottom + tipRect.height > vh - margin
+        && cellRect.top - tipRect.height > margin) {
+      ttip.style.top = 'auto';
+      ttip.style.bottom = '100%';
+    }
+  }
+  document.querySelectorAll('td.cell').forEach(function (cell) {
+    cell.addEventListener('mouseenter', function () { place(cell); });
+  });
+})();
+"""
+
+_LEGEND_HTML = (
+    '<p class="legend">'
+    "<strong>Legend:</strong> "
+    '<span style="color:#0a7d2c">=</span> full parity '
+    "(Dynamo, vLLM, and SGLang produce the same results) · "
+    '<span style="color:#0a7d2c">V/S</span> divergence '
+    "(V = vLLM, S = SGLang; intentional, has <code>reason:</code>) · "
+    '<span style="color:#c63">?</span> research-needed suffix '
+    "(e.g. V?, S? — diverges with no <code>reason:</code> yet) · "
+    '<span style="color:#b00">!</span> expected-error suffix '
+    "(e.g. V!, S! — engine crashes by design) · "
+    '<span style="color:#aaa">n/a</span> not applicable · '
+    "<strong>†</strong> (parser column) = no vLLM peer parser for this family "
+    "(every case is <code>expected.vllm.unavailable</code>) · "
+    "<strong>§</strong> (parser column) = no SGLang peer parser for this family."
+    "</p>"
+)
+
+
+def _compute_stats(
+    cases: dict, sub_cases: list[str], families: list[str]
+) -> dict[str, int]:
+    """Aggregate cell outcomes across the (family × sub_case) grid."""
+    s = {
+        "families": len(families),
+        "sub_cases": len(sub_cases),
+        "slots": len(families) * len(sub_cases),
+        "real": 0,
+        "parity": 0,
+        "documented": 0,
+        "research": 0,
+        "errors": 0,
+        "na": 0,
+    }
+    for fam in families:
+        for sub in sub_cases:
+            case = cases.get((fam, sub))
+            text = cell_for(case)
+            if case is None or text == "n/a":
+                s["na"] += 1
+                continue
+            s["real"] += 1
+            if text == "=":
+                s["parity"] += 1
+            elif "!" in text:
+                s["errors"] += 1
+            elif "?" in text:
+                s["research"] += 1
+            else:
+                s["documented"] += 1
+    return s
+
+
+def _stats_html(s: dict[str, int]) -> str:
+    return (
+        '<p class="stats">'
+        f"Stats: {s['families']} families × {s['sub_cases']} sub-cases "
+        f"= {s['slots']} grid slots ({s['na']} n/a). "
+        f"<strong>{s['real']}</strong> real cases: "
+        f'<span style="color:#0a7d2c">{s["parity"]} full parity</span> · '
+        f'<span style="color:#0a7d2c">{s["documented"]} documented divergences</span> '
+        "(have <code>reason:</code>) · "
+        f'<span style="color:#c63">{s["research"]} research-needed</span> '
+        "(no <code>reason:</code> yet) · "
+        f'<span style="color:#b00">{s["errors"]} expected-errors</span>.'
+        "</p>"
+    )
+
+
+def render_html(
+    cases: dict,
+    sub_cases: list[str],
+    no_vllm: set[str],
+    no_sglang: set[str],
+    top_n: list[tuple[str, str]],
+    others: list[tuple[str, str]],
+) -> str:
+    descriptions = _parse_subcase_descriptions()
+    refs = _build_family_to_rust_ref()
+
+    fixed_headers = "".join(
+        f"<th>{html_lib.escape(h)}</th>" for h in ("model", "parser")
+    )
+    sub_headers = "".join(_subcase_header_html(sub, descriptions) for sub in sub_cases)
+    n_cols = 2 + len(sub_cases)
+
+    body_rows: list[str] = [
+        f'<tr class="section"><td colspan="{n_cols}">Top-N models</td></tr>'
+    ]
+    for model, fam in top_n:
+        body_rows.append(
+            render_row_html(model, fam, cases, sub_cases, refs, no_vllm, no_sglang)
+        )
+    body_rows.append(f'<tr class="section"><td colspan="{n_cols}">Others</td></tr>')
+    for model, fam in others:
+        body_rows.append(
+            render_row_html(model, fam, cases, sub_cases, refs, no_vllm, no_sglang)
+        )
+
+    all_families = [fam for _, fam in top_n] + [fam for _, fam in others]
+    stats = _compute_stats(cases, sub_cases, all_families)
+
+    table_html = (
+        "<table>"
+        f"<thead><tr>{fixed_headers}{sub_headers}</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody>"
+        "</table>"
+    )
+
+    now = datetime.datetime.now(zoneinfo.ZoneInfo("America/Los_Angeles"))
+    stamp = now.strftime("%Y-%m-%d %H:%M %Z")
+
+    versions = _peer_versions()
+    if versions:
+        peer_bits = " · ".join(
+            f"{name} <code>{html_lib.escape(versions[name])}</code>"
+            for name in ("vllm", "sglang")
+            if name in versions
+        )
+        versions_html = (
+            f'<p class="versions">Peer parser versions pinned in '
+            f'<a href="../../../pyproject.toml">pyproject.toml</a>: '
+            f"{peer_bits}.</p>\n"
+        )
+    else:
+        versions_html = ""
+
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n'
+        '<head><meta charset="utf-8"><title>Dynamo parser parity chart</title>'
+        f"<style>{_HTML_STYLE}</style></head>\n"
+        "<body>\n"
+        "<h1>Dynamo parser parity chart</h1>\n"
+        f'<p class="generated">Auto-generated on {html_lib.escape(stamp)} '
+        f"from <code>tests/parity/parser/fixtures/**/PARSER.*.yaml</code>: "
+        f"<code>python3 tests/parity/parser/generate_parity_chart.py --html "
+        f"&gt; tests/parity/parser/PARITY.html</code></p>\n"
+        "<p>Parser column links to the family's Rust config / parser. "
+        "Sub-case column headers link to "
+        '<a href="../../../lib/parsers/PARSER_CASES.md">PARSER_CASES.md</a> '
+        "(hover for the one-line description). Cells link to the source "
+        "fixture YAML; hover a non-= cell for the case description and "
+        "the divergence reason.</p>\n"
+        f"{table_html}\n"
+        f"{_LEGEND_HTML}\n"
+        f"{versions_html}"
+        f"{_stats_html(stats)}\n"
+        f"{_glossary_html(descriptions, sub_cases)}\n"
+        f"<script>{_HTML_SCRIPT}</script>\n"
+        "</body></html>\n"
+    )
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    p.add_argument(
+        "--html",
+        action="store_true",
+        help="Emit HTML (clickable + tooltips) instead of Markdown.",
+    )
+    args = p.parse_args()
+
+    cases, labels = load_all_cases()
+    sub_cases = _discover_sub_cases(cases)
+    no_vllm, no_sglang = _derive_no_peer_sets(cases)
+    top_n, others = _build_display_groups(cases, labels)
+    if args.html:
+        print(render_html(cases, sub_cases, no_vllm, no_sglang, top_n, others))
+    else:
+        print(render_markdown(cases, sub_cases, no_vllm, no_sglang, top_n, others))
+
+
+if __name__ == "__main__":
+    main()

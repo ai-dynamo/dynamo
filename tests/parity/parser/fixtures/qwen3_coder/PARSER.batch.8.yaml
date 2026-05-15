@@ -24,11 +24,14 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: 'I will check the weather. '
+      dynamo: &d_8_a
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: 'I will check the weather. '
+      vllm: *d_8_a
+      sglang: *d_8_a
   PARSER.batch.8.b:
     description: Narration after tool call only
     ref: dynamo
@@ -43,11 +46,14 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
+      dynamo: &d_8_b
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *d_8_b
+      sglang: *d_8_b
   PARSER.batch.8.c:
     description: Narration both before and after (sandwich)
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L282
@@ -62,11 +68,14 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: 'I will check the weather. '
+      dynamo: &d_8_c
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: 'I will check the weather. '
+      vllm: *d_8_c
+      sglang: *d_8_c
   PARSER.batch.8.d:
     description: Narration between multiple tool calls
     ref: dynamo
@@ -87,11 +96,14 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: 'I will check the weather. '
+      dynamo: &d_8_d
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: 'I will check the weather. '
+      vllm: *d_8_d
+      sglang: *d_8_d

@@ -21,12 +21,21 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>\n</｜DSML｜invoke>'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<｜DSML｜tool_calls>
+
+          <｜DSML｜invoke name="get_weather">
+
+          <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+
+          </｜DSML｜invoke>'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.5.b:
     description: Closing </｜DSML｜tool_calls> without matching open
     ref: dynamo
@@ -38,12 +47,16 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: |-
-        <｜DSML｜invoke name="get_weather">
-        <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
-        </｜DSML｜invoke>
-        </｜DSML｜tool_calls>
+      dynamo: &d_5_b
+        calls: []
+        normal_text: |-
+          <｜DSML｜invoke name="get_weather">
+          <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+          </｜DSML｜invoke>
+          </｜DSML｜tool_calls>
+      vllm: *d_5_b
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.5.c:
     description: Truncation mid-parameter value
     ref: dynamo
@@ -54,9 +67,16 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="get_weather">\n<｜DSML｜parameter name="location" string="true">NY'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<｜DSML｜tool_calls>
+
+          <｜DSML｜invoke name="get_weather">
+
+          <｜DSML｜parameter name="location" string="true">NY'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='deepseek_v4'

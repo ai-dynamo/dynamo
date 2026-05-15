@@ -723,3 +723,16 @@ class TestBenchmarkGrid:
         total_kv = 100 * 16
         for ctx_len, bs in points:
             assert ctx_len <= total_kv
+
+
+def test_build_sampling_params_maps_max_thinking_tokens():
+    from dynamo.vllm.handlers import build_sampling_params
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {"max_thinking_tokens": 1024},
+        "output_options": {},
+    }
+    sp = build_sampling_params(request, default_sampling_params={})
+    assert sp.thinking_token_budget == 1024

@@ -17,12 +17,15 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"}'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'
   PARSER.batch.5.c:
     description: Truncation deeper inside arguments JSON (vs .a which truncates at the closing brace)
     ref: dynamo
@@ -30,9 +33,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<|python_tag|>{"name": "get_weather", "arguments": {"loc'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<|python_tag|>{"name": "get_weather", "arguments": {"loc'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'
