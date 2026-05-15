@@ -7,6 +7,27 @@ subtitle: Reproduce round-robin, sticky-session, KV-router, and sticky-proxy rep
 
 # AIPerf Session Routing Replay
 
+## Results
+
+| Mode | Completed | Mean TTFT | P95 TTFT | P99 TTFT | Max TTFT | Mean E2E | Output tok/s | Req/s | Prefix reuse |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `round_robin` | 44,000 | 603 ms | 1.05 s | 13.52 s | 52.21 s | 15.09 s | 7,491.6 | 32.38 | 0.433 |
+| `sticky_session` | 44,000 | 1,305 ms | 3.19 s | 13.52 s | 52.21 s | 15.35 s | 7,387.4 | 31.93 | 0.433 |
+| `kv_router` | 44,000 | 584 ms | 815 ms | 14.58 s | 48.78 s | 14.89 s | 7,534.1 | 32.56 | 0.435 |
+| `kv_router_sticky_session_proxy` | 44,000 | 592 ms | 821 ms | 14.75 s | 48.78 s | 14.91 s | 7,514.9 | 32.48 | 0.433 |
+
+Interpretation for this trace:
+
+- Plain sticky session is worse on mean and p95 TTFT than round-robin or KV-aware routing, even
+  though the trace has strong session structure.
+- Exact KV routing and the sticky-session proxy are close under this 16k-block setup.
+- Exact KV has a small edge in prefix reuse and throughput, but this trace does not show a large
+  gap between block-level affinity and the session proxy.
+- This is consistent with a traffic shape where most deep reuse is intra-session and cross-session
+  overlap is shallow.
+
+## What This Branch Adds
+
 This branch adds two offline replay-only router modes for comparing session-level affinity against
 block-level KV affinity on a multi-turn AIPerf trace:
 
@@ -154,25 +175,6 @@ for mode in round_robin sticky_session kv_router kv_router_sticky_session_proxy;
   jq -r '[.completed_requests,.mean_ttft_ms,.p95_ttft_ms,.p99_ttft_ms,.max_ttft_ms,.mean_e2e_latency_ms,.output_throughput_tok_s,.request_throughput_rps,.prefix_cache_reused_ratio] | @tsv' "$f"
 done
 ```
-
-## Results
-
-| Mode | Completed | Mean TTFT | P95 TTFT | P99 TTFT | Max TTFT | Mean E2E | Output tok/s | Req/s | Prefix reuse |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `round_robin` | 44,000 | 603 ms | 1.05 s | 13.52 s | 52.21 s | 15.09 s | 7,491.6 | 32.38 | 0.433 |
-| `sticky_session` | 44,000 | 1,305 ms | 3.19 s | 13.52 s | 52.21 s | 15.35 s | 7,387.4 | 31.93 | 0.433 |
-| `kv_router` | 44,000 | 584 ms | 815 ms | 14.58 s | 48.78 s | 14.89 s | 7,534.1 | 32.56 | 0.435 |
-| `kv_router_sticky_session_proxy` | 44,000 | 592 ms | 821 ms | 14.75 s | 48.78 s | 14.91 s | 7,514.9 | 32.48 | 0.433 |
-
-Interpretation for this trace:
-
-- Plain sticky session is worse on mean and p95 TTFT than round-robin or KV-aware routing, even
-  though the trace has strong session structure.
-- Exact KV routing and the sticky-session proxy are close under this 16k-block setup.
-- Exact KV has a small edge in prefix reuse and throughput, but this trace does not show a large
-  gap between block-level affinity and the session proxy.
-- This is consistent with a traffic shape where most deep reuse is intra-session and cross-session
-  overlap is shallow.
 
 ## Validation
 
