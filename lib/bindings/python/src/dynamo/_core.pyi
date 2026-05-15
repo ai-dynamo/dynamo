@@ -552,9 +552,11 @@ class RoutingConstraints:
     Request-side routing constraints.
 
     ``required_taints`` is a hard eligibility filter.
-    ``preferred_taints`` maps taint -> weight in ``(-1.0, 1.0)``.
+    ``preferred_taints`` maps taint -> signed weight.
     Positive weights prefer matching workers, negative weights avoid them,
-    and ``0.0`` is neutral.
+    and ``0.0`` is neutral. Matching weights are summed and squashed with
+    ``tanh``, so opposite preferences cancel before Dynamo converts the
+    bounded bias into a strictly positive score multiplier.
     """
     required_taints: Set[str]
     preferred_taints: Dict[str, float]

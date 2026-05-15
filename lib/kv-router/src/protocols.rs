@@ -202,15 +202,15 @@ impl RoutingConstraints {
     }
 
     pub fn preferred_taint_multiplier(&self, worker_taints: &HashSet<String>) -> f64 {
-        self.preferred_taints
+        let bias = self
+            .preferred_taints
             .iter()
             .filter(|(taint, _)| worker_taints.contains(*taint))
-            .fold(1.0, |multiplier, (_, weight)| {
-                // Clamp weight to (-0.999, 0.999) to avoid multiplier <= 0 and numerical instabilities
-                // which would invert or zero out the score.
-                let weight = f64::from(*weight).clamp(-0.999, 0.999);
-                multiplier * (1.0 - weight)
-            })
+            .map(|(_, weight)| f64::from(*weight))
+            .sum::<f64>()
+            .tanh();
+
+        (-bias).exp()
     }
 }
 

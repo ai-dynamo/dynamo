@@ -299,6 +299,9 @@ pub struct RoutingConstraintsSchema {
     /// Soft preference weights keyed by worker taint.
     /// Positive weights prefer matching workers; negative weights avoid them.
     /// A weight of 0.0 is neutral and has no effect.
+    /// Matching weights are summed and squashed with `tanh`, so opposite
+    /// preferences cancel before Dynamo converts the bounded bias into a
+    /// strictly positive score multiplier.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub preferred_taints: std::collections::HashMap<String, f32>,
 }
@@ -501,18 +504,7 @@ impl NvExt {
     }
 }
 
-fn validate_nv_ext(nv_ext: &NvExt) -> Result<(), ValidationError> {
-    if let Some(routing_constraints) = nv_ext.routing_constraints.as_ref()
-        && routing_constraints
-            .preferred_taints
-            .values()
-            .any(|weight| !(-1.0..1.0).contains(weight))
-    {
-        let mut error = ValidationError::new("preferred_taint_weight_out_of_range");
-        error.message = Some("preferred taint weights must be in the range (-1.0, 1.0)".into());
-        return Err(error);
-    }
-
+fn validate_nv_ext(_nv_ext: &NvExt) -> Result<(), ValidationError> {
     Ok(())
 }
 
