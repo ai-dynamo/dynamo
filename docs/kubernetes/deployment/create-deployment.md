@@ -7,6 +7,8 @@ title: Creating Deployments
 The scripts in the `examples/<backend>/launch` folder like [agg.sh](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/agg.sh) demonstrate how you can serve your models locally.
 The corresponding YAML files like [agg.yaml](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/agg.yaml) show you how you could create a Kubernetes deployment for your inference graph.
 
+`nvidia.com/v1alpha1` is deprecated in favor of `nvidia.com/v1beta1`. Equivalent v1beta1 manifests are available under each backend's `deploy/v1beta1/` directory.
+
 This guide explains how to create your own deployment files.
 
 ## Step 1: Choose Your Architecture Pattern
