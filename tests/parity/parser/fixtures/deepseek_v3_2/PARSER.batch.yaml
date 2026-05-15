@@ -77,3 +77,32 @@ cases:
         normal_text: ''
       vllm: *id005
       sglang: *id005
+  PARSER.batch.11:
+    description: Separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 targets delimiter-separated parser formats. deepseek_v3_2 uses DSML invoke/parameter tags rather than delimiter-splitting call bodies, so separator-looking characters inside values are not a distinct parser state from the existing malformed/string-value coverage.
+  PARSER.batch.12:
+    description: Multi-call separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 targets delimiter-separated parser formats. deepseek_v3_2 uses DSML invoke/parameter tags rather than delimiter-splitting call bodies, so separator-looking characters inside values are not a distinct parser state from the existing malformed/string-value coverage. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: dynamo
+    model_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>unknown_tool<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>unknown_tool<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      vllm:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>unknown_tool<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      sglang:
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>unknown_tool<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>

@@ -75,3 +75,35 @@ cases:
           arguments:
             location: LA
         normal_text: ''
+  PARSER.batch.11:
+    description: Separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 targets delimiter-separated parser formats. harmony uses channel/recipient/message envelope tokens plus a JSON payload rather than delimiter-splitting multiple calls with an in-band separator, so this separator-state regression has no separate grammar surface here.
+  PARSER.batch.12:
+    description: Multi-call separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 targets delimiter-separated parser formats. harmony uses channel/recipient/message envelope tokens plus a JSON payload rather than delimiter-splitting multiple calls with an in-band separator, so this separator-state regression has no separate grammar surface here. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: dynamo
+    model_text: <|channel|>commentary to=functions.unknown_tool <|constrain|>json<|message|>{"location":"NYC"}
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang:
+        calls: []
+        normal_text: <|channel|>commentary to=functions.unknown_tool <|constrain|>json<|message|>{"location":"NYC"}
+        reason: SGLang treats an unknown harmony recipient as ordinary content rather than forwarding a tool call by default.

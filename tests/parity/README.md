@@ -137,6 +137,7 @@ Cell values show how each engine's recorded `expected.<impl>` block relates to D
 - `S`, `S?`, `S!` — same as V/V?/V! for SGLang.
 - `VS`, `VS?`, `V?S`, `V!S`, `VS!`, `V?S?`, `V!S!`, … — combinations (both engines diverge with any mix of intentional/research-needed/error).
 - `n/a` — **not applicable**: engine marked `unavailable` (no parser registered for that family), OR the sub-case shape doesn't apply to this grammar (e.g. attribute-encoded DSML families have no `4.b` because there's no embedded JSON to malform).
+- `—` — **missing fixture coverage**: no fixture entry exists for that family/case yet. If the case is intentionally not applicable, add an explicit chart-only n/a stub with `description:` and `reason:` so the chart can explain it.
 
 19 parsers total — split into the **Top-N models** we prioritize and
 **Others** wired into the harness for completeness. Both sections sorted
