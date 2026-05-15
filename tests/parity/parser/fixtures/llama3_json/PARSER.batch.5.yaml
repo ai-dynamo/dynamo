@@ -96,3 +96,7 @@ cases:
         calls: []
         normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<|python_tag|>{"name":
           "get_weather", "arguments": {"location": "Boston"}};{"name": "get_weather", "arguments": {"location": "New York'
+  PARSER.batch.5.b:
+    description: Orphan closing-marker — n/a for this family's syntax
+    reason: |-
+      Orphan closing-marker test is n/a — llama3_json's output has no matching delimiter pair to leave unclosed.

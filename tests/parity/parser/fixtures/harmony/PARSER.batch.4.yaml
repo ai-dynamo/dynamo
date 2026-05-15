@@ -56,3 +56,7 @@ cases:
       vllm:
         unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
       sglang: *id002
+  PARSER.batch.4.d:
+    description: Malformed variant 4.d — not applicable to this family
+    reason: |-
+      Malformed-input variant 4.d does not apply to harmony's parser syntax (no equivalent end-marker recovery scenario).

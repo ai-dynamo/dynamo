@@ -520,7 +520,7 @@ def _format_output_block_html(block) -> str:
     if not isinstance(block, dict):
         return html_lib.escape("(no expectation)")
     if block.get("unavailable"):
-        return html_lib.escape("(unavailable)")
+        return html_lib.escape(f"unavailable: {block['unavailable']}")
     if "error" in block:
         return html_lib.escape(f"error matching {block['error']!r}")
     nt = block.get("normal_text", "") or ""
@@ -812,6 +812,23 @@ def _cell_class(text: str) -> str:
     return "documented"
 
 
+def _build_na_tooltip_html(case: dict) -> str:
+    """Tooltip for an n/a stub case (only `reason:` in YAML, no `expected:`
+    block). Renders case id + description + the reason. Used when the cell
+    is n/a because the scenario doesn't apply to the family's parser syntax."""
+    case_id = case.get("__case_id", "")
+    desc = case.get("description") or ""
+    head = f"{case_id} — {desc}" if (case_id and desc) else (case_id or desc)
+    reason = case.get("reason") or "n/a (no reason given)"
+    parts = ['<div class="ttip">']
+    if head:
+        parts.append(f'<div class="ttip-head">{html_lib.escape(head)}</div>')
+    parts.append('<div class="ttip-section">Why n/a:</div>')
+    parts.append(f'<pre class="ttip-pre">{html_lib.escape(str(reason))}</pre>')
+    parts.append("</div>")
+    return "".join(parts)
+
+
 def render_cell_html(case: dict | None) -> str:
     text = cell_for(case)
     cls = _cell_class(text)
@@ -820,7 +837,13 @@ def render_cell_html(case: dict | None) -> str:
 
     dyn = case.get("expected", {}).get("dynamo")
     if not isinstance(dyn, dict):
-        return f'<td class="cell {cls}">{text}</td>'
+        # n/a stub: case has only `reason:` (no `expected:` block).
+        fp = case.get("__fixture_path", "")
+        ttip = _build_na_tooltip_html(case)
+        if not fp:
+            return f'<td class="cell {cls}">{text}{ttip}</td>'
+        href = html_lib.escape(fp)
+        return f'<td class="cell {cls}"><a href="{href}">{text}</a>{ttip}</td>'
 
     fp = case.get("__fixture_path", "")
     # Case id + description live in the rich CSS tooltip head — don't also

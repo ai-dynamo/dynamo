@@ -81,3 +81,7 @@ cases:
           arguments: {}
         normal_text: ''
         reason: SGLang Llama32Detector scans past the malformed prefix and recovers the later valid JSON object.
+  PARSER.batch.4.d:
+    description: Malformed variant 4.d — not applicable to this family
+    reason: |-
+      Malformed-input variant 4.d does not apply to llama3_json's parser syntax (no equivalent end-marker recovery scenario).

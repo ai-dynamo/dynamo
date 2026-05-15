@@ -39,3 +39,7 @@ cases:
         calls: []
         normal_text: ''
         reason: SGLang glm47 rejects whitespace between the function name and </tool_call> (`get_time `), emitting no calls; Dynamo and vLLM both tolerate it and extract the empty-args call
+  PARSER.batch.6.c:
+    description: Empty-body variant 6.c — not yet authored for this family
+    reason: |-
+      Empty-body variant 6.c not yet authored for glm47; see 6.a / 6.b for this family's empty / whitespace scenarios.

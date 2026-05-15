@@ -107,6 +107,13 @@ def _run_parity_case(
     # ImportError (e.g. a stale upstream API ref after a vLLM/SGLang rename)
     # propagates as a real test ERROR rather than a silent green skip.
     pytest.importorskip(_PACKAGE[impl_name])
+    # n/a stub case: only a `reason:` field, no `expected:` block. Skip — the
+    # stub exists solely to populate the chart's n/a tooltip.
+    if "expected" not in fixture:
+        pytest.skip(
+            f"{impl_name}/{family}/{case_id}: n/a stub (no expected: block): "
+            f"{fixture.get('reason', '(no reason given)')}"
+        )
     parse_mod = importlib.import_module(f"tests.parity.parser.{impl_name}")
     got = parse_mod.parse(family, fixture["model_text"], fixture.get("tools"))
 

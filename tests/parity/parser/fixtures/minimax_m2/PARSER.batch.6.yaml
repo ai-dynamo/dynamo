@@ -45,3 +45,7 @@ cases:
         normal_text: ''
       vllm: *id003
       sglang: *id003
+  PARSER.batch.6.c:
+    description: Empty-body variant 6.c — not yet authored for this family
+    reason: |-
+      Empty-body variant 6.c not yet authored for minimax_m2; see 6.a / 6.b for this family's empty / whitespace scenarios.

@@ -88,3 +88,7 @@ cases:
         calls: []
         normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name":
           "get_weather", "arguments": {"location": "LA"}}</tool_call>'
+  PARSER.batch.2.b:
+    description: Two back-to-back fence pairs — not applicable to this family
+    reason: |-
+      qwen25's multi-call form is exercised by PARSER.batch.2.a / 2.c / 2.d; no back-to-back fence/wrapper pattern applies to this family's parser syntax.

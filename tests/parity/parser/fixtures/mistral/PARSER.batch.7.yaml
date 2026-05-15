@@ -106,3 +106,11 @@ cases:
       sglang:
         calls: []
         normal_text: ''
+  PARSER.batch.7.e:
+    description: Argument value contains family separator (single call) — n/a for this family
+    reason: |-
+      Argument-content vs. separator-character hazard is specific to llama3_json's choice of semicolon as a delimiter; mistral uses a delimiter-based syntax where arbitrary characters in argument strings can't collide with the separator.
+  PARSER.batch.7.f:
+    description: Argument value contains family separator (parallel calls) — n/a for this family
+    reason: |-
+      Parallel-call streaming-split safety for separator-in-argument is specific to llama3_json's semicolon delimiter; mistral's parser doesn't face this hazard.
