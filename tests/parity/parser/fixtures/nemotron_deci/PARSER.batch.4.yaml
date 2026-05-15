@@ -73,3 +73,7 @@ cases:
         unavailable: vLLM has no parser for family='nemotron_deci'
       sglang:
         unavailable: SGLang has no detector for family='nemotron_deci'
+  PARSER.batch.4.e:
+    description: Malformed-prefix recovery — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.4.e is specific to llama3_json's raw JSON-object scanner: a malformed JSON-looking prefix is followed by a complete JSON object, and the detector may resynchronize on the later object. This family uses a framed parser grammar instead of that raw JSON-prefix scanner; malformed-input coverage for this family lives in PARSER.batch.4.a through 4.d.

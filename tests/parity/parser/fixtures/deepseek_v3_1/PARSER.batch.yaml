@@ -64,3 +64,39 @@ cases:
         normal_text: ''
       vllm: *id005
       sglang: *id005
+  PARSER.batch.11:
+    description: Separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 targets grammar-level call separators embedded inside argument string values. deepseek_v3_1 frames each call with begin/end tokens; its <｜tool▁sep｜> token separates the function name from the JSON argument block, not calls from each other or values inside the argument JSON. Generic escaped/string-value coverage remains in PARSER.batch.7.b.
+  PARSER.batch.12:
+    description: Multi-call separator-character case — n/a for this family's syntax
+    reason: |-
+      PARSER.batch.11 targets grammar-level call separators embedded inside argument string values. deepseek_v3_1 frames each call with begin/end tokens; its <｜tool▁sep｜> token separates the function name from the JSON argument block, not calls from each other or values inside the argument JSON. Generic escaped/string-value coverage remains in PARSER.batch.7.b. PARSER.batch.12 is the multi-call version of the same separator-state check, so the same applicability rule applies.
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: dynamo
+    model_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>unknown_tool<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: SGLang drops unknown tool names by default unless SGLANG_FORWARD_UNKNOWN_TOOLS is enabled.
