@@ -19,6 +19,7 @@ pub mod engine;
 pub mod error;
 mod publisher;
 pub mod run;
+pub mod telemetry;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 #[cfg(debug_assertions)]

@@ -491,20 +491,62 @@ class Context:
         """
         ...
 
-    def record_attribute(self, key: str, value: Any) -> None:
+    def current_span(self) -> "SpanProxy":
         """
-        Record an attribute on the worker's ``engine.generate`` span. Engines
-        call this via ``dynamo.common.backend.telemetry.record(...)``. Unknown
-        field names are silently dropped — pre-declare attrs on the span.
+        Handle on the framework's ``engine.generate`` span. Use it to
+        ``set_attribute`` / ``add_event`` / ``set_status`` on the parent
+        span. Returns a silent no-op proxy when no parent was plumbed in
+        (test contexts) or the OTel bridge isn't installed.
+
+        Engines normally reach this through
+        ``dynamo.common.backend.telemetry.current_span(context)``.
         """
         ...
 
-    def record_event(self, name: str, attrs: Optional[dict[str, Any]] = None) -> None:
+    def start_span(
+        self, name: str, attrs: Optional[dict[str, Any]] = None
+    ) -> "SpanProxy":
         """
-        Emit an event on the worker's ``engine.generate`` span. Engines call
-        this via ``dynamo.common.backend.telemetry.event(...)``.
+        Open a child span under ``engine.generate`` with a dynamic name.
+        The returned ``SpanProxy`` is a context manager — the span ends on
+        ``__exit__`` / ``close()`` / drop.
+
+        Engines normally reach this through
+        ``dynamo.common.backend.telemetry.start_span(context, name)``.
         """
         ...
+
+class SpanProxy:
+    """
+    Unified span handle returned by ``Context.current_span()`` (the
+    framework auto-span) and ``Context.start_span()`` (child spans).
+    Mirrors the OTel ``Span`` API: ``set_attribute`` / ``add_event`` /
+    ``set_status``. Usable as a Python context manager (closes on
+    ``__exit__``). All methods are silent no-ops when the underlying
+    span is absent.
+    """
+
+    def set_attribute(self, key: str, value: Any) -> None:
+        """Set an attribute on the span. Any key is accepted; OTel imposes
+        no pre-declaration constraint."""
+        ...
+
+    def add_event(self, name: str, attrs: Optional[dict[str, Any]] = None) -> None:
+        """Emit a structured event on the span."""
+        ...
+
+    def set_status(self, status: str, description: Optional[str] = None) -> None:
+        """Set the span's status. ``status`` is ``"ok"`` or ``"error"``;
+        ``description`` is optional context (typically a short error name)."""
+        ...
+
+    def close(self) -> None:
+        """End the underlying span (child spans only — no-op for the
+        auto-span). Idempotent."""
+        ...
+
+    def __enter__(self) -> "SpanProxy": ...
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool: ...
 
 class WorkerMetricsPublisher:
     """

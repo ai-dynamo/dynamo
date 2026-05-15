@@ -331,12 +331,18 @@ Level standards:
 
 ## Tracing / OpenTelemetry
 
-Rust engines use the `tracing` crate directly — there is no Dynamo-specific
-telemetry wrapper. Spans opened inside `generate()` nest under the framework's
-`handle_payload` parent automatically (set up by the runtime at
+Rust engines use the `tracing` crate directly for static-name spans —
+spans opened inside `generate()` nest under the framework's `handle_payload`
+parent automatically (set up by the runtime at
 `lib/runtime/src/pipeline/network/ingress/push_endpoint.rs`). When
 `OTEL_EXPORT_ENABLED=1` (see `lib/runtime/src/logging.rs`), these spans export
 as OTLP via the `tracing-opentelemetry` layer; otherwise they remain local.
+
+For **dynamic** span names — names computed at runtime, which `tracing::info_span!`
+can't handle — use `dynamo_backend_common::telemetry::start_span(name)`. It
+goes through OTel directly while still inheriting the bridged parent context;
+the returned `SpanGuard` closes on drop. Both paths land in the same trace
+tree.
 
 Two patterns worth knowing:
 

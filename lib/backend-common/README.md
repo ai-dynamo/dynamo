@@ -288,6 +288,81 @@ The kit asserts:
 `testing::mock_context()` and `testing::cancelling_context(after)` are
 available for hand-written tests.
 
+## Telemetry
+
+`EngineAdapter` opens an `engine.generate` `tracing` span around every
+`generate()` call. The span nests under the runtime's `handle_payload`
+parent, so the full trace tree (frontend → NATS → worker → engine) is
+contiguous. Attributes are auto-recorded across the stream lifecycle.
+
+Set `OTEL_EXPORT_ENABLED=1` to enable OTLP export (default off). When off,
+the span still exists locally so `tracing` log events carry the `trace_id`,
+but per-chunk recording is skipped for cost.
+
+### `engine.generate` attributes
+
+| Attribute | When | Source |
+|---|---|---|
+| `model`, `input_tokens`, `disagg_role` | Entry | request fields + adapter mode |
+| `ttft_ms` | First non-empty chunk | adapter timing |
+| `output_tokens` | Terminal | sum of `chunk.token_ids.len()` across the stream |
+| `finish_reason`, `cancelled` | Terminal | engine's terminal chunk + ctx.is_stopped() |
+| `avg_itl_ms`, `itl_p50_ms`, `itl_p99_ms`, `itl_max_ms` | Terminal | per-chunk timestamp aggregation |
+| `error_kind` | Mid-stream typed error | Debug-formatted `ErrorType`, e.g. `Backend(InvalidArgument)` — search by substring |
+| `prefill_trace_id`, `prefill_span_id` | Decode entry | typed `prefill_trace_link` from prefill peer |
+
+The span also gets `OpenTelemetrySpanExt::set_status(Status::error(...))`
+on the error paths so Tempo / Jaeger render the span as failed natively.
+
+### Disaggregated trace linking
+
+Prefill workers stamp the `{trace_id, span_id}` of their `engine.generate`
+span into the terminal chunk's `prefill_trace_link` (a typed
+`Option<TraceLink>` field, framework-owned — separate from the engine's
+opaque `disaggregated_params`). Decode workers read it on entry and attach
+a real OTel `Link` (via `OpenTelemetrySpanExt::add_link`) plus record the
+fallback `prefill_trace_id` / `prefill_span_id` attributes for log
+analysis. Tempo renders the link as a cross-span edge.
+
+### Engine-side instrumentation
+
+Two surfaces. Pick by whether the span name is known at compile time:
+
+**Static name → `tracing` directly.** Spans opened inside `generate()`
+nest under `engine.generate` automatically:
+
+```rust
+async_stream::stream! { ... }
+    .instrument(tracing::info_span!("engine.decode_loop", blocks_held = 8))
+```
+
+**Dynamic name → `dynamo_backend_common::telemetry::start_span`.** The
+`tracing` macro requires compile-time names; this helper goes through OTel
+directly while still inheriting the bridged parent context:
+
+```rust
+use dynamo_backend_common::telemetry;
+
+let mut span = telemetry::start_span(format!("kv_load_rank_{rank}"));
+span.set_attribute("blocks", 8);
+// closes on drop
+```
+
+Both paths land in the same OTel trace tree and the same JSONL trace_id.
+
+Two footguns to remember:
+- Prefer `.instrument(span)` on futures / streams over
+  `let _g = span.entered();` — the `Entered` guard pins the span to the
+  current thread; holding it across `.await` either fails to compile or
+  leaves the span entered on the wrong task.
+- `tokio::spawn(fut.in_current_span())` — bare `tokio::spawn` does NOT
+  inherit the current span, so logs from spawned tasks lose `trace_id`
+  correlation.
+
+For outbound calls that need to carry trace context (HTTP, custom
+transports), use `dynamo_runtime::logging::inject_trace_headers_into_map`
+or `get_distributed_tracing_context`. NATS egress is auto-injected.
+
 ## File Index
 
 ```text

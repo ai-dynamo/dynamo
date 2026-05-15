@@ -1,20 +1,60 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Context is a wrapper around the AsyncEngineContext to allow for Python bindings.
+// `Context` wraps `AsyncEngineContext` for PyO3 — exposes cancellation,
+// trace identity, and span access for engine observability.
+//
+// Engine code reaches the observability surface through the
+// `dynamo.common.backend.telemetry` facade, which is itself a thin wrapper
+// over [`Context::current_span`] / [`Context::start_span`]. Both return a
+// unified [`SpanProxy`] handle whose `set_attribute` / `add_event` /
+// `set_status` operations mirror the OTel `Span` API.
 
 use dynamo_runtime::logging::DistributedTraceContext;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::context::Controller;
+use opentelemetry::global::BoxedSpan;
+use opentelemetry::trace::{Span as OtelSpan, Status, TraceContextExt, Tracer};
+use opentelemetry::{KeyValue, global};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use tokio::sync::watch;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-// Context is a wrapper around the AsyncEngineContext to allow for Python bindings.
-// Not all methods of the AsyncEngineContext are exposed, jsut the primary ones for tracing + cancellation.
-// Kept as class, to allow for future expansion if needed.
+/// Process-wide guard: once-per-process WARN when telemetry calls hit a
+/// parent `engine.generate` span that has no OTel context (i.e., the
+/// `tracing-opentelemetry` layer isn't installed — non-JSONL deployments).
+/// One log line is enough to surface the configuration issue; rate-limiting
+/// to once avoids flooding logs in high-QPS workers.
+///
+/// Visibility level is WARN because telemetry calls silently no-oping is a
+/// real operator-relevant misconfiguration — if the engine is recording
+/// attributes and getting nothing, the operator needs to see it at default
+/// log levels, not just when debug is enabled.
+static BRIDGE_MISSING_WARNED: OnceLock<()> = OnceLock::new();
+
+fn warn_bridge_missing_once(method: &str) {
+    if BRIDGE_MISSING_WARNED.set(()).is_ok() {
+        tracing::warn!(
+            method,
+            "telemetry call is a no-op: OTel bridge layer not installed \
+             (needs DYN_LOGGING_JSONL=1 + OTEL_EXPORT_ENABLED=1). \
+             Engine telemetry attributes / events / child spans are NOT \
+             being recorded. Further no-ops in this process are silent."
+        );
+    }
+}
+
+/// Per-request handle exposed to Python engine code. Owns cancellation
+/// (via `AsyncEngineContext`), trace identity (via `DistributedTraceContext`),
+/// the disagg first-token signal, and the captured `engine.generate` span.
+///
+/// The span is private — engine code reaches it via [`Context::current_span`]
+/// (the auto-span proxy) or [`Context::start_span`] (a child span). The
+/// facade in `dynamo.common.backend.telemetry` is a one-line wrapper around
+/// those methods.
 #[derive(Clone)]
 #[pyclass]
 pub struct Context {
@@ -24,10 +64,9 @@ pub struct Context {
     /// prefill requests.
     first_token: Option<watch::Sender<bool>>,
     metadata: Arc<Mutex<BTreeMap<String, String>>>,
-    /// `engine.generate` span captured before crossing the spawn_blocking
-    /// boundary, so PyO3 `record_attribute` / `record_event` can target it
-    /// from Python code (where `Span::current()` is the worker thread root,
-    /// not the auto-span). `None` for Python-instantiated test contexts.
+    /// Captured `engine.generate` span. `None` for Python-instantiated test
+    /// contexts (where no parent span was plumbed in) — `current_span` /
+    /// `start_span` return a no-op `SpanProxy` in that case.
     span: Option<tracing::Span>,
 }
 
@@ -144,19 +183,18 @@ impl Context {
             trace_context,
             first_token,
             metadata: Arc::new(Mutex::new(metadata)),
-            span: Some(tracing::Span::current()),
+            span: None,
         }
     }
 
-    /// Override the span the telemetry methods record onto. Used by
-    /// `PyLLMEngine::generate` to plumb the `engine.generate` auto-span
-    /// across the spawn_blocking boundary.
+    /// Attach the `engine.generate` span. Called by `PyLLMEngine::generate`
+    /// after capturing `Span::current()` outside the spawn_blocking boundary.
+    /// See `lib/bindings/python/rust/backend.rs` for the invariant.
     pub fn with_span(mut self, span: tracing::Span) -> Self {
         self.span = Some(span);
         self
     }
 
-    // Get trace context for Rust-side usage
     pub fn trace_context(&self) -> Option<&DistributedTraceContext> {
         self.trace_context.as_ref()
     }
@@ -191,16 +229,14 @@ impl Context {
         }
     }
 
-    // sync method of `await async_is_stopped()`
     fn is_stopped(&self) -> bool {
         self.inner.is_stopped()
     }
 
-    // sync method of `await async_is_killed()`
     fn is_killed(&self) -> bool {
         self.inner.is_killed()
     }
-    // issues a stop generating
+
     fn stop_generating(&self) {
         self.inner.stop_generating();
     }
@@ -209,7 +245,6 @@ impl Context {
         self.inner.id()
     }
 
-    // allows building a async callback.
     fn async_killed_or_stopped<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
         let inner = self.inner.clone();
 
@@ -250,7 +285,6 @@ impl Context {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = metadata;
     }
 
-    // Expose trace information to Python for debugging
     #[getter]
     fn trace_id(&self) -> Option<String> {
         self.trace_context.as_ref().map(|ctx| ctx.trace_id.clone())
@@ -268,65 +302,71 @@ impl Context {
             .and_then(|ctx| ctx.parent_id.clone())
     }
 
-    /// Record an attribute on the `engine.generate` span. Silently no-op when
-    /// no span was plumbed in (Python-instantiated test contexts). Used by
-    /// `dynamo.common.backend.telemetry.record(...)`.
-    fn record_attribute(&self, key: &str, value: Bound<'_, PyAny>) -> PyResult<()> {
-        let Some(span) = &self.span else {
-            return Ok(());
-        };
-        // Span::record only accepts declared empty fields. Engines should
-        // record canonical attrs (e.g. via `telemetry.record(input_tokens=N)`)
-        // — unknown field names are silently dropped by tracing, matching
-        // the `tracing::Span::record` semantics.
-        if let Ok(b) = value.downcast::<PyBool>() {
-            span.record(key, b.is_true());
-        } else if let Ok(i) = value.downcast::<PyInt>() {
-            span.record(key, i.extract::<i64>()?);
-        } else if let Ok(f) = value.downcast::<PyFloat>() {
-            span.record(key, f.extract::<f64>()?);
-        } else if let Ok(s) = value.downcast::<PyString>() {
-            span.record(key, s.to_str()?);
-        } else {
-            // Fallback: render via Python `repr()` so callers see something
-            // useful in trace UIs even for engine-specific objects.
-            let repr = value.repr()?.extract::<String>()?;
-            span.record(key, repr.as_str());
+    /// Handle on the framework's `engine.generate` span — the parent span
+    /// that engine attributes / events should attach to. Always returns a
+    /// `SpanProxy`; when no parent was plumbed in (test contexts) or the
+    /// OTel bridge isn't installed, the proxy is a silent no-op.
+    ///
+    /// Prefer the `dynamo.common.backend.telemetry.current_span(context)`
+    /// facade in engine code — it's the documented surface.
+    fn current_span(&self) -> SpanProxy {
+        match &self.span {
+            Some(span) if span.context().span().span_context().is_valid() => SpanProxy {
+                inner: SpanProxyInner::Tracing(span.clone()),
+            },
+            Some(_) => {
+                warn_bridge_missing_once("current_span");
+                SpanProxy {
+                    inner: SpanProxyInner::NoOp,
+                }
+            }
+            None => SpanProxy {
+                inner: SpanProxyInner::NoOp,
+            },
         }
-        Ok(())
     }
 
-    /// Emit a structured event on the `engine.generate` span. `attrs` is an
-    /// optional dict of field name → Python value, rendered via `repr()` for
-    /// non-primitive types. Used by `dynamo.common.backend.telemetry.event`.
+    /// Open a child span under the `engine.generate` parent. Use this for
+    /// dynamic span names (`tracing::info_span!` requires compile-time
+    /// names). Returned `SpanProxy` is a context manager; the span ends on
+    /// `__exit__` / `close()` / drop.
+    ///
+    /// Returns a no-op proxy when no parent was plumbed in or the bridge
+    /// isn't installed. Prefer the
+    /// `dynamo.common.backend.telemetry.start_span(context, name)` facade
+    /// in engine code.
     #[pyo3(signature = (name, attrs=None))]
-    fn record_event(&self, name: &str, attrs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
-        let Some(span) = &self.span else {
-            return Ok(());
+    fn start_span(&self, name: &str, attrs: Option<&Bound<'_, PyDict>>) -> PyResult<SpanProxy> {
+        let Some(parent) = &self.span else {
+            return Ok(SpanProxy {
+                inner: SpanProxyInner::NoOp,
+            });
         };
-        // Build a comma-separated rendering of the attrs map. We can't emit
-        // dynamic fields via the `event!` macro (compile-time names only), so
-        // pack into a single `attrs` field. Operators read `event_name` + `attrs`.
-        let attrs_str = match attrs {
-            Some(d) if !d.is_empty() => {
-                let mut parts: Vec<String> = Vec::with_capacity(d.len());
-                for (k, v) in d.iter() {
-                    let k_str = k.extract::<String>()?;
-                    let v_repr = v.repr()?.extract::<String>()?;
-                    parts.push(format!("{k_str}={v_repr}"));
-                }
-                parts.join(", ")
+        let parent_ctx = parent.context();
+        if !parent_ctx.span().span_context().is_valid() {
+            warn_bridge_missing_once("start_span");
+            return Ok(SpanProxy {
+                inner: SpanProxyInner::NoOp,
+            });
+        }
+        let tracer = global::tracer("dynamo");
+        let mut otel_attrs = Vec::new();
+        if let Some(d) = attrs {
+            for (k, v) in d.iter() {
+                otel_attrs.push(KeyValue::new(
+                    k.extract::<String>()?,
+                    py_to_otel_value(&v)?,
+                ));
             }
-            _ => String::new(),
-        };
-        let _enter = span.enter();
-        tracing::event!(
-            target: "request_span",
-            tracing::Level::INFO,
-            event_name = name,
-            attrs = %attrs_str,
-        );
-        Ok(())
+        }
+        let mut builder = tracer.span_builder(name.to_string());
+        if !otel_attrs.is_empty() {
+            builder = builder.with_attributes(otel_attrs);
+        }
+        let span = builder.start_with_context(&tracer, &parent_ctx);
+        Ok(SpanProxy {
+            inner: SpanProxyInner::Otel(Some(span)),
+        })
     }
 
     /// Build W3C trace headers for propagating to downstream inference engines.
@@ -357,6 +397,152 @@ impl Context {
             headers.insert("request-id".to_string(), id.clone());
         }
         Some(headers)
+    }
+}
+
+/// Unified Python-facing span handle. Returned from both
+/// `Context.current_span()` (auto-span) and `Context.start_span()` (child
+/// span). Routes `set_attribute` / `add_event` / `set_status` to whichever
+/// underlying span the proxy wraps.
+///
+/// `__enter__` / `__exit__` make the proxy usable as a `with`-block context
+/// manager. For child spans, `__exit__` (and `close()`) ends the span; for
+/// the auto-span the proxy is a borrow and `close()` is a no-op (the
+/// framework owns the span's lifecycle).
+#[pyclass]
+pub struct SpanProxy {
+    inner: SpanProxyInner,
+}
+
+enum SpanProxyInner {
+    /// Auto-span — borrows the `engine.generate` span via tracing. Writes
+    /// go through `OpenTelemetrySpanExt` so attribute names are dynamic
+    /// (no pre-declaration constraint).
+    Tracing(tracing::Span),
+    /// Child span — owns an OTel `BoxedSpan`. Ends on close / drop.
+    /// `Option` makes close idempotent.
+    Otel(Option<BoxedSpan>),
+    /// No parent or bridge missing. All calls are silent no-ops.
+    NoOp,
+}
+
+#[pymethods]
+impl SpanProxy {
+    /// Set an attribute. OTel imposes no pre-declaration constraint;
+    /// any key is accepted. No-op when the proxy is no-op or already closed.
+    fn set_attribute(&mut self, key: &str, value: Bound<'_, PyAny>) -> PyResult<()> {
+        match &mut self.inner {
+            SpanProxyInner::Tracing(span) => {
+                span.set_attribute(key.to_string(), py_to_otel_value(&value)?);
+            }
+            SpanProxyInner::Otel(Some(span)) => {
+                span.set_attribute(KeyValue::new(key.to_string(), py_to_otel_value(&value)?));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Emit a structured event. Per-attr key/value (real OTel `SpanEvent`
+    /// fields — trace backends can query individual keys).
+    #[pyo3(signature = (name, attrs=None))]
+    fn add_event(&mut self, name: &str, attrs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        let collect = |d: Option<&Bound<'_, PyDict>>| -> PyResult<Vec<KeyValue>> {
+            let mut out = Vec::new();
+            if let Some(d) = d {
+                for (k, v) in d.iter() {
+                    out.push(KeyValue::new(
+                        k.extract::<String>()?,
+                        py_to_otel_value(&v)?,
+                    ));
+                }
+            }
+            Ok(out)
+        };
+        match &mut self.inner {
+            SpanProxyInner::Tracing(span) => {
+                span.add_event(name.to_string(), collect(attrs)?);
+            }
+            SpanProxyInner::Otel(Some(span)) => {
+                span.add_event(name.to_string(), collect(attrs)?);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Set the span's status. `status` is either `"ok"` or `"error"`;
+    /// `description` is optional context (typically a short error name).
+    #[pyo3(signature = (status, description=None))]
+    fn set_status(&mut self, status: &str, description: Option<String>) -> PyResult<()> {
+        let otel_status = match status {
+            "ok" => Status::Ok,
+            "error" => Status::error(description.unwrap_or_default()),
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "set_status: expected \"ok\" or \"error\", got {other:?}"
+                )));
+            }
+        };
+        match &mut self.inner {
+            SpanProxyInner::Tracing(span) => {
+                span.set_status(otel_status);
+            }
+            SpanProxyInner::Otel(Some(span)) => {
+                span.set_status(otel_status);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// End the underlying span (child spans only). Idempotent; no-op for
+    /// the auto-span and no-op proxies. Called automatically by `__exit__`
+    /// and on drop.
+    fn close(&mut self) {
+        if let SpanProxyInner::Otel(slot) = &mut self.inner
+            && let Some(mut span) = slot.take()
+        {
+            span.end();
+        }
+    }
+
+    fn __enter__(slf: PyRefMut<Self>) -> PyRefMut<Self> {
+        slf
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<Bound<'_, PyAny>>,
+        _exc_value: Option<Bound<'_, PyAny>>,
+        _traceback: Option<Bound<'_, PyAny>>,
+    ) -> bool {
+        self.close();
+        false
+    }
+}
+
+impl Drop for SpanProxy {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// Coerce a Python value into an OTel `Value` for `KeyValue` attributes.
+/// Primitive types preserve type; everything else renders via `repr()`.
+fn py_to_otel_value(v: &Bound<'_, PyAny>) -> PyResult<opentelemetry::Value> {
+    use opentelemetry::Value;
+    if let Ok(b) = v.downcast::<PyBool>() {
+        Ok(Value::Bool(b.is_true()))
+    } else if let Ok(i) = v.downcast::<PyInt>() {
+        Ok(Value::I64(i.extract::<i64>()?))
+    } else if let Ok(f) = v.downcast::<PyFloat>() {
+        Ok(Value::F64(f.extract::<f64>()?))
+    } else if let Ok(s) = v.downcast::<PyString>() {
+        Ok(Value::String(s.to_str()?.to_string().into()))
+    } else {
+        Ok(Value::String(v.repr()?.extract::<String>()?.into()))
     }
 }
 

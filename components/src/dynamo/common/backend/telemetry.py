@@ -3,43 +3,53 @@
 
 """Engine-author telemetry facade.
 
-Thin wrapper around the PyO3 ``Context`` methods so engine code adds
-attributes and events without importing ``opentelemetry`` directly.
-Records land on the framework's ``engine.generate`` span (created by
-``EngineAdapter`` in ``lib/backend-common``); when no span is plumbed
-in (Python-instantiated test contexts), the calls are silent no-ops.
+OTel-shaped surface for adding attributes, events, and child spans to the
+framework's ``engine.generate`` span. Both functions return a unified
+``SpanProxy`` whose ``set_attribute`` / ``add_event`` / ``set_status``
+mirror the OpenTelemetry ``Span`` API — no Dynamo-specific vocabulary to
+learn.
 
-Span attributes must be **declared** on the ``engine.generate`` span to
-take effect — the canonical set is ``model``, ``input_tokens``,
-``output_tokens``, ``ttft_ms``, ``finish_reason``, ``cancelled``,
-``disagg_role``, ``error_kind``. Unknown attribute names are dropped
-by ``tracing::Span::record`` (matching the underlying Rust API).
-Events have no such restriction.
+Example::
+
+    from dynamo.common.backend import telemetry
+
+    span = telemetry.current_span(context)
+    span.set_attribute("ttft_ms", 42.0)
+    span.add_event("first_token", token_id=15339)
+
+    with telemetry.start_span(context, "kv_load") as child:
+        child.set_attribute("blocks", 8)
+
+When no parent span is plumbed in (Python-instantiated test contexts) or
+the OTel bridge isn't installed, the returned ``SpanProxy`` is a silent
+no-op — calls do not raise. A once-per-process WARN log fires the first
+time a no-op is exercised so the misconfiguration is discoverable.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from dynamo._core import Context
 
+if TYPE_CHECKING:
+    from dynamo._core import SpanProxy
 
-def record(context: Context, **attrs: Any) -> None:
-    """Record one or more attributes on the current ``engine.generate`` span.
+
+def current_span(context: Context) -> "SpanProxy":
+    """Return a handle on the framework's ``engine.generate`` span."""
+    return context.current_span()
+
+
+def start_span(context: Context, name: str, **attrs: Any) -> "SpanProxy":
+    """Open a child span under ``engine.generate`` with the given dynamic
+    name. The returned ``SpanProxy`` is a context manager — use ``with``
+    so the span ends on exit.
 
     Example::
 
-        telemetry.record(context, kv_cache_hit_blocks=8, scheduler_wait_ms=12.3)
+        with telemetry.start_span(context, "tokenize", batch_size=8) as s:
+            tokens = tokenizer.encode(prompt)
+            s.add_event("encoder_warmup_complete")
     """
-    for key, value in attrs.items():
-        context.record_attribute(key, value)
-
-
-def event(context: Context, name: str, **attrs: Any) -> None:
-    """Emit a span event with optional structured attributes.
-
-    Example::
-
-        telemetry.event(context, "nixl_transfer_complete", bytes=1048576)
-    """
-    context.record_event(name, dict(attrs) if attrs else None)
+    return context.start_span(name, dict(attrs) if attrs else None)
