@@ -13,11 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Apply with `kubectl apply -n <ns> -f http-route.yaml`, where <ns> is the
-# namespace that contains both the `inference-gateway` Gateway and the
-# `llama3-70b-disagg-pool` InferencePool. If the Gateway lives elsewhere, add
-# `namespace: <gw-ns>` under parentRefs; if the InferencePool lives elsewhere,
-# add `namespace: <pool-ns>` under backendRefs.
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:

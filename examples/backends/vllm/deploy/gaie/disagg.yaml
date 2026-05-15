@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# GAIE-managed disaggregated vLLM deployment, tuned for *stability* in
-# environments without RDMA / GPUDirect (e.g. CI vClusters on AKS).
+# GAIE-managed disaggregated vLLM deployment, tuned for *stability* because used as a Post Merge test
 #
 # Why this configuration looks the way it does (intentional, not a default):
 #
