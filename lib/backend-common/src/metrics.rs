@@ -331,16 +331,20 @@ mod tests {
             .get_metrics_registry()
             .prometheus_expfmt_combined()
             .expect("expfmt");
-        assert!(
-            text.contains("dynamo_component_cleanup_time_seconds"),
-            "cleanup gauge missing from /metrics: {text}"
-        );
-        assert!(
-            text.contains("dynamo_component_drain_time_seconds"),
-            "drain gauge missing from /metrics: {text}"
-        );
-        // The observed values must round-trip through the scrape.
-        assert!(text.contains(" 1.5"), "cleanup value missing: {text}");
-        assert!(text.contains(" 0.25"), "drain value missing: {text}");
+        // Find the data row for each gauge (skip HELP/TYPE comment lines)
+        // and assert the observed value is the trailing token. Per-line
+        // matching avoids false-positives where some other gauge on the
+        // registry happens to read the same value.
+        let data_line = |gauge: &str| -> Option<String> {
+            text.lines()
+                .find(|l| l.starts_with(gauge) && !l.starts_with('#'))
+                .map(str::to_owned)
+        };
+        let cleanup = data_line("dynamo_component_cleanup_time_seconds")
+            .unwrap_or_else(|| panic!("cleanup gauge data row missing: {text}"));
+        let drain = data_line("dynamo_component_drain_time_seconds")
+            .unwrap_or_else(|| panic!("drain gauge data row missing: {text}"));
+        assert!(cleanup.ends_with(" 1.5"), "cleanup value wrong: {cleanup}");
+        assert!(drain.ends_with(" 0.25"), "drain value wrong: {drain}");
     }
 }
