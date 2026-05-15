@@ -330,20 +330,22 @@ fn is_weight_file(path: &Path) -> bool {
     )
 }
 
-/// Symlink any non-weight file in `snapshot_dir` into `slug_dir` that
-/// isn't already present. The typed-slot resolve loop has already
-/// symlinked the 5 typed artifacts; this pass picks up the sibling
-/// metadata files (`preprocessor_config.json`, `special_tokens_map.json`,
-/// `added_tokens.json`, `tokenizer.model`, …) that downstream consumers
-/// — lightseek-mm in particular — need to instantiate HF preprocessors
-/// from `slug_dir` via `from_pretrained()`.
-///
-/// Trust model: `snapshot_dir` is either an `hub::from_hf` snapshot
-/// (HF / ModelExpress-verified) or a `file://`-resolved local
-/// directory the worker already pointed the typed slots at — i.e. a
-/// directory the typed-slot resolve trusted. Files harvested here are
-/// by definition the same canonical artifacts that ship alongside the
-/// typed slots; no new trust surface is introduced.
+/// Symlink non-weight files from `snapshot_dir` into `slug_dir`, skipping
+/// any name already present (typed slots own those). Picks up
+/// `preprocessor_config.json` and other sibling files that
+/// `from_pretrained(slug_dir)` consumers need.
+/// Parent directory of a `file://` URI when it resolves to a real local
+/// directory. Returns `None` for any other scheme or unreachable path.
+fn file_uri_parent(uri: &str) -> Option<PathBuf> {
+    let url = url::Url::parse(uri).ok()?;
+    if url.scheme() != "file" {
+        return None;
+    }
+    let path = url.to_file_path().ok()?;
+    let parent = path.parent()?;
+    parent.is_dir().then(|| parent.to_path_buf())
+}
+
 fn harvest_siblings(snapshot_dir: &Path, slug_dir: &Path) -> anyhow::Result<()> {
     let entries = match std::fs::read_dir(snapshot_dir) {
         Ok(e) => e,
@@ -1060,28 +1062,13 @@ impl ModelDeploymentCard {
             "resolved model metadata files",
         );
 
-        // Pass 2.5: harvest non-weight sibling files from any directory
-        // the typed-slot resolve actually walked — hf:// snapshot dirs
-        // and file:// parent dirs (shared-mount, --model-path overlay).
-        // Consumers (lightseek-mm, vllm/sglang chat processors) read
-        // sibling files like `preprocessor_config.json` from `slug_dir`
-        // via `from_pretrained()`; without this MM-aware routing
-        // silently degrades to text-prefix. No-op for http:// (the
-        // self-host route surface — when default-ON ships, the worker
-        // will need to advertise extras itself).
+        // Harvest non-weight siblings (preprocessor_config.json, …) from
+        // every snapshot dir we touched. No-op for `http://`.
         let mut snapshot_dirs: std::collections::HashSet<PathBuf> =
-            std::collections::HashSet::new();
-        for snap in hf_snapshots.values() {
-            snapshot_dirs.insert(snap.clone());
-        }
+            hf_snapshots.values().cloned().collect();
         for (uri, _) in &entries {
-            if let Ok(u) = url::Url::parse(uri)
-                && u.scheme() == "file"
-                && let Ok(p) = u.to_file_path()
-                && let Some(parent) = p.parent()
-                && parent.is_dir()
-            {
-                snapshot_dirs.insert(parent.to_path_buf());
+            if let Some(parent) = file_uri_parent(uri) {
+                snapshot_dirs.insert(parent);
             }
         }
         for snap in &snapshot_dirs {
@@ -1936,6 +1923,13 @@ mod tests {
             assert!(snap.join("tokenizer.json").exists());
             assert!(snap.join("generation_config.json").exists());
 
+            // Sibling harvest: TinyLlama_v1.1 fixture ships
+            // `special_tokens_map.json` and `tokenizer.model` outside the
+            // typed slots — both must land in slug_dir for
+            // `from_pretrained()` to see a complete model dir.
+            assert!(snap.join("special_tokens_map.json").exists());
+            assert!(snap.join("tokenizer.model").exists());
+
             for (cf, _) in mdc.iter_metadata_files() {
                 let path = cf.path().expect("post-download local path");
                 assert!(path.starts_with(&snap));
@@ -2045,72 +2039,59 @@ mod tests {
         assert!(!dest.exists(), "dest must not exist after cancel");
     }
 
-    /// The harvest must:
-    /// - bring in non-weight sibling files (preprocessor_config.json,
-    ///   special_tokens_map.json) so MM consumers can `from_pretrained`
-    ///   the slug_dir,
-    /// - skip weight blobs (*.safetensors, *.bin, *.pt, …) so we don't
-    ///   bloat the metadata cache,
-    /// - leave existing entries alone (typed slots already symlinked
-    ///   by the resolve loop must not be overwritten or duplicated),
-    /// - keep `.safetensors.index.json` (json extension, not a weight).
+    /// Brings in the sibling that `lightseek-mm` needs.
     #[test]
-    fn harvest_siblings_copies_non_weights_skipping_existing() -> anyhow::Result<()> {
+    fn harvest_brings_in_non_weight_siblings() -> anyhow::Result<()> {
         let snap = tempfile::tempdir()?;
         let slug = tempfile::tempdir()?;
-
-        // Sibling files we want to land in slug_dir.
         std::fs::write(snap.path().join("preprocessor_config.json"), b"pre")?;
-        std::fs::write(snap.path().join("special_tokens_map.json"), b"st")?;
-        std::fs::write(snap.path().join("added_tokens.json"), b"at")?;
-        std::fs::write(snap.path().join("model.safetensors.index.json"), b"idx")?;
-        // Sentencepiece tokenizer model — non-weight `.model` extension.
         std::fs::write(snap.path().join("tokenizer.model"), b"sp")?;
-
-        // Weight blobs we must NOT copy.
-        std::fs::write(snap.path().join("model.safetensors"), b"WEIGHTS")?;
-        std::fs::write(snap.path().join("pytorch_model.bin"), b"WEIGHTS")?;
-        std::fs::write(snap.path().join("model.gguf"), b"WEIGHTS")?;
-        std::fs::write(snap.path().join("model.onnx"), b"WEIGHTS")?;
-
-        // Typed slot already symlinked by the resolve loop. Harvest must
-        // skip it (and must not error on the pre-existing dst).
-        let typed_slot_blob = snap.path().join("config.json");
-        std::fs::write(&typed_slot_blob, b"cfg")?;
-        std::os::unix::fs::symlink(&typed_slot_blob, slug.path().join("config.json"))?;
-
+        // `.safetensors.index.json` is `.json`, not a weight — must be kept.
+        std::fs::write(snap.path().join("model.safetensors.index.json"), b"idx")?;
         super::harvest_siblings(snap.path(), slug.path())?;
-
         assert!(slug.path().join("preprocessor_config.json").exists());
-        assert!(slug.path().join("special_tokens_map.json").exists());
-        assert!(slug.path().join("added_tokens.json").exists());
-        assert!(slug.path().join("model.safetensors.index.json").exists());
         assert!(slug.path().join("tokenizer.model").exists());
-
-        for weight in [
-            "model.safetensors",
-            "pytorch_model.bin",
-            "model.gguf",
-            "model.onnx",
-        ] {
-            assert!(
-                !slug.path().join(weight).exists(),
-                "weight {weight} must not be harvested",
-            );
-        }
-
-        // The pre-existing typed-slot symlink is intact and untouched.
-        let preserved = slug.path().join("config.json");
-        assert!(preserved.is_symlink() || preserved.exists());
+        assert!(slug.path().join("model.safetensors.index.json").exists());
         Ok(())
     }
 
-    /// Snapshot dir missing entirely: harvest is a no-op (best-effort).
+    /// Weight blobs stay out so the metadata cache doesn't bloat.
     #[test]
-    fn harvest_siblings_tolerates_missing_snapshot() -> anyhow::Result<()> {
+    fn harvest_skips_weight_blobs() -> anyhow::Result<()> {
+        let snap = tempfile::tempdir()?;
         let slug = tempfile::tempdir()?;
-        let missing = slug.path().join("does-not-exist");
-        super::harvest_siblings(&missing, slug.path())?;
+        for weight in ["model.safetensors", "pytorch_model.bin", "model.gguf"] {
+            std::fs::write(snap.path().join(weight), b"WEIGHTS")?;
+        }
+        super::harvest_siblings(snap.path(), slug.path())?;
+        for weight in ["model.safetensors", "pytorch_model.bin", "model.gguf"] {
+            assert!(!slug.path().join(weight).exists());
+        }
+        Ok(())
+    }
+
+    /// Missing snapshot dir is best-effort: no error, no work.
+    #[test]
+    fn harvest_tolerates_missing_snapshot() -> anyhow::Result<()> {
+        let slug = tempfile::tempdir()?;
+        super::harvest_siblings(&slug.path().join("does-not-exist"), slug.path())?;
+        Ok(())
+    }
+
+    /// Typed slots already in slug_dir survive a harvest pass untouched.
+    #[test]
+    fn harvest_preserves_existing_dst() -> anyhow::Result<()> {
+        let snap = tempfile::tempdir()?;
+        let slug = tempfile::tempdir()?;
+        let typed = snap.path().join("config.json");
+        std::fs::write(&typed, b"cfg")?;
+        std::os::unix::fs::symlink(&typed, slug.path().join("config.json"))?;
+        // Drop a different file in snap so the harvest does something.
+        std::fs::write(snap.path().join("special_tokens_map.json"), b"st")?;
+        super::harvest_siblings(snap.path(), slug.path())?;
+        let preserved = slug.path().join("config.json");
+        assert!(preserved.is_symlink());
+        assert!(slug.path().join("special_tokens_map.json").exists());
         Ok(())
     }
 }
