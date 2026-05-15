@@ -217,7 +217,7 @@ or the model emitted EOS mid-generation.
 
 ### Sub-cases
 
-Three distinct truncation shapes with different recovery contracts:
+Five distinct truncation shapes with different recovery contracts:
 
 - **`PARSER.batch.5.a`** Missing closing tag. Open fence present,
   matching close absent. The most common shape (model hit `max_tokens`
@@ -229,6 +229,14 @@ Three distinct truncation shapes with different recovery contracts:
   partway through the call body (mid-arguments, mid-name). The
   recovery contract differs from `.a`/`.b`: the call body itself is
   incomplete, not just the wrapper.
+- **`PARSER.batch.5.d`** Multi-call response where the last call is
+  complete but missing only the final end marker. Tests whether the
+  parser can recover already-closed earlier calls without treating the
+  unfinished tail as a valid call.
+- **`PARSER.batch.5.e`** Multi-call response where the last call is
+  truncated inside an argument value. Tests that completed earlier
+  calls remain recoverable while the partial trailing call is dropped,
+  preserved as text, or surfaced as an impl-defined error.
 
 ## `PARSER.batch.6` — Empty args
 
@@ -287,10 +295,14 @@ splits along four type-handling axes:
   produce `20` (int) instead. The test asserts preservation
   (Dynamo's behavior); schema-coercing impls show up as registered
   divergences.
-- **`PARSER.batch.7.d`** Multi-arg / nested / quoted / split-across-chunks.
-  Multiple parameters in one call, deeply-nested arguments, quotes/
-  brackets inside string values, and primitives split across streaming
-  token boundaries. Tests the streaming-aware concatenation logic.
+- **`PARSER.batch.7.d`** Multi-arg / nested. Multiple parameters in
+  one call plus ordinary nested object / array values. This is the
+  batch-mode nested-argument baseline.
+- **`PARSER.batch.7.e`** Large / deep / JSON-edge argument payloads.
+  Covers unusually deep objects, larger arrays, explicit JSON `null`,
+  empty nested objects, and duplicate-key / last-key-wins policy when
+  a grammar can represent it. Chunk-boundary versions of these shapes
+  belong under `PARSER.stream.3`, not here.
 
 ## `PARSER.batch.8` — Normal text interleaved with tool calls
 
@@ -335,10 +347,23 @@ Engine emits a chunk with `delta.content = ""`, or a final response
 with `tool_calls: []`, or `null` values inside arguments.
 
 - Applies to every tool-call parser.
-- Null-value handling inside parameters is parser-level
-  (`parse_parameters` in DSML handles it via
-  `serde_json::Value::Null`). Empty-choices / empty-stream handling
-  is typically at the e2e integration layer.
+- Null-value handling inside parameters is parser-level argument
+  coverage and belongs under `PARSER.batch.7` (or `PARSER.xml.2` for
+  XML schema coercion), not under this empty-output bucket.
+- Empty-choices / empty-stream handling is typically at the e2e
+  integration layer; parser fixtures should pin only what can be
+  represented as parser input.
+
+### Sub-cases
+
+- **`PARSER.batch.9.a`** Empty model text (`""`). The parser should
+  return no calls and empty normal text.
+- **`PARSER.batch.9.b`** Blank / whitespace-only model text. The
+  parser should not invent a call; preservation vs trimming of
+  whitespace is an implementation contract recorded in the fixture.
+- **`PARSER.batch.9.c`** Explicit empty tool-call container when the
+  grammar has one, such as an empty JSON-array wrapper. Grammars
+  without an empty-container spelling should mark this `N/A`.
 
 ## `PARSER.batch.10` — Duplicate tool calls (same name twice)
 
@@ -369,6 +394,17 @@ its custom argument object.
   delimiter-state regression rather than folding it into generic
   string escaping.
 
+### Sub-cases
+
+- **`PARSER.batch.11.a`** Call separator character inside a single
+  argument string value, such as semicolon or comma.
+- **`PARSER.batch.11.b`** Structural delimiter inside a string value,
+  such as braces or brackets that would otherwise affect wrapper
+  depth tracking.
+- **`PARSER.batch.11.c`** Tool-call marker / format sentinel text
+  inside a string value. Tests marker detection state, not generic
+  Unicode or escaping.
+
 ## `PARSER.batch.12` — Separator characters inside one call of a multi-call response
 
 Two or more calls are present, and one call's argument string contains a
@@ -382,6 +418,15 @@ separator-looking character before the real call separator.
   separators, but not a separator-looking character inside the first
   call's argument. This case is the combined `2.a + 11` state-machine
   check.
+
+### Sub-cases
+
+- **`PARSER.batch.12.a`** Two or more calls, with a call-separator
+  character inside one argument string before the real inter-call
+  separator.
+- **`PARSER.batch.12.b`** Two or more calls, with nested structures or
+  structural delimiters inside one call before later calls. Streaming
+  chunk-boundary versions remain `PARSER.stream.2` / `.3` co-tags.
 
 ## `PARSER.batch.13` — Unknown / unregistered tool name
 
@@ -398,6 +443,20 @@ not present in the request's supplied `tools` list.
   emitted call is syntactically valid and contains the expected
   structural keys. The unknown part is the function registry lookup
   against the request's supplied `tools` list.
+
+### Sub-cases
+
+- **`PARSER.batch.13.a`** Unknown-only call under the implementation's
+  default behavior (drop, forward, or preserve as text).
+- **`PARSER.batch.13.b`** Unknown-only call under an explicit
+  forward-unknown-tools mode, where the implementation has such a
+  switch. Mark `N/A` when the parser has no opt-in mode.
+- **`PARSER.batch.13.c`** Mixed known and unknown calls in the same
+  response. The fixture records whether the implementation extracts
+  the known call and drops / forwards / preserves the unknown one.
+- **`PARSER.batch.13.d`** Unknown native index or registry index out
+  of range for grammars that reference tools by ordinal instead of
+  name.
 
 ---
 
@@ -637,8 +696,9 @@ Minimum viable set:
    non-negotiable for any parser that sits behind a streaming
    frontend.
 6. `PARSER.batch.8` — interleaved text.
-7. `PARSER.batch.{9, 10, 13}` — empty/null, duplicate calls, and
-   unknown tool names.
+7. `PARSER.batch.9.{a,b,c}`, `PARSER.batch.10`, and
+   `PARSER.batch.13.{a,c}` — empty / blank / empty-container inputs,
+   duplicate calls, and unknown tool names.
 8. Format variants where applicable (`PARSER.fmt.{1..5}`): cover
    any that the parser's grammar permits. Mark `N/A` for those that
    don't apply. JSON-family parsers (Mistral, Llama 3 JSON, Hermes)

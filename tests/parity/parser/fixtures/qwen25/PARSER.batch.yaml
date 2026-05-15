@@ -40,18 +40,45 @@ cases:
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
       sglang: *id002
-  PARSER.batch.9:
-    description: Empty input
+  PARSER.batch.9.a:
+    description: Empty model text
     model_text: ''
     tools:
-    - *id001
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
     expected:
-      dynamo: &id003
+      dynamo:
         calls: []
         normal_text: ''
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
-      sglang: *id003
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.9.b:
+    description: Blank / whitespace-only model text
+    ref: dynamo
+    model_text: '   '
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '   '
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang:
+        calls: []
+        normal_text: '   '
   PARSER.batch.10:
     description: Duplicate calls (same name twice)
     model_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}</tool_call><tool_call>{"name": "get_weather",

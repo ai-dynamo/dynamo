@@ -41,17 +41,47 @@ cases:
         normal_text: Hello, how can I help you today?
       vllm: *id003
       sglang: *id003
-  PARSER.batch.9:
-    description: Empty input
+  PARSER.batch.9.a:
+    description: Empty model text
     model_text: ''
     tools:
-    - *id002
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
     expected:
-      dynamo: &id004
+      dynamo:
         calls: []
         normal_text: ''
-      vllm: *id004
-      sglang: *id004
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.9.b:
+    description: Blank / whitespace-only model text
+    ref: dynamo
+    model_text: '   '
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '   '
+      vllm:
+        calls: []
+        normal_text: '   '
+      sglang:
+        calls: []
+        normal_text: '   '
   PARSER.batch.10:
     description: Duplicate calls (same name twice)
     model_text: |-

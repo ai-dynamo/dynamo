@@ -47,15 +47,39 @@ cases:
         unavailable: vLLM has no parser for family='nemotron_nano'
       sglang:
         unavailable: SGLang has no detector for family='nemotron_nano'
-  PARSER.batch.9:
-    description: Empty input
+  PARSER.batch.9.a:
+    description: Empty model text
     model_text: ''
     tools:
-    - *id001
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
     expected:
       dynamo:
         calls: []
         normal_text: ''
+      vllm:
+        unavailable: vLLM has no parser for family='nemotron_nano'
+      sglang:
+        unavailable: SGLang has no detector for family='nemotron_nano'
+  PARSER.batch.9.b:
+    description: Blank / whitespace-only model text
+    ref: dynamo
+    model_text: '   '
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '   '
       vllm:
         unavailable: vLLM has no parser for family='nemotron_nano'
       sglang:

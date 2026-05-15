@@ -36,17 +36,47 @@ cases:
         normal_text: Hello, how can I help you today?
       vllm: *id003
       sglang: *id003
-  PARSER.batch.9:
-    description: Empty input
+  PARSER.batch.9.a:
+    description: Empty model text
     model_text: ''
     tools:
-    - *id002
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
     expected:
-      dynamo: &id004
+      dynamo:
         calls: []
         normal_text: ''
-      vllm: *id004
-      sglang: *id004
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.9.b:
+    description: Blank / whitespace-only model text
+    ref: dynamo
+    model_text: '   '
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: '   '
+      vllm:
+        calls: []
+        normal_text: '   '
+      sglang:
+        calls: []
+        normal_text: '   '
   PARSER.batch.10:
     description: Duplicate calls (same name twice)
     model_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|><|tool_call>call:get_weather{location:<|"|>LA<|"|>}<tool_call|>
@@ -64,8 +94,8 @@ cases:
         normal_text: ''
       vllm: *id005
       sglang: *id005
-  PARSER.batch.11:
-    description: Single call with argument delimiters inside string value
+  PARSER.batch.11.a:
+    description: Call separator character inside one argument string value
     ref: dynamo
     model_text: <|tool_call>call:run_query{sql:<|"|>SELECT a,b:and{brace}<|"|>}<tool_call|>
     tools:
@@ -76,16 +106,86 @@ cases:
           sql:
             type: string
     expected:
-      dynamo: &d_11
+      dynamo:
         calls:
         - name: run_query
           arguments:
             sql: SELECT a,b:and{brace}
         normal_text: ''
-      vllm: *d_11
-      sglang: *d_11
-  PARSER.batch.12:
-    description: Parallel calls where one argument contains delimiter characters
+      vllm:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a,b:and{brace}
+        normal_text: ''
+      sglang:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a,b:and{brace}
+        normal_text: ''
+  PARSER.batch.11.b:
+    description: Structural delimiter inside one argument string value
+    ref: SGLang/LightSeek delimiter-state audit
+    model_text: <|tool_call>call:run_query{sql:<|"|>SELECT value WHERE note has brace } and bracket ]<|"|>}<tool_call|>
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        normal_text: ''
+      vllm:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        normal_text: ''
+      sglang:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        normal_text: ''
+  PARSER.batch.11.c:
+    description: Tool-call marker text inside one argument string value
+    ref: SGLang/LightSeek delimiter-state audit
+    model_text: <|tool_call>call:run_query{sql:<|"|>literal <|tool_call>call:get_time{}<tool_call|> stays text<|"|>}<tool_call|>
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: run_query
+          arguments:
+            sql: literal <|tool_call>call:get_time{}<tool_call|> stays text
+        normal_text: ''
+      vllm:
+        calls:
+        - name: run_query
+          arguments:
+            sql: literal <|tool_call>call:get_time{}<tool_call|> stays text
+        normal_text: ''
+      sglang:
+        calls:
+        - name: run_query
+          arguments:
+            sql: literal <|tool_call>call:get_time{}<tool_call|> stays text
+        normal_text: ''
+  PARSER.batch.12.a:
+    description: Multi-call response with a separator character inside one argument string value
     ref: dynamo
     model_text: <|tool_call>call:run_query{sql:<|"|>SELECT a,b:and{brace}<|"|>}<tool_call|><|tool_call>call:get_time{timezone:<|"|>EST<|"|>}<tool_call|>
     tools:
@@ -102,7 +202,7 @@ cases:
           timezone:
             type: string
     expected:
-      dynamo: &d_12
+      dynamo:
         calls:
         - name: run_query
           arguments:
@@ -111,20 +211,135 @@ cases:
           arguments:
             timezone: EST
         normal_text: ''
-      vllm: *d_12
-      sglang: *d_12
-  PARSER.batch.13:
-    description: Unknown tool name absent from supplied tools
+      vllm:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a,b:and{brace}
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      sglang:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a,b:and{brace}
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+  PARSER.batch.12.b:
+    description: Multi-call response with structural delimiters inside one argument string value
+    ref: SGLang/LightSeek delimiter-state audit
+    model_text: <|tool_call>call:run_query{sql:<|"|>SELECT value WHERE note has brace } and bracket ]<|"|>}<tool_call|><|tool_call>call:get_time{timezone:<|"|>EST<|"|>}<tool_call|>
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    - name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      sglang:
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT value WHERE note has brace } and bracket ]
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+  PARSER.batch.13.a:
+    description: Unknown-only call under default behavior
     ref: originated from https://github.com/sgl-project/sglang/blob/612785ffdcaf35552f1ed433a981d596ca9fe900/test/registered/unit/function_call/test_function_call_parser.py#L4312
     model_text: <|tool_call>call:unknown_tool{location:<|"|>NYC<|"|>}<tool_call|>
     tools:
-    - *id002
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
     expected:
-      dynamo: &d_13
+      dynamo:
         calls:
         - name: unknown_tool
           arguments:
             location: NYC
         normal_text: ''
-      vllm: *d_13
-      sglang: *d_13
+      vllm:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      sglang:
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+  PARSER.batch.13.c:
+    description: Mixed known and unknown calls in one response
+    ref: SGLang TestHunyuanDetectorDetectAndParse.test_mixed_known_and_unknown_tools
+    model_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}<tool_call|><|tool_call>call:unknown_tool{location:<|"|>LA<|"|>}<tool_call|>
+    tools:
+    - name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: unknown_tool
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: unknown_tool
+          arguments:
+            location: LA
+        normal_text: ''
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: unknown_tool
+          arguments:
+            location: LA
+        normal_text: ''
