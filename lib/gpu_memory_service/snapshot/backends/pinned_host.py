@@ -14,6 +14,7 @@ from gpu_memory_service.common import cuda_utils
 
 PINNED_COPY_CHUNK_SIZE = 64 * 1024 * 1024
 
+_LOGGER = logging.getLogger(__name__)
 _ALIGNMENT = 4096
 _LIBC = ctypes.CDLL(None)
 _LIBC.posix_memalign.argtypes = [
@@ -44,21 +45,29 @@ class PinnedCopySlot:
     """One reusable pinned host buffer and CUDA stream."""
 
     def __init__(self, size: int = PINNED_COPY_CHUNK_SIZE) -> None:
-        self.view, self._raw, self.ptr = _allocate_aligned_buffer(size)
-        self.stream = cuda_utils.cuda_stream_create_nonblocking()
+        self.size = int(size)
+        self.view, self._raw, self.ptr = _allocate_aligned_buffer(self.size)
+        self.stream = None
         self.busy = False
         self._registered = False
+        self._closed = False
         try:
-            cuda_utils.cuda_host_register(self.ptr, size)
+            self.stream = cuda_utils.cuda_stream_create_nonblocking()
+            cuda_utils.cuda_host_register(self.ptr, self.size)
             self._registered = True
         except Exception:
             try:
-                cuda_utils.cuda_stream_destroy(self.stream)
+                if self.stream is not None:
+                    cuda_utils.cuda_stream_destroy(self.stream)
             finally:
                 _free_aligned_buffer(self.view, self.ptr)
             raise
 
     def copy_to_device_async(self, dst_ptr: int, size: int) -> None:
+        if not isinstance(size, int) or size < 0 or size > self.size:
+            raise ValueError(
+                f"copy size {size!r} exceeds pinned buffer capacity {self.size}"
+            )
         cuda_utils.cuda_memcpy_h2d_async(dst_ptr, self.ptr, size, self.stream)
         self.busy = True
 
@@ -69,16 +78,43 @@ class PinnedCopySlot:
         self.busy = False
 
     def close(self) -> None:
-        self.wait()
+        if self._closed:
+            return
+        error = None
+        try:
+            self.wait()
+        except Exception as exc:  # noqa: BLE001
+            error = exc
         try:
             if self._registered:
                 cuda_utils.cuda_host_unregister(self.ptr)
                 self._registered = False
-        finally:
-            try:
+        except Exception as exc:  # noqa: BLE001
+            if error is None:
+                error = exc
+            else:
+                _LOGGER.warning(
+                    "failed to unregister pinned host buffer", exc_info=True
+                )
+        try:
+            if self.stream is not None:
                 cuda_utils.cuda_stream_destroy(self.stream)
-            finally:
-                _free_aligned_buffer(self.view, self.ptr)
+                self.stream = None
+        except Exception as exc:  # noqa: BLE001
+            if error is None:
+                error = exc
+            else:
+                _LOGGER.warning("failed to destroy CUDA copy stream", exc_info=True)
+        try:
+            _free_aligned_buffer(self.view, self.ptr)
+            self._closed = True
+        except Exception as exc:  # noqa: BLE001
+            if error is None:
+                error = exc
+            else:
+                _LOGGER.warning("failed to free aligned host buffer", exc_info=True)
+        if error is not None:
+            raise error
 
 
 def make_pinned_copy_slots(count: int) -> List[PinnedCopySlot]:
@@ -91,7 +127,10 @@ def make_pinned_copy_slots(count: int) -> List[PinnedCopySlot]:
             try:
                 slot.close()
             except Exception:
-                pass
+                _LOGGER.warning(
+                    "failed to close partially created pinned copy slot",
+                    exc_info=True,
+                )
         raise
     return slots
 

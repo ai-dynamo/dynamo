@@ -83,17 +83,37 @@ class TransferBackend(Protocol):
 def build_file_transfer_sources(
     input_dir: str,
     allocations: Sequence[AllocationEntry],
+    *,
+    allow_absolute_paths: bool = False,
 ) -> List[FileTransferSource]:
     """Convert manifest allocation placement into backend-neutral extents."""
-    return [
-        FileTransferSource(
-            allocation_id=entry.allocation_id,
-            file_path=os.path.join(input_dir, entry.tensor_file),
-            file_offset=int(entry.tensor_offset),
-            byte_count=int(entry.aligned_size),
+    base_dir = os.path.abspath(input_dir)
+    sources: List[FileTransferSource] = []
+    for entry in allocations:
+        tensor_file = str(entry.tensor_file)
+        if os.path.isabs(tensor_file):
+            if not allow_absolute_paths:
+                raise ValueError(
+                    "Snapshot tensor path must be relative for allocation "
+                    f"{entry.allocation_id}: {tensor_file!r}"
+                )
+            file_path = os.path.normpath(tensor_file)
+        else:
+            file_path = os.path.abspath(os.path.join(base_dir, tensor_file))
+            if os.path.commonpath([base_dir, file_path]) != base_dir:
+                raise ValueError(
+                    "Snapshot tensor path escapes input_dir for allocation "
+                    f"{entry.allocation_id}: {tensor_file!r}"
+                )
+        sources.append(
+            FileTransferSource(
+                allocation_id=entry.allocation_id,
+                file_path=file_path,
+                file_offset=int(entry.tensor_offset),
+                byte_count=int(entry.aligned_size),
+            )
         )
-        for entry in allocations
-    ]
+    return sources
 
 
 def create_transfer_backend(

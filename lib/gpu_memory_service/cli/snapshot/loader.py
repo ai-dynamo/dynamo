@@ -129,8 +129,12 @@ def main(argv: list[str] | None = None) -> None:
         required=True,
         required_flag="--checkpoint-dir",
     )
-    max_workers = int(
-        arg_or_env(parser, args.max_workers, GMS_LOAD_WORKERS_ENV, default=8)
+    max_workers = arg_or_env(
+        parser,
+        args.max_workers,
+        GMS_LOAD_WORKERS_ENV,
+        default=8,
+        coerce=int,
     )
     transfer_backend = _validate_transfer_backend(
         parser,

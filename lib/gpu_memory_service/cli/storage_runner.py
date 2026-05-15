@@ -24,6 +24,12 @@ import argparse
 import logging
 import sys
 
+from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
+from gpu_memory_service.snapshot.transfer import (
+    DEFAULT_TRANSFER_BACKEND,
+    TRANSFER_BACKEND_CHOICES,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -51,8 +57,6 @@ def _resolve_socket(device: int, socket_path) -> str:
 
 
 def _parse_sharded_ssd_roots(value) -> list[str]:
-    from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
-
     return parse_sharded_ssd_roots(value or "")
 
 
@@ -143,11 +147,6 @@ _SHARD_SIZE_DEFAULT = 4 * 1024**3  # 4 GiB
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    from gpu_memory_service.snapshot.transfer import (
-        DEFAULT_TRANSFER_BACKEND,
-        TRANSFER_BACKEND_CHOICES,
-    )
-
     parser = argparse.ArgumentParser(
         prog="gms-storage-client",
         description="Save and load GPU Memory Service state to/from disk.",

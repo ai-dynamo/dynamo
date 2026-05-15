@@ -403,15 +403,10 @@ class _NixlGDSTransferSession:
                     _release_transfer_resources(
                         self._agent, handle, file_reg, vram_reg, fd
                     )
+                    self._drain_pending_before_error(pending)
                     raise
 
-            for handle, file_reg, vram_reg, fd, file_path in pending:
-                _wait_for_transfer_done(
-                    self._agent,
-                    handle,
-                    file_path,
-                    NIXL_GDS_TRANSFER_BACKEND,
-                )
+            self._wait_for_pending_transfers(pending)
         finally:
             for handle, file_reg, vram_reg, fd, _ in pending:
                 _release_transfer_resources(
@@ -434,3 +429,44 @@ class _NixlGDSTransferSession:
 
     def close(self) -> None:
         self._active = False
+
+    def _wait_for_pending_transfers(
+        self,
+        pending: Sequence[Tuple[Any, Any, Any, Optional[int], str]],
+    ) -> None:
+        first_error = None
+        for handle, _file_reg, _vram_reg, _fd, file_path in pending:
+            try:
+                _wait_for_transfer_done(
+                    self._agent,
+                    handle,
+                    file_path,
+                    NIXL_GDS_TRANSFER_BACKEND,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if first_error is None:
+                    first_error = exc
+                else:
+                    logger.warning(
+                        "%s transfer also failed for %s",
+                        NIXL_GDS_TRANSFER_BACKEND,
+                        file_path,
+                        exc_info=True,
+                    )
+        if first_error is not None:
+            raise first_error
+
+    def _drain_pending_before_error(
+        self,
+        pending: Sequence[Tuple[Any, Any, Any, Optional[int], str]],
+    ) -> None:
+        if not pending:
+            return
+        try:
+            self._wait_for_pending_transfers(pending)
+        except Exception:
+            logger.warning(
+                "%s failed while draining in-flight transfers after setup error",
+                NIXL_GDS_TRANSFER_BACKEND,
+                exc_info=True,
+            )

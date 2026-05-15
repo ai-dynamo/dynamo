@@ -132,24 +132,26 @@ def main(argv: list[str] | None = None) -> None:
         required=True,
         required_flag="--checkpoint-dir",
     )
-    max_workers = int(
-        arg_or_env(parser, args.max_workers, GMS_SAVE_WORKERS_ENV, default=8)
+    max_workers = arg_or_env(
+        parser,
+        args.max_workers,
+        GMS_SAVE_WORKERS_ENV,
+        default=8,
+        coerce=int,
     )
-    lock_timeout_ms = int(
-        arg_or_env(
-            parser,
-            args.save_lock_timeout_ms,
-            GMS_SAVE_LOCK_TIMEOUT_MS_ENV,
-            default=DEFAULT_SAVE_LOCK_TIMEOUT_MS,
-        )
+    lock_timeout_ms = arg_or_env(
+        parser,
+        args.save_lock_timeout_ms,
+        GMS_SAVE_LOCK_TIMEOUT_MS_ENV,
+        default=DEFAULT_SAVE_LOCK_TIMEOUT_MS,
+        coerce=int,
     )
-    shard_size_bytes = int(
-        arg_or_env(
-            parser,
-            args.shard_size_bytes,
-            GMS_SHARD_SIZE_BYTES_ENV,
-            default=4 * 1024**3,
-        )
+    shard_size_bytes = arg_or_env(
+        parser,
+        args.shard_size_bytes,
+        GMS_SHARD_SIZE_BYTES_ENV,
+        default=4 * 1024**3,
+        coerce=int,
     )
     sharded_ssd_roots = parse_sharded_ssd_roots(
         arg_or_env(

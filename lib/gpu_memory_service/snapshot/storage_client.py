@@ -44,6 +44,9 @@ from gpu_memory_service.snapshot.transfer import (
     DEFAULT_TRANSFER_BACKEND as _DEFAULT_TRANSFER_BACKEND,
 )
 from gpu_memory_service.snapshot.transfer import (
+    SHARDED_SSD_TRANSFER_BACKEND as _SHARDED_SSD_TRANSFER_BACKEND,
+)
+from gpu_memory_service.snapshot.transfer import (
     GMSSnapshotConfig,
     GMSTransferTarget,
     build_file_transfer_sources,
@@ -371,7 +374,11 @@ class GMSStorageClient:
         self._validate_load_request()
 
         manifest, saved_metadata = _load_manifest_and_metadata(input_dir)
-        sources = build_file_transfer_sources(input_dir, manifest.allocations)
+        sources = build_file_transfer_sources(
+            input_dir,
+            manifest.allocations,
+            allow_absolute_paths=backend_name == _SHARDED_SSD_TRANSFER_BACKEND,
+        )
         backend = create_transfer_backend(
             backend_name,
             GMSSnapshotConfig(
