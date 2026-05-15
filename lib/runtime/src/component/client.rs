@@ -157,6 +157,8 @@ pub struct Client {
     instance_avail: Arc<ArcSwap<Vec<u64>>>,
     // These are the instance source ids less those reported as busy (above threshold)
     instance_free: Arc<ArcSwap<Vec<u64>>>,
+    // These are the instance ids reported as busy (above threshold)
+    instance_busy: Arc<StdMutex<HashSet<u64>>>,
     // Watch sender for available instance IDs (for sending updates)
     instance_avail_tx: Arc<tokio::sync::watch::Sender<Vec<u64>>>,
     // Watch receiver for available instance IDs (for cloning to external subscribers)
@@ -203,6 +205,7 @@ impl Client {
             instance_source: instance_source.clone(),
             instance_avail: Arc::new(ArcSwap::from(Arc::new(initial_ids.clone()))),
             instance_free: Arc::new(ArcSwap::from(Arc::new(initial_ids))),
+            instance_busy: Arc::new(StdMutex::new(HashSet::new())),
             instance_avail_tx: Arc::new(avail_tx),
             instance_avail_rx: avail_rx,
             reconcile_interval,
@@ -285,10 +288,14 @@ impl Client {
 
     /// Update the set of free instances based on busy instance IDs
     pub fn update_free_instances(&self, busy_instance_ids: &[u64]) {
-        let all_instance_ids = self.instance_ids();
-        let free_ids: Vec<u64> = all_instance_ids
+        let mut busy_ids = self.instance_busy.lock().unwrap();
+        busy_ids.clear();
+        busy_ids.extend(busy_instance_ids.iter().copied());
+
+        let free_ids = self
+            .instance_ids()
             .into_iter()
-            .filter(|id| !busy_instance_ids.contains(id))
+            .filter(|id| !busy_ids.contains(id))
             .collect();
         self.instance_free.store(Arc::new(free_ids));
     }
@@ -304,12 +311,6 @@ impl Client {
         let cancel_token = self.endpoint.drt().primary_token();
         let client = self.clone();
         let endpoint_id = self.endpoint.id();
-        let mut known_instance_ids = self
-            .instance_source
-            .borrow()
-            .iter()
-            .map(|instance| instance.id())
-            .collect::<HashSet<_>>();
         tokio::task::spawn(async move {
             let mut rx = client.instance_source.as_ref().clone();
             while !cancel_token.is_cancelled() {
@@ -320,19 +321,15 @@ impl Client {
                     .collect();
 
                 client.instance_avail.store(Arc::new(instance_ids.clone()));
-                client.instance_free.rcu(|previous_free_ids| {
-                    let previous_free_ids =
-                        previous_free_ids.iter().copied().collect::<HashSet<_>>();
+                {
+                    let busy_ids = client.instance_busy.lock().unwrap();
                     let free_ids = instance_ids
                         .iter()
                         .copied()
-                        .filter(|id| {
-                            previous_free_ids.contains(id) || !known_instance_ids.contains(id)
-                        })
+                        .filter(|id| !busy_ids.contains(id))
                         .collect();
-                    Arc::new(free_ids)
-                });
-                known_instance_ids = instance_ids.iter().copied().collect();
+                    client.instance_free.store(Arc::new(free_ids));
+                }
 
                 // Clean up stale occupancy counters for instances that no longer exist.
                 let registry = client.endpoint.drt().routing_occupancy_states();
@@ -583,6 +580,40 @@ mod tests {
         assert!(
             client.instance_ids_free().is_empty(),
             "periodic reconciliation should not mark an existing busy worker free"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_instance_reconciliation_preserves_busy_new_instances() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let worker_id = drt.connection_id();
+        let ns = drt
+            .namespace("test_new_busy_reconciliation".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        client.update_free_instances(&[worker_id]);
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        assert_eq!(instances[0].id(), worker_id);
+
+        tokio::time::sleep(TEST_RECONCILE_INTERVAL + Duration::from_millis(50)).await;
+
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "discovery reconciliation should not mark a newly discovered busy worker free"
         );
 
         rt.shutdown();
