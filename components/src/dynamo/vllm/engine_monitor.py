@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import inspect
 import logging
 import os
 import traceback
@@ -58,9 +59,9 @@ class VllmEngineMonitor:
         Shutdown the vLLM engine on crash scenarios to free resources.
         """
         try:
-            await asyncio.wait_for(
-                self.engine_client.shutdown(), timeout=ENGINE_SHUTDOWN_TIMEOUT
-            )
+            result = self.engine_client.shutdown()
+            if inspect.isawaitable(result):
+                await asyncio.wait_for(result, timeout=ENGINE_SHUTDOWN_TIMEOUT)
         except asyncio.TimeoutError:
             logger.warning(
                 "vLLM engine shutdown timed out after %ds", ENGINE_SHUTDOWN_TIMEOUT
