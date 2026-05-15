@@ -48,6 +48,35 @@ from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
 logger = logging.getLogger(__name__)
 
+
+def _default_output_dir() -> str:
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir:
+        return str(Path(runtime_dir) / "dynamo-fastvideo" / "outputs")
+
+    home_dir = Path.home()
+    if str(home_dir) not in {"", "/"}:
+        return str(home_dir / ".cache" / "dynamo" / "fastvideo" / "outputs")
+
+    uid = os.getuid() if hasattr(os, "getuid") else "unknown"
+    return str(Path("/tmp") / f"dynamo-fastvideo-{uid}" / "outputs")
+
+
+def _ensure_private_directory(path: Path) -> None:
+    missing_dirs = []
+    current = path
+    while not current.exists():
+        missing_dirs.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for directory in missing_dirs:
+        if directory.is_dir():
+            directory.chmod(0o700)
+
+
 DEFAULT_MODEL = "FastVideo/FastWan2.1-T2V-1.3B-Diffusers"
 DEFAULT_ATTENTION_BACKEND = "VIDEO_SPARSE_ATTN"
 DEFAULT_TORCH_COMPILE_BACKEND = "inductor"
@@ -63,7 +92,7 @@ DEFAULT_MAX_VIDEO_WIDTH = 4096
 DEFAULT_MAX_VIDEO_HEIGHT = 4096
 DEFAULT_RESPONSE_FORMAT = "b64_json"
 DEFAULT_OUTPUT_FORMAT = "mp4"
-DEFAULT_OUTPUT_DIR = "/tmp/dynamo-fastvideo-outputs"
+DEFAULT_OUTPUT_DIR = _default_output_dir()
 DEFAULT_VSA_SPARSITY = 0.8
 ATTENTION_BACKEND_CHOICES = (
     "FLASH_ATTN",
@@ -299,8 +328,11 @@ class FastVideoBackend:
 
     def _resolve_response_format(self, response_format: str | None) -> str:
         resolved = response_format or DEFAULT_RESPONSE_FORMAT
-        if resolved not in {"b64_json", "url"}:
-            raise ValueError("response_format must be one of: b64_json, url")
+        if resolved != "b64_json":
+            raise ValueError(
+                "FastVideo example worker only supports response_format='b64_json'; "
+                "url responses require configured media storage"
+            )
         return resolved
 
     def _resolve_output_format(self, output_format: str | None) -> str:
@@ -373,7 +405,7 @@ class FastVideoBackend:
         if self.generator is None:
             raise RuntimeError("Generator is not initialized")
 
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_private_directory(self.output_dir)
         output_path = self.output_dir / f"{video_id}.mp4"
         generation_request = self._build_generation_request(
             prompt=prompt,
@@ -405,10 +437,16 @@ class FastVideoBackend:
         response_format: str,
         video_path: Path,
     ) -> VideoData:
-        if response_format == "url":
-            return VideoData(output_format=output_format, url=str(video_path))
+        if response_format != "b64_json":
+            raise ValueError(
+                "FastVideo example worker only supports response_format='b64_json'"
+            )
 
         video_bytes = await asyncio.to_thread(video_path.read_bytes)
+        try:
+            await asyncio.to_thread(video_path.unlink)
+        except FileNotFoundError:
+            pass
         return VideoData(
             output_format=output_format,
             b64_json=base64.b64encode(video_bytes).decode("utf-8"),
@@ -508,6 +546,8 @@ class FastVideoBackend:
                 ],
                 inference_time_s=time.time() - started_at,
             ).model_dump()
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.exception("[%s] Generation failed", video_id)
             yield VideoCreateResponse(
@@ -720,7 +760,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         default=DEFAULT_OUTPUT_DIR,
-        help="Directory for generated MP4 files and url responses.",
+        help="Directory for generated MP4 staging files.",
     )
 
     args = parser.parse_args()
