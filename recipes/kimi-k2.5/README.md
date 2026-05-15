@@ -19,7 +19,8 @@ We compare four Dynamo + TRTLLM deployment modes on **6x GB200 (24 GPU)**:
 
 ## Results
 
-![Throughput vs per-user latency Pareto](artifacts/pareto_throughputs.png)
+<img width="1650" height="1050" alt="image" src="https://github.com/user-attachments/assets/8a91309a-839b-4086-be1d-8d9e9b0dee44" />
+
 
 The disaggregated configuration with KV-aware routing, Eagle decoding, and KV offloading achieves the best system throughput and interactivity.
 
@@ -108,6 +109,7 @@ kubectl apply -f trtllm/disagg-eagle-kv-router/perf.yaml -n ${NAMESPACE}
 | Agg + Eagle + KV routing | ~85 | ~4,400 |
 | Agg + Eagle + Round-robin | ~95 | ~4,000 |
 | Agg + Round-robin (no Eagle) | ~105 | ~1,700 |
+(Consistent with the pareto plot at the top)
 
 
 ## Cleanup
