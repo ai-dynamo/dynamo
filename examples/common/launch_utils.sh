@@ -71,12 +71,15 @@ EXAMPLE_PROMPT_VISUAL="A golden retriever riding a skateboard through a neon-lit
 # _terminate_process_group in tests/utils/managed_process.py.
 dynamo_reap_and_exit() {
     local _rc=${1:-0}
-    local _pids
-    _pids=$(jobs -p)
-    if [[ -n "$_pids" ]]; then
-        # Signal tracked PIDs directly; `kill 0` would TERM bash itself.
-        # shellcheck disable=SC2086  # word-split for multiple PIDs
-        kill -TERM $_pids 2>/dev/null || true
+    # Shield bash from its own SIGTERM/SIGINT before signaling the pgid.
+    # Without this, `kill -TERM 0` boomerangs onto bash and re-enters this
+    # trap. `trap ''` only changes bash's disposition; already-running
+    # children keep their default signal handling.
+    trap '' TERM INT
+    if [[ -n "$(jobs -p)" ]]; then
+        # Signal the entire process group so grandchildren (subprocesses
+        # spawned by tracked jobs) get TERM too, not just direct children.
+        kill -TERM 0 2>/dev/null || true
     fi
     wait 2>/dev/null || true
     exit "$_rc"
