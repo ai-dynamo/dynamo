@@ -244,8 +244,12 @@ navigation:
             path: mocker/mocker.md
           - page: Mocker Offline Trace Replay
             path: benchmarks/mocker-trace-replay.md
-      - page: Writing Python Workers
+      - page: Writing Python Workers (lower-level)
         path: development/backend-guide.md
+      - page: Writing Python Unified Backends
+        path: development/python-backend-guide.md
+      - page: Writing Rust Unified Backends
+        path: development/rust-backend-guide.md
 
   # ==================== Backends ====================
   - section: Backends
