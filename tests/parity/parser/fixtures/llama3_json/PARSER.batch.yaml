@@ -91,6 +91,7 @@ cases:
       sglang: *id006
   PARSER.batch.11:
     description: Single call with semicolon inside argument string value
+    ref: dynamo
     model_text: '<|python_tag|>{"name": "run_query", "arguments": {"sql": "SELECT a; SELECT b"}}'
     tools:
     - name: run_query
@@ -110,6 +111,7 @@ cases:
       sglang: *id007
   PARSER.batch.12:
     description: Parallel calls where one argument contains a semicolon (streaming split safety)
+    ref: dynamo
     model_text: '<|python_tag|>{"name": "run_query", "arguments": {"sql": "SELECT a; SELECT b"}};{"name": "get_time", "arguments":
       {"timezone": "EST"}}'
     tools:
@@ -137,3 +139,21 @@ cases:
         normal_text: ''
       vllm: *id008
       sglang: *id008
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: originated from https://github.com/sgl-project/sglang/blob/612785ffdcaf35552f1ed433a981d596ca9fe900/test/registered/unit/function_call/test_unknown_tool_name.py#L29
+    model_text: '<|python_tag|>{"name": "unknown_tool", "arguments": {"location": "NYC"}}'
+    tools:
+    - *id002
+    expected:
+      dynamo: &d_13
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *d_13
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: SGLang drops unknown tool names by default unless SGLANG_FORWARD_UNKNOWN_TOOLS is enabled.

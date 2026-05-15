@@ -109,6 +109,25 @@ FAMILY_FILTER = set(_args.family or [])
 if OVERWRITE and not MERGE_MODE:
     _ap.error("--overwrite-if-exists requires --merge")
 
+
+def _known_fixture_families() -> set[str]:
+    families = set()
+    for fp in sorted(FIXTURES.glob("*/PARSER.*.yaml")):
+        doc = yaml.safe_load(fp.read_text())
+        families.add(doc["family"])
+    return families
+
+
+if FAMILY_FILTER:
+    known_families = _known_fixture_families()
+    unknown_families = FAMILY_FILTER - known_families
+    if unknown_families:
+        _ap.error(
+            "unknown --family value(s): "
+            f"{', '.join(sorted(unknown_families))}. "
+            f"Known families: {', '.join(sorted(known_families))}"
+        )
+
 wrapper = importlib.import_module(
     f"tests.parity.parser.{IMPL}"
 )  # noqa: E402 — needs sys.path tweak above
@@ -374,6 +393,13 @@ def main() -> int:
                 d = check_drift(case, family, case_id, got)
                 if d is not None:
                     drift.append((key, d))
+
+    if FAMILY_FILTER and n_total == 0:
+        print(
+            f"ERROR: --family matched no cases: {', '.join(sorted(FAMILY_FILTER))}",
+            file=sys.stderr,
+        )
+        return 2
 
     mode = "MERGE" if MERGE_MODE else "CHECK"
     print(

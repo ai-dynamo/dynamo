@@ -69,3 +69,67 @@ cases:
       vllm: *id005
       sglang:
         unavailable: SGLang has no detector for family='jamba'
+  PARSER.batch.11:
+    description: Single JSON-array call with comma inside argument string value
+    model_text: '<tool_calls>[{"name": "run_query", "arguments": {"sql": "SELECT a, SELECT b"}}]</tool_calls>'
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    expected:
+      dynamo: &d_11
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a, SELECT b
+        normal_text: ''
+      vllm: *d_11
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
+  PARSER.batch.12:
+    description: Parallel JSON-array calls where one argument contains a comma
+    model_text: '<tool_calls>[{"name": "run_query", "arguments": {"sql": "SELECT a, SELECT b"}}, {"name": "get_time", "arguments": {"timezone": "EST"}}]</tool_calls>'
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    - name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo: &d_12
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a, SELECT b
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm: *d_12
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    model_text: '<tool_calls>[{"name": "unknown_tool", "arguments": {"location": "NYC"}}]</tool_calls>'
+    tools:
+    - *id002
+    expected:
+      dynamo: &d_13
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *d_13
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'

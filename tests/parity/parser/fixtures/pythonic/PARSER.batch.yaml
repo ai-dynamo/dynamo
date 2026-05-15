@@ -64,3 +64,70 @@ cases:
         normal_text: ''
       vllm: *id005
       sglang: *id005
+  PARSER.batch.11:
+    description: Single call with comma inside argument string value
+    ref: dynamo
+    model_text: '[run_query(sql="SELECT a, SELECT b")]'
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    expected:
+      dynamo: &d_11
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a, SELECT b
+        normal_text: ''
+      vllm: *d_11
+      sglang: *d_11
+  PARSER.batch.12:
+    description: Parallel calls where one argument contains a comma
+    ref: dynamo
+    model_text: '[run_query(sql="SELECT a, SELECT b"), get_time(timezone="EST")]'
+    tools:
+    - name: run_query
+      parameters:
+        type: object
+        properties:
+          sql:
+            type: string
+    - name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo: &d_12
+        calls:
+        - name: run_query
+          arguments:
+            sql: SELECT a, SELECT b
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm: *d_12
+      sglang: *d_12
+  PARSER.batch.13:
+    description: Unknown tool name absent from supplied tools
+    ref: originated from https://github.com/sgl-project/sglang/blob/612785ffdcaf35552f1ed433a981d596ca9fe900/test/registered/unit/function_call/test_function_call_parser.py#L3147
+    model_text: '[unknown_tool(location="NYC")]'
+    tools:
+    - *id002
+    expected:
+      dynamo: &d_13
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *d_13
+      sglang:
+        calls: []
+        normal_text: ''
+        reason: SGLang PythonicDetector drops unknown tool names by default unless SGLANG_FORWARD_UNKNOWN_TOOLS is enabled.
