@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import socket
+import sys
 from typing import Any, Dict, Optional
 
 from vllm.distributed.kv_events import KVEventsConfig
@@ -51,6 +52,7 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
 
     # rest vLLM args
     engine_args: AsyncEngineArgs
+    logprobs_mode_explicitly_set: bool = False
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
@@ -72,6 +74,7 @@ def parse_args(argv: list[str] | None = None) -> Config:
     Returns:
         Config: Parsed configuration object.
     """
+    raw_argv = sys.argv[1:] if argv is None else argv
     dynamo_runtime_argspec = DynamoRuntimeArgGroup()
     dynamo_vllm_argspec = DynamoVllmArgGroup()
 
@@ -117,7 +120,14 @@ def parse_args(argv: list[str] | None = None) -> Config:
     update_engine_config_with_dynamo(dynamo_config, engine_config)
 
     dynamo_config.engine_args = engine_config
+    dynamo_config.logprobs_mode_explicitly_set = _arg_was_provided(
+        raw_argv, "--logprobs-mode"
+    )
     return dynamo_config
+
+
+def _arg_was_provided(argv: list[str], option: str) -> bool:
+    return any(arg == option or arg.startswith(f"{option}=") for arg in argv)
 
 
 def cross_validate_config(
