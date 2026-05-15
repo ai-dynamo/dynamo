@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    G2PB_ENDPOINT_NAME, G2pbCommitRequest, G2pbError, G2pbFetchBlocksResponse,
-    G2pbFetchRequest, G2pbHealthResponse, G2pbLoadRemoteRequest, G2pbOfferRequest,
-    G2pbOfferResponse, G2pbPeer, G2pbPutBlock, G2pbPutPayloadRequest, G2pbQueryHit,
-    G2pbQueryRequest, G2pbRpcRequest, G2pbRpcResponse, G2pbStageBlocksRequest,
-    G2pbStageBlocksResponse, G2pbStorageAgent, G2pbTransferBlock,
+    G2PB_ENDPOINT_NAME, G2pbCommitRequest, G2pbError, G2pbFetchBlocksResponse, G2pbFetchRequest,
+    G2pbHealthResponse, G2pbLoadRemoteRequest, G2pbOfferRequest, G2pbOfferResponse, G2pbPeer,
+    G2pbPutBlock, G2pbPutPayloadRequest, G2pbQueryHit, G2pbQueryRequest, G2pbRpcRequest,
+    G2pbRpcResponse, G2pbStageBlocksRequest, G2pbStageBlocksResponse, G2pbStorageAgent,
+    G2pbTransferBlock,
 };
 use crate::block_manager::block::nixl::SerializedNixlBlockSet;
 use crate::tokens::{SequenceHash, compute_hash_v2};

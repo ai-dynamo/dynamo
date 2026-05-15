@@ -214,9 +214,7 @@ pub use g2pb_client::{
     G2pbStorageClient, discover_g2pb_peers, route_g2pb_put_blocks_by_owner,
     route_g2pb_sequence_hashes_by_owner, route_g2pb_transfer_blocks_by_owner, select_g2pb_owner,
 };
-pub use g2pb_service::{
-    G2pbCacheStorage, G2pbStorageAgent, G2pbStorageConfig,
-};
+pub use g2pb_service::{G2pbCacheStorage, G2pbStorageAgent, G2pbStorageConfig};
 #[cfg(test)]
 mod tests {
     use super::*;

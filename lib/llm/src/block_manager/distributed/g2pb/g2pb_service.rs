@@ -506,9 +506,10 @@ impl G2pbPeerStorage for G2pbCacheStorage {
                     })
                     .expect("metadata lock poisoned");
             } else {
-                let (offset, _) = self.allocate_in_g2(block.payload.len()).await.map_err(|_| {
-                    G2pbError::UnknownPeer { instance_id: 0 }
-                })?;
+                let (offset, _) = self
+                    .allocate_in_g2(block.payload.len())
+                    .await
+                    .map_err(|_| G2pbError::UnknownPeer { instance_id: 0 })?;
                 self.write_to_g2(offset, &block.payload).await;
                 let location = G2pbCacheLocation::G2 { offset };
 
@@ -703,7 +704,6 @@ impl G2pbPeerStorage for G2pbCacheStorage {
         Ok(blocks)
     }
 }
-
 
 fn filter_first_sequence_hash_matches<T, F>(
     items: Vec<T>,

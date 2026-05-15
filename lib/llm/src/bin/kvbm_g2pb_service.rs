@@ -341,10 +341,11 @@ impl G2pbPeerRuntime {
                         sequence_hashes: vec![*sequence_hash],
                     })?;
                 state.reserved.remove(sequence_hash);
-                let payload = read_host_block_payload(&staged.block).map_err(|_| G2pbError::NotFound {
-                    instance_id: self.instance_id,
-                    sequence_hashes: vec![*sequence_hash],
-                })?;
+                let payload =
+                    read_host_block_payload(&staged.block).map_err(|_| G2pbError::NotFound {
+                        instance_id: self.instance_id,
+                        sequence_hashes: vec![*sequence_hash],
+                    })?;
                 let actual_checksum =
                     dynamo_llm::block_manager::distributed::G2pbTransferBlock::compute_checksum(
                         &payload,
@@ -362,7 +363,10 @@ impl G2pbPeerRuntime {
                     *sequence_hash,
                     CommittedBlock {
                         staged: StagedBlock {
-                            meta: committed_meta.last().cloned().expect("committed metadata missing"),
+                            meta: committed_meta
+                                .last()
+                                .cloned()
+                                .expect("committed metadata missing"),
                             ..staged
                         },
                         last_access_tick: tick,
