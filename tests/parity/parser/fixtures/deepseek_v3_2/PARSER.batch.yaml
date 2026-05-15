@@ -88,7 +88,12 @@ cases:
   PARSER.batch.13:
     description: Unknown tool name absent from supplied tools
     ref: dynamo
-    model_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>unknown_tool<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+    model_text: |-
+      <｜DSML｜function_calls>
+      <｜DSML｜invoke name="unknown_tool">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜function_calls>
     tools:
     - name: get_weather
       parameters:
@@ -98,11 +103,20 @@ cases:
             type: string
     expected:
       dynamo:
-        calls: []
-        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>unknown_tool<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
       vllm:
-        calls: []
-        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>unknown_tool<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
       sglang:
-        calls: []
-        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>unknown_tool<｜tool▁sep｜>{"location":"NYC"}<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+        calls:
+        - name: unknown_tool
+          arguments:
+            location: NYC
+        normal_text: ''
