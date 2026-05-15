@@ -7,10 +7,11 @@ subtitle: Reproduce round-robin, sticky-session, KV-router, and sticky-proxy rep
 
 # AIPerf Session Routing Replay
 
-## Results
+## Simulation Results
 
-This table uses the first `10,000` rows of `/Users/peabrane/Downloads/dataset_aiperf.jsonl`,
-interpreted as per-session deltas with `--trace-format mooncake_delta`.
+These simulation results use the first `10,000` rows of
+`/Users/peabrane/Downloads/dataset_aiperf.jsonl`, interpreted as per-session deltas with
+`--trace-format mooncake_delta`.
 
 Config: `8` workers, closed-loop concurrency `128`, trace block size `64`, engine block size `64`,
 `16,384` GPU KV blocks per worker, AIC-backed vLLM timing for `Qwen/Qwen3-32B` on `h200_sxm`.
