@@ -319,7 +319,10 @@ def _derive_no_peer_sets(cases: dict) -> tuple[set[str], set[str]]:
         by_family.setdefault(fam, []).append(case)
 
     def all_unavail(fam_cases: list[dict], impl: str) -> bool:
-        for c in fam_cases:
+        expected_cases = [c for c in fam_cases if isinstance(c.get("expected"), dict)]
+        if not expected_cases:
+            return False
+        for c in expected_cases:
             block = c.get("expected", {}).get(impl)
             if not isinstance(block, dict) or "unavailable" not in block:
                 return False
@@ -481,6 +484,8 @@ _LEGEND_MD = (
     "`=` full parity (Dynamo, vLLM, and SGLang produce the same results) · "
     "`V`/`S` divergence (V = vLLM, S = SGLang; intentional, has `reason:`) · "
     "`?` research-needed suffix (e.g. V?, S? — diverges with no `reason:` yet) · "
+    "`↯` Dynamo leaks tool call markup into `normal_text` "
+    "(`expected.dynamo.dynamo_leak:` carries the explanation) · "
     "`!` expected-error suffix (e.g. V!, S! — engine crashes by design) · "
     "`n/a` not applicable · "
     "`†` (parser column) = no vLLM peer parser for this family · "
@@ -1242,7 +1247,7 @@ def _legend_html(versions: dict[str, str]) -> str:
         '<span style="color:#c63">?</span> more research needed '
         "(e.g. V?, S? — diverges with no <code>reason:</code> yet) · "
         '<span style="color:#c63">↯</span> Dynamo leaks tool call markup into <code>normal_text</code> '
-        "(<code>expected.dynamo.reason:</code> carries the explanation) · "
+        "(<code>expected.dynamo.dynamo_leak:</code> carries the explanation) · "
         '<span style="color:#b00">!</span> expected-error suffix '
         "(e.g. V!, S! — engine crashes by design) · "
         '<span style="color:#aaa">n/a</span> not applicable · '
@@ -1289,7 +1294,7 @@ def _compute_stats(
                 s["parity"] += 1
             elif "!" in text:
                 s["errors"] += 1
-            elif "?" in text:
+            elif "?" in text or "↯" in text:
                 s["research"] += 1
             else:
                 s["documented"] += 1
