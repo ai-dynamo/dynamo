@@ -1018,6 +1018,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         ));
 
         // MidStreamFail after 3 tokens: without the fix, migration would succeed and

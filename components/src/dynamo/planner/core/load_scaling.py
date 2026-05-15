@@ -719,44 +719,67 @@ class LoadScalingMixin:
     def _prefill_easy_decision(
         self, fpm_stats: dict[tuple[str, int], ForwardPassMetrics], num_workers: int
     ) -> Optional[int]:
-        p_caps = self._capabilities.prefill
-        ctx_len = p_caps.context_length if p_caps else None
-        if not ctx_len or ctx_len <= 0:
-            logger.warning(
-                "context_length not available, skipping easy prefill scaling"
-            )
-            self._diag_load_reason = "insufficient_data"
-            return None
         if num_workers == 0:
             self._diag_load_reason = "insufficient_data"
             return None
 
-        is_latency = self._config.optimization_target == "latency"
-        up_thresh = (
-            _PREFILL_LATENCY_SCALE_UP if is_latency else _PREFILL_THROUGHPUT_SCALE_UP
-        )
-        down_thresh = (
-            _PREFILL_LATENCY_SCALE_DOWN
-            if is_latency
-            else _PREFILL_THROUGHPUT_SCALE_DOWN
-        )
+        target = self._config.optimization_target
+        is_load = target == "load"
+        is_latency = target == "latency"
 
-        ratios: list[float] = []
-        for (wid, dp), fpm in fpm_stats.items():
-            queued = fpm.queued_requests.sum_prefill_tokens
-            ratio = queued / ctx_len
-            ratios.append(ratio)
-            logger.info(
-                f"Easy prefill {wid}:dp{dp}: queued={queued}, "
-                f"context_length={ctx_len}, ratio={ratio:.3f}"
+        values: list[float] = []
+        if is_load:
+            up_thresh = self._config.prefill_scale_up_queue_tokens
+            down_thresh = self._config.prefill_scale_down_queue_tokens
+            if up_thresh is None or down_thresh is None:
+                logger.warning(
+                    "prefill load thresholds not available, skipping prefill scaling"
+                )
+                self._diag_load_reason = "insufficient_data"
+                return None
+            for (wid, dp), fpm in fpm_stats.items():
+                queued = fpm.queued_requests.sum_prefill_tokens
+                values.append(float(queued))
+                logger.info(
+                    f"Load prefill {wid}:dp{dp}: queued={queued}, "
+                    f"scale_up_tokens={up_thresh}, scale_down_tokens={down_thresh}"
+                )
+        else:
+            p_caps = self._capabilities.prefill
+            ctx_len = p_caps.context_length if p_caps else None
+            if not ctx_len or ctx_len <= 0:
+                logger.warning(
+                    "context_length not available, skipping easy prefill scaling"
+                )
+                self._diag_load_reason = "insufficient_data"
+                return None
+
+            up_thresh = (
+                _PREFILL_LATENCY_SCALE_UP
+                if is_latency
+                else _PREFILL_THROUGHPUT_SCALE_UP
+            )
+            down_thresh = (
+                _PREFILL_LATENCY_SCALE_DOWN
+                if is_latency
+                else _PREFILL_THROUGHPUT_SCALE_DOWN
             )
 
-        if not ratios:
+            for (wid, dp), fpm in fpm_stats.items():
+                queued = fpm.queued_requests.sum_prefill_tokens
+                ratio = queued / ctx_len
+                values.append(ratio)
+                logger.info(
+                    f"Easy prefill {wid}:dp{dp}: queued={queued}, "
+                    f"context_length={ctx_len}, ratio={ratio:.3f}"
+                )
+
+        if not values:
             self._diag_load_reason = "insufficient_data"
             return None
 
         # Scale up if ANY engine above threshold
-        if any(r >= up_thresh for r in ratios):
+        if any(v >= up_thresh for v in values):
             logger.info(
                 f"Easy prefill: engine(s) above scale-up threshold "
                 f"({up_thresh}), scaling up to {num_workers + 1}"
@@ -765,16 +788,24 @@ class LoadScalingMixin:
 
         # Scale down if ALL engines below threshold
         if num_workers > 1:
-            if is_latency:
+            if is_load:
+                if all(v <= down_thresh for v in values):
+                    desired = max(num_workers - 1, self._config.min_endpoint)
+                    logger.info(
+                        f"Load prefill: all engines at or below scale-down "
+                        f"threshold ({down_thresh}), -> {desired}"
+                    )
+                    return desired
+            elif is_latency:
                 # For latency mode, scale down when ALL queues are empty
-                if all(r <= down_thresh for r in ratios):
+                if all(v <= down_thresh for v in values):
                     desired = max(num_workers - 1, self._config.min_endpoint)
                     logger.info(
                         f"Easy prefill: all engines at zero queue, -> {desired}"
                     )
                     return desired
             else:
-                if all(r < down_thresh for r in ratios):
+                if all(v < down_thresh for v in values):
                     desired = max(num_workers - 1, self._config.min_endpoint)
                     logger.info(
                         f"Easy prefill: all engines below scale-down threshold "
@@ -798,13 +829,30 @@ class LoadScalingMixin:
             self._diag_load_reason = "insufficient_data"
             return None
 
-        is_latency = self._config.optimization_target == "latency"
-        up_thresh = (
-            _DECODE_LATENCY_SCALE_UP if is_latency else _DECODE_THROUGHPUT_SCALE_UP
-        )
-        down_thresh = (
-            _DECODE_LATENCY_SCALE_DOWN if is_latency else _DECODE_THROUGHPUT_SCALE_DOWN
-        )
+        target = self._config.optimization_target
+        is_load = target == "load"
+        is_latency = target == "latency"
+        if is_load:
+            if (
+                self._config.decode_scale_up_kv_rate is None
+                or self._config.decode_scale_down_kv_rate is None
+            ):
+                logger.warning(
+                    "decode load thresholds not available, skipping decode scaling"
+                )
+                self._diag_load_reason = "insufficient_data"
+                return None
+            up_thresh = self._config.decode_scale_up_kv_rate / 100.0
+            down_thresh = self._config.decode_scale_down_kv_rate / 100.0
+        else:
+            up_thresh = (
+                _DECODE_LATENCY_SCALE_UP if is_latency else _DECODE_THROUGHPUT_SCALE_UP
+            )
+            down_thresh = (
+                _DECODE_LATENCY_SCALE_DOWN
+                if is_latency
+                else _DECODE_THROUGHPUT_SCALE_DOWN
+            )
 
         utils: list[float] = []
         for (wid, dp), fpm in fpm_stats.items():
@@ -821,14 +869,19 @@ class LoadScalingMixin:
             self._diag_load_reason = "insufficient_data"
             return None
 
-        if any(u > up_thresh for u in utils):
+        if any(u >= up_thresh if is_load else u > up_thresh for u in utils):
             logger.info(
                 f"Easy decode: engine(s) above scale-up threshold "
                 f"({up_thresh}), scaling up to {num_workers + 1}"
             )
             return num_workers + 1
 
-        if num_workers > 1 and all(u < down_thresh for u in utils):
+        scale_down = (
+            all(u <= down_thresh for u in utils)
+            if is_load
+            else all(u < down_thresh for u in utils)
+        )
+        if num_workers > 1 and scale_down:
             desired = max(num_workers - 1, self._config.min_endpoint)
             logger.info(
                 f"Easy decode: all engines below scale-down threshold "
@@ -853,13 +906,30 @@ class LoadScalingMixin:
             self._diag_load_reason = "insufficient_data"
             return None
 
-        is_latency = self._config.optimization_target == "latency"
-        up_thresh = (
-            _DECODE_LATENCY_SCALE_UP if is_latency else _DECODE_THROUGHPUT_SCALE_UP
-        )
-        down_thresh = (
-            _DECODE_LATENCY_SCALE_DOWN if is_latency else _DECODE_THROUGHPUT_SCALE_DOWN
-        )
+        target = self._config.optimization_target
+        is_load = target == "load"
+        is_latency = target == "latency"
+        if is_load:
+            if (
+                self._config.decode_scale_up_kv_rate is None
+                or self._config.decode_scale_down_kv_rate is None
+            ):
+                logger.warning(
+                    "decode load thresholds not available, skipping agg scaling"
+                )
+                self._diag_load_reason = "insufficient_data"
+                return None
+            up_thresh = self._config.decode_scale_up_kv_rate / 100.0
+            down_thresh = self._config.decode_scale_down_kv_rate / 100.0
+        else:
+            up_thresh = (
+                _DECODE_LATENCY_SCALE_UP if is_latency else _DECODE_THROUGHPUT_SCALE_UP
+            )
+            down_thresh = (
+                _DECODE_LATENCY_SCALE_DOWN
+                if is_latency
+                else _DECODE_THROUGHPUT_SCALE_DOWN
+            )
 
         utils: list[float] = []
         for (wid, dp), fpm in fpm_stats.items():
@@ -877,14 +947,19 @@ class LoadScalingMixin:
             self._diag_load_reason = "insufficient_data"
             return None
 
-        if any(u > up_thresh for u in utils):
+        if any(u >= up_thresh if is_load else u > up_thresh for u in utils):
             logger.info(
                 f"Easy agg: engine(s) above scale-up threshold "
                 f"({up_thresh}), scaling up to {num_workers + 1}"
             )
             return num_workers + 1
 
-        if num_workers > 1 and all(u < down_thresh for u in utils):
+        scale_down = (
+            all(u <= down_thresh for u in utils)
+            if is_load
+            else all(u < down_thresh for u in utils)
+        )
+        if num_workers > 1 and scale_down:
             desired = max(num_workers - 1, self._config.min_endpoint)
             logger.info(
                 f"Easy agg: all engines below scale-down threshold "

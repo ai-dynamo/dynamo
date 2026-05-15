@@ -15,7 +15,7 @@ use crate::pools::SequenceHash;
 /// realistic token sequence (so parent/child lineage relationships line up).
 pub struct BlockSequenceBuilder {
     tokens: Vec<u32>,
-    salt: Option<u64>,
+    salt: Option<dynamo_tokens::SaltHash>,
     block_size: usize,
 }
 
@@ -42,7 +42,7 @@ impl BlockSequenceBuilder {
     }
 
     /// Set salt for the underlying TokenBlockSequence.
-    pub fn with_salt(mut self, salt: u64) -> Self {
+    pub fn with_salt(mut self, salt: dynamo_tokens::SaltHash) -> Self {
         self.salt = Some(salt);
         self
     }

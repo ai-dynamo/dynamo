@@ -219,7 +219,7 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
 		if !r.RuntimeConfig.DRAEnabled {
 			return ctrl.Result{}, fmt.Errorf(
-				"GMS requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available")
+				"GMS requires DRA (Dynamic Resource Allocation), but the resource.k8s.io/v1 API is not available")
 		}
 		if len(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers) == 0 {
 			return ctrl.Result{}, fmt.Errorf("checkpoint job requires at least one container for GMS")

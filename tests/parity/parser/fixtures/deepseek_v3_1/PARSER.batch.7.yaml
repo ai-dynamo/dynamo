@@ -20,13 +20,16 @@ cases:
           first_class:
             type: boolean
     expected:
-      calls:
-      - name: book_flight
-        arguments:
-          destination: Paris
-          passengers: 2
-          first_class: true
-      normal_text: ''
+      dynamo: &d_7_a
+        calls:
+        - name: book_flight
+          arguments:
+            destination: Paris
+            passengers: 2
+            first_class: true
+        normal_text: ''
+      vllm: *d_7_a
+      sglang: *d_7_a
   PARSER.batch.7.b:
     description: Unicode + escaped chars
     ref: dynamo
@@ -39,11 +42,14 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: Tōkyō "central"
-      normal_text: ''
+      dynamo: &d_7_b
+        calls:
+        - name: get_weather
+          arguments:
+            location: Tōkyō "central"
+        normal_text: ''
+      vllm: *d_7_b
+      sglang: *d_7_b
   PARSER.batch.7.c:
     description: Schema mismatch — string value where schema declares integer
     ref: dynamo
@@ -56,11 +62,14 @@ cases:
           celsius:
             type: integer
     expected:
-      calls:
-      - name: set_temperature
-        arguments:
-          celsius: '20'
-      normal_text: ''
+      dynamo: &d_7_c
+        calls:
+        - name: set_temperature
+          arguments:
+            celsius: '20'
+        normal_text: ''
+      vllm: *d_7_c
+      sglang: *d_7_c
   PARSER.batch.7.d:
     description: Nested object + array (existing)
     ref: dynamo
@@ -75,13 +84,16 @@ cases:
           config:
             type: object
     expected:
-      calls:
-      - name: process_data
-        arguments:
-          items:
-          - 1
-          - 2
-          - 3
-          config:
-            nested: true
-      normal_text: ''
+      dynamo: &d_7_d
+        calls:
+        - name: process_data
+          arguments:
+            items:
+            - 1
+            - 2
+            - 3
+            config:
+              nested: true
+        normal_text: ''
+      vllm: *d_7_d
+      sglang: *d_7_d
