@@ -831,10 +831,7 @@ class ManagedDeployment:
 
         This is the diagnostic that converts a "deployment timed out, no idea
         why" CI failure into a self-diagnosing one when a worker is in
-        CrashLoopBackOff during startup. The vLLM ``ValueError: KV cache
-        memory ... larger than available`` that fixed this PR was identified
-        from the inline log tail this function produces.
-
+        CrashLoopBackOff during startup.
         Each container is reported at most once per restart_count value via
         ``_logged_restart_counts``: the next time the same container restarts
         (count increments), we dump the new previous-instance log. Restarts
@@ -903,7 +900,13 @@ class ManagedDeployment:
                     # does not silently consume the event.
                     self._logged_restart_counts[key] = after
             return warnings
-        except Exception as e:
+        except exceptions.ApiException as e:
+            # API access can fail mid-poll (vCluster syncer hiccup, transient
+            # connection reset). Best-effort diagnostic: skip this round and
+            # let the next poll retry. Bugs in our own field access (e.g.
+            # ``cs.last_state.terminated`` on an unexpected status shape)
+            # propagate to the wait loop's "Unexpected exception" handler so
+            # they don't get silently swallowed.
             self._logger.debug(f"Failed to check in-flight restart counts: {e}")
             return []
 
@@ -934,15 +937,13 @@ class ManagedDeployment:
         except exceptions.ApiException as e:
             # 400 "previous terminated container … not found" is the common
             # case when restart_count > 0 but the previous instance log was
-            # rotated. 404 means the pod is gone (cleanup race).
+            # rotated. 404 means the pod is gone (cleanup race). Anything
+            # else (e.g. an AttributeError in our own formatting) is a real
+            # bug -- let it bubble to the wait loop's outer handler instead
+            # of silently returning None.
             self._logger.debug(
                 f"No previous log for {pod_name}/{container} "
                 f"(status={e.status}, reason={e.reason})"
-            )
-            return None
-        except Exception as e:
-            self._logger.debug(
-                f"Failed to fetch previous log for {pod_name}/{container}: {e}"
             )
             return None
 
@@ -1122,8 +1123,7 @@ class ManagedDeployment:
         # (e.g. workers with a frontendSidecar, or pods running under vCluster
         # with the rewrite-hosts init container) reject ``pod.logs()`` calls
         # that omit ``container=`` with a "container name must be specified"
-        # error -- exactly the case that masked the GAIE sidecar logs in CI.
-        # Iterate every container (including init containers) and write one
+        # so we have to be more detailed here. Iterate every container and write one
         # log file per container.
         container_names: List[str] = []
         try:
