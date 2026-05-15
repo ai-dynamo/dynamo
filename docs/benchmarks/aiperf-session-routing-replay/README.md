@@ -40,30 +40,6 @@ Raw reports from this run were written to:
 /tmp/dynamo_replay_aiperf_10000_delta_compare_cc128
 ```
 
-## Draft Message
-
-Ran some numbers with the offline simulation harness: [results and
-reproducer](https://github.com/ai-dynamo/dynamo/blob/rupei/aiperf-session-routing-replay/docs/benchmarks/aiperf-session-routing-replay/README.md).
-I did not get a real GPU allocation yet, but I would like to try it on real GPUs when I find
-bandwidth. The results should translate reasonably well because this is the high-fidelity replay
-simulator.
-
-As expected, hard sticky routing has much worse TTFT even though it has much higher prefix cache
-reuse. On the 10k-row AIPerf slice at CC128, hard sticky gets prefix reuse `0.702` versus
-round-robin `0.573`, but mean TTFT is `6.02s` versus `1.89s`, and p95 TTFT is `28.28s` versus
-`4.27s`. Throughput is not strictly worse than round-robin in this run, but it still lags the
-KV-router variants and buys the cache hits with much worse queueing. That is the main point:
-cache-hit rate alone is not the objective.
-
-KV router wins on TTFT here, as expected: mean TTFT `1.64s`, p95 `3.80s`, and prefix reuse `0.624`.
-I also added an interesting hybrid implementation: it uses the KV router load-balancing cost
-function, but replaces exact KV-indexer overlap with a sticky-session heuristic, so there is no
-indexer dependency while still tracking load. That hybrid is surprisingly competitive on this
-trace: mean TTFT `1.70s`, p95 `4.66s`, prefix reuse `0.650`, and the best measured throughput in
-this slice. It does not beat exact KV routing on TTFT tail, but it is much healthier than hard
-sticky and seems like a useful baseline for the question of how much exact block-level indexing is
-buying over session-level affinity plus load.
-
 ## What This Branch Adds
 
 This branch adds three pieces needed to compare session-level affinity against block-level KV
