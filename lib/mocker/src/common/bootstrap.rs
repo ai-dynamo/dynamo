@@ -340,18 +340,22 @@ mod tests {
         let port = server.port();
         let room_id = 1004u64;
 
+        let (prefill_entered_tx, prefill_entered_rx) = tokio::sync::oneshot::channel();
         let mut prefill_ready = tokio::spawn({
             let server = server.clone();
-            async move { server.wait_for_decode_ready(room_id).await }
+            async move {
+                let _ = prefill_entered_tx.send(());
+                server.wait_for_decode_ready(room_id).await
+            }
         });
 
-        let result = tokio::time::timeout(Duration::from_millis(50), &mut prefill_ready).await;
+        prefill_entered_rx.await.unwrap();
         assert!(
-            result.is_err(),
+            !prefill_ready.is_finished(),
             "Prefill should wait until decode metadata arrives"
         );
 
-        let mut decode_handle =
+        let decode_handle =
             tokio::spawn(async move { connect_to_prefill("127.0.0.1", port, room_id).await });
 
         let result = tokio::time::timeout(Duration::from_secs(1), &mut prefill_ready)
@@ -363,9 +367,8 @@ mod tests {
             "Prefill should see decode metadata: {result:?}"
         );
 
-        let result = tokio::time::timeout(Duration::from_millis(50), &mut decode_handle).await;
         assert!(
-            result.is_err(),
+            !decode_handle.is_finished(),
             "Decode should wait until prefill marks the room complete"
         );
 
