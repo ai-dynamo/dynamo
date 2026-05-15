@@ -273,6 +273,29 @@ impl Model {
         self.first_ready_workers().is_some()
     }
 
+    /// Whether this model can serve at least one inference request right now.
+    ///
+    /// Stricter than [`Self::is_displayable`]: requires a WorkerSet that has at
+    /// least one non-prefill serving engine attached, workers connected, and
+    /// `can_serve_requests()` true. Used by KServe gRPC `model_ready` /
+    /// `server_ready` to avoid the race where a `ModelDeploymentCard` is
+    /// registered before its WorkerSet has been wired up.
+    pub fn is_ready_to_serve(&self) -> bool {
+        self.worker_sets.iter().any(|entry| {
+            let ws = entry.value();
+            if ws.worker_count() == 0 || !ws.can_serve_requests() {
+                return false;
+            }
+            ws.has_chat_engine()
+                || ws.has_completions_engine()
+                || ws.has_embeddings_engine()
+                || ws.has_images_engine()
+                || ws.has_tensor_engine()
+                || ws.has_videos_engine()
+                || ws.has_audios_engine()
+        })
+    }
+
     /// Whether this model should be visible in /v1/models.
     pub fn is_displayable(&self) -> bool {
         let has_serving_engine = |ws: &WorkerSet| {
@@ -1101,5 +1124,84 @@ mod tests {
         model.add_worker_set("dynamo".to_string(), _ws);
 
         assert!(model.is_workers_ready("dynamo"));
+    }
+
+    // -- is_ready_to_serve tests --
+    //
+    // Regression coverage for the KServe gRPC `model_ready` race: a
+    // ModelDeploymentCard is saved before the WorkerSet's engines are wired up,
+    // and `is_ready_to_serve` must remain false until at least one serving
+    // engine is attached to a WorkerSet that has workers.
+
+    #[test]
+    fn test_is_ready_to_serve_false_when_no_worker_sets() {
+        let model = Model::new("llama".to_string());
+        assert!(!model.is_ready_to_serve());
+    }
+
+    #[test]
+    fn test_is_ready_to_serve_false_for_prefill_only_set() {
+        // A WorkerSet without any serving engine attached (the lifecycle state
+        // between ModelDeploymentCard save and engine attach) must not count
+        // as ready, even though `is_displayable` treats prefill-only as visible.
+        let model = Model::new("llama".to_string());
+        model.add_worker_set("ns1".to_string(), make_worker_set("ns1", "abc"));
+
+        assert!(
+            model.is_displayable(),
+            "displayable fallback covers prefill"
+        );
+        assert!(
+            !model.is_ready_to_serve(),
+            "prefill-only set must not be ready to serve inference"
+        );
+    }
+
+    #[test]
+    fn test_is_ready_to_serve_false_when_zero_workers_even_with_engine() {
+        // Engine attached but the discovery watcher reports zero connected
+        // workers. KServe must report not-ready until a worker is available.
+        let model = Model::new("llama".to_string());
+        let mut ws = WorkerSet::new(
+            "ns1".to_string(),
+            "abc".to_string(),
+            crate::model_card::ModelDeploymentCard::default(),
+        );
+        let (_tx, rx) = watch::channel::<Vec<u64>>(vec![]);
+        ws.set_instance_watcher(rx);
+        ws.chat_engine = Some(make_test_chat_engine());
+        // Keep the sender alive for the duration of the test so the watcher
+        // doesn't close.
+        let _tx_keep = _tx;
+        model.add_worker_set("ns1".to_string(), Arc::new(ws));
+
+        assert!(
+            !model.is_ready_to_serve(),
+            "engine attached but no workers connected -> not ready"
+        );
+    }
+
+    #[test]
+    fn test_is_ready_to_serve_true_with_chat_engine() {
+        // In-process WorkerSet (no instance_count_rx → worker_count==1) with a
+        // chat engine attached is ready to serve.
+        let model = Model::new("llama".to_string());
+        let mut ws = WorkerSet::new(
+            "ns1".to_string(),
+            "abc".to_string(),
+            crate::model_card::ModelDeploymentCard::default(),
+        );
+        ws.chat_engine = Some(make_test_chat_engine());
+        model.add_worker_set("ns1".to_string(), Arc::new(ws));
+
+        assert!(model.is_ready_to_serve());
+    }
+
+    /// Build a chat completions engine backed by the in-tree echo engine.
+    fn make_test_chat_engine()
+    -> crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine {
+        Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        ))
     }
 }
