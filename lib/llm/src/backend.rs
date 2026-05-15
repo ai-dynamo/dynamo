@@ -390,6 +390,7 @@ impl
                     disaggregated_params: data.disaggregated_params,
                     worker_trace_link: data.worker_trace_link,
                     engine_data: data.engine_data,
+                    prompt_logprobs: data.prompt_logprobs,
                 })
             })
         });

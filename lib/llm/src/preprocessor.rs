@@ -240,6 +240,39 @@ pub struct OpenAIPreprocessor {
 }
 
 impl OpenAIPreprocessor {
+    fn nvext_passthrough_args<R: NvExtProvider>(
+        request: &R,
+    ) -> Option<serde_json::Map<String, serde_json::Value>> {
+        let mut nvext_passthrough = serde_json::Map::new();
+
+        if let Some(nvext) = request.nvext() {
+            if let Some(ref fields) = nvext.extra_fields {
+                nvext_passthrough.insert("extra_fields".to_string(), serde_json::json!(fields));
+            }
+            if let Some(ref salt) = nvext.cache_salt {
+                nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
+            }
+            if nvext.token_data.is_some() {
+                nvext_passthrough.insert("token_in".to_string(), serde_json::Value::Bool(true));
+            }
+        }
+
+        if !nvext_passthrough.contains_key("cache_salt")
+            && let Some(salt) = request
+                .unsupported_fields()
+                .and_then(|fields| fields.get("cache_salt"))
+                .and_then(|value| value.as_str())
+        {
+            nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
+        }
+
+        if nvext_passthrough.is_empty() {
+            None
+        } else {
+            Some(nvext_passthrough)
+        }
+    }
+
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         let formatter = PromptFormatter::from_mdc(&mdc)?;
         let tokenizer = mdc.tokenizer()?;
@@ -471,7 +504,16 @@ impl OpenAIPreprocessor {
             builder.router(Some(router_params.clone()));
         }
 
-        Ok((builder.build()?, annotations, prompt_injected_reasoning))
+        let mut preprocessed = builder.build()?;
+
+        // If omitted, allow generation up to the remaining context length.
+        if preprocessed.stop_conditions.max_tokens.is_none() && self.context_length > 0 {
+            let prompt_len = preprocessed.token_ids.len() as u32;
+            preprocessed.stop_conditions.max_tokens =
+                Some(self.context_length.saturating_sub(prompt_len));
+        }
+
+        Ok((preprocessed, annotations, prompt_injected_reasoning))
     }
 
     pub fn builder<
@@ -563,6 +605,12 @@ impl OpenAIPreprocessor {
             }));
         }
 
+        if let Some(nvext_passthrough) = Self::nvext_passthrough_args(request) {
+            builder.extra_args(Some(
+                serde_json::json!({ "nvext": serde_json::Value::Object(nvext_passthrough) }),
+            ));
+        }
+
         // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
         builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
 
@@ -630,7 +678,7 @@ impl OpenAIPreprocessor {
         }
     }
 
-    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest>(
+    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest + NvExtProvider>(
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
@@ -864,6 +912,10 @@ impl OpenAIPreprocessor {
 
             if let Some(ref prompt) = formatted_prompt {
                 extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
+            }
+
+            if let Some(nvext_passthrough) = Self::nvext_passthrough_args(request) {
+                extra_args["nvext"] = serde_json::Value::Object(nvext_passthrough);
             }
 
             // Forward routing-side mm_hashes as `multi_modal_uuids` so vLLM
