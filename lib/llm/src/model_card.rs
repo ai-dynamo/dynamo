@@ -330,10 +330,6 @@ fn is_weight_file(path: &Path) -> bool {
     )
 }
 
-/// Symlink non-weight files from `snapshot_dir` into `slug_dir`, skipping
-/// any name already present (typed slots own those). Picks up
-/// `preprocessor_config.json` and other sibling files that
-/// `from_pretrained(slug_dir)` consumers need.
 /// Parent directory of a `file://` URI when it resolves to a real local
 /// directory. Returns `None` for any other scheme or unreachable path.
 fn file_uri_parent(uri: &str) -> Option<PathBuf> {
@@ -346,7 +342,20 @@ fn file_uri_parent(uri: &str) -> Option<PathBuf> {
     parent.is_dir().then(|| parent.to_path_buf())
 }
 
-fn harvest_siblings(snapshot_dir: &Path, slug_dir: &Path) -> anyhow::Result<()> {
+/// Symlink non-weight files from `snapshot_dir` into `slug_dir`. Picks up
+/// `preprocessor_config.json` and other sibling files that
+/// `from_pretrained(slug_dir)` consumers need.
+///
+/// Names in `typed_filenames` are owned by the resolve loop's typed-slot
+/// pass — never overwritten. Every other harvested sibling is re-linked
+/// unconditionally so a re-registration with the same `mdcsum` but a
+/// different upstream snapshot picks up fresh contents (mdcsum doesn't
+/// cover harvested files).
+fn harvest_siblings(
+    snapshot_dir: &Path,
+    slug_dir: &Path,
+    typed_filenames: &std::collections::HashSet<String>,
+) -> anyhow::Result<()> {
     let entries = match std::fs::read_dir(snapshot_dir) {
         Ok(e) => e,
         Err(e) => {
@@ -368,13 +377,14 @@ fn harvest_siblings(snapshot_dir: &Path, slug_dir: &Path) -> anyhow::Result<()> 
             Some(n) if !n.is_empty() => n.to_owned(),
             _ => continue,
         };
-        let dst = slug_dir.join(&name);
-        if dst.exists() {
+        if typed_filenames.contains(&name) {
             continue;
         }
+        let dst = slug_dir.join(&name);
         // Resolve through the canonical target so a downstream
         // `canonicalize` lands on a stable blob path rather than
-        // chasing snapshot-dir symlinks.
+        // chasing snapshot-dir symlinks. `symlink_force` is idempotent
+        // and atomic via `stage_and_rename_sync`.
         let target = std::fs::canonicalize(&path).unwrap_or(path);
         symlink_force(&target, &dst)
             .with_context(|| format!("harvesting {} -> {}", target.display(), dst.display()))?;
@@ -1063,7 +1073,12 @@ impl ModelDeploymentCard {
         );
 
         // Harvest non-weight siblings (preprocessor_config.json, …) from
-        // every snapshot dir we touched. No-op for `http://`.
+        // every snapshot dir we touched. Typed-slot basenames are passed
+        // through so the harvest never overwrites them. No-op for `http://`.
+        let typed_filenames: std::collections::HashSet<String> = entries
+            .iter()
+            .filter_map(|(uri, _)| uri_basename(uri).ok())
+            .collect();
         let mut snapshot_dirs: std::collections::HashSet<PathBuf> =
             hf_snapshots.values().cloned().collect();
         for (uri, _) in &entries {
@@ -1072,7 +1087,7 @@ impl ModelDeploymentCard {
             }
         }
         for snap in &snapshot_dirs {
-            harvest_siblings(snap, &slug_dir)?;
+            harvest_siblings(snap, &slug_dir, &typed_filenames)?;
         }
 
         // Pass 3: rewrite cf.path to the cache symlink so downstream
@@ -2048,7 +2063,7 @@ mod tests {
         std::fs::write(snap.path().join("tokenizer.model"), b"sp")?;
         // `.safetensors.index.json` is `.json`, not a weight — must be kept.
         std::fs::write(snap.path().join("model.safetensors.index.json"), b"idx")?;
-        super::harvest_siblings(snap.path(), slug.path())?;
+        super::harvest_siblings(snap.path(), slug.path(), &Default::default())?;
         assert!(slug.path().join("preprocessor_config.json").exists());
         assert!(slug.path().join("tokenizer.model").exists());
         assert!(slug.path().join("model.safetensors.index.json").exists());
@@ -2063,7 +2078,7 @@ mod tests {
         for weight in ["model.safetensors", "pytorch_model.bin", "model.gguf"] {
             std::fs::write(snap.path().join(weight), b"WEIGHTS")?;
         }
-        super::harvest_siblings(snap.path(), slug.path())?;
+        super::harvest_siblings(snap.path(), slug.path(), &Default::default())?;
         for weight in ["model.safetensors", "pytorch_model.bin", "model.gguf"] {
             assert!(!slug.path().join(weight).exists());
         }
@@ -2074,24 +2089,43 @@ mod tests {
     #[test]
     fn harvest_tolerates_missing_snapshot() -> anyhow::Result<()> {
         let slug = tempfile::tempdir()?;
-        super::harvest_siblings(&slug.path().join("does-not-exist"), slug.path())?;
+        super::harvest_siblings(
+            &slug.path().join("does-not-exist"),
+            slug.path(),
+            &Default::default(),
+        )?;
         Ok(())
     }
 
-    /// Typed slots already in slug_dir survive a harvest pass untouched.
+    /// Names in `typed_filenames` survive a harvest pass even when the
+    /// snapshot dir contains a different file at the same basename — the
+    /// resolve loop's typed slots own those.
     #[test]
-    fn harvest_preserves_existing_dst() -> anyhow::Result<()> {
+    fn harvest_preserves_typed_filenames() -> anyhow::Result<()> {
+        let blob_dir = tempfile::tempdir()?;
         let snap = tempfile::tempdir()?;
         let slug = tempfile::tempdir()?;
-        let typed = snap.path().join("config.json");
-        std::fs::write(&typed, b"cfg")?;
-        // Use the production helper so the test works on non-Unix too.
-        super::symlink_force(&typed, &slug.path().join("config.json"))?;
-        // Drop a different file in snap so the harvest does something.
+
+        // Typed slot: blob in the dynamo cache; slug_dir links to it.
+        let typed_blob = blob_dir.path().join("config-blob");
+        std::fs::write(&typed_blob, b"typed-slot-content")?;
+        super::symlink_force(&typed_blob, &slug.path().join("config.json"))?;
+
+        // Snapshot dir has a different `config.json` — the stale-payload
+        // case the harvest must NOT import over the typed slot.
+        std::fs::write(snap.path().join("config.json"), b"STALE-DO-NOT-IMPORT")?;
         std::fs::write(snap.path().join("special_tokens_map.json"), b"st")?;
-        super::harvest_siblings(snap.path(), slug.path())?;
-        let preserved = slug.path().join("config.json");
-        assert!(preserved.is_symlink());
+
+        let typed_filenames: std::collections::HashSet<String> =
+            ["config.json".to_string()].into_iter().collect();
+        super::harvest_siblings(snap.path(), slug.path(), &typed_filenames)?;
+
+        // Content equality is portable: `symlink_force` degrades to a copy
+        // on non-Unix, so we can't depend on `is_symlink()`.
+        assert_eq!(
+            std::fs::read(slug.path().join("config.json"))?,
+            b"typed-slot-content"
+        );
         assert!(slug.path().join("special_tokens_map.json").exists());
         Ok(())
     }
