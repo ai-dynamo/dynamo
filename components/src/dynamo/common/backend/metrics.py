@@ -3,7 +3,10 @@
 
 """Engine-facing Prometheus helpers.
 
-Engines call :func:`register_global_registry` from inside
+Engines call :func:`register_global_registry` (for the default
+``prometheus_client.REGISTRY``) or :func:`register_engine_registry` (for
+a custom :class:`CollectorRegistry` they own — e.g. SGLang's
+multiprocess registry) from inside
 :meth:`LLMEngine.register_prometheus` to bridge their vendor-prefixed
 registry (``vllm:``, ``sglang:``, ``trtllm_``, ``lmcache:``) into the
 runtime's combined ``/metrics`` output.
@@ -22,6 +25,8 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Optional
 
 from dynamo.common.utils.prometheus import get_prometheus_expfmt
+
+from ._internal_metrics import register_engine_registry
 
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
@@ -93,8 +98,6 @@ def register_global_registry(
     # this module before prometheus_client touches the env var.
     from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 
-    from ._internal_metrics import register_engine_registry
-
     all_prefixes = [engine_prefix] + list(multiproc_only_prefixes or [])
     multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
 
@@ -148,5 +151,6 @@ def register_global_registry(
 __all__ = [
     "ensure_prometheus_multiproc_dir",
     "gather_with_labels",
+    "register_engine_registry",
     "register_global_registry",
 ]

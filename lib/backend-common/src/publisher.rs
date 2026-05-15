@@ -158,11 +158,9 @@ fn publish_tick(
         // Single source of truth feeds both consumers: router-input signal
         // for the KV router, and `dynamo_component_*` gauges for /metrics.
         component_publisher.update(&snapshot);
-        if let Err(e) = router_publisher.publish(
-            Some(source.dp_rank),
-            None,
-            Some(snapshot.kv_used_blocks),
-        ) {
+        if let Err(e) =
+            router_publisher.publish(Some(source.dp_rank), None, Some(snapshot.kv_used_blocks))
+        {
             if !warned_ranks.contains(&source.dp_rank) {
                 warned_ranks.push(source.dp_rank);
                 tracing::warn!(dp_rank = source.dp_rank, error = %e,

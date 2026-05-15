@@ -15,8 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dynamo_runtime::metrics::{
-    MetricsHierarchy, PrometheusExpositionFormatCallback, create_metric,
-    prometheus_names::labels,
+    MetricsHierarchy, PrometheusExpositionFormatCallback, create_metric, prometheus_names::labels,
 };
 
 use crate::engine::EngineConfig;
@@ -152,7 +151,6 @@ impl LifecycleGauges {
         self.drain_time_seconds.set(seconds);
     }
 }
-
 
 /// Standalone hierarchy for tests — no parent, no DRT, no connection_id.
 #[cfg(any(test, feature = "testing"))]
@@ -319,8 +317,14 @@ mod tests {
         // create_metric's auto-injection.
         let auto = metrics.auto_labels();
         assert_eq!(auto.get(labels::NAMESPACE).map(String::as_str), Some("dyn"));
-        assert_eq!(auto.get(labels::COMPONENT).map(String::as_str), Some("backend"));
-        assert_eq!(auto.get(labels::ENDPOINT).map(String::as_str), Some("generate"));
+        assert_eq!(
+            auto.get(labels::COMPONENT).map(String::as_str),
+            Some("backend")
+        );
+        assert_eq!(
+            auto.get(labels::ENDPOINT).map(String::as_str),
+            Some("generate")
+        );
 
         let lifecycle = LifecycleGauges::new(&metrics).expect("construct lifecycle gauges");
         lifecycle.observe_cleanup_time(1.5);

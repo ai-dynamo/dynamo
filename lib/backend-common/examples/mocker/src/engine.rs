@@ -507,10 +507,7 @@ impl LLMEngine for MockerBackend {
         }])
     }
 
-    async fn setup_metrics(
-        &self,
-        _ctx: MetricsCtx<'_>,
-    ) -> Result<MetricsBindings, DynamoError> {
+    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
         Ok(MetricsBindings {
             component: Some(Arc::new(MockerComponentMetrics {
                 kv_used_blocks: self.kv_used_blocks.clone(),

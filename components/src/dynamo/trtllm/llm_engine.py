@@ -40,9 +40,7 @@ from dynamo.common.backend.engine import (
     GenerateRequest,
     LLMEngine,
 )
-from dynamo.common.backend.metrics import (
-    register_global_registry,
-)
+from dynamo.common.backend.metrics import register_global_registry
 from dynamo.common.backend.publisher import (
     ComponentMetricsSource,
     ComponentSnapshot,

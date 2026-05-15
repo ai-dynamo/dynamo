@@ -83,17 +83,25 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
 
     # Deprecated alias: --publish-events-and-metrics maps to --publish-kv-events.
     # Same for the legacy env var. Both are removed in the next release.
-    if any(a.split("=", 1)[0] in ("--publish-events-and-metrics", "--no-publish-events-and-metrics")
-           for a in cli_args):
+    if any(
+        a.split("=", 1)[0]
+        in ("--publish-events-and-metrics", "--no-publish-events-and-metrics")
+        for a in cli_args
+    ):
         import warnings
+
         warnings.warn(
             "--publish-events-and-metrics is deprecated; use --publish-kv-events. "
             "The old flag stays as an alias for one release.",
             DeprecationWarning,
             stacklevel=2,
         )
-    if "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS" in os.environ and "DYN_TRTLLM_PUBLISH_KV_EVENTS" not in os.environ:
+    if (
+        "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS" in os.environ
+        and "DYN_TRTLLM_PUBLISH_KV_EVENTS" not in os.environ
+    ):
         import warnings
+
         warnings.warn(
             "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated; use "
             "DYN_TRTLLM_PUBLISH_KV_EVENTS. The old env var stays as an "
@@ -101,7 +109,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
             DeprecationWarning,
             stacklevel=2,
         )
-        os.environ["DYN_TRTLLM_PUBLISH_KV_EVENTS"] = os.environ["DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS"]
+        os.environ["DYN_TRTLLM_PUBLISH_KV_EVENTS"] = os.environ[
+            "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS"
+        ]
 
     parser = argparse.ArgumentParser(
         description="Dynamo TensorRT-LLM worker configuration\n\n"

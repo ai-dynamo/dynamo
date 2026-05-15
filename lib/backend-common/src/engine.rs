@@ -282,10 +282,7 @@ pub trait LLMEngine: Send + Sync + 'static {
     ///
     /// Errors abort startup; `cleanup` runs on the partial state. Do not
     /// retain `ctx.metrics` past return.
-    async fn setup_metrics(
-        &self,
-        _ctx: MetricsCtx<'_>,
-    ) -> Result<MetricsBindings, DynamoError> {
+    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
         Ok(MetricsBindings::default())
     }
 }
@@ -294,7 +291,6 @@ pub trait LLMEngine: Send + Sync + 'static {
 /// from its own thread thereafter.
 pub type OnPublisherReady =
     Box<dyn FnOnce(Arc<KvEventPublisher>) -> Result<(), DynamoError> + Send + 'static>;
-
 
 /// KV event source descriptor. Two flavors: subscribe to an engine-provided
 /// ZMQ PUB, or hand a publisher to the engine and let it drive `publish`
