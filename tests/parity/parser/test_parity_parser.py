@@ -4,8 +4,29 @@
 """Parser-mode parity tests — Method 2 of the cross-impl parity (parser) effort.
 
 For each fixture, run the same input through Dynamo's Rust parser (via PyO3)
-and the upstream Python parsers (vLLM + SGLang). Diff against the recorded
-expected output and against each other.
+and the upstream Python parsers (vLLM + SGLang). Each case's YAML carries an
+`expected:` block with ALL THREE impl keys (Variant A):
+
+    expected:
+      dynamo: &d_8_a                   # always present (oracle)
+        calls: [...]
+        normal_text: '...'
+      vllm: *d_8_a                     # anchor ref when engine matches dynamo
+      sglang:                          # concrete override when engine differs
+        calls: [...]
+        normal_text: '...'
+
+Per-impl spec is one of:
+  - `{calls, normal_text}` — concrete expected output. The test asserts the
+    impl produces this exact output (whether via anchor ref to dynamo or as
+    an inline divergent block, the test is the same).
+  - `{unavailable: <msg>}` — impl has no parser for this family; skip.
+  - `{error: <msg>}` — impl is expected to crash with this error string
+    (substring match).
+
+If the impl's actual output drifts away from the recorded spec, the assertion
+fails noisily — the YAML edit needed is obvious from the diff. There's no
+xfail/XPASS-strict bookkeeping because the spec IS the truth.
 
 Run:
     pytest tests/parity/parser/test_parity_parser.py -v
@@ -26,764 +47,15 @@ pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
 FIXTURES_ROOT = Path(__file__).parent / "fixtures"
 
-
 # Impl name → optional package whose absence is a legitimate skip. Anything
 # else that fails inside the wrapper module (e.g. a stale `from vllm.X import
 # Y` after vLLM renamed Y) is a real bug and must surface as a test ERROR,
 # not a green skip — so we use `pytest.importorskip` inline rather than a
 # blanket `try: import X except ImportError`.
-IMPL_NAMES: tuple[str, ...] = ("dynamo", "vllm", "sglang")
 _PACKAGE: dict[str, str] = {
     "dynamo": "dynamo._core",
     "vllm": "vllm",
     "sglang": "sglang",
-}
-
-
-# (impl, family, case_id) -> reason. Surfaced findings from running the harness;
-# each entry is a real behavioral divergence we've chosen to document rather
-# than fix. Promote to a tracked bug before removing.
-#
-# Pattern: vLLM and SGLang both truncate normal_text at the *end* of the
-# tool-call wrapper for some parser families. Dynamo preserves text that
-# appears after the closing wrapper token for the families still listed below.
-_TRAILING_NORMAL_TEXT_DROP = "drops trailing normal_text after tool-call wrapper end"
-_HARMONY_REQUIRES_ASSISTANT_PREFIX = (
-    "SGLang's GptOssDetector bot_token requires '<|start|>assistant<|channel|>commentary' "
-    "envelope; Dynamo accepts the bare '<|channel|>commentary' variant"
-)
-# PARSER.batch.4 (malformed JSON) and PARSER.batch.5 (missing end-token) are
-# impl-defined recovery contracts per PARSER_CASES.md. Each parser picks its
-# own behavior (drop, recover-best-effort, fall back to string args, surface
-# error). Cross-impl parity is not expected; we record divergences as a map
-# of "what each impl does" rather than asserting one truth.
-_RECOVERY_CONTRACT = "impl-defined recovery contract (see PARSER_CASES.md)"
-
-KNOWN_DIVERGENCES: dict[tuple[str, str, str], str] = {
-    # vLLM and SGLang both truncate normal_text at the *end* of the tool-call
-    # wrapper for these parser families. Only Dynamo preserves text after
-    # the closing wrapper token.
-    #
-    # kimi_k2 PARSER.batch.8 sub-cases (SGLang has no kimi_k2 detector → skips):
-    #   .a (pre-text only)   — vLLM preserves trailing whitespace; Dynamo trims
-    #   .b (post-text only)  — vLLM drops the trailing text entirely
-    #   .c (sandwich)        — vLLM preserves leading text but drops trailing
-    #   .d (between calls)   — vLLM drops inter-call text after first close
-    (
-        "vllm",
-        "kimi_k2",
-        "PARSER.batch.8.a",
-    ): "preserves trailing space; Dynamo trims it",
-    ("vllm", "kimi_k2", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "kimi_k2", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "kimi_k2", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "glm47", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "glm47", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "glm47", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "glm47", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
-    # SGLang's GptOssDetector requires a strict '<|start|>assistant<|channel|>commentary'
-    # bot_token; bare '<|channel|>commentary' variants (PARSER.batch.1, .6, .13)
-    # are not detected at all.
-    ("sglang", "harmony", "PARSER.batch.1"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
-    ("sglang", "harmony", "PARSER.batch.6.a"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
-    ("sglang", "harmony", "PARSER.batch.6.b"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
-    ("sglang", "harmony", "PARSER.batch.8.a"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
-    ("sglang", "harmony", "PARSER.batch.8.b"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
-    ("sglang", "harmony", "PARSER.batch.8.c"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
-    ("sglang", "harmony", "PARSER.batch.8.d"): _HARMONY_REQUIRES_ASSISTANT_PREFIX,
-    # SGLang's GptOssDetector drops the analysis-channel preamble entirely;
-    # Dynamo surfaces it as normal_text.
-    # Inverse of the bare-envelope finding: when the input *does* have the
-    # assistant prefix and contains back-to-back commentary blocks, SGLang
-    # extracts both calls — Dynamo's harmony parser drops them and treats the
-    # raw input as normal_text. Dynamo bug class; see harmony_parser.rs comment
-    # block above test_parse_harmony_multiple_calls_recovers.
-    (
-        "sglang",
-        "harmony",
-        "PARSER.batch.10",
-    ): "Dynamo drops back-to-back commentary blocks; SGLang extracts them",
-    # Whitespace handling on text immediately preceding the bot_token:
-    # - SGLang on DeepSeek variants trims one trailing space; Dynamo keeps it.
-    (
-        "sglang",
-        "deepseek_v3_1",
-        "PARSER.batch.8.a",
-    ): "trims trailing space from preceding normal_text",
-    (
-        "sglang",
-        "deepseek_v3_1",
-        "PARSER.batch.8.c",
-    ): "trims trailing space from preceding normal_text",
-    (
-        "sglang",
-        "deepseek_v3_1",
-        "PARSER.batch.8.d",
-    ): "trims trailing space from preceding normal_text",
-    (
-        "sglang",
-        "deepseek_v3",
-        "PARSER.batch.8.a",
-    ): "trims trailing space from preceding normal_text",
-    (
-        "sglang",
-        "deepseek_v3",
-        "PARSER.batch.8.c",
-    ): "trims trailing space from preceding normal_text",
-    (
-        "sglang",
-        "deepseek_v3",
-        "PARSER.batch.8.d",
-    ): "trims trailing space from preceding normal_text",
-    ("sglang", "pythonic", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "pythonic", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "pythonic", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "pythonic", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
-    # Inverse of the XML-family pattern: post-#9350 Dynamo trims trailing
-    # text after wrapper-end on minimax_m2; SGLang preserves it. Only .a
-    # matches (no trailing text in that shape).
-    (
-        "sglang",
-        "minimax_m2",
-        "PARSER.batch.8.b",
-    ): "sglang preserves trailing normal_text after wrapper end; Dynamo trims it (post-#9350)",
-    (
-        "sglang",
-        "minimax_m2",
-        "PARSER.batch.8.c",
-    ): "sglang preserves trailing normal_text after wrapper end; Dynamo trims it (post-#9350)",
-    (
-        "sglang",
-        "minimax_m2",
-        "PARSER.batch.8.d",
-    ): "sglang preserves trailing normal_text after wrapper end; Dynamo trims it (post-#9350)",
-    ("vllm", "gemma4", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "gemma4", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "gemma4", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
-    # vLLM's pythonic parser rejects the whole input when the bracket-call form
-    # is surrounded by interleaved text — calls=[], normal_text=raw input.
-    # Dynamo's pythonic parser extracts the call and surfaces the surrounding
-    # text in normal_text (matches the upstream Llama 4 / pythonic_detector
-    # behavior — vLLM is the outlier here).
-    (
-        "vllm",
-        "pythonic",
-        "PARSER.batch.8.a",
-    ): "vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the call",
-    (
-        "vllm",
-        "pythonic",
-        "PARSER.batch.8.b",
-    ): "vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the call",
-    (
-        "vllm",
-        "pythonic",
-        "PARSER.batch.8.c",
-    ): "vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the call",
-    (
-        "vllm",
-        "pythonic",
-        "PARSER.batch.8.d",
-    ): "vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the call",
-    # PARSER.batch.4 (malformed) — impl-defined recovery contract.
-    # PARSER.batch.5 (missing end-token recovery) — impl-defined. Dynamo's
-    # PyO3 batch binding now uses `detect_and_parse_tool_call_with_recovery`
-    # so the registered `expected` reflects the recovered call; impls that
-    # still drop on the missing end-token diverge here.
-    # vllm/sglang qwen3_coder.batch.5 both recover to the same call as
-    # Dynamo and match the new expected — intentionally NOT registered.
-    # PARSER.batch.5 sub-cases — recovery contract (impl-defined; see PARSER_CASES.md).
-    # vllm divergences from harness; sglang .a inherited from prior bare-key registry,
-    # additional sglang .b/.c entries to be added as CI surfaces them.
-    ("vllm", "deepseek_v3", "PARSER.batch.5.a"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v3", "PARSER.batch.5.c"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v3_1", "PARSER.batch.5.a"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v3_1", "PARSER.batch.5.c"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v3_2", "PARSER.batch.5.a"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v3_2", "PARSER.batch.5.c"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v4", "PARSER.batch.5.a"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v4", "PARSER.batch.5.c"): _RECOVERY_CONTRACT,
-    ("vllm", "glm47", "PARSER.batch.5.a"): _RECOVERY_CONTRACT,
-    ("vllm", "glm47", "PARSER.batch.5.c"): _RECOVERY_CONTRACT,
-    ("vllm", "jamba", "PARSER.batch.5.a"): _RECOVERY_CONTRACT,
-    ("vllm", "llama3_json", "PARSER.batch.5.a"): _RECOVERY_CONTRACT,
-    ("vllm", "llama3_json", "PARSER.batch.5.c"): _RECOVERY_CONTRACT,
-    ("vllm", "minimax_m2", "PARSER.batch.5.a"): _RECOVERY_CONTRACT,
-    ("vllm", "minimax_m2", "PARSER.batch.5.c"): _RECOVERY_CONTRACT,
-    ("vllm", "mistral", "PARSER.batch.5.c"): _RECOVERY_CONTRACT,
-    ("vllm", "phi4", "PARSER.batch.5.a"): _RECOVERY_CONTRACT,
-    ("vllm", "phi4", "PARSER.batch.5.b"): _RECOVERY_CONTRACT,
-    ("vllm", "phi4", "PARSER.batch.5.c"): _RECOVERY_CONTRACT,
-    ("vllm", "qwen3_coder", "PARSER.batch.5.b"): _RECOVERY_CONTRACT,
-    ("sglang", "deepseek_v3", "PARSER.batch.5.a"): _RECOVERY_CONTRACT,
-    ("sglang", "deepseek_v3_1", "PARSER.batch.5.a"): _RECOVERY_CONTRACT,
-    ("sglang", "glm47", "PARSER.batch.5.a"): _RECOVERY_CONTRACT,
-    ("sglang", "harmony", "PARSER.batch.5.a"): _RECOVERY_CONTRACT,
-    ("sglang", "minimax_m2", "PARSER.batch.5.a"): _RECOVERY_CONTRACT,
-    ("sglang", "mistral", "PARSER.batch.5.a"): _RECOVERY_CONTRACT,
-    ("sglang", "qwen25", "PARSER.batch.5.a"): _RECOVERY_CONTRACT,
-    # PARSER.batch.4 sub-cases — malformed/partial JSON args; recovery contract impl-defined.
-    # vllm divergences from harness; sglang provisional .a entries inherited from prior bare-key set.
-    ("vllm", "deepseek_v3", "PARSER.batch.4.a"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v3", "PARSER.batch.4.b"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v3", "PARSER.batch.4.c"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v3", "PARSER.batch.4.d"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v3_1", "PARSER.batch.4.a"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v3_1", "PARSER.batch.4.b"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v3_1", "PARSER.batch.4.c"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v3_1", "PARSER.batch.4.d"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v3_2", "PARSER.batch.4.a"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v3_2", "PARSER.batch.4.c"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v4", "PARSER.batch.4.a"): _RECOVERY_CONTRACT,
-    ("vllm", "deepseek_v4", "PARSER.batch.4.c"): _RECOVERY_CONTRACT,
-    ("vllm", "glm47", "PARSER.batch.4.a"): _RECOVERY_CONTRACT,
-    ("vllm", "hermes", "PARSER.batch.4.b"): _RECOVERY_CONTRACT,
-    ("vllm", "jamba", "PARSER.batch.4.c"): _RECOVERY_CONTRACT,
-    ("vllm", "jamba", "PARSER.batch.4.d"): _RECOVERY_CONTRACT,
-    ("vllm", "llama3_json", "PARSER.batch.4.a"): _RECOVERY_CONTRACT,
-    ("vllm", "llama3_json", "PARSER.batch.4.b"): _RECOVERY_CONTRACT,
-    ("vllm", "llama3_json", "PARSER.batch.4.c"): _RECOVERY_CONTRACT,
-    ("vllm", "minimax_m2", "PARSER.batch.4.a"): _RECOVERY_CONTRACT,
-    ("vllm", "minimax_m2", "PARSER.batch.4.c"): _RECOVERY_CONTRACT,
-    ("vllm", "minimax_m2", "PARSER.batch.4.d"): _RECOVERY_CONTRACT,
-    ("vllm", "mistral", "PARSER.batch.4.a"): _RECOVERY_CONTRACT,
-    ("vllm", "mistral", "PARSER.batch.4.b"): _RECOVERY_CONTRACT,
-    (
-        "vllm",
-        "mistral",
-        "PARSER.batch.4.c",
-    ): "EXPECTS_ERROR(KeyError): vLLM mistral_tool_parser raises KeyError when 'name' key is missing",
-    ("vllm", "phi4", "PARSER.batch.4.c"): _RECOVERY_CONTRACT,
-    ("vllm", "phi4", "PARSER.batch.4.d"): _RECOVERY_CONTRACT,
-    ("vllm", "qwen3_coder", "PARSER.batch.4.a"): _RECOVERY_CONTRACT,
-    ("sglang", "harmony", "PARSER.batch.4.a"): _RECOVERY_CONTRACT,
-    # PARSER.batch.2 sub-cases — multi-call shape variations.
-    # .c (with surrounding narration): same trailing-space-vs-trim divergence
-    # as batch.8.c on most XML/JSON families. .b (multi-section back-to-back):
-    # vLLM's deepseek_v3_2/v4 parsers don't restart on second tool_calls fence.
-    # llama3_json across .a/.c/.d: semicolon-separated parsing differs.
-    (
-        "vllm",
-        "deepseek_v3_2",
-        "PARSER.batch.2.b",
-    ): "vLLM deepseek_v3_2 does not restart parsing on a second back-to-back fence pair",
-    ("vllm", "deepseek_v3_2", "PARSER.batch.2.c"): _TRAILING_NORMAL_TEXT_DROP,
-    (
-        "vllm",
-        "deepseek_v4",
-        "PARSER.batch.2.b",
-    ): "vLLM deepseek_v4 does not restart parsing on a second back-to-back fence pair",
-    ("vllm", "deepseek_v4", "PARSER.batch.2.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "gemma4", "PARSER.batch.2.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "glm47", "PARSER.batch.2.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "hermes", "PARSER.batch.2.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "jamba", "PARSER.batch.2.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "kimi_k2", "PARSER.batch.2.c"): _TRAILING_NORMAL_TEXT_DROP,
-    (
-        "vllm",
-        "llama3_json",
-        "PARSER.batch.2.a",
-    ): "vLLM llama3_json does not parse semicolon-separated calls the same way Dynamo does",
-    (
-        "vllm",
-        "llama3_json",
-        "PARSER.batch.2.c",
-    ): "vLLM llama3_json does not parse semicolon-separated calls the same way Dynamo does",
-    (
-        "vllm",
-        "llama3_json",
-        "PARSER.batch.2.d",
-    ): "vLLM llama3_json does not parse semicolon-separated calls the same way Dynamo does",
-    ("vllm", "mistral", "PARSER.batch.2.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "phi4", "PARSER.batch.2.c"): _TRAILING_NORMAL_TEXT_DROP,
-    (
-        "vllm",
-        "pythonic",
-        "PARSER.batch.2.c",
-    ): "vLLM rejects bracket-call form when surrounded by interleaved text; Dynamo extracts the calls",
-    # sglang provisional sub-case entries (carried over from prior bare-key registry).
-    # CI will surface .b/.c/.d if they diverge separately.
-    (
-        "sglang",
-        "harmony",
-        "PARSER.batch.2.a",
-    ): "Dynamo drops back-to-back commentary blocks; SGLang extracts them",
-    (
-        "sglang",
-        "mistral",
-        "PARSER.batch.2.a",
-    ): "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits",
-    (
-        "sglang",
-        "qwen25",
-        "PARSER.batch.2.a",
-    ): "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits",
-    # PARSER.batch.7 sub-cases — complex argument types.
-    # .a (multi-arg standard types) used to diverge for vLLM's XML-grammar parsers
-    # (deepseek_v3_2/v4, minimax_m2, qwen3_coder) — vLLM emitted JSON-typed values
-    # as raw strings while Dynamo coerced per the schema. After this PR's wrapper
-    # fix (passing real ChatCompletionToolsParam Pydantic instances), vLLM's
-    # schema-aware coercion fires and all four families match Dynamo. Only phi4 .d
-    # remains divergent.
-    (
-        "vllm",
-        "phi4",
-        "PARSER.batch.7.d",
-    ): "vLLM emits JSON-typed parameter values as raw strings; Dynamo coerces nested object/array types",
-    # sglang provisional .a entries (carried over from prior bare-key registry).
-    (
-        "sglang",
-        "harmony",
-        "PARSER.batch.7.a",
-    ): "drops analysis-channel content from normal_text",
-    (
-        "sglang",
-        "mistral",
-        "PARSER.batch.7.a",
-    ): "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits",
-    (
-        "sglang",
-        "qwen25",
-        "PARSER.batch.7.a",
-    ): "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits",
-    # Bulk-registered sglang sub-case divergences surfaced by CI on PR #9363.
-    # Patterns: TRIM = sglang trims trailing space from preceding normal_text;
-    # NULL = sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input;
-    # OTHER = misc sglang-specific divergences (see CI log for per-case diff).
-    (
-        "sglang",
-        "deepseek_v3",
-        "PARSER.batch.2.c",
-    ): "trims trailing space from preceding normal_text",
-    (
-        "sglang",
-        "deepseek_v3",
-        "PARSER.batch.4.a",
-    ): "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input",
-    (
-        "sglang",
-        "deepseek_v3",
-        "PARSER.batch.4.c",
-    ): "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input",
-    (
-        "sglang",
-        "deepseek_v3",
-        "PARSER.batch.4.d",
-    ): "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input",
-    (
-        "sglang",
-        "deepseek_v3",
-        "PARSER.batch.5.c",
-    ): "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input",
-    (
-        "sglang",
-        "deepseek_v3_1",
-        "PARSER.batch.2.c",
-    ): "trims trailing space from preceding normal_text",
-    (
-        "sglang",
-        "deepseek_v3_1",
-        "PARSER.batch.4.a",
-    ): "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input",
-    (
-        "sglang",
-        "deepseek_v3_1",
-        "PARSER.batch.4.c",
-    ): "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input",
-    (
-        "sglang",
-        "deepseek_v3_1",
-        "PARSER.batch.4.d",
-    ): "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input",
-    (
-        "sglang",
-        "deepseek_v3_1",
-        "PARSER.batch.5.c",
-    ): "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input",
-    (
-        "sglang",
-        "deepseek_v3_2",
-        "PARSER.batch.2.b",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "deepseek_v3_2",
-        "PARSER.batch.2.c",
-    ): "trims trailing space from preceding normal_text",
-    (
-        "sglang",
-        "glm47",
-        "PARSER.batch.4.a",
-    ): "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input",
-    (
-        "sglang",
-        "glm47",
-        "PARSER.batch.5.c",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "glm47",
-        "PARSER.batch.6.b",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "harmony",
-        "PARSER.batch.2.c",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "harmony",
-        "PARSER.batch.2.d",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "harmony",
-        "PARSER.batch.4.b",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "harmony",
-        "PARSER.batch.5.c",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "harmony",
-        "PARSER.batch.7.b",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "harmony",
-        "PARSER.batch.7.c",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "harmony",
-        "PARSER.batch.7.d",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "hermes",
-        "PARSER.batch.4.b",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "hermes",
-        "PARSER.batch.4.c",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "hermes",
-        "PARSER.batch.6.c",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "kimi_k2",
-        "PARSER.batch.2.c",
-    ): "trims trailing space from preceding normal_text",
-    (
-        "sglang",
-        "kimi_k2",
-        "PARSER.batch.4.b",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "minimax_m2",
-        "PARSER.batch.2.b",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "minimax_m2",
-        "PARSER.batch.2.c",
-    ): "trims trailing space from preceding normal_text",
-    (
-        "sglang",
-        "minimax_m2",
-        "PARSER.batch.5.c",
-    ): "sglang nullifies normal_text on malformed/recovery shapes where Dynamo preserves input",
-    (
-        "sglang",
-        "mistral",
-        "PARSER.batch.2.c",
-    ): "trims trailing space from preceding normal_text",
-    (
-        "sglang",
-        "mistral",
-        "PARSER.batch.2.d",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "mistral",
-        "PARSER.batch.4.a",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "mistral",
-        "PARSER.batch.4.b",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "mistral",
-        "PARSER.batch.4.d",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "mistral",
-        "PARSER.batch.5.c",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "mistral",
-        "PARSER.batch.7.b",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "mistral",
-        "PARSER.batch.7.c",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "mistral",
-        "PARSER.batch.7.d",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "pythonic",
-        "PARSER.batch.2.c",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "qwen25",
-        "PARSER.batch.2.c",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "qwen25",
-        "PARSER.batch.2.d",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "qwen25",
-        "PARSER.batch.4.b",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "qwen25",
-        "PARSER.batch.4.d",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "qwen25",
-        "PARSER.batch.7.b",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "qwen25",
-        "PARSER.batch.7.c",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "qwen25",
-        "PARSER.batch.7.d",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    (
-        "sglang",
-        "qwen3_coder",
-        "PARSER.batch.7.a",
-    ): "sglang diverges on this sub-case (CI-surfaced; see KNOWN_DIVERGENCES log for diff)",
-    # PARSER.batch.6 sub-cases — empty-args edge cases.
-    # .c (no arguments key) flips on impl: most parsers treat missing-key as
-    # malformed, vLLM accepts as empty {}. .b (whitespace inside {}) only
-    # flips for deepseek_v3 because the fenced ```json ... ``` body is
-    # whitespace-sensitive. Other families' .a/.b match across impls.
-    (
-        "vllm",
-        "jamba",
-        "PARSER.batch.6.c",
-    ): "both return calls=[]; vLLM preserves raw input as normal_text on this recovery path, Dynamo emits empty",
-    (
-        "vllm",
-        "llama3_json",
-        "PARSER.batch.6.c",
-    ): "both return calls=[]; vLLM preserves raw input as normal_text on this recovery path, Dynamo emits empty",
-    (
-        "vllm",
-        "mistral",
-        "PARSER.batch.6.c",
-    ): "vLLM accepts call with missing arguments key as having empty args; Dynamo returns calls=[]",
-    (
-        "vllm",
-        "phi4",
-        "PARSER.batch.6.c",
-    ): "both return calls=[]; vLLM preserves raw input as normal_text on this recovery path, Dynamo emits empty",
-    (
-        "vllm",
-        "deepseek_v3",
-        "PARSER.batch.6.c",
-    ): "both return calls=[]; vLLM nullifies normal_text on this recovery path, Dynamo preserves the raw input as normal_text",
-    (
-        "vllm",
-        "deepseek_v3_1",
-        "PARSER.batch.6.c",
-    ): "both return calls=[]; vLLM nullifies normal_text on this recovery path, Dynamo preserves the raw input as normal_text",
-    (
-        "vllm",
-        "deepseek_v3",
-        "PARSER.batch.6.b",
-    ): "vLLM rejects whitespace inside empty {} when wrapped in fenced ```json``` block",
-    # ----- new families: hermes / qwen25 / mistral / jamba / llama3_json / phi4 / nemotron_nano / deepseek_v3_2 -----
-    ("vllm", "hermes", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "hermes", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "hermes", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "jamba", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "jamba", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "jamba", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
-    (
-        "vllm",
-        "llama3_json",
-        "PARSER.batch.10",
-    ): "vLLM llama3_json does not parse semicolon-separated calls the same way Dynamo does",
-    ("vllm", "mistral", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "mistral", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
-    # `("vllm", "mistral", "PARSER.batch.8.d")` lives in the TODO(research) block below
-    # — vLLM raises ValueError on two `[TOOL_CALLS]` envelopes; classified differently
-    # than .a/.c.
-    ("vllm", "phi4", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "phi4", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("vllm", "phi4", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "deepseek_v3_2", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "deepseek_v3_2", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "deepseek_v3_2", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "deepseek_v3_2", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
-    # SGLang's MistralDetector and Qwen25Detector both return empty `calls`
-    # on the bare wire formats Dynamo emits — format-detection failure rather
-    # than a recovery-contract divergence. The exact reason (different start
-    # token, schema-shape mismatch, missing chat-format envelope) is not
-    # investigated here; the cells are recorded as `X` so the matrix reflects
-    # the observed behavior.
-    (
-        "sglang",
-        "mistral",
-        "PARSER.batch.1",
-    ): "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits",
-    (
-        "sglang",
-        "mistral",
-        "PARSER.batch.6.a",
-    ): "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits",
-    (
-        "sglang",
-        "mistral",
-        "PARSER.batch.6.b",
-    ): "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits",
-    ("sglang", "mistral", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "mistral", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "mistral", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
-    (
-        "sglang",
-        "mistral",
-        "PARSER.batch.10",
-    ): "SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits",
-    (
-        "sglang",
-        "qwen25",
-        "PARSER.batch.1",
-    ): "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits",
-    (
-        "sglang",
-        "qwen25",
-        "PARSER.batch.6.a",
-    ): "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits",
-    (
-        "sglang",
-        "qwen25",
-        "PARSER.batch.6.b",
-    ): "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits",
-    ("sglang", "qwen25", "PARSER.batch.8.a"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "qwen25", "PARSER.batch.8.b"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "qwen25", "PARSER.batch.8.c"): _TRAILING_NORMAL_TEXT_DROP,
-    ("sglang", "qwen25", "PARSER.batch.8.d"): _TRAILING_NORMAL_TEXT_DROP,
-    (
-        "sglang",
-        "qwen25",
-        "PARSER.batch.10",
-    ): "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits",
-    (
-        "vllm",
-        "deepseek_v3_2",
-        "PARSER.batch.8.b",
-    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
-    (
-        "vllm",
-        "deepseek_v3_2",
-        "PARSER.batch.8.c",
-    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
-    (
-        "vllm",
-        "deepseek_v3_2",
-        "PARSER.batch.8.d",
-    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
-    (
-        "vllm",
-        "deepseek_v4",
-        "PARSER.batch.8.b",
-    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
-    (
-        "vllm",
-        "deepseek_v4",
-        "PARSER.batch.8.c",
-    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
-    (
-        "vllm",
-        "deepseek_v4",
-        "PARSER.batch.8.d",
-    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
-    (
-        "vllm",
-        "llama3_json",
-        "PARSER.batch.8.a",
-    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
-    (
-        "vllm",
-        "llama3_json",
-        "PARSER.batch.8.c",
-    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
-    (
-        "vllm",
-        "llama3_json",
-        "PARSER.batch.8.d",
-    ): "TODO(research): vLLM returns null normal_text where Dynamo surfaces the narration string",
-    (
-        "vllm",
-        "mistral",
-        "PARSER.batch.8.d",
-    ): "EXPECTS_ERROR(Only one BOT token): vLLM mistral_tool_parser raises ValueError on two consecutive [TOOL_CALLS] envelopes",
-    # SGLang divergences surfaced by CI (cuda{12.9,13.0} arm64). Reasons are
-    # placeholders pending per-case investigation; concrete divergence shape
-    # to be filled in by `embed_divergence_comments.py` runs against SGLang.
-    # (`sglang/deepseek_v3.b`, `sglang/deepseek_v3_1.b`, and `sglang/mistral.d`
-    # are already registered above as "trims trailing space"-class divergences;
-    # if CI still flags them XPASS-strict, those entries will need updating
-    # rather than re-adding here.)
-    (
-        "sglang",
-        "kimi_k2",
-        "PARSER.batch.8.a",
-    ): "TODO(research): SGLang diverges on this case; investigate vs Dynamo's expected",
-    (
-        "sglang",
-        "kimi_k2",
-        "PARSER.batch.8.b",
-    ): "TODO(research): SGLang diverges on this case; investigate vs Dynamo's expected",
-    (
-        "sglang",
-        "kimi_k2",
-        "PARSER.batch.8.c",
-    ): "TODO(research): SGLang diverges on this case; investigate vs Dynamo's expected",
-    (
-        "sglang",
-        "kimi_k2",
-        "PARSER.batch.8.d",
-    ): "TODO(research): SGLang diverges on this case; investigate vs Dynamo's expected",
 }
 
 
@@ -809,10 +81,6 @@ def _load_fixtures() -> list[tuple[str, str, dict[str, Any]]]:
 
     Both schemas are
         {family: "...", mode: "batch", cases: {PARSER.batch.<id>: {...}, ...}}
-    Case keys are the full PARSER_CASES.md ID (e.g. `PARSER.batch.1` or
-    `PARSER.batch.8.a`) so they match KNOWN_DIVERGENCES keys and parametrize
-    IDs directly. The merge across the two layouts is conflict-free as long
-    as a given case ID lives in exactly one file.
     """
     out = []
     for fp in sorted(FIXTURES_ROOT.glob("*/PARSER.*.yaml")):
@@ -826,41 +94,15 @@ def _load_fixtures() -> list[tuple[str, str, dict[str, Any]]]:
 FIXTURES = _load_fixtures()
 
 
-def _marks_for(impl: str) -> list:
-    """Per-param marks. Only the impl marker (`vllm`/`sglang`) — used by CI
-    shards to filter via `-m vllm` / `-m sglang`. `dynamo` gets no marker so
-    it runs in every shard (it's the reference we compare against).
-
-    Known-divergence xfail handling is intentionally NOT a parametrize-time
-    mark — it lives inline in the test body (see `XPASS-strict` block) so a
-    parser/runtime crash on a known-divergence case still hits `pytest.fail`
-    hard instead of being swallowed by an outer `xfail` wrapper."""
-    if impl in ("vllm", "sglang"):
-        return [getattr(pytest.mark, impl)]
-    return []
-
-
-@pytest.mark.parametrize(
-    "family,case_id,fixture,impl_name",
-    [
-        pytest.param(
-            f,
-            c,
-            fx,
-            impl,
-            marks=_marks_for(impl),
-            id=f"{f}/{c}#{impl}",
-        )
-        for (f, c, fx) in FIXTURES
-        for impl in IMPL_NAMES
-    ],
-)
-def test_parity(
+def _run_parity_case(
     family: str,
     case_id: str,
     fixture: dict[str, Any],
     impl_name: str,
 ) -> None:
+    """Single-case parity assertion shared by all three entry points
+    (the all-impls `test_parity` plus the impl-specific
+    `test_parity_vllm` / `test_parity_sglang`)."""
     # Skip ONLY when the optional package itself is missing — wrapper-internal
     # ImportError (e.g. a stale upstream API ref after a vLLM/SGLang rename)
     # propagates as a real test ERROR rather than a silent green skip.
@@ -868,56 +110,28 @@ def test_parity(
     parse_mod = importlib.import_module(f"tests.parity.parser.{impl_name}")
     got = parse_mod.parse(family, fixture["model_text"], fixture.get("tools"))
 
-    # Runtime / parser errors. Wrappers prefix the env-shaped case
-    # ("impl has no parser registered for this family") with `UNAVAILABLE:`
-    # so we can still skip those cleanly.
-    #
-    # Errors on cases NOT in KNOWN_DIVERGENCES are real bugs → fail HARD.
-    #
-    # Errors on cases IN KNOWN_DIVERGENCES are absorbed as xfail ONLY when the
-    # divergence entry's reason explicitly opts into error-absorption via the
-    # `EXPECTS_ERROR(<pattern>):` prefix and the actual error matches the
-    # pattern. Plain-string divergences (the common case — value mismatches)
-    # do NOT absorb errors. This keeps an unrelated wrapper/runtime crash
-    # (e.g. an upstream API rename) from passing silently on a row that's
-    # only supposed to diverge on output values.
-    #
-    # Example entry that DOES absorb a specific error:
-    #   ("vllm", "mistral", "PARSER.batch.8.d"):
-    #       "EXPECTS_ERROR(Only one BOT token): vllm raises ValueError on two TOOL_CALLS envelopes"
-    div = KNOWN_DIVERGENCES.get((impl_name, family, case_id))
-    if got.error:
-        if got.error.startswith("UNAVAILABLE:"):
-            pytest.skip(f"{impl_name} unavailable for {family}: {got.error}")
-        if div is not None:
-            import re as _re
+    spec = fixture["expected"][impl_name]
 
-            m = _re.match(r"^EXPECTS_ERROR\((.+?)\):\s*(.*)$", div, _re.DOTALL)
-            if m and _re.search(m.group(1), got.error):
-                pytest.xfail(
-                    f"known divergence (error matched /{m.group(1)}/): {m.group(2)}"
-                )
+    if "unavailable" in spec:
+        pytest.skip(f"{impl_name} unavailable for {family}: {spec['unavailable']}")
+
+    if "error" in spec:
+        if got.error and spec["error"] in got.error:
+            return  # PASS — engine emitted the recorded error as expected
+        pytest.fail(
+            f"{impl_name}/{family}/{case_id}: expected error {spec['error']!r}, "
+            f"got {got.error!r}"
+        )
+
+    if got.error:
         pytest.fail(f"{impl_name} crashed on {family}/{case_id}: {got.error}")
 
     expected = common.ParseResult(
-        calls=fixture["expected"]["calls"],
-        normal_text=fixture["expected"].get("normal_text"),
+        calls=spec["calls"],
+        normal_text=spec.get("normal_text"),
     )
     got_canonical = common.canonical(got.to_dict())
     expected_canonical = common.canonical(expected.to_dict())
-
-    # Known divergences: xfail the value-diff assertion only. If the values
-    # now match, surface that as a registry-staleness failure (XPASS-strict
-    # equivalent) instead of silently passing.
-    if div is not None:
-        if got_canonical == expected_canonical:
-            pytest.fail(
-                f"XPASS-strict: known divergence ({impl_name},{family},{case_id}) "
-                f"now matches expected — remove from KNOWN_DIVERGENCES. "
-                f"Reason was: {div}"
-            )
-        pytest.xfail(f"known divergence: {div}")
-
     assert got_canonical == expected_canonical, (
         f"\nimpl:     {impl_name}\n"
         f"family:   {family}\n"
@@ -925,3 +139,48 @@ def test_parity(
         f"expected: {expected_canonical}\n"
         f"got:      {got_canonical}\n"
     )
+
+
+# Dynamo-only entry. No engine marker → runs in the default (dynamo-runtime)
+# CI lane. vLLM and SGLang have their own dedicated test functions below.
+@pytest.mark.parametrize(
+    "family,case_id,fixture",
+    [pytest.param(f, c, fx, id=f"{f}/{c}") for (f, c, fx) in FIXTURES],
+)
+def test_parity(
+    family: str,
+    case_id: str,
+    fixture: dict[str, Any],
+) -> None:
+    _run_parity_case(family, case_id, fixture, "dynamo")
+
+
+# vLLM-only entry: function-level `vllm` marker lets the vllm-runtime CI
+# lane select this with `pytest -m vllm`. Each parametrized case targets
+# the same fixture set but only the vllm path; dynamo/sglang are not
+# exercised here.
+@pytest.mark.vllm
+@pytest.mark.parametrize(
+    "family,case_id,fixture",
+    [pytest.param(f, c, fx, id=f"{f}/{c}") for (f, c, fx) in FIXTURES],
+)
+def test_parity_vllm(
+    family: str,
+    case_id: str,
+    fixture: dict[str, Any],
+) -> None:
+    _run_parity_case(family, case_id, fixture, "vllm")
+
+
+# SGLang-only entry (sibling of test_parity_vllm; same shape).
+@pytest.mark.sglang
+@pytest.mark.parametrize(
+    "family,case_id,fixture",
+    [pytest.param(f, c, fx, id=f"{f}/{c}") for (f, c, fx) in FIXTURES],
+)
+def test_parity_sglang(
+    family: str,
+    case_id: str,
+    fixture: dict[str, Any],
+) -> None:
+    _run_parity_case(family, case_id, fixture, "sglang")

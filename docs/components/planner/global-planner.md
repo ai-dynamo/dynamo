@@ -293,6 +293,7 @@ Example:
 
 ```json
 {
+  "enable_priority_retry": true,
   "num_prefill_pools": 2,
   "num_decode_pools": 1,
   "prefill_pool_dynamo_namespaces": [
@@ -302,6 +303,8 @@ Example:
   "decode_pool_dynamo_namespaces": [
     "${K8S_NAMESPACE}-gp-decode-0"
   ],
+  "prefill_pool_priorities": [0, 1],
+  "decode_pool_priorities": [0],
   "prefill_pool_selection_strategy": {
     "ttft_min": 10,
     "ttft_max": 3000,
@@ -330,6 +333,7 @@ Important runtime behavior:
 - Prefill pool selection uses **ISL + TTFT target**
 - Decode pool selection uses **context length + ITL target**
 - OSL is useful for **designing and profiling pools**, but it is **not a direct routing key** in the current `GlobalRouter`
+- Optional priority retry is enabled with `enable_priority_retry`; lower values in `*_pool_priorities` are faster pools, and omitted priority lists default to pool order (`0`, `1`, ...)
 
 Clients can pass request targets through `extra_args`:
 

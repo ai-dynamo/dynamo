@@ -17,15 +17,25 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: Dallas
-      normal_text: I'll check the weather.
-    # TODO(research): vllm diverges — preserves trailing space; Dynamo trims it
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'Dallas'}}]
-    #   normal_text: "I'll check the weather. "
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Dallas
+        normal_text: I'll check the weather.
+      vllm:
+        calls:
+        - arguments:
+            location: Dallas
+          name: get_weather
+        normal_text: 'I''ll check the weather. '
+        reason: "preserves trailing space; Dynamo trims it"
+      sglang:
+        calls:
+        - arguments:
+            location: Dallas
+          name: get_weather
+        normal_text: 'I''ll check the weather. '
   PARSER.batch.8.b:
     description: Narration after tool call only
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_kimi_k2_tool_parser.py#L435
@@ -34,15 +44,25 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: Dallas
-      normal_text: Let me know if you need more.
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'Dallas'}}]
-    #   normal_text: None
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Dallas
+        normal_text: Let me know if you need more.
+      vllm:
+        calls:
+        - arguments:
+            location: Dallas
+          name: get_weather
+        normal_text: ''
+        reason: "drops trailing normal_text after tool-call wrapper end"
+      sglang:
+        calls:
+        - arguments:
+            location: Dallas
+          name: get_weather
+        normal_text: ''
   PARSER.batch.8.c:
     description: Narration both before and after (sandwich)
     ref: dynamo
@@ -51,15 +71,25 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: Dallas
-      normal_text: I'll check the weather.  Let me know if you need more.
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'Dallas'}}]
-    #   normal_text: "I'll check the weather. "
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Dallas
+        normal_text: I'll check the weather.  Let me know if you need more.
+      vllm:
+        calls:
+        - arguments:
+            location: Dallas
+          name: get_weather
+        normal_text: 'I''ll check the weather. '
+        reason: "drops trailing normal_text after tool-call wrapper end"
+      sglang:
+        calls:
+        - arguments:
+            location: Dallas
+          name: get_weather
+        normal_text: 'I''ll check the weather. '
   PARSER.batch.8.d:
     description: Narration between multiple tool calls
     ref: dynamo
@@ -68,15 +98,31 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: Dallas
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: First check Dallas.  Then check NYC.
-    # TODO(research): vllm diverges — drops trailing normal_text after tool-call wrapper end
-    # vllm produces:
-    #   calls: [{'name': 'get_weather', 'arguments': {'location': 'Dallas'}}, {'name': 'get_weather', 'arguments': {'location': 'NYC'}}]
-    #   normal_text: 'First check Dallas. '
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Dallas
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: First check Dallas.  Then check NYC.
+      vllm:
+        calls:
+        - arguments:
+            location: Dallas
+          name: get_weather
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: 'First check Dallas. '
+        reason: "drops trailing normal_text after tool-call wrapper end"
+      sglang:
+        calls:
+        - arguments:
+            location: Dallas
+          name: get_weather
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: 'First check Dallas. '

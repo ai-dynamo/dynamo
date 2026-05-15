@@ -119,6 +119,32 @@ def _create_kv_router_with_timeout(
     return kv_router
 
 
+async def _assert_overlap_scores(
+    kv_router,
+    token_ids: list[int],
+    block_size: int,
+    expected_device_blocks: dict[tuple[int, int], int],
+    label: str,
+):
+    scores = await kv_router.get_overlap_scores(token_ids, include_shared=False)
+
+    assert scores["block_size"] == block_size
+    assert scores["num_blocks"] == len(token_ids) // block_size
+    assert scores["shared_cache"]["enabled"] is False
+
+    rows = {(row["worker_id"], row["dp_rank"]): row for row in scores["workers"]}
+
+    for key, expected in expected_device_blocks.items():
+        assert key in rows, f"{label}: missing overlap row for {key}"
+        row = rows[key]
+        assert (
+            row["device_blocks"] == expected
+        ), f"{label}: expected {key} device_blocks={expected}, got {row}"
+        assert row["host_pinned_extension_blocks"] == 0
+        assert row["disk_extension_blocks"] == 0
+        assert row["shared_beyond_device_blocks"] is None
+
+
 ########################################################
 # Test templates
 ########################################################
@@ -663,6 +689,12 @@ def _test_remote_indexer_decisions(
             (consumer_router, A + C + D + F, None, None, 2.0),
             (consumer_router, A + C + E + G, None, None, 2.0),
         ]
+        dp_a = dp_rank_a if dp_rank_a is not None else 0
+        dp_b = dp_rank_b if dp_rank_b is not None else 0
+        expected_overlap_by_request = {
+            4: {(worker_a_id, dp_a): 3, (worker_b_id, dp_b): 2},
+            5: {(worker_a_id, dp_a): 2, (worker_b_id, dp_b): 3},
+        }
 
         responses: list[dict[str, Optional[int]]] = []
         for i, (
@@ -686,6 +718,14 @@ def _test_remote_indexer_decisions(
                     else ""
                 ),
             )
+            if i in expected_overlap_by_request:
+                await _assert_overlap_scores(
+                    kv_router,
+                    token_ids,
+                    block_size,
+                    expected_overlap_by_request[i],
+                    f"request {i}",
+                )
             result = await send_request_via_python_kv_router(
                 kv_python_router=kv_router,
                 model_name=model_name,
@@ -1586,6 +1626,61 @@ def _test_router_indexers_sync(
             )
             await engine_workers.launch_workers_with_indexer(tmp_endpoint)
 
+        def sort_key(event):
+            data = event["event"]["data"]["stored"]
+            blocks = data["blocks"]
+            first_block = blocks[0]
+            return (
+                event["worker_id"],
+                first_block["tokens_hash"],
+                data["parent_hash"],
+            )
+
+        expected_standalone_key = f"{model_name}:default"
+
+        async def fetch_standalone_events(session, indexer_url, indexer_label):
+            async with session.get(f"{indexer_url}/dump") as resp:
+                assert resp.status == 200, f"GET /dump failed: {resp.status}"
+                dump = await resp.json()
+
+            assert expected_standalone_key in dump, (
+                f"{indexer_label} missing dump key '{expected_standalone_key}', "
+                f"got keys={list(dump.keys())}"
+            )
+            for k, v in dump.items():
+                assert (
+                    isinstance(v, dict) and "events" in v
+                ), f"{indexer_label} dump key '{k}' returned unexpected format: {v}"
+            return sorted(dump[expected_standalone_key]["events"], key=sort_key)
+
+        async def wait_for_standalone_events(
+            indexer_url, expected_events, expected_label, actual_label
+        ):
+            last_error = None
+            async with aiohttp.ClientSession() as session:
+                for attempt in range(50):
+                    try:
+                        actual_events = await fetch_standalone_events(
+                            session, indexer_url, actual_label
+                        )
+                        logger.info(
+                            f"{actual_label} has {len(actual_events)} events "
+                            f"(attempt {attempt + 1})"
+                        )
+                        assert_event_dumps_equal(
+                            expected_events,
+                            actual_events,
+                            expected_label,
+                            actual_label,
+                        )
+                        return actual_events
+                    except (AssertionError, aiohttp.ClientError) as exc:
+                        last_error = exc
+                        await asyncio.sleep(0.2)
+
+            assert last_error is not None
+            raise last_error
+
         async def send_requests_to_router(router, num_requests, router_name, endpoint):
             # Now send the actual requests
             tasks = []
@@ -1716,6 +1811,22 @@ def _test_router_indexers_sync(
                 await nc.close()
         else:
             await asyncio.sleep(1)
+
+        if standalone_indexer_url and standalone_indexer_b_url:
+            logger.info(
+                "Waiting for Standalone A to match Router 1 before launching Indexer B"
+            )
+            state1_before_peer_json = await kv_router1.dump_events()
+            sorted_state1_before_peer = sorted(
+                json.loads(state1_before_peer_json), key=sort_key
+            )
+            await wait_for_standalone_events(
+                standalone_indexer_url,
+                sorted_state1_before_peer,
+                "Router 1",
+                "Standalone A",
+            )
+            logger.info("Standalone A matches Router 1 before Indexer B recovery")
 
         # Create second runtime and endpoint for router 2
         logger.info("Creating second KV router with its own runtime")
@@ -1857,16 +1968,6 @@ def _test_router_indexers_sync(
         state1 = json.loads(state1_json)
         state2 = json.loads(state2_json)
 
-        def sort_key(event):
-            data = event["event"]["data"]["stored"]
-            blocks = data["blocks"]
-            first_block = blocks[0]
-            return (
-                event["worker_id"],
-                first_block["tokens_hash"],
-                data["parent_hash"],
-            )
-
         sorted_state1 = sorted(state1, key=sort_key)
         sorted_state2 = sorted(state2, key=sort_key)
 
@@ -1878,52 +1979,6 @@ def _test_router_indexers_sync(
 
         # Verify standalone HTTP indexers build the same tree (via ZMQ)
         if standalone_indexer_url:
-            # /dump returns {model:tenant -> {"block_size": N, "events": [...]}}
-            expected_key = f"{model_name}:default"
-
-            async def fetch_standalone_events(session, indexer_url, indexer_label):
-                async with session.get(f"{indexer_url}/dump") as resp:
-                    assert resp.status == 200, f"GET /dump failed: {resp.status}"
-                    dump = await resp.json()
-
-                assert expected_key in dump, (
-                    f"{indexer_label} missing dump key '{expected_key}', "
-                    f"got keys={list(dump.keys())}"
-                )
-                for k, v in dump.items():
-                    assert (
-                        isinstance(v, dict) and "events" in v
-                    ), f"{indexer_label} dump key '{k}' returned unexpected format: {v}"
-                return sorted(dump[expected_key]["events"], key=sort_key)
-
-            async def wait_for_standalone_events(
-                indexer_url, expected_events, expected_label, actual_label
-            ):
-                last_error = None
-                async with aiohttp.ClientSession() as session:
-                    for attempt in range(50):
-                        actual_events = await fetch_standalone_events(
-                            session, indexer_url, actual_label
-                        )
-                        logger.info(
-                            f"{actual_label} has {len(actual_events)} events "
-                            f"(attempt {attempt + 1})"
-                        )
-                        try:
-                            assert_event_dumps_equal(
-                                expected_events,
-                                actual_events,
-                                expected_label,
-                                actual_label,
-                            )
-                            return actual_events
-                        except AssertionError as exc:
-                            last_error = exc
-                            await asyncio.sleep(0.2)
-
-                assert last_error is not None
-                raise last_error
-
             sorted_standalone_a = await wait_for_standalone_events(
                 standalone_indexer_url, sorted_state1, "Router 1", "Standalone A"
             )
@@ -2484,6 +2539,12 @@ def _test_router_decisions(
                 2.0,
             ),  # req5: router picks (worker b should win)
         ]
+        dp_a = dp_rank_a if dp_rank_a is not None else 0
+        dp_b = dp_rank_b if dp_rank_b is not None else 0
+        expected_overlap_by_request = {
+            4: {(worker_a_id, dp_a): 3, (worker_b_id, dp_b): 2},
+            5: {(worker_a_id, dp_a): 2, (worker_b_id, dp_b): 3},
+        }
 
         response_worker_ids: list[dict[str, Optional[int]]] = []
 
@@ -2496,6 +2557,16 @@ def _test_router_decisions(
                 if dp_override is not None:
                     log_msg += f", dp_rank={dp_override}"
             logger.info(log_msg)
+
+            request_idx = i + 1
+            if request_idx in expected_overlap_by_request:
+                await _assert_overlap_scores(
+                    kv_router,
+                    token_ids,
+                    block_size,
+                    expected_overlap_by_request[request_idx],
+                    f"request {request_idx}",
+                )
 
             result = await send_request_via_python_kv_router(
                 kv_python_router=kv_router,

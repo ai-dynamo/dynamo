@@ -172,7 +172,7 @@ arguments payload.
   current behavior via
   `serde_json::from_str(...).unwrap_or_else(|_| String(...))`),
   drop-on-error, or explicit error are all valid choices. Cross-impl
-  parity tests should record divergences in their `KNOWN_DIVERGENCES`
+  parity tests should record divergences in the YAML fixture's `expected.<impl>` block
   registry rather than asserting one truth.
 
 ### Sub-cases

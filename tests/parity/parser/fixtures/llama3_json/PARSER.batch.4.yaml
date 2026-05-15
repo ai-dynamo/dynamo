@@ -17,12 +17,15 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<|python_tag|>not even json'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: <|python_tag|>not even json
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'
   PARSER.batch.4.b:
     description: Missing close brace
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_llama3_json_tool_parser.py#L66
@@ -30,12 +33,15 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<|python_tag|>{"name": "get_weather", "arguments": {"location": "NYC"'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'
   PARSER.batch.4.c:
     description: Missing name key
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_llama3_json_tool_parser.py#L234
@@ -43,9 +49,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<|python_tag|>{"arguments": {"location": "NYC"}}'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<|python_tag|>{"arguments": {"location": "NYC"}}'
+        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
+      sglang:
+        unavailable: SGLang has no detector for family='llama3_json'

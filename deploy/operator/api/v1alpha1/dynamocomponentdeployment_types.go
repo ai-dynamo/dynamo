@@ -264,8 +264,10 @@ func init() {
 }
 
 func (s *DynamoComponentDeployment) IsReady() (bool, string) {
-	ready, reason := s.Status.IsReady()
-	return ready, reason
+	if s.Status.ObservedGeneration < s.Generation {
+		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", s.Generation, s.Status.ObservedGeneration)
+	}
+	return s.Status.IsReady()
 }
 
 // GetState returns "ready" or "not_ready" based on conditions

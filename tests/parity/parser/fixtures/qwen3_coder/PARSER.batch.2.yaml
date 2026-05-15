@@ -38,14 +38,17 @@ cases:
           timezone:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: ''
+      dynamo: &d_2_a
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm: *d_2_a
+      sglang: *d_2_a
   PARSER.batch.2.c:
     description: Parallel calls with surrounding narration
     ref: dynamo
@@ -68,14 +71,17 @@ cases:
     - *id001
     - *id002
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_time
-        arguments:
-          timezone: EST
-      normal_text: 'Both queries: '
+      dynamo: &d_2_c
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both queries: '
+      vllm: *d_2_c
+      sglang: *d_2_c
   PARSER.batch.2.d:
     description: Same-name twice (id distinctness)
     ref: dynamo
@@ -98,11 +104,14 @@ cases:
     - *id001
     - *id001
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      - name: get_weather
-        arguments:
-          location: LA
-      normal_text: ''
+      dynamo: &d_2_d
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *d_2_d
+      sglang: *d_2_d

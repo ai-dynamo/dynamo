@@ -28,7 +28,6 @@ use crate::{
     },
 };
 
-use anyhow::Context as _;
 use dynamo_kv_router::config::min_initial_workers_from_env;
 use dynamo_runtime::{
     DistributedRuntime,
@@ -40,6 +39,15 @@ use dynamo_runtime::{
     },
 };
 use std::sync::Arc;
+
+type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
+
+#[derive(Clone)]
+pub struct PreprocessedRouting {
+    backend_engine:
+        ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
+    prefill_router: Arc<PrefillRouter>,
+}
 
 pub struct PreparedEngine {
     pub service_name: String,
@@ -85,6 +93,83 @@ async fn wait_for_min_initial_workers(
                 )
             })?;
     }
+}
+
+fn router_client(
+    client: &Client,
+    router_mode: RouterMode,
+    chooser: Option<&Arc<KvRouter>>,
+) -> anyhow::Result<Client> {
+    if router_mode == RouterMode::KV {
+        let Some(chooser) = chooser else {
+            anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
+        };
+        Ok(chooser.client().clone())
+    } else {
+        Ok(client.clone())
+    }
+}
+
+fn preprocessed_backend_engine(
+    router: LlmPushRouter,
+    router_mode: RouterMode,
+    chooser: Option<Arc<KvRouter>>,
+) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
+{
+    let engine: ServiceEngine<_, _> = match router_mode {
+        RouterMode::Direct => Arc::new(DirectRoutingRouter::new(router)),
+        RouterMode::Random
+        | RouterMode::RoundRobin
+        | RouterMode::PowerOfTwoChoices
+        | RouterMode::LeastLoaded
+        | RouterMode::DeviceAwareWeighted => Arc::new(router),
+        RouterMode::KV => {
+            let Some(chooser) = chooser else {
+                anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
+            };
+            Arc::new(KvPushRouter::new(router, chooser))
+        }
+    };
+
+    Ok(engine)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn build_preprocessed_routing(
+    client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
+    router_mode: RouterMode,
+    worker_monitor: Option<KvWorkerMonitor>,
+    chooser: Option<Arc<KvRouter>>,
+    prefill_chooser: Option<Arc<PrefillRouter>>,
+    enforce_disagg: bool,
+) -> anyhow::Result<PreprocessedRouting> {
+    let min_initial_workers = min_initial_workers_from_env()?;
+    let router_client = router_client(client, router_mode, chooser.as_ref())?;
+
+    wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
+
+    let monitor_arc =
+        worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
+
+    let router =
+        LlmPushRouter::from_client_with_monitor(router_client, router_mode, monitor_arc).await?;
+
+    // Eagerly register router request metrics so they appear as zeros even in
+    // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.
+    // In KV mode, KvPushRouter::new() also calls from_component() (idempotent via
+    // OnceLock), which covers the standalone router path as well.
+    RouterRequestMetrics::from_component(client.endpoint.component());
+
+    let prefill_router = prefill_chooser
+        .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, enforce_disagg));
+
+    let backend_engine = preprocessed_backend_engine(router, router_mode, chooser)?;
+
+    Ok(PreprocessedRouting {
+        backend_engine,
+        prefill_router,
+    })
 }
 
 /// Turns an EngineConfig into an OpenAI chat-completions and completions supported StreamingEngine.
@@ -233,150 +318,67 @@ where
         .link(frontend)?)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn build_routed_pipeline<Req, Resp>(
-    card: &ModelDeploymentCard,
-    client: &Client,
-    model_manager: Arc<crate::discovery::ModelManager>,
-    router_mode: RouterMode,
-    worker_monitor: Option<KvWorkerMonitor>,
-    chooser: Option<Arc<KvRouter>>,
-    tokenizer: crate::tokenizers::Tokenizer,
-    prefill_chooser: Option<Arc<PrefillRouter>>,
-    enforce_disagg: bool,
-    migration_limit: u32,
-    migration_max_seq_len: Option<u32>,
-    metrics: Arc<Metrics>,
-) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
-where
-    Req: Data,
-    Resp: Data,
-    OpenAIPreprocessor: Operator<
-            Context<Req>,
-            Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
-            Context<PreprocessedRequest>,
-            Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
-        >,
-{
-    let PromptFormatter::OAI(formatter) =
-        PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
-    let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tokenizer.clone())
-            .context("OpenAIPreprocessor.new_with_parts")?;
-    build_routed_pipeline_with_preprocessor(
-        card,
-        client,
-        model_manager,
-        router_mode,
-        worker_monitor,
-        chooser,
-        preprocessor,
-        tokenizer,
-        prefill_chooser,
-        enforce_disagg,
-        migration_limit,
-        migration_max_seq_len,
-        metrics,
-    )
-    .await
-}
+impl PreprocessedRouting {
+    pub fn build_pipeline<Req, Resp>(
+        &self,
+        card: &ModelDeploymentCard,
+        preprocessor: Arc<OpenAIPreprocessor>,
+        tokenizer: crate::tokenizers::Tokenizer,
+        migration_limit: u32,
+        migration_max_seq_len: Option<u32>,
+        metrics: Arc<Metrics>,
+    ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
+    where
+        Req: Data,
+        Resp: Data,
+        OpenAIPreprocessor: Operator<
+                Context<Req>,
+                Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
+                Context<PreprocessedRequest>,
+                Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
+            >,
+    {
+        let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
+        let preprocessor_op = preprocessor.into_operator();
+        let token_backend = Backend::from_tokenizer(tokenizer).into_operator();
+        let migration = Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics)
+            .into_operator();
+        let prefill_op = self.prefill_router.into_operator();
+        let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
-#[allow(clippy::too_many_arguments)]
-pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
-    card: &ModelDeploymentCard,
-    client: &Client,
-    model_manager: Arc<crate::discovery::ModelManager>,
-    router_mode: RouterMode,
-    worker_monitor: Option<KvWorkerMonitor>,
-    chooser: Option<Arc<KvRouter>>,
-    preprocessor: Arc<OpenAIPreprocessor>,
-    tokenizer: crate::tokenizers::Tokenizer,
-    prefill_chooser: Option<Arc<PrefillRouter>>,
-    enforce_disagg: bool,
-    migration_limit: u32,
-    migration_max_seq_len: Option<u32>,
-    metrics: Arc<Metrics>,
-) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
-where
-    Req: Data,
-    Resp: Data,
-    OpenAIPreprocessor: Operator<
-            Context<Req>,
-            Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
-            Context<PreprocessedRequest>,
-            Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
-        >,
-{
-    let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
-    let preprocessor_op = preprocessor.into_operator();
-    let backend = Backend::from_tokenizer(tokenizer).into_operator();
-    let migration =
-        Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics).into_operator();
-    let min_initial_workers = min_initial_workers_from_env()?;
+        let engine = frontend
+            .link(preprocessor_op.forward_edge())?
+            .link(migration.forward_edge())?
+            .link(token_backend.forward_edge())?
+            .link(prefill_op.forward_edge())?
+            .link(backend)?
+            .link(prefill_op.backward_edge())?
+            .link(token_backend.backward_edge())?
+            .link(migration.backward_edge())?
+            .link(preprocessor_op.backward_edge())?
+            .link(frontend)?;
 
-    // For KV routing, use the client from the chooser to ensure shared state
-    let router_client = if router_mode == RouterMode::KV {
-        let Some(ref chooser) = chooser else {
-            anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
-        };
-        chooser.client().clone()
-    } else {
-        client.clone()
-    };
+        Ok(engine)
+    }
 
-    wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
+    pub fn build_prefill_pipeline(
+        &self,
+    ) -> anyhow::Result<
+        ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
+    > {
+        let frontend = SegmentSource::<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+        >::new();
+        let prefill_op = self.prefill_router.into_operator();
+        let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
-    let monitor_arc =
-        worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
+        let engine = frontend
+            .link(prefill_op.forward_edge())?
+            .link(backend)?
+            .link(prefill_op.backward_edge())?
+            .link(frontend)?;
 
-    let router =
-        PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
-            router_client,
-            router_mode,
-            monitor_arc,
-        )
-        .await?;
-
-    // Eagerly register router request metrics so they appear as zeros even in
-    // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.
-    // In KV mode, KvPushRouter::new() also calls from_component() (idempotent via
-    // OnceLock), which covers the standalone router path as well.
-    RouterRequestMetrics::from_component(client.endpoint.component());
-
-    let service_backend = match router_mode {
-        RouterMode::Direct => {
-            ServiceBackend::from_engine(Arc::new(DirectRoutingRouter::new(router)))
-        }
-        RouterMode::Random
-        | RouterMode::RoundRobin
-        | RouterMode::PowerOfTwoChoices
-        | RouterMode::LeastLoaded
-        | RouterMode::DeviceAwareWeighted => ServiceBackend::from_engine(Arc::new(router)),
-        RouterMode::KV => {
-            let Some(chooser) = chooser else {
-                anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
-            };
-            ServiceBackend::from_engine(Arc::new(KvPushRouter::new(router, chooser)))
-        }
-    };
-
-    // Use the provided prefill chooser, or create a disabled one if not provided
-    let prefill_chooser = prefill_chooser
-        .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, enforce_disagg));
-    let prefill_op = prefill_chooser.into_operator();
-
-    // Link with prefill chooser including backward edge for response flow
-    let engine = frontend
-        .link(preprocessor_op.forward_edge())?
-        .link(migration.forward_edge())?
-        .link(backend.forward_edge())?
-        .link(prefill_op.forward_edge())?
-        .link(service_backend)?
-        .link(prefill_op.backward_edge())?
-        .link(backend.backward_edge())?
-        .link(migration.backward_edge())?
-        .link(preprocessor_op.backward_edge())?
-        .link(frontend)?;
-
-    Ok(engine)
+        Ok(engine)
+    }
 }
