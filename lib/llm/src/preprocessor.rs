@@ -23,7 +23,7 @@ use anyhow::{Result, bail};
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionRequestMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    CompletionTokensDetails, ChatCompletionToolChoiceOption, EncodingFormat,
+    ChatCompletionToolChoiceOption, CompletionTokensDetails, EncodingFormat,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use futures::Stream;
