@@ -95,6 +95,9 @@ spec:
               value: "0"
             - name: TRTLLM_ENABLE_PDL
               value: "1"
+            # Uncomment the below to reproduce benchmark results in README exactly.
+            # - name: TLLM_SPEC_DECODE_FORCE_NUM_ACCEPTED_TOKENS
+            #   value: "2"
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:<IMAGE_TAG>
           name: ""
           resources: {}

@@ -192,6 +192,9 @@ spec:
               value: "0"
             - name: ENABLE_CONFIGURABLE_MOE
               value: "1"
+            # Uncomment the below to reproduce benchmark results in README exactly.
+            # - name: TLLM_SPEC_DECODE_FORCE_NUM_ACCEPTED_TOKENS
+            #   value: "2"
             # KV transfer (UCX zcopy on; no staging buffer required)
             - name: TRTLLM_TRY_ZCOPY_FOR_KVCACHE_TRANSFER
               value: "1"
