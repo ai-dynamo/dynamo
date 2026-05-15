@@ -3,22 +3,27 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# H200 Counterpart: Kimi-K2.5 DynoSim Data
+# H200 Counterpart: DynoSim Kimi-K2.5 Data
 
 This is a companion data note for the main
-[DynoSim blog draft](./README.md). It follows the same section structure where
-we have H200 data, but keeps the H200 results separate from the B200 MiniMax and
+[DynoSim blog draft](./README.md). It follows the same section structure where we
+have H200 data, while keeping these results separate from the B200 MiniMax and
 Planner figures in the main post.
 
 ## Shared H200 Setup
 
-Unless noted otherwise, these runs use the full 23,608-request Mooncake FAST25
-`toolagent_trace.jsonl` trace with `trace_format=mooncake`,
-`trace_block_size=512`, `moonshotai/Kimi-K2.5`, vLLM 0.19.0 timing through AIC,
-and `h200_sxm`. Engine settings are `block_size=512`,
-`num_gpu_blocks=16384`, and `max_num_batched_tokens=16384`. MoE fields are
-plumbed as `moe_tp_size=tp_size`, `moe_ep_size=1`, and
-`attention_dp_size=1`.
+Unless noted otherwise, these runs use the same workload framing as the main
+post: the full 23,608-request Mooncake FAST25 `toolagent_trace.jsonl` trace,
+Mooncake trace format, and 512-token trace blocks. The H200-specific engine
+profile is `moonshotai/Kimi-K2.5`, vLLM 0.19.0 timing through AIC, and
+`h200_sxm`.
+
+| Category | Value |
+|---|---|
+| Workload | Full 23,608-request `toolagent_trace.jsonl`, `trace_format=mooncake`, `trace_block_size=512` |
+| Model/system | `moonshotai/Kimi-K2.5`, H200-SXM, vLLM 0.19.0 through AIC |
+| Engine config | `block_size=512`, `num_gpu_blocks=16384`, `max_num_batched_tokens=16384` |
+| MoE config | `moe_tp_size=tp_size`, `moe_ep_size=1`, `attention_dp_size=1` |
 
 Data and plotting scripts live in
 [scripts/h200_kimi_counterpart](./scripts/h200_kimi_counterpart/README.md).
@@ -34,16 +39,18 @@ on H200 instead of the B200 MiniMax setup used elsewhere in the main post.
 
 ### 2.1 Single Engine Simulation
 
-There is no H200 hardware-fidelity counterpart in this data set. The main post's
-single-engine fidelity section compares hardware, mocker, and AIC on B200. For
-H200, we only have simulation/AIC-backed replay data, not live H200 silicon
-measurements for the same workload.
+There is no H200 counterpart to the main post's single-engine fidelity figure in
+this data set. That section compares hardware, mocker, and AIC on B200. For
+H200, this companion only carries simulation/AIC-backed replay data, not live
+H200 measurements for the same workload.
 
 ### 2.2 Multi Engine Simulation: Router
 
-The H200 router sweep uses eight aggregated workers at TP=4, so the total budget
-is 32 GPUs. It compares round robin and KV Router over replay concurrencies 32,
-64, 128, 256, and 512.
+For the Router counterpart, we keep the same figure shape as the main post:
+mean TTFT versus concurrency on the left, and throughput per GPU versus
+interactivity on the right. The H200 run uses eight aggregated workers at TP=4,
+for a 32-GPU total budget, and compares round robin with KV Router over replay
+concurrencies 32, 64, 128, 256, and 512.
 
 ![H200 Kimi router counterpart](./images/h200_kv_router_exp.png)
 
@@ -54,30 +61,29 @@ KV Router raises average prefix reuse from `0.413` to `0.492` and cuts TTFT by
 
 ### 2.3 Planner Note
 
-No new Kimi/H200 Planner sweep was run here. The main blog already uses H200 for
-the Planner experiments, but with Qwen3-32B at TP=2 rather than Kimi-K2.5.
+No new Kimi/H200 Planner sweep was run for this companion. The main blog already
+uses H200 for the Planner experiments, but with Qwen3-32B at TP=2 rather than
+Kimi-K2.5.
 
 ## 3. Optimization And Discovery With DynoSim
 
-The H200 optimizer run uses the same replay-optimization idea as section 3.1 of
-the main post: block-coordinate search over TP shape, worker split, and router
-setting. This run used a 16-GPU budget, `arrival_speedup_ratio=0.25`, objective
-`throughput`, and SLA constraints of mean TTFT <= 4000 ms, mean TPOT <= 75 ms,
-and mean E2E <= 20000 ms.
+The H200 optimizer run uses the same presentation as section 3.1 of the main
+post: one replay-optimizer run on the full trace, summarized as a deployment
+candidate table. It uses block-coordinate search over TP shape, worker split,
+and router setting.
 
-No row is feasible under the strict 4 s TTFT SLA. The best near-miss is only
-58.07 ms over the TTFT threshold:
+| Category | Result |
+|---|---|
+| Workload | `moonshotai/Kimi-K2.5`, vLLM 0.19.0, H200-SXM, full 23,608-request `toolagent_trace.jsonl`, `arrival_speedup_ratio=0.25` |
+| Engine config | `block_size=512`, `num_gpu_blocks=16384`, `max_num_batched_tokens=16384` |
+| Budget | 16 GPUs |
+| Objective | Maximize output throughput subject to mean TTFT <= 4,000 ms, mean TPOT <= 75 ms, and mean end-to-end latency <= 20,000 ms |
+| Best near-miss layout | `prefill_tp=2`, `decode_tp=1`, `prefill_workers=5`, `decode_workers=6` |
+| Router | `kv_router`, `prefill_load_scale=0.5` |
+| Key metrics | `output_throughput_tok_s=303.13`, `prefix_cache_reused_ratio=0.5383`, `mean_ttft_ms=4058.07`, `mean_tpot_ms=58.57`, `mean_e2e_latency_ms=13319.99` |
 
-| Field | Value |
-|---|---:|
-| `prefill_tp / decode_tp` | `2 / 1` |
-| `prefill_workers / decode_workers` | `5 / 6` |
-| `prefill_load_scale` | `0.5` |
-| Output throughput | `303.13 tok/s` |
-| Prefix reuse | `0.5383` |
-| Mean TTFT | `4058.07 ms` |
-| Mean TPOT | `58.57 ms` |
-| Mean E2E | `13319.99 ms` |
+No row is feasible under the strict 4 s TTFT SLA. The table above is the best
+near-miss, only 58.07 ms over the TTFT threshold.
 
 The optimizer artifact still names this field `overlap_score_weight`, but this
 code path maps that backward-compatible value to `prefill_load_scale`.

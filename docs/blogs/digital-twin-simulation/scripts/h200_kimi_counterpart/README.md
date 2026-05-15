@@ -26,17 +26,12 @@ Generated figures:
 
 ## Shared Setup
 
-- Trace: full 23,608-request Mooncake FAST25 `toolagent_trace.jsonl`
-- Trace format: `mooncake`
-- Trace block size: 512
-- Model: `moonshotai/Kimi-K2.5`
-- System: `h200_sxm`
-- Backend: vLLM 0.19.0 through AIC
-- Engine block size: 512
-- `num_gpu_blocks=16384`
-- `max_num_batched_tokens=16384`
-- MoE plumbing: `moe_tp_size=tp_size`, `moe_ep_size=1`,
-  `attention_dp_size=1`
+| Category | Value |
+|---|---|
+| Workload | Full 23,608-request Mooncake FAST25 `toolagent_trace.jsonl`, `trace_format=mooncake`, `trace_block_size=512` |
+| Model/system | `moonshotai/Kimi-K2.5`, H200-SXM, vLLM 0.19.0 through AIC |
+| Engine config | `block_size=512`, `num_gpu_blocks=16384`, `max_num_batched_tokens=16384` |
+| MoE config | `moe_tp_size=tp_size`, `moe_ep_size=1`, `attention_dp_size=1` |
 
 ## Router Sweep
 
@@ -60,18 +55,18 @@ The KV Router raises average prefix reuse from 0.413 to 0.492 and cuts TTFT by
 - Search rounds: 2
 - Parallel evaluations: 64
 
-No candidate was feasible under the strict 4 s TTFT SLA. The best near-miss:
+No candidate was feasible under the strict 4 s TTFT SLA. The best near-miss is
+summarized in the same category/result shape as the main blog draft:
 
-| Field | Value |
-|---|---:|
-| `prefill_tp / decode_tp` | `2 / 1` |
-| `prefill_workers / decode_workers` | `5 / 6` |
-| `prefill_load_scale` | `0.5` |
-| Output throughput | `303.13 tok/s` |
-| Prefix reuse | `0.5383` |
-| Mean TTFT | `4058.07 ms` |
-| Mean TPOT | `58.57 ms` |
-| Mean E2E | `13319.99 ms` |
+| Category | Result |
+|---|---|
+| Workload | `moonshotai/Kimi-K2.5`, vLLM 0.19.0, H200-SXM, full 23,608-request `toolagent_trace.jsonl`, `arrival_speedup_ratio=0.25` |
+| Engine config | `block_size=512`, `num_gpu_blocks=16384`, `max_num_batched_tokens=16384` |
+| Budget | 16 GPUs |
+| Objective | Maximize output throughput subject to mean TTFT <= 4,000 ms, mean TPOT <= 75 ms, and mean end-to-end latency <= 20,000 ms |
+| Best near-miss layout | `prefill_tp=2`, `decode_tp=1`, `prefill_workers=5`, `decode_workers=6` |
+| Router | `kv_router`, `prefill_load_scale=0.5` |
+| Key metrics | `output_throughput_tok_s=303.13`, `prefix_cache_reused_ratio=0.5383`, `mean_ttft_ms=4058.07`, `mean_tpot_ms=58.57`, `mean_e2e_latency_ms=13319.99` |
 
 The optimizer log column is named `overlap_score_weight`, but in this code path
 the backward-compatible config maps it to `prefill_load_scale`.
