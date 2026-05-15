@@ -335,10 +335,9 @@ mod tests {
         // and assert the observed value is the trailing token. Per-line
         // matching avoids false-positives where some other gauge on the
         // registry happens to read the same value.
-        let data_line = |gauge: &str| -> Option<String> {
+        let data_line = |gauge: &str| -> Option<&str> {
             text.lines()
                 .find(|l| l.starts_with(gauge) && !l.starts_with('#'))
-                .map(str::to_owned)
         };
         let cleanup = data_line("dynamo_component_cleanup_time_seconds")
             .unwrap_or_else(|| panic!("cleanup gauge data row missing: {text}"));
