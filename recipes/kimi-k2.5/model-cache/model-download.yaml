@@ -36,7 +36,7 @@ spec:
             - name: EAGLE_MODEL_NAME
               value: nvidia/Kimi-K2.5-Thinking-Eagle3
             - name: HF_HOME
-              value: /model-store
+              value: /model-cache
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
           args:
@@ -47,7 +47,7 @@ spec:
               hf download $EAGLE_MODEL_NAME
           volumeMounts:
             - name: model-cache
-              mountPath: /model-store
+              mountPath: /model-cache
       volumes:
       - name: model-cache
         persistentVolumeClaim:

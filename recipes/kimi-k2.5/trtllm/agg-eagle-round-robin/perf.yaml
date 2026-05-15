@@ -18,6 +18,7 @@ metadata:
   name: kimi-k25-agg-rr-eagle-bench
 spec:
   backoffLimit: 1
+  activeDeadlineSeconds: 7200  # 2h hard cap on the Job
   completions: 1
   parallelism: 1
   template:
@@ -54,9 +55,16 @@ spec:
           EPOCH=$(date +%s)
 
           wait_for_model_ready() {
-            echo "Waiting for model '$TARGET_MODEL' at $ENDPOINT/v1/models ..."
+            local max_attempts=${WAIT_FOR_MODEL_MAX_ATTEMPTS:-720}  # 720 * 5s = 1h default
+            local attempt=0
+            echo "Waiting for model '$TARGET_MODEL' at $ENDPOINT/v1/models (max ${max_attempts} attempts) ..."
             while ! curl -sf "http://$ENDPOINT/v1/models" | jq -e --arg m "$TARGET_MODEL" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
-              echo "[$(date '+%H:%M:%S')] not ready, sleeping 5s"
+              attempt=$((attempt + 1))
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "ERROR: model '$TARGET_MODEL' did not become ready after ${max_attempts} attempts. Aborting."
+                exit 1
+              fi
+              echo "[$(date '+%H:%M:%S')] not ready (attempt ${attempt}/${max_attempts}), sleeping 5s"
               sleep 5
             done
             curl -s "http://$ENDPOINT/v1/models" | jq .
