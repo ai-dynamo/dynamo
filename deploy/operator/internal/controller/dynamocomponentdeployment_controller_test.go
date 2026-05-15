@@ -2563,7 +2563,7 @@ func Test_reconcileLeaderWorkerSetResources_UpgradesLegacyIndexedLWSReplicas(t *
 	}
 
 	dcd := makeDCD()
-	var objects []client.Object
+	objects := make([]client.Object, 0, 2+2*int(replicas))
 	objects = append(objects, dcd, serviceAccount.DeepCopy())
 	// v1.1.0 represented DCD replicas as separate one-replica LWS objects.
 	// Native LWS scaling should adopt the old "-0" object, set its
