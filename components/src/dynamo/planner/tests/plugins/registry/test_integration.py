@@ -123,7 +123,7 @@ async def test_full_lifecycle_register_tick_unregister(stub_transport):
             plugin_id="load-scaler",
             plugin_type="propose",
             priority=10,
-            endpoint="unix:///tmp/load-scaler.sock",
+            endpoint="grpc://127.0.0.1:9000",
             auth_token="secret-a",
             protocol_version="1.0",
             execution_interval_seconds=10.0,
@@ -136,7 +136,7 @@ async def test_full_lifecycle_register_tick_unregister(stub_transport):
     # ListPlugins reports a complete picture.
     (info,) = server.list_plugins(ListPluginsRequest())
     assert info.plugin_id == "load-scaler"
-    assert info.transport == "uds"
+    assert info.transport == "grpc"
     assert info.circuit_state == CircuitState.CLOSED
     assert info.is_builtin is False
 
@@ -178,7 +178,7 @@ async def test_circuit_open_removes_plugin_then_half_open_recovers(stub_transpor
             plugin_id="p",
             plugin_type="propose",
             priority=1,
-            endpoint="unix:///tmp/p.sock",
+            endpoint="grpc://127.0.0.1:9000",
             auth_token="secret-a",
             protocol_version="1.0",
             execution_interval_seconds=10.0,
@@ -218,7 +218,7 @@ async def test_heartbeat_missed_eviction_full_path(stub_transport):
             plugin_id="flaky",
             plugin_type="propose",
             priority=1,
-            endpoint="unix:///tmp/flaky.sock",
+            endpoint="grpc://127.0.0.1:9000",
             auth_token="secret-a",
             protocol_version="1.0",
             execution_interval_seconds=5.0,
@@ -251,7 +251,7 @@ async def test_client_driven_version_upgrade(stub_transport):
             plugin_id="p",
             plugin_type="propose",
             priority=1,
-            endpoint="unix:///tmp/p.sock",
+            endpoint="grpc://127.0.0.1:9000",
             auth_token="secret-a",
             protocol_version="1.0",
             execution_interval_seconds=10.0,
@@ -268,7 +268,7 @@ async def test_client_driven_version_upgrade(stub_transport):
             plugin_id="p",
             plugin_type="propose",
             priority=1,
-            endpoint="unix:///tmp/p.sock",
+            endpoint="grpc://127.0.0.1:9000",
             auth_token="secret-a",
             protocol_version="1.0",
             execution_interval_seconds=10.0,
@@ -287,7 +287,7 @@ async def test_client_driven_version_upgrade(stub_transport):
             plugin_id="p",
             plugin_type="propose",
             priority=1,
-            endpoint="unix:///tmp/p.sock",
+            endpoint="grpc://127.0.0.1:9000",
             auth_token="secret-a",
             protocol_version="1.0",
             execution_interval_seconds=10.0,

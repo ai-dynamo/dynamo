@@ -112,10 +112,15 @@ def test_build_registry_from_config_returns_server_and_breaker():
 async def test_build_registry_propagates_protocol_versions():
     from dynamo.planner.plugins.types import RegisterRequest
 
+    from dynamo.planner.plugins.transport.config import TransportConfig
+
     config = PluginRegistrationConfig(
         auth=AuthConfig(trusted_sources=["allow_unauthenticated"]),
         protocol_version_min="1.0",
         protocol_version_max="1.2",
+        # PR #1 dropped unix:// transport; tests now use grpc:// stub
+        # endpoints, which require allow_insecure_grpc=True.
+        transport=TransportConfig(allow_insecure_grpc=True),
     )
     clock = VirtualClock()
     server, _ = build_registry_from_config(config, clock)
@@ -124,7 +129,7 @@ async def test_build_registry_propagates_protocol_versions():
         RegisterRequest(
             plugin_id="p",
             plugin_type="propose",
-            endpoint="unix:///tmp/p.sock",
+            endpoint="grpc://127.0.0.1:9000",
             protocol_version="1.1",
         )
     )

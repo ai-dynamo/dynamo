@@ -103,7 +103,7 @@ def _entry(
     *,
     plugin_type: str = "propose",
     priority: int = 5,
-    endpoint: str = "unix:///tmp/sock",
+    endpoint: str = "grpc://127.0.0.1:9000",
     auth_token: str = "tok",
     protocol_version: str = "1.0",
     version: str = "v1",
@@ -137,7 +137,7 @@ def test_entry_rejects_unknown_plugin_type():
             plugin_id="x",
             plugin_type="bogus",  # type: ignore[arg-type]
             priority=5,
-            endpoint="unix:///tmp/x",
+            endpoint="grpc://127.0.0.1:9000",
         )
 
 
@@ -161,7 +161,7 @@ def test_entry_default_hold_policy_is_hold_last():
         plugin_id="x",
         plugin_type="propose",
         priority=5,
-        endpoint="unix:///tmp/x",
+        endpoint="grpc://127.0.0.1:9000",
     )
     assert e.hold_policy == HoldPolicy.HOLD_LAST
 
@@ -184,13 +184,13 @@ async def test_bootstrap_empty_list_no_op():
 async def test_bootstrap_happy_path_registers_entry():
     orch, server = _build_orch()
     accepted, failures = await orch.register_external_from_config([
-        _entry("ext-a", endpoint="unix:///tmp/ext-a.sock"),
+        _entry("ext-a", endpoint="grpc://127.0.0.1:9000"),
     ])
     assert accepted == 1
     assert failures == []
     plugins = server.list_plugins(ListPluginsRequest())
     assert [p.plugin_id for p in plugins] == ["ext-a"]
-    assert plugins[0].transport == "uds"
+    assert plugins[0].transport == "grpc"
     assert plugins[0].plugin_type == "propose"
 
 
@@ -254,7 +254,7 @@ async def test_bootstrap_inproc_endpoint_rejected():
     orch, server = _build_orch()
     accepted, failures = await orch.register_external_from_config([
         _entry("misconfigured", endpoint="inproc://x"),
-        _entry("ok", endpoint="unix:///tmp/ok.sock"),
+        _entry("ok", endpoint="grpc://127.0.0.1:9000"),
     ])
     assert accepted == 1
     assert {f[0] for f in failures} == {"misconfigured"}
@@ -283,8 +283,8 @@ async def test_bootstrap_duplicate_plugin_id_within_config():
     error before it manifests as confusing tick behaviour."""
     orch, server = _build_orch()
     accepted, failures = await orch.register_external_from_config([
-        _entry("dup", endpoint="unix:///tmp/a.sock"),
-        _entry("dup", endpoint="unix:///tmp/b.sock"),
+        _entry("dup", endpoint="grpc://127.0.0.1:9000"),
+        _entry("dup", endpoint="grpc://127.0.0.1:9000"),
     ])
     assert accepted == 1
     assert {f[0] for f in failures} == {"dup"}

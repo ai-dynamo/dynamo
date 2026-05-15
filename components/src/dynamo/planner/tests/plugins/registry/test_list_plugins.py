@@ -72,7 +72,7 @@ async def _register(server, plugin_id, plugin_type="propose", priority=10,
         plugin_id=plugin_id,
         plugin_type=plugin_type,
         priority=priority,
-        endpoint=f"unix:///tmp/{plugin_id}.sock",
+        endpoint=f"grpc://127.0.0.1:9000",
         protocol_version="1.0",
         execution_interval_seconds=execution_interval_seconds,
         hold_policy=hold_policy,
@@ -139,7 +139,7 @@ async def test_evaluations_total_increments_on_record_result():
 @pytest.mark.asyncio
 async def test_transport_label_matches_transport_type():
     server, _, _, _ = _make_ctx()
-    await _register(server, "p_uds")
+    await _register(server, "p_grpc")
     server.register_internal(
         plugin_id="p_inproc",
         plugin_type="propose",
@@ -147,7 +147,7 @@ async def test_transport_label_matches_transport_type():
         instance=object(),
     )
     out = {p.plugin_id: p.transport for p in server.list_plugins(ListPluginsRequest())}
-    assert out == {"p_uds": "uds", "p_inproc": "in_process"}
+    assert out == {"p_grpc": "grpc", "p_inproc": "in_process"}
 
 
 @pytest.mark.asyncio

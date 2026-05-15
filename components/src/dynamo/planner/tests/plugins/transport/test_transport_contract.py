@@ -37,7 +37,6 @@ from dynamo.planner.plugins.transport import (
     PluginTimeoutError,
     PluginTransport,
     PluginUnknownMethodError,
-    UdsTransport,
 )
 
 pytestmark = [
@@ -286,20 +285,6 @@ async def echo_transport(transport_kind, tmp_path: Path) -> AsyncIterator[Plugin
             await t.close()
         return
 
-    if transport_kind == "uds":
-        sock_path = tmp_path / "echo.sock"
-        listen = f"unix:{sock_path}"
-        server, _ = await _start_grpc_server(listen)
-        try:
-            t = UdsTransport("echo", f"unix://{sock_path}", timeout_seconds=2.0)
-            try:
-                yield t
-            finally:
-                await t.close()
-        finally:
-            await server.stop(grace=0.1)
-        return
-
     if transport_kind == "grpc":
         server, listen = await _start_grpc_server("127.0.0.1:0")
         try:
@@ -336,7 +321,7 @@ async def echo_transport(transport_kind, tmp_path: Path) -> AsyncIterator[Plugin
     pytest.fail(f"unknown transport_kind: {transport_kind}")
 
 
-_TRANSPORT_KINDS = ["in_process", "uds", "grpc", "grpc_mtls"]
+_TRANSPORT_KINDS = ["in_process", "grpc", "grpc_mtls"]
 
 
 # ----------------------------------------------------------------------------
@@ -382,7 +367,7 @@ async def test_byte_equal_response_across_transports(
     ctx_factory,
     tmp_path: Path,
 ):
-    """Response bytes from in_process / uds / grpc must be **byte-identical**.
+    """Response bytes from in_process / grpc must be **byte-identical**.
 
     This is the strongest possible contract — any silent semantic drift
     between transport implementations is caught here.
@@ -397,19 +382,6 @@ async def test_byte_equal_response_across_transports(
     finally:
         await t_inp.close()
 
-    # UDS
-    sock_path = tmp_path / f"echo-{input_name}.sock"
-    server_uds, _ = await _start_grpc_server(f"unix:{sock_path}")
-    try:
-        t_uds = UdsTransport("echo", f"unix://{sock_path}", timeout_seconds=2.0)
-        try:
-            resp_uds = await t_uds.call("Predict", request)
-            bytes_uds = resp_uds.SerializeToString()
-        finally:
-            await t_uds.close()
-    finally:
-        await server_uds.stop(grace=0.1)
-
     # gRPC insecure
     server_grpc, listen = await _start_grpc_server("127.0.0.1:0")
     try:
@@ -422,12 +394,6 @@ async def test_byte_equal_response_across_transports(
     finally:
         await server_grpc.stop(grace=0.1)
 
-    assert bytes_inp == bytes_uds, (
-        f"in_process vs uds bytes differ for input {input_name!r}"
-    )
-    assert bytes_uds == bytes_grpc, (
-        f"uds vs grpc bytes differ for input {input_name!r}"
-    )
     assert bytes_inp == bytes_grpc, (
         f"in_process vs grpc bytes differ for input {input_name!r}"
     )
@@ -448,18 +414,11 @@ async def test_unknown_method_typed_error(echo_transport: PluginTransport, trans
         await echo_transport.call("Propose", request)
 
 
-@pytest.mark.parametrize("transport_kind", ["uds", "grpc"])
 @pytest.mark.asyncio
-async def test_unreachable_endpoint_raises_connection_error(
-    transport_kind: str, tmp_path: Path
-):
-    """UDS/gRPC: pointing transport at non-existent endpoint -> PluginConnectionError."""
-    if transport_kind == "uds":
-        # Socket file does not exist
-        t = UdsTransport("noplug", f"unix://{tmp_path}/noexist.sock", timeout_seconds=0.5)
-    else:
-        # Port not bound
-        t = GrpcTransport("noplug", "grpc://127.0.0.1:1", allow_insecure=True, timeout_seconds=0.5)
+async def test_unreachable_endpoint_raises_connection_error(tmp_path: Path):
+    """gRPC: pointing transport at non-existent endpoint -> PluginConnectionError."""
+    # Port not bound
+    t = GrpcTransport("noplug", "grpc://127.0.0.1:1", allow_insecure=True, timeout_seconds=0.5)
     try:
         with pytest.raises((PluginConnectionError, PluginTimeoutError)):
             await t.call("Predict", pb.PredictStageRequest())

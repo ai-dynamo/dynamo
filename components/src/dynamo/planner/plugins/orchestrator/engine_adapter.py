@@ -65,11 +65,6 @@ from dynamo.planner.core.types import (
     WorkerCapabilities,
     WorkerCounts,
 )
-from dynamo.planner.plugins.builtins.budget_constrain import BuiltinBudgetConstrain
-from dynamo.planner.plugins.builtins.load_predictor import BuiltinLoadPredictor
-from dynamo.planner.plugins.builtins.load_propose import BuiltinLoadPropose
-from dynamo.planner.plugins.builtins.reconcile import BuiltinReconcile
-from dynamo.planner.plugins.builtins.throughput_propose import BuiltinThroughputPropose
 from dynamo.planner.plugins.clock import WallClock
 from dynamo.planner.plugins.merge.types import ComponentKey
 from dynamo.planner.plugins.orchestrator.orchestrator import LocalPlannerOrchestrator
@@ -184,33 +179,13 @@ class OrchestratorEngineAdapter:
         # disabled) deployment path zero-cost.
         self._gateway_server = None
 
-        # Register the 5 builtin plugins + keep instance + registered-entry
-        # refs so per-tick gating (``enabled``) + priming can hit them.
-        self._builtins = {
-            "predictor": BuiltinLoadPredictor(self._orchestrator, config),
-            "load_propose": BuiltinLoadPropose(self._orchestrator, config),
-            "throughput_propose": BuiltinThroughputPropose(self._orchestrator, config),
-            "reconcile": BuiltinReconcile(self._orchestrator, config),
-            "budget": BuiltinBudgetConstrain(self._orchestrator, config),
-        }
-        self._plugin_ids = {
-            "predictor": "builtin_load_predictor",
-            "load_propose": "builtin_load_propose",
-            "throughput_propose": "builtin_throughput_propose",
-            "reconcile": "builtin_reconcile",
-            "budget": "builtin_budget_constrain",
-        }
-        _reg = self._orchestrator.register_internal
-        _reg(plugin_id="builtin_load_predictor", plugin_type="predict", priority=1,
-             instance=self._builtins["predictor"])
-        _reg(plugin_id="builtin_load_propose", plugin_type="propose", priority=5,
-             instance=self._builtins["load_propose"])
-        _reg(plugin_id="builtin_throughput_propose", plugin_type="propose", priority=10,
-             instance=self._builtins["throughput_propose"])
-        _reg(plugin_id="builtin_reconcile", plugin_type="reconcile", priority=1,
-             instance=self._builtins["reconcile"])
-        _reg(plugin_id="builtin_budget_constrain", plugin_type="constrain", priority=1,
-             instance=self._builtins["budget"])
+        # Builtin plugins land in a follow-up PR. PR #1 ships only the
+        # infrastructure (orchestrator + pipeline + transport + registry
+        # + W1/W2 external-plugin wiring); the orchestrator path will
+        # produce empty proposals on every tick until the follow-up adds
+        # builtin load/throughput/reconcile/budget plugins.
+        self._builtins: dict = {}
+        self._plugin_ids: dict = {}
 
     # ------------------------------------------------------------------
     # Bootstrap API (delegates to orchestrator)
@@ -363,11 +338,19 @@ class OrchestratorEngineAdapter:
         ):
             self._observe_fpm(tick_input.fpm_observations)
 
-        # 3. Prime side-channel-dependent plugins.
-        self._builtins["load_propose"].prime_tick(
-            tick_input.fpm_observations, tick_input.worker_counts
-        )
-        self._builtins["budget"].prime_tick(tick_input.worker_counts)
+        # 3. Prime side-channel-dependent plugins. PR #1 ships zero
+        #    builtins so this is a no-op; the follow-up PR re-introduces
+        #    the prime_tick calls when it adds builtin_load_propose +
+        #    builtin_budget_constrain.
+        for slot in ("load_propose", "budget"):
+            plugin = self._builtins.get(slot)
+            if plugin is not None and hasattr(plugin, "prime_tick"):
+                if slot == "load_propose":
+                    plugin.prime_tick(
+                        tick_input.fpm_observations, tick_input.worker_counts
+                    )
+                else:
+                    plugin.prime_tick(tick_input.worker_counts)
 
         # 4. Advance cadence BEFORE running the tick — PSM does this in
         #    on_tick too; doing it here keeps ``_next_scheduled_tick``

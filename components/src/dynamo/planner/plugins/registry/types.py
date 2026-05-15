@@ -29,7 +29,7 @@ from dynamo.planner.plugins.transport.base import PluginTransport
 from dynamo.planner.plugins.types import HoldPolicy
 
 
-TransportType = Literal["in_process", "uds", "grpc"]
+TransportType = Literal["in_process", "grpc"]
 
 
 def derive_transport_type(endpoint: str) -> TransportType:
@@ -40,13 +40,11 @@ def derive_transport_type(endpoint: str) -> TransportType:
     """
     if endpoint.startswith("inproc://"):
         return "in_process"
-    if endpoint.startswith("unix://"):
-        return "uds"
     if endpoint.startswith("grpc://"):
         return "grpc"
     raise ValueError(
         f"derive_transport_type: unknown endpoint scheme in {endpoint!r}; "
-        f"expected 'inproc://', 'unix://', or 'grpc://'"
+        f"expected 'inproc://' or 'grpc://'"
     )
 
 

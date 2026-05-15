@@ -64,16 +64,33 @@ class ExternalPluginEntry(BaseModel):
     )
     priority: int = Field(
         ...,
-        description="Stage priority (smaller wins on PROPOSE/RECONCILE/CONSTRAIN; "
-        "for PREDICT, lowest priority is the chain-augment terminator).",
+        description=(
+            "Stage priority — smaller number = more authoritative in this "
+            "stage. The number's *meaning* is uniform but the *mechanism* "
+            "by which it takes effect differs between the merge stages "
+            "(parallel) and PREDICT (sequential chain):\n"
+            "  • PROPOSE / RECONCILE / CONSTRAIN: plugins run in parallel; "
+            "    smallest-priority SET wins on conflict (type-aware merge). "
+            "    AT_LEAST / AT_MOST clamps stack regardless of priority — "
+            "    AT_LEAST = max of floors, AT_MOST = min of ceilings.\n"
+            "  • PREDICT: plugins run sequentially in priority-DESCENDING "
+            "    order (largest priority first); smallest-priority plugin "
+            "    runs LAST and gets the final word on each prediction "
+            "    field via partial-merge. Only the smallest-priority "
+            "    plugin may set ``final=True`` to terminate the chain — "
+            "    otherwise chain_augment emits a misuse warning + "
+            "    Prometheus counter and the rest of the chain is skipped."
+        ),
     )
     endpoint: str = Field(
         ...,
         min_length=1,
-        description="Wire endpoint where the plugin is reachable. Must "
-        "start with ``unix://`` (UDS — same-Pod sidecar) or ``grpc://`` "
-        "(TCP — cross-Pod). ``inproc://`` is rejected by ``register()`` "
-        "since static-config plugins are out-of-process by definition.",
+        description=(
+            "Wire endpoint where the plugin is reachable. Must start with "
+            "``grpc://host:port`` (TCP). ``inproc://`` is rejected by "
+            "``register()`` since static-config plugins are out-of-process "
+            "by definition."
+        ),
     )
     auth_token: str = Field(
         default="",

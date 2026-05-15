@@ -25,7 +25,6 @@ from dynamo.planner.plugins.transport._mtls import MtlsConfig
 from dynamo.planner.plugins.transport.base import PluginTransport
 from dynamo.planner.plugins.transport.grpc_remote import GrpcTransport
 from dynamo.planner.plugins.transport.in_process import InProcessTransport
-from dynamo.planner.plugins.transport.uds import UdsTransport
 
 log = logging.getLogger(__name__)
 
@@ -100,7 +99,7 @@ def make_transport_for_endpoint(
 
     Args:
         plugin_id: identifier passed through to the transport
-        endpoint: must start with ``inproc://``, ``unix://``, or ``grpc://``
+        endpoint: must start with ``inproc://`` or ``grpc://``
         config: TransportConfig (timeouts, mTLS, etc.)
         in_process_instance: required when ``endpoint`` starts with ``inproc://``;
             ignored otherwise. Bridges the ``register_internal`` path.
@@ -118,18 +117,6 @@ def make_transport_for_endpoint(
                 f"endpoint={endpoint!r}): in_process_instance required for inproc://"
             )
         return InProcessTransport(plugin_id, in_process_instance, timeout_seconds=timeout)
-
-    if endpoint.startswith("unix://"):
-        # mTLS on UDS makes no sense (Pod boundary is the trust boundary)
-        if config.grpc_mtls is not None and config.grpc_mtls.enabled:
-            log.debug(
-                "make_transport_for_endpoint(plugin_id=%s, endpoint=%s): "
-                "grpc_mtls.enabled=True is ignored for unix:// (UDS uses "
-                "filesystem ACL, not TLS)",
-                plugin_id,
-                endpoint,
-            )
-        return UdsTransport(plugin_id, endpoint, timeout_seconds=timeout)
 
     if endpoint.startswith("grpc://"):
         mtls = None
@@ -152,7 +139,7 @@ def make_transport_for_endpoint(
     raise ValueError(
         f"make_transport_for_endpoint(plugin_id={plugin_id!r}): "
         f"unknown endpoint scheme in {endpoint!r}; expected one of "
-        f"'inproc://', 'unix://', 'grpc://'"
+        f"'inproc://', 'grpc://'"
     )
 
 

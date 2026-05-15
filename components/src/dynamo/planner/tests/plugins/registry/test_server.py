@@ -92,7 +92,7 @@ def _make_server(auth=None, protocol_versions=("1.0", "1.0")):
 def _req(
     plugin_id="p1",
     plugin_type="propose",
-    endpoint="unix:///tmp/p1.sock",
+    endpoint="grpc://127.0.0.1:9000",
     auth_token="",
     protocol_version="1.0",
     **kwargs,
@@ -124,8 +124,8 @@ async def test_register_happy_path_creates_plugin_and_transport():
     assert plugin is not None
     assert plugin.plugin_type == "propose"
     assert plugin.priority == 10
-    assert plugin.transport_type == "uds"
-    assert plugin.endpoint == "unix:///tmp/p1.sock"
+    assert plugin.transport_type == "grpc"
+    assert plugin.endpoint == "grpc://127.0.0.1:9000"
     assert plugin.is_builtin is False
     assert len(created) == 1
 
@@ -296,7 +296,7 @@ async def test_list_plugins_filters_and_reports_fields():
     server, _, _, _ = _make_server()
     await server.register(_req(plugin_id="p1", plugin_type="propose"))
     await server.register(
-        _req(plugin_id="p2", plugin_type="predict", endpoint="unix:///tmp/p2.sock")
+        _req(plugin_id="p2", plugin_type="predict", endpoint="grpc://127.0.0.1:9000")
     )
     # no filter
     out = server.list_plugins(ListPluginsRequest())

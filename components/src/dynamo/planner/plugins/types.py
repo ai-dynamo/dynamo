@@ -130,7 +130,7 @@ class PluginInfo(_ProtoMirror):
     protocol_version: str = ""
     enabled: bool = False
     is_builtin: bool = False
-    transport: Literal["", "in_process", "uds", "grpc"] = ""
+    transport: Literal["", "in_process", "grpc"] = ""
     circuit_state: CircuitState = CircuitState.CLOSED
     evaluations_total: int = 0
     last_call_at_seconds_ago: float = 0.0

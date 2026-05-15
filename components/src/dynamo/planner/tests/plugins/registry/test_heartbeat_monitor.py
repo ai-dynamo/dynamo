@@ -68,7 +68,7 @@ async def _register_uds(server, plugin_id="p1", endpoint=None):
         RegisterRequest(
             plugin_id=plugin_id,
             plugin_type="propose",
-            endpoint=endpoint or f"unix:///tmp/{plugin_id}.sock",
+            endpoint=endpoint or f"grpc://127.0.0.1:9000",
             auth_token="",
             protocol_version="1.0",
         )

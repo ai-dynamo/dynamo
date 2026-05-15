@@ -255,21 +255,6 @@ async def grpc_external_plugin(
         await server.stop(grace=0.1)
 
 
-@pytest.fixture
-async def uds_external_plugin(
-    tmp_path: Path,
-) -> AsyncIterator[tuple[_RecordingProposePlugin, str]]:
-    """Plugin reachable via ``unix://<sock>``."""
-    plugin = _RecordingProposePlugin(prefill=3, decode=4)
-    sock_path = tmp_path / "external_plugin.sock"
-    listen = f"unix:{sock_path}"
-    server, _ = await _start_plugin_grpc_server(plugin, listen)
-    try:
-        yield plugin, f"unix://{sock_path}"
-    finally:
-        await server.stop(grace=0.1)
-
-
 # ---------------------------------------------------------------------------
 # Tests — both transports drive the same flow end-to-end
 # ---------------------------------------------------------------------------
@@ -307,32 +292,6 @@ async def test_external_plugin_register_and_invoked_over_grpc(
     # 2. The decision propagated end-to-end into the final proposal.
     assert outcome.execute_action == "apply"
     assert _final_targets(outcome) == {"prefill": 7, "decode": 11}
-
-    await orch.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_external_plugin_register_and_invoked_over_uds(
-    uds_external_plugin,
-):
-    """unix:// path: same flow, different transport — proves UDS
-    doesn't have any divergence vs grpc:// in production wiring."""
-    plugin, endpoint = uds_external_plugin
-    orch, registry, _ = _build_orchestrator()
-
-    await _register_external_plugin(
-        registry, plugin_id="external-propose-uds", endpoint=endpoint
-    )
-
-    plugins = registry.list_plugins(ListPluginsRequest())
-    info = next(p for p in plugins if p.plugin_id == "external-propose-uds")
-    assert info.transport == "uds"
-
-    outcome = await orch.tick(_ctx(), _make_baseline(prefill=1, decode=1))
-
-    assert len(plugin.calls) == 1
-    assert outcome.execute_action == "apply"
-    assert _final_targets(outcome) == {"prefill": 3, "decode": 4}
 
     await orch.shutdown()
 
@@ -396,18 +355,18 @@ async def test_external_plugin_register_rejects_inproc_endpoint():
 async def test_external_plugin_two_external_plugins_compose(
     tmp_path: Path,
 ):
-    """Two external plugins on different transports, both registered;
-    one tick → both invoked → merge picks the higher-priority winner.
-    Sanity-checks the multi-plugin path under real transport hops."""
+    """Two external plugins on two separate grpc:// loopback ports,
+    both registered; one tick → both invoked → merge picks the
+    higher-priority winner. Sanity-checks the multi-plugin path
+    under real transport hops."""
     plugin_a = _RecordingProposePlugin(prefill=10, decode=10)
     plugin_b = _RecordingProposePlugin(prefill=99, decode=99)
 
     server_a, listen_a = await _start_plugin_grpc_server(
         plugin_a, "127.0.0.1:0"
     )
-    sock_path = tmp_path / "plugin_b.sock"
-    server_b, _ = await _start_plugin_grpc_server(
-        plugin_b, f"unix:{sock_path}"
+    server_b, listen_b = await _start_plugin_grpc_server(
+        plugin_b, "127.0.0.1:0"
     )
     try:
         orch, registry, _ = _build_orchestrator()
@@ -432,7 +391,7 @@ async def test_external_plugin_two_external_plugins_compose(
                 plugin_id="ext-b",
                 plugin_type="propose",
                 priority=10,
-                endpoint=f"unix://{sock_path}",
+                endpoint=f"grpc://{listen_b}",
                 auth_token="x",
                 protocol_version="1.0",
                 hold_policy=HoldPolicy.HOLD_LAST,

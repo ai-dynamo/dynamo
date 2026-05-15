@@ -13,7 +13,6 @@ from dynamo.planner.plugins.clock import VirtualClock, WallClock
 from dynamo.planner.plugins.transport import (
     GrpcTransport,
     InProcessTransport,
-    UdsTransport,
 )
 from dynamo.planner.plugins.transport.config import (
     ClockConfig,
@@ -67,9 +66,11 @@ def test_factory_inproc_without_instance_rejected():
         make_transport_for_endpoint("p1", "inproc://p1", TransportConfig())
 
 
-def test_factory_uds():
-    t = make_transport_for_endpoint("p2", "unix:///tmp/x.sock", TransportConfig())
-    assert isinstance(t, UdsTransport)
+def test_factory_unix_rejected_unknown_scheme():
+    """``unix://`` was dropped from PR #1; only ``inproc://`` + ``grpc://``
+    are accepted. Lock the new rejection contract."""
+    with pytest.raises(ValueError, match="unknown endpoint scheme"):
+        make_transport_for_endpoint("p2", "unix:///tmp/x.sock", TransportConfig())
 
 
 def test_factory_grpc_default_refuses_insecure():
