@@ -74,7 +74,25 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
         &self,
         input: SingleIn<serde_json::Value>,
     ) -> Result<ManyOut<Annotated<serde_json::Value>>, Error> {
-        let (json, handle) = input.into_parts();
+        let (mut json, handle) = input.into_parts();
+        // Canary payloads only carry engine-relevant fields (`token_ids`,
+        // `stop_conditions`, etc.). Backfill the rest of
+        // `PreprocessedRequest`'s required schema with empty defaults so
+        // the typed deserializer accepts the probe.
+        if let Some(obj) = json.as_object_mut() {
+            obj.entry("model")
+                .or_insert_with(|| serde_json::Value::String(String::new()));
+            obj.entry("stop_conditions")
+                .or_insert_with(|| serde_json::json!({}));
+            obj.entry("sampling_options")
+                .or_insert_with(|| serde_json::json!({}));
+            obj.entry("output_options")
+                .or_insert_with(|| serde_json::json!({}));
+            obj.entry("eos_token_ids")
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+            obj.entry("annotations")
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        }
         let request: PreprocessedRequest = serde_json::from_value(json)
             .map_err(|e| anyhow::anyhow!("probe payload deserialization failed: {e}"))?;
         let typed_input = handle.map(|_| request);
