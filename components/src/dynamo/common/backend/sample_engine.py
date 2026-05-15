@@ -11,7 +11,7 @@ import queue
 import threading
 import uuid
 from collections.abc import AsyncGenerator
-from typing import Optional
+from typing import Any, Optional
 
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
@@ -19,6 +19,7 @@ from dynamo.llm import KvEventPublisher
 
 from .disagg import enforce_prefill_max_tokens, require_prefill_result
 from .engine import EngineConfig, GenerateChunk, GenerateRequest, LLMEngine
+from .health_check import build_health_check_payload, is_probe
 from .publisher import KvEventSource, Metrics, PushSource, SnapshotSource
 from .worker import WorkerConfig
 
@@ -128,6 +129,11 @@ class SampleLLMEngine(LLMEngine):
     async def metrics_sources(self) -> list[SnapshotSource]:
         return [SnapshotSource(snapshot=lambda: self._metrics, dp_rank=0)]
 
+    async def health_check_payload(self) -> Optional[dict[str, Any]]:
+        # Token 1 stands in for BOS (no real tokenizer here). DECODE bypass
+        # lives in `generate()` via `is_probe(request)` — no payload tricks.
+        return build_health_check_payload(bos_token_id=1)
+
     def _start_publisher_thread(self, publisher: KvEventPublisher) -> None:
         self._publish_thread = threading.Thread(
             target=self._publish_loop,
@@ -181,7 +187,8 @@ class SampleLLMEngine(LLMEngine):
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
-        if self.disaggregation_mode == DisaggregationMode.DECODE:
+        # Canary probes bypass cross-worker coordination — run as aggregated.
+        if self.disaggregation_mode == DisaggregationMode.DECODE and not is_probe(request):
             require_prefill_result(request, self.disaggregation_mode)
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             enforce_prefill_max_tokens(request)

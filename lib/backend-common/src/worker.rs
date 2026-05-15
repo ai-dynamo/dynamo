@@ -35,6 +35,10 @@ const DEFAULT_GRACE_PERIOD_SECS: f64 = 5.0;
 /// Shared with the Python helper so a single env var controls both.
 const GRACE_PERIOD_ENV: &str = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS";
 
+/// Operator override for the health-check canary, mirrors the Python helper
+/// in `lib/bindings/python/src/dynamo/health_check.py`.
+const HEALTH_CHECK_PAYLOAD_ENV: &str = "DYN_HEALTH_CHECK_PAYLOAD";
+
 /// Runtime / transport configuration applied to the process before the
 /// distributed runtime is constructed.
 ///
@@ -134,6 +138,11 @@ pub struct WorkerConfig {
     /// but force-disables the local KV indexer because decode workers do not
     /// host the indexer endpoint.
     pub disaggregation_mode: DisaggregationMode,
+    /// Operator override. `Worker` resolves precedence: this field >
+    /// `DYN_HEALTH_CHECK_PAYLOAD` env > `engine.health_check_payload()`.
+    /// Python sets this via `--health-check-payload` / env; Rust-only
+    /// engines leave it `None` and let `Worker` read the env directly.
+    pub health_check_payload: Option<serde_json::Value>,
     /// Runtime / transport overrides applied via env vars before the
     /// `DistributedRuntime` is constructed.
     pub runtime: RuntimeConfig,
@@ -166,6 +175,7 @@ impl Default for WorkerConfig {
             enable_kv_routing: true,
             metrics_labels: Vec::new(),
             disaggregation_mode: DisaggregationMode::Aggregated,
+            health_check_payload: None,
             runtime: RuntimeConfig::default(),
         }
     }
@@ -564,12 +574,31 @@ impl Worker {
         // — discovery unregister, grace period, drain, cleanup — finishes.
         let _orchestrator_registration = endpoint.drt().register_graceful_task();
 
-        let serve_fut = endpoint
+        // Precedence: WorkerConfig (Python argparse plumbs CLI/env here) >
+        // DYN_HEALTH_CHECK_PAYLOAD env (backstop for Rust-only engines) >
+        // engine default.
+        let probe = match std::mem::take(&mut self.config.health_check_payload)
+            .or_else(load_health_check_payload_from_env)
+        {
+            Some(p) => Some(p),
+            None => self.engine.health_check_payload().await.unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    "engine.health_check_payload() failed; canary disabled for this endpoint",
+                );
+                None
+            }),
+        };
+
+        let mut builder = endpoint
             .endpoint_builder()
             .handler(ingress)
             .metrics_labels(metrics_labels)
-            .graceful_shutdown(true)
-            .start();
+            .graceful_shutdown(true);
+        if let Some(payload) = probe {
+            builder = builder.health_check_payload(payload);
+        }
+        let serve_fut = builder.start();
         tokio::pin!(serve_fut);
 
         tokio::select! {
@@ -670,6 +699,32 @@ fn shutdown_deadline(timeout: Duration, grace_secs: f64) -> Duration {
         Duration::ZERO
     };
     timeout.saturating_add(grace)
+}
+
+/// Read `DYN_HEALTH_CHECK_PAYLOAD` (JSON object or `@/path/to/file.json`).
+/// Returns `None` when the env is unset or the value is invalid; an invalid
+/// value logs a warning so it can't silently disable the engine default.
+fn load_health_check_payload_from_env() -> Option<serde_json::Value> {
+    let raw = std::env::var(HEALTH_CHECK_PAYLOAD_ENV).ok().filter(|s| !s.is_empty())?;
+    let parsed: Result<serde_json::Value, _> = if let Some(path) = raw.strip_prefix('@') {
+        std::fs::read_to_string(path).map_or_else(
+            |e| Err(format!("read {path}: {e}")),
+            |s| serde_json::from_str(&s).map_err(|e| e.to_string()),
+        )
+    } else {
+        serde_json::from_str(&raw).map_err(|e| e.to_string())
+    };
+    match parsed {
+        Ok(v) if v.is_object() => Some(v),
+        Ok(_) => {
+            tracing::warn!(env = HEALTH_CHECK_PAYLOAD_ENV, "value must be a JSON object");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(env = HEALTH_CHECK_PAYLOAD_ENV, error = %e, "parse failed");
+            None
+        }
+    }
 }
 
 /// Read the grace-period seconds from `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`,
@@ -1401,6 +1456,25 @@ mod tests {
     fn grace_period_treats_empty_as_unset() {
         with_env(GRACE_PERIOD_ENV, Some(""), || {
             assert_eq!(grace_period_secs(), DEFAULT_GRACE_PERIOD_SECS);
+        });
+    }
+
+    // -------------------------------------------------------------------
+    // load_health_check_payload_from_env
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn health_check_payload_env_returns_object() {
+        with_env(HEALTH_CHECK_PAYLOAD_ENV, Some(r#"{"token_ids":[1]}"#), || {
+            let got = load_health_check_payload_from_env().unwrap();
+            assert_eq!(got["token_ids"], serde_json::json!([1]));
+        });
+    }
+
+    #[test]
+    fn health_check_payload_env_rejects_non_object() {
+        with_env(HEALTH_CHECK_PAYLOAD_ENV, Some("[1,2,3]"), || {
+            assert!(load_health_check_payload_from_env().is_none());
         });
     }
 

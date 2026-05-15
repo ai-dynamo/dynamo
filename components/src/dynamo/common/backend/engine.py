@@ -216,3 +216,11 @@ class LLMEngine(ABC):
         opts out of metrics publishing. ``Worker`` calls once after
         :meth:`start`."""
         return []
+
+    async def health_check_payload(self) -> Optional[dict[str, Any]]:
+        """Canary payload the runtime sends through :meth:`generate` when
+        the endpoint is idle. Return ``None`` (default) to disable active
+        probing. ``Worker`` calls this once after :meth:`start` and resolves
+        ``DYN_HEALTH_CHECK_PAYLOAD`` / ``--health-check-payload`` overrides
+        on top."""
+        return None

@@ -25,8 +25,8 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use dynamo_backend_common::{
     AsyncEngineContext, BackendError, CommonArgs, DisaggregationMode, DynamoError, EngineConfig,
-    ErrorType, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
-    Metrics, MetricsSource, PreprocessedRequest, WorkerConfig, chunk, usage,
+    ErrorType, GenerateContext, HEALTH_CHECK_KEY, KvEventSource, LLMEngine, LLMEngineOutput,
+    LLMEngineOutputExt, Metrics, MetricsSource, PreprocessedRequest, WorkerConfig, chunk, usage,
 };
 use dynamo_mocker::common::protocols::{
     DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
@@ -491,6 +491,16 @@ impl LLMEngine for MockerBackend {
             }),
             dp_rank: DP_RANK,
         }])
+    }
+
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        let mut payload = serde_json::json!({
+            "token_ids": [1],
+            "stop_conditions": {"max_tokens": 1, "ignore_eos": true},
+            "sampling_options": {"temperature": 0.0},
+        });
+        payload[HEALTH_CHECK_KEY] = serde_json::Value::Bool(true);
+        Ok(Some(payload))
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {

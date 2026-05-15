@@ -141,3 +141,30 @@ async def test_cleanup_joins_publisher_thread_started_via_on_ready():
     assert engine._publish_thread is not None and engine._publish_thread.is_alive()
     await engine.cleanup()
     assert not engine._publish_thread.is_alive()
+
+
+async def test_health_check_payload_decode_probe_passes_generate(monkeypatch):
+    """Decode probe drives `generate()` end-to-end: `is_probe(request)`
+    triggers the bypass branch, `require_prefill_result` is skipped, and
+    the stream completes — even though the payload carries no synthetic
+    `prefill_result`."""
+    monkeypatch.delenv("DYN_HEALTH_CHECK_PAYLOAD", raising=False)
+    engine = SampleLLMEngine(
+        max_tokens=2, delay=0.0, disaggregation_mode=DisaggregationMode.DECODE
+    )
+    payload = await engine.health_check_payload()
+    assert payload is not None
+    assert "prefill_result" not in payload  # no payload trick
+    chunks = await _collect(engine, payload)  # type: ignore[arg-type]
+    assert any(c.get("finish_reason") for c in chunks)
+
+
+async def test_decode_without_probe_marker_still_requires_prefill_result():
+    """Negative: a real DECODE request (no `_HEALTH_CHECK` marker) must
+    still trip `require_prefill_result`. Guards against the bypass branch
+    swallowing real-traffic misconfigurations."""
+    engine = SampleLLMEngine(
+        max_tokens=2, delay=0.0, disaggregation_mode=DisaggregationMode.DECODE
+    )
+    with pytest.raises(ValueError, match="prefill_result"):
+        await _collect(engine, {"token_ids": [1]})

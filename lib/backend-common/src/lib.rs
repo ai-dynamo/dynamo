@@ -29,7 +29,7 @@ pub use args::CommonArgs;
 pub use disagg::DisaggregationMode;
 pub use engine::{
     AsyncEngineContext, BootstrapInfo, CompletionUsage, EngineConfig, FinishReason,
-    GenerateContext, KvEventPublisher, KvEventSource, LLMEngine, LLMEngineOutput,
+    GenerateContext, HEALTH_CHECK_KEY, KvEventPublisher, KvEventSource, LLMEngine, LLMEngineOutput,
     LLMEngineOutputExt, Metrics, MetricsSource, OnPublisherReady, OutputOptions, PrefillResult,
     PreprocessedRequest, SamplingOptions, SnapshotFn, StopConditions, chunk, usage,
 };

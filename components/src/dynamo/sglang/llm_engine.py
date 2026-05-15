@@ -32,6 +32,10 @@ from dynamo.common.backend.engine import (
     GenerateRequest,
     LLMEngine,
 )
+from dynamo.common.backend.health_check import (
+    bos_token_id_or,
+    build_health_check_payload,
+)
 from dynamo.common.backend.publisher import (
     KvEventSource,
     Metrics,
@@ -571,6 +575,29 @@ class SglangLLMEngine(LLMEngine):
             SnapshotSource(snapshot=snapshot_for(rank), dp_rank=rank)
             for rank in range(start, end)
         ]
+
+    async def health_check_payload(self) -> Optional[dict[str, Any]]:
+        bos = bos_token_id_or(getattr(self.engine, "tokenizer_manager", None))
+        extras: Optional[dict[str, Any]] = None
+        # FAKE_BOOTSTRAP_HOST tells SGLang to short-circuit real KV transfer;
+        # room=0 always routes to DP rank 0.
+        if self.serving_mode in (DisaggregationMode.PREFILL, DisaggregationMode.DECODE):
+            try:
+                from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
+            except ImportError:
+                logger.warning("FAKE_BOOTSTRAP_HOST unavailable; disabling disagg canary")
+                return None
+            bootstrap_port = (
+                getattr(self.server_args, "disaggregation_bootstrap_port", None) or 0
+            )
+            extras = {
+                "bootstrap_info": {
+                    "bootstrap_host": FAKE_BOOTSTRAP_HOST,
+                    "bootstrap_port": bootstrap_port,
+                    "bootstrap_room": 0,
+                }
+            }
+        return build_health_check_payload(bos_token_id=bos, extras=extras)
 
     def _build_sampling_params(self, request: GenerateRequest) -> dict:
         if not self._use_sglang_tokenizer:

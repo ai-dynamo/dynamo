@@ -49,6 +49,7 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RuntimeConfig>()?;
     m.add_class::<WorkerConfig>()?;
     m.add_class::<Worker>()?;
+    m.add("HEALTH_CHECK_KEY", dynamo_backend_common::HEALTH_CHECK_KEY)?;
     parent.add_submodule(&m)?;
     py.import("sys")?
         .getattr("modules")?
@@ -255,9 +256,11 @@ impl WorkerConfig {
         metrics_labels = Vec::new(),
         runtime = None,
         disaggregation_mode = DisaggregationMode::Aggregated,
+        health_check_payload = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         namespace: String,
         component: String,
         endpoint: String,
@@ -274,14 +277,27 @@ impl WorkerConfig {
         metrics_labels: Vec<(String, String)>,
         runtime: Option<RuntimeConfig>,
         disaggregation_mode: DisaggregationMode,
-    ) -> Self {
+        health_check_payload: Option<PyObject>,
+    ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
             ModelInput::Text => RsModelInput::Text,
             ModelInput::Tokens => RsModelInput::Tokens,
             ModelInput::Tensor => RsModelInput::Tensor,
         };
-        Self {
+        // Accept a Python dict or None; depythonize to serde_json::Value.
+        let health_check_payload = match health_check_payload {
+            Some(obj) if !obj.is_none(py) => {
+                let bound = obj.bind(py);
+                Some(depythonize::<serde_json::Value>(bound).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "health_check_payload must be a JSON-serializable dict: {e}"
+                    ))
+                })?)
+            }
+            _ => None,
+        };
+        Ok(Self {
             inner: RsWorkerConfig {
                 namespace,
                 component,
@@ -298,9 +314,10 @@ impl WorkerConfig {
                 enable_kv_routing,
                 metrics_labels,
                 disaggregation_mode: disaggregation_mode.into(),
+                health_check_payload,
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
             },
-        }
+        })
     }
 }
 
@@ -725,6 +742,26 @@ impl LLMEngine for PyLLMEngine {
                 sources.push(depythonize_metrics_source(&item)?);
             }
             Ok(sources)
+        })
+        .map_err(py_err_to_dynamo)
+    }
+
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        let py_obj = self
+            .call_method0_async("health_check_payload")
+            .await
+            .map_err(py_err_to_dynamo)?;
+        Python::with_gil(|py| -> PyResult<Option<serde_json::Value>> {
+            let bound = py_obj.bind(py);
+            if bound.is_none() {
+                return Ok(None);
+            }
+            let value: serde_json::Value = depythonize(bound).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "health_check_payload must return a JSON-serializable dict or None: {e}"
+                ))
+            })?;
+            Ok(Some(value))
         })
         .map_err(py_err_to_dynamo)
     }

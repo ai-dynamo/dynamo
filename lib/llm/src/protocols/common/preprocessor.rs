@@ -216,6 +216,23 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(skip)]
     pub tracker: Option<Arc<RequestTracker>>,
+
+    /// Set by the runtime's `HealthCheckManager` when this request originated
+    /// from a canary probe. Engines may use it in `generate()` to bypass
+    /// cross-worker coordination (KV transfer, bootstrap handshake,
+    /// `require_prefill_result`) and run local-only. The wire-format key
+    /// is `_HEALTH_CHECK` so the canary payload built by
+    /// `dynamo.common.backend.health_check.build_health_check_payload`
+    /// (and the legacy `HealthCheckPayload` base class) round-trips through
+    /// this field. Skipped from serialization when false so normal traffic
+    /// doesn't carry the marker.
+    #[builder(default)]
+    #[serde(
+        default,
+        rename = "_HEALTH_CHECK",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub is_probe: bool,
 }
 
 impl PreprocessedRequest {
@@ -290,5 +307,40 @@ impl PreprocessedEmbeddingRequest {
 impl PreprocessedEmbeddingRequest {
     pub fn builder() -> PreprocessedEmbeddingRequestBuilder {
         PreprocessedEmbeddingRequestBuilder::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Covers the `is_probe` serde contract end-to-end: `rename = "_HEALTH_CHECK"`,
+    /// `default`, and `skip_serializing_if`. Each assertion targets a distinct
+    /// attribute; if any is removed the test fails.
+    #[test]
+    fn is_probe_serde_round_trip() {
+        let mut req = PreprocessedRequest::builder()
+            .model("t".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap();
+
+        // skip_serializing_if: default (false) is omitted.
+        assert!(!req.is_probe);
+        let normal = serde_json::to_string(&req).unwrap();
+        assert!(!normal.contains("_HEALTH_CHECK"), "got: {normal}");
+        // default: absent marker round-trips to false.
+        let back: PreprocessedRequest = serde_json::from_str(&normal).unwrap();
+        assert!(!back.is_probe);
+
+        // rename: true serializes as `_HEALTH_CHECK` and round-trips.
+        req.is_probe = true;
+        let probe = serde_json::to_string(&req).unwrap();
+        assert!(probe.contains("\"_HEALTH_CHECK\":true"), "got: {probe}");
+        let back: PreprocessedRequest = serde_json::from_str(&probe).unwrap();
+        assert!(back.is_probe);
     }
 }
