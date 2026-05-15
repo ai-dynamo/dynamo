@@ -22,6 +22,8 @@ from typing import Any, Optional
 import numpy as np
 import yaml
 
+from copy import deepcopy
+from typing import Any, Optional
 from dynamo.common.utils.paths import get_workspace_dir
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.backend_components import (
@@ -118,6 +120,20 @@ def assemble_final_config(
     else:
         base = dgd_config
 
+    # --- Normalize services dict/list ---
+    services_dict, services_list = _normalize_services(base)
+
+    # --- Inject global envs into all containers ---
+    _inject_global_envs(
+        services_list,
+        dgdr.envs or [],
+    )
+
+    _inject_worker_envs(
+        services_dict,
+        dgdr.workerEnvs or [],
+    )
+                        
     # Step 2: for vLLM deployments, turn on the per-worker self-benchmark so
     # the get_perf_metrics endpoint is available to the planner. Mocker
     # workers don't use DYN_BENCHMARK_MODE, so skip when mocker is active.
@@ -620,3 +636,120 @@ def _load_profiling_data(output_dir: str) -> dict:
         pass
 
     return result
+
+
+def _envvar_to_dict(env: Any) -> dict:
+    """Convert a Kubernetes EnvVar-like object into a plain dict.
+
+    Supports:
+    - kubernetes.client.V1EnvVar
+    - pydantic/dataclass objects
+    - plain dicts
+
+    Preserves:
+    - value
+    - valueFrom
+    """
+    if isinstance(env, dict):
+        return deepcopy(env)
+
+    env_dict = {"name": env.name}
+
+    value = getattr(env, "value", None)
+    if value is not None:
+        env_dict["value"] = str(value)
+
+    value_from = (
+        getattr(env, "valueFrom", None)
+        or getattr(env, "value_from", None)
+    )
+
+    if value_from is not None:
+        # Preserve the original Kubernetes structure
+        if hasattr(value_from, "to_dict"):
+            env_dict["valueFrom"] = value_from.to_dict()
+        elif isinstance(value_from, dict):
+            env_dict["valueFrom"] = deepcopy(value_from)
+        else:
+            env_dict["valueFrom"] = deepcopy(vars(value_from))
+
+    return env_dict
+
+
+def _append_envs_or_override(
+    container_env: list[dict],
+    envs: list[Any],
+) -> None:
+    env_map = {e.get("name"): e for e in container_env if isinstance(e, dict)}
+
+    for env in envs:
+        env_dict = _envvar_to_dict(env)
+        name = env_dict["name"]
+
+        # override instead of skip
+        env_map[name] = env_dict
+
+    container_env[:] = list(env_map.values())
+
+
+def _normalize_services(base: dict) -> tuple[dict[str, dict], list[dict]]:
+    """Normalize DGD services to both dict and list forms."""
+    services = base.get("spec", {}).get("services", {})
+
+    if isinstance(services, dict):
+        return services, list(services.values())
+
+    services_dict = {f"svc_{i}": s for i, s in enumerate(services)}
+    return services_dict, services
+
+
+def _inject_global_envs(
+    services_list: list[dict],
+    envs: list[Any],
+) -> None:
+    """Inject envs into all containers across all services."""
+    if not envs:
+        return
+
+    for svc_spec in services_list:
+        containers = svc_spec.get("containers", [])
+
+        for container in _iter_service_containers(svc_spec):
+            container_env = container.setdefault("env", [])
+            _append_envs_or_override(container_env, envs)
+
+
+def _inject_worker_envs(
+    services_dict: dict[str, dict],
+    worker_envs: list[Any],
+) -> None:
+    """Inject envs only into worker containers."""
+    if not worker_envs:
+        return
+
+    worker_names = (
+        set(_vllm_worker_roles().keys())
+        | set(_mocker_worker_names())
+    )
+
+    for svc_name, svc_spec in services_dict.items():
+        if svc_name not in worker_names:
+            continue
+
+        for container in _iter_service_containers(svc_spec):
+            container_env = container.setdefault("env", [])
+            _append_envs_or_override(container_env, worker_envs)
+
+
+def _iter_service_containers(svc_spec: dict):
+    containers = svc_spec.get("containers", [])
+    for c in containers:
+        yield c
+
+    main_container = (
+        svc_spec.get("extraPodSpec", {})
+        .get("mainContainer")
+    )
+
+    if main_container:
+        yield main_container

@@ -754,11 +754,12 @@ def _deep_merge_overrides(
 
     Rules:
     - Dicts are merged recursively; missing intermediate keys are created.
-    - ``spec.services.<name>`` that does not exist in *target* is skipped
-      with a warning (all nested overrides under that service are dropped).
-    - Only ``spec.services.<worker>.extraPodSpec.mainContainer.args`` is
-      *appended* to the existing list (preserving profiler-generated CLI
-      args).  ``args`` at any other path is replaced normally.
+    - `spec.services.<name>` that does not exist in *target* is skipped
+      with a warning.
+    - Only `spec.services.<worker>.extraPodSpec.mainContainer.args` is appended
+      to preserve profiler-generated CLI args.
+    - Environment variables are merged intelligently: user overrides replace
+      injected env vars but log a warning if a name conflict occurs.
     - All other leaf values replace the target value.
     """
     for key, value in overrides.items():
@@ -779,17 +780,62 @@ def _deep_merge_overrides(
                 )
                 continue
 
-        if isinstance(value, dict) and isinstance(target.get(key), dict):
-            _deep_merge_overrides(target[key], value, current_path)
-        elif isinstance(value, dict) and key not in target:
-            target[key] = copy.deepcopy(value)
+        # Recurse for nested dicts
+        if isinstance(value, dict):
+            existing = target.get(key)
+
+            if isinstance(existing, dict):
+                _deep_merge_overrides(existing, value, current_path)
+            else:
+                target[key] = copy.deepcopy(value)
+
+        # Append worker CLI args instead of replacing
         elif (
             key == "args"
             and isinstance(value, list)
             and _is_worker_main_container_args(current_path)
         ):
             existing = target.get(key) or []
-            target[key] = list(existing) + list(value)
+            target[key] = list(existing) + copy.deepcopy(value)
+
+        # Merge env vars by env name. User overrides take precedence over profiler-injected envs.
+        elif (
+            key == "env"
+            and isinstance(value, list)
+            and isinstance(target.get(key), list)
+        ):
+            existing = target.get(key, [])
+            merged: dict[str, dict] = {}
+
+            for env in existing:
+                env_dict = _envvar_to_dict(env)
+                env_name = env_dict.get("name")
+
+                if env_name:
+                    merged[env_name] = env_dict
+
+            for env in value:
+                env_dict = _envvar_to_dict(env)
+                env_name = env_dict.get("name")
+
+                if not env_name:
+                    logger.warning(
+                        "Skipping env override without a valid 'name': %r",
+                        env,
+                    )
+                    continue
+
+                if env_name in merged:
+                    logger.warning(
+                        "Override for env var '%s' replaces the existing value.",
+                        env_name,
+                    )
+
+                merged[env_name] = env_dict
+
+            target[key] = list(merged.values())
+
+        # Replace all other leaf values
         else:
             target[key] = (
                 copy.deepcopy(value) if isinstance(value, (dict, list)) else value
