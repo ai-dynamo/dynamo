@@ -63,7 +63,7 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
-from dynamo.trtllm.utils.trtllm_utils import deep_update
+from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
@@ -84,22 +84,6 @@ def build_kv_connector_config(config: Config):
             sys.exit(1)
     return None
 
-
-def _warn_override_collisions(target: dict, source: dict, path: str = "") -> None:
-    """Log warnings for keys in *source* that will overwrite existing values in *target*."""
-    for key, new_val in source.items():
-        full_key = f"{path}.{key}" if path else key
-        if key in target:
-            old_val = target[key]
-            if isinstance(new_val, dict) and isinstance(old_val, dict):
-                _warn_override_collisions(old_val, new_val, full_key)
-            elif old_val != new_val:
-                logging.warning(
-                    "override_engine_args will replace %s: %r -> %r",
-                    full_key,
-                    old_val,
-                    new_val,
-                )
 
 
 def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
@@ -283,17 +267,28 @@ async def init_llm_worker(
         # TODO: Support extra engine args from json file as well.
         arg_map = update_llm_args_with_extra_options(arg_map, config.extra_engine_args)
 
-    # Apply override_engine_args if provided
+    # Apply override_engine_args if provided. Initialize overrides to empty dict so
+    # that _user_kv_overrides can be computed unconditionally below.
+    overrides: dict = {}
     if config.override_engine_args != "":
         try:
             overrides = json.loads(config.override_engine_args)
             logging.info(f"Applying engine arg overrides: {overrides}")
 
-            _warn_override_collisions(arg_map, overrides)
+            warn_override_collisions(arg_map, overrides)
             deep_update(arg_map, overrides)
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
+
+    # Snapshot kv_cache_config keys explicitly supplied by the user via
+    # override_engine_args. After the publish_events_and_metrics block below we
+    # compare against these to detect silent clobbering by Dynamo internals.
+    _user_kv_overrides: dict = (
+        dict(overrides["kv_cache_config"])
+        if isinstance(overrides.get("kv_cache_config"), dict)
+        else {}
+    )
 
     _sync_config_from_engine_args(config, arg_map)
 
@@ -330,6 +325,27 @@ async def init_llm_worker(
                 arg_map["backend"],
             )
             sys.exit(1)
+
+    # Audit: warn if any user-supplied kv_cache_config keys were silently overwritten
+    # or dropped by Dynamo internals (e.g. the publish_events_and_metrics block above).
+    # This catches the recurring class of bug where internal mutations clobber user intent.
+    if _user_kv_overrides:
+        _final_kv = arg_map.get("kv_cache_config", {})
+        if isinstance(_final_kv, dict):
+            for _k, _user_val in _user_kv_overrides.items():
+                if _k not in _final_kv:
+                    logging.warning(
+                        "User-supplied kv_cache_config.%s was dropped by Dynamo internals",
+                        _k,
+                    )
+                elif _final_kv[_k] != _user_val:
+                    logging.warning(
+                        "User-supplied kv_cache_config.%s was overwritten by Dynamo "
+                        "internals: %r -> %r",
+                        _k,
+                        _user_val,
+                        _final_kv[_k],
+                    )
 
     trtllm_zmq_bind_endpoint = None  # Endpoint for TensorRT-LLM to bind and publish
     consolidator_output_endpoint = (

@@ -325,6 +325,95 @@ async def test_init_llm_worker_engine_args_with_extra_engine_args(
         assert config.max_batch_size == 512
 
 
+@pytest.mark.asyncio
+async def test_user_kv_cache_config_preserved_with_publish_events(monkeypatch):
+    """User-supplied kv_cache_config values survive the publish_events_and_metrics=True path.
+
+    Regression pin for the recurring class of bug where the publish_events_and_metrics
+    conversion block (KvCacheConfig -> dict) silently clobbers user-provided values.
+    """
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS", raising=False)
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--publish-events",
+            "--override-engine-args",
+            '{"kv_cache_config": {"event_buffer_max_size": 8192, "free_gpu_memory_fraction": 0.9}}',
+        ]
+    )
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    kv = exc_info.value.engine_args["kv_cache_config"]
+    assert isinstance(kv, dict), f"Expected kv_cache_config dict, got {type(kv)}"
+    assert kv["event_buffer_max_size"] == 8192, (
+        f"User-supplied event_buffer_max_size=8192 was clobbered; got {kv.get('event_buffer_max_size')}"
+    )
+    assert kv.get("free_gpu_memory_fraction") == 0.9, (
+        f"User-supplied free_gpu_memory_fraction=0.9 was clobbered; got {kv.get('free_gpu_memory_fraction')}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_user_kv_cache_config_preserved_without_publish_events(monkeypatch):
+    """User-supplied kv_cache_config values survive when publish_events_and_metrics=False.
+
+    Ensures the kv_cache_config dict produced by deep_update(override_engine_args) is
+    forwarded unchanged when the publish_events_and_metrics mutation block is skipped.
+    """
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS", raising=False)
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--no-publish-events",
+            "--override-engine-args",
+            '{"kv_cache_config": {"free_gpu_memory_fraction": 0.75}}',
+        ]
+    )
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    kv = exc_info.value.engine_args["kv_cache_config"]
+    # deep_update replaces the KvCacheConfig object with the user-supplied dict
+    # when publish_events=False (no model_dump conversion).
+    assert isinstance(kv, dict), f"Expected kv_cache_config dict, got {type(kv)}"
+    assert kv.get("free_gpu_memory_fraction") == 0.75, (
+        f"User-supplied free_gpu_memory_fraction=0.75 was clobbered; got {kv.get('free_gpu_memory_fraction')}"
+    )
+
+
 class MultimodalProcessorInstantiated(Exception):
     """Custom exception for testing MultimodalRequestProcessor."""
 
