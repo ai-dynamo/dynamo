@@ -27,7 +27,7 @@ cases:
           first_class:
             type: boolean
     expected:
-      dynamo: &d_7_a
+      dynamo: &id001
         calls:
         - name: book_flight
           arguments:
@@ -35,7 +35,7 @@ cases:
             passengers: 2
             first_class: true
         normal_text: ''
-      vllm: *d_7_a
+      vllm: *id001
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.7.b:
@@ -55,12 +55,20 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_7_b
+      dynamo: &id002
         calls:
         - name: get_weather
           arguments:
             location: Tōkyō central
         normal_text: ''
-      vllm: *d_7_b
+      vllm: *id002
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
+  PARSER.batch.7.c:
+    description: Schema-type-mismatch test 7.c — not yet authored for this family
+    reason: |-
+      Schema-type-mismatch test 7.c not yet authored for deepseek_v4; argument-shape coverage is provided by 7.a / 7.b for this family.
+  PARSER.batch.7.d:
+    description: Nested-arguments test 7.d — not yet authored for this family
+    reason: |-
+      Nested-arguments test 7.d not yet authored for deepseek_v4; see 7.a / 7.b for simpler argument shapes.

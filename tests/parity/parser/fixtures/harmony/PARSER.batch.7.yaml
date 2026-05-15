@@ -33,7 +33,6 @@ cases:
       sglang:
         calls: []
         normal_text: <|channel|>commentary to=functions.book_flight <|constrain|>json<|message|>{"destination":"Paris","passengers":2,"first_class":true}<|call|>
-        reason: "drops analysis-channel content from normal_text"
   PARSER.batch.7.b:
     description: Unicode + escaped chars
     ref: dynamo

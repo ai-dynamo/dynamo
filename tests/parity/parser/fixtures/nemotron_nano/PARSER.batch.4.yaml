@@ -53,3 +53,11 @@ cases:
         unavailable: vLLM has no parser for family='nemotron_nano'
       sglang:
         unavailable: SGLang has no detector for family='nemotron_nano'
+  PARSER.batch.4.b:
+    description: Malformed variant 4.b — not yet authored for this family
+    reason: |-
+      Malformed-input variant 4.b not yet authored for nemotron_nano; see 4.a / 4.c / 4.d for this family's malformed-input scenarios.
+  PARSER.batch.4.c:
+    description: Malformed variant 4.c — not yet authored for this family
+    reason: |-
+      Malformed-input variant 4.c not yet authored for nemotron_nano; see 4.a / 4.b / 4.d for this family's malformed-input scenarios.
