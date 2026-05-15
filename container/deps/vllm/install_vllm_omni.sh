@@ -6,22 +6,16 @@ set -euo pipefail
 
 : "${VLLM_OMNI_REF:?VLLM_OMNI_REF must be set}"
 
-VLLM_OMNI_REPO="${VLLM_OMNI_REPO:-https://github.com/vllm-project/vllm-omni.git}"
 VLLM_OMNI_PROTECTED_PACKAGES_FILE="${VLLM_OMNI_PROTECTED_PACKAGES_FILE:-/tmp/vllm_omni_protected_packages.txt}"
-VLLM_OMNI_TARGET_DEVICE="${VLLM_OMNI_TARGET_DEVICE:-cuda}"
 
-REPO_DIR="$(mktemp -d /tmp/vllm-omni.XXXXXX)"
 PROTECTED_CONSTRAINTS="$(mktemp /tmp/vllm-openai-protected.XXXXXX.txt)"
-VLLM_CLI_BACKUP="$(mktemp /tmp/vllm-openai-cli.XXXXXX)"
+VLLM_OMNI_VERSION="${VLLM_OMNI_REF#v}"
 
 cleanup() {
-  rm -rf "${REPO_DIR}" "${PROTECTED_CONSTRAINTS}" "${VLLM_CLI_BACKUP}"
+  rm -rf "${PROTECTED_CONSTRAINTS}"
 }
 
 trap cleanup EXIT
-
-cp /usr/local/bin/vllm "${VLLM_CLI_BACKUP}"
-git clone --depth 1 --branch "${VLLM_OMNI_REF}" "${VLLM_OMNI_REPO}" "${REPO_DIR}"
 
 python3 - "${VLLM_OMNI_PROTECTED_PACKAGES_FILE}" <<'PY' > "${PROTECTED_CONSTRAINTS}"
 import importlib.metadata as md
@@ -40,10 +34,6 @@ for raw_line in Path(sys.argv[1]).read_text().splitlines():
     print(f"{project_name}=={dist.version}")
 PY
 
-export VLLM_OMNI_TARGET_DEVICE
-uv pip install --system --no-deps "${REPO_DIR}"
 uv pip install --system \
   --constraints "${PROTECTED_CONSTRAINTS}" \
-  --requirement "${REPO_DIR}/requirements/common.txt" \
-  "onnxruntime>=1.23.2"
-install -m 755 "${VLLM_CLI_BACKUP}" /usr/local/bin/vllm
+  "vllm-omni==${VLLM_OMNI_VERSION}"

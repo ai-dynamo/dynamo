@@ -161,17 +161,13 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        git \
         jq \
         sox \
         libsox-fmt-all; \
     rm -rf /var/lib/apt/lists/*
 
-# Layer vLLM-Omni on top of the upstream vLLM runtime without letting pip
-# silently replace the base image's torch/vLLM/transformers stack. Keep only
-# the protected base-package policy locally, and let a tiny helper script fetch
-# the omni extras directly from the pinned upstream ref while restoring the
-# upstream `vllm` CLI that vllm-omni overwrites.
+# Layer the released vLLM-Omni package matching the pinned upstream ref while
+# constraining packages already solved in the upstream vLLM image.
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
     --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
     --mount=type=cache,target=/root/.cache/uv,sharing=locked \
