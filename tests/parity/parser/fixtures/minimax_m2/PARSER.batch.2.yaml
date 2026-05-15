@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# `|2+` simply means a single newline ("\n"); see tests/parity/README.md for the full decode.
 
 family: minimax_m2
 mode: batch
@@ -17,14 +19,14 @@ cases:
       </invoke>
       </minimax:tool_call>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
         properties:
           location:
             type: string
-    - &id002
+    - &id003
       name: get_time
       parameters:
         type: object
@@ -32,7 +34,7 @@ cases:
           timezone:
             type: string
     expected:
-      dynamo: &d_2_a
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
@@ -41,8 +43,8 @@ cases:
           arguments:
             timezone: EST
         normal_text: ''
-      vllm: *d_2_a
-      sglang: *d_2_a
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.2.b:
     description: Two back-to-back tool_call wrappers
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_minimax_m2_tool_parser.py#L207
@@ -58,10 +60,10 @@ cases:
       </invoke>
       </minimax:tool_call>
     tools:
-    - *id001
     - *id002
+    - *id003
     expected:
-      dynamo: &d_2_b
+      dynamo: &id004
         calls:
         - name: get_weather
           arguments:
@@ -70,18 +72,17 @@ cases:
           arguments:
             timezone: EST
         normal_text: ''
-      vllm: *d_2_b
+      vllm: *id004
       sglang:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_time
+          arguments:
             timezone: EST
-          name: get_time
-        normal_text: '
+        normal_text: |2+
 
-          '
   PARSER.batch.2.c:
     description: Parallel with surrounding narration
     ref: dynamo
@@ -95,10 +96,10 @@ cases:
       </invoke>
       </minimax:tool_call> Done.
     tools:
-    - *id001
     - *id002
+    - *id003
     expected:
-      dynamo: &d_2_c
+      dynamo: &id005
         calls:
         - name: get_weather
           arguments:
@@ -107,17 +108,16 @@ cases:
           arguments:
             timezone: EST
         normal_text: 'Both: '
-      vllm: *d_2_c
+      vllm: *id005
       sglang:
         calls:
-        - arguments:
+        - name: get_weather
+          arguments:
             location: NYC
-          name: get_weather
-        - arguments:
+        - name: get_time
+          arguments:
             timezone: EST
-          name: get_time
         normal_text: 'Both:  Done.'
-        reason: "trims trailing space from preceding normal_text"
   PARSER.batch.2.d:
     description: Same-name twice
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_minimax_m2_tool_parser.py#L331
@@ -131,10 +131,10 @@ cases:
       </invoke>
       </minimax:tool_call>
     tools:
-    - *id001
-    - *id001
+    - *id002
+    - *id002
     expected:
-      dynamo: &d_2_d
+      dynamo: &id006
         calls:
         - name: get_weather
           arguments:
@@ -143,5 +143,5 @@ cases:
           arguments:
             location: LA
         normal_text: ''
-      vllm: *d_2_d
-      sglang: *d_2_d
+      vllm: *id006
+      sglang: *id006

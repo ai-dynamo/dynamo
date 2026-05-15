@@ -33,8 +33,8 @@ cases:
         unavailable: vLLM has no parser for family='qwen25'
       sglang:
         calls: []
-        normal_text: '<tool_call>{"name": "book_flight", "arguments": {"destination": "Paris", "passengers": 2, "first_class": true}}</tool_call>'
-        reason: "SGLang Qwen25Detector returns calls=[] on the hermes-style <tool_call>...</tool_call> format Dynamo emits"
+        normal_text: '<tool_call>{"name": "book_flight", "arguments": {"destination": "Paris", "passengers": 2, "first_class":
+          true}}</tool_call>'
   PARSER.batch.7.b:
     description: Unicode + escaped chars
     ref: dynamo

@@ -14,7 +14,7 @@ cases:
       </｜DSML｜invoke>
       </｜DSML｜tool_calls>
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -22,37 +22,37 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_1
+      dynamo: &id001
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm: *d_1
+      vllm: *id001
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.3:
     description: No tool call (plain text)
     model_text: Hello, how can I help you today?
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_3
+      dynamo: &id003
         calls: []
         normal_text: Hello, how can I help you today?
-      vllm: *d_3
+      vllm: *id003
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.9:
     description: Empty input
     model_text: ''
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_9
+      dynamo: &id004
         calls: []
         normal_text: ''
-      vllm: *d_9
+      vllm: *id004
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
   PARSER.batch.10:
@@ -67,9 +67,9 @@ cases:
       </｜DSML｜invoke>
       </｜DSML｜tool_calls>
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_10
+      dynamo: &id005
         calls:
         - name: get_weather
           arguments:
@@ -78,6 +78,6 @@ cases:
           arguments:
             location: LA
         normal_text: ''
-      vllm: *d_10
+      vllm: *id005
       sglang:
         unavailable: SGLang has no detector for family='deepseek_v4'
