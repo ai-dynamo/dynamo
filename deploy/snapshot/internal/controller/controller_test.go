@@ -732,6 +732,46 @@ func TestReconcileRestorePodResolvesContainerBeforePodStatus(t *testing.T) {
 	t.Fatalf("expected RestoreRequested event after node-runtime container resolution; actions=%#v", clientset.Actions())
 }
 
+func TestPollForContainerIDSkipsWhenRestoreAttemptAlreadyHeld(t *testing.T) {
+	checkpointID := "abc123"
+	labels := map[string]string{
+		snapshotprotocol.CheckpointIDLabel: checkpointID,
+	}
+	stalePod := makePod("test-pod", "default", testNodeName, corev1.PodRunning, false, labels, nil)
+	stalePod.Status.ContainerStatuses = nil
+
+	w := makeTestController(t)
+	w.runtime = &fakeRuntime{containerIDByPod: testContainerID}
+	clientset := w.clientset.(*fake.Clientset)
+	dir := filepath.Join(w.config.Storage.BasePath, checkpointID, "versions", snapshotprotocol.DefaultCheckpointArtifactVersion)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("failed to create checkpoint dir: %v", err)
+	}
+
+	resolveKey := "default/test-pod/main/resolve"
+	restoreAttemptKey := "default/test-pod/main/" + testContainerID
+	w.inFlight[resolveKey] = struct{}{}
+	w.inFlight[restoreAttemptKey] = struct{}{}
+	w.pollForContainerID(context.Background(), stalePod, "main", checkpointID, "default/test-pod", resolveKey)
+
+	if _, held := w.inFlight[resolveKey]; held {
+		t.Fatal("expected resolver key to be released")
+	}
+	if _, held := w.inFlight[restoreAttemptKey]; !held {
+		t.Fatal("expected existing restore attempt key to remain held")
+	}
+	for _, action := range clientset.Actions() {
+		create, ok := action.(clientgotesting.CreateAction)
+		if !ok || create.GetResource().Resource != "events" {
+			continue
+		}
+		event, ok := create.GetObject().(*corev1.Event)
+		if ok && event.Reason == "RestoreRequested" {
+			t.Fatalf("stale resolver should not start restore while attempt key is held; actions=%#v", clientset.Actions())
+		}
+	}
+}
+
 func TestRunCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{

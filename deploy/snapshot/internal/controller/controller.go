@@ -52,8 +52,9 @@ type checkpointLocations struct {
 }
 
 const (
-	restoreContainerResolveInterval = 50 * time.Millisecond
-	restoreContainerResolveTimeout  = 30 * time.Second
+	restoreContainerResolveInterval       = 50 * time.Millisecond
+	restoreContainerResolveAttemptTimeout = 1 * time.Second
+	restoreContainerResolveTimeout        = 30 * time.Second
 )
 
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
@@ -335,12 +336,27 @@ func (w *NodeController) pollForContainerID(
 	containerName, checkpointID, podKey, resolveKey string,
 ) {
 	defer w.release(resolveKey)
-	deadline := time.After(restoreContainerResolveTimeout)
+	deadlineAt := time.Now().Add(restoreContainerResolveTimeout)
+	deadline := time.NewTimer(time.Until(deadlineAt))
+	defer deadline.Stop()
 	tick := time.NewTicker(restoreContainerResolveInterval)
 	defer tick.Stop()
 	for {
+		resolveCtx, cancel := restoreContainerResolveAttemptContext(ctx, deadlineAt)
+		containerID, err := w.runtime.ResolveContainerIDByPod(resolveCtx, pod.Name, pod.Namespace, containerName)
+		cancel()
+		if err == nil && containerID != "" {
+			w.log.V(1).Info("Resolved restore container via node runtime",
+				"pod", podKey,
+				"container", containerName,
+				"container_id", containerID,
+			)
+			w.startRestoreForContainer(ctx, pod, containerName, containerID, checkpointID, podKey)
+			return
+		}
+
 		select {
-		case <-deadline:
+		case <-deadline.C:
 			w.log.V(1).Info("Timed out polling node runtime for restore container",
 				"pod", podKey,
 				"container", containerName,
@@ -349,12 +365,16 @@ func (w *NodeController) pollForContainerID(
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			if id, err := w.runtime.ResolveContainerIDByPod(ctx, pod.Name, pod.Namespace, containerName); err == nil && id != "" {
-				w.startRestoreForContainer(ctx, pod, containerName, id, checkpointID, podKey)
-				return
-			}
 		}
 	}
+}
+
+func restoreContainerResolveAttemptContext(ctx context.Context, deadlineAt time.Time) (context.Context, context.CancelFunc) {
+	attemptDeadline := time.Now().Add(restoreContainerResolveAttemptTimeout)
+	if deadlineAt.Before(attemptDeadline) {
+		attemptDeadline = deadlineAt
+	}
+	return context.WithDeadline(ctx, attemptDeadline)
 }
 
 func (w *NodeController) startRestoreForContainer(
@@ -615,6 +635,12 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 				return fmt.Errorf("failed to persist terminal restore status %q: %w", value, err)
 			}
 			return fmt.Errorf("failed to update restore status %q: %w", value, err)
+		}
+		if value == snapshotprotocol.RestoreStatusCompleted || value == snapshotprotocol.RestoreStatusFailed {
+			// Keep the attempt key for this controller lifetime so a stale
+			// runtime resolver cannot start the same container again after
+			// terminal status has been persisted.
+			releaseOnExit = false
 		}
 		return nil
 	}
