@@ -13,16 +13,19 @@ cases:
       {}
       ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
     tools:
-    - &id001
+    - &id002
       name: get_time
       parameters:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &id001
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.6.b:
     description: Whitespace inside empty { } (newlines)
     ref: dynamo
@@ -33,26 +36,28 @@ cases:
       }
       ```<｜tool▁call▁end｜><｜tool▁calls▁end｜>
     tools:
-    - *id001
+    - *id002
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
-    # TODO(research): vllm diverges — vLLM rejects whitespace inside empty {} when wrapped in fenced ```json``` block
-    # vllm produces:
-    #   calls: []
-    #   normal_text: None
+      dynamo: &id003
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang: *id003
   PARSER.batch.6.c:
     description: No fenced JSON block (function name only)
     ref: dynamo
     model_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time<｜tool▁call▁end｜><｜tool▁calls▁end｜>
     tools:
-    - *id001
+    - *id002
     expected:
-      calls: []
-      normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time<｜tool▁call▁end｜><｜tool▁calls▁end｜>
-    # TODO(research): vllm diverges — both return calls=[]; vLLM nullifies normal_text on this recovery path, Dynamo preserves the raw input as normal_text
-    # vllm produces:
-    #   calls: []
-    #   normal_text: None
+      dynamo: &id004
+        calls: []
+        normal_text: <｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_time<｜tool▁call▁end｜><｜tool▁calls▁end｜>
+      vllm:
+        calls: []
+        normal_text: ''
+      sglang: *id004

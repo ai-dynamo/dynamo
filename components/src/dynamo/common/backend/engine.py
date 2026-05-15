@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any, Optional, Required, TypedDict
 
 from dynamo._core import Context
 
+from .publisher import KvEventSource, SnapshotSource
+
 if TYPE_CHECKING:
     from .worker import WorkerConfig
 
@@ -69,6 +71,16 @@ class EngineConfig:
     total_kv_blocks: Optional[int] = None
     max_num_seqs: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
+    # Number of data-parallel ranks this worker hosts (defaults to 1).
+    # Engines with attention-DP set this from their engine-side count
+    # (e.g. TRT-LLM's `get_attention_dp_size()`).
+    data_parallel_size: Optional[int] = None
+    # Global index of the first DP rank this worker hosts (defaults to 0).
+    # Non-zero only under multi-worker DP layouts where each worker owns a
+    # sub-range — vLLM hybrid/external LB, SGLang DP-attention across
+    # multiple nodes. The router enumerates ranks
+    # `[data_parallel_start_rank, data_parallel_start_rank + data_parallel_size)`.
+    data_parallel_start_rank: Optional[int] = None
     # Bootstrap address advertised to decode peers. Only meaningful for
     # backends with a Dynamo-level host/port handshake (today: SGLang).
     # Backends whose KV transport is internal — TRT-LLM, vLLM
@@ -193,3 +205,14 @@ class LLMEngine(ABC):
         ``cleanup()`` call after a successful first is a safe no-op.
         """
         ...
+
+    async def kv_event_sources(self) -> list[KvEventSource]:
+        """KV event sources, one per data-parallel rank. Default opts out
+        of KV-aware routing. ``Worker`` calls once after :meth:`start`."""
+        return []
+
+    async def metrics_sources(self) -> list[SnapshotSource]:
+        """Metrics snapshot sources, one per data-parallel rank. Default
+        opts out of metrics publishing. ``Worker`` calls once after
+        :meth:`start`."""
+        return []

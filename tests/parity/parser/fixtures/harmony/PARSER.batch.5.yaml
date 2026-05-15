@@ -17,8 +17,14 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
+      dynamo:
+        calls: []
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang:
+        calls: []
+        normal_text: ''
   PARSER.batch.5.b:
     description: Bare <|call|> without preceding channel envelope
     ref: dynamo
@@ -26,8 +32,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|call|>
+      dynamo: &id002
+        calls: []
+        normal_text: <|call|>
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang: *id002
   PARSER.batch.5.c:
     description: Truncation mid-message JSON
     ref: dynamo
@@ -35,5 +45,55 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"loc
+      dynamo:
+        calls: []
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"loc
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: I'll start by fetching the weather for both Boston and New York at the same time!<|start|>assistant<|channel|>commentary
+      to=functions.get_weather <|constrain|>json<|message|>{"location":"Boston"}<|call|><|start|>assistant<|channel|>commentary
+      to=functions.get_weather <|constrain|>json<|message|>{"location":"New York"}
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<|start|>assistant<|channel|>commentary
+          to=functions.get_weather <|constrain|>json<|message|>{"location":"Boston"}<|call|><|start|>assistant<|channel|>commentary
+          to=functions.get_weather <|constrain|>json<|message|>{"location":"New York"}
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: I'll start by fetching the weather for both Boston and New York at the same time!<|start|>assistant<|channel|>commentary
+      to=functions.get_weather <|constrain|>json<|message|>{"location":"Boston"}<|call|><|start|>assistant<|channel|>commentary
+      to=functions.get_weather <|constrain|>json<|message|>{"location":"New York
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<|start|>assistant<|channel|>commentary
+          to=functions.get_weather <|constrain|>json<|message|>{"location":"Boston"}<|call|><|start|>assistant<|channel|>commentary
+          to=functions.get_weather <|constrain|>json<|message|>{"location":"New York
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!

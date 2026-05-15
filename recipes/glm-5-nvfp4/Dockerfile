@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# TODO: bump to lmsysorg/sglang:v0.5.11-cu130
 ARG BASE_IMAGE="lmsysorg/sglang:v0.5.10.post1-cu130"
 ARG ARCH=arm64
 ARG DYNAMO_COMMIT="main"

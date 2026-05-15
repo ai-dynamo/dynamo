@@ -17,6 +17,7 @@ pub mod args;
 pub mod disagg;
 pub mod engine;
 pub mod error;
+mod publisher;
 pub mod run;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -28,8 +29,9 @@ pub use args::CommonArgs;
 pub use disagg::DisaggregationMode;
 pub use engine::{
     AsyncEngineContext, BootstrapInfo, CompletionUsage, EngineConfig, FinishReason,
-    GenerateContext, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, OutputOptions, PrefillResult,
-    PreprocessedRequest, SamplingOptions, StopConditions, chunk, usage,
+    GenerateContext, KvEventPublisher, KvEventSource, LLMEngine, LLMEngineOutput,
+    LLMEngineOutputExt, Metrics, MetricsSource, OnPublisherReady, OutputOptions, PrefillResult,
+    PreprocessedRequest, SamplingOptions, SnapshotFn, StopConditions, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use run::run;

@@ -369,6 +369,15 @@ def build_sampling_params(
         ):
             existing = sampling_params.stop_token_ids or []
             sampling_params.stop_token_ids = list(set(existing).union(value))
+        # Dynamo's StopConditions uses `max_thinking_tokens`; vLLM 0.20+ exposes
+        # the same concept as `thinking_token_budget` on SamplingParams and
+        # enforces it via the builtin thinking-budget logits processor.
+        if (
+            key == "max_thinking_tokens"
+            and value is not None
+            and hasattr(sampling_params, "thinking_token_budget")
+        ):
+            sampling_params.thinking_token_budget = value
 
     # Apply output_options (logprobs, prompt_logprobs, etc.)
     output_options = request.get("output_options", {})

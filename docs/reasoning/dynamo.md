@@ -41,21 +41,21 @@ require the opening tag to be present in the model output.
 | Parser Name | Models | Upstream name | Force-reasoning | Notes |
 |---|---|---|---|---|
 | `kimi_k25` | Kimi K2.5 | Dynamo-only | Yes | `<think>...</think>` with force-reasoning |
-| `qwen3` | Qwen3.5, QwQ-32B, Qwen3-Think, Qwen3-Coder | | No | `<think>...</think>` |
-| `deepseek_v4` | DeepSeek V4 Pro / Flash | vLLM: `deepseek_v4`; SGLang: `deepseek-v4` | No | `<think>...</think>`. Aliases: `deepseek-v4`, `deepseekv4` |
-| `basic` | Generic CoT models | Dynamo-only | No | Plain `<think>...</think>` |
-| `deepseek_r1` | DeepSeek R1, DeepSeek V3.1, DeepSeek V3.2 | | Yes | Pass explicitly for V3.1/V3.2 (no alias) |
-| `gemma4` | Google Gemma 4 (thinking models) | vLLM: `gemma4` | No | `<\|channel>thought\n...<channel\|>` with `thought\n` role label stripped. Aliases: `gemma-4` |
-| `glm45` | GLM-4.5, GLM-4.7 | Dynamo-only | No | Alias for `nemotron_deci`. `<think>...</think>` |
-| `gpt_oss` | gpt-oss-20b / -120b | Dynamo-only | No | Harmony channel reasoning format |
-| `granite` | Granite 3.x | | No | `Here's my thought process:` / `Here's my response:` |
 | `kimi` | Kimi K2 Instruct / Thinking | Dynamo-only | No | `◁think▷...◁/think▷` |
 | `minimax_append_think` | MiniMax M2 / M2.1 | Dynamo-only | No | Implicit opening `<think>` prepended |
-| `mistral` | Magistral | | Yes | `[THINK]...[/THINK]` |
+| `deepseek_v4` | DeepSeek V4 Pro / Flash | vLLM: `deepseek_v4`; SGLang: `deepseek-v4` | No | `<think>...</think>`. Aliases: `deepseek-v4`, `deepseekv4` |
+| `deepseek_r1` | DeepSeek R1, DeepSeek V3.1, DeepSeek V3.2 | | Yes | Pass explicitly for V3.1/V3.2 (no alias) |
+| `qwen3` | Qwen3.5, QwQ-32B, Qwen3-Think, Qwen3-Coder | | No | `<think>...</think>` |
+| `glm45` | GLM-4.5, GLM-4.7 | Dynamo-only | No | Alias for `nemotron_deci`. `<think>...</think>` |
 | `nemotron3` | Nemotron-3 / Mini | vLLM: `nemotron_v3` | Yes | Alias for `deepseek_r1`. Also accepts `nemotron_v3` |
 | `nemotron_deci` | Nemotron-Super / -Ultra / -Deci, Llama-Nemotron | Dynamo-only | No | `<think>...</think>` |
 | `nemotron_nano` | Nemotron-Nano | Dynamo-only | Yes | Alias for `deepseek_r1` |
+| `gemma4` | Google Gemma 4 (thinking models) | vLLM: `gemma4` | No | `<\|channel>thought\n...<channel\|>` with `thought\n` role label stripped. Aliases: `gemma-4` |
+| `gpt_oss` | gpt-oss-20b / -120b | Dynamo-only | No | Harmony channel reasoning format |
+| `mistral` | Magistral | | Yes | `[THINK]...[/THINK]` |
+| `granite` | Granite 3.x | | No | `Here's my thought process:` / `Here's my response:` |
 | `step3` | Step-3 / Step-3-Reasoning | Dynamo-only | Yes | `<think>...</think>` |
+| `basic` | Generic CoT models | Dynamo-only | No | Plain `<think>...</think>` |
 
 ## Common Parser Pairings
 

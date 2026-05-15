@@ -9,22 +9,28 @@ cases:
     ref: dynamo
     model_text: '[get_time()]'
     tools:
-    - &id001
+    - &id002
       name: get_time
       parameters:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &id001
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
   PARSER.batch.6.b:
     description: Whitespace inside parens
     ref: dynamo
     model_text: '[get_time( )]'
     tools:
-    - *id001
+    - *id002
     expected:
-      calls: []
-      normal_text: '[get_time( )]'
+      dynamo: &id003
+        calls: []
+        normal_text: '[get_time( )]'
+      vllm: *id003
+      sglang: *id003

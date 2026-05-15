@@ -17,15 +17,17 @@ cases:
           location:
             type: string
     expected:
-      calls:
-      - name: get_weather
-        arguments:
-          location: NYC
-      normal_text: ''
-    # TODO(research): vllm diverges — impl-defined recovery contract (see PARSER_CASES.md)
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
   PARSER.batch.5.b:
     description: Closing </tool_calls> without matching <tool_calls> open
     ref: dynamo
@@ -33,8 +35,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls>'
+      dynamo: &id002
+        calls: []
+        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}]</tool_calls>'
+      vllm: *id002
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
   PARSER.batch.5.c:
     description: Truncation mid-arguments JSON
     ref: dynamo
@@ -42,5 +48,55 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"loc'
+      dynamo: &id003
+        calls: []
+        normal_text: '<tool_calls>[{"name": "get_weather", "arguments": {"loc'
+      vllm: *id003
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_calls>[{"name": "get_weather",
+      "arguments": {"location": "Boston"}}, {"name": "get_weather", "arguments": {"location": "New York"}}]'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        - name: get_weather
+          arguments:
+            location: New York
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm:
+        calls: []
+        normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_calls>[{"name":
+          "get_weather", "arguments": {"location": "Boston"}}, {"name": "get_weather", "arguments": {"location": "New York"}}]'
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_calls>[{"name": "get_weather",
+      "arguments": {"location": "Boston"}}, {"name": "get_weather", "arguments": {"location": "New York'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        - name: get_weather
+          arguments:
+            location: New York
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+      vllm:
+        calls: []
+        normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_calls>[{"name":
+          "get_weather", "arguments": {"location": "Boston"}}, {"name": "get_weather", "arguments": {"location": "New York'
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'

@@ -17,8 +17,17 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <|tool_call>nonsense<tool_call|>
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: <|tool_call>nonsense<tool_call|>
+        reason: vLLM leaks the tool call tag into normal_text on the recovery path
+      sglang:
+        calls: []
+        normal_text: <|tool_call>nonsense<tool_call|>
+        reason: SGLang leaks the tool call tag into normal_text on the recovery path
   PARSER.batch.4.b:
     description: Missing close brace in body
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L572
@@ -26,8 +35,20 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|><tool_call|>
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|><tool_call|>
+        reason: vLLM leaks the tool call tag into normal_text on the recovery path
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+        reason: accepts missing close brace before closing sentinel
   PARSER.batch.4.c:
     description: No call:name prefix
     ref: dynamo
@@ -35,8 +56,17 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|tool_call>{location:<|"|>NYC<|"|>}<tool_call|>
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: <|tool_call>{location:<|"|>NYC<|"|>}<tool_call|>
+        reason: vLLM leaks the tool call tag into normal_text on the recovery path
+      sglang:
+        calls: []
+        normal_text: <|tool_call>{location:<|"|>NYC<|"|>}<tool_call|>
+        reason: SGLang leaks the tool call tag into normal_text on the recovery path
   PARSER.batch.4.d:
     description: Mismatched sentinels
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_gemma4_tool_parser.py#L252
@@ -44,5 +74,14 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
+        reason: vLLM leaks the tool call tag into normal_text on the recovery path
+      sglang:
+        calls: []
+        normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
+        reason: SGLang leaks the tool call tag into normal_text on the recovery path
