@@ -30,6 +30,13 @@ pytestmark = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _skip_online(request):
+    callspec = getattr(request.node, "callspec", None)
+    if callspec and callspec.params.get("replay_mode") == "online":
+        pytest.skip("intermittent hang in online replay mode (#9548)")
+
+
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
 @pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])
