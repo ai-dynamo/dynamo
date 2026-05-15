@@ -190,6 +190,7 @@ const (
 	PodInfoFileDynComponent             = "dyn_component"
 	PodInfoFileDynParentDGDName         = "dyn_parent_dgd_k8s_name"
 	PodInfoFileDynParentDGDNamespace    = "dyn_parent_dgd_k8s_namespace"
+	PodInfoFileSnapshotRestoreTrigger   = "snapshot_restore_trigger"
 
 	// Worker hash rolling-update annotations are controller-owned annotations on
 	// DynamoGraphDeployment. They record the active worker generation and must not

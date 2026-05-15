@@ -59,6 +59,11 @@ GMS_LOAD_COMPLETE_FILE_ENV = "GMS_LOAD_COMPLETE_FILE"
 GMS_TRANSFER_BACKEND_ENV = "GMS_TRANSFER_BACKEND"
 GMS_POD_UID_ENV = "GMS_POD_UID"
 GMS_WEIGHTS_CHECKPOINT_DIR_ENV = "GMS_WEIGHTS_CHECKPOINT_DIR"
+GMS_RESTORE_TRIGGER_FILE_ENV = "GMS_RESTORE_TRIGGER_FILE"
+GMS_RESTORE_TRIGGER_ANNOTATION_ENV = "GMS_RESTORE_TRIGGER_ANNOTATION"
+RESTORE_TRIGGER_POLL_SECONDS = 0.05
+K8S_API_TIMEOUT_SECONDS = 2.0
+SERVICE_ACCOUNT_DIR = Path("/var/run/secrets/kubernetes.io/serviceaccount")
 
 
 def _load_device(
@@ -112,6 +117,115 @@ def _clear_completion_sentinel(checkpoint_dir: str) -> None:
         pass
 
 
+def _wait_for_restore_trigger_file(path: Path) -> None:
+    _startup_log("restore_trigger_file_wait_start", f"path={path}")
+    while True:
+        try:
+            trigger = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            trigger = ""
+        if trigger:
+            logger.info("Observed GMS restore trigger: file=%s token=%s", path, trigger)
+            _startup_log("restore_trigger_file_wait_done", f"token={trigger}")
+            return
+        time.sleep(RESTORE_TRIGGER_POLL_SECONDS)
+
+
+def _k8s_pod_annotation_reader(annotation: str):
+    import json
+    import ssl
+    from urllib import parse, request
+
+    host = os.environ.get("KUBERNETES_SERVICE_HOST", "").strip()
+    port = os.environ.get("KUBERNETES_SERVICE_PORT_HTTPS", "").strip() or "443"
+    pod_name = os.environ.get("HOSTNAME", "").strip()
+    namespace = (SERVICE_ACCOUNT_DIR / "namespace").read_text(encoding="utf-8").strip()
+    token = (SERVICE_ACCOUNT_DIR / "token").read_text(encoding="utf-8").strip()
+    if not host or not pod_name or not namespace or not token:
+        raise RuntimeError(
+            "missing Kubernetes service host, pod name, namespace, or service account token"
+        )
+
+    url = (
+        f"https://{host}:{port}/api/v1/namespaces/"
+        f"{parse.quote(namespace, safe='')}/pods/{parse.quote(pod_name, safe='')}"
+    )
+    ca_path = SERVICE_ACCOUNT_DIR / "ca.crt"
+    context = (
+        ssl.create_default_context(cafile=str(ca_path))
+        if ca_path.exists()
+        else ssl.create_default_context()
+    )
+
+    def read_annotation() -> str:
+        req = request.Request(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with request.urlopen(
+            req,
+            context=context,
+            timeout=K8S_API_TIMEOUT_SECONDS,
+        ) as resp:
+            pod = json.loads(resp.read())
+        annotations = pod.get("metadata", {}).get("annotations") or {}
+        return str(annotations.get(annotation, "")).strip()
+
+    return namespace, pod_name, read_annotation
+
+
+def _wait_for_restore_trigger_annotation(annotation: str) -> bool:
+    try:
+        namespace, pod_name, read_annotation = _k8s_pod_annotation_reader(annotation)
+    except Exception as exc:
+        logger.warning(
+            "Unable to configure GMS restore trigger annotation watch: annotation=%s error=%s",
+            annotation,
+            exc,
+        )
+        return False
+
+    _startup_log(
+        "restore_trigger_k8s_wait_start",
+        f"annotation={annotation} pod={namespace}/{pod_name}",
+    )
+    next_error_log = 0.0
+    while True:
+        try:
+            trigger = read_annotation()
+        except Exception as exc:
+            now = time.monotonic()
+            if now >= next_error_log:
+                logger.warning(
+                    "Waiting for GMS restore trigger annotation failed: annotation=%s error=%s",
+                    annotation,
+                    exc,
+                )
+                next_error_log = now + 5.0
+            trigger = ""
+        if trigger:
+            logger.info(
+                "Observed GMS restore trigger: annotation=%s token=%s",
+                annotation,
+                trigger,
+            )
+            _startup_log("restore_trigger_k8s_wait_done", f"token={trigger}")
+            return True
+        time.sleep(RESTORE_TRIGGER_POLL_SECONDS)
+
+
+def _wait_for_restore_trigger() -> None:
+    annotation = os.environ.get(GMS_RESTORE_TRIGGER_ANNOTATION_ENV, "").strip()
+    if annotation and _wait_for_restore_trigger_annotation(annotation):
+        return
+
+    trigger_file = os.environ.get(GMS_RESTORE_TRIGGER_FILE_ENV, "").strip()
+    if not trigger_file:
+        return
+
+    _wait_for_restore_trigger_file(Path(trigger_file))
+
+
 def _list_checkpoint_devices(checkpoint_dir: str) -> list[int]:
     devices: list[int] = []
     for child in Path(checkpoint_dir).iterdir():
@@ -157,6 +271,7 @@ def main() -> None:
     _startup_log("clear_sentinel_start")
     _clear_completion_sentinel(control_dir)
     _startup_log("clear_sentinel_done")
+    _wait_for_restore_trigger()
     _startup_log("discover_devices_start")
     devices = _list_checkpoint_devices(checkpoint_dir)
     _startup_log(

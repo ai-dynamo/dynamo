@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -42,6 +43,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -921,6 +923,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	podLabels := dynamo.GetDCDKubeLabels(dcd)
 	podAnnotations := dynamo.GetDCDKubeAnnotations(dcd)
 	kubeName := dcd.Name
+	resourceAnnotations := getResourceAnnotations(dcd)
 
 	// Convert user-provided metrics annotation into controller-managed label
 	// By default (no annotation), metrics are enabled
@@ -1006,6 +1009,12 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 
+	// The benchmark-only manual restore mode is configured on the DCD
+	// resource annotations by the DGD controller. Preserve it before restore
+	// metadata stamping so snapshot-agent can wait for the explicit trigger.
+	if strings.TrimSpace(resourceAnnotations[snapshotprotocol.RestoreModeAnnotation]) == snapshotprotocol.RestoreModeManual {
+		podAnnotations[snapshotprotocol.RestoreModeAnnotation] = snapshotprotocol.RestoreModeManual
+	}
 	// Restore labels are operator-controlled state. Clear stale values after
 	// metadata merge and only reapply them when checkpoint material is ready.
 	if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(podLabels, podAnnotations, checkpointInfo, r.Config.Checkpoint.Storage); err != nil {

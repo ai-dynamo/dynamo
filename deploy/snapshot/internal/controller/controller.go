@@ -139,7 +139,10 @@ func (w *NodeController) Run(ctx context.Context) error {
 	go ckptFactory.Start(w.stopCh)
 	syncFuncs = append(syncFuncs, ckptInformer.HasSynced)
 
-	// Restore pods carry a checkpoint ID but are not checkpoint sources.
+	// Restore informer: pods that carry a checkpoint-id label but are not
+	// themselves the checkpoint source. A single set-based selector
+	// expresses this without a dedicated "is restore target" boolean
+	// label parallel to the target-containers annotation.
 	restoreSel, err := labels.Parse(snapshotprotocol.CheckpointIDLabel + ",!" + snapshotprotocol.CheckpointSourceLabel)
 	if err != nil {
 		return fmt.Errorf("failed to build restore label selector: %w", err)
@@ -273,6 +276,13 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 		return
 	}
 
+	restoreMode := strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreModeAnnotation])
+	restoreTrigger := strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreTriggerAnnotation])
+	if restoreMode == snapshotprotocol.RestoreModeManual && restoreTrigger == "" {
+		w.log.V(1).Info("Restore pod is waiting for manual trigger", "pod", podKey)
+		return
+	}
+
 	targets, err := snapshotprotocol.TargetContainersFromAnnotations(pod.Annotations, 1, 0)
 	if err != nil {
 		w.log.Error(err, "Restore pod missing target-containers annotation", "pod", podKey)
@@ -290,12 +300,19 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 		}
 	}
 
+	// For each target container: check if kubelet has a running container
+	// for it, check the per-container status annotation, and schedule a
+	// goroutine when (a) we see a fresh containerd ID and (b) the status is
+	// not already terminal for that ID.
 	for _, containerName := range targets {
 		w.maybeStartRestoreForContainer(ctx, pod, containerName, checkpointID, podKey)
 	}
 }
 
-// maybeStartRestoreForContainer starts one restore worker per fresh container.
+// maybeStartRestoreForContainer handles one named target container in a
+// restore pod. It is a no-op when the container has not been scheduled by
+// kubelet yet, or when the agent has already recorded a terminal status for
+// the current containerd container ID.
 func (w *NodeController) maybeStartRestoreForContainer(
 	ctx context.Context,
 	pod *corev1.Pod,
@@ -381,6 +398,21 @@ func (w *NodeController) startRestoreForContainer(
 		w.log.Error(err, "Restore target container name cannot be used in restore status annotation key", "pod", podKey, "container", containerName)
 		return
 	}
+
+	restoreTrigger := strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreTriggerAnnotation])
+	if strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreModeAnnotation]) == snapshotprotocol.RestoreModeManual {
+		if restoreTrigger == "" {
+			w.log.V(1).Info("Restore target is waiting for manual trigger",
+				"pod", podKey,
+				"container", containerName,
+			)
+			return
+		}
+		if strings.TrimSpace(pod.Annotations[annotationKeys.ProcessedTrigger]) == restoreTrigger {
+			return
+		}
+	}
+
 	annotationStatus := pod.Annotations[annotationKeys.Status]
 	annotationContainerID := pod.Annotations[annotationKeys.ContainerID]
 	if annotationContainerID == containerID && (annotationStatus == snapshotprotocol.RestoreStatusCompleted || annotationStatus == snapshotprotocol.RestoreStatusFailed) {
@@ -425,11 +457,12 @@ func (w *NodeController) startRestoreForContainer(
 		"pod", podKey,
 		"checkpoint_id", checkpointID,
 		"container", containerName,
+		"trigger", restoreTrigger,
 	)
 	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "RestoreRequested", fmt.Sprintf("Restore requested from checkpoint %s for container %s", checkpointID, containerName))
 
 	go func() {
-		if err := w.runRestore(ctx, pod, containerName, containerID, checkpointID, checkpointLocation, restoreAttemptKey, startedAt); err != nil {
+		if err := w.runRestore(ctx, pod, containerName, containerID, checkpointID, checkpointLocation, restoreTrigger, restoreAttemptKey, startedAt); err != nil {
 			opLog := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container", containerName)
 			opLog.Error(err, "Restore controller worker failed")
 			emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
@@ -604,7 +637,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 // startup probe waits on the restore-complete sentinel, then its normal
 // readiness probe (if any) decides when the container is ready. The pod only
 // becomes Ready once every restored and cold-started container is ready.
-func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, containerName, containerID, checkpointID string, checkpointLocation checkpointLocations, restoreAttemptKey string, startedAt time.Time) error {
+func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, containerName, containerID, checkpointID string, checkpointLocation checkpointLocations, restoreTrigger string, restoreAttemptKey string, startedAt time.Time) error {
 	releaseOnExit := true
 	defer func() {
 		if releaseOnExit {
@@ -623,6 +656,13 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		annotations, err := snapshotprotocol.RestoreStatusAnnotations(containerName, value, containerID)
 		if err != nil {
 			return err
+		}
+		if restoreTrigger != "" {
+			annotationKeys, err := snapshotprotocol.RestoreStatusAnnotationKeysFor(containerName)
+			if err != nil {
+				return err
+			}
+			annotations[annotationKeys.ProcessedTrigger] = restoreTrigger
 		}
 		if err := annotatePod(ctx, w.clientset, log, pod, annotations); err != nil {
 			if value == snapshotprotocol.RestoreStatusCompleted || value == snapshotprotocol.RestoreStatusFailed {
@@ -650,7 +690,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		return fmt.Errorf("failed to annotate pod with restore in_progress: %w", err)
 	}
 
-	// Run the restore orchestrator (inspect + nsrestore).
+	// Step 1: Run the restore orchestrator (inspect + nsrestore)
 	req := executor.RestoreRequest{
 		CheckpointID:                checkpointID,
 		CheckpointLocation:          checkpointLocation.HostPath,
@@ -679,8 +719,9 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		}
 		return nil
 	}
-	// Any PID inside the container mount namespace reaches the control
-	// volume through /host/proc/<pid>/root.
+	// Step 2: Write restore-complete sentinel. placeholderHostPID came back
+	// from executor.Restore — any PID inside the container's mount namespace
+	// reaches /snapshot-control via /host/proc/<pid>/root.
 	if err := snapshotruntime.WriteControlSentinel(placeholderHostPID, snapshotprotocol.RestoreCompleteFile); err != nil {
 		log.Error(err, "Failed to write restore-complete sentinel")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
