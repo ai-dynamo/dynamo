@@ -52,9 +52,8 @@ type checkpointLocations struct {
 }
 
 const (
-	restoreContainerResolveInterval  = 50 * time.Millisecond
-	restoreContainerResolveTimeout   = 30 * time.Second
-	restoreContainerResolveKeySuffix = "resolve"
+	restoreContainerResolveInterval = 50 * time.Millisecond
+	restoreContainerResolveTimeout  = 30 * time.Second
 )
 
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
@@ -296,6 +295,10 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 }
 
 // maybeStartRestoreForContainer starts one restore worker per fresh container.
+// If pod.Status doesn't carry the ContainerID yet (the kubelet's status patch
+// can lag container exec by 1-5 s), poll the OCI runtime directly. The
+// resolveKey lease prevents the chatty pod-informer from fanning out into
+// many concurrent pollers for the same (pod, container).
 func (w *NodeController) maybeStartRestoreForContainer(
 	ctx context.Context,
 	pod *corev1.Pod,
@@ -303,13 +306,20 @@ func (w *NodeController) maybeStartRestoreForContainer(
 	checkpointID string,
 	podKey string,
 ) {
-	containerID := restoreContainerIDFromStatus(pod, containerName)
-	if containerID == "" {
-		w.maybeStartRestoreContainerResolver(ctx, pod.DeepCopy(), containerName, checkpointID, podKey)
+	if containerID := restoreContainerIDFromStatus(pod, containerName); containerID != "" {
+		w.startRestoreForContainer(ctx, pod, containerName, containerID, checkpointID, podKey)
 		return
 	}
 
-	w.startRestoreForContainer(ctx, pod, containerName, containerID, checkpointID, podKey)
+	resolveKey := fmt.Sprintf("%s/%s/resolve", podKey, containerName)
+	if !w.tryAcquire(resolveKey) {
+		return
+	}
+	w.log.V(1).Info("Restore pod has no running container in Kubernetes status yet; polling node runtime",
+		"pod", podKey,
+		"container", containerName,
+	)
+	go w.pollForContainerID(ctx, pod.DeepCopy(), containerName, checkpointID, podKey, resolveKey)
 }
 
 func restoreContainerIDFromStatus(pod *corev1.Pod, containerName string) string {
@@ -321,51 +331,32 @@ func restoreContainerIDFromStatus(pod *corev1.Pod, containerName string) string 
 	return ""
 }
 
-func (w *NodeController) maybeStartRestoreContainerResolver(
+func (w *NodeController) pollForContainerID(
 	ctx context.Context,
 	pod *corev1.Pod,
-	containerName string,
-	checkpointID string,
-	podKey string,
+	containerName, checkpointID, podKey, resolveKey string,
 ) {
-	resolveKey := fmt.Sprintf("%s/%s/%s", podKey, containerName, restoreContainerResolveKeySuffix)
-	if !w.tryAcquire(resolveKey) {
-		return
-	}
-
-	w.log.V(1).Info("Restore pod has no running container in Kubernetes status yet; resolving via node runtime",
-		"pod", podKey,
-		"container", containerName,
-	)
-
-	go func() {
-		defer w.release(resolveKey)
-
-		resolveCtx, cancel := context.WithTimeout(ctx, restoreContainerResolveTimeout)
-		defer cancel()
-
-		ticker := time.NewTicker(restoreContainerResolveInterval)
-		defer ticker.Stop()
-
-		for {
-			containerID, err := w.runtime.ResolveContainerIDByPod(resolveCtx, pod.Name, pod.Namespace, containerName)
-			if err == nil && containerID != "" {
-				w.startRestoreForContainer(ctx, pod, containerName, containerID, checkpointID, podKey)
+	defer w.release(resolveKey)
+	deadline := time.After(restoreContainerResolveTimeout)
+	tick := time.NewTicker(restoreContainerResolveInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-deadline:
+			w.log.V(1).Info("Timed out polling node runtime for restore container",
+				"pod", podKey,
+				"container", containerName,
+			)
+			return
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			if id, err := w.runtime.ResolveContainerIDByPod(ctx, pod.Name, pod.Namespace, containerName); err == nil && id != "" {
+				w.startRestoreForContainer(ctx, pod, containerName, id, checkpointID, podKey)
 				return
-			}
-
-			select {
-			case <-resolveCtx.Done():
-				w.log.V(1).Info("Timed out resolving restore container via node runtime",
-					"pod", podKey,
-					"container", containerName,
-					"err", err,
-				)
-				return
-			case <-ticker.C:
 			}
 		}
-	}()
+	}
 }
 
 func (w *NodeController) startRestoreForContainer(
