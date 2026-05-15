@@ -115,8 +115,6 @@ cases:
             location: NYC
         normal_text: ''
       sglang:
-        calls:
-        - name: unknown_tool
-          arguments:
-            location: NYC
+        reason: SGLang's DeepSeek V3.2 detector ignores DSML calls whose invoke name is absent from the supplied tool list; Dynamo and vLLM preserve the unknown tool call.
+        calls: []
         normal_text: ''
