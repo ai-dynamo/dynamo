@@ -1,0 +1,57 @@
+/* SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+   SPDX-License-Identifier: Apache-2.0 */
+
+/* Anthropic-style design tokens. Warm cream + copper accent, serif headings.
+   Loaded before style.css so all custom properties are visible to component
+   rules. Light + dark via prefers-color-scheme. */
+
+:root {
+  /* Warm cream surfaces */
+  --bg:         #faf9f5;
+  --surface:    #f0eee6;
+  --surface-2:  #ebe9e0;
+  --border:     #e0ddd2;
+  --border-hi:  #cfcbbd;
+
+  /* Warm dark text */
+  --fg:         #2c2925;
+  --fg-muted:   #6b665c;
+  --fg-subtle:  #8f8a7e;
+
+  /* Claude accent (copper) */
+  --accent:     #cc785c;
+  --accent-hi:  #d97757;
+  --accent-fg:  #ffffff;
+
+  /* Status */
+  --ok:    #4f7d4a;
+  --warn:  #b07d2a;
+  --err:   #b85450;
+  --info:  #5a7da8;
+
+  --radius:    10px;
+  --radius-sm: 6px;
+  --shadow:    0 1px 2px rgba(31, 28, 22, 0.04),
+               0 0 0 1px rgba(31, 28, 22, 0.06);
+
+  --font-serif: "Source Serif 4", "Source Serif Pro", Georgia, "Times New Roman", serif;
+  --font-sans:  -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", system-ui, sans-serif;
+  --font-mono:  ui-monospace, "SF Mono", Menlo, "JetBrains Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:        #1f1e1a;
+    --surface:   #28261f;
+    --surface-2: #322f27;
+    --border:    #3a372e;
+    --border-hi: #4a473d;
+    --fg:        #efeadd;
+    --fg-muted:  #b8b3a3;
+    --fg-subtle: #898475;
+    --accent:    #d97757;
+    --accent-hi: #e08766;
+    --shadow:    0 1px 2px rgba(0, 0, 0, 0.25),
+                 0 0 0 1px rgba(255, 255, 255, 0.05);
+  }
+}

@@ -24,9 +24,10 @@ exec "$KVBM_VENV/bin/python3" -m vllm.entrypoints.openai.api_server \
     "kv_connector_module_path": "kvbm.v2.vllm.schedulers.connector",
     "kv_connector_extra_config": {
       "leader": {
-        "disagg": { "hub_url": "http://127.0.0.1:1337", "role": "decode" },
-        "cache":  { "host": { "cache_size_gb": 2.0 } },
-        "tokio":  { "worker_threads": 2 }
+        "disagg":  { "hub_url": "http://127.0.0.1:1337", "role": "decode" },
+        "cache":   { "host": { "cache_size_gb": 2.0 } },
+        "tokio":   { "worker_threads": 2 },
+        "control": { "metrics": true }
       },
       "worker": {
         "nixl":  { "backends": { "UCX": {}, "POSIX": {} } },

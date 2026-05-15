@@ -3,7 +3,7 @@
 
 //! Shared protocol types for KVBM conditional disaggregation.
 //!
-//! This crate intentionally contains only serializable control-plane data. It
+//! This module intentionally contains only serializable control-plane data. It
 //! is shared by the connector, hub, and future admission code without making
 //! any one of those crates depend on another.
 

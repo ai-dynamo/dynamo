@@ -21,14 +21,14 @@ use kvbm_connector::connector::leader::disagg::testing::{
     wait_until,
 };
 use kvbm_connector::connector::leader::disagg::{ConnectorLeaderApi, PrefillDisaggLeader};
-use kvbm_disagg_protocol::{
-    DISAGG_PROTOCOL_VERSION, RemotePrefillParams, SessionEndpoint, SessionId, TransferParams,
-};
 use kvbm_engine::disagg::session::{CommittedBlock, MockSession, MockSessionFactory};
 use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
 use kvbm_engine::testing::token_blocks::{create_token_sequence, generate_sequence_hashes};
 use kvbm_logical::blocks::ImmutableBlock;
 use kvbm_logical::manager::BlockManager;
+use kvbm_protocols::disagg::{
+    DISAGG_PROTOCOL_VERSION, RemotePrefillParams, SessionEndpoint, SessionId, TransferParams,
+};
 
 const TOTAL_BLOCKS: usize = 4;
 const BLOCK_SIZE: usize = TEST_BLOCK_SIZE;

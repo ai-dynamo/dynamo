@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use kvbm_disagg_protocol::TransferParams;
+use kvbm_protocols::disagg::TransferParams;
 
 use crate::BlockId;
 use crate::connector::leader::scheduler::{KvConnectorMetadata, SchedulerOutput};
@@ -382,6 +382,6 @@ fn audit_gnmt_exit(role: &'static str, request_id: &str, result: &Result<(Option
 /// a remote-decode marker is present.
 fn remote_prefill_marker(
     params: &TransferParams,
-) -> Option<&kvbm_disagg_protocol::RemotePrefillParams> {
+) -> Option<&kvbm_protocols::disagg::RemotePrefillParams> {
     params.remote_prefill.as_ref()
 }

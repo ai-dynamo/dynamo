@@ -1,24 +1,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Integration tests for the hub's HTTP→velo proxy
-//! (`ConnectorControlManager`).
+//! Integration tests for the typed `/control/<module>/<handler>` HTTP
+//! routes ([`ControlPlaneManager`]).
 //!
-//! Stands up a hub plus a fake velo "connector" peer that registers a
-//! `kvbm.connector.leader.reset` handler returning canned
-//! `ControlReply` values. Drives `PUT /v1/instances/{id}/reset` against
-//! the hub and asserts the proxy maps each connector outcome to the
-//! correct HTTP status — equivalent to what the connector's local
-//! axum shim would have returned for the same logical outcome.
+//! Stands up a hub plus a fake velo leader peer that registers a
+//! `kvbm.leader.control.reset` handler returning canned [`ControlReply`]
+//! values. Drives `POST /v1/instances/{id}/control/dev/reset` against the
+//! hub and asserts each [`ControlError`] variant lands on the correct
+//! HTTP status code.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use kvbm_control_protocol::{
+use kvbm_hub::{ControlPlaneManager, HubServer};
+use kvbm_protocols::control::{
     ControlError, ControlReply, RESET_HANDLER, ResetRequest, ResetResponse, Tier, TierError,
 };
-use kvbm_hub::{ConnectorControlManager, HubServer};
 use velo::Handler;
 use velo::transports::tcp::TcpTransportBuilder;
 
@@ -45,7 +44,7 @@ async fn new_velo() -> Arc<velo::Velo> {
 
 async fn start_hub_with_proxy() -> HubServer {
     let transport = new_velo_transport();
-    let proxy: Arc<ConnectorControlManager> = Arc::new(ConnectorControlManager::new());
+    let proxy: Arc<ControlPlaneManager> = Arc::new(ControlPlaneManager::new());
     kvbm_hub::create_server_builder()
         .bind_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
         .discovery_port(0)
@@ -108,7 +107,11 @@ fn http() -> reqwest::Client {
 }
 
 fn proxy_reset_url(server: &HubServer, id: velo_ext::InstanceId) -> String {
-    format!("http://{}/v1/instances/{}/reset", server.control_addr(), id)
+    format!(
+        "http://{}/v1/instances/{}/control/dev/reset",
+        server.control_addr(),
+        id
+    )
 }
 
 // ---- tests ------------------------------------------------------------------
@@ -130,7 +133,7 @@ async fn proxy_ok_returns_200_with_unwrapped_body() {
     let (_c, id) = register_connector(&server, &peer).await;
 
     let resp = http()
-        .put(proxy_reset_url(&server, id))
+        .post(proxy_reset_url(&server, id))
         .header("content-type", "application/json")
         .body("{}")
         .send()
@@ -159,7 +162,7 @@ async fn proxy_tier_not_configured_returns_400() {
     let (_c, id) = register_connector(&server, &peer).await;
 
     let resp = http()
-        .put(proxy_reset_url(&server, id))
+        .post(proxy_reset_url(&server, id))
         .header("content-type", "application/json")
         .body(r#"{"tiers":["g3"]}"#)
         .send()
@@ -182,7 +185,7 @@ async fn proxy_not_initialized_returns_503() {
     let (_c, id) = register_connector(&server, &peer).await;
 
     let resp = http()
-        .put(proxy_reset_url(&server, id))
+        .post(proxy_reset_url(&server, id))
         .header("content-type", "application/json")
         .body("{}")
         .send()
@@ -207,7 +210,7 @@ async fn proxy_internal_error_returns_500() {
     let (_c, id) = register_connector(&server, &peer).await;
 
     let resp = http()
-        .put(proxy_reset_url(&server, id))
+        .post(proxy_reset_url(&server, id))
         .header("content-type", "application/json")
         .body("{}")
         .send()
@@ -244,7 +247,7 @@ async fn proxy_partial_failure_in_response_body() {
     let (_c, id) = register_connector(&server, &peer).await;
 
     let resp = http()
-        .put(proxy_reset_url(&server, id))
+        .post(proxy_reset_url(&server, id))
         .header("content-type", "application/json")
         .body(r#"{"tiers":["g2","g3"]}"#)
         .send()
@@ -268,7 +271,7 @@ async fn proxy_unknown_instance_returns_404() {
     let nonexistent = velo_ext::InstanceId::new_v4();
 
     let resp = http()
-        .put(proxy_reset_url(&server, nonexistent))
+        .post(proxy_reset_url(&server, nonexistent))
         .header("content-type", "application/json")
         .body("{}")
         .send()
@@ -283,7 +286,7 @@ async fn proxy_unknown_instance_returns_404() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn proxy_discovery_only_returns_503() {
     // Hub WITHOUT a velo transport.
-    let proxy: Arc<ConnectorControlManager> = Arc::new(ConnectorControlManager::new());
+    let proxy: Arc<ControlPlaneManager> = Arc::new(ControlPlaneManager::new());
     let server = kvbm_hub::create_server_builder()
         .bind_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
         .discovery_port(0)
@@ -298,7 +301,7 @@ async fn proxy_discovery_only_returns_503() {
     // path itself reaches the proxy. Use a bogus id; the manager
     // checks velo presence before the registry, so the response is 503.
     let resp = http()
-        .put(proxy_reset_url(&server, velo_ext::InstanceId::new_v4()))
+        .post(proxy_reset_url(&server, velo_ext::InstanceId::new_v4()))
         .header("content-type", "application/json")
         .body("{}")
         .send()

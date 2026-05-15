@@ -77,7 +77,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
-use kvbm_disagg_protocol::TransferParams;
+use kvbm_protocols::disagg::TransferParams;
 
 use crate::BlockId;
 use crate::common::RequestMetadata;

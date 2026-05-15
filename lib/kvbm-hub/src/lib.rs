@@ -54,6 +54,7 @@ pub mod handlers;
 pub mod protocol;
 pub mod registry;
 pub mod server;
+pub mod web;
 
 pub use client::{HubClient, HubClientBuilder, HubClientConfig, HubRegistrationGuard};
 pub use config::HubConfig;
@@ -61,7 +62,7 @@ pub use features::conditional_disagg::{
     ConditionalDisaggClient, ConditionalDisaggManager, DispatchOutcome, HttpVllmDispatcher,
     PrefillRequestDispatcher, RecordingDispatcher,
 };
-pub use features::connector_control::ConnectorControlManager;
+pub use features::control_plane::ControlPlaneManager;
 pub use features::{FeatureError, FeatureManager, HubContext};
 pub use handlers::{HEARTBEAT_HANDLER, HeartbeatAck, HeartbeatRequest};
 pub use protocol::{

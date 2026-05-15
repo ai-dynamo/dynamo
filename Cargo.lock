@@ -4509,13 +4509,12 @@ dependencies = [
  "insta",
  "kvbm-common",
  "kvbm-config",
- "kvbm-control-protocol",
- "kvbm-disagg-protocol",
  "kvbm-engine",
  "kvbm-hub",
  "kvbm-logical",
  "kvbm-observability",
  "kvbm-physical",
+ "kvbm-protocols",
  "libc",
  "oneshot",
  "parking_lot",
@@ -4532,30 +4531,6 @@ dependencies = [
  "url",
  "uuid",
  "velo",
-]
-
-[[package]]
-name = "kvbm-control-protocol"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "velo-ext",
-]
-
-[[package]]
-name = "kvbm-disagg-protocol"
-version = "0.1.0"
-dependencies = [
- "kvbm-common",
- "rmp-serde",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "uuid",
- "velo-ext",
 ]
 
 [[package]]
@@ -4579,14 +4554,15 @@ dependencies = [
  "futures",
  "kvbm-common",
  "kvbm-config",
- "kvbm-disagg-protocol",
  "kvbm-logical",
  "kvbm-observability",
  "kvbm-physical",
+ "kvbm-protocols",
  "libc",
  "nvtx",
  "oneshot",
  "parking_lot",
+ "prometheus",
  "rayon",
  "rmp-serde",
  "serde",
@@ -4614,8 +4590,7 @@ dependencies = [
  "figment",
  "futures",
  "kvbm-common",
- "kvbm-control-protocol",
- "kvbm-disagg-protocol",
+ "kvbm-protocols",
  "parking_lot",
  "reqwest 0.12.28",
  "serde",
@@ -4712,6 +4687,22 @@ dependencies = [
  "uuid",
  "validator",
  "velo",
+]
+
+[[package]]
+name = "kvbm-protocols"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "kvbm-common",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+ "velo",
+ "velo-ext",
 ]
 
 [[package]]

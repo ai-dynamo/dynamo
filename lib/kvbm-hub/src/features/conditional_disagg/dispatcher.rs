@@ -111,13 +111,13 @@ impl PrefillRequestDispatcher for RecordingDispatcher {
 ///   "prompt": [<token-id>, ...],           // pre-tokenized; vLLM accepts list[int] directly
 ///   "max_tokens": 1,                       // prefill-only; we only need KV state
 ///   "kv_transfer_params": {                // surfaced to the connector;
-///     "remote_prefill": { ... }            // shape == kvbm_disagg_protocol::TransferParams
+///     "remote_prefill": { ... }            // shape == kvbm_protocols::disagg::TransferParams
 ///   }
 /// }
 /// ```
 ///
 /// The `kv_transfer_params` value is serialized directly from
-/// [`kvbm_disagg_protocol::TransferParams`] so the prefill connector's
+/// [`kvbm_protocols::disagg::TransferParams`] so the prefill connector's
 /// `slot.transfer_params()` (which `serde_json::from_value::<TransferParams>`)
 /// round-trips it without translation.
 ///
@@ -154,7 +154,7 @@ impl PrefillRequestDispatcher for HttpVllmDispatcher {
     fn dispatch(&self, request: PrefillRequest) -> BoxFuture<'_, Result<DispatchOutcome>> {
         Box::pin(async move {
             let url = format!("{}/v1/completions", self.base_url);
-            let transfer_params = kvbm_disagg_protocol::TransferParams::remote_prefill(
+            let transfer_params = kvbm_protocols::disagg::TransferParams::remote_prefill(
                 request.remote_prefill_params(),
             );
             // vLLM `CompletionRequest.prompt` accepts `list[int]` directly
@@ -197,7 +197,7 @@ impl PrefillRequestDispatcher for HttpVllmDispatcher {
 mod tests {
     use super::*;
     use crate::protocol::PrefillRequest;
-    use kvbm_disagg_protocol::DISAGG_PROTOCOL_VERSION;
+    use kvbm_protocols::disagg::DISAGG_PROTOCOL_VERSION;
     use velo_ext::InstanceId;
 
     fn make_request(id: &str) -> PrefillRequest {
@@ -319,12 +319,12 @@ mod tests {
             payload["prompt_token_ids"].is_null(),
             "prompt_token_ids is a response field, must not be sent as request input"
         );
-        // kv_transfer_params must deserialize into kvbm_disagg_protocol::TransferParams
+        // kv_transfer_params must deserialize into kvbm_protocols::disagg::TransferParams
         // — this is the contract the prefill connector relies on via
         // slot.transfer_params(). Round-trip through the typed deserializer so
         // a future field rename / wrapper-key drift fails this test loudly
         // rather than silently producing TransferParams { remote_prefill: None }.
-        let kvtp: kvbm_disagg_protocol::TransferParams =
+        let kvtp: kvbm_protocols::disagg::TransferParams =
             serde_json::from_value(payload["kv_transfer_params"].clone())
                 .expect("kv_transfer_params must deserialize as TransferParams");
         let remote = kvtp

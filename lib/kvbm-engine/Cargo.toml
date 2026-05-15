@@ -13,10 +13,11 @@ description = "Distributed coordination primitives for KVBM"
 [dependencies]
 kvbm-common = { workspace = true }
 kvbm-config = { workspace = true }
-kvbm-disagg-protocol = { workspace = true }
 kvbm-logical = { workspace = true }
 kvbm-observability = { workspace = true }
 kvbm-physical = { workspace = true }
+kvbm-protocols = { workspace = true }
+prometheus = { workspace = true }
 velo = { workspace = true }
 
 # Workspace deps
@@ -58,6 +59,10 @@ figment = { version = "0.10", features = ["env", "toml"], optional = true }
 libc = { version = "0.2", optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 nvtx = { version = "1.3", optional = true }
+
+[dev-dependencies]
+# Control-plane tests exercise the public velo client.
+kvbm-protocols = { workspace = true, features = ["client"] }
 
 [features]
 default = ["s3", "testing"]

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::time::SystemTime;
 
 use ::velo::Messenger;
 use anyhow::Result;
@@ -9,10 +10,19 @@ use dashmap::DashMap;
 use tokio::sync::{Mutex, mpsc, watch};
 use uuid::Uuid;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+use kvbm_config::DisaggregationRole;
+use kvbm_protocols::control::{
+    ControlError, HostInfo, InstanceDescription, LayoutDescription, ModuleId, TierCapacity,
+    TierKind, WorkerInfo,
+};
 
 use crate::{
-    BlockId, G2, G3, InstanceId, SequenceHash, disagg::RemoteBlockSet, object::ObjectBlockOps,
+    BlockId, G2, G3, InstanceId, SequenceHash,
+    disagg::RemoteBlockSet,
+    disagg::session::{SessionFactory, SessionManager},
+    object::ObjectBlockOps,
     worker::RemoteDescriptor,
 };
 use kvbm_common::LogicalLayoutHandle;
@@ -20,6 +30,7 @@ use kvbm_logical::{
     blocks::{BlockRegistry, ImmutableBlock},
     manager::BlockManager,
 };
+use kvbm_observability::SharedKvbmObservability;
 use kvbm_physical::transfer::{TransferCompleteNotification, TransferOptions};
 
 use kvbm_physical::manager::{LayoutHandle, SerializedLayout};
@@ -127,6 +138,60 @@ pub struct InstanceLeader {
     /// metadata unchanged — preserving pre-AB-1a behaviour for callers
     /// that have not yet configured cross-parallelism.
     parallelism_template: Option<ParallelismTemplate>,
+
+    // ========================================================================
+    // Disagg control plane
+    // ========================================================================
+    /// Keeps disagg sessions opened by the control plane's `transfer` module
+    /// alive until their lifecycle ends.
+    session_manager: Arc<SessionManager>,
+
+    /// The disagg `SessionFactory`, injected post-construction via
+    /// [`InstanceLeader::set_session_factory`]. Empty until the connector
+    /// builds the factory (which itself holds an `Arc<InstanceLeader>`, so it
+    /// cannot exist at `InstanceLeader` build time). The control plane's
+    /// `transfer` module reads it at RPC-invocation time, by which point a
+    /// remote client could only have connected after full init.
+    session_factory: Arc<OnceLock<Arc<dyn SessionFactory>>>,
+
+    // ========================================================================
+    // Describe state (Phase C)
+    // ========================================================================
+    /// Disaggregation role this leader plays — `None` for standalone. Set at
+    /// construction time from `KvbmConfig::disagg.as_ref().map(|d| d.role)`.
+    role: Option<DisaggregationRole>,
+
+    /// Process start time. Captured at construction; surfaced via
+    /// [`Self::describe`].
+    started_at: SystemTime,
+
+    /// Stringified hub instance id, injected post-construction via
+    /// [`Self::set_hub_instance_id`] when the connector successfully
+    /// registers with the hub. Empty for standalone leaders or before
+    /// hub registration completes.
+    hub_instance_id: Arc<OnceLock<String>>,
+
+    /// Opaque JSON of the leader's `KvbmConfig`, injected post-construction
+    /// via [`Self::set_config_blob`]. The connector serialises its
+    /// `KvbmRuntime::config()` and stores the result here so `describe`
+    /// can surface it to the hub UI without `kvbm-protocols` depending on
+    /// `kvbm-config`. First-write-wins; subsequent calls are no-ops.
+    config_blob: Arc<OnceLock<serde_json::Value>>,
+
+    /// Modules enabled on this leader's control plane. Injected
+    /// post-construction by the connector via [`Self::set_modules`] after
+    /// `ControlPlaneBuilder::register` returns. The leader cannot fetch
+    /// this from the control plane directly because `ControlPlane` is
+    /// built after `InstanceLeader` and isn't held inside it. Empty until
+    /// set; surfaced via [`Self::describe`].
+    modules: Arc<OnceLock<Vec<ModuleId>>>,
+
+    /// Shared Prometheus registry + metric handles for this leader, as
+    /// owned by [`crate::KvbmRuntime`]. Optional because some test paths
+    /// (e.g. `testing/distributed.rs`) build a bare leader without a
+    /// runtime. The `metrics` control module reads this; when `None`,
+    /// the module is not registered.
+    observability: Option<SharedKvbmObservability>,
 }
 
 /// Builder for InstanceLeader.
@@ -142,6 +207,8 @@ pub struct InstanceLeaderBuilder {
     cached_worker_metadata: Option<Vec<SerializedLayout>>,
     object_client: Option<Arc<dyn ObjectBlockOps>>,
     parallelism_template: Option<ParallelismTemplate>,
+    role: Option<DisaggregationRole>,
+    observability: Option<SharedKvbmObservability>,
 }
 
 impl InstanceLeaderBuilder {
@@ -161,6 +228,7 @@ impl InstanceLeaderBuilder {
     /// ```
     pub fn with_runtime(self, runtime: &crate::KvbmRuntime) -> Self {
         self.messenger(runtime.messenger().clone())
+            .observability(runtime.observability().clone())
     }
 
     pub fn messenger(mut self, messenger: Arc<Messenger>) -> Self {
@@ -239,6 +307,24 @@ impl InstanceLeaderBuilder {
         self
     }
 
+    /// Set the disaggregation role this leader plays. Surfaced via
+    /// [`InstanceLeader::describe`] for the hub UI. Defaults to `None`
+    /// (standalone — not part of a P/D split).
+    pub fn role(mut self, role: DisaggregationRole) -> Self {
+        self.role = Some(role);
+        self
+    }
+
+    /// Set the shared KVBM observability handle (Prometheus registry +
+    /// metric collectors) for this leader. Sourced from
+    /// [`crate::KvbmRuntime::observability`]; populated by
+    /// [`Self::with_runtime`]. The `metrics` control module reads this;
+    /// callers that don't need that module can leave it unset.
+    pub fn observability(mut self, observability: SharedKvbmObservability) -> Self {
+        self.observability = Some(observability);
+        self
+    }
+
     pub fn build(self) -> Result<InstanceLeader> {
         let messenger = self
             .messenger
@@ -295,6 +381,14 @@ impl InstanceLeaderBuilder {
             session_sessions: Arc::new(DashMap::new()),
             object_client: self.object_client,
             parallelism_template: self.parallelism_template,
+            session_manager: SessionManager::with_default_watchdog(runtime),
+            session_factory: Arc::new(OnceLock::new()),
+            role: self.role,
+            started_at: SystemTime::now(),
+            hub_instance_id: Arc::new(OnceLock::new()),
+            config_blob: Arc::new(OnceLock::new()),
+            modules: Arc::new(OnceLock::new()),
+            observability: self.observability,
         })
     }
 }
@@ -402,6 +496,173 @@ impl InstanceLeader {
     /// Get the list of remote leader instance IDs.
     pub fn remote_leaders(&self) -> Vec<InstanceId> {
         self.remote_leaders.read().unwrap().clone()
+    }
+
+    /// The disagg [`SessionManager`] — keeps control-plane-opened sessions
+    /// alive until their lifecycle ends.
+    pub fn session_manager(&self) -> &Arc<SessionManager> {
+        &self.session_manager
+    }
+
+    /// Shared KVBM observability handle (Prometheus registry + collectors).
+    ///
+    /// `Some` when the leader was built via [`InstanceLeaderBuilder::with_runtime`]
+    /// (or [`InstanceLeaderBuilder::observability`] directly). `None` for bare
+    /// test leaders that bypass the runtime. The control plane's `metrics`
+    /// module reads this; when `None`, the module is not registered.
+    pub fn observability(&self) -> Option<&SharedKvbmObservability> {
+        self.observability.as_ref()
+    }
+
+    /// A clonable handle to the disagg `SessionFactory` cell.
+    ///
+    /// The cell is populated post-construction via [`set_session_factory`].
+    /// The control plane's `transfer` module holds this handle and reads the
+    /// factory lazily, at RPC-invocation time.
+    ///
+    /// [`set_session_factory`]: InstanceLeader::set_session_factory
+    pub fn session_factory_cell(&self) -> Arc<OnceLock<Arc<dyn SessionFactory>>> {
+        Arc::clone(&self.session_factory)
+    }
+
+    /// Inject the disagg `SessionFactory` once it has been built.
+    ///
+    /// Idempotent: a second call is a no-op (the factory is built once during
+    /// connector init). Returns whether this call set the value.
+    pub fn set_session_factory(&self, factory: Arc<dyn SessionFactory>) -> bool {
+        self.session_factory.set(factory).is_ok()
+    }
+
+    // ========================================================================
+    // Describe (Phase C)
+    // ========================================================================
+
+    /// Inject the leader's `KvbmConfig` serialised as JSON. Surfaced via
+    /// [`Self::describe`] under `InstanceDescription::config`.
+    ///
+    /// First-write-wins (matches [`Self::set_session_factory`] semantics).
+    /// Returns `true` if this call stored the value, `false` if the cell
+    /// was already populated.
+    pub fn set_config_blob(&self, value: serde_json::Value) -> bool {
+        self.config_blob.set(value).is_ok()
+    }
+
+    /// Inject the hub's instance id post-registration. Surfaced via
+    /// [`Self::describe`] under `InstanceDescription::hub_instance_id`.
+    /// First-write-wins.
+    pub fn set_hub_instance_id(&self, id: InstanceId) -> bool {
+        self.hub_instance_id.set(id.to_string()).is_ok()
+    }
+
+    /// Inject the list of control-plane modules enabled on this leader.
+    /// Called by the connector after `ControlPlaneBuilder::register`
+    /// returns. First-write-wins. Surfaced via [`Self::describe`].
+    pub fn set_modules(&self, modules: Vec<ModuleId>) -> bool {
+        self.modules.set(modules).is_ok()
+    }
+
+    /// Get the disaggregation role this leader plays, if any.
+    pub fn role(&self) -> Option<DisaggregationRole> {
+        self.role
+    }
+
+    /// Build a structured topology snapshot of this leader.
+    ///
+    /// **Lifecycle:** in steady state the connector pushes this payload to the
+    /// hub via `HubClient::push_describe` after `set_config_blob` and after
+    /// `set_hub_instance_id`. The hub may also fall back to pulling this
+    /// snapshot via the [`DESCRIBE_INSTANCE_HANDLER`] velo handler when its
+    /// cache is cold.
+    ///
+    /// **Pre-stamping behaviour:** if workers have not yet stamped their
+    /// layouts, `describe` returns `Ok(InstanceDescription)` with empty
+    /// `workers`, empty `tier_capacity`, `block_size: None`, and
+    /// `parallelism: None`. The identity / capability / process fields
+    /// (`instance_id`, `worker_ids`, `modules`, `role`, `host`, `started_at`)
+    /// are always populated. Callers decide whether to wait for stamping
+    /// before pushing.
+    ///
+    /// [`DESCRIBE_INSTANCE_HANDLER`]: kvbm_protocols::control::DESCRIBE_INSTANCE_HANDLER
+    pub async fn describe(&self) -> Result<InstanceDescription, ControlError> {
+        use super::describe_map::{
+            to_disagg_role, to_layout_config_description, to_parallelism_description,
+            to_storage_kind_description, to_tier_kind,
+        };
+
+        let exports: Vec<SerializedLayout> = self
+            .assemble_export_metadata()
+            .await
+            .map_err(|e| ControlError::Internal(format!("assemble_export_metadata: {e:#}")))?;
+
+        let mut workers: Vec<WorkerInfo> = Vec::with_capacity(exports.len());
+        for s in &exports {
+            let unpacked = s
+                .unpack()
+                .map_err(|e| ControlError::Internal(format!("unpack SerializedLayout: {e:#}")))?;
+
+            // Honest `None` when the worker carries no stamped descriptor.
+            // Never synthesise a `Some(1x1)` placeholder — that would lie
+            // about topology for a multi-worker TP leader pre-stamping (or
+            // for any leader built without a `ParallelismTemplate`).
+            let parallelism = unpacked
+                .parallelism
+                .as_ref()
+                .map(to_parallelism_description);
+
+            let layouts: Vec<LayoutDescription> = unpacked
+                .layouts
+                .iter()
+                .map(|ld| {
+                    let cfg = &ld.layout.layout_config;
+                    let bytes_per_block = cfg.bytes_per_block();
+                    let block_layout = kv_block_layout_name(&ld.layout.layout_type_details);
+                    LayoutDescription {
+                        tier: to_tier_kind(ld.logical_type),
+                        config: to_layout_config_description(cfg),
+                        location: to_storage_kind_description(&ld.layout.location),
+                        layout_type: layout_type_name(&ld.layout.layout_type_details).to_owned(),
+                        block_layout,
+                        bytes_per_block,
+                        total_bytes: bytes_per_block.saturating_mul(cfg.num_blocks),
+                    }
+                })
+                .collect();
+
+            workers.push(WorkerInfo {
+                worker_id: unpacked.worker_address.worker_id,
+                nixl_agent_name: unpacked.worker_address.nixl_agent_name.clone(),
+                parallelism,
+                layouts,
+            });
+        }
+
+        let block_size = common_page_size(&workers);
+        let parallelism = aggregate_parallelism(&workers);
+        let tier_capacity = sum_tier_capacity(&workers);
+
+        // Modules: read whatever the connector injected post-`ControlPlaneBuilder::register`.
+        // Empty until `set_modules` has fired — which it always has by the time the
+        // connector pushes describe; the fallback-pull path may serve an empty list
+        // briefly during a cold restart and that's acceptable.
+        let modules = self.modules.get().cloned().unwrap_or_default();
+
+        Ok(InstanceDescription {
+            instance_id: self.messenger.instance_id().to_string(),
+            worker_ids: workers.iter().map(|w| w.worker_id).collect(),
+            hub_instance_id: self.hub_instance_id.get().cloned(),
+            block_size,
+            parallelism,
+            tier_capacity,
+            workers,
+            modules,
+            role: self.role.map(to_disagg_role),
+            config: self.config_blob.get().cloned(),
+            host: HostInfo {
+                hostname: read_hostname(),
+                pid: std::process::id(),
+            },
+            started_at: self.started_at,
+        })
     }
 
     /// Scan for all blocks matching any of the given sequence hashes.
@@ -631,6 +892,71 @@ impl InstanceLeader {
         service.register_handlers()?;
 
         Ok(())
+    }
+
+    /// Build and register the public leader [`ControlPlane`].
+    ///
+    /// Distinct from [`register_handlers`](Self::register_handlers), which
+    /// wires the engine-internal `VeloLeaderService`. The control plane is
+    /// public surface, organized as modules:
+    /// - `core` (always-on) — `register_leader`.
+    /// - `transfer` (always-on) — G2 search → disagg-session creation. Reads
+    ///   the `SessionFactory` lazily from the cell populated by
+    ///   [`set_session_factory`](Self::set_session_factory).
+    /// - `dev` (opt-in) — `reset`. Safe in production.
+    /// - `test` (opt-in) — `register_test_blocks`. Usable in production but
+    ///   logs a warning when enabled.
+    ///
+    /// `dev` / `test` come from `control.dev` / `control.test` in
+    /// `KvbmConfig`. Takes `Arc<Self>` because the `core` / `dev` modules
+    /// hold an `Arc<InstanceLeader>`. The returned [`ControlPlane`] carries
+    /// only introspection metadata; the handlers live on the messenger and
+    /// the modules' captured state outlives the returned handle.
+    pub fn register_control_plane(
+        self: &Arc<Self>,
+        dev: bool,
+        test: bool,
+        metrics: bool,
+    ) -> Result<Arc<crate::leader::ControlPlane>> {
+        use crate::leader::control::{
+            ControlPlane, CoreModule, DevModule, MetricsModule, TestModule, TransferModule,
+        };
+
+        let mut builder =
+            ControlPlane::builder(self.messenger.clone(), self.messenger.instance_id())
+                .with_module(CoreModule::new(Arc::clone(self)))
+                .with_module(TransferModule::new(
+                    self.g2_manager.clone(),
+                    self.session_factory_cell(),
+                    self.session_manager.clone(),
+                ));
+
+        if dev {
+            builder = builder.with_module(DevModule::new(Arc::clone(self)));
+        }
+        if test {
+            tracing::warn!(
+                "control plane `test` module enabled — exposes test-only handlers; \
+                 not intended for production"
+            );
+            builder = builder.with_module(TestModule::new(self.g2_manager.clone()));
+        }
+        if metrics {
+            match self.observability.as_ref() {
+                Some(obs) => {
+                    builder =
+                        builder.with_module(MetricsModule::new(Arc::clone(self), Arc::clone(obs)));
+                }
+                None => {
+                    tracing::warn!(
+                        "control plane `metrics` module requested but no observability \
+                         handle was provided to InstanceLeaderBuilder; module not registered"
+                    );
+                }
+            }
+        }
+
+        builder.register()
     }
 
     /// Store session state (held blocks and status channel).
@@ -1444,6 +1770,161 @@ impl InstanceLeader {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Describe helpers (Phase C)
+// ---------------------------------------------------------------------------
+
+/// Discriminant name of a `LayoutTypeDetails` variant — snake_case to match
+/// the rest of the control-plane JSON.
+fn layout_type_name(details: &kvbm_physical::layout::LayoutTypeDetails) -> &'static str {
+    use kvbm_physical::layout::LayoutTypeDetails;
+    match details {
+        LayoutTypeDetails::FullyContiguous(_) => "fully_contiguous",
+        LayoutTypeDetails::LayerSeparate(_) => "layer_separate",
+    }
+}
+
+/// snake_case name of the `KvBlockLayout` discriminant carried by a
+/// `LayoutTypeDetails` variant. Both variants carry one; this helper
+/// abstracts the unwrap.
+fn kv_block_layout_name(details: &kvbm_physical::layout::LayoutTypeDetails) -> String {
+    use kvbm_common::KvBlockLayout;
+    use kvbm_physical::layout::LayoutTypeDetails;
+    let kbl: KvBlockLayout = match details {
+        LayoutTypeDetails::FullyContiguous(d) => d.kv_block_layout,
+        LayoutTypeDetails::LayerSeparate(d) => d.kv_block_layout,
+    };
+    match kbl {
+        KvBlockLayout::UniversalTP => "universal_tp".to_owned(),
+        KvBlockLayout::UniversalPP => "universal_pp".to_owned(),
+        KvBlockLayout::OperationalHND => "operational_hnd".to_owned(),
+        KvBlockLayout::OperationalNHD => "operational_nhd".to_owned(),
+        KvBlockLayout::Unknown => "unknown".to_owned(),
+        // `Custom` carries an axis ordering; render as a hyphenated tag of
+        // the four axis discriminants, e.g. `custom[block-layer-page-head]`.
+        // Stable + diagnosable even though the exact layout is dynamic.
+        KvBlockLayout::Custom(dims) => {
+            let parts: Vec<&'static str> = dims.iter().map(block_dim_short_name).collect();
+            format!("custom[{}]", parts.join("-"))
+        }
+    }
+}
+
+fn block_dim_short_name(d: &kvbm_common::BlockDim) -> &'static str {
+    use kvbm_common::BlockDim;
+    match d {
+        BlockDim::Layer => "layer",
+        BlockDim::Outer => "outer",
+        BlockDim::Page => "page",
+        BlockDim::Head => "head",
+    }
+}
+
+/// Common `page_size` across all (worker, layout) pairs, or `None` if
+/// heterogeneous / empty.
+fn common_page_size(workers: &[WorkerInfo]) -> Option<usize> {
+    let mut seen: Option<usize> = None;
+    for w in workers {
+        for l in &w.layouts {
+            let p = l.config.page_size;
+            match seen {
+                None => seen = Some(p),
+                Some(s) if s == p => {}
+                Some(_) => return None,
+            }
+        }
+    }
+    seen
+}
+
+/// Top-level [`ParallelismDescription`] when every worker has a stamped
+/// descriptor AND they agree on `tp_size`/`pp_size`/`shard_axis`/`global_extents`.
+///
+/// **Returns `None`** if any worker has `parallelism: None` (unstamped /
+/// single-rank leader without a template). The aggregate must NEVER lie:
+/// synthesising a `Some(1x1)` for a multi-worker leader whose descriptors
+/// aren't stamped yet would tell operators "this leader is single-rank" when
+/// it isn't. The per-worker `rank` and `layer_ownership` are intentionally
+/// projected to rank 0 / the union range to give a "leader-wide view".
+fn aggregate_parallelism(
+    workers: &[WorkerInfo],
+) -> Option<kvbm_protocols::control::ParallelismDescription> {
+    use kvbm_protocols::control::{LayerRange, ParallelismDescription};
+
+    // Any unstamped worker → aggregate is unknown. This is the bug fix:
+    // pre-fix, an unstamped worker's synthesised 1x1 placeholder would
+    // "agree" with other placeholders and the aggregate would lie.
+    let first = workers.first()?.parallelism.clone()?;
+    let mut layer_start = first.layer_ownership.start;
+    let mut layer_end = first.layer_ownership.end;
+    for w in workers.iter().skip(1) {
+        let p = w.parallelism.as_ref()?;
+        if p.tp_size != first.tp_size
+            || p.pp_size != first.pp_size
+            || p.shard_axis != first.shard_axis
+            || p.global_extents != first.global_extents
+        {
+            return None;
+        }
+        layer_start = layer_start.min(p.layer_ownership.start);
+        layer_end = layer_end.max(p.layer_ownership.end);
+    }
+    Some(ParallelismDescription {
+        rank: 0,
+        layer_ownership: LayerRange {
+            start: layer_start,
+            end: layer_end,
+        },
+        ..first
+    })
+}
+
+/// Sum tier capacity across all workers, grouping by [`TierKind`].
+fn sum_tier_capacity(workers: &[WorkerInfo]) -> Vec<TierCapacity> {
+    use std::collections::HashMap;
+    let mut acc: HashMap<TierKind, TierCapacity> = HashMap::new();
+    for w in workers {
+        for l in &w.layouts {
+            let entry = acc.entry(l.tier).or_insert(TierCapacity {
+                tier: l.tier,
+                num_blocks: 0,
+                bytes_per_block: l.bytes_per_block,
+                total_bytes: 0,
+            });
+            entry.num_blocks = entry.num_blocks.saturating_add(l.config.num_blocks);
+            entry.total_bytes = entry.total_bytes.saturating_add(l.total_bytes as u64);
+        }
+    }
+    let mut out: Vec<TierCapacity> = acc.into_values().collect();
+    // Deterministic order: G1, G2, G3, G4.
+    out.sort_by_key(|t| match t.tier {
+        TierKind::G1 => 0,
+        TierKind::G2 => 1,
+        TierKind::G3 => 2,
+        TierKind::G4 => 3,
+    });
+    out
+}
+
+/// Read hostname from libc, falling back to the `HOSTNAME` env var and
+/// finally `"unknown"`. Avoids a hard `hostname` crate dep — std + env
+/// suffice for the level of identity we need in describe.
+fn read_hostname() -> String {
+    if let Ok(name) = std::env::var("HOSTNAME")
+        && !name.is_empty()
+    {
+        return name;
+    }
+    // Fall back to `uname` via /proc/sys/kernel/hostname on Linux.
+    if let Ok(name) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+    "unknown".to_owned()
+}
+
 impl Leader for InstanceLeader {
     fn find_matches_with_options(
         &self,
@@ -1707,6 +2188,94 @@ mod tests {
             err.to_string().contains("tp_size * pp_size"),
             "expected length-mismatch error, got: {err}"
         );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Describe (Phase C)
+    // ------------------------------------------------------------------
+
+    /// Pre-stamping snapshot: the leader's pre-worker-stamp state still
+    /// produces a valid `InstanceDescription` with identity + process info.
+    /// The cached metadata is empty layouts (no `LogicalLayoutDescriptor`s),
+    /// so `workers` lands with `WorkerInfo` entries that carry the
+    /// `worker_id` and an empty `layouts` vec.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn describe_pre_stamping_populates_identity_fields() -> Result<()> {
+        let cached = vec![stub_metadata_for(7), stub_metadata_for(8)];
+        let leader = leader_with_cached_metadata(cached, None).await?;
+
+        let d = leader.describe().await.expect("describe ok");
+        assert_eq!(d.worker_ids, vec![7, 8]);
+        assert_eq!(d.workers.len(), 2);
+        // Layouts are empty (no `LogicalLayoutDescriptor`s in stub metadata)
+        // — so block_size aggregates to None, tier_capacity is empty.
+        assert!(d.block_size.is_none());
+        assert!(d.tier_capacity.is_empty());
+        // Identity / process / capability fields populated.
+        assert_eq!(d.instance_id, leader.messenger().instance_id().to_string());
+        assert!(d.hub_instance_id.is_none(), "no set_hub_instance_id call");
+        assert!(d.config.is_none(), "no set_config_blob call");
+        assert!(d.modules.is_empty(), "no set_modules call");
+        assert!(d.role.is_none());
+        assert_ne!(d.host.pid, 0);
+        Ok(())
+    }
+
+    /// **Regression test** — describe MUST NOT synthesise a fake `tp_size=1,
+    /// pp_size=1` parallelism when workers haven't stamped descriptors yet
+    /// (or when the leader was built without a `ParallelismTemplate`).
+    /// Reporting 1x1 for a multi-worker TP leader is a lie about topology.
+    ///
+    /// Pre-fix: per-worker parallelism was synthesised to `Some(1x1)` and
+    /// the aggregate cascaded to `Some(1x1)`. Post-fix: both are `None` and
+    /// the wire honestly says "parallelism unknown / not stamped".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn describe_does_not_invent_1x1_parallelism_when_unstamped() -> Result<()> {
+        // Two workers, no template — `stub_metadata_for` packs
+        // `parallelism = None`. A pre-fix implementation would lie that
+        // the leader is single-rank (1x1) when it actually has two workers.
+        let cached = vec![stub_metadata_for(0), stub_metadata_for(1)];
+        let leader = leader_with_cached_metadata(cached, None).await?;
+
+        let d = leader.describe().await.expect("describe ok");
+        assert_eq!(d.workers.len(), 2);
+
+        // Per-worker parallelism must be None when the descriptor is unstamped.
+        for w in &d.workers {
+            assert!(
+                w.parallelism.is_none(),
+                "worker {} reports parallelism without a stamped descriptor: {:?}",
+                w.worker_id,
+                w.parallelism
+            );
+        }
+        // Aggregate must be None when any worker is unstamped — never a
+        // synthetic 1x1 for what is actually a 2-worker leader.
+        assert!(
+            d.parallelism.is_none(),
+            "top-level parallelism synthesised without stamped descriptors: {:?}",
+            d.parallelism
+        );
+        Ok(())
+    }
+
+    /// `set_config_blob` / `set_hub_instance_id` / `set_modules` are
+    /// idempotent: first-write-wins, subsequent calls return false.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn describe_setters_are_idempotent() -> Result<()> {
+        let leader = leader_with_cached_metadata(vec![], None).await?;
+        let first = serde_json::json!({"a": 1});
+        let second = serde_json::json!({"b": 2});
+        assert!(leader.set_config_blob(first.clone()));
+        assert!(!leader.set_config_blob(second.clone()));
+        let d = leader.describe().await.expect("describe ok");
+        assert_eq!(d.config.as_ref(), Some(&first));
+
+        assert!(leader.set_modules(vec![kvbm_protocols::control::ModuleId::Core]));
+        assert!(!leader.set_modules(vec![kvbm_protocols::control::ModuleId::Test]));
+        let d2 = leader.describe().await.expect("describe ok");
+        assert_eq!(d2.modules, vec![kvbm_protocols::control::ModuleId::Core]);
         Ok(())
     }
 }

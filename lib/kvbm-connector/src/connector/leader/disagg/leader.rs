@@ -525,9 +525,9 @@ mod tests {
     use crate::connector::leader::disagg::testing::{
         MockInnerLeaderShim, MockSlot, TEST_BLOCK_SIZE,
     };
-    use kvbm_disagg_protocol::{RemotePrefillParams, TransferParams};
     use kvbm_engine::testing::managers::{TestManagerBuilder, TestRegistryBuilder};
     use kvbm_logical::manager::BlockManager;
+    use kvbm_protocols::disagg::{RemotePrefillParams, TransferParams};
 
     fn make_g2_manager() -> Arc<BlockManager<G2>> {
         let registry = TestRegistryBuilder::new().build();

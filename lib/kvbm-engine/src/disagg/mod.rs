@@ -3,14 +3,14 @@
 
 //! Engine-owned conditional-disaggregation session protocol and helpers.
 //!
-//! Hub-visible request metadata lives in `kvbm-disagg-protocol`. The
+//! Hub-visible request metadata lives in `kvbm-protocols (disagg)`. The
 //! [`session`] submodule owns the symmetric `Session` API + its production
 //! ([`session::VeloSession`]) and test ([`session::MockSession`]) impls.
 //!
 //! This module also re-exports the small data types used by the engine's
 //! RDMA primitive (`InstanceLeader::pull_remote_block_sets`) and by
 //! `VeloSession::pull`: [`RemoteBlockRef`] and [`RemoteBlockSet`], plus
-//! [`SessionEndpoint`] from `kvbm-disagg-protocol`.
+//! [`SessionEndpoint`] from `kvbm-protocols (disagg)`.
 
 pub mod session;
 
@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{BlockId, LogicalLayoutHandle};
 
-pub use kvbm_disagg_protocol::SessionEndpoint;
+pub use kvbm_protocols::disagg::SessionEndpoint;
 
 /// Serializable reference to a block made available through a session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

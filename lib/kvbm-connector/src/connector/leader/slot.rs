@@ -826,7 +826,7 @@ impl RequestSlot {
     /// transfer params. `Ok(None)` when no metadata / no params present.
     pub fn transfer_params(
         &self,
-    ) -> Result<Option<kvbm_disagg_protocol::TransferParams>, serde_json::Error> {
+    ) -> Result<Option<kvbm_protocols::disagg::TransferParams>, serde_json::Error> {
         self.request.disagg_transfer_params()
     }
 

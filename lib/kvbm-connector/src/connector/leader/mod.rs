@@ -2,12 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod audit;
-mod control;
-pub mod control_api;
 pub mod disagg;
 mod request;
 mod slot;
-pub mod velo_control;
 
 use super::worker::ConnectorWorkerClient;
 use crate::{BlockId, G2, InstanceId, KvbmRuntime};
@@ -54,9 +51,6 @@ pub struct ConnectorLeader {
     oracle: Arc<dyn Oracle>,
     /// Offload engine for G1→G2→G3 transfers (initialized in initialize_async)
     offload_engine: OnceLock<OffloadEngine>,
-    /// Control server shutdown handle (initialized in initialize_async)
-    #[allow(dead_code)] // Kept for RAII-based shutdown on drop
-    control_server_shutdown: OnceLock<oneshot::Sender<()>>,
     /// Accumulated G2 blocks for intra-pass onboarding.
     ///
     /// These blocks are collected from each request's find session during
@@ -131,7 +125,6 @@ impl ConnectorLeader {
             slots: DashMap::new(),
             oracle: Arc::new(DefaultOracle::default()),
             offload_engine: OnceLock::new(),
-            control_server_shutdown: OnceLock::new(),
             pending_intra_pass_g2_blocks: Mutex::new(Vec::new()),
             forward_pass_samples: Mutex::new(None),
             disagg_client: OnceLock::new(),
@@ -430,7 +423,7 @@ impl ConnectorLeader {
     pub(crate) fn slot_transfer_params(
         &self,
         request_id: &str,
-    ) -> Result<Option<kvbm_disagg_protocol::TransferParams>> {
+    ) -> Result<Option<kvbm_protocols::disagg::TransferParams>> {
         let slot = self.get_slot(request_id)?;
         let slot = slot.lock();
         slot.transfer_params()

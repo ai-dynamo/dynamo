@@ -11,8 +11,8 @@
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use kvbm_disagg_protocol::SessionId;
 use kvbm_engine::disagg::session::Session;
+use kvbm_protocols::disagg::SessionId;
 
 #[derive(Clone)]
 pub struct BeginOutcome {

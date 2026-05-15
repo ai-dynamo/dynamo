@@ -333,6 +333,9 @@ pub trait PeerResolver: Send + Sync {
     fn resolve_and_register(&self, instance_id: InstanceId) -> BoxFuture<'_, Result<()>>;
 }
 
+pub mod manager;
+pub use manager::{DEFAULT_SESSION_WATCHDOG, SessionManager};
+
 pub mod velo;
 pub use velo::{SESSION_STREAM_SCHEMA, VeloSession, VeloSessionFactory};
 

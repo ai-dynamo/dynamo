@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use futures::{FutureExt, future::BoxFuture};
-use kvbm_disagg_protocol::{RemotePrefillRequest, TransferParams};
+use kvbm_protocols::disagg::{RemotePrefillRequest, TransferParams};
 use tokio::sync::oneshot;
 
 use super::transport::{CdBlockTransport, CdWorkerHook, InnerLeaderShim};
