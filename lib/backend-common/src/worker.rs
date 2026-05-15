@@ -524,9 +524,9 @@ impl Worker {
         }
         let cleanup_elapsed = cleanup_start.elapsed().as_secs_f64();
         // Record cleanup latency on dynamo_component_cleanup_time_seconds
-        // BEFORE stopping the publisher loops — otherwise the next /metrics
-        // scrape sees stale state. The gauge is operator-useful when scraped
-        // in the brief window between cleanup-complete and pod-terminate.
+        // BEFORE the publisher Arc gets dropped on shutdown below. The gauge
+        // is operator-useful when scraped in the brief window between
+        // cleanup-complete and pod-terminate.
         if let Some(handles) = self.publishers.as_ref()
             && let Some(publisher) = handles.component_publisher.as_ref()
         {

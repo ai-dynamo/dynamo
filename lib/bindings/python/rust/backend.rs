@@ -949,24 +949,18 @@ impl ComponentMetricsPublisher for PyComponentMetricsPublisher {
         });
     }
     fn set_cleanup_time(&self, seconds: f64) {
-        Python::with_gil(|py| {
-            if let Err(e) = self
-                .gauges
-                .bind(py)
-                .call_method1("set_cleanup_time", (seconds,))
-            {
-                tracing::warn!(error = %e, "set_cleanup_time failed");
-            }
-        });
+        self.set_lifecycle_gauge("set_cleanup_time", seconds);
     }
     fn set_drain_time(&self, seconds: f64) {
+        self.set_lifecycle_gauge("set_drain_time", seconds);
+    }
+}
+
+impl PyComponentMetricsPublisher {
+    fn set_lifecycle_gauge(&self, method: &'static str, seconds: f64) {
         Python::with_gil(|py| {
-            if let Err(e) = self
-                .gauges
-                .bind(py)
-                .call_method1("set_drain_time", (seconds,))
-            {
-                tracing::warn!(error = %e, "set_drain_time failed");
+            if let Err(e) = self.gauges.bind(py).call_method1(method, (seconds,)) {
+                tracing::warn!(error = %e, method, "lifecycle gauge update failed");
             }
         });
     }
