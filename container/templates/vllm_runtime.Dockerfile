@@ -56,7 +56,6 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 # missing package must be added explicitly.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    uv pip install --system --no-deps "msgspec==0.19.0" && \
     uv pip install --system --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install --system --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
