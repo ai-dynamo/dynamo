@@ -581,13 +581,17 @@ impl Worker {
             .or_else(load_health_check_payload_from_env)
         {
             Some(p) => Some(p),
-            None => self.engine.health_check_payload().await.unwrap_or_else(|e| {
-                tracing::warn!(
-                    error = %e,
-                    "engine.health_check_payload() failed; canary disabled for this endpoint",
-                );
-                None
-            }),
+            None => self
+                .engine
+                .health_check_payload()
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        "engine.health_check_payload() failed; canary disabled for this endpoint",
+                    );
+                    None
+                }),
         };
 
         let mut builder = endpoint
@@ -705,7 +709,9 @@ fn shutdown_deadline(timeout: Duration, grace_secs: f64) -> Duration {
 /// Returns `None` when the env is unset or the value is invalid; an invalid
 /// value logs a warning so it can't silently disable the engine default.
 fn load_health_check_payload_from_env() -> Option<serde_json::Value> {
-    let raw = std::env::var(HEALTH_CHECK_PAYLOAD_ENV).ok().filter(|s| !s.is_empty())?;
+    let raw = std::env::var(HEALTH_CHECK_PAYLOAD_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())?;
     let parsed: Result<serde_json::Value, _> = if let Some(path) = raw.strip_prefix('@') {
         std::fs::read_to_string(path).map_or_else(
             |e| Err(format!("read {path}: {e}")),
@@ -717,7 +723,10 @@ fn load_health_check_payload_from_env() -> Option<serde_json::Value> {
     match parsed {
         Ok(v) if v.is_object() => Some(v),
         Ok(_) => {
-            tracing::warn!(env = HEALTH_CHECK_PAYLOAD_ENV, "value must be a JSON object");
+            tracing::warn!(
+                env = HEALTH_CHECK_PAYLOAD_ENV,
+                "value must be a JSON object"
+            );
             None
         }
         Err(e) => {
@@ -1465,10 +1474,14 @@ mod tests {
 
     #[test]
     fn health_check_payload_env_returns_object() {
-        with_env(HEALTH_CHECK_PAYLOAD_ENV, Some(r#"{"token_ids":[1]}"#), || {
-            let got = load_health_check_payload_from_env().unwrap();
-            assert_eq!(got["token_ids"], serde_json::json!([1]));
-        });
+        with_env(
+            HEALTH_CHECK_PAYLOAD_ENV,
+            Some(r#"{"token_ids":[1]}"#),
+            || {
+                let got = load_health_check_payload_from_env().unwrap();
+                assert_eq!(got["token_ids"], serde_json::json!([1]));
+            },
+        );
     }
 
     #[test]
