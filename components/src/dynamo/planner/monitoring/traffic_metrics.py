@@ -42,6 +42,7 @@ class Metrics:
     request_duration: Optional[float] = None
     p_load: Optional[float] = None
     d_load: Optional[float] = None
+    kv_hit_rate: Optional[float] = None
 
     def is_valid(self) -> bool:
         """Check if all required metrics are valid (not None and not NaN)."""
@@ -97,6 +98,30 @@ class PrometheusAPIClient:
         self.prom = PrometheusConnect(url=url, disable_ssl=True)
         self.dynamo_namespace = dynamo_namespace
         self.metrics_source = metrics_source  # "frontend" | "router"
+
+    def _frontend_metric_name(self, metric_name: str) -> str:
+        if metric_name.startswith(prometheus_names.name_prefix.FRONTEND):
+            return metric_name
+        return f"{prometheus_names.name_prefix.FRONTEND}_{metric_name}"
+
+    def _sum_frontend_metric(self, result, model_name: str) -> Optional[float]:
+        if not result:
+            return None
+
+        metrics_containers = parse_frontend_metric_containers(result)
+        total = 0.0
+        matched = False
+        for container in metrics_containers:
+            # Frontend lowercases model names in Prometheus labels.
+            if (
+                container.metric.model
+                and container.metric.model.lower() == model_name.lower()
+                and container.metric.dynamo_namespace == self.dynamo_namespace
+                and not math.isnan(container.value[1])
+            ):
+                matched = True
+                total += container.value[1]
+        return total if matched else None
 
     def _get_average_metric(
         self,
@@ -245,30 +270,34 @@ class PrometheusAPIClient:
             except Exception as e:
                 logger.error(f"Error getting avg request count: {e}")
                 return 0
-        # This function follows a different query pattern than the other metrics
+        # This function follows a different query pattern than the other metrics:
+        # use frontend-started requests so throughput planning sees offered load,
+        # not only completed responses.
         try:
-            requests_total_metric = prometheus_names.frontend_service.REQUESTS_TOTAL
-            # Prepend the frontend metric prefix if not already present
-            if not requests_total_metric.startswith(
-                prometheus_names.name_prefix.FRONTEND
-            ):
-                requests_total_metric = (
-                    f"{prometheus_names.name_prefix.FRONTEND}_{requests_total_metric}"
-                )
-            raw_res = self.prom.custom_query(
+            requests_started_metric = self._frontend_metric_name(
+                prometheus_names.frontend_service.REQUESTS_STARTED_TOTAL
+            )
+            started_res = self.prom.custom_query(
+                query=f"increase({requests_started_metric}[{interval}])"
+            )
+            started_count = self._sum_frontend_metric(started_res, model_name)
+            if started_count is not None:
+                return started_count
+
+            logger.warning(
+                f"No prometheus metric data available for {requests_started_metric} "
+                f"with model {model_name} and dynamo namespace "
+                f"{self.dynamo_namespace}; falling back to completed request count"
+            )
+
+            requests_total_metric = self._frontend_metric_name(
+                prometheus_names.frontend_service.REQUESTS_TOTAL
+            )
+            completed_res = self.prom.custom_query(
                 query=f"increase({requests_total_metric}[{interval}])"
             )
-            metrics_containers = parse_frontend_metric_containers(raw_res)
-            total_count = 0.0
-            for container in metrics_containers:
-                # Frontend lowercases model names for Prometheus labels so we need to do case-insensitive comparison
-                if (
-                    container.metric.model
-                    and container.metric.model.lower() == model_name.lower()
-                    and container.metric.dynamo_namespace == self.dynamo_namespace
-                ):
-                    total_count += container.value[1]
-            return total_count
+            completed_count = self._sum_frontend_metric(completed_res, model_name)
+            return completed_count or 0
         except Exception as e:
             logger.error(f"Error getting avg request count: {e}")
             return 0
@@ -300,6 +329,47 @@ class PrometheusAPIClient:
             "avg output sequence tokens",
             model_name,
         )
+
+    def get_avg_kv_hit_rate(self, interval: str, model_name: str) -> Optional[float]:
+        """Average predicted KV cache hit rate (0.0-1.0) from the router.
+
+        Only available when metrics_source == "router" (the histogram lives on
+        the LocalRouter component). In disagg deployments the scrape is
+        namespace-filtered, so if the planner's ``dynamo_namespace`` matches
+        the prefill pool, the returned value pools only prefill-router
+        observations.
+
+        Returns ``None`` (not ``0.0``) on missing data — Prometheus scrape
+        gaps must not be confused with a real "no reuse" signal: the state
+        machine treats a real ``0.0`` as a valid observation and would
+        otherwise drag the predictor / sticky value down toward zero on
+        every scrape failure. The caller's ``_clamp_kv_hit_rate(None)``
+        falls back to no-discount behavior, which is the safe choice.
+        """
+        if self.metrics_source != "router":
+            return None
+        full_metric_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.router.KV_HIT_RATE}"
+        )
+        try:
+            ns = self.dynamo_namespace.replace("-", "_")
+            ns_filter = f'{prometheus_names.labels.NAMESPACE}="{ns}"'
+            query = (
+                f"sum(increase({full_metric_name}_sum{{{ns_filter}}}[{interval}])) / "
+                f"sum(increase({full_metric_name}_count{{{ns_filter}}}[{interval}]))"
+            )
+            result = self.prom.custom_query(query=query)
+            if not result:
+                logger.info(
+                    f"No prometheus data for {full_metric_name}, returning None"
+                )
+                return None
+            value = float(result[0]["value"][1])
+            return None if math.isnan(value) else value
+        except Exception as e:
+            logger.warning(f"Error getting avg kv hit rate: {e}")
+            return None
 
     def warn_if_router_not_scraped(self) -> None:
         """Warn if Prometheus is not scraping any dynamo_component_router_* series.

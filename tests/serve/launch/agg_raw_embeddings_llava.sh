@@ -5,18 +5,18 @@
 # LLaVA Raw-Embeddings E/PD Test
 #
 # Phase 1 — Run HuggingFace vision encoder standalone to produce
-#            pre-computed embeddings at $EMBEDDINGS_FILE (.pt tensor).
+#            pre-computed embeddings at $EMBEDDINGS_FILE (.safetensors format).
 #
 # Phase 2 — Start Encode + Aggregated PD workers for LLaVA, then
 #            accept chat/completions requests whose image_url points
-#            to the embeddings file (file:///tmp/llava_embeddings.pt).
+#            to the embeddings file (file:///tmp/llava_embeddings.safetensors).
 #
 # Known limitation: The default revision of llava-hf/llava-v1.6-mistral-7b-hf
 # may crash with certain TRT-LLM versions.  Set MODEL_REVISION to pin a
 # safe commit (e.g. 52320fb52229).
 
 set -e
-trap 'echo Cleaning up...; rm -f "${EMBEDDINGS_FILE:-/tmp/llava_embeddings.pt}" /tmp/_resolved_model_path.txt; kill 0' EXIT
+trap 'echo Cleaning up...; rm -f "${EMBEDDINGS_FILE:-/tmp/llava_embeddings.safetensors}" /tmp/_resolved_model_path.txt; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 
@@ -37,7 +37,7 @@ export MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-50}
 export CUSTOM_TEMPLATE=${CUSTOM_TEMPLATE:-"$DYNAMO_HOME/examples/backends/trtllm/templates/llava_multimodal.jinja"}
 
 # Embeddings configuration
-EMBEDDINGS_FILE="${EMBEDDINGS_FILE:-/tmp/llava_embeddings.pt}"
+EMBEDDINGS_FILE="${EMBEDDINGS_FILE:-/tmp/llava_embeddings.safetensors}"
 TEST_IMAGE_URL="${TEST_IMAGE_URL:-https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png}"
 
 # Extra arguments forwarded to the PD worker (e.g. --multimodal-embedding-cache-capacity-gb 10)
@@ -71,13 +71,14 @@ CUDA_VISIBLE_DEVICES=0 python3 - <<'PYEOF'
 import torch, io, os, urllib.request
 from PIL import Image
 from huggingface_hub import snapshot_download
+from safetensors.torch import save_file as safetensors_save_file
 from transformers import LlavaNextForConditionalGeneration, LlavaNextProcessor
 
 model_id   = os.environ["MODEL_PATH"]
 revision   = os.environ.get("MODEL_REVISION", "") or None
 image_url  = os.environ.get("TEST_IMAGE_URL",
     "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png")
-output     = os.environ.get("EMBEDDINGS_FILE", "/tmp/llava_embeddings.pt")
+output     = os.environ.get("EMBEDDINGS_FILE", "/tmp/llava_embeddings.safetensors")
 
 # ── Download / resolve model ──
 print(f"Resolving model {model_id} (revision={revision}) …")
@@ -125,8 +126,8 @@ with torch.no_grad():
 
 print(f"Embeddings: shape={embeddings.shape}, dtype={embeddings.dtype}")
 
-# ── Save to disk ──
-torch.save(embeddings.cpu(), output)
+# ── Save to disk as safetensors (safe format, no pickle) ──
+safetensors_save_file({"embedding": embeddings.cpu()}, output)
 print(f"Saved embeddings → {output}")
 
 # ── Write resolved model path so Phase 2 uses the exact same revision ──

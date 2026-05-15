@@ -9,7 +9,7 @@ use dynamo_tokens::TokenBlockSequence;
 use super::Request;
 use super::scheduler::CachedRequestData;
 use kvbm_common::{BlockId, SequenceHash};
-use kvbm_engine::leader::FindMatchesResult;
+use kvbm_engine::leader::{FindMatchesResult, InstanceLeader, MatchBreakdown, OnboardingStatus};
 use kvbm_engine::offload::TransferHandle;
 use kvbm_logical::KvbmSequenceHashProvider;
 
@@ -35,6 +35,44 @@ pub enum StateTransitionError {
 // State Data Structs
 // ============================================================================
 
+/// A single contiguous sub-range of the logical sequence being searched.
+///
+/// Multiple shards exist when the search has been reconciled against a changing
+/// `num_computed_tokens` or `total_tokens`: for example, when vLLM evicts G1 blocks
+/// between polls we prepend a new prefix shard, and when tokens are restored from
+/// eviction we append a new upper shard. On completion we walk shards in order
+/// and unify their match counts using first-hole semantics.
+#[derive(Debug)]
+pub struct OnboardingShard {
+    /// Block index in the logical sequence where this shard's search starts (inclusive).
+    pub start_block: usize,
+
+    /// Number of sequence hashes this shard queried. The shard covers block
+    /// indices `[start_block .. start_block + num_queried_blocks)`.
+    pub num_queried_blocks: usize,
+
+    /// The find session that owns the matched blocks via RAII.
+    pub find_session: FindMatchesResult,
+}
+
+impl OnboardingShard {
+    /// Exclusive end block index of this shard.
+    pub fn end_block(&self) -> usize {
+        self.start_block + self.num_queried_blocks
+    }
+
+    /// Best-effort release of the underlying session.
+    ///
+    /// For `Ready` variants this is a no-op (blocks drop via RAII). For
+    /// `AsyncSession` variants this calls `release_session` on the leader so
+    /// that server-side session state is freed.
+    pub fn release(&self, leader: &InstanceLeader) {
+        if let Some(session_id) = self.find_session.session_id() {
+            leader.release_session(session_id);
+        }
+    }
+}
+
 /// Data associated with onboarding operations (both PreparingToOnboard and Onboarding states).
 ///
 /// RAII cleanup hook for resources kicked off during a CD-remote
@@ -54,25 +92,207 @@ pub trait CdOnboardingPayload: Send + Sync + std::fmt::Debug {}
 
 /// This struct holds all the state needed for finding and loading external KV cache blocks.
 ///
-/// `find_session` is `None` for **CD-decode** requests — those have no
-/// local find/onboard work; the slot enters `Onboarding` purely so the
-/// canonical `update_connector_output` cleanup path applies. The
-/// `cd_payload` field carries the RAII cleanup hook for the CD pipeline.
-/// At least one of `find_session` / `cd_payload` is `Some` whenever the
-/// slot is in `PreparingToOnboard` / `Onboarding`.
+/// `shards` is a list of contiguous `OnboardingShard`s covering some block-index range of the
+/// logical sequence; shards are reconciled and added when `num_computed_tokens` or
+/// `total_tokens` changes between calls to `get_num_new_matched_tokens` (see
+/// `reconcile_and_process` in `search.rs`).
+///
+/// `shards` is **empty** for **CD-decode** requests — those have no local
+/// find/onboard work; the slot enters `Onboarding` purely so the canonical
+/// `update_connector_output` cleanup path applies. The `cd_payload` field
+/// carries the RAII cleanup hook for the CD pipeline. At least one of
+/// `shards` (non-empty) / `cd_payload` is set whenever the slot is in
+/// `PreparingToOnboard` / `Onboarding`.
 #[derive(Debug)]
 pub struct OnboardingState {
-    /// The number of tokens that match tokens already in the G1 storage
+    /// The number of tokens that match tokens already in the G1 storage,
+    /// as last reported by vLLM. May be updated on retries.
     pub num_computed_tokens: usize,
 
-    /// The active find session for discovering external blocks.
-    /// `None` when this onboarding is purely CD-driven (no local match).
-    pub find_session: Option<FindMatchesResult>,
+    /// The `total_tokens` captured when the earliest shard was issued. Used
+    /// to detect when the logical sequence has grown (eviction restore).
+    pub total_tokens_at_start: usize,
+
+    /// Shards sorted by `start_block` ascending. Invariant: contiguous and
+    /// non-overlapping, i.e. `shards[i+1].start_block == shards[i].end_block()`.
+    /// May be empty when the onboarding is purely CD-driven (no local match).
+    pub shards: Vec<OnboardingShard>,
 
     /// RAII cleanup hook for the CD-remote prefill pipeline. Dropped
     /// when this `OnboardingState` is taken/dropped — that's the
     /// canonical CD cleanup point.
     pub cd_payload: Option<Box<dyn CdOnboardingPayload>>,
+}
+
+impl OnboardingState {
+    /// Build a new state from a single initial shard.
+    pub fn new(
+        num_computed_tokens: usize,
+        total_tokens_at_start: usize,
+        initial_shard: OnboardingShard,
+    ) -> Self {
+        let state = Self {
+            num_computed_tokens,
+            total_tokens_at_start,
+            shards: vec![initial_shard],
+            cd_payload: None,
+        };
+        state.debug_assert_contiguous();
+        state
+    }
+
+    /// Build a new state with no shards, carrying only a CD-remote payload.
+    ///
+    /// Used by the CD-decode cold-cache path where vLLM reports no local
+    /// match; the slot is promoted straight into `Onboarding` and the
+    /// CD wrapper drives the load (G2→G1 via worker_pull_chunk + RDMA
+    /// pull-back from the prefill peer) outside the canonical
+    /// `find_session.wait_for_completion` flow.
+    pub fn new_cd_only(cd_payload: Box<dyn CdOnboardingPayload>) -> Self {
+        Self {
+            num_computed_tokens: 0,
+            total_tokens_at_start: 0,
+            shards: Vec::new(),
+            cd_payload: Some(cd_payload),
+        }
+    }
+
+    /// Total number of blocks queried across all shards (for metrics).
+    pub fn total_query_blocks(&self) -> usize {
+        self.shards.iter().map(|s| s.num_queried_blocks).sum()
+    }
+
+    /// Sum of match breakdowns across all shards.
+    pub fn aggregate_breakdown(&self) -> MatchBreakdown {
+        self.shards
+            .iter()
+            .map(|s| s.find_session.match_breakdown())
+            .fold(MatchBreakdown::default(), |acc, b| MatchBreakdown {
+                host_blocks: acc.host_blocks + b.host_blocks,
+                disk_blocks: acc.disk_blocks + b.disk_blocks,
+                object_blocks: acc.object_blocks + b.object_blocks,
+            })
+    }
+
+    /// Return `true` iff every shard has reached a terminal state.
+    pub fn all_shards_terminal(&self) -> bool {
+        self.shards.iter().all(shard_is_terminal)
+    }
+
+    /// Compute the `(effective_start, final_end)` block-index span covered by
+    /// the contiguous match so far.
+    ///
+    /// `effective_start` is the greater of the earliest shard's start and the
+    /// current `num_computed_tokens / bs`. `final_end` is the first-hole
+    /// boundary walking contiguously from `shards[0].start_block`.
+    ///
+    /// Precondition: all shards are terminal (`all_shards_terminal()` is true).
+    pub fn matched_span(&self, block_size: usize) -> (usize, usize) {
+        debug_assert!(!self.shards.is_empty());
+        debug_assert!(self.all_shards_terminal());
+
+        let mut running_end = self.shards[0].start_block;
+        let mut final_end = running_end;
+        for shard in &self.shards {
+            debug_assert_eq!(shard.start_block, running_end);
+            let matched = shard_terminal_matched_count(shard);
+            if matched < shard.num_queried_blocks {
+                final_end = running_end + matched;
+                break;
+            }
+            running_end += shard.num_queried_blocks;
+            final_end = running_end;
+        }
+
+        let new_computed_blocks = self.num_computed_tokens / block_size;
+        let effective_start = self.shards[0].start_block.max(new_computed_blocks);
+        (effective_start, final_end)
+    }
+
+    /// Check invariants on shard list (contiguous, non-overlapping, sorted).
+    pub(crate) fn debug_assert_contiguous(&self) {
+        if cfg!(debug_assertions) {
+            for pair in self.shards.windows(2) {
+                debug_assert_eq!(
+                    pair[1].start_block,
+                    pair[0].end_block(),
+                    "OnboardingState shards must be contiguous: {:?}",
+                    self.shards
+                        .iter()
+                        .map(|s| (s.start_block, s.num_queried_blocks))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    /// Release sessions for every shard (best-effort cleanup).
+    pub fn release_all(&self, leader: &InstanceLeader) {
+        for shard in &self.shards {
+            shard.release(leader);
+        }
+    }
+}
+
+/// True if the find session of this shard has reached a terminal state.
+pub fn shard_is_terminal(shard: &OnboardingShard) -> bool {
+    match &shard.find_session {
+        FindMatchesResult::Ready(_) => true,
+        FindMatchesResult::AsyncSession(s) => matches!(
+            s.status(),
+            OnboardingStatus::Complete { .. }
+                | OnboardingStatus::Holding { .. }
+                | OnboardingStatus::Prepared { .. }
+        ),
+    }
+}
+
+/// Return the matched block count for a terminal shard.
+///
+/// Panics if called on a non-terminal shard; callers must gate on
+/// [`OnboardingState::all_shards_terminal`] first.
+///
+/// **Drain-idempotent**: both Ready and AsyncSession variants return the
+/// shard's matched count from a source captured at terminal-state time
+/// (Ready: `match_breakdown`, set at construction; AsyncSession:
+/// `OnboardingStatus::Complete.matched_blocks`, set by the staging path).
+/// This is required so [`OnboardingState::matched_span`] —
+/// and therefore [`super::ConnectorLeader::slot_match_split`] — returns
+/// the same value before and after `take_g2_blocks` / `take_g3_blocks`
+/// has been called on a shard. The CD wrapper relies on this: it reads
+/// `slot_match_split` (USAA-1 validation, line ~755 of decode_leader.rs)
+/// after `take_local_match_g2_blocks` has drained Ready vecs at the
+/// `commit_gnmt_remote` site. Reading `r.total_count()` (live Vec length)
+/// would shrink `matched_span.final_end` post-drain and shift
+/// `split.local_match_range()` / `split.remote_range()`.
+pub fn shard_terminal_matched_count(shard: &OnboardingShard) -> usize {
+    match &shard.find_session {
+        // Ready: sum the per-tier breakdown captured at construction. This
+        // covers bypass-mode hits (host_blocks + disk_blocks) and the
+        // non-bypass case (host_blocks only). Reading `r.total_count()`
+        // here would drop to 0 after `take_g2_blocks`/`take_g3_blocks`.
+        FindMatchesResult::Ready(r) => {
+            let b = r.match_breakdown();
+            b.host_blocks + b.disk_blocks + b.object_blocks
+        }
+        FindMatchesResult::AsyncSession(s) => match s.status() {
+            OnboardingStatus::Complete { matched_blocks } => matched_blocks,
+            // Holding / Prepared are not currently produced on this path; treat the
+            // session as if its g2_count() is authoritative.
+            OnboardingStatus::Holding { .. } | OnboardingStatus::Prepared { .. } => {
+                s.get_blocks_count().unwrap_or(0)
+            }
+            OnboardingStatus::Searching
+            | OnboardingStatus::Preparing { .. }
+            | OnboardingStatus::Staging { .. } => {
+                debug_assert!(
+                    false,
+                    "shard_terminal_matched_count called on non-terminal shard"
+                );
+                0
+            }
+        },
+    }
 }
 
 /// Data associated with offloading operations.
@@ -315,10 +535,11 @@ impl SlotStateMachine {
     ///
     /// Three legal transitions, mirroring the inner gnmt's outcome:
     ///
-    /// 1. `Inactive` → `Onboarding(OnboardingState { find_session: None, cd_payload: Some(...) })`
+    /// 1. `Inactive` → `Onboarding(OnboardingState::new_cd_only(payload))`
     ///    — cold-cache CD: no local match was found, the wrapper
     ///    promotes the slot directly into Onboarding so
-    ///    `process_finished_onboarding` cleanup applies.
+    ///    `process_finished_onboarding` cleanup applies. `shards` is
+    ///    empty in this path.
     /// 2. `Onboarding(state)` with `state.cd_payload.is_none()` →
     ///    same state, with `cd_payload` attached. The local-match
     ///    onboarding is already running; CD just adds its cleanup.
@@ -327,13 +548,13 @@ impl SlotStateMachine {
     ///    ownership unifies into `Onboarding`. The CD wrapper
     ///    drives the actual load (G2→G1 via worker_pull_chunk +
     ///    RDMA pull-back from the prefill peer) outside the
-    ///    canonical `start_onboarding` / `find_session.wait_for_completion`
+    ///    canonical `start_onboarding` / per-shard `wait_for_completion`
     ///    path; the slot's transactional state must reflect that
     ///    it is actively onboarding so
     ///    `process_finished_onboarding`'s `txn_take_onboarding`
-    ///    cleanup applies. The carried-over `find_session=Some(...)`
-    ///    from inner gnmt is released via `release_session` in
-    ///    that cleanup, identical to the canonical non-CD path.
+    ///    cleanup applies. Carried-over shard sessions are released
+    ///    via `release_all` in that cleanup, identical to the canonical
+    ///    non-CD path.
     ///
     /// Any state with `cd_payload` already set returns
     /// `MarkedForDeletion`-shaped `InvalidTransition` (we don't
@@ -349,11 +570,8 @@ impl SlotStateMachine {
         let current = std::mem::replace(&mut self.txn_state, TransactionState::Inactive);
         match current {
             TransactionState::Inactive => {
-                self.txn_state = TransactionState::Onboarding(OnboardingState {
-                    num_computed_tokens: 0,
-                    find_session: None,
-                    cd_payload: Some(cd_payload),
-                });
+                self.txn_state =
+                    TransactionState::Onboarding(OnboardingState::new_cd_only(cd_payload));
                 Ok(())
             }
             TransactionState::Onboarding(mut state) => {
@@ -660,9 +878,6 @@ pub struct RequestSlot {
     /// the `KvConnectorMetadata.intra_pass_load` field.
     pending_intra_pass: Option<IntraPassPending>,
 
-    /// Number of cache blocks queried for the active match attempt.
-    match_query_blocks: usize,
-
     /// Prevent duplicate matched-token metric emission during repeated polling.
     matched_tokens_reported: bool,
 }
@@ -803,7 +1018,6 @@ impl RequestSlot {
             finished_evaluating: false,
             match_requires_reset: false,
             pending_intra_pass: None,
-            match_query_blocks: 0,
             matched_tokens_reported: false,
         })
     }
@@ -900,13 +1114,20 @@ impl RequestSlot {
         self.match_requires_reset = requires_reset;
     }
 
-    pub fn set_match_query_blocks(&mut self, match_query_blocks: usize) {
-        self.match_query_blocks = match_query_blocks;
+    /// Reset the matched-tokens metric reporting flag. Called when a new
+    /// onboarding search is kicked off so that the next match count is
+    /// reported exactly once.
+    pub fn reset_matched_tokens_reported(&mut self) {
         self.matched_tokens_reported = false;
     }
 
-    pub fn match_query_blocks(&self) -> usize {
-        self.match_query_blocks
+    /// Total number of blocks queried across all shards of the active
+    /// onboarding search, or 0 if there is no active onboarding state.
+    pub fn total_query_blocks(&self) -> usize {
+        self.state
+            .onboarding_state()
+            .map(|s| s.total_query_blocks())
+            .unwrap_or(0)
     }
 
     pub fn mark_matched_tokens_reported(&mut self) -> bool {
@@ -967,20 +1188,48 @@ impl RequestSlot {
 
     /// Begin preparing to onboard blocks from remote storage.
     ///
-    /// Creates an `OnboardingState` with the given find session and computed tokens count.
-    /// Only valid when in `Inactive` state and slot is not marked for deletion.
+    /// Creates an `OnboardingState` with a single initial shard covering
+    /// `[start_block .. start_block + num_queried_blocks)`. Only valid when
+    /// in `Inactive` state and slot is not marked for deletion.
     pub fn txn_prepare_to_onboard(
+        &mut self,
+        num_computed_tokens: usize,
+        total_tokens_at_start: usize,
+        start_block: usize,
+        num_queried_blocks: usize,
+        find_session: FindMatchesResult,
+    ) -> Result<(), StateTransitionError> {
+        let initial_shard = OnboardingShard {
+            start_block,
+            num_queried_blocks,
+            find_session,
+        };
+        let state = OnboardingState::new(num_computed_tokens, total_tokens_at_start, initial_shard);
+        self.evaluated_tokens = 0;
+        self.matched_tokens_reported = false;
+        self.state.txn_prepare_to_onboard(state)
+    }
+
+    /// Test-only convenience wrapper matching the legacy 2-argument signature
+    /// of `txn_prepare_to_onboard`. Defaults `total_tokens_at_start`, `start_block`,
+    /// and `num_queried_blocks` to values consistent with the existing
+    /// state-machine tests (which don't exercise reconciliation).
+    #[cfg(test)]
+    pub fn txn_prepare_to_onboard_legacy(
         &mut self,
         num_computed_tokens: usize,
         find_session: FindMatchesResult,
     ) -> Result<(), StateTransitionError> {
-        let state = OnboardingState {
+        // Pick plausible-but-arbitrary shard metadata; tests that care about
+        // these values use `txn_prepare_to_onboard` directly.
+        let block_size = self.block_size();
+        self.txn_prepare_to_onboard(
             num_computed_tokens,
-            find_session: Some(find_session),
-            cd_payload: None,
-        };
-        self.evaluated_tokens = 0;
-        self.state.txn_prepare_to_onboard(state)
+            num_computed_tokens,
+            num_computed_tokens / block_size,
+            1,
+            find_session,
+        )
     }
 
     /// Transition from PreparingToOnboard to Onboarding.
@@ -1151,7 +1400,6 @@ impl RequestSlot {
 
         // Clear the reset flag
         self.match_requires_reset = false;
-        self.match_query_blocks = 0;
         self.matched_tokens_reported = false;
 
         // NOTE: Do NOT clear pending_intra_pass here. By the time reset_for_preemption
@@ -2484,10 +2732,12 @@ mod tests {
             RequestSlot::new(request, TEST_BLOCK_SIZE).expect("Failed to create RequestSlot")
         }
 
-        /// Helper to create a mock OnboardingState for testing.
-        /// Returns (num_computed_tokens, FindMatchesResult).
+        /// Helper to create a mock `(num_computed_tokens, FindMatchesResult)`
+        /// pair for state-machine testing. Callers pass the pair to
+        /// [`RequestSlot::txn_prepare_to_onboard_legacy`], which fills in
+        /// shard metadata with test defaults.
         fn create_mock_onboarding_state() -> (usize, FindMatchesResult) {
-            // Create a Ready result with no blocks for testing purposes
+            // Create a Ready result with no blocks for testing purposes.
             let ready_result = ReadyResult::new(vec![], Default::default());
             (100, FindMatchesResult::Ready(ready_result))
         }
@@ -2505,7 +2755,7 @@ mod tests {
             assert!(slot.txn_state().is_inactive());
 
             // Transition to PreparingToOnboard should succeed
-            let result = slot.txn_prepare_to_onboard(num_computed_tokens, find_session);
+            let result = slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session);
             assert!(result.is_ok());
 
             // Verify state changed
@@ -2521,12 +2771,12 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // First transition to PreparingToOnboard
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
 
             // Try to prepare again - should fail
             let (num_computed_tokens2, find_session2) = create_mock_onboarding_state();
-            let result = slot.txn_prepare_to_onboard(num_computed_tokens2, find_session2);
+            let result = slot.txn_prepare_to_onboard_legacy(num_computed_tokens2, find_session2);
 
             assert!(result.is_err());
             assert!(matches!(
@@ -2545,7 +2795,7 @@ mod tests {
 
             // Try to prepare to onboard - should fail
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
-            let result = slot.txn_prepare_to_onboard(num_computed_tokens, find_session);
+            let result = slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session);
 
             assert!(result.is_err());
             assert!(matches!(
@@ -2560,7 +2810,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // First prepare to onboard
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
 
             // Then start onboarding
@@ -2591,7 +2841,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // Prepare to onboard
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
 
             // Mark for deletion
@@ -2627,7 +2877,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // Inner gnmt path: matches found → PreparingToOnboard.
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
             assert!(matches!(
                 slot.txn_state(),
@@ -2638,12 +2888,12 @@ mod tests {
             slot.txn_install_or_attach_cd_payload(Box::new(MockCdPayload))
                 .unwrap();
 
-            // Slot is now Onboarding with both find_session and cd_payload set.
+            // Slot is now Onboarding with both shards and cd_payload set.
             match slot.txn_state() {
                 TransactionState::Onboarding(state) => {
                     assert!(
-                        state.find_session.is_some(),
-                        "find_session preserved across install"
+                        !state.shards.is_empty(),
+                        "shards preserved across install"
                     );
                     assert!(state.cd_payload.is_some(), "cd_payload installed");
                     assert_eq!(state.num_computed_tokens, 100);
@@ -2656,15 +2906,15 @@ mod tests {
 
             // Canonical cleanup: take_onboarding must now succeed.
             let onboarding = slot.txn_take_onboarding().unwrap();
-            assert!(onboarding.find_session.is_some());
+            assert!(!onboarding.shards.is_empty());
             assert!(onboarding.cd_payload.is_some());
             assert!(matches!(slot.txn_state(), TransactionState::Inactive));
         }
 
         /// CD-decode cold-cache path: no inner match. Inactive →
-        /// Onboarding(find_session=None, cd_payload=Some). Pinning
-        /// the existing arm 1 behavior so changes to arm 3 don't
-        /// silently affect cold-cache.
+        /// Onboarding(shards=empty, cd_payload=Some). Pinning the
+        /// existing arm 1 behavior so changes to arm 3 don't silently
+        /// affect cold-cache.
         #[test]
         fn test_txn_install_cd_payload_inactive_to_onboarding() {
             let mut slot = create_test_slot();
@@ -2674,7 +2924,7 @@ mod tests {
 
             match slot.txn_state() {
                 TransactionState::Onboarding(state) => {
-                    assert!(state.find_session.is_none());
+                    assert!(state.shards.is_empty());
                     assert!(state.cd_payload.is_some());
                 }
                 other => panic!("expected Onboarding, got {:?}", other.name()),
@@ -2688,7 +2938,7 @@ mod tests {
         fn test_txn_install_cd_payload_twice_fails() {
             let mut slot = create_test_slot();
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
 
             // First install promotes PreparingToOnboard → Onboarding.
@@ -2709,7 +2959,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // Setup: Inactive -> PreparingToOnboard -> Onboarding
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
             slot.txn_start_onboarding().unwrap();
 
@@ -2744,7 +2994,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // Only prepare, don't start
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
 
             // Try to take onboarding from PreparingToOnboard - should fail
@@ -2767,7 +3017,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // Setup: Inactive -> PreparingToOnboard
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
             assert!(matches!(
                 slot.txn_state(),
@@ -2805,7 +3055,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // Setup: Inactive -> PreparingToOnboard -> Onboarding
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
             slot.txn_start_onboarding().unwrap();
 
@@ -2829,7 +3079,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // Setup: Inactive -> PreparingToOnboard
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
 
             // Mark for deletion — this is the cancel path in request_finished.
@@ -2942,7 +3192,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // Setup: Inactive -> PreparingToOnboard -> Onboarding
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
             slot.txn_start_onboarding().unwrap();
 
@@ -2984,7 +3234,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // Setup: get to Error state
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
             slot.txn_start_onboarding().unwrap();
             slot.txn_to_error();
@@ -3093,7 +3343,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // Setup onboarding
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
             slot.txn_start_onboarding().unwrap();
 
@@ -3115,7 +3365,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // Setup and transition to error
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
             slot.txn_to_error();
 
@@ -3144,7 +3394,7 @@ mod tests {
             assert!(slot.txn_state().is_inactive());
 
             // 2. Prepare to onboard
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
             assert!(matches!(
                 slot.txn_state(),
@@ -3215,7 +3465,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // 1. Prepare to onboard
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
 
             // 2. Request finished while preparing
@@ -3241,7 +3491,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // 1. Start onboarding
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
             slot.txn_start_onboarding().unwrap();
 
@@ -3272,7 +3522,7 @@ mod tests {
 
             // Setup some state
             slot.apply_new_blocks(vec![100, 200]);
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
             slot.advance_evaluated_tokens(50);
             slot.set_match_requires_reset(true);
@@ -3317,7 +3567,7 @@ mod tests {
             assert!(!slot.has_onboarding_state());
 
             // True when preparing
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
             assert!(slot.has_onboarding_state());
 
@@ -3339,7 +3589,7 @@ mod tests {
             assert!(slot.onboarding_state().is_none());
 
             // Some when preparing
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
             let state = slot.onboarding_state().unwrap();
             assert_eq!(state.num_computed_tokens, 100);
@@ -3387,7 +3637,7 @@ mod tests {
             let (num_computed_tokens, find_session) = create_mock_onboarding_state();
 
             // Start onboarding
-            slot.txn_prepare_to_onboard(num_computed_tokens, find_session)
+            slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session)
                 .unwrap();
 
             // Try to start offloading - should fail
@@ -3404,7 +3654,7 @@ mod tests {
             slot.txn_start_offloading().unwrap();
 
             // Try to prepare onboard - should fail
-            let result = slot.txn_prepare_to_onboard(num_computed_tokens, find_session);
+            let result = slot.txn_prepare_to_onboard_legacy(num_computed_tokens, find_session);
             assert!(result.is_err());
         }
     }
@@ -3532,6 +3782,100 @@ mod tests {
             assert_eq!(mappings.len(), 2);
             assert_eq!(mappings[0], (100, expected_hashes[0]));
             assert_eq!(mappings[1], (200, expected_hashes[1]));
+        }
+    }
+
+    /// Drain-idempotence of `shard_terminal_matched_count` / `matched_span`.
+    ///
+    /// The CD wrapper calls `slot_match_split` AFTER `take_local_match_g2_blocks`
+    /// has already drained Ready shards' G2 vecs (see `commit_gnmt_remote` →
+    /// `commit_usaa1` at decode_leader.rs ~502 and ~755). If
+    /// `shard_terminal_matched_count` reads from `ReadyResult::total_count()`
+    /// (live Vec length), the post-drain call shrinks `matched_span.final_end`,
+    /// `split.local_match_range()` / `split.remote_range()` shift, and the
+    /// G1 destination slicing in `commit_usaa1` corrupts.
+    ///
+    /// These tests pin the contract: the count comes from a source captured at
+    /// terminal-state time (Ready: `match_breakdown` set at construction),
+    /// not from the live `blocks.len()`. We simulate the post-drain state by
+    /// constructing a Ready shard with empty G2 / G3 Vecs but a non-zero
+    /// `MatchBreakdown` — the count must reflect the breakdown.
+    #[cfg(test)]
+    mod drain_idempotence_tests {
+        use super::*;
+        use kvbm_engine::leader::{MatchBreakdown, ReadyResult};
+
+        /// Ready shard with empty Vec (post-drain state) but breakdown=3 must
+        /// still report 3 matched blocks.
+        #[test]
+        fn shard_terminal_matched_count_reads_breakdown_not_vec() {
+            let breakdown = MatchBreakdown {
+                host_blocks: 3,
+                disk_blocks: 0,
+                object_blocks: 0,
+            };
+            // Empty blocks Vec — mirrors the state after `take_g2_blocks` ran.
+            let ready = ReadyResult::new(vec![], breakdown);
+            let shard = OnboardingShard {
+                start_block: 0,
+                num_queried_blocks: 3,
+                find_session: FindMatchesResult::Ready(ready),
+            };
+            assert_eq!(shard_terminal_matched_count(&shard), 3);
+        }
+
+        /// Same invariant for a bypass-host Ready shard with disk_blocks > 0.
+        #[test]
+        fn shard_terminal_matched_count_bypass_sums_host_plus_disk() {
+            let breakdown = MatchBreakdown {
+                host_blocks: 2,
+                disk_blocks: 4,
+                object_blocks: 0,
+            };
+            let ready = ReadyResult::new(vec![], breakdown);
+            let shard = OnboardingShard {
+                start_block: 0,
+                num_queried_blocks: 6,
+                find_session: FindMatchesResult::Ready(ready),
+            };
+            assert_eq!(shard_terminal_matched_count(&shard), 6);
+        }
+
+        /// End-to-end: `matched_span` (and therefore `slot_match_split`'s
+        /// `local_match_blocks`) is unchanged when a Ready shard's G2 Vec
+        /// has been drained.
+        #[test]
+        fn matched_span_unchanged_after_ready_drain() {
+            let block_size = 4;
+            let pre_breakdown = MatchBreakdown {
+                host_blocks: 5,
+                disk_blocks: 0,
+                object_blocks: 0,
+            };
+            let ready_pre = ReadyResult::new(vec![], pre_breakdown);
+            let mut state = OnboardingState::new(
+                0,
+                5 * block_size,
+                OnboardingShard {
+                    start_block: 0,
+                    num_queried_blocks: 5,
+                    find_session: FindMatchesResult::Ready(ready_pre),
+                },
+            );
+            let (start_pre, end_pre) = state.matched_span(block_size);
+
+            // Simulate drain (no-op for empty Vec, but exercises the path).
+            let _ = state.shards[0].find_session.take_g2_blocks();
+
+            let (start_post, end_post) = state.matched_span(block_size);
+            assert_eq!(
+                (start_pre, end_pre),
+                (start_post, end_post),
+                "matched_span must be drain-idempotent (was {:?}, became {:?})",
+                (start_pre, end_pre),
+                (start_post, end_post),
+            );
+            assert_eq!(end_pre - start_pre, 5);
         }
     }
 }

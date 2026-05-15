@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: harmony
+mode: batch
+cases:
+  PARSER.batch.5.a:
+    description: Missing <|call|> end marker (bare envelope)
+    ref: dynamo
+    model_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        reason: "Dynamo echoes the entire <|start|>…<|message|>{args} envelope into normal_text on missing <|call|> end marker; SGLang returns cleanly-empty"
+        calls: []
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.5.b:
+    description: Bare <|call|> without preceding channel envelope
+    ref: dynamo
+    model_text: <|call|>
+    tools:
+    - *id001
+    expected:
+      dynamo: &id002
+        reason: "Dynamo's harmony parser leaves <|call|> harmony token in normal_text on missing/orphan end marker (impl-defined recovery)"
+        calls: []
+        normal_text: <|call|>
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang: *id002
+  PARSER.batch.5.c:
+    description: Truncation mid-message JSON
+    ref: dynamo
+    model_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"loc
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        reason: "Dynamo's harmony parser leaves <|channel|> harmony token, <|message|> harmony token, <|constrain|> harmony token (+1 more) in normal_text on missing/orphan end marker (impl-defined recovery)"
+        calls: []
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"loc
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.5.d:
+    description: Multi-call, last call missing only end marker (body complete)
+    ref: dynamo
+    model_text: I'll start by fetching the weather for both Boston and New York at the same time!<|start|>assistant<|channel|>commentary
+      to=functions.get_weather <|constrain|>json<|message|>{"location":"Boston"}<|call|><|start|>assistant<|channel|>commentary
+      to=functions.get_weather <|constrain|>json<|message|>{"location":"New York"}
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<|start|>assistant<|channel|>commentary
+          to=functions.get_weather <|constrain|>json<|message|>{"location":"Boston"}<|call|><|start|>assistant<|channel|>commentary
+          to=functions.get_weather <|constrain|>json<|message|>{"location":"New York"}
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+  PARSER.batch.5.e:
+    description: Multi-call, last call truncated mid-arg-value
+    ref: dynamo
+    model_text: I'll start by fetching the weather for both Boston and New York at the same time!<|start|>assistant<|channel|>commentary
+      to=functions.get_weather <|constrain|>json<|message|>{"location":"Boston"}<|call|><|start|>assistant<|channel|>commentary
+      to=functions.get_weather <|constrain|>json<|message|>{"location":"New York
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        calls: []
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<|start|>assistant<|channel|>commentary
+          to=functions.get_weather <|constrain|>json<|message|>{"location":"Boston"}<|call|><|start|>assistant<|channel|>commentary
+          to=functions.get_weather <|constrain|>json<|message|>{"location":"New York
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang:
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!

@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: qwen3_coder
+mode: batch
+cases:
+  PARSER.batch.4.a:
+    description: Tool_call wrapper with no <function> body
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L322
+    model_text: |-
+      <tool_call>
+      random text without function tag
+      </tool_call>
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        calls: []
+        normal_text: |-
+          <tool_call>
+          random text without function tag
+          </tool_call>
+      vllm:
+        calls: []
+        normal_text: |-
+          <tool_call>
+          random text without function tag
+          </tool_call>
+        reason: impl-defined recovery contract (see PARSER_CASES.md)
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.4.d:
+    description: Missing </parameter> closing tag
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_qwen3coder_tool_parser.py#L729
+    model_text: |-
+      <tool_call>
+      <function=get_weather>
+      <parameter=location>
+      NYC
+      </function>
+      </tool_call>
+    tools:
+    - *id001
+    expected:
+      dynamo: &id002
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *id002
+      sglang: *id002
+  PARSER.batch.4.b:
+    description: Malformed variant 4.b — not yet authored for this family
+    reason: |-
+      Malformed-input variant 4.b not yet authored for qwen3_coder; see 4.a / 4.c / 4.d for this family's malformed-input scenarios.
+  PARSER.batch.4.c:
+    description: Malformed variant 4.c — not yet authored for this family
+    reason: |-
+      Malformed-input variant 4.c not yet authored for qwen3_coder; see 4.a / 4.b / 4.d for this family's malformed-input scenarios.

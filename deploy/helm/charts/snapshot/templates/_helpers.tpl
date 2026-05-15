@@ -73,3 +73,35 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Fail fast on unsupported runtime.type values. Called once from daemonset.yaml.
+*/}}
+{{- define "snapshot.validateRuntime" -}}
+{{- if not (has .Values.runtime.type (list "containerd" "crio")) }}
+{{- fail (printf "runtime.type must be 'containerd' or 'crio', got %q" .Values.runtime.type) }}
+{{- end }}
+{{- end }}
+
+{{/*
+Resolve the runtime socket path. Uses .Values.runtime.socketPath when set,
+otherwise falls back to the per-runtime default.
+*/}}
+{{- define "snapshot.runtimeSocket" -}}
+{{- if .Values.runtime.socketPath }}
+{{- .Values.runtime.socketPath }}
+{{- else if eq .Values.runtime.type "crio" }}
+{{- "/var/run/crio/crio.sock" }}
+{{- else }}
+{{- "/run/containerd/containerd.sock" }}
+{{- end }}
+{{- end }}
+
+{{/*
+Host directory holding per-container storage (overlay upperdirs the agent
+reads for rootfs-diff capture, and CRI-O config.json fallback).
+*/}}
+{{- define "snapshot.runtimeStorageDir" -}}
+{{- if eq .Values.runtime.type "crio" -}}/var/lib/containers{{- else -}}/var/lib/containerd{{- end -}}
+{{- end }}
+

@@ -23,6 +23,7 @@ use std::{
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use super::{EventWarningKind, MatchDetails, PreBoundEventCounters};
 use crate::active_set::reconcile_active_workers;
 use crate::protocols::*;
 
@@ -161,12 +162,20 @@ impl RadixTree {
     ///
     /// ### Returns
     ///
-    /// An `OverlapScores` representing the match scores.
-    pub fn find_matches(&self, sequence: Vec<LocalBlockHash>, early_exit: bool) -> OverlapScores {
-        let mut scores = OverlapScores::new();
+    /// A `MatchDetails` representing overlap scores plus continuation state.
+    pub fn find_match_details(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+        early_exit: bool,
+    ) -> MatchDetails {
+        let mut details = MatchDetails::new();
+        let MatchDetails {
+            overlap_scores: scores,
+            last_matched_hashes,
+        } = &mut details;
 
         if sequence.is_empty() {
-            return scores;
+            return details;
         }
 
         let now = Instant::now();
@@ -183,7 +192,7 @@ impl RadixTree {
         };
 
         let Some(first_child) = first_child else {
-            return scores;
+            return details;
         };
 
         // Initialize active worker set from first child.
@@ -207,22 +216,20 @@ impl RadixTree {
         }
 
         if active.is_empty() {
-            return scores;
+            return details;
         }
+
+        let mut current_hash = first_child
+            .borrow()
+            .block_hash
+            .expect("matched radix node must have a block hash");
 
         if early_exit && active_count == 1 {
             for worker in &active {
                 scores.scores.insert(*worker, 1);
+                last_matched_hashes.insert(*worker, current_hash);
             }
-            for worker in scores.scores.keys() {
-                let tree_size = self
-                    .lookup
-                    .get(worker)
-                    .expect("worker in scores must exist in lookup table")
-                    .len();
-                scores.tree_sizes.insert(*worker, tree_size);
-            }
-            return scores;
+            return details;
         }
 
         let mut current = first_child;
@@ -255,6 +262,7 @@ impl RadixTree {
                 if child_count != active_count {
                     reconcile_active_workers(&mut active, &borrow.workers, |worker| {
                         scores.scores.insert(worker, matched_depth);
+                        last_matched_hashes.insert(worker, current_hash);
                     });
                     active_count = active.len();
                 }
@@ -280,9 +288,17 @@ impl RadixTree {
 
             if early_exit && active_count == 1 {
                 matched_depth = (idx + 1) as u32;
+                current_hash = block
+                    .borrow()
+                    .block_hash
+                    .expect("matched radix node must have a block hash");
                 break;
             }
 
+            current_hash = block
+                .borrow()
+                .block_hash
+                .expect("matched radix node must have a block hash");
             current = block;
             matched_depth = (idx + 1) as u32;
         }
@@ -290,21 +306,17 @@ impl RadixTree {
         // Record scores for workers that survived through the deepest matched level.
         for worker in &active {
             scores.scores.insert(*worker, matched_depth);
+            last_matched_hashes.insert(*worker, current_hash);
         }
 
         tracing::trace!("RadixTree::find_matches: final scores={:?}", scores.scores);
 
-        // Populate tree sizes for all workers that have scores.
-        for worker in scores.scores.keys() {
-            let tree_size = self
-                .lookup
-                .get(worker)
-                .expect("worker in scores must exist in lookup table")
-                .len();
-            scores.tree_sizes.insert(*worker, tree_size);
-        }
+        details
+    }
 
-        scores
+    /// An `OverlapScores` representing the match scores.
+    pub fn find_matches(&self, sequence: Vec<LocalBlockHash>, early_exit: bool) -> OverlapScores {
+        self.find_match_details(sequence, early_exit).overlap_scores
     }
 
     /// Apply a [`RouterEvent`] to the radix tree.
@@ -313,6 +325,14 @@ impl RadixTree {
     ///
     /// * `event` - The `RouterEvent` to apply.
     pub fn apply_event(&mut self, event: RouterEvent) -> Result<(), KvCacheEventError> {
+        self.apply_event_with_counters(event, None)
+    }
+
+    pub(crate) fn apply_event_with_counters(
+        &mut self,
+        event: RouterEvent,
+        counters: Option<&PreBoundEventCounters>,
+    ) -> Result<(), KvCacheEventError> {
         let (worker_id, kv_event) = (event.worker_id, event.event);
         let (id, op) = (kv_event.event_id, kv_event.data);
 
@@ -345,6 +365,7 @@ impl RadixTree {
                 };
 
                 let mut needs_worker_insert = false;
+                let mut duplicate_store = !op.blocks.is_empty();
 
                 // In each iteration we lock the parent and insert the worker
                 // deferred from the previous iteration, avoiding a second
@@ -352,8 +373,8 @@ impl RadixTree {
                 for block_data in op.blocks {
                     let mut parent_mut = current.borrow_mut();
 
-                    if needs_worker_insert {
-                        parent_mut.workers.insert(worker);
+                    if needs_worker_insert && parent_mut.workers.insert(worker) {
+                        duplicate_store = false;
                     }
                     needs_worker_insert = true;
 
@@ -361,6 +382,7 @@ impl RadixTree {
                         Some(block) => {
                             // Verify our simplifying assumption: block_hash is uniform across workers
                             if block.borrow().block_hash != Some(block_data.block_hash) {
+                                duplicate_store = false;
                                 tracing::warn!(
                                     expected = ?block_data.block_hash,
                                     actual = ?block.borrow().block_hash,
@@ -370,6 +392,7 @@ impl RadixTree {
                             block.clone()
                         }
                         None => {
+                            duplicate_store = false;
                             let new_block = worker_lookup
                                 .get(&block_data.block_hash)
                                 .cloned()
@@ -400,15 +423,22 @@ impl RadixTree {
                         return Err(KvCacheEventError::InvalidBlockSequence);
                     }
 
-                    worker_lookup.insert(block_data.block_hash, child.clone());
+                    match worker_lookup.insert(block_data.block_hash, child.clone()) {
+                        Some(existing) if Rc::ptr_eq(&existing, &child) => {}
+                        _ => duplicate_store = false,
+                    }
 
                     drop(parent_mut);
                     current = child;
                 }
 
                 // Insert worker into the last child.
-                if needs_worker_insert {
-                    current.borrow_mut().workers.insert(worker);
+                if needs_worker_insert && current.borrow_mut().workers.insert(worker) {
+                    duplicate_store = false;
+                }
+
+                if duplicate_store && let Some(counters) = counters {
+                    counters.inc_warning(EventWarningKind::DuplicateStore);
                 }
 
                 Ok(())
@@ -542,6 +572,7 @@ impl RadixTree {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
                             parent_hash,
+                            start_position: None,
                             blocks: vec![KvCacheStoredBlockData {
                                 block_hash,
                                 mm_extra_info: None,
@@ -566,6 +597,11 @@ impl RadixTree {
 
     pub fn current_size(&self) -> usize {
         self.lookup.values().map(|m| m.len()).sum()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tree_size_for_worker(&self, worker: WorkerWithDpRank) -> Option<usize> {
+        self.lookup.get(&worker).map(|blocks| blocks.len())
     }
 }
 

@@ -1,0 +1,15 @@
+{
+  "request_id": "deepseek-v4-content-before-tool-test",
+  "expected_output": {"normal_content": "Let me check the forecast for Tokyo right now.", "reasoning_content": "The user wants today's weather in Tokyo. I'll acknowledge the request, then call get_weather.", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"location\": \"Tokyo\", \"unit\": \"celsius\"}"}}]},
+  "input_stream": [
+    {"data":{"id":"chatcmpl-deepseek-v4-content-before-tool","choices":[{"index":0,"delta":{"content":"<think>The user wants today's weather in Tokyo. I'll acknowledge the request, then call get_weather.</think>","role":"assistant","reasoning_content":"The user wants today's weather in Tokyo. I'll acknowledge the request, then call get_weather."}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-content-before-tool","choices":[{"index":0,"delta":{"content":"Let me check the forecast for Tokyo right now.","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-content-before-tool","choices":[{"index":0,"delta":{"content":"<｜DSML｜tool_calls>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-content-before-tool","choices":[{"index":0,"delta":{"content":"<｜DSML｜invoke name=\"get_weather\">\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-content-before-tool","choices":[{"index":0,"delta":{"content":"<｜DSML｜parameter name=\"location\" string=\"true\">Tokyo</｜DSML｜parameter>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-content-before-tool","choices":[{"index":0,"delta":{"content":"<｜DSML｜parameter name=\"unit\" string=\"true\">celsius</｜DSML｜parameter>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-content-before-tool","choices":[{"index":0,"delta":{"content":"</｜DSML｜invoke>\n","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-content-before-tool","choices":[{"index":0,"delta":{"content":"</｜DSML｜tool_calls>","role":"assistant"}}]}},
+    {"data":{"id":"chatcmpl-deepseek-v4-content-before-tool","choices":[{"index":0,"delta":{"content":null,"role":"assistant"},"finish_reason":"tool_calls"}]}}
+  ]
+}

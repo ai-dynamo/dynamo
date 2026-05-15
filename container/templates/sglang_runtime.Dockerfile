@@ -40,8 +40,10 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 {% endif %}
 
 {% if target not in ("dev", "local-dev") %}
-# Runtime target installs the prebuilt Dynamo wheels. Dev/local-dev build from
-# source later in the shared dev stage after the workspace is bind-mounted.
+# Runtime target installs only the prebuilt Dynamo wheels. SGLang and its NIXL
+# packages come from the upstream lmsysorg/sglang runtime image; --no-deps keeps
+# pip from replacing that stack. Dev/local-dev build from source later in the
+# shared dev stage after the workspace is bind-mounted.
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
@@ -49,6 +51,21 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     pip install --break-system-packages --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl
+
+# Install accelerate for diffusion/video worker pipelines (diffusers requires it
+# for enable_model_cpu_offload but the upstream SGLang runtime image omits it)
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    pip install --break-system-packages --no-deps "accelerate==1.13.0"
+
+# Install distro: openai>=1.x's _base_client imports it unconditionally, and
+# sglang 0.5.11's server_args eagerly imports sglang.srt.entrypoints.openai.protocol
+# which pulls in openai.types.responses → triggers openai pkg init → import distro.
+# The upstream lmsysorg/sglang runtime installs openai with --no-deps so distro is
+# missing; without this any dynamo.sglang worker fails to import at startup.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    pip install --break-system-packages --no-deps "distro==1.9.0"
 
 # Install gpu_memory_service wheel if enabled (all targets)
 ARG ENABLE_GPU_MEMORY_SERVICE
@@ -60,11 +77,21 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     fi
 {% endif %}
 
+# Install nvtx pinned in container/deps/requirements.common.txt so DYN_NVTX=1
+# profiling works in all targets (runtime, dev, local-dev) — see
+# components/src/dynamo/common/utils/nvtx_utils.py. --no-deps preserves the
+# upstream lmsysorg/sglang Python stack.
+RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    pip install --break-system-packages --no-deps $(grep -E '^nvtx==' /tmp/requirements.common.txt)
+
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/frontend /workspace/components/src/dynamo/frontend
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/sglang /workspace/components/src/dynamo/sglang
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
 COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
@@ -79,7 +106,10 @@ RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/
 
 RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
-    ln -s /workspace /sgl-workspace/dynamo
+    ln -s /workspace /sgl-workspace/dynamo && \
+    NSYS_BIN=$(find /opt/nvidia/nsight-compute -maxdepth 6 -type f -name nsys -executable 2>/dev/null | head -n1) && \
+    if [ -n "$NSYS_BIN" ]; then ln -sf "$NSYS_BIN" /usr/local/bin/nsys; \
+    else echo "WARNING: no bundled nsys found under /opt/nvidia/nsight-compute"; fi
 
 USER dynamo
 ARG DYNAMO_COMMIT_SHA

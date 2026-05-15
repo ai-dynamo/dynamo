@@ -10,6 +10,69 @@ use kvbm_common::LogicalLayoutHandle;
 use kvbm_physical::TransferOptions;
 
 use super::*;
+use crate::G3;
+
+/// Future type returned by `FindMatchesResult::wait_for_completion()`.
+type StagingCompletion = Either<Ready<Result<()>>, BoxFuture<'static, Result<()>>>;
+
+/// Collect the G2 blocks destined for onboarding from every shard, honoring
+/// the `[effective_start .. final_end)` span (first-hole contiguous match).
+///
+/// This walks shards in order, calling `take_g2_blocks()` on each. It then
+/// drops the leading `effective_start - shards[0].start_block` blocks (the
+/// Case-B mask) from the head and truncates the tail to `final_end -
+/// effective_start` elements. Any excess beyond `final_end` in the hole-shard
+/// (the shard whose match count was < num_queried_blocks) comes pre-filtered
+/// because terminal shards have `matched_count` g2 blocks available.
+pub(crate) fn collect_g2_blocks_from_shards(
+    state: &mut slot::OnboardingState,
+    block_size: usize,
+) -> Result<Vec<ImmutableBlock<G2>>> {
+    debug_assert!(!state.shards.is_empty());
+    debug_assert!(state.all_shards_terminal());
+
+    let (effective_start, final_end) = state.matched_span(block_size);
+    debug_assert!(effective_start <= final_end);
+    let desired_blocks = final_end - effective_start;
+    let leading_skip = effective_start - state.shards[0].start_block;
+
+    let mut collected: Vec<ImmutableBlock<G2>> = Vec::new();
+    for shard in state.shards.iter_mut() {
+        // Stop early once we have enough blocks.
+        if collected.len() >= leading_skip + desired_blocks {
+            break;
+        }
+        let blocks = shard
+            .find_session
+            .take_g2_blocks()
+            .ok_or_else(|| anyhow!("No G2 blocks found for shard at {}", shard.start_block))?;
+        collected.extend(blocks);
+    }
+
+    // Apply head mask.
+    if leading_skip > 0 {
+        if leading_skip > collected.len() {
+            bail!(
+                "effective_start mask ({}) exceeds collected g2 blocks ({})",
+                leading_skip,
+                collected.len()
+            );
+        }
+        collected.drain(..leading_skip);
+    }
+
+    // Truncate the tail to exactly desired_blocks.
+    if collected.len() < desired_blocks {
+        bail!(
+            "collected {} g2 blocks but span requested {}",
+            collected.len(),
+            desired_blocks
+        );
+    }
+    collected.truncate(desired_blocks);
+
+    Ok(collected)
+}
 
 /// Select the G1 block IDs that correspond to externally-matched (onboard) blocks.
 ///
@@ -51,35 +114,59 @@ impl ConnectorLeader {
         block_ids: Vec<BlockId>,
         num_external_tokens: usize,
     ) -> Result<()> {
+        // Intra-pass onboarding currently only supports G2→G1 (the worker's
+        // CudaStream layer-by-layer load expects G2 sources). Host-bypass
+        // mode has no G2 to source from, so reject the combination loudly
+        // rather than silently producing wrong results. Use Inter mode if
+        // bypass is required.
+        if self.runtime.config().cache.bypass_host_cache() {
+            bail!(
+                "Intra-pass onboarding is not supported when host (G2) cache is bypassed. \
+                 Set DYN_KVBM_CPU_CACHE_GB to enable G2, or use Inter onboard mode \
+                 (the default) which supports the bypass + GDS direct G3→G1 path."
+            );
+        }
         let shared_slot = self.get_slot(request_id)?;
         let mut slot = shared_slot.lock();
+
+        let block_size = self.block_size();
         let num_computed_tokens = slot
             .onboarding_state()
             .expect("session should exist")
             .num_computed_tokens;
 
+        // The g1 slice starts at `num_computed_blocks` (i.e. the effective
+        // start used when computing matched_tokens; see `matched_span`) and
+        // spans `num_external_blocks` entries. We take this slice up front so
+        // we can own it without borrowing `block_ids` past `apply_new_blocks`.
         let g1_block_ids = select_onboard_block_ids(
             &block_ids,
             num_computed_tokens,
             num_external_tokens,
-            self.block_size(),
+            block_size,
         );
 
         // Record the block_ids - this assigns them to the token_block sequence hashes
         slot.apply_new_blocks(block_ids);
 
-        // Extract G2 blocks from the find session (takes ownership)
-        let g2_blocks = slot
-            .onboarding_state_mut()
-            .ok_or_else(|| anyhow!("Expected active onboarding state for {}", request_id))?
-            .find_session
-            .as_mut()
-            .ok_or_else(|| anyhow!(
-                "intra-pass onboarding requires a find_session; got CD-only OnboardingState for {}",
-                request_id
-            ))?
-            .take_g2_blocks()
-            .ok_or_else(|| anyhow!("No G2 blocks found for intra-pass onboarding"))?;
+        // Extract G2 blocks from every shard (with head mask + tail truncate)
+        // and also capture the session IDs we now need to release.
+        //
+        // CD-only states have empty shards; intra-pass onboarding is not on the
+        // CD path so an empty shards list here is a programmer error caught by
+        // `collect_g2_blocks_from_shards`.
+        let (g2_blocks, session_ids_to_release) = {
+            let state = slot
+                .onboarding_state_mut()
+                .ok_or_else(|| anyhow!("Expected active onboarding state for {}", request_id))?;
+            let g2_blocks = collect_g2_blocks_from_shards(state, block_size)?;
+            let session_ids: Vec<_> = state
+                .shards
+                .iter()
+                .filter_map(|s| s.find_session.session_id())
+                .collect();
+            (g2_blocks, session_ids)
+        };
 
         let g2_block_ids: Vec<BlockId> = g2_blocks.iter().map(|b| b.block_id()).collect();
 
@@ -109,6 +196,14 @@ impl ConnectorLeader {
         slot.txn_to_error(); // Clear the PreparingToOnboard state
         let _ = slot.txn_take_error(); // Discard and transition to Inactive
 
+        // Release server-side session state for every shard's async session
+        // (Ready variants return None, so they're skipped).
+        if let Some(instance_leader) = self.instance_leader() {
+            for session_id in session_ids_to_release {
+                instance_leader.release_session(session_id);
+            }
+        }
+
         Ok(())
     }
 
@@ -120,8 +215,9 @@ impl ConnectorLeader {
     ) -> Result<()> {
         let shared_slot = self.get_slot(request_id)?;
 
-        // Extract session_id and transition to Onboarding state
-        let (staging_fut, onboard_blocks_ids) = {
+        // Extract a wait_for_completion future for every shard, then transition
+        // to Onboarding.
+        let (staging_futs, onboard_blocks_ids) = {
             let mut slot = shared_slot.lock();
 
             let num_computed_tokens = match slot.onboarding_state() {
@@ -139,14 +235,12 @@ impl ConnectorLeader {
             // this will assign the block_ids to the token_block sequence hashes
             slot.apply_new_blocks(block_ids);
 
-            let staging_fut = match slot.onboarding_state() {
-                Some(onboarding_state) => match onboarding_state.find_session.as_ref() {
-                    Some(fs) => fs.wait_for_completion(),
-                    None => bail!(
-                        "Expected find_session in onboarding state for {} (CD-only?)",
-                        request_id
-                    ),
-                },
+            let staging_futs: Vec<_> = match slot.onboarding_state() {
+                Some(onboarding_state) => onboarding_state
+                    .shards
+                    .iter()
+                    .map(|shard| shard.find_session.wait_for_completion())
+                    .collect(),
                 None => bail!("Expected active onboarding state for {}", request_id),
             };
 
@@ -155,19 +249,23 @@ impl ConnectorLeader {
                 bail!("Failed to start onboarding: {}", e);
             }
 
-            (staging_fut, onboard_blocks_ids)
+            (staging_futs, onboard_blocks_ids)
         };
 
         let leader = self.clone();
         let handle = self.runtime.tokio();
         let request_id = request_id.to_string();
+        let block_size = self.block_size();
 
+        let bypass_host = self.runtime.config().cache.bypass_host_cache();
         handle.spawn(async move {
             match execute_onboarding(
                 leader.clone(),
                 shared_slot.clone(),
                 onboard_blocks_ids.clone(),
-                staging_fut,
+                staging_futs,
+                block_size,
+                bypass_host,
             )
             .await
             {
@@ -189,15 +287,24 @@ impl ConnectorLeader {
                 }
             }
 
-            // This will clean up the find session if it exists, this is necessary to avoid resource leaks.
-            if let Some(session_id) = shared_slot
+            // Release server-side state for every shard's async session (Ready
+            // variants return None).
+            let session_ids: Vec<_> = shared_slot
                 .lock()
                 .onboarding_state()
-                .and_then(|state| state.find_session.as_ref())
-                .and_then(|fs| fs.session_id())
-            {
+                .map(|state| {
+                    state
+                        .shards
+                        .iter()
+                        .filter_map(|s| s.find_session.session_id())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !session_ids.is_empty() {
                 let instance_leader = leader.instance_leader().expect("InstanceLeader not set");
-                instance_leader.release_session(session_id);
+                for session_id in session_ids {
+                    instance_leader.release_session(session_id);
+                }
             }
 
             // regardess of error, we mark the onboarding as complete
@@ -221,48 +328,109 @@ async fn execute_onboarding(
     leader: Arc<ConnectorLeader>,
     slot: Arc<Mutex<RequestSlot>>,
     block_ids: Vec<BlockId>,
-    staging_fut: Either<Ready<Result<()>>, BoxFuture<'static, Result<()>>>,
+    staging_futs: Vec<StagingCompletion>,
+    block_size: usize,
+    bypass_host: bool,
 ) -> Result<()> {
     let g1_block_ids = block_ids;
     let start = Instant::now();
 
-    // Wait for find_session completion by accessing it through the slot
-    staging_fut
-        .await
-        .context("Onboarding find_session operation failed")?;
+    // Wait for every shard's find_session to reach a terminal state.
+    for fut in staging_futs {
+        fut.await
+            .context("Onboarding find_session operation failed")?;
+    }
     let staging_complete = Instant::now();
 
-    let g2_blocks = slot
-        .lock()
-        .onboarding_state_mut()
-        .expect("Onboarding state not found")
-        .find_session
-        .as_mut()
-        .expect("find_session required for inter-pass G2 onboarding")
-        .take_g2_blocks()
-        .ok_or_else(|| anyhow::anyhow!("No G2 blocks found"))?;
+    // Pull source blocks from the find session. In host-bypass mode the
+    // Ready result carries G3 blocks (no staging happened); otherwise the
+    // AsyncSession has already staged into G2 across one or more shards.
+    //
+    // The ImmutableBlock<G2/G3> Drop impl returns the block to the inactive
+    // pool, so the source-blocks Vec must outlive `execute_local_transfer`
+    // below — otherwise the source blocks could be evicted and overwritten
+    // mid-transfer. Both branches bind their Vec at function scope.
+    //
+    // FIXME(kvbm-398 merge): multi-shard search + bypass_host is not yet
+    // implemented — bypass_host paths still assume a single legacy shard.
+    let _g2_source_hold: Vec<ImmutableBlock<G2>>;
+    let _g3_source_hold: Vec<ImmutableBlock<G3>>;
+    let (src_layout, src_block_ids) = {
+        let mut slot_guard = slot.lock();
+        let state = slot_guard
+            .onboarding_state_mut()
+            .expect("Onboarding state not found");
+        if bypass_host {
+            if state.shards.len() != 1 {
+                bail!(
+                    "G2-bypass onboarding with multi-shard search is not yet supported \
+                     (shard_count={})",
+                    state.shards.len()
+                );
+            }
+            // Apply the same head-mask + tail-truncate as the G2 path so the
+            // G3 source list aligns with g1_block_ids, which was sliced from
+            // `matched_span`. Without this, a post-issue increase in
+            // num_computed_tokens (leading_skip > 0) or a partial shard
+            // (matched_count < num_queried_blocks) over-selects source blocks.
+            let (effective_start, final_end) = state.matched_span(block_size);
+            let desired = final_end.saturating_sub(effective_start);
+            let leading_skip = effective_start - state.shards[0].start_block;
 
-    let g2_block_ids: Vec<BlockId> = g2_blocks.iter().map(|b| b.block_id()).collect();
+            let mut g3_blocks = state.shards[0]
+                .find_session
+                .take_g3_blocks()
+                .ok_or_else(|| anyhow!("No G3 blocks found (bypass mode)"))?;
 
-    let num_blocks = g2_block_ids.len();
+            if leading_skip > g3_blocks.len() {
+                bail!(
+                    "effective_start mask ({}) exceeds collected g3 blocks ({})",
+                    leading_skip,
+                    g3_blocks.len()
+                );
+            }
+            g3_blocks.drain(..leading_skip);
+
+            if g3_blocks.len() < desired {
+                bail!(
+                    "collected {} g3 blocks but span requested {}",
+                    g3_blocks.len(),
+                    desired
+                );
+            }
+            g3_blocks.truncate(desired);
+
+            let ids: Vec<BlockId> = g3_blocks.iter().map(|b| b.block_id()).collect();
+            _g3_source_hold = g3_blocks;
+            _g2_source_hold = Vec::new();
+            (LogicalLayoutHandle::G3, ids)
+        } else {
+            let g2_blocks = collect_g2_blocks_from_shards(state, block_size)?;
+            let ids: Vec<BlockId> = g2_blocks.iter().map(|b| b.block_id()).collect();
+            _g2_source_hold = g2_blocks;
+            _g3_source_hold = Vec::new();
+            (LogicalLayoutHandle::G2, ids)
+        }
+    };
+
+    let num_blocks = src_block_ids.len();
     assert_eq!(num_blocks, g1_block_ids.len());
 
-    // All blocks are now in G2
     let instance_leader = leader.instance_leader().expect("InstanceLeader not set");
     let parallel_worker = instance_leader
         .parallel_worker()
         .ok_or_else(|| anyhow::anyhow!("No parallel worker available for local transfer"))?;
 
-    // TODO: potential optimization would be to stream G2 blocks to G1 blocks as G2 blocks are ready.
-    // The current implementation awaits all G2 blocks to be ready before executing the transfer.
-    // The balance here is when do we acquire/allocate G1 blocks as they are a precious commodity vs.,
-    // when should we start onboarding. More analysis is needed here to determine the optimal strategy.
+    // TODO: potential optimization would be to stream blocks to G1 as they
+    // become ready. The current implementation awaits all source blocks
+    // before issuing the transfer. The balance is when to acquire/allocate
+    // G1 blocks (a precious commodity) vs. when to start onboarding.
     let start_xfer = Instant::now();
     parallel_worker
         .execute_local_transfer(
-            LogicalLayoutHandle::G2,
+            src_layout,
             LogicalLayoutHandle::G1,
-            Arc::from(g2_block_ids),
+            Arc::from(src_block_ids),
             Arc::from(g1_block_ids),
             TransferOptions::default(),
         )?
@@ -274,7 +442,11 @@ async fn execute_onboarding(
         staging_ms = staging_complete.duration_since(start).as_millis() as u64,
         xfer_ms = end_xfer.duration_since(start_xfer).as_millis() as u64,
         total_ms = end_xfer.duration_since(start).as_millis() as u64,
-        src = "kvbm_engine::G2",
+        src = if bypass_host {
+            "kvbm_engine::G3"
+        } else {
+            "kvbm_engine::G2"
+        },
         dst = "kvbm_engine::G1",
         "Onboard transfer complete"
     );

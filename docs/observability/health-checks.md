@@ -14,7 +14,7 @@ orchestration frameworks such as Kubernetes.
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `DYN_SYSTEM_PORT` | System status server port | `8081` | `9090` |
+| `DYN_SYSTEM_PORT` | System status server port | `-1` (disabled) | `8081` |
 | `DYN_SYSTEM_STARTING_HEALTH_STATUS` | Initial health status | `notready` | `ready`, `notready` |
 | `DYN_SYSTEM_HEALTH_PATH` | Custom health endpoint path | `/health` | `/custom/health` |
 | `DYN_SYSTEM_LIVE_PATH` | Custom liveness endpoint path | `/live` | `/custom/live` |

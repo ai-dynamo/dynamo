@@ -58,6 +58,8 @@ After sending a few requests, the Prometheus Exposition Format text metrics are 
 - Frontend: `http://localhost:8000/metrics`
 - Backend worker: `http://localhost:8081/metrics`
 
+**Note:** Labeled series (e.g., `...{model="..."}`) only appear after the first matching request is served. See [Available Metrics](metrics.md#available-metrics) for details.
+
 ### Access Web Interfaces
 
 Once Dynamo components are running:

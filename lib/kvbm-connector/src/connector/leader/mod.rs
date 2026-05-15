@@ -10,9 +10,7 @@ use super::worker::ConnectorWorkerClient;
 use crate::{BlockId, G2, InstanceId, KvbmRuntime};
 use kvbm_config::OnboardMode;
 use kvbm_engine::leader::InstanceLeader;
-use kvbm_engine::leader::{
-    FindMatchesOptions, FindMatchesResult, Leader, OnboardingStatus, StagingMode,
-};
+use kvbm_engine::leader::{FindMatchesOptions, Leader, StagingMode};
 use kvbm_engine::offload::OffloadEngine;
 use kvbm_engine::worker::SerializedLayout;
 use kvbm_engine::worker::VeloWorkerClient;
@@ -20,7 +18,7 @@ use kvbm_hub::ConditionalDisaggClient;
 use kvbm_logical::blocks::ImmutableBlock;
 use kvbm_observability::CacheStatsTracker;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::collections::HashSet;
@@ -305,13 +303,21 @@ impl ConnectorLeader {
         let all_sequence_hashes = slot.all_sequence_hashes();
 
         let onboarding = slot.onboarding_state().map(|o| {
-            // CD-only onboarding has no find_session; treat as no local match.
-            let breakdown = o
-                .find_session
-                .as_ref()
-                .map(|fs| fs.match_breakdown())
-                .unwrap_or_default();
-            let local = breakdown.host_blocks + breakdown.disk_blocks + breakdown.object_blocks;
+            // The CD wrapper requires `local == take_local_match_g2_blocks().len()`,
+            // which itself routes through `collect_g2_blocks_from_shards`. Both
+            // must apply matched-span (first-hole) semantics with head-mask +
+            // tail-truncate; using `aggregate_breakdown()` (raw per-tier sums)
+            // would over-count when a later shard partially matches or when
+            // num_computed_tokens advanced after the shard was issued.
+            //
+            // Empty shards = CD-only state (cold-cache): zero local match —
+            // `matched_span` debug_asserts non-empty, so short-circuit here.
+            let local = if o.shards.is_empty() {
+                0
+            } else {
+                let (effective_start, final_end) = o.matched_span(block_size);
+                final_end - effective_start
+            };
             (local, o.num_computed_tokens)
         });
 
@@ -341,15 +347,26 @@ impl ConnectorLeader {
     ) -> Result<Vec<ImmutableBlock<G2>>> {
         let slot = self.get_slot(request_id)?;
         let mut slot = slot.lock();
+        let block_size = slot.block_size();
         let Some(onboarding) = slot.onboarding_state_mut() else {
             return Ok(Vec::new());
         };
-        // CD-only OnboardingState has no find_session — there's nothing to take.
-        let Some(fs) = onboarding.find_session.as_mut() else {
+        // CD-only OnboardingState has no shards — there's nothing to take.
+        // Mirrors `slot_match_split`'s `local_match_blocks = 0` for empty shards;
+        // the CD wrapper asserts the two agree.
+        if onboarding.shards.is_empty() {
             return Ok(Vec::new());
-        };
-        fs.take_g2_blocks()
-            .ok_or_else(|| anyhow!("slot {} G2 blocks not yet ready to take", request_id))
+        }
+        // Delegate to the canonical helper so this matches the intra-pass /
+        // execute_onboarding paths: head-mask leading_skip (skipped when
+        // num_computed_tokens advances after a shard was issued), tail-truncate
+        // to `final_end - effective_start`. Without this the wrapper's
+        // `local_g2.len() == split.local_match_blocks` invariant fails on any
+        // shard with a partial match or any race against vLLM's eviction.
+        crate::connector::leader::onboard::collect_g2_blocks_from_shards(
+            onboarding, block_size,
+        )
+        .with_context(|| format!("slot {} G2 collection failed", request_id))
     }
 
     /// Clone a contiguous slice of the slot's `TokenBlock`s.
@@ -575,10 +592,9 @@ impl ConnectorLeader {
         let outcome = self.process_match(&mut slot, num_computed_tokens);
         let match_breakdown = slot
             .onboarding_state()
-            .and_then(|state| state.find_session.as_ref())
-            .map(|fs| fs.match_breakdown())
+            .map(|state| state.aggregate_breakdown())
             .unwrap_or_default();
-        let blocks_queried = slot.match_query_blocks();
+        let blocks_queried = slot.total_query_blocks();
 
         // Single point for state transition
         match slot.finalize_match_check(outcome) {

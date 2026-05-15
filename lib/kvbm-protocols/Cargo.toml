@@ -3,7 +3,7 @@
 
 [package]
 name = "kvbm-protocols"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 description = "Shared KVBM wire protocols: conditional disaggregation and the public leader control plane."
 authors.workspace = true

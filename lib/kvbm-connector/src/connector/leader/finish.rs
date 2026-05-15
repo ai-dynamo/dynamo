@@ -299,23 +299,21 @@ impl ConnectorLeader {
         // }
 
         let onboarding_state = slot.txn_take_onboarding()?;
-        let find_session_id = onboarding_state
-            .find_session
-            .as_ref()
-            .and_then(|fs| fs.session_id());
+        let shard_session_ids: Vec<_> = onboarding_state
+            .shards
+            .iter()
+            .filter_map(|s| s.find_session.session_id())
+            .collect();
         let had_cd_payload = onboarding_state.cd_payload.is_some();
         crate::audit!(
             "process_finished_onboarding_take",
             role = "both",
             request_id,
-            find_session_id = ?find_session_id,
+            shard_session_ids = ?shard_session_ids,
             had_cd_payload
         );
-        if let Some(session_id) = find_session_id {
-            self.instance_leader
-                .get()
-                .unwrap()
-                .release_session(session_id);
+        if let Some(instance_leader) = self.instance_leader.get() {
+            onboarding_state.release_all(instance_leader);
         }
         // Dropping `onboarding_state` runs the `cd_payload`'s `Drop`
         // impl — the canonical CD cleanup (coordinator.release,
@@ -450,13 +448,18 @@ async fn cleanup_offloading_handles(mut handles: Vec<TransferHandle>, request_id
 
 /// Async cleanup task for a request cancelled while in `PreparingToOnboard`.
 ///
-/// The find session is driven to a terminal state before its server-side
-/// state is released. `FindMatchesResult::Ready` resolves immediately (blocks
-/// are held via RAII and drop when `onboarding_state` falls out of scope);
-/// `AsyncSession` awaits `wait_for_completion` — already-terminal sessions
-/// complete on first poll and in-flight sessions drain naturally. A drain
-/// error is logged but the task still attempts `release_session`, because
-/// leaving the leader-side session state mapped is worse than a failed RPC.
+/// Each shard's find session is driven to a terminal state before its
+/// server-side state is released. `FindMatchesResult::Ready` variants resolve
+/// immediately (blocks are held via RAII and will be dropped when the state
+/// falls out of scope at the end of this task); `AsyncSession` variants await
+/// `wait_for_completion` — already-terminal sessions complete on first poll,
+/// and in-flight sessions drain naturally. A session-drain error is logged
+/// but the task still attempts to release the session, because leaving the
+/// leader-side session state mapped would be worse than a failed RPC.
+///
+/// Shards are drained concurrently via `join_all` so that ready / already-
+/// terminal shards free their resources immediately without waiting on the
+/// slowest in-flight shard.
 ///
 /// No worker callback (`mark_onboarding_complete` / `mark_failed_onboarding` /
 /// `mark_offloading_complete`) is emitted — the scheduler never committed
@@ -466,53 +469,54 @@ async fn cleanup_preparing_to_onboard(
     instance_leader: InstanceLeader,
     request_id: String,
 ) {
-    // `find_session` is `Option<FindMatchesResult>` post-CD-merge: the
-    // PreparingToOnboard cancel path is reachable only via the canonical
-    // non-CD flow (`txn_prepare_to_onboard`), which always sets
-    // `find_session = Some(...)`. The CD-decode path promotes
-    // `PreparingToOnboard → Onboarding` when installing `cd_payload`, so a
-    // CD-attached slot is never observed here. The `if let Some` shape
-    // keeps this robust if that invariant ever changes — `cd_payload`'s
-    // `Drop` (run when `onboarding_state` falls out of scope) is the
-    // CD-side cleanup, so a None branch is a correct no-op.
-    let Some(find_session) = onboarding_state.find_session.as_ref() else {
-        tracing::debug!(
-            "PreparingToOnboard cleanup: no find_session to drain for request_id: {}",
-            request_id
-        );
-        // `onboarding_state` drops here, firing any `cd_payload`'s `Drop`.
-        return;
-    };
-
-    let session_id = find_session.session_id();
-    let wait = find_session.wait_for_completion();
-
+    // Shards may be empty when the state is purely CD-driven (no local match);
+    // the PreparingToOnboard cancel path is reachable only via the canonical
+    // non-CD flow today (the CD path promotes PreparingToOnboard → Onboarding
+    // on install), but the empty-shards branch is a correct no-op: drain_futures
+    // becomes empty and `cd_payload`'s Drop still fires when `onboarding_state`
+    // falls out of scope below.
+    let shard_count = onboarding_state.shards.len();
     tracing::debug!(
-        "starting PreparingToOnboard cleanup for request_id: {} (session: {:?})",
-        request_id,
-        session_id
+        "starting PreparingToOnboard cleanup of {} shard(s) for request_id: {}",
+        shard_count,
+        request_id
     );
 
-    if let Err(e) = wait.await {
-        tracing::warn!(
-            "find_session drain failed for request_id {} (session {:?}): {}; \
-             releasing session anyway",
-            request_id,
-            session_id,
-            e
-        );
-    }
-    if let Some(session_id) = session_id {
-        instance_leader.release_session(session_id);
-    }
+    let drain_futures = onboarding_state
+        .shards
+        .iter()
+        .map(|shard| {
+            let wait = shard.find_session.wait_for_completion();
+            let session_id = shard.find_session.session_id();
+            let instance_leader = instance_leader.clone();
+            let request_id = request_id.clone();
+            async move {
+                if let Err(e) = wait.await {
+                    tracing::warn!(
+                        "find_session drain failed for request_id {} (session {:?}): {}; \
+                         releasing session anyway",
+                        request_id,
+                        session_id,
+                        e
+                    );
+                }
+                if let Some(session_id) = session_id {
+                    instance_leader.release_session(session_id);
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+
+    futures::future::join_all(drain_futures).await;
 
     // Dropping `onboarding_state` here releases any `Ready`-variant blocks
     // held by RAII (and any installed `cd_payload`'s Drop).
     drop(onboarding_state);
 
     tracing::debug!(
-        "PreparingToOnboard cleanup complete for request_id: {}",
-        request_id
+        "PreparingToOnboard cleanup complete for request_id: {} ({} shard(s))",
+        request_id,
+        shard_count
     );
 }
 
@@ -520,22 +524,26 @@ async fn cleanup_preparing_to_onboard(
 mod cleanup_tests {
     //! Unit tests for `cleanup_preparing_to_onboard`.
     //!
-    //! Covered:
-    //! - `AsyncSession` find session → `InstanceLeader::release_session`,
-    //! - `Ready` find session → no `release_session` call (RAII only),
-    //! - non-terminal `AsyncSession` blocks release until terminal,
+    //! These cover the observable contract of the cancel-path cleanup task:
+    //! - every `AsyncSession` shard has its session released via
+    //!   `InstanceLeader::release_session`,
+    //! - `Ready` shards are dropped via RAII (no extra release call),
+    //! - non-terminal `AsyncSession` shards block release until they become
+    //!   terminal,
+    //! - shards drain concurrently via `join_all`,
     //! - sessions unrelated to the state are left alone.
     //!
-    //! Observability: `release_session` removes from all three internal
-    //! session maps; the `#[cfg(any(test, feature = "testing"))]` `has_session`
-    //! accessor on `InstanceLeader` returns `true` if any still sees the id.
+    //! Observability is via the `#[cfg(any(test, feature = "testing"))]`
+    //! `has_session` accessor on `InstanceLeader` — `release_session` removes
+    //! from all three internal session maps; `has_session` returns `true` if
+    //! any of them still sees the id.
     use super::*;
     use kvbm_engine::leader::{
         AsyncSessionResult, FindMatchesResult, MatchBreakdown, OnboardingStatus, ReadyResult,
         SessionId,
     };
     use kvbm_engine::testing::{managers, messenger};
-    use slot::OnboardingState;
+    use slot::{OnboardingShard, OnboardingState};
     use std::time::Duration;
     use tokio::sync::{Mutex as TokioMutex, watch};
     use uuid::Uuid;
@@ -545,6 +553,8 @@ mod cleanup_tests {
     const TEST_BLOCK_COUNT: usize = 8;
     const TEST_BLOCK_SIZE: usize = 4;
 
+    /// Build a minimal `InstanceLeader` backed by a local TCP messenger. No
+    /// handlers are registered — the tests only touch the session maps.
     async fn build_leader() -> InstanceLeader {
         let m = messenger::create_messenger_tcp()
             .await
@@ -566,6 +576,7 @@ mod cleanup_tests {
             .expect("instance leader")
     }
 
+    /// A terminal `AsyncSession` (status = Complete) with a known session_id.
     fn complete_async(session_id: SessionId) -> FindMatchesResult {
         let (status_tx, status_rx) =
             watch::channel(OnboardingStatus::Complete { matched_blocks: 0 });
@@ -579,6 +590,8 @@ mod cleanup_tests {
         ))
     }
 
+    /// A pending `AsyncSession` (status = Searching) with a known session_id.
+    /// Returns the shard and the watch sender so the test can drive it terminal.
     fn pending_async(
         session_id: SessionId,
     ) -> (FindMatchesResult, watch::Sender<OnboardingStatus>) {
@@ -593,23 +606,42 @@ mod cleanup_tests {
         (FindMatchesResult::AsyncSession(session), status_tx)
     }
 
+    /// A `Ready` shard with no blocks — no session_id, RAII-only release.
     fn ready_empty() -> FindMatchesResult {
         FindMatchesResult::Ready(ReadyResult::new(vec![], MatchBreakdown::default()))
     }
 
-    fn state_with(find_session: FindMatchesResult) -> OnboardingState {
-        OnboardingState {
-            num_computed_tokens: 0,
-            find_session: Some(find_session),
-            cd_payload: None,
+    /// Build an `OnboardingState` from a list of shards, numbering them
+    /// contiguously starting at block 0 with `num_queried_blocks = 1` each.
+    fn state_from(shards: Vec<FindMatchesResult>) -> OnboardingState {
+        assert!(!shards.is_empty());
+        let mut it = shards.into_iter().enumerate();
+        let (i0, first) = it.next().unwrap();
+        let mut state = OnboardingState::new(
+            0,
+            0,
+            OnboardingShard {
+                start_block: i0,
+                num_queried_blocks: 1,
+                find_session: first,
+            },
+        );
+        for (i, find_session) in it {
+            state.shards.push(OnboardingShard {
+                start_block: i,
+                num_queried_blocks: 1,
+                find_session,
+            });
         }
+        state
     }
 
     fn fresh_id() -> SessionId {
         Uuid::new_v4()
     }
 
-    /// Terminal `AsyncSession`: cleanup must call `release_session`.
+    /// Test 1 — a single terminal `AsyncSession` shard: cleanup must release
+    /// the session.
     #[tokio::test]
     async fn cleanup_releases_async_session() {
         let leader = build_leader().await;
@@ -617,34 +649,37 @@ mod cleanup_tests {
         leader.insert_test_session_marker(sid);
         assert!(leader.has_session(sid));
 
-        let state = state_with(complete_async(sid));
+        let state = state_from(vec![complete_async(sid)]);
         cleanup_preparing_to_onboard(state, leader.clone(), "r1".into()).await;
 
         assert!(
             !leader.has_session(sid),
-            "cleanup must release the AsyncSession's server-side state"
+            "cleanup must release AsyncSession shards"
         );
     }
 
-    /// `Ready` find session: no session_id, so no `release_session` call; an
-    /// unrelated registered session must remain.
+    /// Test 2 — mixed shards: `Ready` shard needs no session call; the
+    /// `AsyncSession` shard is released; an unrelated session is untouched.
     #[tokio::test]
-    async fn cleanup_ready_session_is_noop_and_scoped() {
+    async fn cleanup_skips_ready_shards_and_scoped_to_state() {
         let leader = build_leader().await;
+        let sid = fresh_id();
         let unrelated = fresh_id();
+        leader.insert_test_session_marker(sid);
         leader.insert_test_session_marker(unrelated);
 
-        let state = state_with(ready_empty());
+        let state = state_from(vec![ready_empty(), complete_async(sid)]);
         cleanup_preparing_to_onboard(state, leader.clone(), "r2".into()).await;
 
+        assert!(!leader.has_session(sid), "AsyncSession shard must release");
         assert!(
             leader.has_session(unrelated),
             "cleanup must not touch sessions outside the OnboardingState"
         );
     }
 
-    /// Non-terminal `AsyncSession` blocks `release_session` until the status
-    /// reaches a terminal state.
+    /// Test 3 — a non-terminal `AsyncSession` shard blocks cleanup until the
+    /// status transitions to a terminal state, then releases.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cleanup_drains_pending_async_before_release() {
         let leader = build_leader().await;
@@ -652,7 +687,7 @@ mod cleanup_tests {
         leader.insert_test_session_marker(sid);
 
         let (find, status_tx) = pending_async(sid);
-        let state = state_with(find);
+        let state = state_from(vec![find]);
 
         let leader_for_task = leader.clone();
         let task = tokio::spawn(cleanup_preparing_to_onboard(
@@ -662,13 +697,15 @@ mod cleanup_tests {
         ));
 
         // With status still Searching, cleanup is blocked on wait_for_completion.
+        // Give it a tick to ensure it has polled.
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             leader.has_session(sid),
-            "cleanup must wait for terminal status before releasing"
+            "cleanup must wait for AsyncSession to reach terminal status before releasing"
         );
         assert!(!task.is_finished(), "cleanup task should still be pending");
 
+        // Transition the session to terminal; cleanup should complete and release.
         status_tx
             .send(OnboardingStatus::Complete { matched_blocks: 0 })
             .expect("send terminal status");
@@ -676,7 +713,48 @@ mod cleanup_tests {
 
         assert!(
             !leader.has_session(sid),
-            "cleanup must release once the status reaches terminal"
+            "cleanup must release after status reaches terminal"
         );
+    }
+
+    /// Test 4 — `join_all` drains shards concurrently: a terminal shard does
+    /// not wait for a pending sibling.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cleanup_drains_concurrently() {
+        let leader = build_leader().await;
+        let terminal_id = fresh_id();
+        let pending_id = fresh_id();
+        leader.insert_test_session_marker(terminal_id);
+        leader.insert_test_session_marker(pending_id);
+
+        let (pending_find, status_tx) = pending_async(pending_id);
+        let state = state_from(vec![complete_async(terminal_id), pending_find]);
+
+        let leader_for_task = leader.clone();
+        let task = tokio::spawn(cleanup_preparing_to_onboard(
+            state,
+            leader_for_task,
+            "r4".into(),
+        ));
+
+        // Drive the test runtime so the terminal shard's release_session can
+        // land even though the pending shard is still blocked.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !leader.has_session(terminal_id),
+            "terminal shard must be released before the pending shard transitions"
+        );
+        assert!(
+            leader.has_session(pending_id),
+            "pending shard must still be registered while its find session is non-terminal"
+        );
+        assert!(!task.is_finished());
+
+        status_tx
+            .send(OnboardingStatus::Complete { matched_blocks: 0 })
+            .expect("send terminal status");
+        task.await.expect("cleanup task");
+
+        assert!(!leader.has_session(pending_id));
     }
 }

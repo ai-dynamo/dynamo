@@ -10,11 +10,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::time::Instant;
 
-use super::prefill_tracker::{PrefillLoadSnapshot, added_prefill_tokens};
+use super::PrefillTokenDeltas;
+use super::prefill_tracker::PrefillLoadSnapshot;
 use super::prompt_membership_trie::{PromptMembershipTrie, WorkerLookup};
 use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
-use crate::protocols::{OverlapScores, WorkerWithDpRank};
+use crate::protocols::WorkerWithDpRank;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WorkerLoadSnapshot {
@@ -96,15 +97,11 @@ impl PromptRegistry {
         self.membership.maybe_cleanup();
     }
 
-    #[expect(clippy::too_many_arguments)]
-    fn project_loads_from_overlap(
+    fn project_loads_from_membership(
         &self,
         query_len: usize,
         matched_depth: &FxHashMap<WorkerWithDpRank, usize>,
-        isl: usize,
-        overlaps: &OverlapScores,
-        track_prefill_tokens: bool,
-        block_size: usize,
+        prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
     ) -> (
         FxHashMap<WorkerWithDpRank, usize>,
@@ -121,12 +118,7 @@ impl PromptRegistry {
             let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
             let new_blocks = query_len.saturating_sub(overlap_depth);
             let active_tokens = load.active_tokens(decay_now);
-            let overlap = *overlaps.scores.get(&worker).unwrap_or(&0);
-            let added_tokens = if track_prefill_tokens {
-                added_prefill_tokens(block_size, isl, overlap)
-            } else {
-                0
-            };
+            let added_tokens = prefill_token_deltas.tokens_for(worker);
 
             potential_blocks.insert(worker, load.active_blocks + new_blocks);
             potential_tokens.insert(worker, active_tokens + added_tokens);
@@ -135,13 +127,10 @@ impl PromptRegistry {
         (potential_blocks, potential_tokens)
     }
 
-    pub(super) fn potential_blocks_and_tokens_with_prefill_tracking(
+    pub(super) fn potential_blocks_and_tokens(
         &self,
         token_sequence: Option<&[SequenceHash]>,
-        isl: usize,
-        overlaps: &OverlapScores,
-        track_prefill_tokens: bool,
-        block_size: usize,
+        prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
     ) -> (
         FxHashMap<WorkerWithDpRank, usize>,
@@ -149,13 +138,10 @@ impl PromptRegistry {
     ) {
         let query_len = token_sequence.map_or(0, |query| query.len());
         let matched_depth = self.membership.compute_overlap_depths(token_sequence);
-        self.project_loads_from_overlap(
+        self.project_loads_from_membership(
             query_len,
             &matched_depth,
-            isl,
-            overlaps,
-            track_prefill_tokens,
-            block_size,
+            prefill_token_deltas,
             decay_now,
         )
     }
@@ -273,15 +259,11 @@ mod tests {
         hashes.iter().copied().collect()
     }
 
-    #[expect(clippy::too_many_arguments)]
     fn naive_potential_loads(
         expected_loads: &FxHashMap<WorkerWithDpRank, WorkerLoadSnapshot>,
         expected_blocks: &FxHashMap<WorkerWithDpRank, FxHashSet<SequenceHash>>,
         token_sequence: Option<&[SequenceHash]>,
-        isl: usize,
-        overlaps: &OverlapScores,
-        track_prefill_tokens: bool,
-        block_size: usize,
+        prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
     ) -> (
         FxHashMap<WorkerWithDpRank, usize>,
@@ -304,12 +286,7 @@ mod tests {
             });
             let new_blocks =
                 token_sequence.map_or(0, |query| query.len().saturating_sub(overlap_depth));
-            let overlap = *overlaps.scores.get(&worker).unwrap_or(&0);
-            let added_tokens = if track_prefill_tokens {
-                added_prefill_tokens(block_size, isl, overlap)
-            } else {
-                0
-            };
+            let added_tokens = prefill_token_deltas.tokens_for(worker);
 
             potential_blocks.insert(worker, load.active_blocks + new_blocks);
             potential_tokens.insert(worker, load.active_tokens(decay_now) + added_tokens);
@@ -381,18 +358,12 @@ mod tests {
             &expected_loads,
             &expected_blocks,
             Some(&full_prompt),
-            384,
-            &OverlapScores::default(),
-            false,
-            4,
+            &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual = registry.potential_blocks_and_tokens_with_prefill_tracking(
+        let actual = registry.potential_blocks_and_tokens(
             Some(&full_prompt),
-            384,
-            &OverlapScores::default(),
-            false,
-            4,
+            &PrefillTokenDeltas::none(),
             decay_now,
         );
 
@@ -425,12 +396,9 @@ mod tests {
         registry.assert_consistent_with_workers(&expected_loads, &expected_blocks);
         assert_eq!(registry.active_tokens(now).get(&worker).copied(), Some(9));
 
-        let actual = registry.potential_blocks_and_tokens_with_prefill_tracking(
+        let actual = registry.potential_blocks_and_tokens(
             Some(&[1, 2, 3]),
-            12,
-            &OverlapScores::default(),
-            false,
-            4,
+            &PrefillTokenDeltas::none(),
             now,
         );
         assert_eq!(actual.0.get(&worker).copied(), Some(5));
@@ -474,12 +442,9 @@ mod tests {
         registry.assert_consistent_with_workers(&expected_loads, &expected_blocks);
         assert!(!registry.active_blocks().contains_key(&worker_a));
 
-        let actual = registry.potential_blocks_and_tokens_with_prefill_tracking(
+        let actual = registry.potential_blocks_and_tokens(
             Some(&[1, 2, 3]),
-            12,
-            &OverlapScores::default(),
-            false,
-            4,
+            &PrefillTokenDeltas::none(),
             Instant::now(),
         );
         assert_eq!(actual.0.get(&worker_b).copied(), Some(3));
@@ -516,18 +481,12 @@ mod tests {
             &expected_loads,
             &expected_blocks,
             Some(&[1, 2, 3]),
-            12,
-            &OverlapScores::default(),
-            false,
-            4,
+            &PrefillTokenDeltas::none(),
             decay_now,
         );
-        let actual = registry.potential_blocks_and_tokens_with_prefill_tracking(
+        let actual = registry.potential_blocks_and_tokens(
             Some(&[1, 2, 3]),
-            12,
-            &OverlapScores::default(),
-            false,
-            4,
+            &PrefillTokenDeltas::none(),
             decay_now,
         );
 

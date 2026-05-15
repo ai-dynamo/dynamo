@@ -29,6 +29,8 @@ from dynamo.common.utils.prometheus import (
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import (
     KvEventPublisher,
+    MediaDecoder,
+    MediaFetcher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
@@ -41,22 +43,11 @@ from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
 from .args import Config, _uses_dynamo_connector, parse_args
+from .cache_info import get_configured_kv_event_block_size
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
-
-# Optional imports for frontend decoding support
-MediaDecoder: type | None = None
-MediaFetcher: type | None = None
-try:
-    from dynamo.llm import MediaDecoder, MediaFetcher
-
-    MEDIA_DECODER_AVAILABLE = True
-except ImportError:
-    MediaDecoder = None
-    MediaFetcher = None
-    MEDIA_DECODER_AVAILABLE = False
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -93,12 +84,10 @@ def run_dynamo_headless(config: Config) -> None:
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
                 configure_gms_lock_mode,
-                validate_cudagraph_mode,
             )
 
-            os.environ["DYN_GMS_SHADOW_MODE"] = "1"
+            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
             configure_gms_lock_mode(config.engine_args)
-            validate_cudagraph_mode(config.engine_args)
 
     elif config.engine_args.load_format in ("mx-source", "mx-target"):
         config.engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
@@ -335,6 +324,7 @@ def setup_kv_event_publisher(
     # all served workers should cover all ranks.
     dp_start, dp_size = get_dp_range_for_worker(vllm_config)
     kv_publishers = []
+    kv_event_block_size = get_configured_kv_event_block_size(vllm_config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):
         if consolidator_enabled:
@@ -355,7 +345,7 @@ def setup_kv_event_publisher(
 
         kv_publisher = KvEventPublisher(
             endpoint=generate_endpoint,
-            kv_block_size=vllm_config.cache_config.block_size,
+            kv_block_size=kv_event_block_size,
             zmq_endpoint=zmq_endpoint,
             zmq_topic="",
             enable_local_indexer=config.enable_local_indexer,
@@ -472,17 +462,15 @@ def setup_vllm_engine(
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
                 configure_gms_lock_mode,
-                validate_cudagraph_mode,
             )
 
-            os.environ["DYN_GMS_SHADOW_MODE"] = "1"
+            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
             logger.info(
-                "[Shadow] Enabled shadow mode: will skip KV cache allocation at startup"
+                "[GMS] Failover enabled: will use scratch KV for initialization until engine is primary"
             )
             # ENGINE_ID=0 writes weights, all others import (RO).
             # Prevents deadlock during TP>1 failover.
             configure_gms_lock_mode(engine_args)
-            validate_cudagraph_mode(engine_args)
 
     if engine_args.load_format in ("mx-source", "mx-target"):
         try:
@@ -656,6 +644,13 @@ async def register_vllm_model(
         config.exclude_tools_when_tool_choice_none
     )
 
+    # Propagate stream_interval so the frontend can respect --stream-interval.
+    # set_engine_specific requires a JSON-encoded string (the Rust binding
+    # parses it with serde_json::from_str); str(int) happens to be valid JSON.
+    stream_interval = getattr(config.engine_args, "stream_interval", None)
+    if stream_interval is not None:
+        runtime_config.set_engine_specific("stream_interval", str(stream_interval))
+
     # Get data_parallel_size from vllm_config (defaults to 1)
     dp_range = get_dp_range_for_worker(vllm_config)
     runtime_config.data_parallel_start_rank = dp_range[0]
@@ -666,19 +661,15 @@ async def register_vllm_model(
     media_decoder = None
     media_fetcher = None
     if config.frontend_decoding:
-        if not MEDIA_DECODER_AVAILABLE:
-            raise RuntimeError(
-                "--frontend-decoding requires MediaDecoder support. "
-                "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
-            )
-        assert MediaDecoder is not None and MediaFetcher is not None
         media_decoder = MediaDecoder()
         media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
         # media_decoder.enable_video({})
 
         media_fetcher = MediaFetcher()
         media_fetcher.timeout_ms(30000)
-        media_fetcher.allow_direct_port(True)
+        allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
+        media_fetcher.allow_direct_ip(allow_internal)
+        media_fetcher.allow_direct_port(allow_internal)
 
     await register_model(
         model_input,
@@ -687,7 +678,7 @@ async def register_vllm_model(
         config.model,
         config.served_model_name,
         context_length=vllm_config.model_config.max_model_len,
-        kv_cache_block_size=runtime_values["block_size"],
+        kv_cache_block_size=runtime_values["kv_event_block_size"],
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
         media_decoder=media_decoder,
@@ -696,13 +687,15 @@ async def register_vllm_model(
 
 
 def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
-    """Retrieve cache configuration information from [`AsyncLLM`] engine."""
+    """Return vLLM cache and scheduler limits used for model registration."""
 
     try:
         # Get values directly from vllm_config instead of collective_rpc
+        kv_event_block_size = get_configured_kv_event_block_size(engine.vllm_config)
         cache_values = {
             "num_gpu_blocks": engine.vllm_config.cache_config.num_gpu_blocks,
             "block_size": engine.vllm_config.cache_config.block_size,
+            "kv_event_block_size": kv_event_block_size,
         }
 
         scheduler_values = {
@@ -710,11 +703,12 @@ def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
             "max_num_batched_tokens": engine.vllm_config.scheduler_config.max_num_batched_tokens,
         }
 
-        logging.info(f"Cache config values: {cache_values}")
-        logging.info(f"Scheduler config values: {scheduler_values}")
+        logging.debug(f"Cache config values: {cache_values}")
+        logging.debug(f"Scheduler config values: {scheduler_values}")
         return {
             "num_gpu_blocks": cache_values["num_gpu_blocks"],
             "block_size": cache_values["block_size"],
+            "kv_event_block_size": cache_values["kv_event_block_size"],
             "max_num_seqs": scheduler_values["max_num_seqs"],
             "max_num_batched_tokens": scheduler_values["max_num_batched_tokens"],
         }

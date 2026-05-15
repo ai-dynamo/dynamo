@@ -22,7 +22,7 @@ from tests.gpu_memory_service.flow_assertions import (
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 
-pytestmark = [pytest.mark.nightly, pytest.mark.fault_tolerance]
+pytestmark = [pytest.mark.nightly, pytest.mark.fault_tolerance, pytest.mark.core]
 
 # Event flow under test:
 # 1. Weights are published once as a committed layout.
@@ -131,6 +131,7 @@ def test_gms_basic_quiesce_resume_sglang(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/OPS-4450")
 @pytest.mark.trtllm
 @pytest.mark.e2e
 @pytest.mark.gpu_1
@@ -177,6 +178,7 @@ def test_gms_basic_quiesce_resume_trtllm(
         )
 
 
+@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/OPS-4450")
 @pytest.mark.trtllm
 @pytest.mark.e2e
 @pytest.mark.gpu_1

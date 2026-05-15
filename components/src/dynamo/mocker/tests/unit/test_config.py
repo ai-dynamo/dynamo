@@ -53,6 +53,7 @@ def make_args(**overrides):
         "sglang_schedule_conservativeness": None,
         "aic_perf_model": False,
         "aic_system": None,
+        "aic_backend": None,
         "aic_backend_version": None,
         "aic_tp_size": None,
         "aic_moe_tp_size": None,
@@ -237,6 +238,22 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
     }
 
     assert "has_perf_model" not in payload
+
+
+def test_aic_backend_override_decouples_from_engine_type():
+    args = make_args(
+        engine_type="vllm",
+        aic_perf_model=True,
+        aic_system="h200_sxm",
+        aic_backend="trtllm",
+        aic_tp_size=4,
+    )
+
+    engine_args = CONFIG.build_mocker_engine_args(args)
+    payload = json.loads(engine_args.dump_json())
+
+    assert payload["engine_type"] == "vllm"
+    assert payload["aic_backend"] == "trtllm"
 
 
 def test_mock_engine_args_from_json_ignores_legacy_has_perf_model_field():

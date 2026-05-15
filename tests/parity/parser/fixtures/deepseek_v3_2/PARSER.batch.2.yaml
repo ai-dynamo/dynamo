@@ -1,0 +1,163 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# `|2+` simply means a single newline ("\n"); see tests/parity/README.md for the full decode.
+
+family: deepseek_v3_2
+mode: batch
+cases:
+  PARSER.batch.2.a:
+    description: Two invokes inside one function_calls wrapper
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_deepseekv32_tool_parser.py#L172
+    model_text: |-
+      <｜DSML｜function_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      <｜DSML｜invoke name="get_time">
+      <｜DSML｜parameter name="timezone" string="true">EST</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜function_calls>
+    tools:
+    - &id002
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    - &id003
+      name: get_time
+      parameters:
+        type: object
+        properties:
+          timezone:
+            type: string
+    expected:
+      dynamo: &id001
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm: *id001
+      sglang: *id001
+  PARSER.batch.2.b:
+    description: Two back-to-back function_calls wrappers
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_deepseekv32_tool_parser.py#L327
+    model_text: |-
+      <｜DSML｜function_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜function_calls>
+      <｜DSML｜function_calls>
+      <｜DSML｜invoke name="get_time">
+      <｜DSML｜parameter name="timezone" string="true">EST</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜function_calls>
+    tools:
+    - *id002
+    - *id003
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: ''
+      vllm:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: |2+
+
+        reason: "preserves inter-fence newline between back-to-back function_calls wrappers"
+      sglang:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        normal_text: ''
+  PARSER.batch.2.c:
+    description: With surrounding narration
+    ref: dynamo
+    model_text: |-
+      Both: <｜DSML｜function_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      <｜DSML｜invoke name="get_time">
+      <｜DSML｜parameter name="timezone" string="true">EST</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜function_calls> Done.
+    tools:
+    - *id002
+    - *id003
+    expected:
+      dynamo:
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_time
+          arguments:
+            timezone: EST
+        normal_text: 'Both: '
+      vllm:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            timezone: EST
+          name: get_time
+        normal_text: 'Both: '
+        reason: drops trailing normal_text after tool-call wrapper end
+      sglang:
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            timezone: EST
+          name: get_time
+        normal_text: 'Both:'
+        reason: trims trailing space from preceding normal_text
+  PARSER.batch.2.d:
+    description: Same-name twice
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_deepseekv32_tool_parser.py#L370
+    model_text: |-
+      <｜DSML｜function_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">NYC</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="location" string="true">LA</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜function_calls>
+    tools:
+    - *id002
+    - *id002
+    expected:
+      dynamo: &id004
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        - name: get_weather
+          arguments:
+            location: LA
+        normal_text: ''
+      vllm: *id004
+      sglang: *id004

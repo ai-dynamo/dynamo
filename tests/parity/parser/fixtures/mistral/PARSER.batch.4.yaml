@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+family: mistral
+mode: batch
+cases:
+  PARSER.batch.4.a:
+    description: TOOL_CALLS wrapper with garbage
+    ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/test_mistral_tool_parser.py#L405
+    model_text: '[TOOL_CALLS]not a json array[/TOOL_CALLS]'
+    tools:
+    - &id001
+      name: get_weather
+      parameters:
+        type: object
+        properties:
+          location:
+            type: string
+    expected:
+      dynamo:
+        reason: "Dynamo's mistral parser leaves [TOOL_CALLS], [/TOOL_CALLS] in normal_text on malformed input (impl-defined recovery)"
+        calls: []
+        normal_text: '[TOOL_CALLS]not a json array[/TOOL_CALLS]'
+      vllm:
+        calls: []
+        normal_text: not a json array[/TOOL_CALLS]
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.4.b:
+    description: Missing close brace in JSON
+    ref: dynamo
+    model_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"][/TOOL_CALLS]'
+    tools:
+    - *id001
+    expected:
+      dynamo:
+        reason: "Dynamo's mistral parser leaves [TOOL_CALLS], [/TOOL_CALLS] in normal_text on malformed input (impl-defined recovery)"
+        calls: []
+        normal_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"][/TOOL_CALLS]'
+      vllm:
+        calls: []
+        normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"][/TOOL_CALLS]'
+      sglang:
+        calls: []
+        normal_text: ''
+  PARSER.batch.4.c:
+    description: Missing name key
+    ref: dynamo
+    model_text: '[TOOL_CALLS][{"arguments": {"location": "NYC"}}][/TOOL_CALLS]'
+    tools:
+    - *id001
+    expected:
+      dynamo: &id002
+        calls: []
+        normal_text: ''
+      vllm:
+        error: 'KeyError: ''name'''
+        reason: vLLM mistral_tool_parser raises KeyError when 'name' key is missing
+      sglang: *id002
+  PARSER.batch.4.d:
+    description: Missing [/TOOL_CALLS] close
+    ref: dynamo
+    model_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"location": "NYC"}}]'
+    tools:
+    - *id001
+    expected:
+      dynamo: &id003
+        calls:
+        - name: get_weather
+          arguments:
+            location: NYC
+        normal_text: ''
+      vllm: *id003
+      sglang:
+        calls: []
+        normal_text: ''

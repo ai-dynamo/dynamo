@@ -35,11 +35,23 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `backend_instance_id` | `u64` | `None` | Router | Routes the request to a specific backend instance. |
 | `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When provided with `backend_instance_id`, tokenization is skipped. |
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
-| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`. |
+| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
+| `agent_context` | object | `None` | Preprocessor | Passive session and trajectory identity for agent traces. See [Agent Context](#agent-context) below and [Agent Tracing](../../agents/agent-tracing.md). |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
 | `session_control` | object | `None` | Router | Session lifecycle and sticky routing for subagent KV isolation. See [Session Control](#session-control). |
+
+Related root-level Dynamo output option:
+
+| Field | Type | Default | Consumed By | Description |
+|-------|------|---------|-------------|-------------|
+| `return_tokens_as_token_ids` | `bool` | `false` | Response builder | Formats logprob token strings as `token_id:<id>` instead of decoded text. |
+
+`return_tokens_as_token_ids` only changes returned logprob token display. To stop on
+token IDs, pass integer IDs in the normal `stop` array, for example
+`"stop": [576]`. Strings such as `"token_id:576"` remain literal string stop
+sequences and are not parsed as token IDs.
 
 ### Header Overrides
 
@@ -49,6 +61,36 @@ Routing fields can also be set via HTTP headers, which take priority over `nvext
 |--------|-----------|
 | `x-worker-instance-id` | `backend_instance_id` and `decode_worker_id` |
 | `x-prefill-instance-id` | `prefill_worker_id` |
+
+## Agent Context
+
+The `agent_context` sub-object carries passive session and trajectory identity for
+agentic requests. Dynamo uses this metadata to emit request traces when the
+agent trace sink is enabled. It does not change routing, scheduling, or cache
+behavior.
+
+| Field | Type | Required | Description |
+|-------|------|:--------:|-------------|
+| `session_type_id` | `string` | Yes | Reusable profile or agent class label. |
+| `session_id` | `string` | Yes | Top-level agent run/session identifier. |
+| `trajectory_id` | `string` | Yes | One schedulable reasoning/tool trajectory. |
+| `parent_trajectory_id` | `string` | No | Parent trajectory, typically for subagents. |
+
+```json
+{
+    "nvext": {
+        "agent_context": {
+            "session_type_id": "deep_research",
+            "session_id": "research-run-42",
+            "trajectory_id": "research-run-42:researcher",
+            "parent_trajectory_id": "research-run-42:planner"
+        }
+    }
+}
+```
+
+For identity semantics, trace sink configuration, and JSONL schema details,
+see [Agent Tracing](../../agents/agent-tracing.md).
 
 ## Agent Hints
 
@@ -163,6 +205,9 @@ When the client requests response metadata via `extra_fields`, the response incl
 |-------|---------------|-------------|
 | `worker_id` | `extra_fields: ["worker_id"]` | Prefill/decode worker IDs and data parallel ranks that processed the request. |
 | `timing` | `extra_fields: ["timing"]` | Per-request timing information (TTFT, ITL, queue time, etc.). |
+| `routed_experts` | `extra_fields: ["routed_experts"]` | Routed expert capture payload returned by SGLang-backed requests. |
+| `engine_data` | `extra_fields: ["engine_data"]` | Opaque backend-provided engine metadata. |
+| `stop_reason` | `extra_fields: ["stop_reason"]` | Backend-specific matched stop condition, returned under `nvext` because it is not part of the OpenAI completions schema. Dynamo currently serves this as a response-level field for single-choice requests; supporting `n > 1` will require an indexed per-choice shape. |
 | `token_ids` | Automatic (GAIE Stage 1) | Tokenized prompt for reuse in Stage 2 query-only mode. |
 
 ### Example response `nvext`
@@ -190,4 +235,6 @@ When the client requests response metadata via `extra_fields`, the response incl
 |----------|-------------|
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
 | [Configuration and Tuning](../router/router-configuration.md) | Full router configuration and CLI arguments |
+| [Agent Tracing](../../agents/agent-tracing.md) | Passive session/trajectory identity, JSONL request traces, and harness tool-event ingestion |
+| [Agent Hints](../../agents/agent-hints.md) | Per-request serving hints for routing, scheduling, and cache behavior |
 | [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and session control |
