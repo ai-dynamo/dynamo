@@ -87,6 +87,7 @@ pub struct SchedulingRequest {
 #[derive(Clone, Copy)]
 pub(crate) struct RoutingEligibility<'a> {
     allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
+    pinned_worker: Option<WorkerWithDpRank>,
     routing_constraints: &'a RoutingConstraints,
 }
 
@@ -94,12 +95,19 @@ impl<'a> RoutingEligibility<'a> {
     #[inline]
     pub(crate) fn new(
         allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
+        pinned_worker: Option<WorkerWithDpRank>,
         routing_constraints: &'a RoutingConstraints,
     ) -> Self {
         Self {
             allowed_worker_ids,
+            pinned_worker,
             routing_constraints,
         }
+    }
+
+    #[inline]
+    pub(crate) fn pinned_worker(&self) -> Option<WorkerWithDpRank> {
+        self.pinned_worker
     }
 
     #[inline]
@@ -140,11 +148,8 @@ impl<'a> RoutingEligibility<'a> {
     }
 
     #[inline]
-    pub(crate) fn validate_pinned_worker(
-        &self,
-        pinned_worker: Option<WorkerWithDpRank>,
-    ) -> Result<(), KvSchedulerError> {
-        let Some(pinned_worker) = pinned_worker else {
+    pub(crate) fn validate_pinned_worker(&self) -> Result<(), KvSchedulerError> {
+        let Some(pinned_worker) = self.pinned_worker else {
             return Ok(());
         };
 
@@ -158,15 +163,60 @@ impl<'a> RoutingEligibility<'a> {
     }
 
     #[inline]
-    pub(crate) fn bypasses_capacity_check(&self, pinned_worker: Option<WorkerWithDpRank>) -> bool {
-        pinned_worker.is_none() && self.allowed_worker_ids.is_some()
+    pub(crate) fn bypasses_capacity_check(&self) -> bool {
+        self.pinned_worker.is_none() && self.allowed_worker_ids.is_some()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct SchedulingContext<'a, C> {
+    request: &'a SchedulingRequest,
+    eligibility: RoutingEligibility<'a>,
+    workers: &'a HashMap<WorkerId, C>,
+}
+
+impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
+    pub fn new(request: &'a SchedulingRequest, workers: &'a HashMap<WorkerId, C>) -> Self {
+        Self {
+            request,
+            eligibility: request.eligibility(),
+            workers,
+        }
+    }
+
+    pub fn request(&self) -> &'a SchedulingRequest {
+        self.request
+    }
+
+    pub fn best_effective_prefill_tokens(&self) -> usize {
+        let cached_tokens = match self.eligibility.pinned_worker() {
+            Some(worker) => self.request.effective_cached_tokens_for(worker),
+            None => self
+                .request
+                .effective_cached_tokens
+                .iter()
+                .filter(|(worker, _)| {
+                    self.workers.get(&worker.worker_id).is_some_and(|config| {
+                        self.eligibility.allows_worker(worker.worker_id, config)
+                    })
+                })
+                .map(|(_, cached_tokens)| *cached_tokens)
+                .max()
+                .unwrap_or(0),
+        };
+
+        self.request.isl_tokens.saturating_sub(cached_tokens)
     }
 }
 
 impl SchedulingRequest {
     #[inline]
     pub(crate) fn eligibility(&self) -> RoutingEligibility<'_> {
-        RoutingEligibility::new(self.allowed_worker_ids.as_ref(), &self.routing_constraints)
+        RoutingEligibility::new(
+            self.allowed_worker_ids.as_ref(),
+            self.pinned_worker,
+            &self.routing_constraints,
+        )
     }
 
     pub(crate) fn prefill_token_deltas(&self) -> PrefillTokenDeltas {
@@ -194,22 +244,6 @@ impl SchedulingRequest {
             .collect();
 
         PrefillTokenDeltas::new(self.isl_tokens, by_worker)
-    }
-
-    pub(crate) fn best_effective_prefill_tokens(&self) -> usize {
-        let eligibility = self.eligibility();
-        let cached_tokens = match self.pinned_worker {
-            Some(worker) => self.effective_cached_tokens_for(worker),
-            None => self
-                .effective_cached_tokens
-                .iter()
-                .filter(|(worker, _)| eligibility.allows_worker_id(worker.worker_id))
-                .map(|(_, cached_tokens)| *cached_tokens)
-                .max()
-                .unwrap_or(0),
-        };
-
-        self.isl_tokens.saturating_sub(cached_tokens)
     }
 
     pub(crate) fn effective_cached_tokens_for(&self, worker: WorkerWithDpRank) -> usize {

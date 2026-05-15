@@ -14,7 +14,8 @@ use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    RoutingEligibility, SchedulingRequest, SchedulingResponse, pinned_worker_config,
+    RoutingEligibility, SchedulingContext, SchedulingRequest, SchedulingResponse,
+    pinned_worker_config,
 };
 use crate::protocols::{PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
@@ -147,7 +148,7 @@ impl<
     pub async fn enqueue(&self, mut request: SchedulingRequest) {
         let eligibility = request.eligibility();
 
-        if let Err(error) = eligibility.validate_pinned_worker(request.pinned_worker) {
+        if let Err(error) = eligibility.validate_pinned_worker() {
             request.respond(Err(error));
             return;
         }
@@ -160,20 +161,19 @@ impl<
             return;
         };
 
-        if eligibility.bypasses_capacity_check(request.pinned_worker) {
+        if eligibility.bypasses_capacity_check() {
             self.admit_one(request, decay_now).await;
             return;
         }
 
-        if self.all_workers_busy(
-            threshold,
-            request.eligibility(),
-            request.pinned_worker,
-            decay_now,
-        ) {
+        if self.all_workers_busy(threshold, request.eligibility(), decay_now) {
             tracing::debug!("all workers busy, queueing request");
             let arrival_offset = self.start_time.elapsed();
-            let key = self.policy.enqueue_key(arrival_offset, &request);
+            let key = {
+                let workers = self.workers_with_configs.borrow();
+                self.policy
+                    .enqueue_key(arrival_offset, SchedulingContext::new(&request, &workers))
+            };
             let isl_tokens = request.isl_tokens;
             self.pending.lock().await.push(QueueEntry { key, request });
             self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
@@ -195,11 +195,16 @@ impl<
         if S::DYNAMIC {
             let now = self.start_time.elapsed();
             let mut heap = self.pending.lock().await;
+            let workers = self.workers_with_configs.borrow();
             let rekeyed: Vec<_> = std::mem::take(&mut *heap)
                 .into_vec()
                 .into_iter()
                 .map(|e| QueueEntry {
-                    key: self.policy.rekey(now, &e.key, &e.request),
+                    key: self.policy.rekey(
+                        now,
+                        &e.key,
+                        SchedulingContext::new(&e.request, &workers),
+                    ),
                     request: e.request,
                 })
                 .collect();
@@ -217,12 +222,7 @@ impl<
             // drain overhead bounded to the heap front. A blocked pinned or
             // otherwise constrained request can temporarily stall later
             // schedulable entries until we adopt a cheaper non-HOL strategy.
-            if self.all_workers_busy(
-                threshold,
-                front.request.eligibility(),
-                front.request.pinned_worker,
-                decay_now,
-            ) {
+            if self.all_workers_busy(threshold, front.request.eligibility(), decay_now) {
                 break;
             }
             let entry = heap.pop().expect("heap front vanished before pop");
@@ -355,13 +355,12 @@ impl<
         &self,
         threshold: f64,
         eligibility: RoutingEligibility<'_>,
-        pinned_worker: Option<WorkerWithDpRank>,
         decay_now: Instant,
     ) -> bool {
         let active_tokens = self.slots.active_tokens(decay_now);
         let configs = self.workers_with_configs.borrow();
 
-        if let Some(worker) = pinned_worker {
+        if let Some(worker) = eligibility.pinned_worker() {
             let Ok(config) = pinned_worker_config::<C>(&*configs, worker) else {
                 return false;
             };

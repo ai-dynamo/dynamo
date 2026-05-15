@@ -14,6 +14,7 @@ use dynamo_kv_router::protocols::{
     WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
+use dynamo_kv_router::scheduling::SchedulingContext;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, PrefillTokenDeltas, RadixTree,
     RouterSchedulingPolicy, SchedulingPolicy, SchedulingRequest, SequenceRequest, WorkerSelector,
@@ -442,13 +443,14 @@ impl OfflineReplayRouter {
 
     fn enqueue_key(&self, now_ms: f64, request: &PendingRequest) -> ReplayQueueKey {
         let arrival_offset = Duration::from_secs_f64((now_ms.max(0.0)) / 1000.0);
+        let scheduling_request = request.scheduling_request(
+            self.block_size as usize,
+            FxHashMap::default(),
+            FxHashMap::default(),
+        );
         self.policy.enqueue_key(
             arrival_offset,
-            &request.scheduling_request(
-                self.block_size as usize,
-                FxHashMap::default(),
-                FxHashMap::default(),
-            ),
+            SchedulingContext::new(&scheduling_request, &self.workers_with_configs),
         )
     }
 

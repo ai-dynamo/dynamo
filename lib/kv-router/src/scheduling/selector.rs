@@ -204,9 +204,9 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         assert!(request.isl_tokens > 0);
         let eligibility = request.eligibility();
-        eligibility.validate_pinned_worker(request.pinned_worker)?;
+        eligibility.validate_pinned_worker()?;
 
-        let pinned_worker = request.pinned_worker;
+        let pinned_worker = eligibility.pinned_worker();
 
         if pinned_worker.is_none()
             && !eligibility.has_eligible_worker(
