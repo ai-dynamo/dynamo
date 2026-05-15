@@ -278,10 +278,13 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             let Some(config) = workers.get(&worker.worker_id) else {
                 return base_score;
             };
-            base_score
-                * request
-                    .routing_constraints
-                    .preferred_taint_multiplier(config.taints())
+            match request
+                .routing_constraints
+                .preferred_taint_multiplier(config.taints())
+            {
+                Some(multiplier) => base_score * multiplier,
+                None => base_score,
+            }
         };
 
         let worker_iter = workers

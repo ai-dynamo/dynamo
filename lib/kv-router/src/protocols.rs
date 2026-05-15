@@ -209,9 +209,9 @@ impl RoutingConstraints {
             .count()
     }
 
-    pub fn preferred_taint_multiplier(&self, worker_taints: &HashSet<String>) -> f64 {
+    pub fn preferred_taint_multiplier(&self, worker_taints: &HashSet<String>) -> Option<f64> {
         if self.preferred_taints.is_empty() {
-            return 1.0;
+            return None;
         }
 
         let bias = self
@@ -222,7 +222,7 @@ impl RoutingConstraints {
             .sum::<f64>()
             .tanh();
 
-        (-bias).exp()
+        Some((-bias).exp())
     }
 }
 
