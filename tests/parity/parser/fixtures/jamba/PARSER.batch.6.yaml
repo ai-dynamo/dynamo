@@ -15,10 +15,14 @@ cases:
         type: object
         properties: {}
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &d_6_a
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *d_6_a
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
   PARSER.batch.6.b:
     description: Whitespace inside arguments {}
     ref: dynamo
@@ -26,10 +30,14 @@ cases:
     tools:
     - *id001
     expected:
-      calls:
-      - name: get_time
-        arguments: {}
-      normal_text: ''
+      dynamo: &d_6_b
+        calls:
+        - name: get_time
+          arguments: {}
+        normal_text: ''
+      vllm: *d_6_b
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'
   PARSER.batch.6.c:
     description: No arguments key
     ref: dynamo
@@ -37,9 +45,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
-    # TODO(research): vllm diverges — both return calls=[]; vLLM preserves raw input as normal_text on this recovery path, Dynamo emits empty
-    # vllm produces:
-    #   calls: []
-    #   normal_text: '<tool_calls>[{"name": "get_time"}]</tool_calls>'
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: '<tool_calls>[{"name": "get_time"}]</tool_calls>'
+        reason: "both return calls=[]; vLLM preserves raw input as normal_text on this recovery path, Dynamo emits empty"
+      sglang:
+        unavailable: SGLang has no detector for family='jamba'

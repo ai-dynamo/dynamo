@@ -82,6 +82,10 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     load_scaling_down_sensitivity = 80  # 0-100
     load_metric_samples = 10  # number of samples per interval
     load_min_observations = 5  # cold start threshold
+    prefill_scale_up_queue_tokens = None
+    prefill_scale_down_queue_tokens = None
+    decode_scale_up_kv_rate = None
+    decode_scale_down_kv_rate = None
 
     # Advisory mode: compute and log decisions without executing scaling
     advisory = False

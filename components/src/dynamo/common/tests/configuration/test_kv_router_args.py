@@ -14,6 +14,17 @@ from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
+def _clear_admission_control_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
+        "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
+        "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
+        "DYN_NO_ADMISSION_CONTROL",
+        "DYN_ROUTER_QUEUE_THRESHOLD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_overlap_score_credit_cli_uses_kv_router_config_field() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
@@ -317,3 +328,57 @@ def test_load_aware_frontend_implies_kv_router_mode() -> None:
     assert config.overlap_score_credit == 0.0
     assert config.use_kv_events is False
     assert config.router_assume_kv_reuse is False
+
+
+def test_frontend_uses_admission_control_defaults(monkeypatch) -> None:
+    _clear_admission_control_env(monkeypatch)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args([])
+
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+
+    assert config.active_decode_blocks_threshold == 1.0
+    assert config.active_prefill_tokens_threshold == 10_000_000
+    assert config.active_prefill_tokens_threshold_frac == 64.0
+    assert config.router_queue_threshold == 16.0
+
+
+def test_no_admission_control_clears_busy_thresholds_but_keeps_queue(
+    monkeypatch,
+) -> None:
+    _clear_admission_control_env(monkeypatch)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        [
+            "--no-admission-control",
+            "--active-decode-blocks-threshold",
+            "0.5",
+            "--active-prefill-tokens-threshold",
+            "1000",
+            "--active-prefill-tokens-threshold-frac",
+            "2.0",
+            "--router-queue-threshold",
+            "32.0",
+        ]
+    )
+
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+
+    assert config.no_admission_control is True
+    assert config.active_decode_blocks_threshold is None
+    assert config.active_prefill_tokens_threshold is None
+    assert config.active_prefill_tokens_threshold_frac is None
+    assert config.router_queue_threshold == 32.0
+    assert config.router_kwargs() == {
+        "active_decode_blocks_threshold": None,
+        "active_prefill_tokens_threshold": None,
+        "active_prefill_tokens_threshold_frac": None,
+        "enforce_disagg": False,
+    }
+    assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0

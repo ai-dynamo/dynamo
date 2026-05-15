@@ -17,8 +17,15 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: <|tool_call>call:get_weather{location:<|"|>NYC<|"|>}
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
+      sglang:
+        unavailable: SGLang has no detector for family='gemma4'
   PARSER.batch.5.b:
     description: Closing <tool_call|> without matching <|tool_call> open
     ref: dynamo
@@ -26,8 +33,15 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: call:get_weather{location:<|"|>NYC<|"|>}<tool_call|>
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
+      sglang:
+        unavailable: SGLang has no detector for family='gemma4'
   PARSER.batch.5.c:
     description: Truncation mid-argument value
     ref: dynamo
@@ -35,5 +49,12 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|tool_call>call:get_weather{location:<|"|>N
+      dynamo:
+        calls: []
+        normal_text: ''
+      vllm:
+        calls: []
+        normal_text: <|tool_call>call:get_weather{location:<|"|>N
+        reason: "vLLM leaks the tool call tag into normal_text on the recovery path"
+      sglang:
+        unavailable: SGLang has no detector for family='gemma4'
