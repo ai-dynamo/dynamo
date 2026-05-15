@@ -448,7 +448,7 @@ where
     /// The rejection path is gated by `fault_detection_enabled` (true here);
     /// busy detection itself is driven by the monitor via `client.set_busy_instances(...)`.
     /// If no thresholds are configured on the monitor (or no monitor is provided),
-    /// `client.all_instances_busy()` returns false and the gate never rejects.
+    /// `client.instance_ids_free()` returns all instances and the gate never rejects.
     pub async fn from_client_with_monitor(
         client: Client,
         router_mode: RouterMode,
@@ -808,33 +808,36 @@ where
 
         // Check if all workers are busy (when fault detection is enabled).
         if self.fault_detection_enabled {
-            let all_instances_busy = self.client.all_instances_busy();
+            let free_instances = self.client.instance_ids_free();
             if tracing::enabled!(tracing::Level::DEBUG) {
                 tracing::debug!(
                     request_id = %request_id,
                     instance_id,
                     router_mode = ?self.router_mode,
-                    busy_workers = self.client.busy_instance_count(),
-                    total_workers = self.client.instance_count(),
-                    all_instances_busy,
+                    free_workers = free_instances.len(),
+                    total_workers = self.client.instance_ids().len(),
                     "checked worker busy state"
                 );
             }
-            if all_instances_busy {
-                tracing::warn!(
-                    instance_id,
-                    total_workers = self.client.instance_count(),
-                    "Rejecting request: all workers are busy"
-                );
-                let cause = PipelineError::ServiceOverloaded(
-                    "All workers are busy, please retry later".to_string(),
-                );
-                return Err(DynamoError::builder()
-                    .error_type(ErrorType::ResourceExhausted)
-                    .message("All workers are busy, please retry later")
-                    .cause(cause)
-                    .build()
-                    .into());
+            if free_instances.is_empty() {
+                // Check if we actually have any instances at all
+                let all_instances = self.client.instance_ids();
+                if !all_instances.is_empty() {
+                    tracing::warn!(
+                        instance_id,
+                        total_workers = all_instances.len(),
+                        "Rejecting request: all workers are busy"
+                    );
+                    let cause = PipelineError::ServiceOverloaded(
+                        "All workers are busy, please retry later".to_string(),
+                    );
+                    return Err(DynamoError::builder()
+                        .error_type(ErrorType::ResourceExhausted)
+                        .message("All workers are busy, please retry later")
+                        .cause(cause)
+                        .build()
+                        .into());
+                }
             }
         }
 
