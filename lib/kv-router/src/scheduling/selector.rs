@@ -207,26 +207,25 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         let pinned_worker = request.pinned_worker;
 
-        if pinned_worker.is_none()
-            && !workers
-                .keys()
-                .any(|worker_id| request.is_worker_allowed(*worker_id))
-        {
-            return Err(KvSchedulerError::NoEndpoints);
-        }
-
-        if pinned_worker.is_none()
-            && !request.routing_constraints.is_empty()
-            && workers
+        if pinned_worker.is_none() {
+            let allowed_workers: Vec<_> = workers
                 .iter()
                 .filter(|(worker_id, _)| request.is_worker_allowed(**worker_id))
-                .all(|(_, config)| {
-                    !request
+                .collect();
+
+            if allowed_workers.is_empty() {
+                return Err(KvSchedulerError::NoEndpoints);
+            }
+
+            if request.routing_constraints.has_hard_constraints()
+                && !allowed_workers.iter().any(|(_, config)| {
+                    request
                         .routing_constraints
                         .is_compatible_with_worker_taints(config.taints())
                 })
-        {
-            return Err(KvSchedulerError::NoEndpoints);
+            {
+                return Err(KvSchedulerError::NoEndpoints);
+            }
         }
 
         let request_blocks = request.request_blocks(block_size);

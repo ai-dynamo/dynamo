@@ -366,7 +366,7 @@ impl<
             let Ok(config) = pinned_worker_config::<C>(&*configs, worker) else {
                 return false;
             };
-            if !routing_constraints.is_empty()
+            if routing_constraints.has_hard_constraints()
                 && !routing_constraints.is_compatible_with_worker_taints(config.taints())
             {
                 return false;
@@ -386,7 +386,7 @@ impl<
             {
                 continue;
             }
-            if !routing_constraints.is_empty()
+            if routing_constraints.has_hard_constraints()
                 && !routing_constraints.is_compatible_with_worker_taints(config.taints())
             {
                 continue;

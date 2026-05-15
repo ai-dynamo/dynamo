@@ -17,6 +17,21 @@ pub struct RoutingConstraints {
     pub preferred_taints: HashMap<String, f32>,
 }
 
+#[pymethods]
+impl RoutingConstraints {
+    #[new]
+    #[pyo3(signature = (required_taints=None, preferred_taints=None))]
+    fn new(
+        required_taints: Option<HashSet<String>>,
+        preferred_taints: Option<HashMap<String, f32>>,
+    ) -> Self {
+        Self {
+            required_taints: required_taints.unwrap_or_default(),
+            preferred_taints: preferred_taints.unwrap_or_default(),
+        }
+    }
+}
+
 impl From<RoutingConstraints> for RsRoutingConstraints {
     fn from(value: RoutingConstraints) -> Self {
         Self {
