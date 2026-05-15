@@ -6,16 +6,13 @@ main post.
 
 ## Files
 
-- `router_data.csv` - normalized router sweep data for round robin, KV Router,
-  and KV Router with AIC prefill-load modeling.
-- `kvbm_diagnostic_data.csv` - diagnostic KVBM G2 data. This setup did not
-  create G1 pressure, so baseline and G2 overlap and should not be used as a
-  KVBM benefit claim.
+- `router_data.csv` - normalized router sweep data for round robin and KV
+  Router.
 - `optimize_evaluated.csv` - all H200 replay-optimizer candidate rows.
 - `optimize_summary.json` - optimizer setup plus best infeasible result.
 - `optimize_setup.json` - serialized setup from the remote run.
 - `optimize_progress.log` - remote optimizer progress log.
-- `plot.py` - renders the H200 figures into `../../images/`.
+- `plot.py` - renders the H200 router figure into `../../images/`.
 
 ## Render Figures
 
@@ -26,8 +23,6 @@ main post.
 Generated figures:
 
 - `../../images/h200_kv_router_exp.png`
-- `../../images/h200_kvbm_g2_diagnostic.png`
-- `../../images/h200_optimizer_candidates.png`
 
 ## Shared Setup
 
@@ -51,24 +46,9 @@ Generated figures:
 - Router modes:
   - `round_robin`
   - `kv_router`
-  - `kv_router` with `router_prefill_load_model=aic`
 
 The KV Router raises average prefix reuse from 0.413 to 0.492 and cuts TTFT by
-46-58% versus round robin across the sweep. The AIC prefill-load path is
-included as a separate line; in this aggregate-worker sweep it gives slightly
-higher throughput and prefix reuse than KV Router alone, while TTFT is slightly
-higher.
-
-## KVBM Diagnostic
-
-- Workers: 1 aggregated worker
-- TP: 4, total GPUs: 4
-- Concurrencies: 8, 16, 32, 64
-- Baseline: G1 only with 16,384 GPU blocks
-- G2 run: `num_g2_blocks=32768`
-
-Baseline and G2 are identical because the run does not create enough G1 pressure
-for the G2 tier to matter. This is retained as a diagnostic artifact only.
+46-58% versus round robin across the sweep.
 
 ## Replay Optimize
 

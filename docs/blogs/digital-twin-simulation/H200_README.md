@@ -28,7 +28,7 @@ Data and plotting scripts live in
 The H200 runs exercise the same DynoSim structure as the main draft: workload
 trace, scheduler simulation, AIC-backed pass timing, Router decisions, and
 offline replay metrics. The difference is the model/system profile: Kimi-K2.5
-on H200 instead of the B200 MiniMax router and KVBM setup.
+on H200 instead of the B200 MiniMax setup used elsewhere in the main post.
 
 ## 2. Simulating The Dynamo Digital Twin
 
@@ -42,31 +42,17 @@ measurements for the same workload.
 ### 2.2 Multi Engine Simulation: Router
 
 The H200 router sweep uses eight aggregated workers at TP=4, so the total budget
-is 32 GPUs. It compares round robin, KV Router, and KV Router with AIC prefill
-load modeling over replay concurrencies 32, 64, 128, 256, and 512.
+is 32 GPUs. It compares round robin and KV Router over replay concurrencies 32,
+64, 128, 256, and 512.
 
 ![H200 Kimi router counterpart](./images/h200_kv_router_exp.png)
 
 KV Router raises average prefix reuse from `0.413` to `0.492` and cuts TTFT by
 46-58% versus round robin across the sweep. At c=512, round robin reaches
 `34.64 TPS/GPU` with `6832.97 ms` TTFT; KV Router reaches `39.01 TPS/GPU` with
-`2976.70 ms` TTFT. Adding router-side AIC prefill-load modeling nudges c=512
-throughput to `39.42 TPS/GPU` and prefix reuse to `0.502`, but TTFT is slightly
-higher than KV Router alone in this aggregate-worker sweep.
+`2976.70 ms` TTFT.
 
-### 2.2 Multi Engine Simulation: KVBM Diagnostic
-
-We also ran the baseline-vs-G2 KVBM setup on H200 Kimi, but it should be treated
-as a diagnostic rather than a result. With `num_gpu_blocks=16384`, the workload
-does not create enough G1 pressure for the G2 host-memory tier to matter, so the
-baseline and G2 lines overlap.
-
-![H200 Kimi KVBM diagnostic](./images/h200_kvbm_g2_diagnostic.png)
-
-This confirms that the current H200 Kimi setup is not a useful KVBM benefit
-figure. Yongming's KVBM-specific run should remain the source for that section.
-
-### 2.2 Multi Engine Simulation: Planner
+### 2.3 Planner Note
 
 No new Kimi/H200 Planner sweep was run here. The main blog already uses H200 for
 the Planner experiments, but with Qwen3-32B at TP=2 rather than Kimi-K2.5.
@@ -78,8 +64,6 @@ the main post: block-coordinate search over TP shape, worker split, and router
 setting. This run used a 16-GPU budget, `arrival_speedup_ratio=0.25`, objective
 `throughput`, and SLA constraints of mean TTFT <= 4000 ms, mean TPOT <= 75 ms,
 and mean E2E <= 20000 ms.
-
-![H200 Kimi optimizer candidates](./images/h200_optimizer_candidates.png)
 
 No row is feasible under the strict 4 s TTFT SLA. The best near-miss is only
 58.07 ms over the TTFT threshold:
@@ -98,15 +82,6 @@ No row is feasible under the strict 4 s TTFT SLA. The best near-miss is only
 The optimizer artifact still names this field `overlap_score_weight`, but this
 code path maps that backward-compatible value to `prefill_load_scale`.
 
-## 3.3 Simulation In The Production Routing Loop
-
-The H200 aggregate-worker router sweep includes an AIC prefill-load line, but it
-is not the same as the B200 fixed-layout result in the main post. In this H200
-sweep, AIC prefill-load modeling mostly improves throughput and prefix reuse
-slightly while increasing TTFT by a few percent relative to KV Router alone.
-That makes it useful as a counterpart data point, not as a replacement for the
-main post's router-side AIC TTFT reduction example.
-
 ## 4. How To Use This Data
 
 Use this README as an H200 appendix or parallel working note. The clean claims
@@ -115,8 +90,6 @@ from this data are:
 - H200 Kimi router simulation reproduces the same qualitative Router story:
   cache-aware routing improves prefix reuse, throughput per GPU, and TTFT versus
   round robin.
-- The current H200 Kimi KVBM setup is not a valid G2 benefit plot because G1 is
-  not pressured.
 - The H200 optimizer run found a strong near-feasible layout under a strict
   4 s TTFT SLA, but not a feasible one.
 
