@@ -557,14 +557,12 @@ mod tests {
         // waiters), both would return Ok and these assertions catch the change.
         let ok_count = [r1.is_ok(), r2.is_ok()].iter().filter(|&&ok| ok).count();
         assert_eq!(
-            ok_count,
-            1,
+            ok_count, 1,
             "Exactly one prefill should succeed (surviving sender); r1={r1:?} r2={r2:?}"
         );
         let err_count = [r1.is_err(), r2.is_err()].iter().filter(|&&e| e).count();
         assert_eq!(
-            err_count,
-            1,
+            err_count, 1,
             "Exactly one prefill should fail (dropped sender); r1={r1:?} r2={r2:?}"
         );
         assert!(rd.is_ok(), "Decode should succeed: {rd:?}");
