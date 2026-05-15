@@ -68,6 +68,13 @@ BASE_PORT_BOOTSTRAP = 10100  # Base port for disagg bootstrap rendezvous
 BASE_PORT_ZMQ = 11100  # Base port for ZMQ KV event publishing
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
+ROUTER_OVERLOAD_DEBUG_DYN_LOG = (
+    "info,"
+    "dynamo_llm::discovery::worker_monitor=debug,"
+    "dynamo_llm::kv_router=debug,"
+    "dynamo_runtime::pipeline::network::egress::push_router=debug,"
+    "dynamo_llm::mocker=debug"
+)
 PLANNER_PROFILE_DATA_DIR = (
     Path(__file__).resolve().parents[2]
     / "components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"
@@ -1068,9 +1075,14 @@ def test_mocker_two_kv_router(
 )  # Use NATS Core (local indexer)
 @pytest.mark.timeout(45)  # ~3x average (~13.10s), rounded up (when enabled)
 def test_mocker_kv_router_overload_503(
-    request, runtime_services_dynamic_ports, predownload_tokenizers, durable_kv_events
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    durable_kv_events,
+    monkeypatch,
 ):
     """Test that KV router returns 503 when mocker workers are overloaded."""
+    monkeypatch.setenv("DYN_LOG", ROUTER_OVERLOAD_DEBUG_DYN_LOG)
     logger.info("Starting mocker KV router overload test for 503 status")
     # Create mocker args dictionary with limited resources - use local indexer (NATS Core mode)
     mocker_args = {

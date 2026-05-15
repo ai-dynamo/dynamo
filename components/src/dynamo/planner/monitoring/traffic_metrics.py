@@ -99,6 +99,30 @@ class PrometheusAPIClient:
         self.dynamo_namespace = dynamo_namespace
         self.metrics_source = metrics_source  # "frontend" | "router"
 
+    def _frontend_metric_name(self, metric_name: str) -> str:
+        if metric_name.startswith(prometheus_names.name_prefix.FRONTEND):
+            return metric_name
+        return f"{prometheus_names.name_prefix.FRONTEND}_{metric_name}"
+
+    def _sum_frontend_metric(self, result, model_name: str) -> Optional[float]:
+        if not result:
+            return None
+
+        metrics_containers = parse_frontend_metric_containers(result)
+        total = 0.0
+        matched = False
+        for container in metrics_containers:
+            # Frontend lowercases model names in Prometheus labels.
+            if (
+                container.metric.model
+                and container.metric.model.lower() == model_name.lower()
+                and container.metric.dynamo_namespace == self.dynamo_namespace
+                and not math.isnan(container.value[1])
+            ):
+                matched = True
+                total += container.value[1]
+        return total if matched else None
+
     def _get_average_metric(
         self,
         full_metric_name: str,
@@ -246,30 +270,34 @@ class PrometheusAPIClient:
             except Exception as e:
                 logger.error(f"Error getting avg request count: {e}")
                 return 0
-        # This function follows a different query pattern than the other metrics
+        # This function follows a different query pattern than the other metrics:
+        # use frontend-started requests so throughput planning sees offered load,
+        # not only completed responses.
         try:
-            requests_total_metric = prometheus_names.frontend_service.REQUESTS_TOTAL
-            # Prepend the frontend metric prefix if not already present
-            if not requests_total_metric.startswith(
-                prometheus_names.name_prefix.FRONTEND
-            ):
-                requests_total_metric = (
-                    f"{prometheus_names.name_prefix.FRONTEND}_{requests_total_metric}"
-                )
-            raw_res = self.prom.custom_query(
+            requests_started_metric = self._frontend_metric_name(
+                prometheus_names.frontend_service.REQUESTS_STARTED_TOTAL
+            )
+            started_res = self.prom.custom_query(
+                query=f"increase({requests_started_metric}[{interval}])"
+            )
+            started_count = self._sum_frontend_metric(started_res, model_name)
+            if started_count is not None:
+                return started_count
+
+            logger.warning(
+                f"No prometheus metric data available for {requests_started_metric} "
+                f"with model {model_name} and dynamo namespace "
+                f"{self.dynamo_namespace}; falling back to completed request count"
+            )
+
+            requests_total_metric = self._frontend_metric_name(
+                prometheus_names.frontend_service.REQUESTS_TOTAL
+            )
+            completed_res = self.prom.custom_query(
                 query=f"increase({requests_total_metric}[{interval}])"
             )
-            metrics_containers = parse_frontend_metric_containers(raw_res)
-            total_count = 0.0
-            for container in metrics_containers:
-                # Frontend lowercases model names for Prometheus labels so we need to do case-insensitive comparison
-                if (
-                    container.metric.model
-                    and container.metric.model.lower() == model_name.lower()
-                    and container.metric.dynamo_namespace == self.dynamo_namespace
-                ):
-                    total_count += container.value[1]
-            return total_count
+            completed_count = self._sum_frontend_metric(completed_res, model_name)
+            return completed_count or 0
         except Exception as e:
             logger.error(f"Error getting avg request count: {e}")
             return 0

@@ -75,7 +75,7 @@ tilt-up: kubectl helm ## Start Tilt for local operator development.
 manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	# Use a large maxDescLen to ensure all field comments are included as OpenAPI descriptions
 	# allowDangerousTypes=true is needed for the EndpointPickerConfig from gateway-api-inference-extension which contains float fields
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=100000,allowDangerousTypes=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=100000,allowDangerousTypes=true,generateEmbeddedObjectMeta=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 	echo "Removing name from mainContainer required fields"
 	for file in config/crd/bases/*.yaml; do \
 		$(YQ) eval '(.. | select(has("mainContainer")) | .mainContainer.required) |= (. - ["name"])' -i --indent 2 $$file || exit 1; \
@@ -89,10 +89,6 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	echo "Fixing PluginSpec parameters field: json.RawMessage needs x-kubernetes-preserve-unknown-fields instead of type: string"
 	for file in config/crd/bases/*.yaml; do \
 		$(YQ) eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
-	done
-	echo "Fixing profilingJob template metadata: controller-gen emits bare type: object for metav1.ObjectMeta, add x-kubernetes-preserve-unknown-fields so labels/annotations are accepted"
-	for file in config/crd/bases/*.yaml; do \
-		$(YQ) eval '(.. | select(has("profilingJob")) | .profilingJob.properties.template.properties.metadata)."x-kubernetes-preserve-unknown-fields" = true' -i --indent 2 $$file || exit 1; \
 	done
 	echo "Adding NVIDIA header to CRD files"
 	for file in config/crd/bases/*.yaml; do \

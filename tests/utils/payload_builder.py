@@ -265,6 +265,7 @@ def chat_payload(
     extra_body: Optional[Dict[str, Any]] = None,
     expected_num_choices: Optional[int] = None,
     max_attempts: int = 1,
+    timeout: int = 60,
 ) -> ChatPayload:
     body: Dict[str, Any] = {
         "messages": [
@@ -298,6 +299,7 @@ def chat_payload(
             expected_response=expected_response or [],
             expected_num_choices=expected_num_choices,
             max_attempts=max_attempts,
+            timeout=timeout,
         )
     else:
         return ChatPayload(
@@ -307,6 +309,7 @@ def chat_payload(
             expected_response=expected_response or [],
             expected_num_choices=expected_num_choices,
             max_attempts=max_attempts,
+            timeout=timeout,
         )
 
 
