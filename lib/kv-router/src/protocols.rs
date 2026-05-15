@@ -184,6 +184,10 @@ impl RoutingConstraints {
         self.required_taints.is_empty() && self.preferred_taints.is_empty()
     }
 
+    pub fn has_hard_constraints(&self) -> bool {
+        !self.required_taints.is_empty()
+    }
+
     pub fn is_compatible_with_worker_taints(&self, worker_taints: &HashSet<String>) -> bool {
         self.required_taints
             .iter()
