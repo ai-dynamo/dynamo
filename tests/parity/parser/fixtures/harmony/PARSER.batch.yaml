@@ -8,7 +8,7 @@ cases:
   PARSER.batch.1:
     description: Single tool call (basic complete envelope)
     ref: "OpenAI Harmony receiving tool calls: https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
-    model_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
+    model_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|>
     tools:
     - &id001
       name: get_weather
@@ -18,22 +18,19 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
+      dynamo: &d_1
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm:
-        calls: []
-        normal_text: ''
-        reason: "Spec-strict behavior: Harmony tool calls terminate with '<|call|>'; Dynamo extracts this missing-stop-token shape as EOF recovery"
+      vllm: *d_1
       sglang:
         calls: []
-        normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
-        reason: "Less spec-correct recovery: fixture omits '<|call|>' and SGLang preserves raw Harmony markup as user-visible normal_text"
+        normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}<|call|>
+        reason: "Less spec-correct parsing: SGLang leaks raw Harmony markup instead of extracting a valid '<|call|>'-terminated commentary tool call."
   PARSER.batch.3:
-    description: No tool call (plain text)
+    description: No tool call (bare text without final channel)
     ref: "OpenAI Harmony channels/final output: https://developers.openai.com/cookbook/articles/openai-harmony#channels"
     model_text: Hello, how can I help you today?
     tools:
@@ -41,12 +38,12 @@ cases:
     expected:
       dynamo: &d_3
         calls: []
-        normal_text: Hello, how can I help you today?
-      vllm:
-        calls: []
         normal_text: ''
-        reason: "Spec-strict behavior: user-visible assistant text belongs in final/commentary; Dynamo and SGLang preserve bare text as fallback"
-      sglang: *d_3
+      vllm: *d_3
+      sglang:
+        calls: []
+        normal_text: Hello, how can I help you today?
+        reason: "Less spec-correct fallback: bare text is not a valid Harmony assistant response because no final message was emitted. A valid response would be '<|channel|>final<|message|>Hello, how can I help you today?<|return|>'."
   PARSER.batch.9:
     description: Empty input
     model_text: ''

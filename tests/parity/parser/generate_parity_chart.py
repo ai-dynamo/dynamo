@@ -404,6 +404,7 @@ def load_all_cases() -> tuple[dict[tuple[str, str], dict], dict[str, str]]:
             labels.setdefault(family, doc["model_label"])
         for cid, case in doc["cases"].items():
             sub = cid.replace("PARSER.batch.", "")
+            case["__family"] = family
             case["__fixture_path"] = rel
             case["__case_id"] = cid
             cases[(family, sub)] = case
@@ -558,7 +559,7 @@ def render_markdown(
 _IMPL_DISPLAY = {"dynamo": "Dynamo", "vllm": "vLLM", "sglang": "SGLang"}
 
 
-def _format_output_block_html(block) -> str:
+def _format_output_block_html(block, family: str | None = None) -> str:
     """HTML rendering of an `expected.<impl>` block for tooltips.
     Applies _colorize_xml to `normal_text` so raw model output the engine
     failed to parse shows the same tag coloring as the input."""
@@ -578,7 +579,7 @@ def _format_output_block_html(block) -> str:
         calls_line = html_lib.escape(f"calls=[{rendered}]")
     else:
         calls_line = "calls=[]"
-    nt_line = f"normal_text='{_colorize_xml(nt)}'"
+    nt_line = f"normal_text='{_colorize_markup(nt, family)}'"
     return f"{nt_line}\n{calls_line}"
 
 
@@ -628,6 +629,52 @@ _END_SUFFIXES = ("_end", "▁end")
 _HARMONY_TURN_OPEN = "start"
 _HARMONY_TURN_CLOSE = frozenset({"end", "return", "call"})
 _HARMONY_SECTION_MARKERS = frozenset({"channel", "constrain", "message"})
+_HARMONY_TOKEN_RE = re.compile(r"<\|([A-Za-z_]+)\|>")
+_HARMONY_SEGMENT_CLASS = {
+    "start": "tt-h-start",
+    "channel": "tt-h-channel",
+    "constrain": "tt-h-constrain",
+    "message": "tt-h-message",
+    "end": "tt-h-stop",
+    "return": "tt-h-stop",
+    "call": "tt-h-call",
+}
+
+
+def _colorize_harmony(text: str) -> str:
+    """Color Harmony's linear token segments as `<|token|>related-text`.
+
+    Harmony is not paired XML. Tokens such as `<|channel|>` and `<|message|>`
+    introduce the header/content span that follows, so each special token is
+    grouped with text up to the next Harmony token.
+    """
+    pieces: list[str] = []
+    last = 0
+    for m in _HARMONY_TOKEN_RE.finditer(text):
+        if m.start() > last:
+            pieces.append(html_lib.escape(text[last : m.start()]))
+        token_name = m.group(1)
+        if token_name in _HARMONY_TURN_CLOSE:
+            end = m.end()
+        else:
+            next_m = _HARMONY_TOKEN_RE.search(text, m.end())
+            end = next_m.start() if next_m else len(text)
+        cls = _HARMONY_SEGMENT_CLASS.get(token_name, "tt-h-other")
+        token = html_lib.escape(m.group(0))
+        related = html_lib.escape(text[m.end() : end])
+        pieces.append(
+            f'<span class="tt-h {cls}"><span class="tt-h-token">{token}</span>{related}</span>'
+        )
+        last = end
+    if last < len(text):
+        pieces.append(html_lib.escape(text[last:]))
+    return "".join(pieces)
+
+
+def _colorize_markup(text: str, family: str | None = None) -> str:
+    if family == "harmony" and _HARMONY_TOKEN_RE.search(text):
+        return _colorize_harmony(text)
+    return _colorize_xml(text)
 
 
 def _strip_suffix(s: str, suffixes: tuple[str, ...]) -> str | None:
@@ -763,9 +810,10 @@ def _build_tooltip_html(case: dict, dyn) -> str:
 
     model_text = case.get("model_text")
     if isinstance(model_text, str) and model_text:
+        family = case.get("__family")
         parts.append('<div class="ttip-section">Input:</div>')
         parts.append(
-            f"<pre class=\"ttip-pre\">input_text='{_colorize_xml(model_text)}'</pre>"
+            f"<pre class=\"ttip-pre\">input_text='{_colorize_markup(model_text, family)}'</pre>"
         )
 
     expected = case.get("expected") or {}
@@ -787,13 +835,15 @@ def _build_tooltip_html(case: dict, dyn) -> str:
 
     if all_parity:
         parts.append('<div class="ttip-section">All engines parity:</div>')
-        parts.append(f'<pre class="ttip-pre">{_format_output_block_html(dyn)}</pre>')
+        parts.append(
+            f'<pre class="ttip-pre">{_format_output_block_html(dyn, case.get("__family"))}</pre>'
+        )
     else:
         for impl in ("dynamo", "vllm", "sglang"):
             block = expected.get(impl)
             parts.append(f'<div class="ttip-section">{_IMPL_DISPLAY[impl]}:</div>')
             parts.append(
-                f'<pre class="ttip-pre">{_format_output_block_html(block)}</pre>'
+                f'<pre class="ttip-pre">{_format_output_block_html(block, case.get("__family"))}</pre>'
             )
 
     reasons = _tooltip_for(case, dyn) if isinstance(dyn, dict) else ""
@@ -1297,6 +1347,15 @@ td.parser:hover .ttip {
 .tt-c6 { color: #22d3ee; }
 .tt-c7 { color: #f87171; }
 .tt-orphan { background: #7f1d1d; color: #fecaca; padding: 0 2px; border-radius: 2px; }
+.tt-h { padding: 0 1px; border-radius: 2px; }
+.tt-h-token { font-weight: 700; }
+.tt-h-start { color: #fbbf24; }
+.tt-h-channel { color: #60a5fa; }
+.tt-h-constrain { color: #a78bfa; }
+.tt-h-message { color: #34d399; }
+.tt-h-call { color: #fb923c; }
+.tt-h-stop { color: #f87171; }
+.tt-h-other { color: #22d3ee; }
 """
 
 # Clamps `.ttip` into the viewport on hover. Pure CSS can't know each
