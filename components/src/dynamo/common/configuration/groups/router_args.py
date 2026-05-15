@@ -49,10 +49,19 @@ class RouterConfigBase(ConfigBase):
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
+    no_admission_control: bool = False
 
     def router_kwargs(self) -> dict:
         """Return a dict suitable for ``RouterConfig(mode, kv_config, **kwargs)``."""
+        self.apply_no_admission_control()
         return {f: getattr(self, f) for f in _ROUTER_FIELDS}
+
+    def apply_no_admission_control(self) -> None:
+        if not self.no_admission_control:
+            return
+        self.active_decode_blocks_threshold = None
+        self.active_prefill_tokens_threshold = None
+        self.active_prefill_tokens_threshold_frac = None
 
 
 class RouterArgGroup(ArgGroup):
@@ -139,11 +148,25 @@ class RouterArgGroup(ArgGroup):
             g,
             flag_name="--active-prefill-tokens-threshold-frac",
             env_var="DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
-            default=10.0,
+            default=64.0,
             help=(
                 "Fraction of max_num_batched_tokens for busy detection. Worker is busy when "
                 "active_prefill_tokens > frac * max_num_batched_tokens. Pass 'None' on the CLI to "
-                "disable this check. Uses OR logic with --active-prefill-tokens-threshold. Default: 10.0."
+                "disable this check. Uses OR logic with --active-prefill-tokens-threshold. Default: 64.0."
             ),
             arg_type=_nullable_float,
+        )
+        add_argument(
+            g,
+            flag_name="--no-admission-control",
+            env_var="DYN_NO_ADMISSION_CONTROL",
+            default=False,
+            help=(
+                "Disable busy-worker admission checks by clearing "
+                "--active-decode-blocks-threshold, --active-prefill-tokens-threshold, "
+                "and --active-prefill-tokens-threshold-frac. Router queueing remains "
+                "controlled by --router-queue-threshold."
+            ),
+            arg_type=None,
+            action="store_true",
         )
