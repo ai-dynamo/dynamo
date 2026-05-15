@@ -11,7 +11,6 @@ use serde_json::Value;
 use std::sync::OnceLock;
 
 static COMMENTARY_BLOCK_REGEX: OnceLock<Regex> = OnceLock::new();
-static COMPLETE_COMMENTARY_BLOCK_REGEX: OnceLock<Regex> = OnceLock::new();
 static COMMENTARY_BLOCK_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
 static COMMENTARY_HEADER_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
 static ANALYSIS_BLOCK_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -31,15 +30,6 @@ fn commentary_block_regex() -> &'static Regex {
             r"(?s)(?:<\|start\|>assistant)?<\|channel\|>commentary to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)<\|call\|>",
         )
         .expect("commentary block regex")
-    })
-}
-
-fn complete_commentary_block_regex() -> &'static Regex {
-    COMPLETE_COMMENTARY_BLOCK_REGEX.get_or_init(|| {
-        Regex::new(
-            r"(?s)(?:<\|start\|>assistant)?<\|channel\|>commentary to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)<\|call\|>",
-        )
-        .expect("complete commentary block regex")
     })
 }
 
@@ -189,19 +179,11 @@ fn serialize_harmony_arguments(raw_args: &str) -> String {
 /// Returns (calls, residual_text) where residual_text is everything not
 /// consumed by a matched commentary block — preserved so non-tool user-visible
 /// spans aren't dropped.
-fn extract_calls_via_regex(
-    text: &str,
-    allow_eof_recovery: bool,
-) -> (Vec<ToolCallResponse>, String) {
+fn extract_calls_via_regex(text: &str) -> (Vec<ToolCallResponse>, String) {
     let mut out = Vec::new();
     let mut residual = String::new();
     let mut cursor = 0;
-    let regex = if allow_eof_recovery {
-        commentary_block_regex()
-    } else {
-        complete_commentary_block_regex()
-    };
-    for cap in regex.captures_iter(text) {
+    for cap in commentary_block_regex().captures_iter(text) {
         let m = cap.get(0).expect("regex match has full span");
         residual.push_str(&text[cursor..m.start()]);
         cursor = m.end();
@@ -264,7 +246,7 @@ pub async fn get_harmony_encoding() -> &'static Result<HarmonyEncoding, anyhow::
 /// * `Err(e)` - If parsing fails due to encoding or tokenization errors
 pub async fn parse_tool_calls_harmony_complete(
     text: &str,
-    config: &JsonParserConfig,
+    _config: &JsonParserConfig,
     _tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
     let enc = match get_harmony_encoding().await.as_ref() {
@@ -287,7 +269,10 @@ pub async fn parse_tool_calls_harmony_complete(
             // Recovery: harmony rejects parallel commentary blocks even when
             // every call is explicitly closed. Only EOF/truncated recovery is
             // gated, so streaming jails do not synthesize incomplete calls.
-            let (calls, residual) = extract_calls_via_regex(text, config.allow_eof_recovery);
+            // Harmony differs from generic JSON/XML recovery: a tool call is
+            // complete only once `<|call|>` is present. Do not synthesize a
+            // call from EOF; that would diverge from vLLM/openai_harmony.
+            let (calls, residual) = extract_calls_via_regex(text);
             if !calls.is_empty() {
                 let normal_text =
                     strip_harmony_protocol_from_normal_text(&residual, "regex_recovery_residual");
