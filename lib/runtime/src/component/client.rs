@@ -234,14 +234,6 @@ impl Client {
             .collect()
     }
 
-    pub fn instance_count(&self) -> usize {
-        self.instance_source.borrow().len()
-    }
-
-    pub fn busy_instance_count(&self) -> usize {
-        self.instance_busy.load().len()
-    }
-
     pub fn all_instances_busy(&self) -> bool {
         let busy_ids = self.instance_busy.load();
         if busy_ids.is_empty() {
