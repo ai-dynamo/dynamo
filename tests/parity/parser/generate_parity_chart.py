@@ -449,12 +449,11 @@ def cell_for(case: dict | None) -> str:
     elif s_kind == "err":
         parts.append("S!")
 
-    # `reason:` on the `expected.dynamo` block flags Dynamo's own output
-    # as leaking tool call markup into `normal_text` (parser failed to
-    # extract calls). Mirrors the peer-side `reason:` convention. Prepend
-    # `↯` so the cell still shows peer status; when there's no peer
-    # divergence the cell becomes just `↯`.
-    if isinstance(dyn, dict) and dyn.get("reason"):
+    # `reason:` on the `expected.dynamo` block flags Dynamo's own output as
+    # leaking tool call markup only when Dynamo also leaves residual
+    # `normal_text`. Dynamo can have non-leak reasons for dropped malformed
+    # markup, so don't mark those as `↯`.
+    if isinstance(dyn, dict) and dyn.get("reason") and bool(dyn.get("normal_text")):
         if parts:
             return "↯" + "".join(parts)
         return "↯"
@@ -756,7 +755,11 @@ def _build_tooltip_html(case: dict, dyn) -> str:
         parts.append('<div class="ttip-section">Divergence reason:</div>')
         parts.append(f'<pre class="ttip-pre">{html_lib.escape(reasons)}</pre>')
 
-    dyn_leak = dyn.get("reason") if isinstance(dyn, dict) else None
+    dyn_leak = (
+        dyn.get("reason")
+        if isinstance(dyn, dict) and bool(dyn.get("normal_text"))
+        else None
+    )
     if dyn_leak:
         parts.append('<div class="ttip-section">↯ Dynamo tool call leaks:</div>')
         parts.append(f'<pre class="ttip-pre">{html_lib.escape(str(dyn_leak))}</pre>')
