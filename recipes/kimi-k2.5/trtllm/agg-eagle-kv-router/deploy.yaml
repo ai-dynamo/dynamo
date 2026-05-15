@@ -33,12 +33,6 @@ spec:
             - --router-mode
             - kv
             - --router-reset-states
-            - --active-prefill-tokens-threshold
-            - "1000000000"
-            - --active-decode-blocks-threshold
-            - "100"
-            - --active-prefill-tokens-threshold-frac
-            - "100"
             - --request-plane
             - nats
           env:
@@ -46,7 +40,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:<IMAGE_TAG>
           name: ""
           resources: {}
         nodeSelector:
@@ -103,7 +97,7 @@ spec:
               value: "1"
             - name: TLLM_SPEC_DECODE_FORCE_NUM_ACCEPTED_TOKENS
               value: "2"
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:<IMAGE_TAG>
           name: ""
           resources: {}
           securityContext:
