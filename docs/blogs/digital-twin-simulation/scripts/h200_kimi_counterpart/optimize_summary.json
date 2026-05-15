@@ -1,0 +1,68 @@
+{
+  "args": {
+    "arrival_speedup_ratio": 0.25,
+    "e2e_sla": 20000.0,
+    "gpu_budget": 16,
+    "kind": "optimize",
+    "max_parallel_evals": 64,
+    "out": "/home/scratch.rupei_gpu/digital_twin_h200_kimi/optimize/summary.json",
+    "search_rounds": 2,
+    "tpot_sla": 75.0,
+    "ttft_sla": 4000.0
+  },
+  "elapsed_wall_s": 8054.234087705612,
+  "kind": "optimize",
+  "metrics": null,
+  "report": {
+    "best_feasible": null,
+    "best_infeasible": {
+      "completed_requests": 23608,
+      "decode_tp": 1,
+      "decode_workers": 6,
+      "feasible": false,
+      "mean_e2e_latency_ms": 13319.988993429779,
+      "mean_output_token_throughput_per_user": 23.300792581799314,
+      "mean_tpot_ms": 58.56541151757951,
+      "mean_ttft_ms": 4058.072733208514,
+      "objective": "throughput",
+      "output_throughput_tok_s": 303.12953631977655,
+      "overlap_score_weight": 0.5,
+      "prefill_tp": 2,
+      "prefill_workers": 5,
+      "prefix_cache_reused_ratio": 0.5382607804577434,
+      "request_throughput_rps": 1.6643224801049172,
+      "router_mode": "kv_router",
+      "score": 303.12953631977655,
+      "total_gpus_used": 16,
+      "violation_penalty": 0.014518183302128396,
+      "wall_time_ms": 1445730.22569
+    },
+    "evaluated_count": 48,
+    "feasible_count": 0,
+    "setup": {
+      "aic_backend_version": "0.19.0",
+      "arrival_speedup_ratio": 0.25,
+      "backend": "vllm",
+      "engine": {
+        "block_size": 512,
+        "max_num_batched_tokens": 16384,
+        "num_gpu_blocks": 16384,
+        "speedup_ratio": 1.0
+      },
+      "gpu_budget": 16,
+      "max_parallel_evals": 64,
+      "model": "moonshotai/Kimi-K2.5",
+      "objective": "throughput",
+      "search_rounds": 2,
+      "sla": {
+        "mean_e2e_latency_ms": 20000.0,
+        "mean_tpot_ms": 75.0,
+        "mean_ttft_ms": 4000.0
+      },
+      "system": "h200_sxm",
+      "trace_file": "/home/scratch.rupei_gpu/digital_twin_h200_kimi/toolagent_trace.jsonl",
+      "trace_format": "mooncake"
+    },
+    "top_feasible": []
+  }
+}

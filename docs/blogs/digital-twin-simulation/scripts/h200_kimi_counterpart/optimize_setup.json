@@ -1,0 +1,24 @@
+{
+  "aic_backend_version": "0.19.0",
+  "arrival_speedup_ratio": 0.25,
+  "backend": "vllm",
+  "engine": {
+    "block_size": 512,
+    "max_num_batched_tokens": 16384,
+    "num_gpu_blocks": 16384,
+    "speedup_ratio": 1.0
+  },
+  "gpu_budget": 16,
+  "max_parallel_evals": 64,
+  "model": "moonshotai/Kimi-K2.5",
+  "objective": "throughput",
+  "search_rounds": 2,
+  "sla": {
+    "mean_e2e_latency_ms": 20000.0,
+    "mean_tpot_ms": 75.0,
+    "mean_ttft_ms": 4000.0
+  },
+  "system": "h200_sxm",
+  "trace_file": "/home/scratch.rupei_gpu/digital_twin_h200_kimi/toolagent_trace.jsonl",
+  "trace_format": "mooncake"
+}
