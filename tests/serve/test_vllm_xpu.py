@@ -7,7 +7,6 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -21,6 +20,7 @@ from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_b
 from tests.serve.lora_utils import MinioLoraConfig
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.multimodal import LOCAL_VIDEO_TEST_URI
 from tests.utils.payload_builder import (
     cached_tokens_chat_payload,
     chat_payload,
@@ -45,10 +45,6 @@ class VLLMConfig(EngineConfig):
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
-LOCAL_VIDEO_TEST_PATH = Path(
-    WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
-).resolve()
-LOCAL_VIDEO_TEST_URI = LOCAL_VIDEO_TEST_PATH.as_uri()
 
 
 # vLLM test configurations
@@ -280,11 +276,11 @@ vllm_configs = {
             pytest.mark.timeout(220),  # ~5x observed 43.7s; 2B model loads slower on CI
             pytest.mark.post_merge,
         ],
-        model="Qwen/Qwen2-VL-2B-Instruct",
-        # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         script_args=[
             "--model",
-            "Qwen/Qwen2-VL-2B-Instruct",
+            "Qwen/Qwen3-VL-2B-Instruct",
             "--frontend-decoding",
         ],
         request_payloads=[
@@ -300,7 +296,7 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["green"],
+                expected_response=["purple", "blue", "white", "green"],
                 temperature=0.0,
                 max_tokens=100,
             )
@@ -326,6 +322,7 @@ vllm_configs = {
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
         delayed_start=0,
         timeout=360,
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         request_payloads=[
             chat_payload(
                 [
@@ -339,7 +336,7 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["purple"],
+                expected_response=["purple", "blue", "white", "green"],
                 max_tokens=100,
             ),
         ],
@@ -409,6 +406,7 @@ vllm_configs = {
         ],
         delayed_start=0,
         timeout=600,
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         request_payloads=[
             ToolCallingChatPayload(
                 body={
@@ -475,16 +473,14 @@ vllm_configs = {
         marks=[
             pytest.mark.xpu_1,
             pytest.mark.multimodal,
-            pytest.mark.pre_merge,
-            pytest.mark.skip(
-                reason="Temporary: video stream load failure for local media URI in CI"
-            ),
+            pytest.mark.nightly,
             pytest.mark.timeout(600),  # TODO: profile to get tighter timeout
         ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-VL-2B-Instruct",
         delayed_start=60,  # Video models require longer loading time
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct"],
         timeout=600,  # 10 minutes for video processing overhead
+        env={"DYN_MM_LOCAL_PATH": WORKSPACE_DIR},
         request_payloads=[
             chat_payload(
                 [
@@ -598,6 +594,15 @@ def test_serve_deployment(
     """
     Test dynamo serve deployments with different graph configurations.
     """
+    # Start the media HTTP server only for multimodal configs that need it,
+    # avoiding the TOCTOU port-allocation race for non-multimodal tests.
+    if any(
+        getattr(m, "name", None) == "multimodal"
+        or getattr(getattr(m, "mark", None), "name", None) == "multimodal"
+        for m in vllm_config_test.marks
+    ):
+        request.getfixturevalue("image_server")
+
     config = dataclasses.replace(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
@@ -609,6 +614,7 @@ def test_serve_deployment(
 @pytest.mark.xpu_2
 @pytest.mark.nightly
 @pytest.mark.multimodal
+@pytest.mark.model("Qwen/Qwen2.5-VL-7B-Instruct")
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
 def test_multimodal_b64(
     request,
@@ -638,7 +644,7 @@ def test_multimodal_b64(
             },
         ],
         repeat_count=1,
-        expected_response=["purple"],
+        expected_response=["purple", "blue", "white", "green"],
         max_tokens=100,
     )
 
@@ -666,6 +672,7 @@ def test_multimodal_b64(
 @pytest.mark.xpu_1
 @pytest.mark.pre_merge
 @pytest.mark.multimodal
+@pytest.mark.model("Qwen/Qwen3-VL-2B-Instruct")
 @pytest.mark.timeout(220)
 def test_multimodal_b64_frontend_decoding(
     request,
@@ -694,7 +701,7 @@ def test_multimodal_b64_frontend_decoding(
             },
         ],
         repeat_count=1,
-        expected_response=["green"],
+        expected_response=["purple", "blue", "white", "green"],
         temperature=0.0,
         max_tokens=100,
     )

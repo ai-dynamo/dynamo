@@ -132,7 +132,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 {% if device == "xpu" %}
 RUN apt-get update && \
     apt-get install -y --no-install-recommends --fix-missing \
-    #ffmpeg \
     libsndfile1 \
     libsm6 \
     libxext6 \
