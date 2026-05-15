@@ -386,6 +386,7 @@ mod tests {
             disaggregated_params: None,
             completion_usage: None,
             engine_data: None,
+            prompt_logprobs: None,
         })
     }
 
