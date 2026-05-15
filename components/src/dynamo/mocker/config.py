@@ -263,6 +263,8 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         aic_moe_tp_size=aic_moe_tp_size,
         aic_moe_ep_size=aic_moe_ep_size,
         aic_attention_dp_size=aic_attention_dp_size,
+        gpu_memory_utilization=getattr(args, "gpu_memory_utilization", None),
+        mem_fraction_static=getattr(args, "mem_fraction_static", None),
         enable_local_indexer=not getattr(args, "durable_kv_events", False),
         kv_transfer_bandwidth=getattr(args, "kv_transfer_bandwidth", None),
         reasoning=_parse_reasoning_config(getattr(args, "reasoning", None)),

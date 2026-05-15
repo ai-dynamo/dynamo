@@ -280,10 +280,14 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
             aic_tp_size=4,
             max_num_batched_tokens=4096,
             gpu_memory_utilization=0.8,
+            mem_fraction_static=0.7,
         )
     )
 
     assert engine_args.num_gpu_blocks == 46000
+    payload = json.loads(engine_args.dump_json())
+    assert payload["gpu_memory_utilization"] == 0.8
+    assert payload["mem_fraction_static"] == 0.7
     assert calls == [
         {
             "backend_name": "vllm",
@@ -293,7 +297,7 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
             "block_size": 64,
             "max_num_batched_tokens": 4096,
             "gpu_memory_utilization": 0.8,
-            "mem_fraction_static": 0.88,
+            "mem_fraction_static": 0.7,
             "backend_version": None,
             "moe_tp_size": None,
             "moe_ep_size": None,

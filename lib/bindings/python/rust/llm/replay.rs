@@ -1418,7 +1418,8 @@ impl PlannerReplayBridge {
         arrival_speedup_ratio: f64,
         trace_block_size: usize,
     ) -> PyResult<Self> {
-        let args = extra_engine_args.inner();
+        let args =
+            Python::with_gil(|py| materialize_replay_mocker_args(py, extra_engine_args.clone()))?;
         let router_mode = parse_replay_router_mode(router_mode)?;
         let router_config = load_replay_router_config(router_config);
 
@@ -1454,9 +1455,13 @@ impl PlannerReplayBridge {
         arrival_speedup_ratio: f64,
         trace_block_size: usize,
     ) -> PyResult<Self> {
+        let prefill_args =
+            Python::with_gil(|py| materialize_replay_mocker_args(py, prefill_engine_args.clone()))?;
+        let decode_args =
+            Python::with_gil(|py| materialize_replay_mocker_args(py, decode_engine_args.clone()))?;
         let config = dynamo_mocker::replay::OfflineDisaggReplayConfig {
-            prefill_args: prefill_engine_args.inner(),
-            decode_args: decode_engine_args.inner(),
+            prefill_args,
+            decode_args,
             num_prefill_workers,
             num_decode_workers,
         };
