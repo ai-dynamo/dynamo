@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::sync::OnceLock;
 
 static COMMENTARY_BLOCK_REGEX: OnceLock<Regex> = OnceLock::new();
+static COMPLETE_COMMENTARY_BLOCK_REGEX: OnceLock<Regex> = OnceLock::new();
 static COMMENTARY_BLOCK_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
 static COMMENTARY_HEADER_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
 static ANALYSIS_BLOCK_CLEANUP_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -30,9 +31,18 @@ fn commentary_block_regex() -> &'static Regex {
         // (`\z`, the bare-envelope PARSER.batch.5 variant where the model never
         // emitted `<|call|>` before EOS / max_tokens).
         Regex::new(
-            r"(?s)<\|channel\|>commentary to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)(?:<\|call\|>|\z)",
+            r"(?s)(?:<\|start\|>assistant)?<\|channel\|>commentary to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)(?:<\|call\|>|\z)",
         )
         .expect("commentary block regex")
+    })
+}
+
+fn complete_commentary_block_regex() -> &'static Regex {
+    COMPLETE_COMMENTARY_BLOCK_REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?s)(?:<\|start\|>assistant)?<\|channel\|>commentary to=functions\.(?P<name>[\w.\-]+).*?<\|message\|>(?P<args>.*?)<\|call\|>",
+        )
+        .expect("complete commentary block regex")
     })
 }
 
@@ -117,9 +127,7 @@ fn strip_harmony_protocol_from_normal_text(text: &str, reason: &'static str) -> 
         .replace_all(&cleaned, |caps: &Captures<'_>| {
             record_special_tokens(&caps[0], &mut stripped);
             push_unique(&mut stripped, "analysis_envelope".to_string());
-            caps.name("body")
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_default()
+            ""
         })
         .into_owned();
 
@@ -159,13 +167,21 @@ fn strip_harmony_protocol_from_normal_text(text: &str, reason: &'static str) -> 
 /// Extract calls via regex when harmony's strict tokenizer rejects the input
 /// (truncated JSON, multiple back-to-back commentary blocks, etc.).
 /// Returns (calls, residual_text) where residual_text is everything not
-/// consumed by a matched commentary block — preserved so analysis prose and
-/// non-tool suffixes aren't dropped.
-fn extract_calls_via_regex(text: &str) -> (Vec<ToolCallResponse>, String) {
+/// consumed by a matched commentary block — preserved so non-tool user-visible
+/// spans aren't dropped.
+fn extract_calls_via_regex(
+    text: &str,
+    allow_eof_recovery: bool,
+) -> (Vec<ToolCallResponse>, String) {
     let mut out = Vec::new();
     let mut residual = String::new();
     let mut cursor = 0;
-    for (i, cap) in commentary_block_regex().captures_iter(text).enumerate() {
+    let regex = if allow_eof_recovery {
+        commentary_block_regex()
+    } else {
+        complete_commentary_block_regex()
+    };
+    for cap in regex.captures_iter(text) {
         let m = cap.get(0).expect("regex match has full span");
         residual.push_str(&text[cursor..m.start()]);
         cursor = m.end();
@@ -177,15 +193,17 @@ fn extract_calls_via_regex(text: &str) -> (Vec<ToolCallResponse>, String) {
         }
         let args_json = match serde_json::from_str::<Value>(raw_args) {
             Ok(v) => serde_json::to_string(&v).unwrap_or_else(|_| raw_args.to_string()),
-            Err(_) => match try_repair_truncated_json(raw_args)
+            Err(_) if allow_eof_recovery => match try_repair_truncated_json(raw_args)
                 .and_then(|r| serde_json::from_str::<Value>(&r).ok())
             {
                 Some(v) => serde_json::to_string(&v).unwrap_or_else(|_| raw_args.to_string()),
                 None => raw_args.to_string(),
             },
+            Err(_) => continue,
         };
+        let call_idx = out.len() + 1;
         out.push(ToolCallResponse {
-            id: format!("call-{}", i + 1),
+            id: format!("call-{call_idx}"),
             tp: ToolCallType::Function,
             function: CalledFunction {
                 name: name.to_string(),
@@ -256,19 +274,14 @@ pub async fn parse_tool_calls_harmony_complete(
             tracing::debug!(
                 "Failed to parse messages from completion tokens: {e}. Falling back to regex extraction."
             );
-            // Recovery: harmony rejects parallel commentary blocks and
-            // truncated JSON. Gated on `allow_eof_recovery` so streaming
-            // jails (where the tokenizer often rejects mid-chunk before all
-            // tokens have arrived) don't extract a partial call.
-            if config.allow_eof_recovery {
-                let (calls, residual) = extract_calls_via_regex(text);
-                if !calls.is_empty() {
-                    let normal_text = strip_harmony_protocol_from_normal_text(
-                        &residual,
-                        "regex_recovery_residual",
-                    );
-                    return Ok((calls, Some(normal_text)));
-                }
+            // Recovery: harmony rejects parallel commentary blocks even when
+            // every call is explicitly closed. Only EOF/truncated recovery is
+            // gated, so streaming jails do not synthesize incomplete calls.
+            let (calls, residual) = extract_calls_via_regex(text, config.allow_eof_recovery);
+            if !calls.is_empty() {
+                let normal_text =
+                    strip_harmony_protocol_from_normal_text(&residual, "regex_recovery_residual");
+                return Ok((calls, Some(normal_text)));
             }
             let normal_text =
                 strip_harmony_protocol_from_normal_text(text, "parse_failed_no_recovered_calls");
@@ -276,7 +289,7 @@ pub async fn parse_tool_calls_harmony_complete(
         }
     };
 
-    let mut normal_text = String::new();
+    let normal_text = String::new();
 
     let mut res = Vec::with_capacity(messages.len());
     let mut call_idx = 0; // Index of the tool call
@@ -335,12 +348,6 @@ pub async fn parse_tool_calls_harmony_complete(
                     },
                 });
             }
-        // Handle reasoning(analysis) channel
-        } else if channel == Some("analysis") {
-            normal_text.push_str(match &message.content[0] {
-                Text(t) => &t.text,
-                _ => "",
-            });
         }
     }
     Ok((res, Some(normal_text.to_string())))
@@ -448,10 +455,7 @@ mod tests {
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
-        assert_eq!(
-            normal_content,
-            Some("Need to use function get_current_weather.".to_string())
-        );
+        assert_eq!(normal_content, Some("".to_string()));
         assert_eq!(tool_calls.len(), 0);
     }
 
@@ -462,10 +466,7 @@ mod tests {
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
-        assert_eq!(
-            normal_content,
-            Some("Need to use function get_current_weather.".to_string())
-        );
+        assert_eq!(normal_content, Some("".to_string()));
         assert_eq!(tool_calls.len(), 1);
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_current_weather");
@@ -480,10 +481,7 @@ mod tests {
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
-        assert_eq!(
-            normal_content,
-            Some("Need to use function get_current_weather.".to_string())
-        );
+        assert_eq!(normal_content, Some("".to_string()));
         assert_eq!(tool_calls.len(), 1);
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_current_weather");
@@ -496,16 +494,10 @@ mod tests {
     #[tokio::test] // PARSER.batch.2 — gpt-oss
     async fn test_parse_harmony_multiple_calls_recovers() {
         let text = r#"<|start|>assistant<|channel|>commentary to=functions.a <|constrain|>json<|message|>{"x":1}<|call|><|start|>assistant<|channel|>commentary to=functions.b <|constrain|>json<|message|>{"y":2}<|call|>"#;
-        let (tool_calls, _normal) = parse_tool_calls_harmony_complete(
-            text,
-            &JsonParserConfig {
-                allow_eof_recovery: true,
-                ..Default::default()
-            },
-            None,
-        )
-        .await
-        .unwrap();
+        let (tool_calls, _normal) =
+            parse_tool_calls_harmony_complete(text, &Default::default(), None)
+                .await
+                .unwrap();
         assert_eq!(tool_calls.len(), 2);
         let (n0, a0) = extract_name_and_args(tool_calls[0].clone());
         let (n1, a1) = extract_name_and_args(tool_calls[1].clone());
@@ -586,6 +578,10 @@ mod tests {
             !normal.contains("<|start|>"),
             "normal must not leak harmony start token: {normal:?}"
         );
+        assert!(
+            !normal.contains("assistant"),
+            "normal must not leak harmony assistant marker: {normal:?}"
+        );
     }
 
     #[tokio::test]
@@ -623,7 +619,7 @@ mod tests {
             parse_tool_calls_harmony_complete(text, &Default::default(), None)
                 .await
                 .unwrap();
-        assert_eq!(normal_content, Some("We need to call get_weather function. The user asks \"What's the weather like in San Francisco in Celsius?\" So location: \"San Francisco, CA\" unit: \"celsius\". Let's call function.".to_string()));
+        assert_eq!(normal_content, Some("".to_string()));
         assert_eq!(tool_calls.len(), 1);
         let (name, args) = extract_name_and_args(tool_calls[0].clone());
         assert_eq!(name, "get_weather");

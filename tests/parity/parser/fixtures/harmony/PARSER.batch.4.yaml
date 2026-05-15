@@ -6,7 +6,7 @@ mode: batch
 cases:
   PARSER.batch.4.a:
     description: Channel envelope with garbage body
-    ref: dynamo
+    ref: "OpenAI Harmony JSON-constrained function calls: https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
     model_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>not json at all<|call|>
     tools:
     - &id001
@@ -25,14 +25,14 @@ cases:
         - arguments: not json at all
           name: get_weather
         normal_text: ''
-        reason: "vLLM preserves malformed JSON tool-call args as a raw string; Dynamo drops the malformed call"
+        reason: "Dynamo/SGLang are more spec-correct: '<|constrain|>json' requires JSON args; vLLM surfaces malformed non-JSON as a raw string"
       sglang:
         calls: []
         normal_text: ''
         reason: "impl-defined recovery contract (see PARSER_CASES.md)"
   PARSER.batch.4.b:
     description: Unterminated JSON in message body
-    ref: dynamo
+    ref: "OpenAI Harmony JSON-constrained function calls: https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
     model_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>
     tools:
     - *id001
@@ -45,7 +45,7 @@ cases:
         - arguments: '{"location":"NYC'
           name: get_weather
         normal_text: ''
-        reason: "vLLM preserves unterminated JSON tool-call args as a raw string; Dynamo drops the malformed call"
+        reason: "Dynamo/SGLang are more spec-correct: '<|constrain|>json' requires complete JSON args; vLLM surfaces the unterminated payload as a raw string"
       sglang:
         calls: []
         normal_text: ''

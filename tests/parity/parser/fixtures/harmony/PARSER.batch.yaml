@@ -7,6 +7,7 @@ mode: batch
 cases:
   PARSER.batch.1:
     description: Single tool call (basic complete envelope)
+    ref: "OpenAI Harmony receiving tool calls: https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
     model_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
     tools:
     - &id001
@@ -26,13 +27,14 @@ cases:
       vllm:
         calls: []
         normal_text: ''
-        reason: "vLLM OpenAIToolParser only finalizes harmony tool calls after '<|call|>'; fixture omits the closing call token"
+        reason: "Spec-strict behavior: Harmony tool calls terminate with '<|call|>'; Dynamo extracts this missing-stop-token shape as EOF recovery"
       sglang:
         calls: []
         normal_text: <|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC"}
-        reason: "SGLang's GptOssDetector bot_token requires '<|start|>assistant<|channel|>commentary' envelope; Dynamo accepts the bare '<|channel|>commentary' variant"
+        reason: "Less spec-correct recovery: fixture omits '<|call|>' and SGLang preserves raw Harmony markup as user-visible normal_text"
   PARSER.batch.3:
     description: No tool call (plain text)
+    ref: "OpenAI Harmony channels/final output: https://developers.openai.com/cookbook/articles/openai-harmony#channels"
     model_text: Hello, how can I help you today?
     tools:
     - *id001
@@ -43,7 +45,7 @@ cases:
       vllm:
         calls: []
         normal_text: ''
-        reason: "vLLM OpenAIToolParser only surfaces text from harmony final/commentary channels; bare plain text is ignored"
+        reason: "Spec-strict behavior: user-visible assistant text belongs in final/commentary; Dynamo and SGLang preserve bare text as fallback"
       sglang: *d_3
   PARSER.batch.9:
     description: Empty input
@@ -66,7 +68,13 @@ cases:
     - *id001
     expected:
       dynamo:
-        calls: []
+        calls:
+        - arguments:
+            location: NYC
+          name: get_weather
+        - arguments:
+            location: LA
+          name: get_weather
         normal_text: ''
       vllm:
         calls:
@@ -77,7 +85,6 @@ cases:
             location: LA
           name: get_weather
         normal_text: ''
-        reason: "Dynamo drops back-to-back commentary blocks; vLLM extracts them"
       sglang:
         calls:
         - arguments:
@@ -87,7 +94,6 @@ cases:
             location: LA
           name: get_weather
         normal_text: ''
-        reason: "Dynamo drops back-to-back commentary blocks; SGLang extracts them"
   PARSER.batch.11:
     description: Separator-character case — n/a for this family's syntax
     reason: |-

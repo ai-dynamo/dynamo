@@ -756,6 +756,11 @@ def _build_tooltip_html(case: dict, dyn) -> str:
     if head:
         parts.append(f'<div class="ttip-head">{html_lib.escape(head)}</div>')
 
+    ref = case.get("ref")
+    if isinstance(ref, str) and ref:
+        parts.append('<div class="ttip-section">Ref:</div>')
+        parts.append(f'<pre class="ttip-pre">{html_lib.escape(ref)}</pre>')
+
     model_text = case.get("model_text")
     if isinstance(model_text, str) and model_text:
         parts.append('<div class="ttip-section">Input:</div>')
@@ -1439,6 +1444,7 @@ def render_html(
     no_sglang: set[str],
     top_n: list[tuple[str, str]],
     others: list[tuple[str, str]],
+    family_filter: str | None = None,
 ) -> str:
     descriptions = _parse_subcase_descriptions()
     refs = _build_family_to_rust_ref()
@@ -1448,16 +1454,19 @@ def render_html(
     sub_headers = "".join(_subcase_header_html(sub, descriptions) for sub in sub_cases)
     n_cols = 2 + len(sub_cases)
 
-    body_rows: list[str] = [
-        f'<tr class="section"><td colspan="{n_cols}">Top-N models</td></tr>'
-    ]
+    body_rows: list[str] = []
+    if top_n:
+        body_rows.append(
+            f'<tr class="section"><td colspan="{n_cols}">Top-N models</td></tr>'
+        )
     for model, fam in top_n:
         body_rows.append(
             render_row_html(
                 model, fam, cases, sub_cases, refs, no_vllm, no_sglang, inheritance
             )
         )
-    body_rows.append(f'<tr class="section"><td colspan="{n_cols}">Others</td></tr>')
+    if others:
+        body_rows.append(f'<tr class="section"><td colspan="{n_cols}">Others</td></tr>')
     for model, fam in others:
         body_rows.append(
             render_row_html(
@@ -1477,6 +1486,16 @@ def render_html(
 
     now = datetime.datetime.now(zoneinfo.ZoneInfo("America/Los_Angeles"))
     stamp = now.strftime("%Y-%m-%d %H:%M %Z")
+    title = (
+        f"Dynamo {family_filter} parser parity chart"
+        if family_filter
+        else "Dynamo parser parity chart"
+    )
+    command = "python3 tests/parity/parser/generate_parity_chart.py --html"
+    output = "tests/parity/parser/PARITY.html"
+    if family_filter:
+        command += f" --family {family_filter}"
+        output = f"tests/parity/parser/PARITY.{family_filter}.html"
 
     sha = _commit_sha()
     if sha:
@@ -1490,13 +1509,14 @@ def render_html(
     return (
         "<!DOCTYPE html>\n"
         '<html lang="en">\n'
-        '<head><meta charset="utf-8"><title>Dynamo parser parity chart</title>'
+        f'<head><meta charset="utf-8"><title>{html_lib.escape(title)}</title>'
         f"<style>{_HTML_STYLE}</style></head>\n"
         "<body>\n"
-        "<h1>Dynamo parser parity chart</h1>\n"
-        f'<p class="generated">Auto-generated on {html_lib.escape(stamp)}{sha_html}: '
-        f"<code>python3 tests/parity/parser/generate_parity_chart.py --html "
-        f"&gt; tests/parity/parser/PARITY.html</code></p>\n"
+        f"<h1>{html_lib.escape(title)}</h1>\n"
+        f'<p class="generated">Auto-generated on {html_lib.escape(stamp)}{sha_html} '
+        f"from <code>tests/parity/parser/fixtures/**/PARSER.*.yaml</code>: "
+        f"<code>{html_lib.escape(command)} "
+        f"&gt; {html_lib.escape(output)}</code></p>\n"
         "<p>Parser column links to the family's Rust config / parser. "
         "Sub-case column headers link to "
         '<a href="../../../lib/parsers/PARSER_CASES.md">PARSER_CASES.md</a> '
@@ -1519,14 +1539,33 @@ def main():
         action="store_true",
         help="Emit HTML (clickable + tooltips) instead of Markdown.",
     )
+    p.add_argument(
+        "--family",
+        help="Render only one parser family, e.g. harmony.",
+    )
     args = p.parse_args()
 
     cases, labels = load_all_cases()
+    if args.family:
+        cases = {k: v for k, v in cases.items() if k[0] == args.family}
+        labels = {k: v for k, v in labels.items() if k == args.family}
+        if not cases:
+            raise SystemExit(f"no parser fixtures found for family={args.family!r}")
     sub_cases = _discover_sub_cases(cases)
     no_vllm, no_sglang = _derive_no_peer_sets(cases)
     top_n, others = _build_display_groups(cases, labels)
     if args.html:
-        print(render_html(cases, sub_cases, no_vllm, no_sglang, top_n, others))
+        print(
+            render_html(
+                cases,
+                sub_cases,
+                no_vllm,
+                no_sglang,
+                top_n,
+                others,
+                family_filter=args.family,
+            )
+        )
     else:
         print(render_markdown(cases, sub_cases, no_vllm, no_sglang, top_n, others))
 

@@ -29,7 +29,7 @@ cases:
         reason: "impl-defined recovery contract (see PARSER_CASES.md)"
   PARSER.batch.5.b:
     description: Bare <|call|> without preceding channel envelope
-    ref: dynamo
+    ref: "OpenAI Harmony tool-call stop token: https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
     model_text: <|call|>
     tools:
     - *id001
@@ -41,7 +41,7 @@ cases:
       sglang:
         calls: []
         normal_text: <|call|>
-        reason: "Dynamo strips bare harmony control tokens from normal_text; SGLang preserves the raw input"
+        reason: "Dynamo/vLLM are more spec-correct: '<|call|>' is a control stop token, not user-visible text; SGLang preserves raw markup"
   PARSER.batch.5.c:
     description: Truncation mid-message JSON
     ref: dynamo
@@ -67,12 +67,19 @@ cases:
     - *id001
     expected:
       dynamo:
-        calls: []
-        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<|start|>assistant<|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"Boston"}<|call|><|start|>assistant<|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"New York"}
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!commentary
+          to=functions.get_weather json{"location":"New York"}
+        reason: "Dynamo/SGLang are more spec-correct: they strip the incomplete trailing commentary envelope after extracting the complete first call; vLLM preserves protocol-stripped residue from the incomplete second call"
       sglang:
         calls:
         - name: get_weather
@@ -89,12 +96,19 @@ cases:
     - *id001
     expected:
       dynamo:
-        calls: []
-        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!<|start|>assistant<|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"Boston"}<|call|><|start|>assistant<|channel|>commentary
-          to=functions.get_weather <|constrain|>json<|message|>{"location":"New York
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:
-        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+        calls:
+        - name: get_weather
+          arguments:
+            location: Boston
+        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!commentary
+          to=functions.get_weather json{"location":"New York
+        reason: "Dynamo/SGLang are more spec-correct: they strip the incomplete trailing commentary envelope after extracting the complete first call; vLLM preserves protocol-stripped residue from the incomplete second call"
       sglang:
         calls:
         - name: get_weather

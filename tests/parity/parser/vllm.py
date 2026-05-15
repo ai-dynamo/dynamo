@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from typing import Any
 
@@ -28,6 +29,15 @@ from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from tests.parity.common import ParseResult, decode_arguments
 
 _HARMONY_ASSISTANT_START = "<|start|>assistant"
+_HARMONY_COMMENTARY_CALL_RE = re.compile(
+    r"(?:<\|start\|>assistant)?<\|channel\|>commentary\b.*?<\|message\|>.*?<\|call\|>",
+    re.DOTALL,
+)
+_HARMONY_ANALYSIS_RE = re.compile(
+    r"<\|channel\|>analysis<\|message\|>(.*?)(?:<\|end\|>|$)",
+    re.DOTALL,
+)
+_HARMONY_SPECIAL_TOKEN_RE = re.compile(r"<\|[^|]+?\|>")
 
 
 class _OmnivorousVocab(dict):
@@ -76,6 +86,54 @@ def _harmony_token_ids(raw_text: str) -> list[int]:
 
     enc = get_encoding()
     return enc.encode(text, allowed_special=enc.special_tokens_set)
+
+
+def _harmony_cleanup_residual_text(text: str) -> str:
+    """Return the non-call narration left outside extracted commentary calls."""
+
+    text = _HARMONY_ANALYSIS_RE.sub("", text)
+    text = text.replace(_HARMONY_ASSISTANT_START, "")
+    return _HARMONY_SPECIAL_TOKEN_RE.sub("", text)
+
+
+def _harmony_token_text_and_normal_text(raw_text: str) -> tuple[str, str | None]:
+    """Split prose-wrapped harmony text into vLLM token input plus narration.
+
+    vLLM's OpenAIToolParser expects assistant-completion harmony tokens. The
+    parity fixtures intentionally include surrounding narration to compare how
+    engines handle mixed text and tool calls, so feed vLLM only complete
+    commentary call envelopes and preserve the stripped residual text as the
+    wrapper's normal_text contribution.
+    """
+
+    matches = list(_HARMONY_COMMENTARY_CALL_RE.finditer(raw_text))
+    if not matches:
+        return raw_text, None
+
+    blocks = []
+    residual_parts = []
+    cursor = 0
+    for match in matches:
+        residual_parts.append(
+            _harmony_cleanup_residual_text(raw_text[cursor : match.start()])
+        )
+        block = match.group(0)
+        if block.startswith(_HARMONY_ASSISTANT_START):
+            block = block[len(_HARMONY_ASSISTANT_START) :]
+        if blocks:
+            block = f"{_HARMONY_ASSISTANT_START}{block}"
+        blocks.append(block)
+        cursor = match.end()
+
+    residual_parts.append(_harmony_cleanup_residual_text(raw_text[cursor:]))
+    residual = "".join(residual_parts).strip()
+    normal_text = residual if residual.strip() else None
+    return "".join(blocks), normal_text
+
+
+def _merge_normal_text(first: str | None, second: str | None) -> str | None:
+    merged = "".join(part for part in (first, second) if part)
+    return merged if merged.strip() else None
 
 
 # Maps parser_family → vLLM's registered parser key (registered via
@@ -135,12 +193,16 @@ def parse(
         # We construct a minimal request shape with only the tools field, since most parsers ignore the rest.
         request = SimpleNamespace(tools=wrapped_tools)
         if key == "openai":
+            token_text, residual_normal_text = _harmony_token_text_and_normal_text(
+                raw_text
+            )
             info = parser.extract_tool_calls(
-                raw_text,
+                token_text,
                 request,
-                token_ids=_harmony_token_ids(raw_text),
+                token_ids=_harmony_token_ids(token_text),
             )
         else:
+            residual_normal_text = None
             info = parser.extract_tool_calls(raw_text, request)
     except NotImplementedError as e:
         # Known unsupported combinations (e.g., vLLM's harmony parser requires
@@ -154,4 +216,7 @@ def parse(
         {"name": tc.function.name, "arguments": decode_arguments(tc.function.arguments)}
         for tc in info.tool_calls or []
     ]
-    return ParseResult(calls=calls, normal_text=info.content)
+    return ParseResult(
+        calls=calls,
+        normal_text=_merge_normal_text(residual_normal_text, info.content),
+    )

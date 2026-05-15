@@ -6,7 +6,7 @@ mode: batch
 cases:
   PARSER.batch.6.a:
     description: Canonical empty {} message body
-    ref: dynamo
+    ref: "OpenAI Harmony tool calls terminate with '<|call|>': https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
     model_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{}
     tools:
     - &id001
@@ -23,14 +23,14 @@ cases:
       vllm:
         calls: []
         normal_text: ''
-        reason: "vLLM OpenAIToolParser only finalizes harmony tool calls after '<|call|>'; fixture omits the closing call token"
+        reason: "Spec-strict behavior: Harmony tool calls terminate with '<|call|>'; Dynamo extracts this missing-stop-token shape as EOF recovery"
       sglang:
         calls: []
         normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{}
-        reason: "SGLang's GptOssDetector bot_token requires '<|start|>assistant<|channel|>commentary' envelope; Dynamo accepts the bare '<|channel|>commentary' variant"
+        reason: "Less spec-correct recovery: fixture omits '<|call|>' and SGLang preserves raw Harmony markup as user-visible normal_text"
   PARSER.batch.6.b:
     description: Whitespace inside empty {}
-    ref: dynamo
+    ref: "OpenAI Harmony tool calls terminate with '<|call|>': https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
     model_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{ }
     tools:
     - *id001
@@ -43,14 +43,14 @@ cases:
       vllm:
         calls: []
         normal_text: ''
-        reason: "vLLM OpenAIToolParser only finalizes harmony tool calls after '<|call|>'; fixture omits the closing call token"
+        reason: "Spec-strict behavior: Harmony tool calls terminate with '<|call|>'; Dynamo extracts this missing-stop-token shape as EOF recovery"
       sglang:
         calls: []
         normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json<|message|>{ }
-        reason: "SGLang's GptOssDetector bot_token requires '<|start|>assistant<|channel|>commentary' envelope; Dynamo accepts the bare '<|channel|>commentary' variant"
+        reason: "Less spec-correct recovery: fixture omits '<|call|>' and SGLang preserves raw Harmony markup as user-visible normal_text"
   PARSER.batch.6.c:
     description: No <|message|> body
-    ref: dynamo
+    ref: "OpenAI Harmony tool-call message header/body format: https://developers.openai.com/cookbook/articles/openai-harmony#receiving-tool-calls"
     model_text: <|channel|>commentary to=functions.get_time <|constrain|>json
     tools:
     - *id001
@@ -62,4 +62,4 @@ cases:
       sglang:
         calls: []
         normal_text: <|channel|>commentary to=functions.get_time <|constrain|>json
-        reason: "Dynamo strips malformed harmony commentary headers from normal_text; SGLang preserves the raw input"
+        reason: "Dynamo/vLLM are more spec-correct: a commentary header without '<|message|>' is malformed protocol, not user-visible text; SGLang preserves raw markup"
