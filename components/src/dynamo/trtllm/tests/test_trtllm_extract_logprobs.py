@@ -23,6 +23,7 @@ from dynamo.trtllm.request_handlers.handler_base import extract_logprobs  # noqa
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.trtllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.unit,
 ]

@@ -35,6 +35,8 @@ pytestmark = [
     # vLLM dependency, but the `pre_merge and vllm and gpu_0` marker filter
     # in .github/workflows/pr.yaml is what selects the test into a runner).
     pytest.mark.vllm,
+    pytest.mark.core,
+    pytest.mark.model(MODEL),
 ]
 
 

@@ -19,6 +19,7 @@ from dynamo.vllm.handlers import extract_logprobs  # noqa: E402
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.unit,
 ]

@@ -164,6 +164,13 @@ class WorkerConfig:
                 runtime_cfg, "dyn_structural_tag_schema", "auto"
             ),
         }
+        # Operator-set policy, if exposed. Accept either a `UnsupportedFieldPolicy`
+        # enum value or a lowercase string (``"reject"`` / ``"warn"`` / ``"ignore"``).
+        policy = getattr(runtime_cfg, "unsupported_field_policy", None)
+        if policy is not None:
+            if isinstance(policy, str):
+                policy = getattr(UnsupportedFieldPolicy, policy.capitalize())
+            kwargs["unsupported_field_policy"] = policy
         # vLLM/TRT-LLM expose `disaggregation_mode`; SGLang exposes
         # `serving_mode`. Skip the probe when an override is supplied so
         # backends with a foreign enum (TRT-LLM) bypass the coercer.
