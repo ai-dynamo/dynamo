@@ -98,9 +98,20 @@ impl LifecycleGauges {
     /// Construct + register both gauges against the runtime
     /// `MetricsRegistry`.
     pub fn new(metrics: &EngineMetrics) -> Result<Self, DynamoError> {
+        // `create_metric` auto-injects hierarchy labels (namespace,
+        // component, endpoint, worker_id) and validates that user-provided
+        // labels don't collide with them. Pass only the model/model_name
+        // entries from auto_labels — the hierarchy ones land via auto-inject.
+        let auto_injected = [
+            labels::NAMESPACE,
+            labels::COMPONENT,
+            labels::ENDPOINT,
+            labels::WORKER_ID,
+        ];
         let labels: Vec<(&str, &str)> = metrics
             .auto_labels()
             .iter()
+            .filter(|(k, _)| !auto_injected.contains(&k.as_str()))
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
         let hierarchy = metrics.hierarchy().as_ref();
