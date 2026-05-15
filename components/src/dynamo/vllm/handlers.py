@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import inspect
 import logging
 import os
 
@@ -86,6 +87,8 @@ DECODED_VARIANT_KEY: Final = "Decoded"
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+_GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 
 
 class _DeferredAbort:
@@ -366,6 +369,15 @@ def build_sampling_params(
         ):
             existing = sampling_params.stop_token_ids or []
             sampling_params.stop_token_ids = list(set(existing).union(value))
+        # Dynamo's StopConditions uses `max_thinking_tokens`; vLLM 0.20+ exposes
+        # the same concept as `thinking_token_budget` on SamplingParams and
+        # enforces it via the builtin thinking-budget logits processor.
+        if (
+            key == "max_thinking_tokens"
+            and value is not None
+            and hasattr(sampling_params, "thinking_token_budget")
+        ):
+            sampling_params.thinking_token_budget = value
 
     # Apply output_options (logprobs, prompt_logprobs, etc.)
     output_options = request.get("output_options", {})
@@ -470,6 +482,81 @@ def build_sampling_params_openai(
     return sampling_params
 
 
+def _engine_generate_reasoning_kwargs(
+    engine_client: Any,
+    reasoning_ended: bool | None,
+    reasoning_parser_kwargs: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if reasoning_ended is None and reasoning_parser_kwargs is None:
+        return {}
+
+    support = _engine_generate_reasoning_support(engine_client)
+    if support is None:
+        return {}
+    accepts_reasoning_ended, accepts_reasoning_parser_kwargs = support
+
+    kwargs: dict[str, Any] = {}
+    if accepts_reasoning_ended:
+        kwargs["reasoning_ended"] = reasoning_ended
+    if accepts_reasoning_parser_kwargs:
+        kwargs["reasoning_parser_kwargs"] = reasoning_parser_kwargs
+
+    if not kwargs:
+        logger.debug(
+            "vLLM generate does not accept reasoning parser kwargs; "
+            "running without request-local reasoning parser metadata"
+        )
+    return kwargs
+
+
+def _engine_generate_reasoning_support(
+    engine_client: Any,
+) -> tuple[bool, bool] | None:
+    try:
+        cached = vars(engine_client).get(_GENERATE_REASONING_SUPPORT_CACHE_ATTR)
+    except TypeError:
+        cached = None
+    if cached is not None:
+        return cached
+
+    try:
+        parameters = inspect.signature(engine_client.generate).parameters
+    except (TypeError, ValueError):
+        logger.debug(
+            "Unable to inspect vLLM generate signature; dropping reasoning parser kwargs"
+        )
+        return None
+
+    accepts_kwargs = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()
+    )
+    support = (
+        accepts_kwargs or "reasoning_ended" in parameters,
+        accepts_kwargs or "reasoning_parser_kwargs" in parameters,
+    )
+    try:
+        setattr(engine_client, _GENERATE_REASONING_SUPPORT_CACHE_ATTR, support)
+    except Exception:
+        pass
+    return support
+
+
+def _request_reasoning_metadata(
+    request: dict[str, Any],
+) -> tuple[bool | None, dict[str, Any] | None]:
+    reasoning_ended = request.get("reasoning_ended")
+    reasoning_parser_kwargs = request.get("reasoning_parser_kwargs")
+
+    extra_args = request.get("extra_args")
+    if isinstance(extra_args, dict):
+        if reasoning_ended is None:
+            reasoning_ended = extra_args.get("reasoning_ended")
+        if reasoning_parser_kwargs is None:
+            reasoning_parser_kwargs = extra_args.get("reasoning_parser_kwargs")
+
+    return reasoning_ended, reasoning_parser_kwargs
+
+
 def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
     """
     Get the global DP rank range that this worker is responsible for based on vLLM config.
@@ -506,6 +593,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     """
 
     _benchmark_results: Optional[dict] = None
+    # Class-level default so test doubles that bypass __init__ via
+    # __new__ still have a sane value; __init__ overrides this from
+    # hf_config.use_unified_vision_chunk on real instances.
+    _use_unified_vision_chunk: bool = False
 
     def __init__(
         self,
@@ -558,6 +649,21 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
         self._quiesce_lock = asyncio.Lock()
         self._mm_kwargs_receiver: MmKwargsNixlReceiver | None = None
+
+        # Some models (Kimi-K2.5) declare their image modality as
+        # "vision_chunk" rather than "image". vLLM's openai entrypoint
+        # renames the dict key + wraps images via the chat_utils tracker,
+        # but dynamo bypasses chat_utils and builds `multi_modal_data`
+        # directly — so we mirror the rename + wrap here. The flag lives
+        # on the model's HF config; defaults to False for all other
+        # families.
+        self._use_unified_vision_chunk = bool(
+            getattr(
+                self.engine_client.vllm_config.model_config.hf_config,
+                "use_unified_vision_chunk",
+                False,
+            )
+        )
 
         # Serialise concurrent scale_elastic_ep calls.  vLLM's elastic-EP
         # bootstrap creates a fresh TCPStore per scale operation and stores it
@@ -1622,17 +1728,38 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 )
 
         image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
-        if "image" not in vllm_mm_data and image_mm_items:
+        # Kimi-K2.5 (and any model with `use_unified_vision_chunk=True`)
+        # consumes images under the `vision_chunk` modality, not `image`,
+        # and expects each item to be a `VisionChunkImage` TypedDict.
+        # See chat_utils.use_unified_vision_chunk_modality for the
+        # upstream rename + wrap path.
+        image_modality_key = (
+            "vision_chunk" if self._use_unified_vision_chunk else "image"
+        )
+        if image_modality_key not in vllm_mm_data and image_mm_items:
             with _nvtx.annotate("mm_backend:image_download", color="green"):
                 images = await self.image_loader.load_image_batch(
                     image_mm_items,
                 )
 
             if images:
-                # vLLM expects single image or list
-                vllm_mm_data["image"] = images[0] if len(images) == 1 else images
+                if self._use_unified_vision_chunk:
+                    # `VisionChunkImage` is a TypedDict — a plain dict
+                    # with `type`/`image`/`uuid` keys is structurally
+                    # equivalent. uuid=None matches vLLM's chat_utils
+                    # path when the request doesn't pre-supply one.
+                    chunks = [
+                        {"type": "image", "image": img, "uuid": None} for img in images
+                    ]
+                    vllm_mm_data["vision_chunk"] = (
+                        chunks[0] if len(chunks) == 1 else chunks
+                    )
+                else:
+                    # vLLM expects single image or list
+                    vllm_mm_data["image"] = images[0] if len(images) == 1 else images
                 logger.debug(
-                    f"Extracted {len(images)} image(s) for multimodal processing"
+                    f"Extracted {len(images)} image(s) for multimodal "
+                    f"processing under modality={image_modality_key!r}"
                 )
 
         video_mm_items = mm_map.get(VIDEO_URL_KEY, [])
@@ -1785,7 +1912,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         forwarded_hashes = extra_args.get("mm_hashes")
         mm_uuids: dict[str, Any] | None = None
         if forwarded_hashes:
-            mm_uuids = {"image": forwarded_hashes}
+            # vLLM binds multi_modal_uuids by modality key string match.
+            # For models with use_unified_vision_chunk=True (e.g. Kimi-K2.5)
+            # images live under `vision_chunk`, not `image`; hardcoding
+            # `image` here would silently fail to bind and force vLLM back
+            # to its own content-derived hash, breaking router/worker
+            # cache-key alignment.
+            mm_modality_key = (
+                "vision_chunk" if self._use_unified_vision_chunk else "image"
+            )
+            mm_uuids = {mm_modality_key: forwarded_hashes}
         elif self.embedding_loader is None:
             mm_uuids = _compute_mm_uuids(multi_modal_data)
             if mm_uuids and multi_modal_data:
@@ -1960,6 +2096,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         embedding_sequence_length=None,
         trace_headers=None,
         priority=0,
+        reasoning_ended=None,
+        reasoning_parser_kwargs=None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -1976,6 +2114,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 data_parallel_rank=data_parallel_rank,
                 trace_headers=trace_headers,
                 priority=priority,
+                **_engine_generate_reasoning_kwargs(
+                    self.engine_client,
+                    reasoning_ended,
+                    reasoning_parser_kwargs,
+                ),
             )
 
             num_output_tokens_so_far: dict[int, int] = {}
@@ -2254,6 +2397,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority = -int(routing.get("priority", 0))
 
         trace_headers = build_trace_headers(context)
+        reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
 
         # In disagg decode mode, defer engine_client.abort() until the first
         # token so we don't abort while a NIXL KV transfer is still in flight
@@ -2277,6 +2421,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         embedding_sequence_length=embedding_sequence_length,
                         trace_headers=trace_headers,
                         priority=priority,
+                        reasoning_ended=reasoning_ended,
+                        reasoning_parser_kwargs=reasoning_parser_kwargs,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
@@ -2512,6 +2658,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         priority = -int(routing.get("priority", 0))
 
         trace_headers = build_trace_headers(context)
+        reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
@@ -2523,6 +2670,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     priority=priority,
+                    **_engine_generate_reasoning_kwargs(
+                        self.engine_client,
+                        reasoning_ended,
+                        reasoning_parser_kwargs,
+                    ),
                 )
             except EngineDeadError as e:
                 logger.error(f"vLLM EngineDeadError: {e}")

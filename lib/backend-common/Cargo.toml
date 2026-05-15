@@ -20,7 +20,7 @@ testing = []
 
 [dependencies]
 dynamo-runtime = { workspace = true }
-dynamo-llm = { workspace = true }
+dynamo-llm = { path = "../llm", version = "1.2.0", default-features = false }
 dynamo-protocols = { workspace = true }
 
 anyhow = { workspace = true }
@@ -28,5 +28,10 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
+serde = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

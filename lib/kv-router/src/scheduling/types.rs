@@ -13,8 +13,12 @@ use crate::sequences::PrefillTokenDeltas;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TierOverlapBlocks {
-    pub host_pinned: HashMap<WorkerWithDpRank, usize>,
-    pub disk: HashMap<WorkerWithDpRank, usize>,
+    #[serde(default)]
+    pub device: FxHashMap<WorkerWithDpRank, usize>,
+    #[serde(default)]
+    pub host_pinned: FxHashMap<WorkerWithDpRank, usize>,
+    #[serde(default)]
+    pub disk: FxHashMap<WorkerWithDpRank, usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +144,7 @@ impl SchedulingRequest {
             .is_none_or(|ids| ids.contains(&worker_id))
     }
 
+    #[cfg(test)]
     pub(crate) fn prefill_tokens_for(&self, worker: WorkerWithDpRank) -> usize {
         let default_prefill_tokens = if self.track_prefill_tokens {
             self.isl_tokens
@@ -150,6 +155,20 @@ impl SchedulingRequest {
             .get(&worker)
             .copied()
             .unwrap_or(default_prefill_tokens)
+    }
+
+    /// Prompt-side load before applying this request's cache-hit credits.
+    pub(crate) fn raw_prefill_tokens_for(&self, worker: WorkerWithDpRank) -> usize {
+        if !self.track_prefill_tokens {
+            return 0;
+        }
+
+        match self.prefill_tokens.get(&worker).copied() {
+            Some(projected_tokens) => {
+                projected_tokens.saturating_add(self.effective_cached_tokens_for(worker))
+            }
+            None => self.isl_tokens,
+        }
     }
 
     pub(crate) fn request_blocks(&self, block_size: u32) -> u64 {

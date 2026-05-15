@@ -70,6 +70,7 @@ impl From<RouterMode> for RsRouterMode {
     }
 }
 
+mod backend;
 mod context;
 mod engine;
 pub mod errors;
@@ -197,6 +198,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
     m.add_class::<llm::kv::KvRouter>()?;
+    m.add_class::<llm::routed_engine::RoutedEngine>()?;
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
@@ -207,6 +209,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     engine::add_to_module(m)?;
     errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
+    backend::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
     let prometheus_metrics = PyModule::new(m.py(), "prometheus_metrics")?;

@@ -3,14 +3,11 @@
 
 mod support;
 
-#[path = "../kv_router/common/mod.rs"]
-mod common;
-
 #[path = "../kv_router/active_sequences_shared.rs"]
 mod active_sequences_shared;
 
 use active_sequences_shared::{generate_sequence_events, run_benchmark};
-use common::process_mooncake_trace;
+use dynamo_bench::kv_router_common::replay::process_mooncake_trace;
 
 const BLOCK_SIZE: u32 = 128;
 const NUM_GPU_BLOCKS: usize = 16384;

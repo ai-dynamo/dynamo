@@ -19,12 +19,14 @@
 //! you need the event plane.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
 use dynamo_backend_common::{
-    AsyncEngineContext, BackendError, CommonArgs, DynamoError, EngineConfig, ErrorType, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, WorkerConfig, chunk, usage,
+    AsyncEngineContext, BackendError, CommonArgs, DisaggregationMode, DynamoError, EngineConfig,
+    ErrorType, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
+    Metrics, MetricsSource, PreprocessedRequest, WorkerConfig, chunk, usage,
 };
 use dynamo_mocker::common::protocols::{
     DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
@@ -118,15 +120,23 @@ struct ActiveEntry {
 }
 
 /// Removes the request's entry from the active-requests map on any stream
-/// exit path — natural completion, cancellation, or an early drop.
+/// exit path — natural completion, cancellation, or an early drop. Also
+/// releases the synthetic block accounting so `kv_used_blocks` tracks the
+/// in-flight set rather than monotonically growing.
 struct ActiveRequestGuard {
     uuid: Uuid,
     active: Arc<DashMap<Uuid, ActiveEntry>>,
+    kv_used_blocks: Arc<AtomicU64>,
+    blocks_held: u64,
 }
 
 impl Drop for ActiveRequestGuard {
     fn drop(&mut self) {
         self.active.remove(&self.uuid);
+        if self.blocks_held > 0 {
+            self.kv_used_blocks
+                .fetch_sub(self.blocks_held, Ordering::Relaxed);
+        }
     }
 }
 
@@ -134,6 +144,9 @@ pub struct MockerBackend {
     model_name: String,
     context_length: u32,
     engine_args: MockEngineArgs,
+    /// Disaggregation role, observed in `generate()` to switch between the
+    /// aggregated path and the simulated prefill / decode handshake.
+    disaggregation_mode: DisaggregationMode,
     cancel: CancellationToken,
     active: Arc<DashMap<Uuid, ActiveEntry>>,
     request_tx: OnceCell<mpsc::UnboundedSender<DirectRequest>>,
@@ -142,18 +155,29 @@ pub struct MockerBackend {
     /// the scheduler tasks running for the engine's lifetime.
     #[allow(dead_code)]
     scheduler: OnceCell<Box<dyn SchedulerHandle>>,
+    /// Synthetic KV-block accounting. Bumped per request in `generate()`
+    /// so the metrics snapshot reports a non-trivial load number.
+    /// Real engines would source this from their scheduler.
+    kv_used_blocks: Arc<AtomicU64>,
 }
 
 impl MockerBackend {
-    fn new(model_name: String, context_length: u32, engine_args: MockEngineArgs) -> Self {
+    fn new(
+        model_name: String,
+        context_length: u32,
+        engine_args: MockEngineArgs,
+        disaggregation_mode: DisaggregationMode,
+    ) -> Self {
         MockerBackend {
             model_name,
             context_length,
             engine_args,
+            disaggregation_mode,
             cancel: CancellationToken::new(),
             active: Arc::new(DashMap::new()),
             request_tx: OnceCell::new(),
             scheduler: OnceCell::new(),
+            kv_used_blocks: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -165,13 +189,20 @@ impl MockerBackend {
         .map_err(|e| invalid_arg(e.to_string()))?;
 
         let engine_args = build_engine_args(&args)?;
-        let engine = Self::new(args.model_name.clone(), args.context_length, engine_args);
+        let disaggregation_mode = args.common.disaggregation_mode;
+        let engine = Self::new(
+            args.model_name.clone(),
+            args.context_length,
+            engine_args,
+            disaggregation_mode,
+        );
         let config = WorkerConfig {
             namespace: args.common.namespace,
             component: args.common.component,
             endpoint: args.common.endpoint,
             endpoint_types: args.common.endpoint_types,
             custom_jinja_template: args.common.custom_jinja_template,
+            disaggregation_mode,
             model_name: args.model_path,
             served_model_name: Some(args.model_name),
             ..Default::default()
@@ -182,7 +213,7 @@ impl MockerBackend {
 
 #[async_trait]
 impl LLMEngine for MockerBackend {
-    async fn start(&self) -> Result<EngineConfig, DynamoError> {
+    async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
         // Reject double-start BEFORE calling `create_engine`. The
         // scheduler's internal `CancelGuard` fires `self.cancel.cancel()`
         // on drop, so if we create a second scheduler and then error
@@ -252,39 +283,67 @@ impl LLMEngine for MockerBackend {
             total_kv_blocks: Some(self.engine_args.num_gpu_blocks as u64),
             max_num_seqs: self.engine_args.max_num_seqs.map(|v| v as u64),
             max_num_batched_tokens: self.engine_args.max_num_batched_tokens.map(|v| v as u64),
+            data_parallel_size: None,
+            data_parallel_start_rank: None,
+            // Mocker has no real KV transport, so it never advertises a
+            // bootstrap address. Real prefill engines populate these in
+            // start() to publish ModelRuntimeConfig.disaggregated_endpoint.
+            bootstrap_host: None,
+            bootstrap_port: None,
         })
     }
 
     async fn generate(
         &self,
         request: PreprocessedRequest,
-        ctx: Arc<dyn AsyncEngineContext>,
-    ) -> Result<BoxStream<'static, LLMEngineOutput>, DynamoError> {
+        ctx: GenerateContext,
+    ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         let request_tx = self
             .request_tx
             .get()
             .ok_or_else(|| engine_shutdown("generate called before start"))?
             .clone();
 
+        // Decode workers must receive prefill_result from the prefill peer
+        // (the frontend's PrefillRouter forwards it). The mocker doesn't
+        // verify the contents — the synthetic handle is opaque — but its
+        // presence is the wire-level invariant we want to test.
+        if self.disaggregation_mode.is_decode() && request.prefill_result.is_none() {
+            return Err(invalid_arg(
+                "mocker decode worker received request with no prefill_result; \
+                 expected the frontend to forward disaggregated_params from a prefill peer",
+            ));
+        }
+
         let uuid = ctx.id().parse().unwrap_or_else(|_| Uuid::new_v4());
         let prompt_len = request.token_ids.len() as u32;
-        let max_output_tokens = request
+        let requested_max_tokens = request
             .stop_conditions
             .max_tokens
             .map(|n| n as usize)
             .unwrap_or(DEFAULT_MAX_TOKENS);
+        // Prefill workers only need to populate KV cache for the prompt; cap
+        // generation at one token regardless of what the client asked for, so
+        // the response carries a single terminal with disaggregated_params.
+        let max_output_tokens = if self.disaggregation_mode.is_prefill() {
+            1
+        } else {
+            requested_max_tokens
+        };
+        let is_prefill = self.disaggregation_mode.is_prefill();
 
         // max_tokens == 0: nothing to generate, but still need a terminal.
         // Skip the scheduler round-trip entirely — the mocker protocol
-        // requires max_output_tokens >= 1.
+        // requires max_output_tokens >= 1. (Prefill always raises the floor
+        // to 1, so this branch is unreachable when in prefill mode.)
         if max_output_tokens == 0 {
             return Ok(Box::pin(async_stream::stream! {
                 // Honour cancellation even on this fast path so the
                 // terminal's finish_reason reflects what the client asked for.
                 if ctx.is_stopped() {
-                    yield LLMEngineOutput::cancelled().with_usage(usage(prompt_len, 0));
+                    yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_len, 0)));
                 } else {
-                    yield LLMEngineOutput::length().with_usage(usage(prompt_len, 0));
+                    yield Ok(LLMEngineOutput::length().with_usage(usage(prompt_len, 0)));
                 }
             }));
         }
@@ -302,7 +361,7 @@ impl LLMEngine for MockerBackend {
             uuid,
             ActiveEntry {
                 tx,
-                ctx: ctx.clone(),
+                ctx: ctx.inner_arc(),
             },
         );
 
@@ -311,9 +370,20 @@ impl LLMEngine for MockerBackend {
             return Err(engine_shutdown("scheduler is not accepting requests"));
         }
 
+        // Synthetic per-request block accounting: each request claims its
+        // prompt blocks for the duration of generation. Released by the
+        // guard's Drop. Demonstrates the metrics-publish path without
+        // depending on the scheduler exposing real KV usage.
+        let block_size = self.engine_args.block_size.max(1) as u32;
+        let blocks_held = prompt_len.div_ceil(block_size) as u64;
+        self.kv_used_blocks
+            .fetch_add(blocks_held, Ordering::Relaxed);
+
         let guard = ActiveRequestGuard {
             uuid,
             active: self.active.clone(),
+            kv_used_blocks: self.kv_used_blocks.clone(),
+            blocks_held,
         };
 
         Ok(Box::pin(async_stream::stream! {
@@ -336,15 +406,15 @@ impl LLMEngine for MockerBackend {
                 tokio::select! {
                     biased;
                     _ = ctx.stopped() => {
-                        yield LLMEngineOutput::cancelled()
-                            .with_usage(usage(prompt_len, generated));
+                        yield Ok(LLMEngineOutput::cancelled()
+                            .with_usage(usage(prompt_len, generated)));
                         break;
                     }
                     maybe_signal = rx.recv() => {
                         let Some(signal) = maybe_signal else {
-                            yield LLMEngineOutput::error(
+                            yield Ok(LLMEngineOutput::error(
                                 "mocker backend: scheduler channel closed before completion".to_string(),
-                            );
+                            ));
                             break;
                         };
                         generated += 1;
@@ -356,17 +426,30 @@ impl LLMEngine for MockerBackend {
                             // If it ever fires early, surface it instead of
                             // silently truncating.
                             if (generated as usize) < max_output_tokens {
-                                yield LLMEngineOutput::error(format!(
+                                yield Ok(LLMEngineOutput::error(format!(
                                     "mocker backend: scheduler signalled completion at {generated}/{max_output_tokens} tokens"
-                                ));
+                                )));
                                 break;
                             }
-                            yield LLMEngineOutput::length()
+                            let mut terminal = LLMEngineOutput::length()
                                 .with_tokens(vec![token_id])
                                 .with_usage(usage(prompt_len, generated));
+                            // Prefill workers stamp a synthetic
+                            // `disaggregated_params` payload on the terminal
+                            // so the frontend's PrefillRouter has something
+                            // to forward to the decode peer. The mocker has
+                            // no real KV transfer; the handle is opaque and
+                            // exists only to exercise the wire format.
+                            if is_prefill {
+                                terminal.disaggregated_params = Some(serde_json::json!({
+                                    "mocker_handle": uuid.to_string(),
+                                    "completed_tokens": [token_id],
+                                }));
+                            }
+                            yield Ok(terminal);
                             break;
                         }
-                        yield chunk::token(token_id);
+                        yield Ok(chunk::token(token_id));
                     }
                 }
             }
@@ -383,6 +466,31 @@ impl LLMEngine for MockerBackend {
         // simulated compute on this uuid until max_output_tokens.
         // Future cleanup will need an abort hook in `dynamo-mocker`.
         tracing::debug!(request_id = ctx.id(), "mocker backend: abort requested");
+    }
+
+    /// One Push source for KV events plus one Snapshot source for
+    /// metrics. The Push `on_ready` is a no-op — the mocker's scheduler
+    /// doesn't emit real KV events. Real Rust engines would start a
+    /// polling thread here that calls `publisher.publish` directly.
+    /// Metrics report a synthetic `kv_used_blocks` derived from
+    /// per-request prompt-block counts maintained in `generate()`.
+    async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+        Ok(vec![KvEventSource::Push {
+            on_ready: Box::new(|_publisher| Ok(())),
+            dp_rank: DP_RANK,
+        }])
+    }
+
+    async fn metrics_sources(&self) -> Result<Vec<MetricsSource>, DynamoError> {
+        let used = self.kv_used_blocks.clone();
+        Ok(vec![MetricsSource {
+            snapshot: Arc::new(move || {
+                Some(Metrics {
+                    kv_used_blocks: Some(used.load(Ordering::Relaxed)),
+                })
+            }),
+            dp_rank: DP_RANK,
+        }])
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
@@ -433,10 +541,31 @@ mod tests {
     use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
     use futures::StreamExt;
 
+    /// Wraps a runtime context into a `GenerateContext` for tests. None of the
+    /// mocker tests exercise the deferred-abort path so `first_token` is None.
+    fn gen_ctx(ctx: Arc<dyn AsyncEngineContext>) -> GenerateContext {
+        GenerateContext::new(ctx, None)
+    }
+
     fn test_engine() -> MockerBackend {
+        test_engine_with_mode(DisaggregationMode::Aggregated)
+    }
+
+    fn test_engine_with_mode(mode: DisaggregationMode) -> MockerBackend {
         let args = Args::try_parse_from(["bin"]).unwrap();
         let engine_args = build_engine_args(&args).unwrap();
-        MockerBackend::new(args.model_name, args.context_length, engine_args)
+        MockerBackend::new(args.model_name, args.context_length, engine_args, mode)
+    }
+
+    async fn collect_ok(
+        stream: futures::stream::BoxStream<'static, Result<LLMEngineOutput, DynamoError>>,
+    ) -> Vec<LLMEngineOutput> {
+        stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|item| item.expect("engine yielded Err in test"))
+            .collect()
     }
 
     fn request(max_tokens: Option<u32>) -> PreprocessedRequest {
@@ -474,7 +603,7 @@ mod tests {
     #[tokio::test]
     async fn start_returns_advertised_metadata() {
         let engine = test_engine();
-        let cfg = engine.start().await.unwrap();
+        let cfg = engine.start(0).await.unwrap();
         assert_eq!(cfg.model, "mocker-model");
         assert_eq!(cfg.kv_cache_block_size, Some(64));
         assert_eq!(cfg.total_kv_blocks, Some(16384));
@@ -490,9 +619,9 @@ mod tests {
         // on drop), leaving the engine unusable. The fix is to reject
         // the second call BEFORE creating a second scheduler.
         let engine = test_engine();
-        engine.start().await.unwrap();
+        engine.start(0).await.unwrap();
 
-        let err = engine.start().await.unwrap_err();
+        let err = engine.start(0).await.unwrap_err();
         assert_eq!(
             err.error_type(),
             ErrorType::Backend(BackendError::EngineShutdown)
@@ -501,10 +630,10 @@ mod tests {
         // The engine must still serve after the rejected double-start.
         let ctx = Context::new(());
         let stream = engine
-            .generate(request(Some(2)), ctx.context())
+            .generate(request(Some(2)), gen_ctx(ctx.context()))
             .await
             .expect("engine must still be usable after rejected double-start");
-        let chunks: Vec<_> = stream.collect().await;
+        let chunks: Vec<_> = collect_ok(stream).await;
         let terminal = chunks.last().expect("at least a terminal");
         assert!(
             matches!(terminal.finish_reason, Some(FinishReason::Length)),
@@ -539,7 +668,9 @@ mod tests {
     async fn generate_before_start_is_an_error() {
         let engine = test_engine();
         let ctx = Context::new(());
-        let result = engine.generate(request(Some(1)), ctx.context()).await;
+        let result = engine
+            .generate(request(Some(1)), gen_ctx(ctx.context()))
+            .await;
         let Err(err) = result else {
             panic!("expected generate() to fail before start()");
         };
@@ -552,14 +683,14 @@ mod tests {
     #[tokio::test]
     async fn generate_with_zero_max_tokens_emits_empty_length_terminal() {
         let engine = test_engine();
-        engine.start().await.unwrap();
+        engine.start(0).await.unwrap();
 
         let ctx = Context::new(());
         let stream = engine
-            .generate(request(Some(0)), ctx.context())
+            .generate(request(Some(0)), gen_ctx(ctx.context()))
             .await
             .expect("stream");
-        let chunks: Vec<_> = stream.collect().await;
+        let chunks: Vec<_> = collect_ok(stream).await;
 
         assert_eq!(chunks.len(), 1, "zero max_tokens should yield one terminal");
         assert!(chunks[0].token_ids.is_empty());
@@ -581,16 +712,16 @@ mod tests {
         // can't silently fall back to a Length terminal on cancelled
         // requests.
         let engine = test_engine();
-        engine.start().await.unwrap();
+        engine.start(0).await.unwrap();
 
         let ctx = Context::new(());
         let ctrl = ctx.context();
         ctrl.stop_generating();
         let stream = engine
-            .generate(request(Some(0)), ctrl)
+            .generate(request(Some(0)), gen_ctx(ctrl))
             .await
             .expect("stream");
-        let chunks: Vec<_> = stream.collect().await;
+        let chunks: Vec<_> = collect_ok(stream).await;
 
         assert_eq!(chunks.len(), 1);
         assert!(matches!(
@@ -604,15 +735,15 @@ mod tests {
     #[tokio::test]
     async fn generate_runs_to_completion() {
         let engine = test_engine();
-        engine.start().await.unwrap();
+        engine.start(0).await.unwrap();
 
         let ctx = Context::new(());
         let ctrl = ctx.context();
         let stream = engine
-            .generate(request(Some(4)), ctrl)
+            .generate(request(Some(4)), gen_ctx(ctrl))
             .await
             .expect("stream");
-        let chunks: Vec<_> = stream.collect().await;
+        let chunks: Vec<_> = collect_ok(stream).await;
 
         assert!(!chunks.is_empty(), "expected at least one chunk");
         let terminal = chunks.last().unwrap();
@@ -631,17 +762,17 @@ mod tests {
     #[tokio::test]
     async fn generate_cancellation_yields_cancelled_chunk() {
         let engine = test_engine();
-        engine.start().await.unwrap();
+        engine.start(0).await.unwrap();
 
         let ctx = Context::new(());
         let ctrl = ctx.context();
         let stream = engine
-            .generate(request(Some(10_000)), ctrl.clone())
+            .generate(request(Some(10_000)), gen_ctx(ctrl.clone()))
             .await
             .expect("stream");
         ctrl.stop_generating();
 
-        let chunks: Vec<_> = stream.collect().await;
+        let chunks: Vec<_> = collect_ok(stream).await;
         let terminal = chunks.last().expect("at least a terminal");
         assert!(
             matches!(terminal.finish_reason, Some(FinishReason::Cancelled)),
@@ -654,9 +785,122 @@ mod tests {
 
     #[tokio::test]
     async fn mocker_passes_conformance() {
-        let engine = test_engine();
-        dynamo_backend_common::testing::run_conformance(engine)
+        dynamo_backend_common::testing::run_conformance(test_engine)
             .await
             .expect("mocker backend must satisfy conformance");
+    }
+
+    fn request_with_prefill_result(prefill: serde_json::Value) -> PreprocessedRequest {
+        use dynamo_backend_common::PrefillResult;
+        let mut req = request(Some(8));
+        req.prefill_result = Some(PrefillResult {
+            disaggregated_params: prefill,
+            prompt_tokens_details: None,
+        });
+        req
+    }
+
+    #[tokio::test]
+    async fn prefill_mode_emits_one_token_with_disaggregated_params() {
+        // Prefill workers must produce exactly one token regardless of the
+        // client's max_tokens and stamp the terminal with disaggregated_params
+        // so the frontend's PrefillRouter has something to forward to a
+        // decode peer. Even if the user asks for 5 tokens, prefill caps to 1.
+        let engine = test_engine_with_mode(DisaggregationMode::Prefill);
+        engine.start(0).await.unwrap();
+
+        let stream = engine
+            .generate(request(Some(5)), gen_ctx(Context::new(()).context()))
+            .await
+            .expect("stream");
+        let chunks = collect_ok(stream).await;
+
+        // Single terminal carrying the disaggregated_params payload.
+        assert_eq!(chunks.len(), 1, "prefill must emit exactly one chunk");
+        let terminal = &chunks[0];
+        assert!(
+            matches!(terminal.finish_reason, Some(FinishReason::Length)),
+            "expected Length terminal, got {:?}",
+            terminal.finish_reason
+        );
+        let params = terminal
+            .disaggregated_params
+            .as_ref()
+            .expect("prefill terminal must carry disaggregated_params");
+        assert!(params.get("mocker_handle").is_some());
+        let usage = terminal.completion_usage.as_ref().unwrap();
+        assert_eq!(usage.completion_tokens, 1);
+
+        engine.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn decode_mode_rejects_request_without_prefill_result() {
+        // The frontend's PrefillRouter is responsible for forwarding the
+        // prefill peer's disaggregated_params on the decode request. If it
+        // doesn't, generate must fail loudly with InvalidArgument so the
+        // misconfiguration surfaces immediately instead of producing
+        // silently-incorrect tokens.
+        let engine = test_engine_with_mode(DisaggregationMode::Decode);
+        engine.start(0).await.unwrap();
+
+        let result = engine
+            .generate(request(Some(2)), gen_ctx(Context::new(()).context()))
+            .await;
+        let Err(err) = result else {
+            panic!("decode without prefill_result must error");
+        };
+        assert_eq!(
+            err.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+
+        engine.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn decode_mode_runs_to_completion_when_prefill_result_provided() {
+        let engine = test_engine_with_mode(DisaggregationMode::Decode);
+        engine.start(0).await.unwrap();
+
+        let req = request_with_prefill_result(serde_json::json!({
+            "mocker_handle": "synthetic-from-test",
+        }));
+        let stream = engine
+            .generate(req, gen_ctx(Context::new(()).context()))
+            .await
+            .expect("stream");
+        let chunks = collect_ok(stream).await;
+
+        // Decode workers run normally — only the prefill_result presence
+        // check is gated; max_tokens is honoured as written.
+        let terminal = chunks.last().expect("at least a terminal");
+        assert!(
+            matches!(terminal.finish_reason, Some(FinishReason::Length)),
+            "expected Length terminal, got {:?}",
+            terminal.finish_reason
+        );
+        // Decode must NOT stamp a new disaggregated_params on its response —
+        // that's the prefill role.
+        assert!(terminal.disaggregated_params.is_none());
+
+        engine.cleanup().await.unwrap();
+    }
+
+    #[test]
+    fn from_args_propagates_disaggregation_mode_to_worker_config_and_engine() {
+        // The mode flows two places: onto WorkerConfig (consumed by the
+        // Rust Worker for registration) and onto the engine itself
+        // (consumed in generate() for per-mode dispatch). Both must
+        // agree — a mismatch would mean the engine ran prefill logic
+        // while the runtime registered as decode (or vice versa).
+        let (engine, config) = MockerBackend::from_args(Some(vec![
+            "bin".to_string(),
+            "--disaggregation-mode".to_string(),
+            "prefill".to_string(),
+        ]))
+        .unwrap();
+        assert_eq!(config.disaggregation_mode, DisaggregationMode::Prefill);
+        assert_eq!(engine.disaggregation_mode, DisaggregationMode::Prefill);
     }
 }

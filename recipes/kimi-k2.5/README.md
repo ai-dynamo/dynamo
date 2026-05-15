@@ -2,6 +2,10 @@
 
 Deployment recipes for **Kimi-K2.5** using TensorRT-LLM with Dynamo's KV-aware routing.
 
+A separate TokenSpeed-based aggregated recipe is available under
+[`tokenspeed/agg/nvidia/`](tokenspeed/agg/nvidia/README.md) (requires a local
+image build — no public Dynamo+TokenSpeed image yet).
+
 ## Available Configurations
 
 There are two model weight variants, each with its own model download and deploy manifests:

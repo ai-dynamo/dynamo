@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-VLLM_VER="0.20.0"
+VLLM_VER="0.20.1"
 VLLM_REF="v${VLLM_VER}"
 DEVICE="cuda"
 
@@ -28,7 +28,7 @@ DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
 FLASHINF_REF="v0.6.8.post1"
 LMCACHE_REF="0.4.4"
-VLLM_OMNI_REF="release/v0.19.0rc1"
+VLLM_OMNI_REF="v0.20.0"
 TORCH_REF="2.11.0"
 TORCHVISION_REF="0.26.0"
 
@@ -154,12 +154,12 @@ git checkout $VLLM_REF
 echo "✓ vLLM repository cloned"
 
 echo "\n=== Installing vLLM-Omni ==="
-# Install omni BEFORE vLLM. Its transitive dependencies can otherwise upgrade the
+# Install Omni BEFORE vLLM. Its transitive dependencies can otherwise upgrade the
 # torch/transformers stack after vLLM is installed, which can leave vllm._C ABI-mismatched.
 # vLLM should remain the final owner of the runtime stack in this environment.
 if [ -n "$VLLM_OMNI_REF" ] && [ "$ARCH" = "amd64" ]; then
-    # Try PyPI first, fall back to building from source
-    if uv pip install ${VLLM_UV_ARGS} vllm-omni==${VLLM_OMNI_REF#v} 2>&1; then
+    # Try PyPI first, fall back to building from source.
+    if uv pip install ${VLLM_UV_ARGS} "vllm-omni==${VLLM_OMNI_REF#v}" 2>&1; then
         echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from PyPI"
     else
         echo "⚠ PyPI install failed, building from source..."
@@ -181,7 +181,7 @@ fi
 if [ "$DEVICE" = "cuda" ]; then
     echo "\n=== Installing vLLM & FlashInfer ==="
 
-    # vLLM 0.20.0 switches the default PyPI CUDA wheel to CUDA 13.0.
+    # vLLM 0.20.x switches the default PyPI CUDA wheel to CUDA 13.0.
     # Use the release wheel variant index for CUDA-specific vLLM binaries,
     # and ask uv for the matching torch backend for the PyTorch stack.
     echo "Installing vLLM $VLLM_VER (torch backend: $TORCH_BACKEND)..."
@@ -250,6 +250,56 @@ if [ "$DEVICE" = "cpu" ]; then
     python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
     uv pip install dist/*.whl
 fi
+
+# Apply vendored vLLM patches for this ref. Used to carry upstream fixes
+# that are missing from the pinned release wheel (e.g. PR backports
+# dropped between rc and final tags). Skipped when:
+#   - VLLM_VER is >= 0.21.0  (upstream fix expected to be merged by then)
+#   - no patches/<VLLM_REF>/ subdir exists, or it has no *.patch files
+#
+# rc/post/dev/+ suffixes are stripped before comparison (so v0.21.0rc0
+# also trips the skip). Non-semver refs (commit SHA, branch name) fall
+# through to the directory-existence check.
+VLLM_VER_BASE=$(echo "$VLLM_VER" | sed -E 's/(rc|\.post|\.dev|\+).*//')
+PATCH_DIR="/tmp/deps/vllm/patches/${VLLM_REF}"
+if [[ "$VLLM_VER_BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && \
+   printf '%s\n%s\n' "0.21.0" "$VLLM_VER_BASE" | sort -V | head -n1 | grep -qx "0.21.0"; then
+    echo "vLLM $VLLM_VER >= 0.21 — skipping vendored patches (assumed merged upstream)"
+elif [ -d "$PATCH_DIR" ] && compgen -G "$PATCH_DIR/*.patch" > /dev/null; then
+    echo "\n=== Applying vendored vLLM patches from $PATCH_DIR ==="
+    # Run from / so cwd isn't ahead of the venv on sys.path. The build
+    # script is still inside the $INSTALLATION_DIR/vllm source clone here
+    # (from the earlier `cd vllm`), and that clone contains a `vllm/`
+    # package directory. Without the cd, `import vllm` resolves the
+    # source clone, vllm.__file__ points at /opt/vllm/vllm/__init__.py,
+    # and the patch lands on the build-only source tree — not on the
+    # installed wheel that the runtime actually imports. Same pattern as
+    # the post-install verification block above.
+    VLLM_SITE_PACKAGES=$(cd / && python3 -c "import vllm, os; print(os.path.dirname(os.path.dirname(vllm.__file__)))")
+    for p in "$PATCH_DIR"/*.patch; do
+        echo "  $(basename "$p")"
+        # --batch: suppress interactive prompts. Without it, an unmatched
+        #          file path in a hunk produces `File to patch:` on stdin
+        #          and hangs `docker build`.
+        # --forward: skip patches that already appear applied or reversed —
+        #          benign for re-runs and for wheels that already carry
+        #          the fix (e.g. a v0.20.1.post1 hotfix).
+        #
+        # GNU patch exit codes: 0 = clean apply, 1 = hunks rejected or
+        # skipped via --forward, >=2 = fatal. Accept rc=1 (so the patches
+        # block doesn't become a brittle build gate); propagate >=2.
+        rc=0
+        patch -p1 --batch --forward -d "$VLLM_SITE_PACKAGES" < "$p" || rc=$?
+        if [ "$rc" -ge 2 ]; then
+            echo "    fatal: patch exited $rc"
+            exit "$rc"
+        elif [ "$rc" -eq 1 ]; then
+            echo "    (already applied or partial; continuing)"
+        fi
+    done
+    echo "✓ vLLM patches applied"
+fi
+
 echo "✓ vLLM installation completed"
 
 echo "\n=== Installing LMCache from source ==="

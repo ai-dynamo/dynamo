@@ -44,6 +44,7 @@ const MAX_SNAPSHOT_STABILITY_ATTEMPTS: usize = 10;
 
 const CHECK_INTERVAL_BASE: Duration = Duration::from_secs(1);
 const CHECK_INTERVAL_JITTER_MS: i64 = 100;
+const STARTUP_ORPHAN_CLEANUP_GRACE: Duration = Duration::from_secs(1);
 
 // ============================================================================
 // Discovery Helpers
@@ -272,8 +273,12 @@ pub(crate) async fn start_kv_router_background(
         }
     }
 
-    // Cleanup orphaned consumers on startup
-    cleanup_orphaned_consumers(&mut nats_queue, &component, &consumer_id).await;
+    spawn_startup_orphan_cleanup(
+        component.clone(),
+        stream_name.clone(),
+        nats_server.clone(),
+        consumer_id.clone(),
+    );
 
     // Wait for at least one worker instance before proceeding
     let mut instance_event_stream =
@@ -432,43 +437,137 @@ pub(crate) async fn start_kv_router_background(
     Ok(())
 }
 
-/// Cleanup orphaned NATS consumers that no longer have corresponding router entries
-async fn cleanup_orphaned_consumers(
-    nats_queue: &mut NatsQueue,
-    component: &Component,
-    consumer_id: &str,
+/// Returns the startup candidate consumers that should be deleted as orphans.
+///
+/// A consumer is orphaned when it exists in NATS but has no corresponding active
+/// router instance in discovery. The input must be the startup candidate list
+/// captured before the cleanup grace period, with this router's own consumer
+/// already excluded.
+///
+/// When `active_instance_ids` is empty we conservatively return nothing: an
+/// empty active set means either (a) no peer routers have registered yet
+/// (simultaneous-startup race) or (b) discovery is unavailable / using a
+/// different key for this deployment. In both cases deleting peers is wrong —
+/// NATS `inactive_threshold` (configured in NatsQueue) cleans up genuine
+/// orphans automatically.
+fn select_startup_orphaned_consumers(
+    startup_candidates: Vec<String>,
+    active_instance_ids: &HashSet<String>,
+) -> Vec<String> {
+    if active_instance_ids.is_empty() {
+        tracing::debug!(
+            "No active router instances found in discovery; skipping orphan \
+             consumer cleanup to avoid simultaneous-startup race"
+        );
+        return Vec::new();
+    }
+
+    startup_candidates
+        .into_iter()
+        .filter(|c| !active_instance_ids.contains(c))
+        .collect()
+}
+
+fn spawn_startup_orphan_cleanup(
+    component: Component,
+    stream_name: String,
+    nats_server: String,
+    consumer_id: String,
 ) {
-    let Ok(consumers) = nats_queue.list_consumers().await else {
-        return;
-    };
-
-    // Get active routers from discovery
-    let discovery = component.drt().discovery();
-    let Ok(router_instances) = discovery
-        .list(router_discovery_query(
-            component.namespace().name(),
-            component.name().to_string(),
-        ))
-        .await
-    else {
-        tracing::debug!("Failed to list router instances from discovery, skipping cleanup");
-        return;
-    };
-
-    // Build set of active router instance IDs
-    let active_instance_ids: HashSet<String> = router_instances
-        .iter()
-        .map(|instance| instance.instance_id().to_string())
-        .collect();
-
-    for consumer in consumers {
-        if consumer == consumer_id {
-            // Never delete myself (extra/redundant safeguard)
-            continue;
+    tokio::spawn(async move {
+        let mut cleanup_queue = NatsQueue::new_without_consumer(
+            stream_name,
+            nats_server,
+            std::time::Duration::from_secs(60),
+        );
+        if let Err(e) = cleanup_queue.connect().await {
+            tracing::debug!("Failed to connect NATS queue for startup orphan cleanup: {e:?}");
+            return;
         }
-        if !active_instance_ids.contains(&consumer) {
-            tracing::info!("Cleaning up orphaned consumer: {consumer}");
-            let _ = nats_queue.shutdown(Some(consumer)).await;
+
+        let Ok(mut startup_candidates) = cleanup_queue.list_consumers().await else {
+            return;
+        };
+        startup_candidates.retain(|consumer| consumer != &consumer_id);
+
+        if startup_candidates.is_empty() {
+            return;
+        };
+
+        tokio::time::sleep(STARTUP_ORPHAN_CLEANUP_GRACE).await;
+
+        let discovery = component.drt().discovery();
+        let Ok(router_instances) = discovery
+            .list(router_discovery_query(
+                component.namespace().name(),
+                component.name().to_string(),
+            ))
+            .await
+        else {
+            tracing::debug!("Failed to list router instances from discovery, skipping cleanup");
+            return;
+        };
+
+        let active_instance_ids: HashSet<String> = router_instances
+            .iter()
+            .map(|instance| instance.instance_id().to_string())
+            .collect();
+        let orphans = select_startup_orphaned_consumers(startup_candidates, &active_instance_ids);
+        if orphans.is_empty() {
+            return;
         }
+
+        for consumer in orphans {
+            tracing::info!("Cleaning up startup orphaned consumer: {consumer}");
+            if let Err(e) = cleanup_queue.shutdown(Some(consumer.clone())).await {
+                tracing::warn!("Failed to clean up startup orphaned consumer {consumer}: {e}");
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
+    #[test]
+    fn empty_active_set_skips_cleanup() {
+        // Simultaneous-startup race: peers haven't registered yet, so the
+        // active set is empty. Must NOT delete anything — would wipe peers.
+        let startup_candidates = vec![s("peer-a"), s("peer-b")];
+        let active: HashSet<String> = HashSet::new();
+        let orphans = select_startup_orphaned_consumers(startup_candidates, &active);
+        assert!(
+            orphans.is_empty(),
+            "empty active set must skip cleanup (regression for #8015), got: {orphans:?}"
+        );
+    }
+
+    #[test]
+    fn active_startup_candidates_not_orphaned() {
+        let startup_candidates = vec![s("peer-a"), s("peer-b")];
+        let active: HashSet<String> = ["peer-a", "peer-b"].iter().map(|s| s.to_string()).collect();
+        let orphans = select_startup_orphaned_consumers(startup_candidates, &active);
+        assert_eq!(orphans, Vec::<String>::new());
+    }
+
+    #[test]
+    fn inactive_startup_candidates_returned() {
+        let startup_candidates = vec![s("peer-a"), s("ghost")];
+        let active: HashSet<String> = ["self", "peer-a"].iter().map(|s| s.to_string()).collect();
+        let orphans = select_startup_orphaned_consumers(startup_candidates, &active);
+        assert_eq!(orphans, vec![s("ghost")]);
+    }
+
+    #[test]
+    fn new_consumers_after_startup_snapshot_are_not_deleted() {
+        let startup_candidates = vec![s("ghost")];
+        let active: HashSet<String> = ["self", "peer-a"].iter().map(|s| s.to_string()).collect();
+        let orphans = select_startup_orphaned_consumers(startup_candidates, &active);
+        assert_eq!(orphans, vec![s("ghost")]);
     }
 }

@@ -24,10 +24,10 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{
-    EventKind, EventWarningKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer, WorkerTask,
+    EventKind, EventWarningKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer,
+    WorkerLookupStats, WorkerTask,
 };
 use crate::active_set::reconcile_active_workers;
 use crate::protocols::{
@@ -114,8 +114,6 @@ pub type LevelIndex = FxHashMap<ExternalSequenceBlockHash, (usize, LocalBlockHas
 pub struct PositionalIndexer {
     index: DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
 
-    tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
-
     jump_size: usize,
 }
 
@@ -131,7 +129,6 @@ impl PositionalIndexer {
 
         Self {
             index: DashMap::with_hasher(FxBuildHasher),
-            tree_sizes: DashMap::with_hasher(FxBuildHasher),
             jump_size,
         }
     }
@@ -194,6 +191,14 @@ impl SyncIndexer for PositionalIndexer {
                         tracing::warn!("Failed to send events: {:?}", e);
                     }
                 }
+                WorkerTask::Stats(sender) => {
+                    let stats = WorkerLookupStats::from_worker_block_counts(
+                        worker_blocks
+                            .iter()
+                            .map(|(worker, worker_map)| (*worker, worker_map.len())),
+                    );
+                    let _ = sender.send(stats);
+                }
                 WorkerTask::Flush(sender) => {
                     let _ = sender.send(());
                 }
@@ -209,17 +214,6 @@ impl SyncIndexer for PositionalIndexer {
 
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
         self.jump_search_matches(sequence, early_exit)
-    }
-
-    fn worker_count(&self) -> usize {
-        self.tree_sizes.len()
-    }
-
-    fn block_count(&self) -> usize {
-        self.tree_sizes
-            .iter()
-            .map(|e| e.value().load(Ordering::Relaxed))
-            .sum()
     }
 }
 
@@ -300,7 +294,6 @@ impl PositionalIndexer {
 
         let worker_blocks_entry = worker_blocks.entry(worker).or_default();
 
-        let mut num_blocks_added = 0usize;
         let mut duplicate_store = !blocks.is_empty();
 
         for (i, block_data) in blocks.into_iter().enumerate() {
@@ -325,19 +318,8 @@ impl PositionalIndexer {
                 Some(existing) if existing == (position, local_hash) => {}
                 Some(_) => duplicate_store = false,
                 None => {
-                    num_blocks_added += 1;
                     duplicate_store = false;
                 }
-            }
-        }
-
-        match self.tree_sizes.get(&worker) {
-            Some(size) => {
-                size.fetch_add(num_blocks_added, Ordering::Relaxed);
-            }
-            None => {
-                self.tree_sizes
-                    .insert(worker, AtomicUsize::new(num_blocks_added));
             }
         }
 
@@ -366,8 +348,6 @@ impl PositionalIndexer {
             KvCacheEventError::BlockNotFound
         })?;
 
-        let mut num_removed_blocks = 0;
-
         for seq_hash in seq_hashes {
             let Some((position, local_hash)) = worker_map.remove(seq_hash) else {
                 tracing::warn!(
@@ -378,22 +358,12 @@ impl PositionalIndexer {
                     "Failed to find block to remove; skipping remove operation"
                 );
 
-                if let Some(size) = self.tree_sizes.get(&worker) {
-                    size.fetch_sub(num_removed_blocks, Ordering::Relaxed);
-                }
-
                 return Err(KvCacheEventError::BlockNotFound);
             };
 
             if let Some(mut entry) = self.index.get_mut(&(position, local_hash)) {
                 let _ = entry.remove(*seq_hash, worker);
             }
-
-            num_removed_blocks += 1;
-        }
-
-        if let Some(size) = self.tree_sizes.get(&worker) {
-            size.fetch_sub(num_removed_blocks, Ordering::Relaxed);
         }
 
         Ok(())
@@ -422,7 +392,6 @@ impl PositionalIndexer {
                     let _ = entry.remove(*seq_hash, key);
                 }
             }
-            self.tree_sizes.remove(&key);
         }
     }
 
@@ -453,13 +422,6 @@ impl PositionalIndexer {
             if keep_worker {
                 // Re-insert worker with empty map to keep it tracked
                 worker_blocks.insert(worker, FxHashMap::default());
-                // Reset tree size to 0 but keep the entry so scoring remains consistent.
-                if let Some(size) = self.tree_sizes.get(&worker) {
-                    size.store(0, Ordering::Relaxed);
-                }
-            } else {
-                // Fully remove the worker from tree_sizes.
-                self.tree_sizes.remove(&worker);
             }
         }
     }
@@ -511,14 +473,11 @@ impl PositionalIndexer {
 
 impl PositionalIndexer {
     /// Compute sequence hash incrementally from previous hash and current local hash.
+    /// Delegates to [`dynamo_tokens::compute_next_sequence_hash`] so the request-side
+    /// chain agrees with whatever produced the event stream.
     #[inline]
     fn compute_next_seq_hash(prev_seq_hash: u64, current_local_hash: u64) -> u64 {
-        let mut bytes = [0u8; 16];
-
-        bytes[..8].copy_from_slice(&prev_seq_hash.to_le_bytes());
-        bytes[8..].copy_from_slice(&current_local_hash.to_le_bytes());
-
-        dynamo_tokens::compute_hash_v2(&bytes, crate::protocols::XXH3_SEED)
+        dynamo_tokens::compute_next_sequence_hash(prev_seq_hash, current_local_hash)
     }
 
     /// Ensure seq_hashes is computed up to and including target_pos.

@@ -12,7 +12,7 @@
 # Template variables (substituted by sweep_runner.py --deploy-template):
 #   ${DGD_NAME}              - DynamoGraphDeployment name
 #   ${IMAGE}                 - Container image
-#   ${DYN_TOKENIZER_BACKEND} - "default" (hf) or "fast"
+#   ${DYN_TOKENIZER}         - "default" (hf) or "fastokens"
 #   ${FRONTEND_PORT}         - Frontend HTTP port (default: 8000)
 #   ${ROUTER_MODE}           - Frontend router mode (default: round-robin)
 #   ${MODEL}                 - Model path (HF ID or local path on PVC)
@@ -57,8 +57,8 @@ ${FRONTEND_IMAGE_PULL_SECRETS_BLOCK}
           args:
             - python3 -m dynamo.frontend --router-mode ${ROUTER_MODE} --http-port ${FRONTEND_PORT}
           env:
-            - name: DYN_TOKENIZER_BACKEND
-              value: "${DYN_TOKENIZER_BACKEND}"
+            - name: DYN_TOKENIZER
+              value: "${DYN_TOKENIZER}"
             - name: DYN_PERF_DIAG
               value: "1"
             - name: HF_HOME

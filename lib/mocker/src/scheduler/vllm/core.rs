@@ -7,7 +7,7 @@ use std::time::Duration;
 use dynamo_kv_router::protocols::WorkerId;
 use dynamo_tokens::blocks::UniqueBlock;
 #[cfg(feature = "kvbm-offload")]
-use kvbm_logical::MutableBlock;
+use kvbm_logical::{ImmutableBlock, MutableBlock};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -21,6 +21,8 @@ use crate::common::protocols::{
 use crate::common::sequence::ActiveSequence;
 use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::kv_manager::KvManager;
+#[cfg(feature = "kvbm-offload")]
+use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
 use crate::replay::TraceCollector;
 use crate::scheduler::{
     AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, ForwardPassSnapshot,
@@ -124,6 +126,7 @@ impl SchedulerState {
         }
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
     fn compact_running(&mut self) {
         let mut compacted = VecDeque::with_capacity(self.running.len());
         while let Some(uuid) = self.running.pop_front() {
@@ -217,12 +220,14 @@ impl SchedulerState {
 /// cached in G1 at park time; the swap-in covers the next
 /// `handle.block_count()` blocks starting at that offset. We need this
 /// to register the right slice of the request's PLHs into G1 inactive
-/// after the transfer completes.
+/// after the transfer completes. `_prefix_pins` keeps that cached prefix
+/// resident until the suffix can publish Device-tier Stored events against it.
 #[cfg(feature = "kvbm-offload")]
 pub(crate) struct AwaitingSwapIn {
     pub(crate) uuid: Uuid,
     pub(crate) handle: crate::kvbm_offload::SwapInHandle,
     pub(crate) destination_slots: Vec<MutableBlock<G1>>,
+    pub(crate) _prefix_pins: Vec<ImmutableBlock<G1>>,
     pub(crate) skip_blocks: usize,
 }
 
@@ -409,14 +414,21 @@ impl VllmCore {
             let unique = request.sequence.unique_blocks();
             let plhs = request.sequence.positional_lineage_hashes();
             let local_hashes = request.sequence.block_hashes();
+            let token_ids = request.sequence.block_token_ids();
             unique
                 .iter()
                 .zip(plhs.iter())
                 .zip(local_hashes.iter())
+                .zip(token_ids.iter())
                 .skip(skip)
                 .take(count)
-                .filter_map(|((block, plh), local)| match block {
-                    UniqueBlock::FullBlock(seq_hash) => Some((*seq_hash, *plh, *local)),
+                .filter_map(|(((block, plh), local), token_ids)| match block {
+                    UniqueBlock::FullBlock(seq_hash) => Some(SwapInRegistrationBlock {
+                        seq_hash: *seq_hash,
+                        plh: *plh,
+                        local_hash: *local,
+                        token_ids: Some(token_ids.clone()),
+                    }),
                     UniqueBlock::PartialBlock(_) => None,
                 })
                 .collect()
@@ -434,14 +446,12 @@ impl VllmCore {
                 _ => None,
             }
         };
-        let outcome = self.kv_manager.register_swapped_in_blocks(
-            &entries,
-            parent_hash,
-            aws.destination_slots,
-        );
+        let entries_len = entries.len();
+        let outcome =
+            self.kv_manager
+                .register_swapped_in_blocks(entries, parent_hash, aws.destination_slots);
         debug_assert_eq!(
-            outcome.consumed_entries,
-            entries.len(),
+            outcome.consumed_entries, entries_len,
             "reserved destination slots should cover every swapped-in block"
         );
         self.state.prepend_waiting(aws.uuid);
@@ -482,6 +492,10 @@ impl VllmCore {
         if remaining_plhs.is_empty() {
             return SwapInAdmissionAttempt::NoHit;
         }
+        let prefix_pins = match self.kv_manager.try_pin_g1_prefix(&plhs[..skip_blocks]) {
+            Some(pins) => pins,
+            None => return SwapInAdmissionAttempt::NoHit,
+        };
         let (handle, destination_slots) = match self
             .kv_manager
             .try_batch_swap_in(remaining_plhs, Some(now_ms))
@@ -500,11 +514,13 @@ impl VllmCore {
             uuid,
             handle,
             destination_slots,
+            _prefix_pins: prefix_pins,
             skip_blocks,
         });
         SwapInAdmissionAttempt::Parked
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
     pub(super) fn execute_pass_internal(
         &mut self,
         mut collector: Option<&mut TraceCollector>,
@@ -517,10 +533,16 @@ impl VllmCore {
         self.state.compact_running();
         let mut token_budget = self.args.max_num_batched_tokens.unwrap_or(usize::MAX);
         let mut scheduled = FxHashMap::default();
+        scheduled.reserve(
+            self.state
+                .running
+                .len()
+                .saturating_add(self.state.waiting.len().min(16)),
+        );
         let mut batch_count = 0usize;
         let mut batch_total_isl = 0usize;
         let mut batch_total_prefix = 0usize;
-        let mut admissions = Vec::new();
+        let mut admissions = Vec::with_capacity(self.state.waiting.len().min(16));
         let mut preempted_any = false;
 
         let mut req_index = 0usize;
@@ -619,10 +641,10 @@ impl VllmCore {
         // but the worker still has blocked requests or pending source-slot
         // releases, so `is_done()` never triggers.
         #[cfg(feature = "kvbm-offload")]
-        if end_ms <= now_ms {
-            if let Some(deadline) = self.kv_manager.earliest_offload_deadline() {
-                end_ms = deadline.max(now_ms);
-            }
+        if end_ms <= now_ms
+            && let Some(deadline) = self.kv_manager.earliest_offload_deadline()
+        {
+            end_ms = deadline.max(now_ms);
         }
 
         let fpm = self.compute_fpm(&scheduled, (end_ms - now_ms) / 1000.0);
@@ -661,6 +683,7 @@ impl VllmCore {
     /// at schedule time, so this method does not depend on `self.state.requests` for
     /// scheduled requests — completed requests may have already been removed.
     /// Queue metrics are derived from `self.state.waiting` at the moment of the call.
+    #[cfg_attr(feature = "profile", inline(never))]
     fn compute_fpm(
         &self,
         scheduled: &FxHashMap<Uuid, ScheduledWork>,
@@ -701,6 +724,7 @@ impl VllmCore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(feature = "profile", inline(never))]
     fn schedule_request(
         &mut self,
         uuid: Uuid,
@@ -877,24 +901,26 @@ impl VllmCore {
         }
     }
 
+    #[cfg_attr(feature = "profile", inline(never))]
     fn emit_ready_tokens(
         &mut self,
         mut collector: Option<&mut TraceCollector>,
         decode_start_ms: f64,
     ) -> (Duration, Vec<OutputSignal>) {
-        let ready = self
-            .state
-            .running
-            .iter()
-            .copied()
-            .filter(|uuid| {
-                let Some(request) = self.state.requests.get(uuid) else {
-                    return false;
-                };
-                request.num_computed_tokens >= request.sequence.len()
-                    && request.sequence.generated_tokens() < request.sequence.max_output_tokens()
-            })
-            .collect::<Vec<_>>();
+        let mut ready = Vec::with_capacity(self.state.running.len());
+        let mut total_length = 0usize;
+        for uuid in self.state.running.iter().copied() {
+            let Some(request) = self.state.requests.get(&uuid) else {
+                continue;
+            };
+            if request.num_computed_tokens < request.sequence.len()
+                || request.sequence.generated_tokens() >= request.sequence.max_output_tokens()
+            {
+                continue;
+            }
+            ready.push(uuid);
+            total_length += request.sequence.len();
+        }
         if ready.is_empty() {
             return (Duration::ZERO, Vec::new());
         }
@@ -906,11 +932,6 @@ impl VllmCore {
         } else {
             let active_kv_tokens = self.kv_manager.num_active_blocks() * self.args.block_size;
             let total_kv_tokens = self.args.num_gpu_blocks * self.args.block_size;
-            let total_length = ready
-                .iter()
-                .filter_map(|uuid| self.state.requests.get(uuid))
-                .map(|request| request.sequence.len())
-                .sum::<usize>();
             let context_length = total_length / ready.len();
             let decode_ms = self.args.perf_model.predict_decode_time(
                 ready.len(),
@@ -923,6 +944,7 @@ impl VllmCore {
         };
 
         let mut output_signals = Vec::with_capacity(ready.len());
+        let mut running_changed = false;
         for uuid in ready {
             let mut emitted = false;
             let mut completed = false;
@@ -932,8 +954,10 @@ impl VllmCore {
                     break;
                 };
                 let signals = sequence.generate();
-                if process_signals(&mut self.kv_manager, &signals) {
-                    if sequence.generated_tokens() < sequence.max_output_tokens() {
+                if signals.is_empty() || process_signals(&mut self.kv_manager, &signals) {
+                    if !signals.is_empty()
+                        && sequence.generated_tokens() < sequence.max_output_tokens()
+                    {
                         sequence.commit_allocation(sequence.len());
                     }
                     emitted = true;
@@ -945,6 +969,7 @@ impl VllmCore {
                 let Some(preempted) = self.state.preempt(self.args.preemption_mode) else {
                     break;
                 };
+                running_changed = true;
                 for signal in preempted.signals {
                     self.kv_manager.process(&signal);
                 }
@@ -982,14 +1007,20 @@ impl VllmCore {
             }
             if completed {
                 self.state.complete(&uuid);
+                running_changed = true;
             }
         }
 
         if output_signals.is_empty() {
+            if running_changed {
+                self.state.compact_running();
+            }
             return (Duration::ZERO, output_signals);
         }
 
-        self.state.compact_running();
+        if running_changed {
+            self.state.compact_running();
+        }
         (decode_time, output_signals)
     }
 }

@@ -233,6 +233,7 @@ type DynamoComponentDeploymentStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:storageversion
+// +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoComponentDeployment is deprecated; use nvidia.com/v1beta1 DynamoComponentDeployment"
 // +kubebuilder:printcolumn:name="DynamoComponent",type="string",JSONPath=".spec.dynamoComponent",description="Dynamo component"
 // +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
 // +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=`.spec.backendFramework`,description="Backend framework (sglang, vllm, trtllm)"
@@ -263,8 +264,10 @@ func init() {
 }
 
 func (s *DynamoComponentDeployment) IsReady() (bool, string) {
-	ready, reason := s.Status.IsReady()
-	return ready, reason
+	if s.Status.ObservedGeneration < s.Generation {
+		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", s.Generation, s.Status.ObservedGeneration)
+	}
+	return s.Status.IsReady()
 }
 
 // GetState returns "ready" or "not_ready" based on conditions
