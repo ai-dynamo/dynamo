@@ -577,11 +577,15 @@ jobs:
               echo "" >> coverage-rust-report.txt
             done
 
-            # Extract line coverage % (3rd percentage on TOTAL line: Region%, Func%, Line%, Branch%)
-            FIRST=$(find coverage-rust-artifacts/ -name "coverage-rust.txt" | sort | head -1)
-            RUST_TOTAL_COVERAGE=$(grep "^TOTAL" "$FIRST" | grep -oE '[0-9]+\.[0-9]+%' | sed -n '3p' || true)
+            # Aggregate line coverage across all crates by summing total/missed lines
+            # from every TOTAL row. Columns on a `cargo llvm-cov report` TOTAL line:
+            #   $2 regions  $3 missed_regions  $4 region%
+            #   $5 funcs    $6 missed_funcs    $7 func%
+            #   $8 lines    $9 missed_lines    $10 line%
+            RUST_TOTAL_COVERAGE=$(find coverage-rust-artifacts/ -name "coverage-rust.txt" -exec grep -h "^TOTAL" {} + \
+              | awk '{ total += $8; missed += $9 } END { if (total > 0) printf "%.2f%%", (total - missed) * 100 / total; else print "N/A" }')
             RUST_TOTAL_COVERAGE="${RUST_TOTAL_COVERAGE:-N/A}"
-            echo "Rust line coverage: ${RUST_TOTAL_COVERAGE}"
+            echo "Rust line coverage (aggregated across $(find coverage-rust-artifacts/ -name "coverage-rust.txt" | wc -l | tr -d ' ') crates): ${RUST_TOTAL_COVERAGE}"
           else
             echo "ℹ️  No Rust coverage artifacts found"
           fi

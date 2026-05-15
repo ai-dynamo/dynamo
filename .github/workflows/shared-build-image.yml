@@ -226,6 +226,8 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
           IMAGE_REPOSITORY: ai-dynamo/dynamo
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
         timeout-minutes: 20
         run: |
           set -x
@@ -241,10 +243,28 @@ jobs:
             CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache,mode=max "
           fi
 
+          # Enable sccache to match the runtime image build path
+          # (.github/actions/docker-remote-build). The runner pod injects
+          # AWS_WEB_IDENTITY_TOKEN_FILE + AWS_ROLE_ARN via IRSA; the Makefile
+          # forwards them to BuildKit as --secret mounts when both are set.
+          # If IRSA is unavailable, sccache will fail to start inside the
+          # container and the build proceeds without cache (never with a
+          # stale one) -- same fallback as the wheel_builder Rust steps.
+          SCCACHE_MAKE_ARGS=""
+          if [ -n "${SCCACHE_S3_BUCKET:-}" ] \
+              && [ -n "${AWS_WEB_IDENTITY_TOKEN_FILE:-}" ] \
+              && [ -f "${AWS_WEB_IDENTITY_TOKEN_FILE}" ] \
+              && [ -n "${AWS_ROLE_ARN:-}" ]; then
+            SCCACHE_MAKE_ARGS="USE_SCCACHE=true SCCACHE_BUCKET=${SCCACHE_S3_BUCKET} SCCACHE_REGION=${AWS_DEFAULT_REGION}"
+          else
+            echo "::warning::sccache prerequisites missing (bucket or IRSA token); EPP Rust build will run without sccache"
+          fi
+
           make -C deploy/inference-gateway/epp image-multiarch-push \
             IMAGE_REPO="${EPP_IMAGE_REPO}" \
             GIT_TAG="${EPP_IMAGE_TAG}" \
             DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/" \
+            ${SCCACHE_MAKE_ARGS} \
             EXTRA_BUILD_ARGS="${CACHE_ARGS}"
       - name: Refresh BuildKit builder (For Frontend Only)
         if: ${{ inputs.target == 'frontend' }}

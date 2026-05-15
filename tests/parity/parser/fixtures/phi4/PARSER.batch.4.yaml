@@ -9,7 +9,7 @@ cases:
     ref: originated from https://github.com/vllm-project/vllm/blob/b53c507bc91f87e28b03e9b54bbff7c76e97d58b/tests/tool_parsers/common_tests.py#L322
     model_text: functools[not a json array]
     tools:
-    - &id001
+    - &id002
       name: get_weather
       parameters:
         type: object
@@ -17,10 +17,10 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &d_4_a
+      dynamo: &id001
         calls: []
         normal_text: ''
-      vllm: *d_4_a
+      vllm: *id001
       sglang:
         unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.4.b:
@@ -28,12 +28,12 @@ cases:
     ref: dynamo
     model_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"]'
     tools:
-    - *id001
+    - *id002
     expected:
-      dynamo: &d_4_b
+      dynamo: &id003
         calls: []
         normal_text: ''
-      vllm: *d_4_b
+      vllm: *id003
       sglang:
         unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.4.c:
@@ -41,7 +41,7 @@ cases:
     ref: dynamo
     model_text: 'functools[{"arguments": {"location": "NYC"}}]'
     tools:
-    - *id001
+    - *id002
     expected:
       dynamo:
         calls: []
@@ -49,7 +49,6 @@ cases:
       vllm:
         calls: []
         normal_text: 'functools[{"arguments": {"location": "NYC"}}]'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
       sglang:
         unavailable: SGLang has no detector for family='phi4'
   PARSER.batch.4.d:
@@ -57,7 +56,7 @@ cases:
     ref: dynamo
     model_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}'
     tools:
-    - *id001
+    - *id002
     expected:
       dynamo:
         calls: []
@@ -65,6 +64,5 @@ cases:
       vllm:
         calls: []
         normal_text: 'functools[{"name": "get_weather", "arguments": {"location": "NYC"}}'
-        reason: "impl-defined recovery contract (see PARSER_CASES.md)"
       sglang:
         unavailable: SGLang has no detector for family='phi4'

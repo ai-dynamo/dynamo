@@ -19,13 +19,14 @@
 //! you need the event plane.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
 use dynamo_backend_common::{
     AsyncEngineContext, BackendError, CommonArgs, DisaggregationMode, DynamoError, EngineConfig,
-    ErrorType, GenerateContext, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
-    PreprocessedRequest, WorkerConfig, chunk, usage,
+    ErrorType, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
+    Metrics, MetricsSource, PreprocessedRequest, WorkerConfig, chunk, usage,
 };
 use dynamo_mocker::common::protocols::{
     DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
@@ -119,15 +120,23 @@ struct ActiveEntry {
 }
 
 /// Removes the request's entry from the active-requests map on any stream
-/// exit path — natural completion, cancellation, or an early drop.
+/// exit path — natural completion, cancellation, or an early drop. Also
+/// releases the synthetic block accounting so `kv_used_blocks` tracks the
+/// in-flight set rather than monotonically growing.
 struct ActiveRequestGuard {
     uuid: Uuid,
     active: Arc<DashMap<Uuid, ActiveEntry>>,
+    kv_used_blocks: Arc<AtomicU64>,
+    blocks_held: u64,
 }
 
 impl Drop for ActiveRequestGuard {
     fn drop(&mut self) {
         self.active.remove(&self.uuid);
+        if self.blocks_held > 0 {
+            self.kv_used_blocks
+                .fetch_sub(self.blocks_held, Ordering::Relaxed);
+        }
     }
 }
 
@@ -146,6 +155,10 @@ pub struct MockerBackend {
     /// the scheduler tasks running for the engine's lifetime.
     #[allow(dead_code)]
     scheduler: OnceCell<Box<dyn SchedulerHandle>>,
+    /// Synthetic KV-block accounting. Bumped per request in `generate()`
+    /// so the metrics snapshot reports a non-trivial load number.
+    /// Real engines would source this from their scheduler.
+    kv_used_blocks: Arc<AtomicU64>,
 }
 
 impl MockerBackend {
@@ -164,6 +177,7 @@ impl MockerBackend {
             active: Arc::new(DashMap::new()),
             request_tx: OnceCell::new(),
             scheduler: OnceCell::new(),
+            kv_used_blocks: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -269,6 +283,8 @@ impl LLMEngine for MockerBackend {
             total_kv_blocks: Some(self.engine_args.num_gpu_blocks as u64),
             max_num_seqs: self.engine_args.max_num_seqs.map(|v| v as u64),
             max_num_batched_tokens: self.engine_args.max_num_batched_tokens.map(|v| v as u64),
+            data_parallel_size: None,
+            data_parallel_start_rank: None,
             // Mocker has no real KV transport, so it never advertises a
             // bootstrap address. Real prefill engines populate these in
             // start() to publish ModelRuntimeConfig.disaggregated_endpoint.
@@ -354,9 +370,20 @@ impl LLMEngine for MockerBackend {
             return Err(engine_shutdown("scheduler is not accepting requests"));
         }
 
+        // Synthetic per-request block accounting: each request claims its
+        // prompt blocks for the duration of generation. Released by the
+        // guard's Drop. Demonstrates the metrics-publish path without
+        // depending on the scheduler exposing real KV usage.
+        let block_size = self.engine_args.block_size.max(1) as u32;
+        let blocks_held = prompt_len.div_ceil(block_size) as u64;
+        self.kv_used_blocks
+            .fetch_add(blocks_held, Ordering::Relaxed);
+
         let guard = ActiveRequestGuard {
             uuid,
             active: self.active.clone(),
+            kv_used_blocks: self.kv_used_blocks.clone(),
+            blocks_held,
         };
 
         Ok(Box::pin(async_stream::stream! {
@@ -439,6 +466,31 @@ impl LLMEngine for MockerBackend {
         // simulated compute on this uuid until max_output_tokens.
         // Future cleanup will need an abort hook in `dynamo-mocker`.
         tracing::debug!(request_id = ctx.id(), "mocker backend: abort requested");
+    }
+
+    /// One Push source for KV events plus one Snapshot source for
+    /// metrics. The Push `on_ready` is a no-op — the mocker's scheduler
+    /// doesn't emit real KV events. Real Rust engines would start a
+    /// polling thread here that calls `publisher.publish` directly.
+    /// Metrics report a synthetic `kv_used_blocks` derived from
+    /// per-request prompt-block counts maintained in `generate()`.
+    async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+        Ok(vec![KvEventSource::Push {
+            on_ready: Box::new(|_publisher| Ok(())),
+            dp_rank: DP_RANK,
+        }])
+    }
+
+    async fn metrics_sources(&self) -> Result<Vec<MetricsSource>, DynamoError> {
+        let used = self.kv_used_blocks.clone();
+        Ok(vec![MetricsSource {
+            snapshot: Arc::new(move || {
+                Some(Metrics {
+                    kv_used_blocks: Some(used.load(Ordering::Relaxed)),
+                })
+            }),
+            dp_rank: DP_RANK,
+        }])
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {

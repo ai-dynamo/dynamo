@@ -14,6 +14,20 @@ use super::super::ToolDefinition;
 use super::super::config::XmlParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
+/// Build a `<start>name>(body)<end>` regex pattern. When `strict` is false,
+/// missing `<end>` falls back to end-of-block so truncated input still parses
+/// best-effort. Strict mode requires both fences and returns no match without
+/// the close tag.
+fn build_block_pattern(start: &str, end: &str, strict: bool) -> String {
+    let start = regex::escape(start);
+    let end = regex::escape(end);
+    if strict {
+        format!(r"(?s){}([^>]+)>(.*?){}", start, end)
+    } else {
+        format!(r"(?s){}([^>]+)>(.*?)(?:{}|$)", start, end)
+    }
+}
+
 /// Strip surrounding quotes from a string if present
 fn strip_quotes(s: &str) -> &str {
     let trimmed = s.trim();
@@ -29,11 +43,12 @@ fn strip_quotes(s: &str) -> &str {
 /// Check if a chunk contains the start of a xml-style tool call.
 /// Format: `<tool_call><function=name><parameter=foo>...</parameter></function></tool_call>`
 pub fn detect_tool_call_start_xml(chunk: &str, config: &XmlParserConfig) -> bool {
-    // Check for complete or partial start token.
     let start_token = &config.tool_call_start_token;
 
-    // Check if we have the complete start token.
-    if chunk.contains(start_token.as_str()) {
+    // Complete start token, or bare `<function=...>` in back-off mode (the
+    // batch path treats both as tool-call starts; the streaming jail must
+    // agree — see XmlParserConfig::is_bare_function_mode).
+    if chunk.contains(start_token.as_str()) || config.is_bare_function_mode(chunk) {
         return true;
     }
 
@@ -53,9 +68,17 @@ pub fn detect_tool_call_start_xml(chunk: &str, config: &XmlParserConfig) -> bool
 /// advances past every consecutive start→end pair so the entire group is captured
 /// as a single jailed region.  Returns the position after the last `</tool_call>`
 /// found, or the length of the chunk when no end token is present.
+///
+/// In back-off mode (see XmlParserConfig::is_bare_function_mode) the
+/// function-level tokens act as the boundary so the jail releases at
+/// `</function>` instead of buffering to EOS waiting for a missing
+/// `</tool_call>`.
 pub fn find_tool_call_end_position_xml(chunk: &str, config: &XmlParserConfig) -> usize {
-    let start_token = &config.tool_call_start_token;
-    let end_token = &config.tool_call_end_token;
+    let (start_token, end_token) = if config.is_bare_function_mode(chunk) {
+        (&config.function_start_token, &config.function_end_token)
+    } else {
+        (&config.tool_call_start_token, &config.tool_call_end_token)
+    };
 
     // Find the first end token — if there isn't one, the call is incomplete.
     let Some(first_end) = chunk.find(end_token.as_str()) else {
@@ -94,6 +117,41 @@ pub fn try_tool_call_parse_xml(
     config: &XmlParserConfig,
     tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<(Vec<ToolCallResponse>, Option<String>)> {
+    // Qwen3-Coder-style passthrough: if the function-start token is absent
+    // anywhere in the input, the reference parser returns the raw input as
+    // content with no tool calls. Gated so it only fires for parsers that
+    // opt in (e.g. qwen3_coder, nemotron_nano); other XML-style families
+    // (minimax_m2, kimi_k2 alias paths) keep their stricter behavior.
+    if config.passthrough_when_no_function
+        && !message.contains(config.function_start_token.as_str())
+    {
+        return Ok((vec![], Some(message.to_string())));
+    }
+
+    // Qwen3-Coder-style back-off: outer wrapper missing but `<function=...>`
+    // tags are present — parse the whole input as a single tool-call block
+    // (mirrors `qwen3coder_tool_parser._get_function_calls`'s fallback).
+    //
+    // Gated on `function_end_token` being present OR `allow_eof_recovery` set,
+    // mirroring the wrapped path's recovery gate in `extract_tool_calls`. The
+    // lenient inner regex has a `|$` fallback that would otherwise match a
+    // partial `<function=...>` block mid-stream and cause `should_exit_jail_
+    // early` to release the jail before the closing tag arrives.
+    if config.is_bare_function_mode(message)
+        && (message.contains(config.function_end_token.as_str()) || config.allow_eof_recovery)
+    {
+        let calls = parse_tool_call_block(message, config, tools).unwrap_or_default();
+        if !calls.is_empty() {
+            // Preserve narration before the first `<function=...>` tag so
+            // streaming output isn't dropped on the back-off path.
+            let prefix = message
+                .split_once(config.function_start_token.as_str())
+                .map(|(p, _)| p.to_string())
+                .unwrap_or_default();
+            return Ok((calls, Some(prefix)));
+        }
+    }
+
     let (normal_text, tool_calls) = extract_tool_calls(message, config, tools)?;
 
     let normal_content = if normal_text.is_empty() {
@@ -152,6 +210,7 @@ fn extract_tool_calls(
                 let block = &text[abs_start..];
                 let function_start = &config.function_start_token;
                 if config.allow_eof_recovery
+                    && !config.strict_match
                     && block.contains(function_start.as_str())
                     && let Ok(mut parsed_calls) = parse_tool_call_block(block, config, tools)
                     && !parsed_calls.is_empty()
@@ -189,20 +248,18 @@ fn parse_tool_call_block(
     config: &XmlParserConfig,
     tools: Option<&[ToolDefinition]>,
 ) -> anyhow::Result<Vec<ToolCallResponse>> {
-    // Build regex patterns based on config
-    let function_start = regex::escape(&config.function_start_token);
-    let function_end = regex::escape(&config.function_end_token);
-    let parameter_start = regex::escape(&config.parameter_start_token);
-    let parameter_end = regex::escape(&config.parameter_end_token);
-
-    let function_pattern = format!(r"(?s){}([^>]+)>(.*?)(?:{}|$)", function_start, function_end);
-    let parameter_pattern = format!(
-        r"(?s){}([^>]+)>(.*?)(?:{}|$)",
-        parameter_start, parameter_end
-    );
-
-    let function_regex = Regex::new(&function_pattern)?;
-    let parameter_regex = Regex::new(&parameter_pattern)?;
+    // Strict-match families (e.g. minimax_m2) require paired fences; lenient
+    // families fall back to end-of-block when the close tag is missing.
+    let function_regex = Regex::new(&build_block_pattern(
+        &config.function_start_token,
+        &config.function_end_token,
+        config.strict_match,
+    ))?;
+    let parameter_regex = Regex::new(&build_block_pattern(
+        &config.parameter_start_token,
+        &config.parameter_end_token,
+        config.strict_match,
+    ))?;
 
     let mut results = Vec::new();
 
@@ -953,6 +1010,56 @@ NYC
         assert_eq!(args["city"], "NYC");
     }
 
+    // Streaming-jail symmetry: when `<function=...>` is partial (no
+    // `</function>` yet) and recovery is OFF, back-off must NOT fire — the
+    // lenient `|$` regex would otherwise match the truncated content and
+    // cause `should_exit_jail_early` to release the jail before the closing
+    // tag arrives, leaking the rest of the call as text. Recovery ON
+    // (finalize path) is still allowed to recover the truncated call.
+    #[test]
+    fn test_parse_qwen3_bare_function_partial_no_recovery_returns_no_calls() {
+        let input = "<function=get_weather>\n<parameter=city>\nNY";
+        let config = XmlParserConfig {
+            backoff_when_no_wrapper: true,
+            // allow_eof_recovery=false (streaming jail path)
+            ..XmlParserConfig::default()
+        };
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert!(
+            calls.is_empty(),
+            "back-off must not fire on partial input without recovery (streaming jail leak)",
+        );
+    }
+
+    #[test]
+    fn test_parse_qwen3_bare_function_complete_streaming_recovers() {
+        // Same scenario but `</function>` has arrived — back-off should fire
+        // even with recovery off (streaming-complete path).
+        let input = "<function=get_weather>\n<parameter=city>\nNYC\n</parameter>\n</function>";
+        let config = XmlParserConfig {
+            backoff_when_no_wrapper: true,
+            ..XmlParserConfig::default()
+        };
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+    }
+
+    #[test]
+    fn test_parse_qwen3_bare_function_partial_with_recovery_recovers() {
+        // Finalize path: recovery ON allows truncated function block to
+        // surface a (potentially incomplete) call rather than being dropped.
+        let input = "<function=get_weather>\n<parameter=city>\nNY";
+        let config = XmlParserConfig {
+            backoff_when_no_wrapper: true,
+            allow_eof_recovery: true,
+            ..XmlParserConfig::default()
+        };
+        let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+    }
+
     // Qwen3-Coder-style XML treats text after the first parsed tool call as
     // non-content, including after EOF recovery.
     #[test]
@@ -968,8 +1075,14 @@ NYC
         assert_eq!(normal, Some("".to_string()));
     }
 
-    #[test] // PARSER.batch.5 — minimax_m2
-    fn test_parse_minimax_m2_no_outer_close_recovers() {
+    #[test] // PARSER.batch.5.a — minimax_m2 spec-strict
+    fn test_parse_minimax_m2_no_outer_close_drops_call() {
+        // MiniMax-M2's reference parser (huggingface.co/MiniMaxAI/MiniMax-M2)
+        // requires both outer fences — missing `</minimax:tool_call>` means
+        // the regex does not match and zero calls are recovered. Strict-match
+        // mode opts into that behavior even when `allow_eof_recovery=true`
+        // would otherwise apply (and the binding-layer override is also
+        // suppressed for strict configs).
         let config = XmlParserConfig {
             tool_call_start_token: "<minimax:tool_call>".to_string(),
             tool_call_end_token: "</minimax:tool_call>".to_string(),
@@ -978,14 +1091,17 @@ NYC
             parameter_start_token: "<parameter name=".to_string(),
             parameter_end_token: "</parameter>".to_string(),
             allow_eof_recovery: true,
+            strict_match: true,
+            passthrough_when_no_function: false,
+            backoff_when_no_wrapper: false,
         };
         let input = r#"<minimax:tool_call><invoke name="get_weather"><parameter name="city">NYC</parameter></invoke>"#;
 
         let (calls, _) = try_tool_call_parse_xml(input, &config, None).unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].function.name, "get_weather");
-        let args: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert_eq!(args["city"], "NYC");
+        assert!(
+            calls.is_empty(),
+            "strict_match config must not recover when outer </minimax:tool_call> is absent"
+        );
     }
 
     #[test] // helper
@@ -1171,10 +1287,8 @@ NYC
     }
 
     /// Helper for the new corner-case tests below (PARSER.batch.6 / PIPELINE.finish_reason / PARSER.batch.9
-    /// / PARSER.batch.10) — `allow_eof_recovery: false` because none of these tests
-    /// rely on EOF recovery. The inline config in
-    /// `test_parse_minimax_m2_no_outer_close_recovers` keeps that flag `true`
-    /// because that test specifically exercises the recovery path.
+    /// / PARSER.batch.10) — matches the production `ToolCallConfig::minimax_m2()`
+    /// factory: strict-match per MiniMax's reference parser.
     fn minimax_m2_config() -> XmlParserConfig {
         XmlParserConfig {
             tool_call_start_token: "<minimax:tool_call>".to_string(),
@@ -1184,6 +1298,9 @@ NYC
             parameter_start_token: "<parameter name=".to_string(),
             parameter_end_token: "</parameter>".to_string(),
             allow_eof_recovery: false,
+            strict_match: true,
+            passthrough_when_no_function: false,
+            backoff_when_no_wrapper: false,
         }
     }
 
