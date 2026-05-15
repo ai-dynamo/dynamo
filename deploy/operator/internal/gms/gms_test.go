@@ -6,7 +6,6 @@
 package gms
 
 import (
-	"path/filepath"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
@@ -34,9 +33,7 @@ func TestEnsureServerSidecar(t *testing.T) {
 	assert.Equal(t, ServerContainerName, server.Name)
 	assert.Equal(t, []string{"python3", "-m", ServerModule}, server.Command)
 	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *server.RestartPolicy)
-	require.NotNil(t, server.StartupProbe)
-	assert.Equal(t, []string{"test", "-f", filepath.Join(SharedMountPath, readyFile)},
-		server.StartupProbe.Exec.Command)
+	assert.Nil(t, server.StartupProbe, "clients drive readiness via connect-retry")
 
 	// DRA claim on server
 	assert.Len(t, server.Resources.Claims, 1)

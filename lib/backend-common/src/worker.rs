@@ -25,6 +25,7 @@ use crate::adapter::EngineAdapter;
 use crate::disagg::DisaggregationMode;
 use crate::engine::{EngineConfig, LLMEngine};
 use crate::error::{BackendError, DynamoError, ErrorType};
+use crate::publisher::{PublisherHandles, setup_publishers};
 
 /// Default grace-period in seconds between discovery unregister and engine drain.
 /// Mirrors the Python `_DEFAULT_GRACE_PERIOD_SECS` constant.
@@ -119,6 +120,9 @@ pub struct WorkerConfig {
     pub exclude_tools_when_tool_choice_none: bool,
     /// Whether this worker should keep an in-process KV indexer.
     pub enable_local_indexer: bool,
+    /// Kill switch for KV-aware-routing publishers. When `false`, skip
+    /// `engine.kv_event_sources()` / `metrics_sources()` entirely.
+    pub enable_kv_routing: bool,
     /// Per-endpoint Prometheus metric labels appended to every metric.
     /// Common labels: `("model", "<served-name>")`.
     pub metrics_labels: Vec<(String, String)>,
@@ -133,6 +137,15 @@ pub struct WorkerConfig {
     /// Runtime / transport overrides applied via env vars before the
     /// `DistributedRuntime` is constructed.
     pub runtime: RuntimeConfig,
+}
+
+impl WorkerConfig {
+    /// Effective `enable_local_indexer`, accounting for disaggregation
+    /// mode. Decode workers force this off because they don't host the
+    /// in-process KV indexer endpoint and must not advertise it.
+    pub(crate) fn effective_enable_local_indexer(&self) -> bool {
+        self.enable_local_indexer && !self.disaggregation_mode.is_decode()
+    }
 }
 
 impl Default for WorkerConfig {
@@ -150,6 +163,7 @@ impl Default for WorkerConfig {
             reasoning_parser: None,
             exclude_tools_when_tool_choice_none: true,
             enable_local_indexer: true,
+            enable_kv_routing: true,
             metrics_labels: Vec::new(),
             disaggregation_mode: DisaggregationMode::Aggregated,
             runtime: RuntimeConfig::default(),
@@ -182,6 +196,8 @@ pub struct Worker {
     engine: Arc<dyn LLMEngine>,
     config: WorkerConfig,
     state: LifecycleState,
+    /// KV-aware-routing publisher handles. Drained in `cleanup_once` while NATS is alive.
+    publishers: Option<PublisherHandles>,
 }
 
 impl Worker {
@@ -190,6 +206,7 @@ impl Worker {
             engine,
             config,
             state: LifecycleState::Init,
+            publishers: None,
         }
     }
 
@@ -364,6 +381,9 @@ impl Worker {
             "engine.start() complete"
         );
 
+        self.setup_kv_aware_publishers(&component, &engine_config)
+            .await?;
+
         // Mid-start signal: engine.start() ran to completion but a signal
         // arrived during it. Skip the serve loop and run the orchestrator
         // directly so `engine.cleanup()` still runs while the runtime is
@@ -376,6 +396,46 @@ impl Worker {
 
         self.serve_with_orchestrator(&engine_config, endpoint, shutdown.clone())
             .await
+    }
+
+    /// Build KV-event and worker-metric publishers from the engine's source
+    /// declarations. No-op if `enable_kv_routing` is off, the engine declares
+    /// no sources, or `engine_config.kv_cache_block_size` is unset.
+    async fn setup_kv_aware_publishers(
+        &mut self,
+        component: &dynamo_runtime::component::Component,
+        engine_config: &EngineConfig,
+    ) -> Result<(), DynamoError> {
+        if !self.config.enable_kv_routing {
+            tracing::debug!("enable_kv_routing=false; skipping kv_event_sources / metrics_sources");
+            return Ok(());
+        }
+        let kv_sources = self.engine.kv_event_sources().await?;
+        let metrics_snapshots = self.engine.metrics_sources().await?;
+        if kv_sources.is_empty() && metrics_snapshots.is_empty() {
+            tracing::debug!(
+                "engine returned no KV/metrics sources; KV-aware routing disabled for this worker"
+            );
+            return Ok(());
+        }
+        let enable_local_indexer = self.config.effective_enable_local_indexer();
+        tracing::debug!(
+            kv_sources = kv_sources.len(),
+            metrics_sources = metrics_snapshots.len(),
+            enable_local_indexer,
+            kv_cache_block_size = ?engine_config.kv_cache_block_size,
+            "Starting KV-aware-routing publishers"
+        );
+        let handles = setup_publishers(
+            component,
+            kv_sources,
+            metrics_snapshots,
+            engine_config.kv_cache_block_size,
+            enable_local_indexer,
+        )
+        .await?;
+        self.publishers = Some(handles);
+        Ok(())
     }
 
     /// Full graceful-shutdown orchestrator: discovery unregister →
@@ -433,6 +493,12 @@ impl Worker {
         match self.engine.cleanup().await {
             Ok(()) => tracing::info!("Engine cleanup complete"),
             Err(e) => tracing::error!(error = %e, "engine cleanup failed"),
+        }
+        // Stop publisher metric loops AFTER engine.cleanup so the engine's
+        // last metric snapshots get published. Then drop the handles so the
+        // publishers' own tokio tasks drain while NATS is still alive.
+        if let Some(mut handles) = self.publishers.take() {
+            handles.shutdown().await;
         }
         // Mark stopped even on failure so a follow-up call no-ops; engines
         // like vLLM/TRT-LLM tear down NCCL groups in cleanup() and a second
@@ -718,8 +784,7 @@ async fn build_local_model(
     // Decode workers don't host the WorkerKvQuery endpoint, so they must not
     // advertise the local indexer regardless of the operator-supplied flag.
     // Mirrors the legacy non-unified vLLM path (worker_factory.py).
-    let enable_local_indexer =
-        config.enable_local_indexer && !config.disaggregation_mode.is_decode();
+    let enable_local_indexer = config.effective_enable_local_indexer();
 
     // Publish the disaggregated bootstrap endpoint when the engine
     // returned one. Only meaningful for prefill workers — decode/agg
@@ -747,6 +812,8 @@ async fn build_local_model(
         total_kv_blocks: engine_config.total_kv_blocks,
         max_num_seqs: engine_config.max_num_seqs,
         max_num_batched_tokens: engine_config.max_num_batched_tokens,
+        data_parallel_size: engine_config.data_parallel_size.unwrap_or(1),
+        data_parallel_start_rank: engine_config.data_parallel_start_rank.unwrap_or(0),
         tool_call_parser: config.tool_call_parser.clone(),
         reasoning_parser: config.reasoning_parser.clone(),
         exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,

@@ -260,6 +260,60 @@ Mid-stream errors have two equivalent terminal forms:
   * **String**: yield `Ok(LLMEngineOutput::error(msg))`. Convenient for
     pure message-level failures. Loses the typed `BackendError` variant.
 
+## KV-aware Routing Sources
+
+Engines opt into KV-aware routing by overriding two trait methods on
+`LLMEngine`:
+
+- `kv_event_sources() -> Vec<KvEventSource>` — one descriptor per
+  data-parallel rank that emits KV cache events.
+- `metrics_sources() -> Vec<MetricsSource>` — one descriptor per
+  data-parallel rank reporting load (`kv_used_blocks`).
+
+Both default to empty. Returning empty opts the worker out of KV-aware
+routing entirely; the router falls back to non-KV scheduling for that
+worker. `Worker` calls these once after `start()` succeeds and constructs
+the publishers itself — engines never instantiate
+`KvEventPublisher`/`WorkerMetricsPublisher`. On shutdown, `Worker` drops
+the handles while NATS is still alive.
+
+### `KvEventSource` flavors
+
+Pick based on how the engine's KV event API is shaped:
+
+- `Zmq { endpoint, topic, dp_rank }` — engine already publishes to a
+  ZMQ PUB socket. `Worker` subscribes directly.
+- `Push { on_ready, dp_rank }` — engine has a blocking poll API.
+  `Worker` constructs the publisher, then calls `on_ready(publisher)`
+  once during setup. The engine stashes the publisher and drives
+  `publish_stored` / `publish_removed` from its own thread. The engine
+  **must** stop that thread in `cleanup()`.
+
+The `mocker` example uses `Push` with a no-op `on_ready`; real Rust
+engines would spawn a polling thread inside `on_ready`. See
+`examples/mocker/src/engine.rs` for the wire-up.
+
+### `MetricsSource`
+
+```rust
+MetricsSource {
+    snapshot: Arc::new(move || Some(Metrics { kv_used_blocks: ... })),
+    dp_rank,
+}
+```
+
+`Worker` invokes `snapshot()` on a fixed interval. It **must** be a
+cheap member-field read — engine-internal calls land in the 10s of ms
+and stall the publish loop. The conformance kit enforces a 1 ms ceiling
+(`MetricsSnapshotTooSlow`). Return `None` to skip publishing for that
+tick (e.g. before the engine has emitted its first scheduler iteration).
+
+### Conformance
+
+The kit asserts that both methods are idempotent across calls (rank set
+is stable for the engine's lifetime) and that snapshot fns satisfy the
+latency ceiling. See `lib/backend-common/src/testing.rs`.
+
 ## Logging
 
 Keep logging standardized across all Rust engines. When adding or

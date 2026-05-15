@@ -93,10 +93,6 @@ impl<R> Annotated<R> {
         self.event.as_deref() != Some("error")
     }
 
-    pub fn is_err(&self) -> bool {
-        !self.is_ok()
-    }
-
     pub fn is_event(&self) -> bool {
         self.event.is_some()
     }

@@ -14,7 +14,7 @@ use std::{
 };
 
 mod common;
-pub use common::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
+pub use common::{PreprocessedRouting, build_preprocessed_routing};
 pub mod endpoint;
 pub mod grpc;
 pub mod http;

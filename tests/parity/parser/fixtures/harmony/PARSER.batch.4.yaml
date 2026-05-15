@@ -17,9 +17,16 @@ cases:
           location:
             type: string
     expected:
-      calls: []
-      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>not json at
-        all<|call|>
+      dynamo:
+        reason: "Dynamo's harmony parser leaves <|channel|> harmony token, <|message|> harmony token, <|call|> harmony token (+2 more) in normal_text on malformed input (impl-defined recovery)"
+        calls: []
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>not json
+          at all<|call|>
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang:
+        calls: []
+        normal_text: ''
   PARSER.batch.4.b:
     description: Unterminated JSON in message body
     ref: dynamo
@@ -27,8 +34,15 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>
+      dynamo:
+        reason: "Dynamo's harmony parser leaves <|channel|> harmony token, <|message|> harmony token, <|call|> harmony token (+2 more) in normal_text on malformed input (impl-defined recovery)"
+        calls: []
+        normal_text: <|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"NYC<|call|>
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang:
+        calls: []
+        normal_text: ''
   PARSER.batch.4.c:
     description: No to=functions.X recipient
     ref: dynamo
@@ -36,5 +50,13 @@ cases:
     tools:
     - *id001
     expected:
-      calls: []
-      normal_text: ''
+      dynamo: &id002
+        calls: []
+        normal_text: ''
+      vllm:
+        unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
+      sglang: *id002
+  PARSER.batch.4.d:
+    description: Malformed variant 4.d — not applicable to this family
+    reason: |-
+      Malformed-input variant 4.d does not apply to harmony's parser syntax (no equivalent end-marker recovery scenario).

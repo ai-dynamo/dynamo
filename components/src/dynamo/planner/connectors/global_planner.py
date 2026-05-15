@@ -306,6 +306,13 @@ class GlobalPlannerConnector(PlannerConnector):
             decode_component_name=decode_component_name,
         )
 
+    def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
+        """Resolve the pool-local worker runtime namespace when available."""
+        local = self._get_local_k8s_connector()
+        if local is None:
+            return base_dynamo_namespace
+        return local.get_worker_runtime_namespace(base_dynamo_namespace)
+
     def get_worker_info(
         self,
         sub_component_type: SubComponentType,

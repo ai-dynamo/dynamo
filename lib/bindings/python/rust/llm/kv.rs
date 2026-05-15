@@ -210,6 +210,27 @@ pub(crate) struct KvEventPublisher {
     warning_count: Arc<AtomicU32>,
 }
 
+impl KvEventPublisher {
+    /// Wrap an already-constructed Rust publisher as the Python pyclass.
+    ///
+    /// Used by the unified-backend bridge (`crate::backend`) so the Worker
+    /// can hand a publisher built from a [`PushSource`] back to the Python
+    /// engine without going through the Python-side `__init__` (which
+    /// requires an `Endpoint` and rebuilds the publisher from scratch).
+    pub(crate) fn from_arc(
+        inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
+        dp_rank: DpRank,
+    ) -> Self {
+        let kv_block_size = inner.kv_block_size() as usize;
+        Self {
+            inner,
+            kv_block_size,
+            dp_rank,
+            warning_count: Arc::new(AtomicU32::new(0)),
+        }
+    }
+}
+
 #[pymethods]
 impl KvEventPublisher {
     /// Create a KV event publisher that batches raw engine events before forwarding
@@ -1187,6 +1208,48 @@ impl KvRouter {
             // Use pythonize to convert Vec<PotentialLoad> to Python list of dicts
             Python::with_gil(|py| {
                 pythonize(py, &loads)
+                    .map(|obj| obj.unbind())
+                    .map_err(to_pyerr)
+            })
+        })
+    }
+
+    #[pyo3(signature = (token_ids, router_config_override=None, block_mm_infos=None, lora_name=None, include_shared=true))]
+    fn get_overlap_scores<'p>(
+        &self,
+        py: Python<'p>,
+        token_ids: Vec<u32>,
+        router_config_override: Option<PyObject>,
+        block_mm_infos: Option<PyObject>,
+        lora_name: Option<String>,
+        include_shared: bool,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let router_config_override = if let Some(obj) = router_config_override {
+            let override_config: RouterConfigOverride =
+                depythonize(obj.bind(py)).map_err(to_pyerr)?;
+            Some(override_config)
+        } else {
+            None
+        };
+        let block_mm_infos = block_mm_infos
+            .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
+            .transpose()?;
+        let chooser = self.inner.chooser.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let scores = chooser
+                .get_overlap_scores(
+                    &token_ids,
+                    router_config_override.as_ref(),
+                    block_mm_infos.as_deref(),
+                    lora_name.as_deref(),
+                    include_shared,
+                )
+                .await
+                .map_err(to_pyerr)?;
+
+            Python::with_gil(|py| {
+                pythonize(py, &scores)
                     .map(|obj| obj.unbind())
                     .map_err(to_pyerr)
             })
