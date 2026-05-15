@@ -90,6 +90,17 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
 {% endif %}
 {% endif %}
 
+{% if device == "cuda" and cuda_version == "12.9" %}
+# TODO: Remove when the next vLLM release line is adopted. The v0.20.1-cu129
+# image ships both nixl-cu12 and nixl-cu13, and the generic nixl shim tries
+# nixl-cu13 first. Drop only the wrong CUDA wheel so import nixl selects cu12.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip uninstall --system -y nixl-cu13 && \
+    python3 -c 'import nixl._api as api; assert "nixl_cu12" in api.__file__, api.__file__'
+
+{% endif %}
+
 {% if context.vllm.enable_media_ffmpeg == "true" %}
 # Copy ffmpeg libraries from wheel_builder (requires root, runs before USER dynamo)
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
