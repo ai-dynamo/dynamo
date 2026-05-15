@@ -84,7 +84,7 @@ class DistributedRuntime:
         Args:
             event_loop: The asyncio event loop
             discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
-            request_plane: Request plane transport ("tcp", "http", or "nats")
+            request_plane: Request plane transport ("tcp" or "nats")
         """
         ...
 

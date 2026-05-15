@@ -832,14 +832,6 @@ where
                     .find(|i| i.instance_id == id)
                     .map(|instance| {
                         let (addr, kind) = match &instance.transport {
-                            TransportType::Http(http_endpoint) => {
-                                tracing::debug!(
-                                    instance_id = id,
-                                    http_endpoint = %http_endpoint,
-                                    "Using HTTP transport for instance"
-                                );
-                                (http_endpoint.clone(), "transport.http.request")
-                            }
                             TransportType::Tcp(tcp_endpoint) => {
                                 tracing::debug!(
                                     instance_id = id,

@@ -74,7 +74,6 @@ pub use endpoint::build_transport_type;
 pub enum TransportType {
     #[serde(rename = "nats_tcp")]
     Nats(String),
-    Http(String),
     Tcp(String),
 }
 
