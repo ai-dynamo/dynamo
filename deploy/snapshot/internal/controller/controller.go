@@ -295,10 +295,8 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 }
 
 // maybeStartRestoreForContainer starts one restore worker per fresh container.
-// If pod.Status doesn't carry the ContainerID yet (the kubelet's status patch
-// can lag container exec by 1-5 s), poll the OCI runtime directly. The
-// resolveKey lease prevents the chatty pod-informer from fanning out into
-// many concurrent pollers for the same (pod, container).
+// Falls back to polling the OCI runtime when pod.Status hasn't published the
+// ContainerID yet (the kubelet status patch can lag exec by 1-5 s).
 func (w *NodeController) maybeStartRestoreForContainer(
 	ctx context.Context,
 	pod *corev1.Pod,
@@ -584,17 +582,11 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 	return nil
 }
 
-// runRestore runs the full restore workflow for a pod:
-//  1. Mark the current container instance as in_progress
+// runRestore runs the full restore workflow for one target container:
+//  1. Annotate the pod with restore in_progress
 //  2. Call executor.Restore (inspect placeholder → nsrestore inside namespace)
-//  3. Write a restore-complete sentinel into the pod's snapshot-control
-//     volume to wake the workload (observed via polling)
-//  4. Mark the container instance as completed
-//
-// Kubernetes readiness is gated separately: each restore-target container's
-// startup probe waits on the restore-complete sentinel, then its normal
-// readiness probe (if any) decides when the container is ready. The pod only
-// becomes Ready once every restored and cold-started container is ready.
+//  3. Write a restore-complete sentinel to wake the workload (polled)
+//  4. Annotate the pod with restore completed
 func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, containerName, containerID, checkpointID string, checkpointLocation checkpointLocations, restoreAttemptKey string, startedAt time.Time) error {
 	releaseOnExit := true
 	defer func() {
