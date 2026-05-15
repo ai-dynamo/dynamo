@@ -102,7 +102,7 @@ cases:
   PARSER.batch.13:
     description: Unknown tool name absent from supplied tools
     ref: dynamo
-    model_text: <|channel|>commentary to=functions.unknown_tool <|constrain|>json<|message|>{"location":"NYC"}
+    model_text: <|channel|>commentary to=functions.unknown_tool <|constrain|>json<|message|>{"location":"NYC"}<|call|>
     tools:
     - name: get_weather
       parameters:
@@ -121,5 +121,5 @@ cases:
         unavailable: 'NotImplementedError: OpenAIToolParser requires token IDs and does not support text-based extraction.'
       sglang:
         calls: []
-        normal_text: <|channel|>commentary to=functions.unknown_tool <|constrain|>json<|message|>{"location":"NYC"}
+        normal_text: <|channel|>commentary to=functions.unknown_tool <|constrain|>json<|message|>{"location":"NYC"}<|call|>
         reason: SGLang treats an unknown harmony recipient as ordinary content rather than forwarding a tool call by default.
